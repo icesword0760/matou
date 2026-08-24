@@ -19,6 +19,8 @@ import { MigrationRunner } from './storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
+import { NotificationProjection } from './product/experience-foundation'
+import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -34,8 +36,10 @@ const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.m
 const database = RuntimeDatabase.open(resolve(dataRoot, 'matou.sqlite'))
 const migrationReady = new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
+const notifications = new NotificationProjection()
 const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
-const controlBackend = new RuntimeControlBackend(database, dataRoot, telemetry)
+const controlBackend = new RuntimeControlBackend(database, dataRoot, telemetry, notifications)
+const rpcRouter = new RuntimeRpcRouter(database, notifications)
 const controlEndpoint = controlEndpointForPlatform(dataRoot)
 const hostControl = new HostControlServer({
   socketPath: controlEndpoint,
@@ -89,7 +93,7 @@ parentPort.on('message', async (event) => {
     return
   }
 
-  const server = new RuntimeServer(port, dataRoot, database, undefined, {
+  const server = new RuntimeServer(port, dataRoot, database, rpcRouter, {
     backend: controlBackend,
     tokens: controlTokens,
     endpoint: controlEndpoint

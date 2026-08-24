@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { RuntimeRpcRouter } from './runtime-rpc-router'
+import { NotificationProjection } from '../product/experience-foundation'
 import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
@@ -164,6 +165,35 @@ describe('RuntimeRpcRouter', () => {
     await expect(router.handle('workspace.create', { command: {}, input: { name: '' } })).rejects.toMatchObject({
       code: 'INVALID_REQUEST'
     })
+  })
+
+  it('projects Task unread counts and clears only the newly visible focused panel', async () => {
+    const notifications = new NotificationProjection({ cooldownMs: 0 })
+    const notificationRouter = new RuntimeRpcRouter(database, notifications)
+    const initial = await notificationRouter.handle('hierarchy.bootstrap-window', payload('notify-bootstrap', {
+      windowId: 'window-1', defaultRootDirectory: '/tmp/notify-workspace',
+      defaultName: 'notify-workspace', now: 1
+    })) as {
+      workspace: { id: string }; task: { id: string }; session: { id: string }; mount: { id: string }
+    }
+    notifications.ingest({
+      eventId: 'error-1', type: 'error', title: '事项出错', subtitle: 'agent', body: 'failed',
+      workspaceId: initial.workspace.id, taskId: initial.task.id, sessionId: initial.session.id,
+      mountId: initial.mount.id, occurredAt: 2
+    })
+
+    const before = await notificationRouter.handle('projection.snapshot', { windowId: 'window-1' }) as {
+      hierarchy: { unreadByTask: Record<string, number> }
+    }
+    expect(before.hierarchy.unreadByTask[initial.task.id]).toBe(1)
+
+    await notificationRouter.handle('hierarchy.activate-task', payload('notify-activate', {
+      windowId: 'window-1', taskId: initial.task.id, now: 3
+    }))
+    const after = await notificationRouter.handle('projection.snapshot', { windowId: 'window-1' }) as {
+      hierarchy: { unreadByTask: Record<string, number> }
+    }
+    expect(after.hierarchy.unreadByTask[initial.task.id]).toBeUndefined()
   })
 
   it('exposes prepare and target acknowledgement for whole-Task migration', async () => {

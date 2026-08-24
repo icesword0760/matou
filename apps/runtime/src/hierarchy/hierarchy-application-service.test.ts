@@ -151,11 +151,12 @@ describe('HierarchyApplicationService Task workflows', () => {
     expect(created.task?.title).toBe('新事项 2')
     const reordered = await service.reorderTask(command('task-order'), {
       windowId: 'window-1', workspaceId: initial.workspace!.id,
-      taskId: created.task!.id, beforeTaskId: first.task!.id, now: 24
+      taskId: first.task!.id, beforeTaskId: created.task!.id, now: 24
     })
     expect(reordered.taskOrder).toEqual([
-      initial.task!.id, created.task!.id, first.task!.id, second.task!.id
+      initial.task!.id, second.task!.id, created.task!.id, first.task!.id
     ])
+    expect(reordered.navigation.taskByWorkspace[initial.workspace!.id]).toBe(created.task!.id)
   })
 
   it('deletes a confirmed final Task and atomically replaces it with 默认', async () => {

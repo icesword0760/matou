@@ -92,6 +92,17 @@ describe('TaskTelemetryRepository', () => {
     expect(next.purgeStaleGenerations()).toBe(2)
     expect(next.snapshot('task-1')).toEqual({ status: {}, progress: undefined, logs: [] })
   })
+
+  it('clears empty status values and clamps external progress to the user-visible range', () => {
+    const telemetry = new TaskTelemetryRepository(database, 'generation-1')
+    telemetry.setStatus('task-1', 'phase', 'building', 2)
+    telemetry.setStatus('task-1', 'phase', '', 3)
+    telemetry.setProgress('task-1', 130, 'finishing', 4)
+
+    expect(telemetry.snapshot('task-1')).toEqual({
+      status: {}, progress: { progress: 100, label: 'finishing' }, logs: []
+    })
+  })
 })
 
 function command(commandId: string) {

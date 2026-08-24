@@ -6,19 +6,27 @@ import type { PtySession } from '../session/pty-session'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { TaskWindowMigrationService } from '../hierarchy/task-window-migration-service'
+import { NotificationProjection } from '../product/experience-foundation'
 
 export class RuntimeControlBackend implements HostControlBackend {
   readonly #database: RuntimeDatabase
   readonly #dataRoot: string
   readonly #telemetry: TaskTelemetryRepository
   readonly #commands: CommandBoundaryRepository
+  readonly #notifications: NotificationProjection | undefined
   readonly #active = new Map<string, PtySession>()
   readonly #taskMigrations: TaskWindowMigrationService
 
-  constructor(database: RuntimeDatabase, dataRoot: string, telemetry: TaskTelemetryRepository) {
+  constructor(
+    database: RuntimeDatabase,
+    dataRoot: string,
+    telemetry: TaskTelemetryRepository,
+    notifications?: NotificationProjection
+  ) {
     this.#database = database
     this.#dataRoot = dataRoot
     this.#telemetry = telemetry
+    this.#notifications = notifications
     this.#commands = new CommandBoundaryRepository(database)
     this.#taskMigrations = new TaskWindowMigrationService(
       database, new DomainTransactionManager(database)
@@ -79,10 +87,12 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   async writeTaskStatus(taskId: string, key: string, value: string | null): Promise<void> {
+    this.#requireActiveTask(taskId)
     this.#telemetry.setStatus(taskId, key, value)
   }
 
   async writeTaskProgress(taskId: string, progress: number, label?: string): Promise<void> {
+    this.#requireActiveTask(taskId)
     this.#telemetry.setProgress(taskId, progress, label)
   }
 
@@ -92,7 +102,33 @@ export class RuntimeControlBackend implements HostControlBackend {
     source: string,
     message: string
   ): Promise<void> {
-    this.#telemetry.appendLog(taskId, level, source, message)
+    this.#requireActiveTask(taskId)
+    const id = this.#telemetry.appendLog(taskId, level, source, message)
+    if (level !== 'error' || !this.#notifications) return
+    const target = this.#database.get<{
+      workspace_id: string; session_id: string; mount_id: string | null
+    }>(
+      `SELECT tasks.workspace_id, sessions.id AS session_id, session_mounts.id AS mount_id
+       FROM tasks
+       JOIN sessions ON sessions.task_id = tasks.id AND sessions.archived_at IS NULL
+       LEFT JOIN session_mounts ON session_mounts.session_id = sessions.id
+       WHERE tasks.id = ? AND tasks.archived_at IS NULL
+       ORDER BY sessions.last_activity_at DESC, session_mounts.created_at DESC LIMIT 1`,
+      taskId
+    )
+    if (!target) return
+    this.#notifications.ingest({
+      eventId: `task-log:${taskId}:${id}`,
+      type: 'error',
+      title: '事项出错',
+      subtitle: source,
+      body: message,
+      workspaceId: target.workspace_id,
+      taskId,
+      sessionId: target.session_id,
+      ...(target.mount_id === null ? {} : { mountId: target.mount_id }),
+      occurredAt: Date.now()
+    })
   }
 
   async moveTaskToWindow(input: {
@@ -133,6 +169,13 @@ export class RuntimeControlBackend implements HostControlBackend {
     const session = this.#active.get(sessionId)
     if (!session) throw new Error(`Session ${sessionId} is not active`)
     return session
+  }
+
+  #requireActiveTask(taskId: string): void {
+    const task = this.#database.get<{ id: string }>(
+      'SELECT id FROM tasks WHERE id = ? AND archived_at IS NULL', taskId
+    )
+    if (!task) throw new Error(`Task ${taskId} does not exist`)
   }
 }
 

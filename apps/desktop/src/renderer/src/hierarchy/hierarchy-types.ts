@@ -67,6 +67,7 @@ export interface HierarchyProjection {
   pathStates: WorkspacePathView[]
   navigation: NavigationView
   taskPlacements: Array<{ windowId: string; taskId: string; ordinal: number }>
+  unreadByTask?: Record<string, number>
 }
 
 export interface HierarchyCommands {

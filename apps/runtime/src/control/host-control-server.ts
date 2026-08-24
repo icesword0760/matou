@@ -263,11 +263,11 @@ export class HostControlServer {
     }
     if (method === 'task.progress.write') {
       const progress = finiteNumber(params.progress, 'progress')
-      if (progress < 0 || progress > 100) throw new ControlFault('INVALID_REQUEST', 'progress must be between 0 and 100')
+      const clampedProgress = Math.min(100, Math.max(0, progress))
       const label = optionalText(params.label, 'label', 1024)
       await this.#backend.writeTaskProgress(
         text(params.taskId, 'taskId', 160),
-        progress,
+        clampedProgress,
         ...(label === undefined ? [] : [label])
       )
       return { written: true }

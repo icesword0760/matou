@@ -557,11 +557,16 @@ export class HierarchyApplicationService {
         throw new Error('before Task must belong to the Workspace')
       }
       const order = parseStringArray(workspace.task_order_json)
-        .filter((id) => activeIds.includes(id) && id !== input.taskId)
+        .filter((id) => activeIds.includes(id))
+      const sourceIndex = order.indexOf(input.taskId)
       const targetIndex = input.beforeTaskId === undefined
-        ? order.length
+        ? order.length - 1
         : order.indexOf(input.beforeTaskId)
-      order.splice(targetIndex < 0 ? order.length : targetIndex, 0, input.taskId)
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+        return { ...readHierarchyResult(tx, input.windowId), taskOrder: order }
+      }
+      order.splice(sourceIndex, 1)
+      order.splice(targetIndex, 0, input.taskId)
       for (const [index, taskId] of order.entries()) {
         tx.run(
           'UPDATE tasks SET sort_key = ?, updated_at = ?, version = version + 1 WHERE id = ?',
@@ -592,7 +597,6 @@ export class HierarchyApplicationService {
         payload: { taskOrder: order },
         occurredAt: input.now
       })
-      activateTaskInTransaction(tx, input.windowId, input.taskId, input.now)
       return {
         ...readHierarchyResult(tx, input.windowId),
         taskOrder: order
@@ -659,6 +663,9 @@ export class HierarchyApplicationService {
         input.taskId
       )
       tx.run('DELETE FROM window_task_focus WHERE task_id = ?', input.taskId)
+      tx.run('DELETE FROM task_status_entries WHERE task_id = ?', input.taskId)
+      tx.run('DELETE FROM task_progress WHERE task_id = ?', input.taskId)
+      tx.run('DELETE FROM task_logs WHERE task_id = ?', input.taskId)
 
       const order = parseStringArray(workspace.task_order_json)
         .filter((taskId) => taskId !== input.taskId)

@@ -103,6 +103,19 @@ describe('HostControlServer', () => {
     expect(backend.sendKey).toHaveBeenCalledWith('session-1', 'Enter')
   })
 
+  it('clamps external Task progress before it reaches the product data channel', async () => {
+    const token = tokenService.issue('run-progress', ['task.progress.write'], Date.now() + 1000)
+    expect(await request(socketPath, controlRequest('progress-high', token, 'task.progress.write', {
+      taskId: 'task-1', progress: 135, label: 'finishing'
+    }))).toMatchObject({ ok: true })
+    expect(backend.writeTaskProgress).toHaveBeenCalledWith('task-1', 100, 'finishing')
+
+    expect(await request(socketPath, controlRequest('progress-low', token, 'task.progress.write', {
+      taskId: 'task-1', progress: -20
+    }))).toMatchObject({ ok: true })
+    expect(backend.writeTaskProgress).toHaveBeenCalledWith('task-1', 0)
+  })
+
   it('isolates backend failure and remains available for later requests', async () => {
     const token = tokenService.issue('run-1', ['terminal.read-current', 'host.list'], Date.now() + 1000)
     backend.readCurrent.mockRejectedValueOnce(new Error('session journal damaged'))

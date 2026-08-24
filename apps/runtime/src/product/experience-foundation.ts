@@ -163,6 +163,12 @@ export class NotificationProjection {
     this.#items.splice(0)
   }
 
+  clearTask(taskId: string): void {
+    for (let index = this.#items.length - 1; index >= 0; index -= 1) {
+      if (this.#items[index]?.taskId === taskId) this.#items.splice(index, 1)
+    }
+  }
+
   resolveNavigation(id: string, database: RuntimeDatabase): NotificationNavigationTarget | undefined {
     const item = this.#items.find((candidate) => candidate.id === id)
     if (!item) return undefined

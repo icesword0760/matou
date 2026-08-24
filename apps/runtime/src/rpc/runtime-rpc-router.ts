@@ -23,6 +23,7 @@ import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
+import { NotificationProjection } from '../product/experience-foundation'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -56,8 +57,9 @@ export class RuntimeRpcRouter {
   readonly #navigation: NavigationRepository
   readonly #detachedSessions: DetachedSessionService
   readonly #taskWindowMigrations: TaskWindowMigrationService
+  readonly #notifications: NotificationProjection
 
-  constructor(database: RuntimeDatabase) {
+  constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
     this.#workspaces = new WorkspaceTaskRepository(database, transactions)
@@ -72,6 +74,7 @@ export class RuntimeRpcRouter {
     this.#navigation = new NavigationRepository(database)
     this.#detachedSessions = new DetachedSessionService(database, transactions)
     this.#taskWindowMigrations = new TaskWindowMigrationService(database, transactions)
+    this.#notifications = notifications
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -178,19 +181,26 @@ export class RuntimeRpcRouter {
             : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
           now: integer(input.now, 'now', 0)
         })
-      case 'hierarchy.delete-task':
-        return this.#hierarchy.deleteTask(command, {
+      case 'hierarchy.delete-task': {
+        const taskId = text(input.taskId, 'taskId')
+        const result = this.#hierarchy.deleteTask(command, {
           windowId: text(input.windowId, 'windowId'),
-          taskId: text(input.taskId, 'taskId'),
+          taskId,
           confirmedIntent: text(input.confirmedIntent, 'confirmedIntent'),
           now: integer(input.now, 'now', 0)
         })
-      case 'hierarchy.activate-task':
-        return this.#hierarchy.activateTask({
+        this.#notifications.clearTask(taskId)
+        return result
+      }
+      case 'hierarchy.activate-task': {
+        const result = this.#hierarchy.activateTask({
           windowId: text(input.windowId, 'windowId'),
           taskId: text(input.taskId, 'taskId'),
           now: integer(input.now, 'now', 0)
         })
+        if (result.mount) this.#notifications.markPanelRead(result.mount.id)
+        return result
+      }
       case 'hierarchy.create-scene':
         return this.#hierarchy.createScene(command, {
           windowId: text(input.windowId, 'windowId'),
@@ -448,6 +458,10 @@ export class RuntimeRpcRouter {
       workspaceId: row.workspace_id, status: row.status, reason: row.reason,
       checkedAt: row.checked_at, validationGeneration: row.validation_generation
     }))
+    const unreadByTask = Object.fromEntries(activeTasks.flatMap(({ id }) => {
+      const count = this.#notifications.unreadCount({ taskId: id })
+      return count > 0 ? [[id, count] as const] : []
+    }))
     return {
       runtimeGeneration: this.#database.runtimeGeneration,
       eventSequence,
@@ -467,6 +481,7 @@ export class RuntimeRpcRouter {
         scenes: activeSceneSnapshots.map(({ scene }) => scene),
         sceneSnapshots: activeSceneSnapshots,
         pathStates,
+        unreadByTask,
         navigation: this.#navigation.get(windowId),
         taskPlacements: this.#navigation.listTaskPlacements()
       }

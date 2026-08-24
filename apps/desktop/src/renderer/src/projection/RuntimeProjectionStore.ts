@@ -23,6 +23,7 @@ export interface HierarchyProjection {
   pathStates?: unknown[]
   taskPlacements?: unknown[]
   sceneSnapshots?: unknown[]
+  unreadByTask?: Record<string, number>
 }
 
 export interface RuntimeProjectionView extends RuntimeProjectionSnapshot {

@@ -66,6 +66,17 @@ describe('NotificationProjection', () => {
     expect(notifications.list()).toEqual([])
   })
 
+  it('clears only the deleted Task while preserving unread feedback for other Tasks', () => {
+    const notifications = new NotificationProjection({ cooldownMs: 0 })
+    notifications.ingest(event('task-1-event', 'error', 1))
+    notifications.ingest({ ...event('task-2-event', 'error', 2), taskId: 'task-2' })
+
+    notifications.clearTask('task-1')
+
+    expect(notifications.unreadCount({ taskId: 'task-1' })).toBe(0)
+    expect(notifications.unreadCount({ taskId: 'task-2' })).toBe(1)
+  })
+
   it('resolves a stable main-window mount and falls back to Task/Session history', () => {
     const notifications = new NotificationProjection()
     const item = notifications.ingest(event('event-nav', 'error', 1))!

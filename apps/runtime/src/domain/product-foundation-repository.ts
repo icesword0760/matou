@@ -188,7 +188,8 @@ export class TaskTelemetryRepository {
   }
 
   setStatus(taskId: string, key: string, value: string | null, now = Date.now()): void {
-    if (value === null) {
+    const normalized = value === null || value === '' ? null : value
+    if (normalized === null) {
       this.#database.run('DELETE FROM task_status_entries WHERE task_id = ? AND key = ?', taskId, key)
     } else {
       this.#database.run(
@@ -196,24 +197,23 @@ export class TaskTelemetryRepository {
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(task_id, key) DO UPDATE SET value = excluded.value,
            runtime_generation = excluded.runtime_generation, updated_at = excluded.updated_at`,
-        taskId, key, value, this.#generation, now
+        taskId, key, normalized, this.#generation, now
       )
     }
-    this.#emit({ kind: 'status', taskId, key, value })
+    this.#emit({ kind: 'status', taskId, key, value: normalized })
   }
 
   setProgress(taskId: string, progress: number, label?: string, now = Date.now()): void {
-    if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
-      throw new Error('Task progress must be between 0 and 100')
-    }
+    if (!Number.isFinite(progress)) throw new Error('Task progress must be finite')
+    const clamped = Math.min(100, Math.max(0, progress))
     this.#database.run(
       `INSERT INTO task_progress (task_id, progress, label, runtime_generation, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(task_id) DO UPDATE SET progress = excluded.progress, label = excluded.label,
          runtime_generation = excluded.runtime_generation, updated_at = excluded.updated_at`,
-      taskId, progress, label ?? null, this.#generation, now
+      taskId, clamped, label ?? null, this.#generation, now
     )
-    this.#emit({ kind: 'progress', taskId, progress, ...(label === undefined ? {} : { label }) })
+    this.#emit({ kind: 'progress', taskId, progress: clamped, ...(label === undefined ? {} : { label }) })
   }
 
   appendLog(taskId: string, level: TaskLogLevel, source: string, message: string, now = Date.now()): number {
