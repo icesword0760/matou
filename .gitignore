@@ -10,3 +10,4 @@ playwright-report/
 .matou-data/
 apps/desktop/package-resources/
 apps/desktop/release/
+.worktrees/
