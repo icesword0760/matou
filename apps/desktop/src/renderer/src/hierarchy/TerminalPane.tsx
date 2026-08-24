@@ -40,7 +40,7 @@ export function TerminalPane(props: {
         else setConfirmationOpen(true)
       }}>×</button>
     </header>
-    {!pathValid && <div role="status">工作区目录不可用</div>}
+    {!pathValid && visible && <div role="status">工作区目录不可用</div>}
     <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} inputDisabled={!pathValid} />

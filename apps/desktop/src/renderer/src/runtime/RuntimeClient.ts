@@ -36,8 +36,10 @@ export class RuntimeClient {
   readonly #requests = new Map<string, PendingRequest>()
   readonly #terminals = new Map<string, TerminalConsumer>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
+  readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
+  #projectionAfterSequence: number | undefined
 
   constructor(
     port: RuntimeClientPort,
@@ -61,8 +63,8 @@ export class RuntimeClient {
     this.#bindPort(port)
   }
 
-  request<T = unknown>(method: RpcMethod, payload: unknown): Promise<T> {
-    if (!this.#ready) return Promise.reject(new Error('Runtime channel is not ready'))
+  async request<T = unknown>(method: RpcMethod, payload: unknown): Promise<T> {
+    await this.whenReady()
     const requestId = crypto.randomUUID()
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -83,9 +85,19 @@ export class RuntimeClient {
     })
   }
 
+  whenReady(): Promise<void> {
+    if (this.#ready) return Promise.resolve()
+    return new Promise((resolve) => this.#readyWaiters.add(resolve))
+  }
+
   subscribeProjection(listener: (message: RuntimeMessage) => void): () => void {
     this.#projectionListeners.add(listener)
     return () => this.#projectionListeners.delete(listener)
+  }
+
+  startProjection(afterSequence: number): void {
+    this.#projectionAfterSequence = afterSequence
+    if (this.#ready) this.#subscribeEvents(afterSequence)
   }
 
   attachTerminal(
@@ -144,7 +156,12 @@ export class RuntimeClient {
   #receive(message: RuntimeMessage): void {
     if (message.type === 'protocol.ready') {
       this.#ready = true
+      for (const resolve of this.#readyWaiters) resolve()
+      this.#readyWaiters.clear()
       for (const { config } of this.#terminals.values()) this.#spawn(config)
+      if (this.#projectionAfterSequence !== undefined) {
+        this.#subscribeEvents(this.#projectionAfterSequence)
+      }
       return
     }
     if (message.type === 'rpc.response' || message.type === 'rpc.error') {
@@ -168,6 +185,13 @@ export class RuntimeClient {
 
   #spawn(config: TerminalAttachment): void {
     this.#post({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, ...config })
+  }
+
+  #subscribeEvents(afterSequence: number): void {
+    this.#post({
+      type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+      consumerId: `${this.#clientId}:projection`, afterSequence, batchSize: 250
+    })
   }
 
   #post(message: unknown): void {

@@ -24,7 +24,7 @@ export function WorkspaceSwitcher({ projection, commands }: {
     </button>
     {open && <div role="menu">
       {projection.workspaces.map((workspace) => <button role="menuitem" key={workspace.id}
-        onClick={() => commands.activateWorkspace(workspace.id)}>{workspace.name}</button>)}
+        onClick={() => { setOpen(false); void commands.activateWorkspace(workspace.id) }}>{workspace.name}</button>)}
       <button role="menuitem" onClick={() => void chooseDirectory()}>新建工作区</button>
       <button role="menuitem" onClick={() => setRenaming(true)}>重命名</button>
       <button role="menuitem" onClick={() => commands.removeWorkspace(active.id)}>移出工作区</button>

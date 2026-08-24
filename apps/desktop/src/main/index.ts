@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'electron'
@@ -14,6 +15,8 @@ let quitting = false
 
 async function createWindow(): Promise<BrowserWindow> {
   const windowId = randomUUID()
+  const defaultRootDirectory = process.env.MATOU_DEFAULT_WORKSPACE ?? join(app.getPath('home'), 'matou_workspace')
+  await mkdir(defaultRootDirectory, { recursive: true })
   const window = new BrowserWindow({
     width: 1200,
     height: 780,
@@ -43,6 +46,7 @@ async function createWindow(): Promise<BrowserWindow> {
   if (process.env.ELECTRON_RENDERER_URL) {
     const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)
     rendererUrl.searchParams.set('windowId', windowId)
+    rendererUrl.searchParams.set('defaultRootDirectory', defaultRootDirectory)
     if (process.env.MATOU_E2E === '1') {
       rendererUrl.searchParams.set('e2e', '1')
     }
@@ -51,6 +55,7 @@ async function createWindow(): Promise<BrowserWindow> {
     await window.loadFile(join(__dirname, '../renderer/index.html'), {
       query: {
         windowId,
+        defaultRootDirectory,
         ...(process.env.MATOU_E2E === '1' ? { e2e: '1' } : {})
       }
     })

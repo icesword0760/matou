@@ -19,6 +19,7 @@ describe('RuntimeClient', () => {
     expect(first.sent.map((message) => message.type)).toContain('terminal.spawn')
 
     const request = client.request('hierarchy.bootstrap-window', { input: true })
+    await Promise.resolve()
     const rpc = first.sent.find((message) => message.type === 'rpc.request')!
     first.deliver({
       type: 'rpc.response', protocolVersion: PROTOCOL_VERSION,
@@ -36,6 +37,39 @@ describe('RuntimeClient', () => {
     expect(second.sent.map((message) => message.type)).toContain('terminal.spawn')
     detach()
     expect(second.sent.map((message) => message.type)).not.toContain('terminal.dispose')
+  })
+
+  it('waits for readiness and resumes the projection stream after reconnect', async () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    client.startProjection(12)
+    const pending = client.request('projection.snapshot', { windowId: 'window-1' })
+    expect(first.sent.some(({ type }) => type === 'rpc.request')).toBe(false)
+
+    first.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['projection-v1']
+    })
+    expect(first.sent).toContainEqual(expect.objectContaining({
+      type: 'events.subscribe', afterSequence: 12
+    }))
+    await Promise.resolve()
+    const rpc = first.sent.find(({ type }) => type === 'rpc.request')!
+    first.deliver({
+      type: 'rpc.response', protocolVersion: PROTOCOL_VERSION,
+      requestId: rpc.requestId, runtimeGeneration: 'generation-1', result: { ok: true }
+    })
+    await expect(pending).resolves.toEqual({ ok: true })
+
+    const second = new FakePort()
+    client.replacePort(second)
+    second.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2', capabilities: ['projection-v1']
+    })
+    expect(second.sent).toContainEqual(expect.objectContaining({
+      type: 'events.subscribe', afterSequence: 12
+    }))
   })
 })
 

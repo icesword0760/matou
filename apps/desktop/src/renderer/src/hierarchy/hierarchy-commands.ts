@@ -1,14 +1,20 @@
 import type { RuntimeClient } from '../runtime/RuntimeClient'
 import type { HierarchyCommands } from './hierarchy-types'
 
-export function createHierarchyCommands(client: RuntimeClient, windowId: string): HierarchyCommands {
+export function createHierarchyCommands(
+  client: RuntimeClient,
+  windowId: string,
+  afterMutation?: () => void | Promise<void>
+): HierarchyCommands {
   let sequence = 0
-  const command = (type: string, input: Record<string, unknown>) => {
+  const command = async (type: string, input: Record<string, unknown>) => {
     const commandId = `${type}-${Date.now()}-${++sequence}`
-    return client.request(type as Parameters<RuntimeClient['request']>[0], {
+    const result = await client.request(type as Parameters<RuntimeClient['request']>[0], {
       command: { commandId, commandType: type, requestHash: JSON.stringify(input) },
       input: { ...input, windowId, now: Date.now() }
     })
+    await afterMutation?.()
+    return result
   }
   return {
     activateWorkspace: (workspaceId) => command('hierarchy.activate-workspace', { workspaceId }),

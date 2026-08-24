@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 
 import '@xterm/xterm/css/xterm.css'
 import './terminal/terminal.css'
+import './hierarchy/hierarchy.css'
 
 import { App } from './App'
 import { RuntimeProvider } from './runtime/RuntimeProvider'
