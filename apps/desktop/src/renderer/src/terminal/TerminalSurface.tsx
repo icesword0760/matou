@@ -1,21 +1,17 @@
 import { useEffect, useRef } from 'react'
 
-import { PROTOCOL_VERSION, type RuntimeMessage } from '@matou/contracts'
+import type { RuntimeMessage } from '@matou/contracts'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 
-const PORT_CHANNEL = 'matou:terminal-port'
-const RENDERER_READY = 'matou:renderer-ready'
+import { useRuntimeClient } from '../runtime/RuntimeProvider'
+
 const SESSION_ID = 'foundation-shell'
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
 
 export type RuntimeStatus =
-  | 'waiting-for-port'
-  | 'handshaking'
-  | 'starting-session'
-  | 'streaming'
-  | 'error'
-  | 'exited'
+  | 'waiting-for-port' | 'handshaking' | 'starting-session'
+  | 'streaming' | 'error' | 'exited'
 
 interface TerminalSurfaceProps {
   onStatusChange: (status: RuntimeStatus) => void
@@ -23,15 +19,17 @@ interface TerminalSurfaceProps {
   onReplayComplete: (marker: string) => void
 }
 
-export function TerminalSurface({ onStatusChange, onSmokeMarker, onReplayComplete }: TerminalSurfaceProps) {
+export function TerminalSurface(props: TerminalSurfaceProps) {
+  const { onStatusChange, onSmokeMarker, onReplayComplete } = props
+  const client = useRuntimeClient()
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const container = containerRef.current
-    if (!container) {
+    if (!container || !client) {
+      onStatusChange('waiting-for-port')
       return
     }
-
     const terminal = new Terminal({
       cursorBlink: true,
       fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, monospace',
@@ -39,177 +37,72 @@ export function TerminalSurface({ onStatusChange, onSmokeMarker, onReplayComplet
       lineHeight: 1.2,
       scrollback: 10_000,
       theme: {
-        background: '#0b0e14',
-        foreground: '#d6deeb',
-        cursor: '#82aaff',
+        background: '#0b0e14', foreground: '#d6deeb', cursor: '#82aaff',
         selectionBackground: '#283457'
       }
     })
-    const fitAddon = new FitAddon()
-    terminal.loadAddon(fitAddon)
+    const fit = new FitAddon()
+    terminal.loadAddon(fit)
     terminal.open(container)
-    fitAddon.fit()
-
-    let port: MessagePort | undefined
-    let spawned = false
-    let observedOutput = ''
-    let replayRequested = false
+    fit.fit()
     const decoder = new TextDecoder()
+    let observed = ''
+    let replayRequested = false
+    onStatusChange('starting-session')
 
-    const post = (message: unknown) => port?.postMessage(message)
-
-    const handleRuntimeMessage = (event: MessageEvent<RuntimeMessage>) => {
-      const message = event.data
-      switch (message.type) {
-        case 'protocol.ready':
-          onStatusChange('starting-session')
-          post({
-            type: 'terminal.spawn',
-            protocolVersion: PROTOCOL_VERSION,
-            sessionId: SESSION_ID,
-            executionContextId: 'local-default',
-            profile: 'shell',
-            cols: terminal.cols,
-            rows: terminal.rows
-          })
-          break
-        case 'protocol.error':
-          console.error(`[Runtime ${message.code}] ${message.message}`)
-          terminal.writeln(`\r\n[Runtime ${message.code}] ${message.message}`)
-          onStatusChange('error')
-          break
-        case 'terminal.spawned':
-          spawned = true
-          onStatusChange('streaming')
-          if (message.reattached && !replayRequested) {
+    const onMessage = (message: RuntimeMessage) => {
+      if (message.type === 'terminal.spawned') {
+        onStatusChange('streaming')
+        if (message.reattached && !replayRequested) {
+          replayRequested = true
+          client.requestTerminalReplay(SESSION_ID)
+        }
+        if (new URLSearchParams(window.location.search).get('e2e') === '1') {
+          client.sendTerminalInput(SESSION_ID, `printf '${SMOKE_MARKER}\\n'\r`)
+        }
+      } else if (message.type === 'terminal.data') {
+        const bytes = message.data instanceof Uint8Array
+          ? message.data
+          : new Uint8Array(message.data)
+        observed = (observed + decoder.decode(bytes, { stream: true })).slice(-8192)
+        if (observed.includes(SMOKE_MARKER)) {
+          onSmokeMarker(SMOKE_MARKER)
+          if (!replayRequested && new URLSearchParams(window.location.search).get('e2e') === '1') {
             replayRequested = true
-            post({
-              type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
-              sessionId: SESSION_ID, fromSequence: 0
-            })
+            client.requestTerminalReplay(SESSION_ID)
           }
-          if (new URLSearchParams(window.location.search).get('e2e') === '1') {
-            post({
-              type: 'terminal.input',
-              protocolVersion: PROTOCOL_VERSION,
-              sessionId: SESSION_ID,
-              data: `printf '${SMOKE_MARKER}\\n'\r`
-            })
-          }
-          break
-        case 'terminal.data': {
-          const bytes = message.data instanceof Uint8Array ? message.data : new Uint8Array(message.data)
-          observedOutput = (observedOutput + decoder.decode(bytes, { stream: true })).slice(-8192)
-          if (observedOutput.includes(SMOKE_MARKER)) {
-            onSmokeMarker(SMOKE_MARKER)
-            if (!replayRequested && new URLSearchParams(window.location.search).get('e2e') === '1') {
-              replayRequested = true
-              post({
-                type: 'terminal.replay-request',
-                protocolVersion: PROTOCOL_VERSION,
-                sessionId: SESSION_ID,
-                fromSequence: 0
-              })
-            }
-          }
-          terminal.write(bytes, () => {
-            post({
-              type: 'terminal.ack',
-              protocolVersion: PROTOCOL_VERSION,
-              sessionId: SESSION_ID,
-              throughSequence: message.sequence
-            })
-          })
-          break
         }
-        case 'terminal.exited':
-          onStatusChange('exited')
-          break
-        case 'terminal.replay-start':
-          terminal.reset()
-          if (message.checkpoint) {
-            const snapshot = message.checkpoint.snapshot instanceof Uint8Array
-              ? message.checkpoint.snapshot
-              : new Uint8Array(message.checkpoint.snapshot)
-            terminal.write(snapshot)
-          }
-          break
-        case 'terminal.gap':
-          break
-        case 'terminal.replay-complete':
-          onReplayComplete(`replayed-through:${message.throughSequence}`)
-          break
+        terminal.write(bytes, () => client.acknowledgeTerminal(SESSION_ID, message.sequence))
+      } else if (message.type === 'terminal.exited') {
+        onStatusChange('exited')
+      } else if (message.type === 'protocol.error') {
+        onStatusChange('error')
+      } else if (message.type === 'terminal.replay-start') {
+        terminal.reset()
+      } else if (message.type === 'terminal.replay-complete') {
+        onReplayComplete(`replayed-through:${message.throughSequence}`)
       }
     }
-
-    const handlePort = (event: MessageEvent) => {
-      if (event.source !== window || event.data?.type !== PORT_CHANNEL || event.ports.length !== 1) {
-        return
-      }
-      const [receivedPort] = event.ports
-      if (!receivedPort) {
-        return
-      }
-      port = receivedPort
-      receivedPort.onmessage = handleRuntimeMessage
-      receivedPort.start()
-      onStatusChange('handshaking')
-      post({
-        type: 'protocol.hello',
-        protocolVersion: PROTOCOL_VERSION,
-        clientId: crypto.randomUUID()
-      })
-    }
-
-    const inputSubscription = terminal.onData((data) => {
-      if (!spawned) {
-        return
-      }
-      post({
-        type: 'terminal.input',
-        protocolVersion: PROTOCOL_VERSION,
-        sessionId: SESSION_ID,
-        data
-      })
+    const detach = client.attachTerminal({
+      sessionId: SESSION_ID,
+      executionContextId: 'local-default',
+      profile: 'shell',
+      cols: terminal.cols,
+      rows: terminal.rows
+    }, onMessage)
+    const input = terminal.onData((data) => client.sendTerminalInput(SESSION_ID, data))
+    const observer = new ResizeObserver(() => {
+      fit.fit()
+      client.resizeTerminal(SESSION_ID, terminal.cols, terminal.rows)
     })
-
-    let resizeFrame = 0
-    const resizeObserver = new ResizeObserver(() => {
-      cancelAnimationFrame(resizeFrame)
-      resizeFrame = requestAnimationFrame(() => {
-        fitAddon.fit()
-        if (spawned) {
-          post({
-            type: 'terminal.resize',
-            protocolVersion: PROTOCOL_VERSION,
-            sessionId: SESSION_ID,
-            cols: terminal.cols,
-            rows: terminal.rows
-          })
-        }
-      })
-    })
-    resizeObserver.observe(container)
-
-    window.addEventListener('message', handlePort)
-    window.postMessage({ type: RENDERER_READY }, '*')
-
+    observer.observe(container)
     return () => {
-      window.removeEventListener('message', handlePort)
-      resizeObserver.disconnect()
-      cancelAnimationFrame(resizeFrame)
-      inputSubscription.dispose()
-      if (spawned) {
-        post({
-          type: 'terminal.dispose',
-          protocolVersion: PROTOCOL_VERSION,
-          sessionId: SESSION_ID
-        })
-      }
-      port?.close()
+      observer.disconnect()
+      input.dispose()
+      detach()
       terminal.dispose()
     }
-  }, [onReplayComplete, onSmokeMarker, onStatusChange])
+  }, [client, onReplayComplete, onSmokeMarker, onStatusChange])
 
   return <div className="terminal-surface" ref={containerRef} />
 }
