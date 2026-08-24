@@ -14,10 +14,11 @@ export function TerminalPane(props: {
   pathValid?: boolean
   onActivate(sessionId: string): unknown
   onDelete(sessionId: string, confirmed?: boolean): unknown
+  onDetach?(sessionId: string): unknown
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
-    pathValid = true, onActivate, onDelete
+    pathValid = true, onActivate, onDelete, onDetach
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const flow = sessionDeleteFlow({
@@ -32,13 +33,24 @@ export function TerminalPane(props: {
   }
   return <section className="terminal-pane" data-testid="terminal-pane"
     data-active={active} hidden={!visible} onPointerDown={() => onActivate(session.id)}>
-    <header className="terminal-pane-header">
+    <header className="terminal-pane-header" draggable={onDetach !== undefined}
+      onDragEnd={(event) => {
+        const outside = event.screenX <= window.screenX || event.screenY <= window.screenY ||
+          event.screenX >= window.screenX + window.outerWidth ||
+          event.screenY >= window.screenY + window.outerHeight
+        if (outside) void onDetach?.(session.id)
+      }}>
       <div><strong>{session.title}</strong><span>{typeLabel(profile)}</span></div>
-      <button aria-label={`删除终端：${session.title}`} onClick={(event) => {
-        event.stopPropagation()
-        if (flow.action === 'silent') remove(false)
-        else setConfirmationOpen(true)
-      }}>×</button>
+      <div className="terminal-pane-actions">
+        {onDetach && <button aria-label={`脱出终端：${session.title}`} onClick={(event) => {
+          event.stopPropagation(); void onDetach(session.id)
+        }}>↗</button>}
+        <button aria-label={`删除终端：${session.title}`} onClick={(event) => {
+          event.stopPropagation()
+          if (flow.action === 'silent') remove(false)
+          else setConfirmationOpen(true)
+        }}>×</button>
+      </div>
     </header>
     {!pathValid && visible && <div role="status">工作区目录不可用</div>}
     <TerminalSurface sessionId={session.id}

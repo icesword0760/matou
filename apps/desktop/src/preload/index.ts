@@ -38,6 +38,13 @@ window.addEventListener('message', (event) => {
 const desktopApi: MatouDesktopApi = {
   selectWorkspaceDirectory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.selectWorkspaceDirectory),
   hideWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.hideWindow, windowId),
-  showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId)
+  showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId),
+  createDetachedTerminalWindow: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.createDetachedTerminalWindow, input),
+  closeDetachedTerminalWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.closeDetachedTerminalWindow, windowId),
+  onDetachedWindowClosed: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.detachedWindowClosed, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.detachedWindowClosed, handler)
+  }
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)

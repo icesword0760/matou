@@ -31,6 +31,11 @@ export class WindowManager {
     return [...this.#windows].find(([, window]) => !window.isDestroyed())?.[0]
   }
 
+  getWindow(windowId: string): ManagedWindow | undefined {
+    const window = this.#windows.get(windowId)
+    return window && !window.isDestroyed() ? window : undefined
+  }
+
   #require(windowId: string): ManagedWindow {
     const window = this.#windows.get(windowId)
     if (!window || window.isDestroyed()) throw new Error(`Window ${windowId} does not exist`)

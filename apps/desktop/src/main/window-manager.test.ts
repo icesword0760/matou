@@ -16,6 +16,19 @@ describe('WindowManager', () => {
     manager.showWindow('window-1')
     expect(first.isVisible()).toBe(true)
   })
+
+  it('tracks a detached window independently from its owning main window', () => {
+    const manager = new WindowManager()
+    const main = new FakeWindow()
+    const detached = new FakeWindow()
+    manager.register('main-1', main)
+    manager.register('detached-1', detached)
+
+    expect(manager.getWindow('detached-1')).toBe(detached)
+    manager.unregister('detached-1')
+    expect(manager.getWindow('detached-1')).toBeUndefined()
+    expect(manager.getWindow('main-1')).toBe(main)
+  })
 })
 
 class FakeWindow implements ManagedWindow {

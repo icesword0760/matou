@@ -11,7 +11,7 @@ vi.mock('../terminal/TerminalSurface', () => ({
     <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled} />
 }))
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'matouDesktop') })
 
 describe('PRD 05 hierarchy shell', () => {
   it('restores each Workspace navigation context after switching away', async () => {
@@ -39,6 +39,22 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByText('工作区目录不可用')).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
     expect(screen.getByTestId('xterm-session-a2')).toBeTruthy()
+  })
+
+  it('shows an ownership placeholder while the same Session lives in a detached window', () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.mounts[0]!.sceneWindowId = 'detached-1'
+    first.windows.push({ id: 'detached-1', sceneId: first.scene.id, state: 'detached' })
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      selectWorkspaceDirectory: vi.fn(), hideWindow: vi.fn(), showWindow: vi.fn(),
+      createDetachedTerminalWindow: vi.fn(), closeDetachedTerminalWindow: vi.fn(),
+      onDetachedWindowClosed: vi.fn(() => () => {})
+    } })
+    render(<HierarchyShell fixture={data} />)
+
+    expect(screen.getByTestId('detached-placeholder').textContent).toContain('已脱出')
+    expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 })
 

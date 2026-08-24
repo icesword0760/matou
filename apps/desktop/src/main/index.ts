@@ -6,10 +6,15 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'el
 
 import { RuntimeHost } from './runtime-host'
 import { WindowManager } from './window-manager'
-import { DESKTOP_CHANNELS } from '../shared/desktop-api'
+import {
+  DESKTOP_CHANNELS,
+  type DetachedTerminalWindowInput,
+  type DetachedWindowClosedEvent
+} from '../shared/desktop-api'
 
 let runtimeHost: RuntimeHost | undefined
 const windows = new WindowManager()
+const browserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
 
@@ -32,7 +37,8 @@ async function createWindow(): Promise<BrowserWindow> {
     }
   })
   windows.register(windowId, window)
-  window.on('closed', () => windows.unregister(windowId))
+  browserWindows.set(windowId, window)
+  window.on('closed', () => { windows.unregister(windowId); browserWindows.delete(windowId) })
   window.on('close', (event) => {
     if (!quitting && process.env.MATOU_E2E !== '1') {
       event.preventDefault()
@@ -62,6 +68,52 @@ async function createWindow(): Promise<BrowserWindow> {
   }
 
   return window
+}
+
+async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput): Promise<void> {
+  if (browserWindows.has(input.windowId)) {
+    windows.showWindow(input.windowId)
+    return
+  }
+  const window = new BrowserWindow({
+    width: 760, height: 520, minWidth: 420, minHeight: 260,
+    show: false, backgroundColor: '#0b0e14',
+    title: input.title,
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.cjs'),
+      nodeIntegration: false, contextIsolation: true, sandbox: true
+    }
+  })
+  windows.register(input.windowId, window)
+  browserWindows.set(input.windowId, window)
+  window.once('ready-to-show', () => window.show())
+  window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
+  window.on('closed', () => {
+    windows.unregister(input.windowId)
+    browserWindows.delete(input.windowId)
+    if (quitting) return
+    const event: DetachedWindowClosedEvent = {
+      windowId: input.windowId, mainWindowId: input.mainWindowId,
+      sceneId: input.sceneId, mountId: input.mountId, sessionId: input.sessionId
+    }
+    browserWindows.get(input.mainWindowId)?.webContents.send(
+      DESKTOP_CHANNELS.detachedWindowClosed, event
+    )
+  })
+  const query = {
+    kind: 'detached-terminal', windowId: input.windowId,
+    mainWindowId: input.mainWindowId, sceneId: input.sceneId,
+    mountId: input.mountId, sessionId: input.sessionId,
+    executionContextId: input.executionContextId,
+    profile: input.profile, title: input.title
+  }
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)
+    for (const [key, value] of Object.entries(query)) rendererUrl.searchParams.set(key, value)
+    await window.loadURL(rendererUrl.toString())
+  } else {
+    await window.loadFile(join(__dirname, '../renderer/index.html'), { query })
+  }
 }
 
 function resolveRuntimeEntry(): string {
@@ -110,6 +162,12 @@ ipcMain.handle(DESKTOP_CHANNELS.hideWindow, (_event, windowId: string) => {
 })
 ipcMain.handle(DESKTOP_CHANNELS.showWindow, (_event, windowId: string) => {
   windows.showWindow(windowId)
+})
+ipcMain.handle(DESKTOP_CHANNELS.createDetachedTerminalWindow, (
+  _event, input: DetachedTerminalWindowInput
+) => createDetachedTerminalWindow(input))
+ipcMain.handle(DESKTOP_CHANNELS.closeDetachedTerminalWindow, (_event, windowId: string) => {
+  browserWindows.get(windowId)?.close()
 })
 
 app.on('before-quit', () => {

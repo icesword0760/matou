@@ -80,4 +80,6 @@ export interface HierarchyCommands {
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
   activateSession(sessionId: string): unknown
   deleteSession(sessionId: string, confirmed?: boolean): unknown
+  detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
+  returnSession(sceneWindowId: string): unknown
 }

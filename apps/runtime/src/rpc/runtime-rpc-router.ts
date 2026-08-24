@@ -13,6 +13,7 @@ import { SessionRepository } from '../domain/session-repository'
 import { WorkspaceTaskRepository } from '../domain/workspace-task-repository'
 import { DomainEventStore } from '../events/domain-event-store'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
+import { DetachedSessionService } from '../hierarchy/detached-session-service'
 import { WorkspacePathService } from '../hierarchy/workspace-path-service'
 import { SceneLayoutService } from '../hierarchy/scene-layout-service'
 import { NavigationRepository } from '../hierarchy/navigation-repository'
@@ -52,6 +53,7 @@ export class RuntimeRpcRouter {
   readonly #workspacePaths: WorkspacePathService
   readonly #sceneLayouts: SceneLayoutService
   readonly #navigation: NavigationRepository
+  readonly #detachedSessions: DetachedSessionService
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -66,6 +68,7 @@ export class RuntimeRpcRouter {
     this.#workspacePaths = new WorkspacePathService(database, transactions)
     this.#sceneLayouts = new SceneLayoutService(database, transactions)
     this.#navigation = new NavigationRepository(database)
+    this.#detachedSessions = new DetachedSessionService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -252,6 +255,22 @@ export class RuntimeRpcRouter {
           ...(optionalText(input.confirmedIntent, 'confirmedIntent') === undefined
             ? {}
             : { confirmedIntent: optionalText(input.confirmedIntent, 'confirmedIntent')! }),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.detach-session':
+        return this.#detachedSessions.detach(command, {
+          mainWindowId: text(input.windowId, 'windowId'),
+          sceneWindowId: text(input.sceneWindowId, 'sceneWindowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          mountId: text(input.mountId, 'mountId'),
+          sessionId: text(input.sessionId, 'sessionId'),
+          nativeWindowKey: text(input.nativeWindowKey, 'nativeWindowKey'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.return-session':
+        return this.#detachedSessions.returnSession(command, {
+          sceneWindowId: text(input.sceneWindowId, 'sceneWindowId'),
+          mainWindowId: text(input.windowId, 'windowId'),
           now: integer(input.now, 'now', 0)
         })
       case 'workspace.create':

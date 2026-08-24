@@ -144,6 +144,27 @@
 .terminal-pane-header span { color: #657087; font-size: 9px; text-transform: uppercase; }
 .terminal-pane-header button { border: 0; color: #707988; background: transparent; }
 .terminal-pane-header button:hover { color: #f1a5a5; }
+.terminal-pane-actions { display: flex; gap: 2px; }
+
+.detached-placeholder {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  justify-items: center;
+  border: 1px dashed #3a4559;
+  border-radius: 7px;
+  color: #8792a6;
+  background: #10141b;
+  text-align: center;
+}
+.detached-placeholder div { display: flex; align-items: center; gap: 9px; }
+.detached-placeholder span { padding: 3px 6px; border-radius: 999px; color: #aac0ed; background: #202b42; font-size: 10px; }
+.detached-placeholder p { margin: 10px 0 14px; font-size: 11px; }
+.detached-placeholder button { padding: 6px 10px; border: 1px solid #35415a; border-radius: 6px; color: #cbd8f1; background: #1a2333; }
+
+.detached-terminal-app { display: grid; grid-template-rows: 42px minmax(0, 1fr); width: 100%; height: 100%; background: #0b0e14; }
+.detached-terminal-app > header { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #252a33; color: #dce3ef; background: #11151c; -webkit-app-region: drag; }
+.detached-terminal-app > header span { color: #748096; font-size: 10px; }
 
 [role="alertdialog"] {
   position: fixed;

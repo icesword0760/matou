@@ -49,6 +49,10 @@ export function createHierarchyCommands(
     activateSession: (sessionId) => command('hierarchy.activate-session', { sessionId }),
     deleteSession: (sessionId, confirmed = false) => command('hierarchy.delete-session', {
       sessionId, ...(confirmed ? { confirmedIntent: `delete-session:${sessionId}` } : {})
-    })
+    }),
+    detachSession: (sceneId, mountId, sessionId, sceneWindowId) => command('hierarchy.detach-session', {
+      sceneId, mountId, sessionId, sceneWindowId, nativeWindowKey: sceneWindowId
+    }),
+    returnSession: (sceneWindowId) => command('hierarchy.return-session', { sceneWindowId })
   }
 }

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { HierarchyShell } from './hierarchy/HierarchyShell'
+import { DetachedTerminalApp } from './hierarchy/DetachedTerminalApp'
 import { TerminalSurface, type RuntimeStatus } from './terminal/TerminalSurface'
 
 export function App() {
@@ -8,6 +9,9 @@ export function App() {
   const [smokeMarker, setSmokeMarker] = useState('')
   const [replayMarker, setReplayMarker] = useState('')
   const e2e = new URLSearchParams(window.location.search).get('e2e') === '1'
+  const detached = new URLSearchParams(window.location.search).get('kind') === 'detached-terminal'
+
+  if (detached) return <DetachedTerminalApp />
 
   return <>
     <HierarchyShell />

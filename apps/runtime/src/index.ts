@@ -17,6 +17,8 @@ import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { MigrationRunner } from './storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
+import { DetachedSessionService } from './hierarchy/detached-session-service'
+import { DomainTransactionManager } from './storage/domain-transaction'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -41,6 +43,8 @@ const hostControl = new HostControlServer({
   backend: controlBackend
 })
 const runtimeReady = migrationReady.then(async () => {
+  new DetachedSessionService(database, new DomainTransactionManager(database))
+    .normalizeOnStartup(Date.now())
   const recovery = await new RuntimeRecoveryService(dataRoot, database).recoverAll()
   for (const failure of recovery.failed) {
     console.error(`[runtime.recovery] ${failure.sessionId} ${failure.code}: ${failure.message}`)

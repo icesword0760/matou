@@ -9,6 +9,7 @@ import type { RuntimeMessage } from '@matou/contracts'
 import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { createHierarchyCommands } from './hierarchy-commands'
+import { DetachedPlaceholder } from './DetachedPlaceholder'
 import type {
   HierarchyCommands, HierarchyProjection, SceneNodeView, SceneSnapshotView
 } from './hierarchy-types'
@@ -86,6 +87,11 @@ function HierarchyProduct({ projection, commands }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
 }) {
+  useEffect(() => window.matouDesktop?.onDetachedWindowClosed((event) => {
+    if (event.mainWindowId === projection.windowId) {
+      void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
+    }
+  }), [commands, projection.windowId])
   const workspaceId = projection.navigation.activeWorkspaceId
   const workspace = projection.workspaces.find(({ id }) => id === workspaceId)
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
@@ -124,12 +130,37 @@ function HierarchyProduct({ projection, commands }: {
                       const mount = snapshot.mounts.find(({ id }) => id === mountId)
                       const session = projection.sessions.find(({ id }) => id === mount?.sessionId)
                       if (!session) return <div role="status">终端记录正在恢复</div>
+                      const detachedWindow = snapshot.windows.find(({ id, state }) =>
+                        id === mount?.sceneWindowId && state === 'detached'
+                      )
+                      if (detachedWindow) {
+                        return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
+                      }
                       return <TerminalPane session={session}
                         active={projection.navigation.sessionByScene[scene.id] === session.id}
                         visible={scene.id === activeSceneId}
                         workspaceSessionCount={workspaceSessionCount}
                         taskName={task.title} pathValid={pathValid}
-                        onActivate={commands.activateSession} onDelete={commands.deleteSession} />
+                        onActivate={commands.activateSession} onDelete={commands.deleteSession}
+                        {...(window.matouDesktop?.createDetachedTerminalWindow
+                          ? { onDetach: async () => {
+                              const sceneWindowId = crypto.randomUUID()
+                              await commands.detachSession(scene.id, mountId, session.id, sceneWindowId)
+                              try {
+                                await window.matouDesktop.createDetachedTerminalWindow({
+                                  windowId: sceneWindowId, mainWindowId: projection.windowId,
+                                  sceneId: scene.id, mountId, sessionId: session.id,
+                                  executionContextId: session.executionContextId ?? 'local-default',
+                                  profile: session.kind === 'claude-code' || session.kind === 'codex'
+                                    ? session.kind : 'shell',
+                                  title: session.title
+                                })
+                              } catch (error) {
+                                await commands.returnSession(sceneWindowId)
+                                throw error
+                              }
+                            } }
+                          : {})} />
                     }} />
                   : <div className="scene-recovery" role="status">正在恢复页签布局…</div>}
               </section>
@@ -205,7 +236,7 @@ function createFixtureCommands(
     createWorkspace: NOOP, renameWorkspace: NOOP, removeWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     createScene: NOOP, renameScene: NOOP, reorderScene: NOOP, closeScene: NOOP,
-    splitSession: NOOP, deleteSession: NOOP
+    splitSession: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP
   }
 }
 
