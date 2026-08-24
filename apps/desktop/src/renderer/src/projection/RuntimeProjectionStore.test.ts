@@ -45,4 +45,27 @@ describe('RuntimeProjectionStore', () => {
     const store = new RuntimeProjectionStore()
     expect('exportAuthoritativeSnapshot' in store).toBe(false)
   })
+
+  it('keeps an active hierarchy projection and removes archived entities from it', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-1' }],
+      tasks: [{ id: 'task-1', workspaceId: 'workspace-1', status: 'active' }],
+      sessions: [{ id: 'session-1', taskId: 'task-1', status: 'running' }],
+      relations: [], scenes: [{ id: 'scene-1', taskId: 'task-1' }],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [{ id: 'workspace-1' }],
+        tasks: [{ id: 'task-1' }], sessions: [{ id: 'session-1' }],
+        scenes: [{ id: 'scene-1' }], navigation: { windowId: 'window-1' }
+      }
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'archive-session', eventType: 'session.archived',
+      aggregateType: 'session', aggregateId: 'session-1', payload: { archivedAt: 2 },
+      schemaVersion: 1, commandId: 'cmd', occurredAt: 2
+    }])
+
+    expect(store.view().hierarchy.sessions).toEqual([])
+  })
 })

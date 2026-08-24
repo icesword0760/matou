@@ -15,6 +15,7 @@ import { DomainEventStore } from '../events/domain-event-store'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { WorkspacePathService } from '../hierarchy/workspace-path-service'
 import { SceneLayoutService } from '../hierarchy/scene-layout-service'
+import { NavigationRepository } from '../hierarchy/navigation-repository'
 import { SessionRelationRepository } from '../relations/session-relation-repository'
 import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
@@ -50,6 +51,7 @@ export class RuntimeRpcRouter {
   readonly #hierarchy: HierarchyApplicationService
   readonly #workspacePaths: WorkspacePathService
   readonly #sceneLayouts: SceneLayoutService
+  readonly #navigation: NavigationRepository
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -63,6 +65,7 @@ export class RuntimeRpcRouter {
     this.#hierarchy = new HierarchyApplicationService(database, transactions)
     this.#workspacePaths = new WorkspacePathService(database, transactions)
     this.#sceneLayouts = new SceneLayoutService(database, transactions)
+    this.#navigation = new NavigationRepository(database)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -80,7 +83,7 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
-    if (method === 'projection.snapshot') return this.#snapshot()
+    if (method === 'projection.snapshot') return this.#snapshot(payload)
     if (method === 'events.replay') {
       const value = record(payload)
       const afterSequence = integer(value.afterSequence, 'afterSequence', 0)
@@ -226,6 +229,31 @@ export class RuntimeRpcRouter {
           root: input.root as LayoutNode,
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.split-session':
+        return this.#hierarchy.splitSession(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          direction: enumeration(
+            input.direction, ['horizontal', 'vertical'] as const, 'direction'
+          ),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.activate-session':
+        return this.#hierarchy.activateSession({
+          windowId: text(input.windowId, 'windowId'),
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.delete-session':
+        return this.#hierarchy.deleteSession(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sessionId: text(input.sessionId, 'sessionId'),
+          ...(optionalText(input.confirmedIntent, 'confirmedIntent') === undefined
+            ? {}
+            : { confirmedIntent: optionalText(input.confirmedIntent, 'confirmedIntent')! }),
+          now: integer(input.now, 'now', 0)
+        })
       case 'workspace.create':
         return this.#workspaces.createWorkspace(command, {
           id: text(input.id, 'id'), name: text(input.name, 'name'),
@@ -342,7 +370,7 @@ export class RuntimeRpcRouter {
     }
   }
 
-  #snapshot(): unknown {
+  #snapshot(payload: unknown): unknown {
     const workspaces = this.#database.all<{ id: string }>('SELECT id FROM workspaces ORDER BY created_at').map(({ id }) => this.#workspaces.getWorkspace(id)!)
     const tasks = this.#database.all<{ id: string }>('SELECT id FROM tasks ORDER BY created_at').map(({ id }) => this.#workspaces.getTask(id)!)
     const sessions = this.#database.all<{ id: string }>('SELECT id FROM sessions ORDER BY created_at').map(({ id }) => this.#sessions.getSession(id)!)
@@ -351,6 +379,25 @@ export class RuntimeRpcRouter {
     const relations = this.#database.all<{ relation_id: string }>('SELECT relation_id FROM session_relations_current ORDER BY created_at').map(({ relation_id }) => this.#relations.getCurrent(relation_id)!)
     const sceneSnapshots = this.#database.all<{ id: string }>('SELECT id FROM scenes ORDER BY created_at').map(({ id }) => this.#scenes.snapshot(id)!)
     const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
+    const requestedWindowId = typeof payload === 'object' && payload !== null &&
+      'windowId' in payload && typeof payload.windowId === 'string'
+      ? payload.windowId
+      : undefined
+    const windowId = requestedWindowId ?? this.#database.get<{ id: string }>(
+      `SELECT id FROM app_windows WHERE kind = 'main' AND state <> 'closed'
+       ORDER BY created_at LIMIT 1`
+    )?.id ?? 'window-1'
+    const activeWorkspaces = workspaces.filter(({ archivedAt }) => archivedAt === undefined)
+    const activeTasks = tasks.filter(({ archivedAt }) => archivedAt === undefined)
+    const activeSessions = sessions.filter(({ archivedAt }) => archivedAt === undefined)
+    const activeSceneSnapshots = sceneSnapshots.filter(({ scene }) => scene.archivedAt === undefined)
+    const pathStates = this.#database.all<{
+      workspace_id: string; status: 'valid' | 'invalid'; reason: '' | 'missing' | 'not-directory' | 'no-access' | 'unknown'
+      checked_at: number; validation_generation: number
+    }>('SELECT * FROM workspace_path_state ORDER BY workspace_id').map((row) => ({
+      workspaceId: row.workspace_id, status: row.status, reason: row.reason,
+      checkedAt: row.checked_at, validationGeneration: row.validation_generation
+    }))
     return {
       runtimeGeneration: this.#database.runtimeGeneration,
       eventSequence,
@@ -361,7 +408,18 @@ export class RuntimeRpcRouter {
       providerBindings,
       relations,
       scenes: sceneSnapshots.map(({ scene }) => scene),
-      sceneSnapshots
+      sceneSnapshots,
+      hierarchy: {
+        windowId,
+        workspaces: activeWorkspaces,
+        tasks: activeTasks,
+        sessions: activeSessions,
+        scenes: activeSceneSnapshots.map(({ scene }) => scene),
+        sceneSnapshots: activeSceneSnapshots,
+        pathStates,
+        navigation: this.#navigation.get(windowId),
+        taskPlacements: this.#navigation.listTaskPlacements()
+      }
     }
   }
 

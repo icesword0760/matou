@@ -10,6 +10,23 @@ export interface RuntimeProjectionSnapshot {
   sessions: Entity[]
   relations: Entity[]
   scenes: Entity[]
+  hierarchy?: HierarchyProjection
+}
+
+export interface HierarchyProjection {
+  windowId: string
+  workspaces: Entity[]
+  tasks: Entity[]
+  sessions: Entity[]
+  scenes: Entity[]
+  navigation: Record<string, unknown>
+  pathStates?: unknown[]
+  taskPlacements?: unknown[]
+  sceneSnapshots?: unknown[]
+}
+
+export interface RuntimeProjectionView extends RuntimeProjectionSnapshot {
+  hierarchy: HierarchyProjection
 }
 
 export class RuntimeProjectionStore {
@@ -20,6 +37,9 @@ export class RuntimeProjectionStore {
   readonly #sessions = new Map<string, Entity>()
   readonly #relations = new Map<string, Entity>()
   readonly #scenes = new Map<string, Entity>()
+  #hierarchyMeta: Omit<HierarchyProjection, 'workspaces' | 'tasks' | 'sessions' | 'scenes'> = {
+    windowId: 'window-1', navigation: { windowId: 'window-1' }
+  }
 
   get eventSequence(): number {
     return this.#eventSequence
@@ -33,6 +53,10 @@ export class RuntimeProjectionStore {
     replaceMap(this.#sessions, snapshot.sessions)
     replaceMap(this.#relations, snapshot.relations)
     replaceMap(this.#scenes, snapshot.scenes)
+    if (snapshot.hierarchy) {
+      const { workspaces: _workspaces, tasks: _tasks, sessions: _sessions, scenes: _scenes, ...meta } = snapshot.hierarchy
+      this.#hierarchyMeta = structuredClone(meta)
+    }
   }
 
   applyBatch(runtimeGeneration: string, events: DomainEventWireEnvelope[]): void {
@@ -51,16 +75,27 @@ export class RuntimeProjectionStore {
     }
   }
 
-  view(): RuntimeProjectionSnapshot {
+  view(): RuntimeProjectionView {
     if (!this.#runtimeGeneration) throw new Error('projection snapshot has not been loaded')
+    const workspaces = [...this.#workspaces.values()]
+    const tasks = [...this.#tasks.values()]
+    const sessions = [...this.#sessions.values()]
+    const scenes = [...this.#scenes.values()]
     return {
       runtimeGeneration: this.#runtimeGeneration,
       eventSequence: this.#eventSequence,
-      workspaces: [...this.#workspaces.values()],
-      tasks: [...this.#tasks.values()],
-      sessions: [...this.#sessions.values()],
+      workspaces,
+      tasks,
+      sessions,
       relations: [...this.#relations.values()],
-      scenes: [...this.#scenes.values()]
+      scenes,
+      hierarchy: {
+        ...structuredClone(this.#hierarchyMeta),
+        workspaces: workspaces.filter(isActive),
+        tasks: tasks.filter(isActive),
+        sessions: sessions.filter(isActive),
+        scenes: scenes.filter(isActive)
+      }
     }
   }
 
@@ -70,8 +105,12 @@ export class RuntimeProjectionStore {
       if (payload) this.#workspaces.set(event.aggregateId, payload)
     } else if (event.eventType === 'workspace.archived') {
       patchEntity(this.#workspaces, event.aggregateId, event.payload)
+    } else if (event.eventType === 'workspace.renamed') {
+      patchEntity(this.#workspaces, event.aggregateId, event.payload)
     } else if (event.eventType === 'task.created' || event.eventType === 'task.updated') {
       if (payload) this.#tasks.set(event.aggregateId, payload)
+    } else if (event.eventType === 'task.renamed') {
+      patchEntity(this.#tasks, event.aggregateId, event.payload)
     } else if (event.eventType === 'task.archived') {
       patchEntity(this.#tasks, event.aggregateId, { ...(asObject(event.payload) ?? {}), status: 'archived' })
     } else if (event.eventType === 'session.created') {
@@ -86,12 +125,18 @@ export class RuntimeProjectionStore {
     } else if (event.eventType === 'session-relation.revoked') {
       this.#relations.delete(event.aggregateId)
     } else if (event.eventType === 'scene.created') {
-      const scene = asEntity(asObject(event.payload)?.scene)
+      const scene = asEntity(asObject(event.payload)?.scene) ?? payload
       if (scene) this.#scenes.set(event.aggregateId, scene)
+    } else if (event.eventType === 'scene.renamed') {
+      patchEntity(this.#scenes, event.aggregateId, event.payload)
     } else if (event.eventType === 'scene.mode-changed' || event.eventType === 'scene.archived') {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
     }
   }
+}
+
+function isActive(entity: Entity): boolean {
+  return entity.archivedAt === undefined && entity.status !== 'archived'
 }
 
 function replaceMap(target: Map<string, Entity>, entities: Entity[]): void {

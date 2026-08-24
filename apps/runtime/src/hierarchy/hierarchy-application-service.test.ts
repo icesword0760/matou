@@ -269,6 +269,40 @@ describe('HierarchyApplicationService Scene workflows', () => {
   })
 })
 
+describe('HierarchyApplicationService Session workflows', () => {
+  it('deletes a sibling mount while preserving the Scene', () => {
+    const initial = bootstrap('session-sibling-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const split = service.splitSession(command('session-split'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, direction: 'horizontal', now: 20
+    })
+
+    const deleted = service.deleteSession(command('session-delete-sibling'), {
+      windowId: 'window-1', sessionId: split.session!.id, now: 21
+    })
+
+    expect(deleted.outcome).toBe('scene-remains')
+    expect(deleted.scene?.id).toBe(initial.scene!.id)
+    expect(deleted.disposedSessionIds).toEqual([split.session!.id])
+  })
+
+  it('deletes a final Session and creates a fresh default Task hierarchy', () => {
+    const initial = bootstrap('session-final-bootstrap')
+    markPathValid(initial.workspace!.id)
+
+    const deleted = service.deleteSession(command('session-delete-final'), {
+      windowId: 'window-1', sessionId: initial.session!.id,
+      confirmedIntent: `delete-session:${initial.session!.id}`, now: 30
+    })
+
+    expect(deleted.outcome).toBe('default-task-created')
+    expect(deleted.task).toMatchObject({ title: '默认' })
+    expect(deleted.task?.id).not.toBe(initial.task!.id)
+    expect(deleted.disposedSessionIds).toEqual([initial.session!.id])
+  })
+})
+
 function command(commandId: string) {
   return { commandId, commandType: 'test', requestHash: `hash-${commandId}` }
 }

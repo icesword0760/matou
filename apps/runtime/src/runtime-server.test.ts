@@ -144,7 +144,14 @@ describe('RuntimeServer domain RPC', () => {
 
     expect(port.last('rpc.response')).toMatchObject({
       requestId: 'request-1', runtimeGeneration: database.runtimeGeneration,
-      result: { eventSequence: 0 }
+      result: {
+        eventSequence: 0,
+        hierarchy: {
+          windowId: 'window-1',
+          workspaces: [expect.objectContaining({ id: 'replay-workspace' })],
+          tasks: [expect.objectContaining({ id: 'replay-task' })]
+        }
+      }
     })
   })
 

@@ -211,6 +211,31 @@ export interface CloseSceneResult extends HierarchyMutationResult {
   action: 'hide-window' | 'closed'
 }
 
+export interface SplitSessionWorkflowInput {
+  windowId: string
+  sceneId: string
+  sourceSessionId: string
+  direction: 'horizontal' | 'vertical'
+  now: number
+}
+
+export interface DeleteSessionWorkflowInput {
+  windowId: string
+  sessionId: string
+  confirmedIntent?: string
+  now: number
+}
+
+export interface ActivateSessionInput {
+  windowId: string
+  sessionId: string
+  now: number
+}
+
+export interface DeleteSessionResult extends HierarchyMutationResult {
+  outcome: 'scene-remains' | 'scene-archives' | 'default-task-created'
+}
+
 export class HierarchyApplicationService {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
@@ -1012,6 +1037,184 @@ export class HierarchyApplicationService {
     })
   }
 
+  splitSession(
+    command: DomainCommandMetadata,
+    input: SplitSessionWorkflowInput
+  ): WorkspaceHierarchyResult {
+    const ids = createHierarchyIds()
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const scene = requireRow<SceneRow>(tx.get(
+        'SELECT * FROM scenes WHERE id = ? AND archived_at IS NULL', input.sceneId
+      ), 'Scene')
+      const source = requireRow<SessionRow>(tx.get(
+        `SELECT sessions.* FROM sessions
+         JOIN session_mounts ON session_mounts.session_id = sessions.id
+         WHERE sessions.id = ? AND session_mounts.scene_id = ? AND sessions.archived_at IS NULL`,
+        input.sourceSessionId, input.sceneId
+      ), 'Session')
+      const task = requireRow<TaskRow>(tx.get(
+        'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', scene.task_id
+      ), 'Task')
+      assertWorkspacePathAvailable(tx, task.workspace_id)
+      tx.run(
+        `INSERT INTO scene_nodes (
+           id, scene_id, parent_node_id, kind, ordinal, created_at
+         ) VALUES (?, ?, ?, 'mount', ?, ?)`,
+        ids.rootNodeId, input.sceneId, scene.root_node_id,
+        tx.get<{ count: number }>(
+          'SELECT COUNT(*) AS count FROM session_mounts WHERE scene_id = ?', input.sceneId
+        )?.count ?? 1,
+        input.now
+      )
+      tx.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title,
+           created_at, updated_at, last_activity_at, version
+         ) VALUES (?, ?, ?, 'shell', 'created', 'Shell', ?, ?, ?, 1)`,
+        ids.sessionId, task.id, source.execution_context_id,
+        input.now, input.now, input.now
+      )
+      tx.run(
+        `INSERT INTO session_mounts (
+           id, scene_id, scene_node_id, session_id, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+        ids.mountId, input.sceneId, ids.rootNodeId, ids.sessionId, input.now
+      )
+      tx.run(
+        `UPDATE scenes SET layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
+        input.now, input.sceneId
+      )
+      activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
+      const session = mapSession(requireRow<SessionRow>(tx.get(
+        'SELECT * FROM sessions WHERE id = ?', ids.sessionId
+      ), 'Session'))
+      emit({
+        eventId: `${command.commandId}:session-created`, eventType: 'session.created',
+        aggregateType: 'session', aggregateId: session.id,
+        workspaceId: task.workspace_id, taskId: task.id, sessionId: session.id,
+        payload: session, occurredAt: input.now
+      })
+      emit({
+        eventId: `${command.commandId}:session-split`, eventType: 'scene.session-split',
+        aggregateType: 'scene', aggregateId: scene.id,
+        workspaceId: task.workspace_id, taskId: task.id, sessionId: session.id,
+        payload: { mountId: ids.mountId, sourceSessionId: source.id, direction: input.direction },
+        occurredAt: input.now
+      })
+      return readHierarchyResult(tx, input.windowId)
+    }).result
+  }
+
+  deleteSession(
+    command: DomainCommandMetadata,
+    input: DeleteSessionWorkflowInput
+  ): DeleteSessionResult {
+    const replacementIds = createHierarchyIds()
+    return this.#transactions.execute(command, (context) => {
+      const { tx, emit } = context
+      registerWindow(tx, input.windowId, input.now)
+      const session = requireRow<SessionRow>(tx.get(
+        'SELECT * FROM sessions WHERE id = ? AND archived_at IS NULL', input.sessionId
+      ), 'Session')
+      const task = requireRow<TaskRow>(tx.get(
+        'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', session.task_id
+      ), 'Task')
+      const workspaceSessionCount = tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM sessions
+         JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = ? AND sessions.archived_at IS NULL
+           AND tasks.archived_at IS NULL`,
+        task.workspace_id
+      )?.count ?? 0
+      if (
+        workspaceSessionCount === 1 &&
+        input.confirmedIntent !== `delete-session:${input.sessionId}`
+      ) {
+        throw new Error('Session deletion intent is stale')
+      }
+      const mount = requireRow<MountRow>(tx.get(
+        'SELECT * FROM session_mounts WHERE session_id = ? ORDER BY created_at LIMIT 1',
+        input.sessionId
+      ), 'SessionMount')
+      const scene = requireRow<SceneRow>(tx.get(
+        'SELECT * FROM scenes WHERE id = ? AND archived_at IS NULL', mount.scene_id
+      ), 'Scene')
+      const sceneSessionCount = tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM session_mounts
+         JOIN sessions ON sessions.id = session_mounts.session_id
+         WHERE session_mounts.scene_id = ? AND sessions.archived_at IS NULL`,
+        scene.id
+      )?.count ?? 0
+      tx.run(
+        `UPDATE sessions SET status = 'archived', archived_at = ?, updated_at = ?, version = version + 1
+         WHERE id = ?`, input.now, input.now, input.sessionId
+      )
+      emit({
+        eventId: `${command.commandId}:session-archived`, eventType: 'session.archived',
+        aggregateType: 'session', aggregateId: session.id,
+        workspaceId: task.workspace_id, taskId: task.id, sessionId: session.id,
+        payload: { archivedAt: input.now }, occurredAt: input.now
+      })
+
+      let outcome: DeleteSessionResult['outcome'] = 'scene-remains'
+      if (sceneSessionCount > 1) {
+        tx.run('DELETE FROM session_mounts WHERE id = ?', mount.id)
+        const sibling = preferredSession(tx, input.windowId, scene.id)
+        if (sibling) activateSessionInTransaction(tx, input.windowId, sibling.id, input.now)
+      } else {
+        outcome = 'scene-archives'
+        tx.run('UPDATE scenes SET archived_at = ?, updated_at = ? WHERE id = ?', input.now, input.now, scene.id)
+        tx.run('DELETE FROM window_scene_focus WHERE scene_id = ?', scene.id)
+        const otherScene = preferredScene(tx, input.windowId, task.id)
+        if (otherScene) {
+          activateSceneInTransaction(tx, input.windowId, otherScene.id, input.now)
+        } else {
+          tx.run(
+            `UPDATE tasks SET status = 'archived', archived_at = ?, updated_at = ?, version = version + 1
+             WHERE id = ?`, input.now, input.now, task.id
+          )
+          tx.run('DELETE FROM window_task_focus WHERE task_id = ?', task.id)
+          tx.run('DELETE FROM window_task_placements WHERE task_id = ?', task.id)
+          const workspace = requireRow<WorkspaceRow>(tx.get(
+            'SELECT * FROM workspaces WHERE id = ?', task.workspace_id
+          ), 'Workspace')
+          const order = parseStringArray(workspace.task_order_json).filter((id) => id !== task.id)
+          tx.run(
+            `UPDATE workspaces SET task_order_json = ?, updated_at = ?, version = version + 1
+             WHERE id = ?`, JSON.stringify(order), input.now, task.workspace_id
+          )
+          const otherTask = preferredTask(tx, input.windowId, task.workspace_id)
+          if (otherTask) {
+            activateTaskInTransaction(tx, input.windowId, otherTask.id, input.now)
+          } else if (workspacePathIsAvailable(tx, task.workspace_id)) {
+            const refreshed = requireRow<WorkspaceRow>(tx.get(
+              'SELECT * FROM workspaces WHERE id = ?', task.workspace_id
+            ), 'Workspace')
+            this.#createTaskHierarchy(context, {
+              ids: replacementIds, windowId: input.windowId, workspace: refreshed,
+              title: '默认', commandId: command.commandId, now: input.now
+            })
+            outcome = 'default-task-created'
+          }
+        }
+      }
+      return {
+        ...readHierarchyResult(tx, input.windowId),
+        outcome,
+        disposedSessionIds: [input.sessionId]
+      }
+    }).result
+  }
+
+  activateSession(input: ActivateSessionInput): WorkspaceHierarchyResult {
+    return this.#database.transaction((tx) => {
+      registerWindow(tx, input.windowId, input.now)
+      activateSessionInTransaction(tx, input.windowId, input.sessionId, input.now)
+      return readHierarchyResult(tx, input.windowId)
+    })
+  }
+
   #createCompleteHierarchy(
     context: DomainMutationContext,
     input: {
@@ -1544,6 +1747,29 @@ function activateSceneInTransaction(
     sceneId,
     session?.id ?? null,
     now
+  )
+}
+
+function activateSessionInTransaction(
+  tx: DatabaseTransaction,
+  windowId: string,
+  sessionId: string,
+  now: number
+): void {
+  const owner = tx.get<{ scene_id: string }>(
+    `SELECT session_mounts.scene_id FROM session_mounts
+     JOIN sessions ON sessions.id = session_mounts.session_id
+     JOIN scenes ON scenes.id = session_mounts.scene_id
+     WHERE sessions.id = ? AND sessions.archived_at IS NULL AND scenes.archived_at IS NULL
+     ORDER BY session_mounts.created_at LIMIT 1`,
+    sessionId
+  )
+  if (!owner) throw new Error(`Session ${sessionId} does not exist in an active Scene`)
+  activateSceneInTransaction(tx, windowId, owner.scene_id, now)
+  tx.run(
+    `UPDATE window_scene_focus SET active_session_id = ?, updated_at = ?
+     WHERE window_id = ? AND scene_id = ?`,
+    sessionId, now, windowId, owner.scene_id
   )
 }
 

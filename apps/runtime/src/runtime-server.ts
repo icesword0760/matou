@@ -94,6 +94,15 @@ export class RuntimeServer {
     this.#control = control
     this.#sessions = sessions
     this.#workspacePaths = workspacePaths
+    for (const session of [...this.#sessions.values()]) {
+      const authority = this.#database.get<{ archived_at: number | null }>(
+        'SELECT archived_at FROM sessions WHERE id = ?', session.sessionId
+      )
+      if (authority?.archived_at !== null && authority?.archived_at !== undefined) {
+        session.dispose()
+        this.#sessions.delete(session.sessionId, session)
+      }
+    }
     this.#workspacePaths.startPolling()
     port.on('message', (event) => {
       void this.#receive(event.data).catch((error) => {
