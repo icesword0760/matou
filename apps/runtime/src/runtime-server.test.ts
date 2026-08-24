@@ -239,6 +239,48 @@ describe('RuntimeServer domain RPC', () => {
     })
     await settle()
   })
+
+  it('rejects input for an invalid Workspace while keeping the PTY alive', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    const guardedPort = new MockPort()
+    new RuntimeServer(guardedPort, root, database, undefined, undefined, sessions)
+    guardedPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'guarded-renderer'
+    })
+    registerSession(database, 'guarded-session')
+    guardedPort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'guarded-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => sessions.has('guarded-session'))
+    const pid = sessions.get('guarded-session')!.pid
+    database.run(
+      `INSERT INTO workspace_path_state (
+         workspace_id, status, reason, checked_at, validation_generation
+       ) VALUES ('replay-workspace', 'invalid', 'missing', ?, 1)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         status = 'invalid', reason = 'missing', checked_at = excluded.checked_at`,
+      Date.now()
+    )
+
+    guardedPort.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'guarded-session', data: 'pwd\r'
+    })
+    await settle()
+
+    expect(guardedPort.last('protocol.error')).toMatchObject({
+      code: 'WORKSPACE_PATH_INVALID',
+      message: '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
+    })
+    expect(sessions.get('guarded-session')?.pid).toBe(pid)
+    guardedPort.receive({
+      type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'guarded-session'
+    })
+    await settle()
+  })
 })
 
 class MockPort extends EventEmitter implements RuntimePort {

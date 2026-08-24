@@ -175,7 +175,12 @@ export type RuntimeMessage =
   | {
       type: 'protocol.error'
       protocolVersion: typeof PROTOCOL_VERSION
-      code: 'VERSION_MISMATCH' | 'INVALID_MESSAGE' | 'SESSION_FORBIDDEN' | 'INTERNAL_ERROR'
+      code:
+        | 'VERSION_MISMATCH'
+        | 'INVALID_MESSAGE'
+        | 'SESSION_FORBIDDEN'
+        | 'WORKSPACE_PATH_INVALID'
+        | 'INTERNAL_ERROR'
       message: string
     }
   | {

@@ -12,6 +12,7 @@ import { SessionRepository } from '../domain/session-repository'
 import { WorkspaceTaskRepository } from '../domain/workspace-task-repository'
 import { DomainEventStore } from '../events/domain-event-store'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
+import { WorkspacePathService } from '../hierarchy/workspace-path-service'
 import { SessionRelationRepository } from '../relations/session-relation-repository'
 import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
@@ -45,6 +46,7 @@ export class RuntimeRpcRouter {
   readonly #geometry: GeometryRepository
   readonly #events: DomainEventStore
   readonly #hierarchy: HierarchyApplicationService
+  readonly #workspacePaths: WorkspacePathService
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -56,6 +58,7 @@ export class RuntimeRpcRouter {
     this.#geometry = new GeometryRepository(database)
     this.#events = new DomainEventStore(database)
     this.#hierarchy = new HierarchyApplicationService(database, transactions)
+    this.#workspacePaths = new WorkspacePathService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -104,19 +107,19 @@ export class RuntimeRpcRouter {
     const input = record(envelope.input)
     switch (method) {
       case 'hierarchy.bootstrap-window':
-        return this.#hierarchy.bootstrapWindow(command, {
+        return this.#withActivePathState(this.#hierarchy.bootstrapWindow(command, {
           windowId: text(input.windowId, 'windowId'),
           defaultRootDirectory: text(input.defaultRootDirectory, 'defaultRootDirectory'),
           defaultName: text(input.defaultName, 'defaultName'),
           now: integer(input.now, 'now', 0)
-        })
+        }))
       case 'hierarchy.create-workspace':
-        return this.#hierarchy.createWorkspace(command, {
+        return this.#withActivePathState(this.#hierarchy.createWorkspace(command, {
           windowId: text(input.windowId, 'windowId'),
           name: text(input.name, 'name'),
           rootDirectory: text(input.rootDirectory, 'rootDirectory'),
           now: integer(input.now, 'now', 0)
-        })
+        }))
       case 'hierarchy.rename-workspace':
         return this.#hierarchy.renameWorkspace(command, {
           workspaceId: text(input.workspaceId, 'workspaceId'),
@@ -131,11 +134,15 @@ export class RuntimeRpcRouter {
           now: integer(input.now, 'now', 0)
         })
       case 'hierarchy.activate-workspace':
-        return this.#hierarchy.activateWorkspace({
+        return this.#withActivePathState(this.#hierarchy.activateWorkspace({
           windowId: text(input.windowId, 'windowId'),
           workspaceId: text(input.workspaceId, 'workspaceId'),
           now: integer(input.now, 'now', 0)
-        })
+        }))
+      case 'hierarchy.validate-workspace-path':
+        return this.#workspacePaths.validateWorkspace(
+          text(input.workspaceId, 'workspaceId')
+        )
       case 'workspace.create':
         return this.#workspaces.createWorkspace(command, {
           id: text(input.id, 'id'), name: text(input.name, 'name'),
@@ -273,6 +280,14 @@ export class RuntimeRpcRouter {
       scenes: sceneSnapshots.map(({ scene }) => scene),
       sceneSnapshots
     }
+  }
+
+  async #withActivePathState<T extends { workspace: { id: string } | null }>(
+    result: T
+  ): Promise<T & { pathState?: Awaited<ReturnType<WorkspacePathService['validateWorkspace']>> }> {
+    if (result.workspace === null) return result
+    const pathState = await this.#workspacePaths.validateWorkspace(result.workspace.id)
+    return { ...result, pathState }
   }
 }
 

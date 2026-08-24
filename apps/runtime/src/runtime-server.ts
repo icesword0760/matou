@@ -20,6 +20,10 @@ import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { SessionRepository } from './domain/session-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
+import {
+  WorkspacePathInvalidError,
+  WorkspacePathService
+} from './hierarchy/workspace-path-service'
 
 export interface PortMessageEvent {
   data: unknown
@@ -60,6 +64,7 @@ export class RuntimeServer {
   readonly #router: RuntimeRpcRouter
   readonly #eventStore: DomainEventStore
   readonly #sessionRepository: SessionRepository
+  readonly #workspacePaths: WorkspacePathService
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
@@ -74,7 +79,11 @@ export class RuntimeServer {
     database: RuntimeDatabase,
     router = new RuntimeRpcRouter(database),
     control?: { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string },
-    sessions = new RuntimeSessionRegistry()
+    sessions = new RuntimeSessionRegistry(),
+    workspacePaths = new WorkspacePathService(
+      database,
+      new DomainTransactionManager(database)
+    )
   ) {
     this.#port = port
     this.#dataRoot = dataRoot
@@ -84,6 +93,8 @@ export class RuntimeServer {
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#control = control
     this.#sessions = sessions
+    this.#workspacePaths = workspacePaths
+    this.#workspacePaths.startPolling()
     port.on('message', (event) => {
       void this.#receive(event.data).catch((error) => {
         this.#sendError('INVALID_MESSAGE', errorMessage(error))
@@ -136,7 +147,16 @@ export class RuntimeServer {
         await this.#spawn(message)
         break
       case 'terminal.input':
-        this.#session(message.sessionId)?.write(message.data)
+        try {
+          await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
+          this.#session(message.sessionId)?.write(message.data)
+        } catch (error) {
+          if (error instanceof WorkspacePathInvalidError) {
+            this.#sendError(error.code, error.message)
+            break
+          }
+          throw error
+        }
         break
       case 'terminal.resize':
         this.#session(message.sessionId)?.resize(message.cols, message.rows)
@@ -441,6 +461,21 @@ export class RuntimeServer {
       })
       return
     }
+    const persistentAuthority = this.#database.get<{ execution_context_id: string }>(
+      `SELECT execution_context_id FROM sessions
+       WHERE id = ? AND archived_at IS NULL`,
+      message.sessionId
+    )
+    if (
+      persistentAuthority !== undefined &&
+      persistentAuthority.execution_context_id !== message.executionContextId
+    ) {
+      this.#sendError(
+        'SESSION_FORBIDDEN',
+        'persisted Session execution context does not match the attach request'
+      )
+      return
+    }
     const cwd = message.executionContextId === 'local-default'
       ? process.env.HOME ?? os.homedir()
       : this.#database.get<{ cwd: string }>(
@@ -452,12 +487,22 @@ export class RuntimeServer {
       return
     }
 
+    if (message.executionContextId !== 'local-default') {
+      try {
+        await this.#workspacePaths.validateExecutionContextBeforeExecution(
+          message.executionContextId
+        )
+      } catch (error) {
+        if (error instanceof WorkspacePathInvalidError) {
+          this.#sendError(error.code, error.message)
+          return
+        }
+        throw error
+      }
+    }
+
     try {
-      const persistentSession = this.#database.get<{ id: string }>(
-        'SELECT id FROM sessions WHERE id = ? AND archived_at IS NULL',
-        message.sessionId
-      )
-      const runId = persistentSession ? randomUUID() : undefined
+      const runId = persistentAuthority ? randomUUID() : undefined
       let controlEnvironment: Record<string, string> | undefined
       if (message.profile !== 'shell' && this.#control) {
         const token = this.#control.tokens.issue(
@@ -571,6 +616,7 @@ export class RuntimeServer {
   }
 
   #detachAll(): void {
+    this.#workspacePaths.stopPolling()
     for (const sessionId of this.#attachedSessionIds) {
       this.#sessions.get(sessionId)?.detach(this.#sendToPort)
     }
