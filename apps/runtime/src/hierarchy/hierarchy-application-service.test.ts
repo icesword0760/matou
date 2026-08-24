@@ -193,6 +193,82 @@ describe('HierarchyApplicationService Task workflows', () => {
   })
 })
 
+describe('HierarchyApplicationService Scene workflows', () => {
+  it('protects the last Scene of the last Task by returning hide-window', () => {
+    const initial = bootstrap('scene-protected-bootstrap')
+    markPathValid(initial.workspace!.id)
+
+    const result = service.closeScene(command('close-protected'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 30
+    })
+
+    expect(result.action).toBe('hide-window')
+    expect(database.get<{ archived_at: number | null }>(
+      'SELECT archived_at FROM scenes WHERE id = ?', initial.scene!.id
+    )?.archived_at).toBeNull()
+    expect(result.disposedSessionIds).toEqual([])
+  })
+
+  it('closes a non-last Scene, disposes its Session, and focuses its successor', () => {
+    const initial = bootstrap('scene-close-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const second = service.createScene(command('scene-new'), {
+      windowId: 'window-1', taskId: initial.task!.id, now: 20
+    })
+    service.activateScene({
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 21
+    })
+
+    const result = service.closeScene(command('scene-close'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 22
+    })
+
+    expect(result.action).toBe('closed')
+    expect(result.disposedSessionIds).toContain(initial.session!.id)
+    expect(result.scene?.id).toBe(second.scene?.id)
+  })
+
+  it('pins manual Scene titles and enforces uniqueness within one Task', () => {
+    const initial = bootstrap('scene-title-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const second = service.createScene(command('scene-new'), {
+      windowId: 'window-1', taskId: initial.task!.id, now: 20
+    })
+    service.renameScene(command('scene-title-1'), {
+      sceneId: initial.scene!.id, name: '发布检查', now: 21
+    })
+
+    expect(() => service.renameScene(command('scene-title-2'), {
+      sceneId: second.scene!.id, name: '发布检查', now: 22
+    })).toThrow('当前事项下已存在同名页签')
+  })
+
+  it('requires the Scene close intent before removing a final Scene when another Task exists', () => {
+    const initial = bootstrap('scene-task-cascade-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const otherTask = service.createTask(command('scene-other-task'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 20
+    })
+    service.activateScene({
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 21
+    })
+
+    expect(() => service.closeScene(command('scene-stale-close'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 22
+    })).toThrow('Scene close intent is stale')
+    const closed = service.closeScene(command('scene-confirmed-close'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      confirmedIntent: `close-scene:${initial.scene!.id}`, now: 23
+    })
+
+    expect(closed.action).toBe('closed')
+    expect(closed.task?.id).toBe(otherTask.task?.id)
+    expect(database.get<{ archived_at: number | null }>(
+      'SELECT archived_at FROM tasks WHERE id = ?', initial.task!.id
+    )?.archived_at).toBe(23)
+  })
+})
+
 function command(commandId: string) {
   return { commandId, commandType: 'test', requestHash: `hash-${commandId}` }
 }

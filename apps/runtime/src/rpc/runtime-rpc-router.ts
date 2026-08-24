@@ -1,6 +1,7 @@
 import type { RpcMethod } from '@matou/contracts'
 import type {
   DomainCommandMetadata,
+  LayoutNode,
   RelationKind,
   SceneMode,
   SessionKind,
@@ -13,6 +14,7 @@ import { WorkspaceTaskRepository } from '../domain/workspace-task-repository'
 import { DomainEventStore } from '../events/domain-event-store'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { WorkspacePathService } from '../hierarchy/workspace-path-service'
+import { SceneLayoutService } from '../hierarchy/scene-layout-service'
 import { SessionRelationRepository } from '../relations/session-relation-repository'
 import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
@@ -47,6 +49,7 @@ export class RuntimeRpcRouter {
   readonly #events: DomainEventStore
   readonly #hierarchy: HierarchyApplicationService
   readonly #workspacePaths: WorkspacePathService
+  readonly #sceneLayouts: SceneLayoutService
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -59,6 +62,7 @@ export class RuntimeRpcRouter {
     this.#events = new DomainEventStore(database)
     this.#hierarchy = new HierarchyApplicationService(database, transactions)
     this.#workspacePaths = new WorkspacePathService(database, transactions)
+    this.#sceneLayouts = new SceneLayoutService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -176,6 +180,50 @@ export class RuntimeRpcRouter {
         return this.#hierarchy.activateTask({
           windowId: text(input.windowId, 'windowId'),
           taskId: text(input.taskId, 'taskId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.create-scene':
+        return this.#hierarchy.createScene(command, {
+          windowId: text(input.windowId, 'windowId'),
+          taskId: text(input.taskId, 'taskId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.rename-scene':
+        return this.#hierarchy.renameScene(command, {
+          sceneId: text(input.sceneId, 'sceneId'),
+          name: text(input.name, 'name'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.reorder-scene':
+        return this.#hierarchy.reorderScene(command, {
+          windowId: text(input.windowId, 'windowId'),
+          taskId: text(input.taskId, 'taskId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          ...(optionalText(input.beforeSceneId, 'beforeSceneId') === undefined
+            ? {}
+            : { beforeSceneId: optionalText(input.beforeSceneId, 'beforeSceneId')! }),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.close-scene':
+        return this.#hierarchy.closeScene(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          ...(optionalText(input.confirmedIntent, 'confirmedIntent') === undefined
+            ? {}
+            : { confirmedIntent: optionalText(input.confirmedIntent, 'confirmedIntent')! }),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.activate-scene':
+        return this.#hierarchy.activateScene({
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.replace-layout':
+        return this.#sceneLayouts.replaceLayout(command, {
+          sceneId: text(input.sceneId, 'sceneId'),
+          expectedRevision: integer(input.expectedRevision, 'expectedRevision', 1),
+          root: input.root as LayoutNode,
           now: integer(input.now, 'now', 0)
         })
       case 'workspace.create':

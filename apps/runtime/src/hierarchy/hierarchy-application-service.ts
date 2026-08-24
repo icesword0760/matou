@@ -174,6 +174,43 @@ export interface HierarchyMutationResult extends WorkspaceHierarchyResult {
   disposedSessionIds: string[]
 }
 
+export interface CreateSceneWorkflowInput {
+  windowId: string
+  taskId: string
+  now: number
+}
+
+export interface RenameSceneWorkflowInput {
+  sceneId: string
+  name: string
+  now: number
+}
+
+export interface ReorderSceneWorkflowInput {
+  windowId: string
+  taskId: string
+  sceneId: string
+  beforeSceneId?: string
+  now: number
+}
+
+export interface CloseSceneWorkflowInput {
+  windowId: string
+  sceneId: string
+  confirmedIntent?: string
+  now: number
+}
+
+export interface ActivateSceneInput {
+  windowId: string
+  sceneId: string
+  now: number
+}
+
+export interface CloseSceneResult extends HierarchyMutationResult {
+  action: 'hide-window' | 'closed'
+}
+
 export class HierarchyApplicationService {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
@@ -682,6 +719,299 @@ export class HierarchyApplicationService {
     })
   }
 
+  createScene(
+    command: DomainCommandMetadata,
+    input: CreateSceneWorkflowInput
+  ): WorkspaceHierarchyResult {
+    const ids = createHierarchyIds()
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const task = requireRow<TaskRow>(tx.get(
+        'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL',
+        input.taskId
+      ), 'Task')
+      const workspace = requireRow<WorkspaceRow>(tx.get(
+        'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL',
+        task.workspace_id
+      ), 'Workspace')
+      assertWorkspacePathAvailable(tx, workspace.id)
+      const sceneOrdinal = tx.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM scenes WHERE task_id = ? AND archived_at IS NULL',
+        input.taskId
+      )?.count ?? 0
+      const sceneName = `Shell · ${workspace.root_directory}`
+      tx.run(
+        `INSERT INTO scenes (
+           id, task_id, name, mode, root_node_id, title_pinned, sort_key,
+           layout_revision, created_at, updated_at
+         ) VALUES (?, ?, ?, 'tile', ?, 0, ?, 1, ?, ?)`,
+        ids.sceneId,
+        input.taskId,
+        sceneName,
+        ids.rootNodeId,
+        sortKey(sceneOrdinal),
+        input.now,
+        input.now
+      )
+      tx.run(
+        `INSERT INTO scene_nodes (id, scene_id, kind, ordinal, created_at)
+         VALUES (?, ?, 'root', 0, ?)`,
+        ids.rootNodeId,
+        ids.sceneId,
+        input.now
+      )
+      tx.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title,
+           created_at, updated_at, last_activity_at, version
+         ) VALUES (?, ?, ?, 'shell', 'created', 'Shell', ?, ?, ?, 1)`,
+        ids.sessionId,
+        input.taskId,
+        task.execution_context_id,
+        input.now,
+        input.now,
+        input.now
+      )
+      tx.run(
+        `INSERT INTO session_mounts (
+           id, scene_id, scene_node_id, session_id, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+        ids.mountId,
+        ids.sceneId,
+        ids.rootNodeId,
+        ids.sessionId,
+        input.now
+      )
+      activateSceneInTransaction(tx, input.windowId, ids.sceneId, input.now)
+      const scene = mapScene(requireRow<SceneRow>(
+        tx.get('SELECT * FROM scenes WHERE id = ?', ids.sceneId), 'Scene'
+      ))
+      const session = mapSession(requireRow<SessionRow>(
+        tx.get('SELECT * FROM sessions WHERE id = ?', ids.sessionId), 'Session'
+      ))
+      const mount = mapMount(requireRow<MountRow>(
+        tx.get('SELECT * FROM session_mounts WHERE id = ?', ids.mountId), 'SessionMount'
+      ))
+      emit({
+        eventId: `${command.commandId}:scene-created`, eventType: 'scene.created',
+        aggregateType: 'scene', aggregateId: scene.id,
+        workspaceId: workspace.id, taskId: task.id, payload: scene,
+        occurredAt: input.now
+      })
+      emit({
+        eventId: `${command.commandId}:session-created`, eventType: 'session.created',
+        aggregateType: 'session', aggregateId: session.id,
+        workspaceId: workspace.id, taskId: task.id, sessionId: session.id,
+        payload: session, occurredAt: input.now
+      })
+      emit({
+        eventId: `${command.commandId}:session-mounted`, eventType: 'scene.session-mounted',
+        aggregateType: 'scene', aggregateId: scene.id,
+        workspaceId: workspace.id, taskId: task.id, sessionId: session.id,
+        payload: mount, occurredAt: input.now
+      })
+      return readHierarchyResult(tx, input.windowId)
+    }).result
+  }
+
+  renameScene(
+    command: DomainCommandMetadata,
+    input: RenameSceneWorkflowInput
+  ): Scene {
+    const name = requiredTrimmed(input.name, 'Scene title')
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const scene = requireRow<SceneRow>(tx.get(
+        'SELECT * FROM scenes WHERE id = ? AND archived_at IS NULL',
+        input.sceneId
+      ), 'Scene')
+      if (tx.get(
+        `SELECT id FROM scenes
+         WHERE task_id = ? AND name = ? AND title_pinned = 1
+           AND archived_at IS NULL AND id <> ?`,
+        scene.task_id,
+        name,
+        input.sceneId
+      )) {
+        throw new Error('当前事项下已存在同名页签')
+      }
+      tx.run(
+        `UPDATE scenes SET name = ?, title_pinned = 1, updated_at = ? WHERE id = ?`,
+        name,
+        input.now,
+        input.sceneId
+      )
+      const renamed = mapScene({
+        ...scene,
+        name,
+        title_pinned: 1,
+        updated_at: input.now
+      })
+      emit({
+        eventId: `${command.commandId}:scene-renamed`, eventType: 'scene.renamed',
+        aggregateType: 'scene', aggregateId: scene.id, taskId: scene.task_id,
+        payload: { name, titlePinned: true }, occurredAt: input.now
+      })
+      return renamed
+    }).result
+  }
+
+  reorderScene(
+    command: DomainCommandMetadata,
+    input: ReorderSceneWorkflowInput
+  ): WorkspaceHierarchyResult {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const scenes = tx.all<{ id: string }>(
+        `SELECT id FROM scenes WHERE task_id = ? AND archived_at IS NULL
+         ORDER BY sort_key, created_at, id`,
+        input.taskId
+      ).map(({ id }) => id)
+      if (!scenes.includes(input.sceneId)) throw new Error('Scene must belong to the Task')
+      if (input.beforeSceneId !== undefined && !scenes.includes(input.beforeSceneId)) {
+        throw new Error('before Scene must belong to the Task')
+      }
+      const order = scenes.filter((id) => id !== input.sceneId)
+      const target = input.beforeSceneId === undefined ? order.length : order.indexOf(input.beforeSceneId)
+      order.splice(target < 0 ? order.length : target, 0, input.sceneId)
+      for (const [index, sceneId] of order.entries()) {
+        tx.run(
+          'UPDATE scenes SET sort_key = ?, updated_at = ? WHERE id = ?',
+          sortKey(index), input.now, sceneId
+        )
+      }
+      const task = requireRow<{ workspace_id: string }>(tx.get(
+        'SELECT workspace_id FROM tasks WHERE id = ?', input.taskId
+      ), 'Task')
+      emit({
+        eventId: `${command.commandId}:scene-order-changed`,
+        eventType: 'task.scene-order-changed',
+        aggregateType: 'task', aggregateId: input.taskId,
+        workspaceId: task.workspace_id, taskId: input.taskId,
+        payload: { sceneOrder: order }, occurredAt: input.now
+      })
+      activateSceneInTransaction(tx, input.windowId, input.sceneId, input.now)
+      return readHierarchyResult(tx, input.windowId)
+    }).result
+  }
+
+  closeScene(
+    command: DomainCommandMetadata,
+    input: CloseSceneWorkflowInput
+  ): CloseSceneResult {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const scene = requireRow<SceneRow>(tx.get(
+        'SELECT * FROM scenes WHERE id = ? AND archived_at IS NULL',
+        input.sceneId
+      ), 'Scene')
+      const task = requireRow<TaskRow>(tx.get(
+        'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL',
+        scene.task_id
+      ), 'Task')
+      const scenes = tx.all<{ id: string }>(
+        `SELECT id FROM scenes WHERE task_id = ? AND archived_at IS NULL
+         ORDER BY sort_key, created_at, id`,
+        task.id
+      ).map(({ id }) => id)
+      const activeTaskCount = tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM tasks
+         WHERE workspace_id = ? AND archived_at IS NULL`,
+        task.workspace_id
+      )?.count ?? 0
+      if (scenes.length === 1 && activeTaskCount === 1) {
+        return {
+          ...readHierarchyResult(tx, input.windowId),
+          action: 'hide-window' as const,
+          disposedSessionIds: []
+        }
+      }
+      if (
+        scenes.length === 1 &&
+        input.confirmedIntent !== `close-scene:${input.sceneId}`
+      ) {
+        throw new Error('Scene close intent is stale')
+      }
+
+      const disposedSessionIds = tx.all<{ id: string }>(
+        `SELECT sessions.id FROM session_mounts
+         JOIN sessions ON sessions.id = session_mounts.session_id
+         WHERE session_mounts.scene_id = ? AND sessions.archived_at IS NULL`,
+        input.sceneId
+      ).map(({ id }) => id)
+      tx.run(
+        `UPDATE sessions SET status = 'archived', archived_at = ?, updated_at = ?, version = version + 1
+         WHERE id IN (SELECT session_id FROM session_mounts WHERE scene_id = ?)
+           AND archived_at IS NULL`,
+        input.now,
+        input.now,
+        input.sceneId
+      )
+      tx.run(
+        'UPDATE scenes SET archived_at = ?, updated_at = ? WHERE id = ?',
+        input.now,
+        input.now,
+        input.sceneId
+      )
+      tx.run('DELETE FROM window_scene_focus WHERE scene_id = ?', input.sceneId)
+      emit({
+        eventId: `${command.commandId}:scene-archived`, eventType: 'scene.archived',
+        aggregateType: 'scene', aggregateId: scene.id,
+        workspaceId: task.workspace_id, taskId: task.id,
+        payload: { archivedAt: input.now, disposedSessionIds }, occurredAt: input.now
+      })
+
+      if (scenes.length > 1) {
+        const remaining = scenes.filter((id) => id !== input.sceneId)
+        const closedIndex = scenes.indexOf(input.sceneId)
+        const nextSceneId = remaining[Math.min(closedIndex, remaining.length - 1)]!
+        activateSceneInTransaction(tx, input.windowId, nextSceneId, input.now)
+      } else {
+        tx.run(
+          `UPDATE tasks SET status = 'archived', archived_at = ?, updated_at = ?, version = version + 1
+           WHERE id = ?`,
+          input.now,
+          input.now,
+          task.id
+        )
+        tx.run('DELETE FROM window_task_focus WHERE task_id = ?', task.id)
+        tx.run('DELETE FROM window_task_placements WHERE task_id = ?', task.id)
+        const workspace = requireRow<WorkspaceRow>(tx.get(
+          'SELECT * FROM workspaces WHERE id = ?', task.workspace_id
+        ), 'Workspace')
+        const taskOrder = parseStringArray(workspace.task_order_json)
+          .filter((taskId) => taskId !== task.id)
+        tx.run(
+          `UPDATE workspaces SET task_order_json = ?, updated_at = ?, version = version + 1
+           WHERE id = ?`,
+          JSON.stringify(taskOrder),
+          input.now,
+          task.workspace_id
+        )
+        const nextTask = preferredTask(tx, input.windowId, task.workspace_id)
+        if (nextTask) activateTaskInTransaction(tx, input.windowId, nextTask.id, input.now)
+        emit({
+          eventId: `${command.commandId}:task-archived`, eventType: 'task.archived',
+          aggregateType: 'task', aggregateId: task.id,
+          workspaceId: task.workspace_id, taskId: task.id,
+          payload: { archivedAt: input.now }, occurredAt: input.now
+        })
+      }
+      return {
+        ...readHierarchyResult(tx, input.windowId),
+        action: 'closed' as const,
+        disposedSessionIds
+      }
+    }).result
+  }
+
+  activateScene(input: ActivateSceneInput): WorkspaceHierarchyResult {
+    return this.#database.transaction((tx) => {
+      registerWindow(tx, input.windowId, input.now)
+      activateSceneInTransaction(tx, input.windowId, input.sceneId, input.now)
+      return readHierarchyResult(tx, input.windowId)
+    })
+  }
+
   #createCompleteHierarchy(
     context: DomainMutationContext,
     input: {
@@ -1152,6 +1482,66 @@ function activateTaskInTransaction(
        updated_at = excluded.updated_at`,
     windowId,
     scene.id,
+    session?.id ?? null,
+    now
+  )
+}
+
+function activateSceneInTransaction(
+  tx: DatabaseTransaction,
+  windowId: string,
+  sceneId: string,
+  now: number
+): void {
+  const scene = tx.get<{ task_id: string; workspace_id: string }>(
+    `SELECT scenes.task_id, tasks.workspace_id FROM scenes
+     JOIN tasks ON tasks.id = scenes.task_id
+     WHERE scenes.id = ? AND scenes.archived_at IS NULL AND tasks.archived_at IS NULL`,
+    sceneId
+  )
+  if (!scene) throw new Error(`Scene ${sceneId} does not exist`)
+  tx.run(
+    `INSERT INTO window_navigation (window_id, active_workspace_id, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(window_id) DO UPDATE SET
+       active_workspace_id = excluded.active_workspace_id,
+       updated_at = excluded.updated_at`,
+    windowId,
+    scene.workspace_id,
+    now
+  )
+  tx.run(
+    `INSERT INTO window_workspace_focus (
+       window_id, workspace_id, active_task_id, updated_at
+     ) VALUES (?, ?, ?, ?)
+     ON CONFLICT(window_id, workspace_id) DO UPDATE SET
+       active_task_id = excluded.active_task_id,
+       updated_at = excluded.updated_at`,
+    windowId,
+    scene.workspace_id,
+    scene.task_id,
+    now
+  )
+  tx.run(
+    `INSERT INTO window_task_focus (window_id, task_id, active_scene_id, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(window_id, task_id) DO UPDATE SET
+       active_scene_id = excluded.active_scene_id,
+       updated_at = excluded.updated_at`,
+    windowId,
+    scene.task_id,
+    sceneId,
+    now
+  )
+  const session = preferredSession(tx, windowId, sceneId)
+  tx.run(
+    `INSERT INTO window_scene_focus (window_id, scene_id, active_session_id, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(window_id, scene_id) DO UPDATE SET
+       active_session_id = excluded.active_session_id,
+       updated_at = excluded.updated_at`,
+    windowId,
+    sceneId,
     session?.id ?? null,
     now
   )
