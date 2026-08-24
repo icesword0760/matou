@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+coverage/
+test-results/
+playwright-report/
+.DS_Store
+*.log
+*.tsbuildinfo
+.matou-data/
+apps/desktop/package-resources/
+apps/desktop/release/

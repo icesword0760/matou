@@ -1,0 +1,243 @@
+import { z } from 'zod'
+
+export const PROTOCOL_VERSION = 1 as const
+
+const protocolVersion = z.literal(PROTOCOL_VERSION)
+const identifier = z
+  .string()
+  .min(1)
+  .max(160)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, 'identifier contains unsupported characters')
+const sessionId = identifier
+
+const helloSchema = z.object({
+  type: z.literal('protocol.hello'),
+  protocolVersion,
+  clientId: identifier
+})
+
+const spawnSchema = z.object({
+  type: z.literal('terminal.spawn'),
+  protocolVersion,
+  sessionId,
+  executionContextId: identifier,
+  profile: z.enum(['shell', 'claude-code', 'codex']),
+  cols: z.number().int().min(2).max(1000),
+  rows: z.number().int().min(1).max(500)
+})
+
+const inputSchema = z.object({
+  type: z.literal('terminal.input'),
+  protocolVersion,
+  sessionId,
+  data: z.string().max(1024 * 1024)
+})
+
+const resizeSchema = z.object({
+  type: z.literal('terminal.resize'),
+  protocolVersion,
+  sessionId,
+  cols: z.number().int().min(2).max(1000),
+  rows: z.number().int().min(1).max(500)
+})
+
+const disposeSchema = z.object({
+  type: z.literal('terminal.dispose'),
+  protocolVersion,
+  sessionId
+})
+
+const ackSchema = z.object({
+  type: z.literal('terminal.ack'),
+  protocolVersion,
+  sessionId,
+  throughSequence: z.number().int().nonnegative()
+})
+
+const replayRequestSchema = z.object({
+  type: z.literal('terminal.replay-request'),
+  protocolVersion,
+  sessionId,
+  fromSequence: z.number().int().nonnegative()
+})
+
+export const RPC_METHODS = [
+  'projection.snapshot',
+  'workspace.create',
+  'workspace.update',
+  'workspace.archive',
+  'execution-context.create-plain',
+  'task.create',
+  'task.update',
+  'task.archive',
+  'session.create',
+  'session.update',
+  'session.archive',
+  'relation.create',
+  'relation.revoke',
+  'relation.restore',
+  'scene.create',
+  'scene.set-mode',
+  'scene.add-node',
+  'scene.remove-node',
+  'scene.attach-window',
+  'scene.detach-window',
+  'scene.mount-session',
+  'scene.unmount-session',
+  'scene.archive',
+  'geometry.put',
+  'events.replay',
+  'events.ack'
+] as const
+
+export type RpcMethod = (typeof RPC_METHODS)[number]
+
+const rpcRequestSchema = z.object({
+  type: z.literal('rpc.request'),
+  protocolVersion,
+  requestId: identifier,
+  method: z.enum(RPC_METHODS),
+  capability: z.literal('renderer'),
+  deadlineAt: z.number().int().positive(),
+  payload: z.unknown()
+})
+
+const rpcCancelSchema = z.object({
+  type: z.literal('rpc.cancel'),
+  protocolVersion,
+  requestId: identifier
+})
+
+const eventsSubscribeSchema = z.object({
+  type: z.literal('events.subscribe'),
+  protocolVersion,
+  consumerId: identifier,
+  afterSequence: z.number().int().nonnegative(),
+  batchSize: z.number().int().min(1).max(1000)
+})
+
+const rendererMessageSchema = z.discriminatedUnion('type', [
+  helloSchema,
+  spawnSchema,
+  inputSchema,
+  resizeSchema,
+  disposeSchema,
+  ackSchema,
+  replayRequestSchema,
+  rpcRequestSchema,
+  rpcCancelSchema,
+  eventsSubscribeSchema
+])
+
+export type RendererMessage = z.infer<typeof rendererMessageSchema>
+
+export function parseRendererMessage(value: unknown): RendererMessage {
+  return rendererMessageSchema.parse(value)
+}
+
+export type RuntimeCapability =
+  | 'terminal-v1'
+  | 'semantic-events-v1'
+  | 'replay-v1'
+  | 'domain-rpc-v1'
+  | 'projection-v1'
+
+export type RuntimeMessage =
+  | {
+      type: 'protocol.ready'
+      protocolVersion: typeof PROTOCOL_VERSION
+      runtimeId: string
+      capabilities: RuntimeCapability[]
+    }
+  | {
+      type: 'protocol.error'
+      protocolVersion: typeof PROTOCOL_VERSION
+      code: 'VERSION_MISMATCH' | 'INVALID_MESSAGE' | 'SESSION_FORBIDDEN' | 'INTERNAL_ERROR'
+      message: string
+    }
+  | {
+      type: 'terminal.spawned'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      pid: number
+      reattached?: boolean
+    }
+  | {
+      type: 'terminal.data'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
+      data: Uint8Array
+    }
+  | {
+      type: 'terminal.exited'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
+      exitCode: number
+      signal?: number
+    }
+  | {
+      type: 'terminal.replay-start'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      checkpointSequence?: number
+      checkpoint?: {
+        terminalSequence: number
+        domainEventSequence: number
+        screenEpoch: number
+        snapshot: Uint8Array
+      }
+      availableFromSequence: number
+      liveSequence: number
+    }
+  | {
+      type: 'terminal.replay-complete'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      throughSequence: number
+    }
+  | {
+      type: 'terminal.gap'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      requestedFromSequence: number
+      availableFromSequence: number
+      reason: 'retention' | 'corruption'
+    }
+  | {
+      type: 'rpc.response'
+      protocolVersion: typeof PROTOCOL_VERSION
+      requestId: string
+      runtimeGeneration: string
+      result: unknown
+    }
+  | {
+      type: 'rpc.error'
+      protocolVersion: typeof PROTOCOL_VERSION
+      requestId: string
+      runtimeGeneration: string
+      code:
+        | 'INVALID_REQUEST'
+        | 'NOT_FOUND'
+        | 'CONFLICT'
+        | 'TIMEOUT'
+        | 'CANCELLED'
+        | 'CAPABILITY_DENIED'
+        | 'INTERNAL_ERROR'
+      message: string
+      retryable: boolean
+    }
+  | {
+      type: 'events.batch'
+      protocolVersion: typeof PROTOCOL_VERSION
+      consumerId: string
+      runtimeGeneration: string
+      events: import('./domain-events').DomainEventWireEnvelope[]
+      throughSequence: number
+    }
+
+export interface RuntimeConnectRequest {
+  type: 'runtime.connect'
+  protocolVersion: typeof PROTOCOL_VERSION
+}

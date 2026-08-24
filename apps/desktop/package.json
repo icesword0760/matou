@@ -1,0 +1,57 @@
+{
+  "name": "@matou/desktop",
+  "version": "0.0.0",
+  "productName": "Matou",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf out"
+  },
+  "dependencies": {
+    "@matou/contracts": "workspace:*",
+    "@matou/ui": "workspace:*",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron-vite": "5.0.0"
+  },
+  "build": {
+    "appId": "com.matou.desktop",
+    "electronVersion": "43.4.1",
+    "asar": true,
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "package-resources/runtime",
+        "to": "runtime"
+      }
+    ],
+    "mac": {
+      "target": "dir",
+      "identity": null
+    },
+    "linux": {
+      "target": "dir"
+    },
+    "win": {
+      "target": "dir"
+    },
+    "directories": {
+      "output": "release"
+    }
+  }
+}

@@ -1,0 +1,91 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #d6deeb;
+  background: #07090d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 14px;
+  width: 100%;
+  height: 100%;
+  padding: 18px;
+  background:
+    radial-gradient(circle at 18% -20%, rgb(72 94 153 / 20%), transparent 42%),
+    #07090d;
+}
+
+.app-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+}
+
+.app-header h1,
+.eyebrow {
+  margin: 0;
+}
+
+.app-header h1 {
+  margin-top: 4px;
+  font-size: 20px;
+  font-weight: 560;
+  letter-spacing: -0.02em;
+}
+
+.eyebrow,
+.runtime-status,
+.smoke-marker {
+  color: #7f8aa8;
+  font-family: "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.runtime-status {
+  padding: 6px 9px;
+  border: 1px solid #27304a;
+  border-radius: 999px;
+  background: rgb(15 20 31 / 80%);
+}
+
+.terminal-panel {
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #1c2436;
+  border-radius: 12px;
+  background: #0b0e14;
+  box-shadow: 0 22px 80px rgb(0 0 0 / 42%);
+}
+
+.terminal-surface {
+  width: 100%;
+  height: 100%;
+  padding: 14px 12px;
+}
+
+.terminal-surface .xterm {
+  height: 100%;
+}
+
+.smoke-marker {
+  min-height: 14px;
+}
