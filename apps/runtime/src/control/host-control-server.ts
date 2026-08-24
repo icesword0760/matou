@@ -16,6 +16,7 @@ export type HostControlScope =
   | 'task.status.write'
   | 'task.progress.write'
   | 'task.log.append'
+  | 'task.move-to-window'
 
 export interface HostTarget {
   ref: string
@@ -36,6 +37,12 @@ export interface HostControlBackend {
   writeTaskStatus(taskId: string, key: string, value: string | null): Promise<void>
   writeTaskProgress(taskId: string, progress: number, label?: string): Promise<void>
   appendTaskLog(taskId: string, level: TaskLogLevel, source: string, message: string): Promise<void>
+  moveTaskToWindow(input: {
+    migrationId: string
+    taskId: string
+    sourceWindowId: string
+    targetWindowId: string
+  }): Promise<unknown>
 }
 
 export function controlEndpointForPlatform(
@@ -275,6 +282,18 @@ export class HostControlServer {
       )
       return { appended: true }
     }
+    if (method === 'task.move-to-window') {
+      try {
+        return await this.#backend.moveTaskToWindow({
+          migrationId: text(params.migrationId, 'migrationId', 160),
+          taskId: text(params.taskId, 'taskId', 160),
+          sourceWindowId: text(params.sourceWindowId, 'sourceWindowId', 160),
+          targetWindowId: text(params.targetWindowId, 'targetWindowId', 160)
+        })
+      } catch (error) {
+        throw new ControlFault('CONFLICT', errorMessage(error))
+      }
+    }
 
     const sessionId = resolveTarget(params.target, targets, projectionRevision)
     if (method === 'terminal.read-current' || method === 'terminal.read-history') {
@@ -407,7 +426,7 @@ function isControlScope(value: unknown): value is HostControlScope {
   return typeof value === 'string' && [
     'host.list', 'terminal.read-current', 'terminal.read-history', 'terminal.read-commands',
     'terminal.send-text', 'terminal.send-key', 'task.status.write',
-    'task.progress.write', 'task.log.append'
+    'task.progress.write', 'task.log.append', 'task.move-to-window'
   ].includes(value)
 }
 function errorMessage(error: unknown): string {

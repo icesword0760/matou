@@ -156,6 +156,28 @@ describe('RuntimeRpcRouter', () => {
     })
   })
 
+  it('exposes prepare and target acknowledgement for whole-Task migration', async () => {
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('bootstrap-move', {
+      windowId: 'window-1', defaultRootDirectory: '/tmp/move-workspace',
+      defaultName: 'move-workspace', now: 1
+    })) as { task: { id: string } }
+    await router.handle('hierarchy.bootstrap-window', payload('bootstrap-target', {
+      windowId: 'window-2', defaultRootDirectory: '/tmp/move-workspace',
+      defaultName: 'move-workspace', now: 2
+    }))
+    await router.handle('hierarchy.move-task-to-window', payload('move-prepare', {
+      phase: 'prepare', migrationId: 'migration-1', taskId: initial.task.id,
+      sourceWindowId: 'window-1', targetWindowId: 'window-2', now: 3
+    }))
+    const committed = await router.handle('hierarchy.move-task-to-window', payload('move-ack', {
+      phase: 'acknowledge', migrationId: 'migration-1', now: 4
+    })) as { state: string }
+
+    expect(committed.state).toBe('committed')
+    expect(database.get('SELECT window_id FROM window_task_placements WHERE task_id = ?', initial.task.id))
+      .toEqual({ window_id: 'window-2' })
+  })
+
   async function seedHierarchy(): Promise<void> {
     await router.handle('workspace.create', payload('workspace', {
       id: 'workspace-1', name: 'Workspace', rootDirectory: '/tmp/workspace', now: 1

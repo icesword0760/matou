@@ -4,6 +4,8 @@ import { TaskTelemetryRepository } from '../domain/product-foundation-repository
 import { readSessionFrames } from '../journal/segment-journal'
 import type { PtySession } from '../session/pty-session'
 import type { RuntimeDatabase } from '../storage/database'
+import { DomainTransactionManager } from '../storage/domain-transaction'
+import { TaskWindowMigrationService } from '../hierarchy/task-window-migration-service'
 
 export class RuntimeControlBackend implements HostControlBackend {
   readonly #database: RuntimeDatabase
@@ -11,12 +13,16 @@ export class RuntimeControlBackend implements HostControlBackend {
   readonly #telemetry: TaskTelemetryRepository
   readonly #commands: CommandBoundaryRepository
   readonly #active = new Map<string, PtySession>()
+  readonly #taskMigrations: TaskWindowMigrationService
 
   constructor(database: RuntimeDatabase, dataRoot: string, telemetry: TaskTelemetryRepository) {
     this.#database = database
     this.#dataRoot = dataRoot
     this.#telemetry = telemetry
     this.#commands = new CommandBoundaryRepository(database)
+    this.#taskMigrations = new TaskWindowMigrationService(
+      database, new DomainTransactionManager(database)
+    )
   }
 
   register(sessionId: string, session: PtySession): void {
@@ -89,6 +95,29 @@ export class RuntimeControlBackend implements HostControlBackend {
     this.#telemetry.appendLog(taskId, level, source, message)
   }
 
+  async moveTaskToWindow(input: {
+    migrationId: string
+    taskId: string
+    sourceWindowId: string
+    targetWindowId: string
+  }): Promise<unknown> {
+    const now = Date.now()
+    const pending = this.#taskMigrations.prepare(command(`${input.migrationId}:prepare`), {
+      ...input, now
+    })
+    try {
+      return this.#taskMigrations.acknowledgeTarget(
+        command(`${input.migrationId}:ack`),
+        { migrationId: pending.id, now: Date.now() }
+      )
+    } catch (error) {
+      this.#taskMigrations.fail(command(`${input.migrationId}:rollback`), {
+        migrationId: pending.id, reason: errorMessage(error), now: Date.now()
+      })
+      throw error
+    }
+  }
+
   async #terminalText(sessionId: string): Promise<string> {
     const active = this.#active.get(sessionId)
     const frames = active ? await active.readFrames() : await readSessionFrames(this.#dataRoot, sessionId)
@@ -105,6 +134,14 @@ export class RuntimeControlBackend implements HostControlBackend {
     if (!session) throw new Error(`Session ${sessionId} is not active`)
     return session
   }
+}
+
+function command(commandId: string) {
+  return { commandId, commandType: 'task.move-to-window', requestHash: commandId }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 const KEY_SEQUENCES = {

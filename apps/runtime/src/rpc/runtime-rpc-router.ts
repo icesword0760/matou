@@ -14,6 +14,7 @@ import { WorkspaceTaskRepository } from '../domain/workspace-task-repository'
 import { DomainEventStore } from '../events/domain-event-store'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { DetachedSessionService } from '../hierarchy/detached-session-service'
+import { TaskWindowMigrationService } from '../hierarchy/task-window-migration-service'
 import { WorkspacePathService } from '../hierarchy/workspace-path-service'
 import { SceneLayoutService } from '../hierarchy/scene-layout-service'
 import { NavigationRepository } from '../hierarchy/navigation-repository'
@@ -54,6 +55,7 @@ export class RuntimeRpcRouter {
   readonly #sceneLayouts: SceneLayoutService
   readonly #navigation: NavigationRepository
   readonly #detachedSessions: DetachedSessionService
+  readonly #taskWindowMigrations: TaskWindowMigrationService
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -69,6 +71,7 @@ export class RuntimeRpcRouter {
     this.#sceneLayouts = new SceneLayoutService(database, transactions)
     this.#navigation = new NavigationRepository(database)
     this.#detachedSessions = new DetachedSessionService(database, transactions)
+    this.#taskWindowMigrations = new TaskWindowMigrationService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -273,6 +276,31 @@ export class RuntimeRpcRouter {
           mainWindowId: text(input.windowId, 'windowId'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.move-task-to-window': {
+        const phase = enumeration(
+          input.phase, ['prepare', 'acknowledge', 'fail'] as const, 'phase'
+        )
+        if (phase === 'prepare') {
+          return this.#taskWindowMigrations.prepare(command, {
+            migrationId: text(input.migrationId, 'migrationId'),
+            taskId: text(input.taskId, 'taskId'),
+            sourceWindowId: text(input.sourceWindowId, 'sourceWindowId'),
+            targetWindowId: text(input.targetWindowId, 'targetWindowId'),
+            now: integer(input.now, 'now', 0)
+          })
+        }
+        if (phase === 'acknowledge') {
+          return this.#taskWindowMigrations.acknowledgeTarget(command, {
+            migrationId: text(input.migrationId, 'migrationId'),
+            now: integer(input.now, 'now', 0)
+          })
+        }
+        return this.#taskWindowMigrations.fail(command, {
+          migrationId: text(input.migrationId, 'migrationId'),
+          reason: text(input.reason, 'reason'),
+          now: integer(input.now, 'now', 0)
+        })
+      }
       case 'workspace.create':
         return this.#workspaces.createWorkspace(command, {
           id: text(input.id, 'id'), name: text(input.name, 'name'),

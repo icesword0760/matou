@@ -112,6 +112,20 @@ describe('HostControlServer', () => {
     }))).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } })
     expect(await request(socketPath, controlRequest('after', token, 'host.list', {}))).toMatchObject({ ok: true })
   })
+
+  it('requires the dedicated capability before moving a whole Task', async () => {
+    const denied = tokenService.issue('run-1', ['host.list'], Date.now() + 1000)
+    const allowed = tokenService.issue('run-2', ['task.move-to-window'], Date.now() + 1000)
+    const params = {
+      migrationId: 'migration-1', taskId: 'task-1',
+      sourceWindowId: 'window-1', targetWindowId: 'window-2'
+    }
+    expect(await request(socketPath, controlRequest('denied', denied, 'task.move-to-window', params)))
+      .toMatchObject({ ok: false, error: { code: 'CAPABILITY_DENIED' } })
+    expect(await request(socketPath, controlRequest('move', allowed, 'task.move-to-window', params)))
+      .toMatchObject({ ok: true, result: { state: 'committed' } })
+    expect(backend.moveTaskToWindow).toHaveBeenCalledWith(params)
+  })
 })
 
 class TestBackend implements HostControlBackend {
@@ -127,6 +141,7 @@ class TestBackend implements HostControlBackend {
   writeTaskStatus = vi.fn(async () => undefined)
   writeTaskProgress = vi.fn(async () => undefined)
   appendTaskLog = vi.fn(async () => undefined)
+  moveTaskToWindow = vi.fn(async () => ({ state: 'committed' }))
   listTargets(): HostTarget[] { return this.targets.map((target) => ({ ...target })) }
 }
 

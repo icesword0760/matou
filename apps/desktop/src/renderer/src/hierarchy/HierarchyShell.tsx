@@ -94,12 +94,22 @@ function HierarchyProduct({ projection, commands }: {
   }), [commands, projection.windowId])
   const workspaceId = projection.navigation.activeWorkspaceId
   const workspace = projection.workspaces.find(({ id }) => id === workspaceId)
-  const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
+  const placedTaskIds = new Set(projection.taskPlacements
+    .filter(({ windowId }) => windowId === projection.windowId)
+    .map(({ taskId }) => taskId))
+  const focusedTaskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
+  const taskId = focusedTaskId && (projection.taskPlacements.length === 0 || placedTaskIds.has(focusedTaskId))
+    ? focusedTaskId
+    : projection.tasks.find(({ id, workspaceId: owner }) =>
+        owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
+      )?.id
   const task = projection.tasks.find(({ id }) => id === taskId)
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
   const workspaceTaskIds = new Set(
-    projection.tasks.filter(({ workspaceId: owner }) => owner === workspaceId).map(({ id }) => id)
+    projection.tasks.filter(({ id, workspaceId: owner }) =>
+      owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
+    ).map(({ id }) => id)
   )
   const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'

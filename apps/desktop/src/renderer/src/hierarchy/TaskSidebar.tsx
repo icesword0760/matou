@@ -11,8 +11,14 @@ export function TaskSidebar({ projection, commands }: {
   projection: HierarchyProjection; commands: HierarchyCommands
 }) {
   const workspaceId = projection.navigation.activeWorkspaceId
-  const tasks = projection.tasks.filter((task) => task.workspaceId === workspaceId)
-  const activeTaskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
+  const placedIds = new Set(projection.taskPlacements
+    .filter(({ windowId }) => windowId === projection.windowId)
+    .map(({ taskId }) => taskId))
+  const tasks = projection.tasks.filter((task) =>
+    task.workspaceId === workspaceId && (projection.taskPlacements.length === 0 || placedIds.has(task.id))
+  )
+  const focusedTaskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
+  const activeTaskId = tasks.some(({ id }) => id === focusedTaskId) ? focusedTaskId : tasks[0]?.id
   const [menuTask, setMenuTask] = useState<TaskView | null>(null)
   const [renameTask, setRenameTask] = useState<TaskView | null>(null)
   const [deleteTask, setDeleteTask] = useState<TaskView | null>(null)

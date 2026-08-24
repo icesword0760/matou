@@ -576,5 +576,23 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         updated_at INTEGER NOT NULL
       ) STRICT;
     `
+  },
+  {
+    version: 9,
+    name: 'task-window-migrations',
+    sql: `
+      CREATE TABLE task_window_migrations (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        source_window_id TEXT NOT NULL REFERENCES app_windows(id),
+        target_window_id TEXT NOT NULL REFERENCES app_windows(id),
+        state TEXT NOT NULL CHECK (state IN ('preparing', 'committed', 'failed')),
+        failure_reason TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE UNIQUE INDEX active_task_window_migration_idx
+      ON task_window_migrations(task_id) WHERE state = 'preparing';
+    `
   }
 ]
