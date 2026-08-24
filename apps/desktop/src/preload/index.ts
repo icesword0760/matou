@@ -1,4 +1,7 @@
-import { ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
+
+import type { MatouDesktopApi } from '../shared/desktop-api'
+import { DESKTOP_CHANNELS } from '../shared/desktop-api'
 
 const PORT_CHANNEL = 'matou:terminal-port'
 const RENDERER_READY = 'matou:renderer-ready'
@@ -31,3 +34,10 @@ window.addEventListener('message', (event) => {
   rendererReady = true
   deliverPort()
 })
+
+const desktopApi: MatouDesktopApi = {
+  selectWorkspaceDirectory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.selectWorkspaceDirectory),
+  hideWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.hideWindow, windowId),
+  showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId)
+}
+contextBridge.exposeInMainWorld('matouDesktop', desktopApi)
