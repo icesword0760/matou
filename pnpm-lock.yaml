@@ -38,6 +38,9 @@ importers:
       '@matou/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@matou/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@matou/ui':
         specifier: workspace:*
         version: link:../../packages/ui
