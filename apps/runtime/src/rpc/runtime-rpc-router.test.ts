@@ -22,6 +22,33 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('routes atomic Workspace hierarchy workflows', async () => {
+    const bootstrapped = await router.handle('hierarchy.bootstrap-window', payload('bootstrap', {
+      windowId: 'window-1',
+      defaultRootDirectory: '/tmp/matou_workspace',
+      defaultName: 'matou_workspace',
+      now: 1
+    })) as { workspace: { id: string }; navigation: { activeWorkspaceId: string } }
+    expect(bootstrapped.navigation.activeWorkspaceId).toBe(bootstrapped.workspace.id)
+
+    const renamed = await router.handle('hierarchy.rename-workspace', payload('rename-workspace', {
+      workspaceId: bootstrapped.workspace.id,
+      name: 'Renamed',
+      now: 2
+    })) as { name: string }
+    expect(renamed.name).toBe('Renamed')
+
+    const activated = await router.handle('hierarchy.activate-workspace', payload('activate-workspace', {
+      windowId: 'window-2',
+      workspaceId: bootstrapped.workspace.id,
+      now: 3
+    })) as { navigation: { windowId: string; activeWorkspaceId: string } }
+    expect(activated.navigation).toMatchObject({
+      windowId: 'window-2',
+      activeWorkspaceId: bootstrapped.workspace.id
+    })
+  })
+
   it('creates, modifies, archives, and projects the authoritative hierarchy', async () => {
     await router.handle('workspace.create', payload('workspace', {
       id: 'workspace-1', name: 'Workspace', rootDirectory: '/tmp/workspace', now: 1

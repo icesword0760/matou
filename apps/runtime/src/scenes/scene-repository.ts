@@ -17,6 +17,9 @@ interface SceneRow {
   name: string
   mode: SceneMode
   root_node_id: string | null
+  title_pinned: number
+  sort_key: string
+  layout_revision: number
   created_at: number
   updated_at: number
   archived_at: number | null
@@ -332,6 +335,9 @@ function mapScene(row: SceneRow): Scene {
     name: row.name,
     mode: row.mode,
     ...(row.root_node_id === null ? {} : { rootNodeId: row.root_node_id }),
+    titlePinned: row.title_pinned === 1,
+    sortKey: row.sort_key,
+    layoutRevision: row.layout_revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at })

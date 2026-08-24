@@ -11,6 +11,7 @@ import type {
 import { SessionRepository } from '../domain/session-repository'
 import { WorkspaceTaskRepository } from '../domain/workspace-task-repository'
 import { DomainEventStore } from '../events/domain-event-store'
+import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { SessionRelationRepository } from '../relations/session-relation-repository'
 import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
@@ -43,6 +44,7 @@ export class RuntimeRpcRouter {
   readonly #scenes: SceneRepository
   readonly #geometry: GeometryRepository
   readonly #events: DomainEventStore
+  readonly #hierarchy: HierarchyApplicationService
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -53,6 +55,7 @@ export class RuntimeRpcRouter {
     this.#scenes = new SceneRepository(database, transactions)
     this.#geometry = new GeometryRepository(database)
     this.#events = new DomainEventStore(database)
+    this.#hierarchy = new HierarchyApplicationService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -100,6 +103,39 @@ export class RuntimeRpcRouter {
     const command = commandMetadata(envelope.command)
     const input = record(envelope.input)
     switch (method) {
+      case 'hierarchy.bootstrap-window':
+        return this.#hierarchy.bootstrapWindow(command, {
+          windowId: text(input.windowId, 'windowId'),
+          defaultRootDirectory: text(input.defaultRootDirectory, 'defaultRootDirectory'),
+          defaultName: text(input.defaultName, 'defaultName'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.create-workspace':
+        return this.#hierarchy.createWorkspace(command, {
+          windowId: text(input.windowId, 'windowId'),
+          name: text(input.name, 'name'),
+          rootDirectory: text(input.rootDirectory, 'rootDirectory'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.rename-workspace':
+        return this.#hierarchy.renameWorkspace(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          name: text(input.name, 'name'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.remove-workspace':
+        return this.#hierarchy.removeWorkspace(command, {
+          windowId: text(input.windowId, 'windowId'),
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          confirmedIntent: text(input.confirmedIntent, 'confirmedIntent'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.activate-workspace':
+        return this.#hierarchy.activateWorkspace({
+          windowId: text(input.windowId, 'windowId'),
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'workspace.create':
         return this.#workspaces.createWorkspace(command, {
           id: text(input.id, 'id'), name: text(input.name, 'name'),

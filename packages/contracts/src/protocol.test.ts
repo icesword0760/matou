@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { PROTOCOL_VERSION, parseRendererMessage } from './protocol'
+import { PROTOCOL_VERSION, RPC_METHODS, parseRendererMessage } from './protocol'
 
 describe('parseRendererMessage', () => {
   it('accepts an exact-version hello message', () => {
@@ -102,6 +102,34 @@ describe('parseRendererMessage', () => {
       deadlineAt: Date.now() + 1000,
       payload: {}
     })).toMatchObject({ type: 'rpc.request', method: 'projection.snapshot' })
+  })
+
+  it('allowlists every PRD 05 hierarchy workflow', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'hierarchy.bootstrap-window',
+      'hierarchy.create-workspace',
+      'hierarchy.rename-workspace',
+      'hierarchy.remove-workspace',
+      'hierarchy.activate-workspace',
+      'hierarchy.validate-workspace-path',
+      'hierarchy.create-task',
+      'hierarchy.rename-task',
+      'hierarchy.reorder-task',
+      'hierarchy.delete-task',
+      'hierarchy.activate-task',
+      'hierarchy.create-scene',
+      'hierarchy.rename-scene',
+      'hierarchy.reorder-scene',
+      'hierarchy.close-scene',
+      'hierarchy.activate-scene',
+      'hierarchy.split-session',
+      'hierarchy.activate-session',
+      'hierarchy.delete-session',
+      'hierarchy.replace-layout',
+      'hierarchy.detach-session',
+      'hierarchy.return-session',
+      'hierarchy.move-task-to-window'
+    ]))
   })
 
   it('rejects RPC methods outside the explicit allowlist', () => {
