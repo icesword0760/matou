@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7])
-    expect(result.currentVersion).toBe(7)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+    expect(result.currentVersion).toBe(8)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -67,9 +67,24 @@ describe('MigrationRunner', () => {
         'migration_telemetry',
         'legacy_projection_diffs',
         'legacy_import_runs',
-        'shadow_repair_queue'
+        'shadow_repair_queue',
+        'workspace_path_state',
+        'app_windows',
+        'window_navigation',
+        'window_workspace_focus',
+        'window_task_focus',
+        'window_scene_focus',
+        'window_task_placements',
+        'bootstrap_state'
       ])
     )
+
+    const sceneColumns = database
+      .all<{ name: string }>('PRAGMA table_info(scenes)')
+      .map(({ name }) => name)
+    expect(sceneColumns).toEqual(expect.arrayContaining([
+      'title_pinned', 'sort_key', 'layout_revision'
+    ]))
   })
 
   it('is idempotent when every migration is already applied', async () => {
@@ -79,7 +94,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 7,
+      currentVersion: 8,
       backupPath: undefined
     })
   })
@@ -94,7 +109,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[3]!,
       FOUNDATION_MIGRATIONS[4]!,
       FOUNDATION_MIGRATIONS[5]!,
-      FOUNDATION_MIGRATIONS[6]!
+      FOUNDATION_MIGRATIONS[6]!,
+      FOUNDATION_MIGRATIONS[7]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -115,7 +131,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 7')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 8')
   })
 
   it('rolls back a failed migration without recording its version', async () => {

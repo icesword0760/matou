@@ -12,6 +12,32 @@ export type SceneId = string
 export type SceneNodeId = string
 export type SessionMountId = string
 
+export type WorkspacePathStatus = 'valid' | 'invalid'
+export type WorkspacePathReason = '' | 'missing' | 'not-directory' | 'no-access' | 'unknown'
+
+export interface WorkspacePathState {
+  workspaceId: WorkspaceId
+  status: WorkspacePathStatus
+  reason: WorkspacePathReason
+  checkedAt: number
+  validationGeneration: number
+}
+
+export interface WindowNavigation {
+  windowId: string
+  activeWorkspaceId?: WorkspaceId
+  taskByWorkspace: Record<WorkspaceId, TaskId>
+  sceneByTask: Record<TaskId, SceneId>
+  sessionByScene: Record<SceneId, SessionId>
+}
+
+export interface TaskPlacement {
+  windowId: string
+  taskId: TaskId
+  ordinal: number
+  updatedAt: number
+}
+
 export interface Workspace {
   id: WorkspaceId
   name: string
@@ -162,6 +188,9 @@ export interface Scene {
   name: string
   mode: SceneMode
   rootNodeId?: SceneNodeId
+  titlePinned: boolean
+  sortKey: string
+  layoutRevision: number
   createdAt: number
   updatedAt: number
   archivedAt?: number

@@ -502,5 +502,79 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         created_at INTEGER NOT NULL
       ) STRICT;
     `
+  },
+  {
+    version: 8,
+    name: 'prd-05-hierarchy-state',
+    sql: `
+      ALTER TABLE scenes ADD COLUMN title_pinned INTEGER NOT NULL DEFAULT 0
+        CHECK (title_pinned IN (0, 1));
+      ALTER TABLE scenes ADD COLUMN sort_key TEXT NOT NULL DEFAULT '';
+      ALTER TABLE scenes ADD COLUMN layout_revision INTEGER NOT NULL DEFAULT 1;
+
+      CREATE UNIQUE INDEX active_pinned_scene_title_idx
+      ON scenes(task_id, name)
+      WHERE archived_at IS NULL AND title_pinned = 1;
+
+      CREATE TABLE workspace_path_state (
+        workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id),
+        status TEXT NOT NULL CHECK (status IN ('valid', 'invalid')),
+        reason TEXT NOT NULL CHECK (reason IN ('', 'missing', 'not-directory', 'no-access', 'unknown')),
+        checked_at INTEGER NOT NULL,
+        validation_generation INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE app_windows (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('main', 'detached-terminal')),
+        state TEXT NOT NULL CHECK (state IN ('visible', 'hidden', 'closed')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE window_navigation (
+        window_id TEXT PRIMARY KEY REFERENCES app_windows(id),
+        active_workspace_id TEXT REFERENCES workspaces(id),
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE window_workspace_focus (
+        window_id TEXT NOT NULL REFERENCES app_windows(id),
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+        active_task_id TEXT REFERENCES tasks(id),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(window_id, workspace_id)
+      ) STRICT;
+
+      CREATE TABLE window_task_focus (
+        window_id TEXT NOT NULL REFERENCES app_windows(id),
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        active_scene_id TEXT REFERENCES scenes(id),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(window_id, task_id)
+      ) STRICT;
+
+      CREATE TABLE window_scene_focus (
+        window_id TEXT NOT NULL REFERENCES app_windows(id),
+        scene_id TEXT NOT NULL REFERENCES scenes(id),
+        active_session_id TEXT REFERENCES sessions(id),
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(window_id, scene_id)
+      ) STRICT;
+
+      CREATE TABLE window_task_placements (
+        window_id TEXT NOT NULL REFERENCES app_windows(id),
+        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+        ordinal INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(window_id, task_id)
+      ) STRICT;
+
+      CREATE TABLE bootstrap_state (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+    `
   }
 ]
