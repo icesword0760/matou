@@ -48,6 +48,10 @@ async function createWindow(): Promise<BrowserWindow> {
 
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
+  window.webContents.setWindowOpenHandler(() => {
+    void createWindow()
+    return { action: 'deny' }
+  })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)

@@ -1053,19 +1053,39 @@ export class HierarchyApplicationService {
          WHERE sessions.id = ? AND session_mounts.scene_id = ? AND sessions.archived_at IS NULL`,
         input.sourceSessionId, input.sceneId
       ), 'Session')
+      const sourceMount = requireRow<MountRow>(tx.get(
+        `SELECT * FROM session_mounts
+         WHERE scene_id = ? AND session_id = ? ORDER BY created_at LIMIT 1`,
+        input.sceneId, input.sourceSessionId
+      ), 'SessionMount')
+      const sourceNode = requireRow<{
+        id: string; parent_node_id: string | null; ordinal: number
+      }>(tx.get(
+        'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?',
+        sourceMount.scene_node_id
+      ), 'SceneNode')
       const task = requireRow<TaskRow>(tx.get(
         'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', scene.task_id
       ), 'Task')
       assertWorkspacePathAvailable(tx, task.workspace_id)
       tx.run(
         `INSERT INTO scene_nodes (
+           id, scene_id, parent_node_id, kind, direction, ordinal, created_at
+         ) VALUES (?, ?, ?, 'split', ?, ?, ?)`,
+        ids.secondaryNodeId, input.sceneId, sourceNode.parent_node_id,
+        input.direction, sourceNode.ordinal, input.now
+      )
+      tx.run(
+        `UPDATE scene_nodes
+         SET parent_node_id = ?, kind = 'mount', direction = NULL, ordinal = 0
+         WHERE id = ?`,
+        ids.secondaryNodeId, sourceNode.id
+      )
+      tx.run(
+        `INSERT INTO scene_nodes (
            id, scene_id, parent_node_id, kind, ordinal, created_at
          ) VALUES (?, ?, ?, 'mount', ?, ?)`,
-        ids.rootNodeId, input.sceneId, scene.root_node_id,
-        tx.get<{ count: number }>(
-          'SELECT COUNT(*) AS count FROM session_mounts WHERE scene_id = ?', input.sceneId
-        )?.count ?? 1,
-        input.now
+        ids.rootNodeId, input.sceneId, ids.secondaryNodeId, 1, input.now
       )
       tx.run(
         `INSERT INTO sessions (
@@ -1082,8 +1102,9 @@ export class HierarchyApplicationService {
         ids.mountId, input.sceneId, ids.rootNodeId, ids.sessionId, input.now
       )
       tx.run(
-        `UPDATE scenes SET layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
-        input.now, input.sceneId
+        `UPDATE scenes SET root_node_id = CASE WHEN root_node_id = ? THEN ? ELSE root_node_id END,
+           layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
+        sourceNode.id, ids.secondaryNodeId, input.now, input.sceneId
       )
       activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
       const session = mapSession(requireRow<SessionRow>(tx.get(

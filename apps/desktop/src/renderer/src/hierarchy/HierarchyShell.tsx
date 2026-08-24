@@ -74,6 +74,48 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
     [client, fixtureCommands, refresh, windowId]
   )
 
+  useEffect(() => {
+    if (!client || queryValue('e2e') !== '1') return
+    window.matouE2e = {
+      moveTaskToWindow: async (input) => {
+        const now = Date.now()
+        const envelope = (phase: 'prepare' | 'acknowledge', commandId: string) => ({
+          command: { commandId, commandType: 'hierarchy.move-task-to-window', requestHash: commandId },
+          input: { ...input, phase, windowId, now: Date.now() }
+        })
+        await client.request('hierarchy.move-task-to-window', envelope('prepare', `${input.migrationId}-prepare-${now}`))
+        await client.request('hierarchy.move-task-to-window', envelope('acknowledge', `${input.migrationId}-ack-${now}`))
+        await refresh()
+      }
+    }
+    return () => { delete window.matouE2e }
+  }, [client, refresh, windowId])
+
+  useEffect(() => {
+    if (!client || fixture || !projection?.navigation.activeWorkspaceId) return
+    const workspaceId = projection.navigation.activeWorkspaceId
+    let checking = false
+    const checkPath = async () => {
+      if (checking) return
+      checking = true
+      const now = Date.now()
+      try {
+        await client.request('hierarchy.validate-workspace-path', {
+          command: {
+            commandId: `hierarchy.validate-workspace-path-${workspaceId}-${now}`,
+            commandType: 'hierarchy.validate-workspace-path', requestHash: `${workspaceId}:${now}`
+          },
+          input: { workspaceId, windowId, now }
+        })
+        await refresh()
+      } finally {
+        checking = false
+      }
+    }
+    const timer = window.setInterval(() => { void checkPath().catch(() => {}) }, 400)
+    return () => window.clearInterval(timer)
+  }, [client, fixture, projection?.navigation.activeWorkspaceId, refresh, windowId])
+
   if (!projection || !commands) {
     return <main className="hierarchy-loading" aria-busy="true">
       <strong>正在恢复工作现场…</strong>
@@ -87,11 +129,14 @@ function HierarchyProduct({ projection, commands }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
 }) {
-  useEffect(() => window.matouDesktop?.onDetachedWindowClosed((event) => {
-    if (event.mainWindowId === projection.windowId) {
-      void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
-    }
-  }), [commands, projection.windowId])
+  useEffect(() => {
+    const unsubscribe = window.matouDesktop?.onDetachedWindowClosed((event) => {
+      if (event.mainWindowId === projection.windowId) {
+        void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
+      }
+    })
+    return () => { if (typeof unsubscribe === 'function') unsubscribe() }
+  }, [commands, projection.windowId])
   const workspaceId = projection.navigation.activeWorkspaceId
   const workspace = projection.workspaces.find(({ id }) => id === workspaceId)
   const placedTaskIds = new Set(projection.taskPlacements

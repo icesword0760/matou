@@ -23,7 +23,9 @@ export function TaskSidebar({ projection, commands }: {
   const [renameTask, setRenameTask] = useState<TaskView | null>(null)
   const [deleteTask, setDeleteTask] = useState<TaskView | null>(null)
   const activeRef = useRef<HTMLButtonElement>(null)
-  useEffect(() => activeRef.current?.scrollIntoView?.({ block: 'nearest' }), [activeTaskId])
+  useEffect(() => {
+    activeRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [activeTaskId])
   return <aside aria-label="事项列表">
     <button onClick={() => workspaceId && commands.createTask(workspaceId)}>+ 新事项</button>
     <div role="list">

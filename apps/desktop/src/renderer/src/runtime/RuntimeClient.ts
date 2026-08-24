@@ -190,7 +190,7 @@ export class RuntimeClient {
   #subscribeEvents(afterSequence: number): void {
     this.#post({
       type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
-      consumerId: `${this.#clientId}:projection`, afterSequence, batchSize: 250
+      consumerId: `${this.#clientId}-projection`, afterSequence, batchSize: 250
     })
   }
 

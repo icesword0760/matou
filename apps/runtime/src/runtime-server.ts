@@ -522,7 +522,8 @@ export class RuntimeServer {
           [
             'host.list', 'terminal.read-current', 'terminal.read-history',
             'terminal.read-commands', 'terminal.send-text', 'terminal.send-key',
-            'task.status.write', 'task.progress.write', 'task.log.append'
+            'task.status.write', 'task.progress.write', 'task.log.append',
+            'task.move-to-window'
           ],
           Date.now() + 24 * 60 * 60 * 1000
         )

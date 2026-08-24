@@ -277,6 +277,10 @@ describe('HierarchyApplicationService Session workflows', () => {
       windowId: 'window-1', sceneId: initial.scene!.id,
       sourceSessionId: initial.session!.id, direction: 'horizontal', now: 20
     })
+    expect(database.get(
+      "SELECT kind, direction FROM scene_nodes WHERE scene_id = ? AND kind = 'split'",
+      initial.scene!.id
+    )).toEqual({ kind: 'split', direction: 'horizontal' })
 
     const deleted = service.deleteSession(command('session-delete-sibling'), {
       windowId: 'window-1', sessionId: split.session!.id, now: 21

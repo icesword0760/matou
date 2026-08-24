@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import type { RuntimeMessage } from '@matou/contracts'
 import { FitAddon } from '@xterm/addon-fit'
@@ -31,6 +31,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP
   } = props
   const client = useRuntimeClient()
+  const [pid, setPid] = useState<number | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const visibleRef = useRef(visible)
@@ -72,6 +73,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
     const onMessage = (message: RuntimeMessage) => {
       if (message.type === 'terminal.spawned') {
+        setPid(message.pid)
         onStatusChange('streaming')
         if (message.reattached && !replayRequested) {
           replayRequested = true
@@ -128,5 +130,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
   }, [client, executionContextId, onReplayComplete, onSmokeMarker, onStatusChange, profile, sessionId])
 
-  return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible} />
+  return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible}
+    data-session-id={sessionId} {...(pid === undefined ? {} : { 'data-pid': pid })} />
 }

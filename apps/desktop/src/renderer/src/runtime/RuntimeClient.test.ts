@@ -51,7 +51,8 @@ describe('RuntimeClient', () => {
       runtimeId: 'runtime-1', capabilities: ['projection-v1']
     })
     expect(first.sent).toContainEqual(expect.objectContaining({
-      type: 'events.subscribe', afterSequence: 12
+      type: 'events.subscribe', afterSequence: 12,
+      consumerId: 'renderer-1-projection'
     }))
     await Promise.resolve()
     const rpc = first.sent.find(({ type }) => type === 'rpc.request')!

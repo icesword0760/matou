@@ -26,7 +26,9 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10 }: {
   const [overflowOpen, setOverflowOpen] = useState(false)
   const [closingSceneId, setClosingSceneId] = useState<string | null>(null)
   const activeRef = useRef<HTMLButtonElement>(null)
-  useEffect(() => activeRef.current?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' }), [activeSceneId])
+  useEffect(() => {
+    activeRef.current?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
+  }, [activeSceneId])
   const activeSessionId = activeSceneId ? projection.navigation.sessionByScene[activeSceneId] : undefined
   const select = (sceneId: string, center = false) => {
     void commands.activateScene(sceneId)

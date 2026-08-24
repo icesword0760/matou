@@ -6,6 +6,7 @@ export interface HierarchyIds {
   taskId: string
   sceneId: string
   rootNodeId: string
+  secondaryNodeId: string
   sessionId: string
   mountId: string
 }
@@ -17,6 +18,7 @@ export function createHierarchyIds(): HierarchyIds {
     taskId: randomUUID(),
     sceneId: randomUUID(),
     rootNodeId: randomUUID(),
+    secondaryNodeId: randomUUID(),
     sessionId: randomUUID(),
     mountId: randomUUID()
   }
