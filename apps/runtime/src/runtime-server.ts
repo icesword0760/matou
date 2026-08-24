@@ -197,6 +197,9 @@ export class RuntimeServer {
     }
     try {
       const result = await this.#router.handle(message.method, message.payload)
+      for (const sessionId of disposedSessionIds(result)) {
+        this.#disposeSession(sessionId)
+      }
       if (this.#cancelledRequests.delete(message.requestId)) {
         this.#sendRpcError(message.requestId, 'CANCELLED', 'request was cancelled', false)
         return
@@ -652,4 +655,14 @@ function highestDomainCursorAtOrBefore(frames: DecodedJournalFrame[], terminalSe
     if (frame.kind === 'domain-cursor') sequence = Math.max(sequence, frame.domainEventSequence)
   }
   return sequence
+}
+
+function disposedSessionIds(result: unknown): string[] {
+  if (typeof result !== 'object' || result === null || !('disposedSessionIds' in result)) {
+    return []
+  }
+  const value = result.disposedSessionIds
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : []
 }

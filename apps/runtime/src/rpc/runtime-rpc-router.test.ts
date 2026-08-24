@@ -47,6 +47,29 @@ describe('RuntimeRpcRouter', () => {
       windowId: 'window-2',
       activeWorkspaceId: bootstrapped.workspace.id
     })
+
+    database.run(
+      `INSERT INTO workspace_path_state (
+         workspace_id, status, reason, checked_at, validation_generation
+       ) VALUES (?, 'valid', '', 4, 2)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         status = 'valid', reason = '', validation_generation = 2`,
+      bootstrapped.workspace.id
+    )
+    const createdTask = await router.handle('hierarchy.create-task', payload('create-task', {
+      windowId: 'window-2', workspaceId: bootstrapped.workspace.id, now: 4
+    })) as { task: { id: string; title: string } }
+    expect(createdTask.task.title).toBe('新事项')
+    await router.handle('hierarchy.rename-task', payload('rename-task', {
+      taskId: createdTask.task.id, title: '实施事项', now: 5
+    }))
+    const taskActivated = await router.handle(
+      'hierarchy.activate-task',
+      payload('activate-task', {
+        windowId: 'window-1', taskId: createdTask.task.id, now: 6
+      })
+    ) as { task: { id: string } }
+    expect(taskActivated.task.id).toBe(createdTask.task.id)
   })
 
   it('creates, modifies, archives, and projects the authoritative hierarchy', async () => {

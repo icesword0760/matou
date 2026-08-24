@@ -143,6 +143,41 @@ export class RuntimeRpcRouter {
         return this.#workspacePaths.validateWorkspace(
           text(input.workspaceId, 'workspaceId')
         )
+      case 'hierarchy.create-task':
+        return this.#hierarchy.createTask(command, {
+          windowId: text(input.windowId, 'windowId'),
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.rename-task':
+        return this.#hierarchy.renameTask(command, {
+          taskId: text(input.taskId, 'taskId'),
+          title: text(input.title, 'title'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.reorder-task':
+        return this.#hierarchy.reorderTask(command, {
+          windowId: text(input.windowId, 'windowId'),
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          taskId: text(input.taskId, 'taskId'),
+          ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
+            ? {}
+            : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.delete-task':
+        return this.#hierarchy.deleteTask(command, {
+          windowId: text(input.windowId, 'windowId'),
+          taskId: text(input.taskId, 'taskId'),
+          confirmedIntent: text(input.confirmedIntent, 'confirmedIntent'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.activate-task':
+        return this.#hierarchy.activateTask({
+          windowId: text(input.windowId, 'windowId'),
+          taskId: text(input.taskId, 'taskId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'workspace.create':
         return this.#workspaces.createWorkspace(command, {
           id: text(input.id, 'id'), name: text(input.name, 'name'),

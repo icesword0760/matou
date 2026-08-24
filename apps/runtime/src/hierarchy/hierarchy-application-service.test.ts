@@ -129,6 +129,70 @@ describe('HierarchyApplicationService Workspace workflows', () => {
   })
 })
 
+describe('HierarchyApplicationService Task workflows', () => {
+  it('chooses the lowest available user Task name and preserves explicit order', async () => {
+    const initial = await bootstrap('task-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const first = await service.createTask(command('task-new-1'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 20
+    })
+    const second = await service.createTask(command('task-new-2'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 21
+    })
+    await service.renameTask(command('task-rename'), {
+      taskId: second.task!.id, title: '新事项 3', now: 22
+    })
+    const created = await service.createTask(command('task-new-3'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 23
+    })
+
+    expect(first.task?.title).toBe('新事项')
+    expect(created.task?.title).toBe('新事项 2')
+    const reordered = await service.reorderTask(command('task-order'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id,
+      taskId: created.task!.id, beforeTaskId: first.task!.id, now: 24
+    })
+    expect(reordered.taskOrder).toEqual([
+      initial.task!.id, created.task!.id, first.task!.id, second.task!.id
+    ])
+  })
+
+  it('deletes a confirmed final Task and atomically replaces it with 默认', async () => {
+    const initial = await bootstrap('delete-bootstrap')
+    markPathValid(initial.workspace!.id)
+
+    const result = await service.deleteTask(command('delete-final'), {
+      windowId: 'window-1',
+      taskId: initial.task!.id,
+      confirmedIntent: `delete-task:${initial.task!.id}`,
+      now: 40
+    })
+
+    expect(result.disposedSessionIds).toContain(initial.session!.id)
+    expect(result.task).toMatchObject({ title: '默认' })
+    expect(result.task?.id).not.toBe(initial.task!.id)
+    expect(database.all<{ title: string }>(
+      `SELECT title FROM tasks
+       WHERE workspace_id = ? AND archived_at IS NULL`,
+      initial.workspace!.id
+    )).toEqual([{ title: '默认' }])
+  })
+
+  it('blocks new Task hierarchy creation when the Workspace path is invalid', async () => {
+    const initial = await bootstrap('invalid-bootstrap')
+    database.run(
+      `INSERT INTO workspace_path_state (
+         workspace_id, status, reason, checked_at, validation_generation
+       ) VALUES (?, 'invalid', 'missing', 20, 1)`,
+      initial.workspace!.id
+    )
+
+    expect(() => service.createTask(command('invalid-task'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 21
+    })).toThrow('工作区目录不可用，请先在本地恢复原路径，或移出该工作区')
+  })
+})
+
 function command(commandId: string) {
   return { commandId, commandType: 'test', requestHash: `hash-${commandId}` }
 }
@@ -144,4 +208,22 @@ function readBootstrapFlag(key: string): unknown {
     'SELECT value_json FROM bootstrap_state WHERE key = ?', key
   )
   return row === undefined ? undefined : JSON.parse(row.value_json)
+}
+
+function bootstrap(commandId: string) {
+  return service.bootstrapWindow(command(commandId), {
+    windowId: 'window-1',
+    defaultRootDirectory: workspaceRoot,
+    defaultName: 'matou_workspace',
+    now: 10
+  })
+}
+
+function markPathValid(workspaceId: string): void {
+  database.run(
+    `INSERT INTO workspace_path_state (
+       workspace_id, status, reason, checked_at, validation_generation
+     ) VALUES (?, 'valid', '', 11, 1)`,
+    workspaceId
+  )
 }
