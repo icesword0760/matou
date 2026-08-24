@@ -64,13 +64,16 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     const terminal = new Terminal({
       cursorBlink: true,
-      fontFamily: 'JetBrains Mono, SFMono-Regular, Menlo, monospace',
-      fontSize: 13,
-      lineHeight: 1.2,
+      cursorStyle: 'bar',
+      fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+      fontSize: 14,
       scrollback: 10_000,
       theme: {
-        background: '#0b0e14', foreground: '#d6deeb', cursor: '#82aaff',
-        selectionBackground: '#283457'
+        background: '#1B1B1B', foreground: '#FAFAFA', cursor: '#FF7809', cursorAccent: '#0d1117',
+        selectionBackground: '#264f78', black: '#484f58', red: '#ff7b72', green: '#3fb950',
+        yellow: '#d29922', blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39d353', white: '#b1bac4',
+        brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
+        brightBlue: '#79c0ff', brightMagenta: '#d2a8ff', brightCyan: '#56d364', brightWhite: '#f0f6fc'
       }
     })
     const fit = new FitAddon()
@@ -131,7 +134,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       fit.fit()
-      client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+      if (terminal.cols >= 2 && terminal.cols <= 1000 && terminal.rows >= 1 && terminal.rows <= 500) {
+        client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+      }
     })
     observer.observe(container)
     return () => {

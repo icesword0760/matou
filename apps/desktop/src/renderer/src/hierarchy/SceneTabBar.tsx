@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { SceneOverflowMenu } from './SceneOverflowMenu'
-import { ConfirmationSequence } from './ConfirmDialog'
+import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
@@ -47,14 +47,14 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
   })
   const close = (sceneId: string) => {
     if (closeFlow.action === 'hide-window') {
-      void window.matouDesktop?.hideWindow(projection.windowId)
+      setClosingSceneId(sceneId)
     } else if (closeFlow.action === 'silent') {
       void Promise.resolve(commands.closeScene(sceneId, false)).catch(NOOP)
     } else {
       setClosingSceneId(sceneId)
     }
   }
-  return <div className="scene-bar" role="tablist" onKeyDown={(event) => {
+  return <div className="scene-bar tab-bar" role="tablist" onKeyDown={(event) => {
     if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || !activeSceneId) return
     const index = scenes.findIndex(({ id }) => id === activeSceneId)
     if (event.key === 'PageUp' && index > 0) void commands.reorderScene(activeSceneId, scenes[index - 1]!.id)
@@ -62,46 +62,55 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
       void commands.reorderScene(activeSceneId, scenes[index + 2]?.id)
     }
   }}>
-    <div className="scene-tabs">
-      {visible.map((scene) => <div key={scene.id} data-scene-id={scene.id}>
+    <div className="scene-tabs tab-bar-left">
+      {visible.map((scene) => <div key={scene.id} data-scene-id={scene.id}
+        className={`tab-item${scene.id === activeSceneId ? ' active' : ''}`}
+        onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
-          aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}
-          onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>{scene.name}</button>
-        <button aria-label={`页签菜单：${scene.name}`} onClick={() => setMenuSceneId(scene.id)}
-          onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>•••</button>
-        <button aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>×</button>
+          className="tab-title" aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}>{scene.name}</button>
+        <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
       </div>)}
     </div>
+    <div className="tab-bar-overflow-actions">
     {overflow.length > 0 && <div>
-      <button aria-label="更多页签" onClick={() => setOverflowOpen(!overflowOpen)}>…</button>
+      <button className="tab-overflow-btn" aria-label="更多页签" onClick={() => setOverflowOpen(!overflowOpen)}>···</button>
       {overflowOpen && <SceneOverflowMenu scenes={overflow} onSelect={(scene) => {
         setOverflowOpen(false); select(scene.id, true)
       }} />}
     </div>}
-    <button aria-label="新建页签" disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+    <button className="tab-add-btn" aria-label="新建页签" disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
       onClick={() => taskId && commands.createScene(taskId)}>+</button>
-    <button aria-label="水平分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
-      title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+    </div>
+    <div className="tab-bar-right">
+    <button className="toolbar-btn split-horizontal-icon" aria-label="水平分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
+      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '水平分屏（左右）'}
       onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'horizontal')}>↔</button>
-    <button aria-label="垂直分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
-      title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+    <button className="toolbar-btn split-vertical-icon" aria-label="垂直分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
+      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '垂直分屏（上下）'}
       onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'vertical')}>↕</button>
+    <span className="tab-bar-separator" />
+    <button className="toolbar-btn file-panel-icon" aria-label="文件面板" title="文件面板">▱</button>
+    </div>
     {menuSceneId && <div role="menu" className="scene-tab-menu">
       <button role="menuitem" onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>
     </div>}
     {renamingSceneId && (() => {
       const scene = scenes.find(({ id }) => id === renamingSceneId)
       if (!scene) return null
-      return <RenameDialog label="页签名称" initialValue={scene.name}
+      return <RenameDialog title="重命名标签页" label="页签名称" placeholder="输入标签页名称" initialValue={scene.name}
         error={(value) => scenes.some((candidate) =>
           candidate.id !== scene.id && candidate.titlePinned && candidate.name === value
-        ) ? `当前事项下已存在名为“${value}”的页签` : undefined}
+        ) ? `当前事项下已存在名为"${value}"的标签页` : undefined}
         onCancel={() => setRenamingSceneId(null)} onConfirm={(name) => {
           setRenamingSceneId(null)
           void Promise.resolve(commands.renameScene(scene.id, name)).catch(NOOP)
         }} />
     })()}
-    {closingSceneId && <ConfirmationSequence steps={closeFlow.steps}
+    {closingSceneId && closeFlow.action === 'hide-window' && <ConfirmDialog title="提示"
+      body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
+      confirmLabel="我知道了" showCancel={false} onCancel={() => setClosingSceneId(null)}
+      onConfirm={() => setClosingSceneId(null)} />}
+    {closingSceneId && closeFlow.action !== 'hide-window' && <ConfirmationSequence steps={closeFlow.steps}
       onCancel={() => setClosingSceneId(null)} onComplete={() => {
         const sceneId = closingSceneId
         setClosingSceneId(null)

@@ -4,6 +4,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { EmptyWorkspaceState } from './EmptyWorkspaceState'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
+import notificationIcon from '../assets/kooky/terminal/dark_toongzhi.svg'
 
 export function WorkspaceSwitcher({ projection, commands }: {
   projection: HierarchyProjection; commands: HierarchyCommands
@@ -18,32 +19,41 @@ export function WorkspaceSwitcher({ projection, commands }: {
   }
   if (!active) return <EmptyWorkspaceState onCreate={() => void chooseDirectory()} />
   const pathState = projection.pathStates.find(({ workspaceId }) => workspaceId === active.id)
-  return <div className="workspace-switcher">
-    <button aria-label="切换工作区" onClick={() => setOpen(!open)}>
-      <strong>{active.name}</strong>
-      <span className="workspace-path" title={active.rootDirectory}>{pathTail(active.rootDirectory)}</span>
-      {pathState?.status === 'invalid' && <span title={reasonCopy(pathState.reason)}>路径失效</span>}
+  return <div className="workspace-switcher project-dropdown">
+    <button className="project-dropdown__trigger" aria-label="切换工作区" onClick={() => setOpen(!open)}>
+      <span className="project-dropdown__trigger-content"><strong className="project-dropdown__name">{active.name}</strong>
+      <svg className={`project-dropdown__chevron${open ? ' open' : ''}`} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg></span>
+      {pathState?.status === 'invalid' && <span className="workspace-invalid" title={reasonCopy(pathState.reason)}>路径失效</span>}
     </button>
-    {open && <div role="menu">
+    <span className="project-dropdown__notify-group"><i className="project-dropdown__divider" />
+      <button className="project-dropdown__notify" aria-label="通知中心"><img src={notificationIcon} alt="" /></button></span>
+    {open && <div role="menu" className="project-dropdown__panel">
+      <div className="project-dropdown__header"><span>workspace</span>
+        <button role="menuitem" onClick={() => void chooseDirectory()}>＋ 新增工作区</button></div>
+      <div className="project-dropdown__list">
       {projection.workspaces.map((workspace) => {
         const state = projection.pathStates.find(({ workspaceId }) => workspaceId === workspace.id)
-        return <button role="menuitem" key={workspace.id}
+        return <div className={`project-dropdown__item${workspace.id === active.id ? ' active' : ''}`} key={workspace.id}>
+          <button role="menuitem" aria-label={workspace.name}
           onClick={() => { setOpen(false); void commands.activateWorkspace(workspace.id) }}>
-          <span>{workspace.name}</span>
+          <span><strong>{workspace.name}</strong><small title={workspace.rootDirectory}>{pathTail(workspace.rootDirectory)}</small></span>
           {state?.status === 'invalid' && <span title={reasonCopy(state.reason)}>路径失效</span>}
-        </button>
+          </button>
+        </div>
       })}
-      <button role="menuitem" onClick={() => void chooseDirectory()}>新建工作区</button>
-      <button role="menuitem" onClick={() => setRenaming(true)}>重命名</button>
-      <button role="menuitem" onClick={() => { setOpen(false); setRemoving(true) }}>移出工作区</button>
+      </div>
+      <div className="project-dropdown__footer-actions">
+        <button role="menuitem" onClick={() => setRenaming(true)}>重命名</button>
+        <button role="menuitem" onClick={() => { setOpen(false); setRemoving(true) }}>删除</button>
+      </div>
     </div>}
-    {renaming && <RenameDialog label="工作区名称" initialValue={active.name}
+    {renaming && <RenameDialog label="工作区名称" placeholder="请输入工作区名称" initialValue={active.name}
       onCancel={() => setRenaming(false)} onConfirm={(name) => {
         void commands.renameWorkspace(active.id, name); setRenaming(false)
       }} />}
-    {removing && <ConfirmDialog title="删除工作区"
-      body={`删除“${active.name}”不会删除磁盘上的工作区目录，但该工作区下所有终端会话都会被丢弃，无法恢复。是否继续？`}
-      confirmLabel="确认删除" onCancel={() => setRemoving(false)} onConfirm={() => {
+    {removing && <ConfirmDialog title="提示"
+      body={`删除 "${active.name}" 不会删除磁盘上的工作区目录，但该工作区下所有终端会话都会被丢弃，无法恢复。 是否继续?`}
+      confirmLabel="确定" onCancel={() => setRemoving(false)} onConfirm={() => {
         setRemoving(false)
         void Promise.resolve(commands.removeWorkspace(active.id)).catch(NOOP)
       }} />}

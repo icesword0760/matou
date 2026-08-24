@@ -9,7 +9,7 @@ test('detaches and returns the same live terminal process', async () => {
     const embedded = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
     await expect(embedded).toHaveAttribute('data-pid', /\d+/)
     const originalPid = await embedded.getAttribute('data-pid')
-    await page.getByRole('button', { name: /^脱出终端：/ }).click({ force: true })
+    await page.locator('.terminal-pane-header').first().dispatchEvent('dragend', { screenX: -1, screenY: -1 })
 
     await expect(page.getByTestId('detached-placeholder')).toContainText('已脱出')
     await expect.poll(async () => (await app.windows()).length).toBe(2)
@@ -26,7 +26,7 @@ test('detaches and returns the same live terminal process', async () => {
 test('returns a detached terminal to its Scene instead of reopening a temporary window after restart', async () => {
   let fixture: MatouFixture = await launchMatou()
   try {
-    await fixture.page.getByRole('button', { name: /^脱出终端：/ }).click({ force: true })
+    await fixture.page.locator('.terminal-pane-header').first().dispatchEvent('dragend', { screenX: -1, screenY: -1 })
     await expect(fixture.page.getByTestId('detached-placeholder')).toContainText('已脱出')
     await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
 

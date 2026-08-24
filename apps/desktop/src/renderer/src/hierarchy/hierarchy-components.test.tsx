@@ -13,6 +13,7 @@ describe('Workspace and Task navigation', () => {
     render(<WorkspaceSwitcher projection={fixture()} commands={commands()} />)
 
     expect(screen.getByText('路径失效')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '切换工作区' }))
     expect(screen.getByTitle('/Users/demo/projects/frontend/app').textContent).toContain('frontend/app')
   })
 
@@ -22,17 +23,17 @@ describe('Workspace and Task navigation', () => {
     render(<WorkspaceSwitcher projection={fixture()} commands={target} />)
 
     await user.click(screen.getByRole('button', { name: '切换工作区' }))
-    expect(screen.getByRole('menuitem', { name: /Frontend.*路径失效/ })).toBeTruthy()
-    await user.click(screen.getByRole('menuitem', { name: '移出工作区' }))
-    expect(screen.getByRole('alertdialog', { name: '删除工作区' }).textContent).toContain(
-      '删除“Frontend”不会删除磁盘上的工作区目录，但该工作区下所有终端会话都会被丢弃，无法恢复。是否继续？'
+    expect(screen.getByRole('menuitem', { name: 'Frontend' }).textContent).toContain('路径失效')
+    await user.click(screen.getByRole('menuitem', { name: '删除' }))
+    expect(screen.getByRole('alertdialog', { name: '提示' }).textContent).toContain(
+      '删除 "Frontend" 不会删除磁盘上的工作区目录，但该工作区下所有终端会话都会被丢弃，无法恢复。 是否继续?'
     )
     await user.click(screen.getByRole('button', { name: '取消' }))
     expect(target.removeWorkspace).not.toHaveBeenCalled()
 
     await user.click(screen.getByRole('button', { name: '切换工作区' }))
-    await user.click(screen.getByRole('menuitem', { name: '移出工作区' }))
-    await user.click(screen.getByRole('button', { name: '确认删除' }))
+    await user.click(screen.getByRole('menuitem', { name: '删除' }))
+    await user.click(screen.getByRole('button', { name: '确定' }))
     expect(target.removeWorkspace).toHaveBeenCalledWith('workspace-1')
   })
 
@@ -45,8 +46,8 @@ describe('Workspace and Task navigation', () => {
     await user.clear(input)
     await user.type(input, '线上 bug')
 
-    expect(screen.getByText('当前工作区下已存在名为“线上 bug”的事项')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '确认' })).toHaveProperty('disabled', true)
+    expect(screen.getByText('当前工作区下已存在名为"线上 bug"的工作台')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', true)
   })
 
   it('rejects a Task drop from another Workspace without issuing a reorder', () => {
@@ -59,27 +60,27 @@ describe('Workspace and Task navigation', () => {
     expect(target.reorderTask).not.toHaveBeenCalled()
   })
 
-  it('offers a keyboard-accessible way to move a Task', async () => {
-    const user = userEvent.setup()
+  it('matches Kooky drag-and-drop Task ordering', async () => {
     const target = commands()
     render(<TaskSidebar projection={fixture()} commands={target} />)
 
-    await user.click(screen.getByRole('button', { name: '事项菜单：线上 bug' }))
-    await user.click(screen.getByRole('menuitem', { name: '上移事项' }))
+    const source = screen.getByTestId('task-task-b')
+    const destination = screen.getByTestId('task-task-a')
+    const transfer = { setData: vi.fn(), getData: vi.fn(() => JSON.stringify({ workspaceId: 'workspace-1', taskId: 'task-b' })) }
+    fireEvent.dragStart(source, { dataTransfer: transfer })
+    fireEvent.drop(destination, { dataTransfer: transfer })
     expect(target.reorderTask).toHaveBeenCalledWith('workspace-1', 'task-b', 'task-a')
   })
 
-  it('requires both warnings before deleting a Task with one or fewer terminals', async () => {
+  it('uses the original Kooky warning before deleting a Task', async () => {
     const user = userEvent.setup()
     const target = commands()
     render(<TaskSidebar projection={fixture()} commands={target} />)
 
     await user.click(screen.getByRole('button', { name: '事项菜单：事项 A' }))
-    await user.click(screen.getByRole('menuitem', { name: '删除事项' }))
-    expect(screen.getByText('删除最后一个终端将连带删除对应事项，是否继续？')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '继续' }))
-    expect(screen.getByText('删除“事项 A”会丢失该事项下所有终端会话，但不会删除本地目录。是否继续？')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '确认删除' }))
+    await user.click(screen.getByRole('menuitem', { name: '删除' }))
+    expect(screen.getByText('删除 "事项 A" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '确定' }))
 
     expect(target.deleteTask).toHaveBeenCalledWith('task-a')
   })

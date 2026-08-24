@@ -17,8 +17,6 @@ import { SceneTabBar } from './SceneTabBar'
 import { SplitTree } from './SplitTree'
 import { TaskSidebar } from './TaskSidebar'
 import { TerminalPane } from './TerminalPane'
-import { WorkspaceSwitcher } from './WorkspaceSwitcher'
-
 export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   const client = useRuntimeClient()
   const windowId = fixture?.windowId ?? queryValue('windowId') ?? 'window-1'
@@ -165,22 +163,13 @@ function HierarchyProduct({ projection, commands }: {
   const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
 
-  return <main className="hierarchy-shell">
-    <header className="hierarchy-topbar">
-      <div className="brand-mark" aria-label="Matou">M</div>
-      <div data-testid="workspace-name"><WorkspaceSwitcher projection={projection} commands={commands} /></div>
-      <div className="hierarchy-window-title">{task?.title ?? '终端工作区'}</div>
-    </header>
-    <div className="hierarchy-body">
-      <TaskSidebar projection={projection} commands={commands} pathValid={pathValid} />
-      <section className="workspace-stage" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
+  return <main className="hierarchy-shell cli-module">
+              <div className="claude-code-view hierarchy-body">
+                <TaskSidebar projection={projection} commands={commands} pathValid={pathValid} />
+                <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
         {task && <>
-          <div className="task-stage-heading">
-            <strong data-testid="active-task">{task.title}</strong>
-            <span>{scenes.length} 个页签 · {projection.sessions.filter(({ taskId: owner }) => owner === task.id).length} 个终端</span>
-          </div>
           <SceneTabBar projection={projection} commands={commands} pathValid={pathValid} />
-          <div className="scene-stack">
+          <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)
               const layout = snapshot ? layoutFromSnapshot(snapshot) : undefined
@@ -241,8 +230,9 @@ function HierarchyProduct({ projection, commands }: {
           </div>
         </>}
         {!task && <div className="scene-recovery" role="status">选择或新建一个事项开始工作</div>}
-      </section>
-    </div>
+                  <div className="shortcut-bar" aria-label="快捷指令栏"><button aria-label="添加快捷指令">+</button></div>
+                </section>
+              </div>
   </main>
 }
 

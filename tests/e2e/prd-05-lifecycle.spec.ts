@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 
 import { expect, test } from '@playwright/test'
 
-import { launchMatou, restartMatou, type MatouFixture, windowId } from './matou-fixture'
+import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 
@@ -14,16 +14,16 @@ test('confirms removing a Workspace, keeps its directory, and remembers explicit
   try {
     const { page } = fixture
     await page.getByRole('button', { name: '切换工作区' }).click()
-    await page.getByRole('menuitem', { name: '移出工作区' }).click()
-    await expect(page.getByRole('alertdialog', { name: '删除工作区' })).toContainText(
+    await page.getByRole('menuitem', { name: '删除' }).click()
+    await expect(page.getByRole('alertdialog', { name: '提示' })).toContainText(
       '不会删除磁盘上的工作区目录'
     )
     await page.getByRole('button', { name: '取消' }).click()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
 
     await page.getByRole('button', { name: '切换工作区' }).click()
-    await page.getByRole('menuitem', { name: '移出工作区' }).click()
-    await page.getByRole('button', { name: '确认删除' }).click()
+    await page.getByRole('menuitem', { name: '删除' }).click()
+    await page.getByRole('button', { name: '确定' }).click()
     await expect(page.getByText('还没有工作区')).toBeVisible()
     await expect(access(fixture.workspaceDirectory)).resolves.toBeUndefined()
 
@@ -41,7 +41,7 @@ test('creates a selected-directory Workspace and opens its complete default hier
       dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
     }, selectedDirectory)
     await fixture.page.getByRole('button', { name: '切换工作区' }).click()
-    await fixture.page.getByRole('menuitem', { name: '新建工作区' }).click()
+    await fixture.page.getByRole('menuitem', { name: /新增工作区/ }).click()
 
     await expect(fixture.page.getByTestId('workspace-name')).toContainText('selected-project')
     await expect(fixture.page.getByTestId('active-task')).toHaveText('默认')
@@ -76,7 +76,7 @@ test('closes only one non-final Scene and selects its deterministic successor', 
   } finally { await fixture.close() }
 })
 
-test('hides the last work scene and restores the same live terminal', async () => {
+test('matches Kooky by protecting the last work scene and keeping the terminal live', async () => {
   const fixture = await launchMatou()
   try {
     const surface = fixture.page.getByTestId('terminal-pane').first().locator('.terminal-surface')
@@ -84,10 +84,8 @@ test('hides the last work scene and restores the same live terminal', async () =
     const pid = await surface.getAttribute('data-pid')
     await fixture.page.getByRole('button', { name: /^关闭页签：/ }).click()
 
-    await expect.poll(() => fixture.app.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()[0]?.isVisible()
-    )).toBe(false)
-    await fixture.page.evaluate((id) => window.matouDesktop.showWindow(id), windowId(fixture.page))
+    await expect(fixture.page.getByRole('alertdialog', { name: '提示' })).toContainText('最后一个事项下的最后一个标签')
+    await fixture.page.getByRole('button', { name: '我知道了' }).click()
     await expect.poll(() => fixture.app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()[0]?.isVisible()
     )).toBe(true)
@@ -100,13 +98,13 @@ test('persists Task order and each Scene divider geometry across restart', async
   let fixture: MatouFixture = await launchMatou()
   try {
     const { page } = fixture
-    await page.getByRole('button', { name: '+ 新事项' }).click()
-    await page.getByRole('button', { name: '+ 新事项' }).click()
-    await page.getByRole('button', { name: '事项菜单：新事项 2' }).click()
-    await page.getByRole('menuitem', { name: '上移事项' }).click()
+    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await expect(page.getByTestId('active-task')).toHaveText('新事项')
+    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
+    await dragTaskBefore(page, '新事项 2', '新事项')
     await expect.poll(() => taskTitles(page)).toEqual(['默认', '新事项 2', '新事项'])
-    await page.getByRole('button', { name: '事项菜单：新事项 2' }).click()
-    await page.getByRole('menuitem', { name: '上移事项' }).click()
+    await dragTaskBefore(page, '新事项 2', '默认')
     await expect.poll(() => taskTitles(page)).toEqual(['新事项 2', '默认', '新事项'])
 
     await page.getByRole('button', { name: '水平分屏' }).click()
@@ -132,7 +130,20 @@ test('persists Task order and each Scene divider geometry across restart', async
 })
 
 async function taskTitles(page: MatouFixture['page']): Promise<string[]> {
-  return page.locator('aside [role="listitem"] > button:first-child').allTextContents()
+  return page.locator('.workbench-item__name').allTextContents()
+}
+
+async function dragTaskBefore(page: MatouFixture['page'], sourceTitle: string, destinationTitle: string) {
+  await page.evaluate(({ sourceTitle, destinationTitle }) => {
+    const rows = [...document.querySelectorAll<HTMLElement>('.workbench-item')]
+    const source = rows.find((row) => row.querySelector('.workbench-item__name')?.textContent === sourceTitle)
+    const destination = rows.find((row) => row.querySelector('.workbench-item__name')?.textContent === destinationTitle)
+    if (!source || !destination) throw new Error('task row missing')
+    const dataTransfer = new DataTransfer()
+    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }))
+    destination.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer }))
+    destination.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer }))
+  }, { sourceTitle, destinationTitle })
 }
 
 async function processCwd(pid: number): Promise<string> {

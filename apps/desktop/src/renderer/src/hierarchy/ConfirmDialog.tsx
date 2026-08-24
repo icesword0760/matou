@@ -7,6 +7,7 @@ export function ConfirmDialog(props: {
   body: string
   confirmLabel: string
   cancelLabel?: string
+  showCancel?: boolean
   onConfirm(): void
   onCancel(): void
 }) {
@@ -19,7 +20,9 @@ export function ConfirmDialog(props: {
     firstButton?.focus()
   }, [])
 
-  return <div ref={dialogRef} role="alertdialog" aria-modal="true" aria-label={props.title}
+  return <div className="kooky-dialog-overlay" onPointerDown={(event) => {
+    if (event.currentTarget === event.target) props.onCancel()
+  }}><div ref={dialogRef} role="alertdialog" aria-modal="true" aria-label={props.title}
     onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)}
     onKeyDown={(event) => {
       if (event.key === 'Escape' && !composing) props.onCancel()
@@ -33,10 +36,13 @@ export function ConfirmDialog(props: {
       event.preventDefault()
       next?.focus()
     }}>
-    <h2>{props.title}</h2><p>{props.body}</p>
-    <button onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
-    <button onClick={props.onCancel}>{props.cancelLabel ?? '取消'}</button>
-  </div>
+    <header><h2>{props.title}</h2><button className="dialog-close" aria-label="关闭" onClick={props.onCancel}>×</button></header>
+    <p>{props.body}</p>
+    <footer>
+      {props.showCancel !== false && <button onClick={props.onCancel}>{props.cancelLabel ?? '取消'}</button>}
+      <button className="dialog-primary" onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
+    </footer>
+  </div></div>
 }
 
 export function ConfirmationSequence(props: {

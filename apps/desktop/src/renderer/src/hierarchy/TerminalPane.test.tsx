@@ -32,15 +32,15 @@ describe('Terminal pane', () => {
     expect(onDelete).toHaveBeenCalledWith('session-1', false)
   })
 
-  it('uses one strong confirmation for the Workspace final Session', async () => {
+  it('matches Kooky by protecting the Workspace final Session', async () => {
     const onDelete = vi.fn()
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} workspaceSessionCount={1} onDelete={onDelete} />)
 
     await user.click(screen.getByRole('button', { name: '删除终端：Claude 主会话' }))
-    expect(screen.getByRole('alertdialog', { name: '删除终端' })).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '确认删除' }))
-    expect(onDelete).toHaveBeenCalledWith('session-1', true)
+    expect(screen.getByRole('alertdialog', { name: '提示' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '我知道了' }))
+    expect(onDelete).not.toHaveBeenCalled()
   })
 })
 

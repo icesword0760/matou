@@ -53,8 +53,8 @@ describe('Scene tabs and split actions', () => {
     await user.clear(input)
     await user.type(input, '页签 2')
 
-    expect(screen.getByText('当前事项下已存在名为“页签 2”的页签')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '确认' })).toHaveProperty('disabled', true)
+    expect(screen.getByText('当前事项下已存在名为"页签 2"的标签页')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', true)
   })
 
   it('measures divider movement against the whole split and keeps pointer capture', () => {

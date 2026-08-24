@@ -15,21 +15,14 @@ export function taskDeleteFlow(input: {
   taskName: string
 }): CloseFlow {
   const regular: ConfirmStep = {
-    title: '删除事项',
-    body: `删除“${input.taskName}”会丢失该事项下所有终端会话，但不会删除本地目录。是否继续？`,
-    confirmLabel: '确认删除',
+    title: '提示',
+    body: `删除 "${input.taskName}" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？`,
+    confirmLabel: '确定',
     cancelLabel: '取消'
   }
   return {
     action: 'confirm',
-    steps: input.sessionCount <= 1
-      ? [{
-          title: '删除事项',
-          body: '删除最后一个终端将连带删除对应事项，是否继续？',
-          confirmLabel: '继续',
-          cancelLabel: '取消'
-        }, regular]
-      : [regular]
+    steps: [regular]
   }
 }
 
@@ -56,13 +49,5 @@ export function sessionDeleteFlow(input: {
   taskName: string
 }): CloseFlow {
   if (!input.isWorkspaceFinal) return { action: 'silent', steps: [] }
-  return {
-    action: 'confirm',
-    steps: [{
-      title: '删除终端',
-      body: `删除最后一个终端将连带销毁事项“${input.taskName}”，所有终端会话会丢失（本地目录不受影响）。是否继续？`,
-      confirmLabel: '确认删除',
-      cancelLabel: '取消'
-    }]
-  }
+  return { action: 'hide-window', steps: [] }
 }

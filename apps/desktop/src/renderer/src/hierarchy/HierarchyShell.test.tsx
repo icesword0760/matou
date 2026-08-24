@@ -39,7 +39,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByText('工作区目录不可用，请先在本地恢复原路径，或移出该工作区')).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
     expect(screen.getByTestId('xterm-session-a2')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '+ 新事项' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '事项' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '水平分屏' })).toHaveProperty('disabled', true)
   })

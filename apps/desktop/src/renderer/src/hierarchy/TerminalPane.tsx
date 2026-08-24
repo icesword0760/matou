@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 import { TerminalSurface } from '../terminal/TerminalSurface'
-import { ConfirmationSequence } from './ConfirmDialog'
+import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import type { SessionView } from './hierarchy-types'
 import { sessionDeleteFlow } from './terminal-close-flow'
 
@@ -31,21 +31,18 @@ export function TerminalPane(props: {
     setConfirmationOpen(false)
     void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
   }
-  return <section className="terminal-pane" data-testid="terminal-pane"
+  return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}`} data-testid="terminal-pane"
     data-active={active} hidden={!visible} onPointerDown={() => onActivate(session.id)}>
-    <header className="terminal-pane-header" draggable={onDetach !== undefined}
+    <header className="terminal-pane-header split-pane-header" draggable={onDetach !== undefined}
       onDragEnd={(event) => {
         const outside = event.screenX <= window.screenX || event.screenY <= window.screenY ||
           event.screenX >= window.screenX + window.outerWidth ||
           event.screenY >= window.screenY + window.outerHeight
         if (outside) void onDetach?.(session.id)
       }}>
-      <div><strong>{session.title}</strong><span>{typeLabel(profile)}</span></div>
+      <div className="pane-header-content"><strong className="pane-title">{session.title}</strong></div>
       <div className="terminal-pane-actions">
-        {onDetach && <button aria-label={`脱出终端：${session.title}`} onClick={(event) => {
-          event.stopPropagation(); void onDetach(session.id)
-        }}>↗</button>}
-        <button aria-label={`删除终端：${session.title}`} onClick={(event) => {
+        <button className="pane-close" aria-label={`删除终端：${session.title}`} onClick={(event) => {
           event.stopPropagation()
           if (flow.action === 'silent') remove(false)
           else setConfirmationOpen(true)
@@ -56,15 +53,13 @@ export function TerminalPane(props: {
     <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} inputDisabled={!pathValid} />
-    {confirmationOpen && <ConfirmationSequence steps={flow.steps}
+    {confirmationOpen && flow.action === 'hide-window' && <ConfirmDialog title="提示"
+      body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
+      confirmLabel="我知道了" showCancel={false} onCancel={() => setConfirmationOpen(false)}
+      onConfirm={() => setConfirmationOpen(false)} />}
+    {confirmationOpen && flow.action !== 'hide-window' && <ConfirmationSequence steps={flow.steps}
       onCancel={() => setConfirmationOpen(false)} onComplete={() => remove(true)} />}
   </section>
-}
-
-function typeLabel(profile: 'shell' | 'claude-code' | 'codex'): string {
-  if (profile === 'claude-code') return 'Claude Code'
-  if (profile === 'codex') return 'Codex'
-  return 'Shell'
 }
 
 function NOOP(): void {}
