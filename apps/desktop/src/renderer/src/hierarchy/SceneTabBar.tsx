@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { SceneOverflowMenu } from './SceneOverflowMenu'
 import { ConfirmationSequence } from './ConfirmDialog'
+import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
 
@@ -14,8 +15,8 @@ export interface SceneCommands {
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
 }
 
-export function SceneTabBar({ projection, commands, visibleLimit = 10 }: {
-  projection: HierarchyProjection; commands: SceneCommands; visibleLimit?: number
+export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid = true }: {
+  projection: HierarchyProjection; commands: SceneCommands; visibleLimit?: number; pathValid?: boolean
 }) {
   const workspaceId = projection.navigation.activeWorkspaceId
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
@@ -25,6 +26,8 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10 }: {
   const overflow = scenes.slice(visibleLimit)
   const [overflowOpen, setOverflowOpen] = useState(false)
   const [closingSceneId, setClosingSceneId] = useState<string | null>(null)
+  const [menuSceneId, setMenuSceneId] = useState<string | null>(null)
+  const [renamingSceneId, setRenamingSceneId] = useState<string | null>(null)
   const activeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     activeRef.current?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
@@ -62,7 +65,10 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10 }: {
     <div className="scene-tabs">
       {visible.map((scene) => <div key={scene.id} data-scene-id={scene.id}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
-          aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}>{scene.name}</button>
+          aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}
+          onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>{scene.name}</button>
+        <button aria-label={`页签菜单：${scene.name}`} onClick={() => setMenuSceneId(scene.id)}
+          onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>•••</button>
         <button aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>×</button>
       </div>)}
     </div>
@@ -72,11 +78,29 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10 }: {
         setOverflowOpen(false); select(scene.id, true)
       }} />}
     </div>}
-    <button aria-label="新建页签" onClick={() => taskId && commands.createScene(taskId)}>+</button>
-    <button aria-label="水平分屏" disabled={!activeSceneId || !activeSessionId}
+    <button aria-label="新建页签" disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+      onClick={() => taskId && commands.createScene(taskId)}>+</button>
+    <button aria-label="水平分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
+      title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
       onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'horizontal')}>↔</button>
-    <button aria-label="垂直分屏" disabled={!activeSceneId || !activeSessionId}
+    <button aria-label="垂直分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
+      title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
       onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'vertical')}>↕</button>
+    {menuSceneId && <div role="menu" className="scene-tab-menu">
+      <button role="menuitem" onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>
+    </div>}
+    {renamingSceneId && (() => {
+      const scene = scenes.find(({ id }) => id === renamingSceneId)
+      if (!scene) return null
+      return <RenameDialog label="页签名称" initialValue={scene.name}
+        error={(value) => scenes.some((candidate) =>
+          candidate.id !== scene.id && candidate.titlePinned && candidate.name === value
+        ) ? `当前事项下已存在名为“${value}”的页签` : undefined}
+        onCancel={() => setRenamingSceneId(null)} onConfirm={(name) => {
+          setRenamingSceneId(null)
+          void Promise.resolve(commands.renameScene(scene.id, name)).catch(NOOP)
+        }} />
+    })()}
     {closingSceneId && <ConfirmationSequence steps={closeFlow.steps}
       onCancel={() => setClosingSceneId(null)} onComplete={() => {
         const sceneId = closingSceneId
@@ -86,4 +110,5 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10 }: {
   </div>
 }
 
+const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}

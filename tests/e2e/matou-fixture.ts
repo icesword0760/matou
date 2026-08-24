@@ -9,11 +9,22 @@ export interface MatouFixture {
   page: Page
   dataDirectory: string
   workspaceDirectory: string
+  rootDirectory: string
   close(): Promise<void>
 }
 
 export async function launchMatou(): Promise<MatouFixture> {
   const root = await mkdtemp(join(tmpdir(), 'matou-prd05-e2e-'))
+  return startMatou(root)
+}
+
+export async function restartMatou(fixture: MatouFixture): Promise<MatouFixture> {
+  await fixture.app.evaluate(({ app }) => { app.quit() }).catch(() => {})
+  await fixture.app.close().catch(() => {})
+  return startMatou(fixture.rootDirectory)
+}
+
+async function startMatou(root: string): Promise<MatouFixture> {
   const dataDirectory = join(root, 'data')
   const workspaceDirectory = join(root, 'matou_workspace')
   await mkdir(workspaceDirectory, { recursive: true })
@@ -28,7 +39,7 @@ export async function launchMatou(): Promise<MatouFixture> {
   })
   const page = await app.firstWindow()
   return {
-    app, page, dataDirectory, workspaceDirectory,
+    app, page, dataDirectory, workspaceDirectory, rootDirectory: root,
     close: async () => {
       await app.close()
       await rm(root, { recursive: true, force: true })

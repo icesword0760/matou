@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import { launchMatou } from './matou-fixture'
+import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
 
 test('detaches and returns the same live terminal process', async () => {
   const fixture = await launchMatou()
@@ -20,5 +20,21 @@ test('detaches and returns the same live terminal process', async () => {
     await expect(page.getByTestId('detached-placeholder')).toHaveCount(0)
     await expect(page.getByTestId('terminal-pane').first().locator('.terminal-surface'))
       .toHaveAttribute('data-pid', originalPid!)
+  } finally { await fixture.close() }
+})
+
+test('returns a detached terminal to its Scene instead of reopening a temporary window after restart', async () => {
+  let fixture: MatouFixture = await launchMatou()
+  try {
+    await fixture.page.getByRole('button', { name: /^脱出终端：/ }).click({ force: true })
+    await expect(fixture.page.getByTestId('detached-placeholder')).toContainText('已脱出')
+    await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+
+    fixture = await restartMatou(fixture)
+    await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
+    await expect(fixture.page.getByTestId('detached-placeholder')).toHaveCount(0)
+    await expect(fixture.page.getByTestId('terminal-pane')).toHaveCount(1)
+    await expect(fixture.page.getByTestId('terminal-pane').locator('.terminal-surface'))
+      .toHaveAttribute('data-pid', /\d+/)
   } finally { await fixture.close() }
 })

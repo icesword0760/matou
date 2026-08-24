@@ -52,10 +52,10 @@ export function TerminalPane(props: {
         }}>×</button>
       </div>
     </header>
-    {!pathValid && visible && <div role="status">工作区目录不可用</div>}
+    {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
     <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
-      profile={profile} visible={visible} inputDisabled={!pathValid} />
+      profile={profile} visible={visible} active={active} inputDisabled={!pathValid} />
     {confirmationOpen && <ConfirmationSequence steps={flow.steps}
       onCancel={() => setConfirmationOpen(false)} onComplete={() => remove(true)} />}
   </section>

@@ -30,6 +30,9 @@ test('creates and renames a Task, adds a Scene, splits, and deletes one terminal
 
     await page.getByRole('button', { name: '新建页签' }).click()
     await expect(page.getByRole('tab')).toHaveCount(2)
+    await page.getByRole('tab').first().click()
+    await page.getByRole('tab').last().click()
+    await expect(page.locator('.scene-stage:not([hidden]) .xterm-helper-textarea')).toBeFocused()
     await page.getByRole('button', { name: '水平分屏' }).click()
     await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
 

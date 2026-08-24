@@ -18,6 +18,7 @@ interface TerminalSurfaceProps {
   executionContextId?: string
   profile?: 'shell' | 'claude-code' | 'codex'
   visible?: boolean
+  active?: boolean
   inputDisabled?: boolean
   onStatusChange?: (status: RuntimeStatus) => void
   onSmokeMarker?: (marker: string) => void
@@ -27,13 +28,14 @@ interface TerminalSurfaceProps {
 export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
-    profile = 'shell', visible = true, inputDisabled = false,
+    profile = 'shell', visible = true, active = true, inputDisabled = false,
     onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP
   } = props
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
   const inputDisabledRef = useRef(inputDisabled)
 
@@ -43,6 +45,16 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [visible])
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
+
+  useEffect(() => {
+    if (!active || !visible) return
+    const focused = document.activeElement as HTMLElement | null
+    if (focused?.closest('[role="dialog"], [role="alertdialog"]') ||
+      (focused && /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName) &&
+        !focused.classList.contains('xterm-helper-textarea'))) return
+    const frame = requestAnimationFrame(() => terminalRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [active, sessionId, visible])
 
   useEffect(() => {
     const container = containerRef.current
@@ -64,6 +76,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(container)
+    terminalRef.current = terminal
     fit.fit()
     fitRef.current = fit
     const decoder = new TextDecoder()
@@ -126,6 +139,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       input.dispose()
       detach()
       fitRef.current = null
+      terminalRef.current = null
       terminal.dispose()
     }
   }, [client, executionContextId, onReplayComplete, onSmokeMarker, onStatusChange, profile, sessionId])

@@ -37,10 +37,7 @@ export class GeometryRepository {
       )
     }
     if (current && update.layoutRevision === current.layoutRevision) {
-      if (JSON.stringify(current.geometry) !== JSON.stringify(update.geometry)) {
-        throw new Error(`conflicting geometry for layout revision ${update.layoutRevision}`)
-      }
-      return current
+      if (JSON.stringify(current.geometry) === JSON.stringify(update.geometry)) return current
     }
     this.#database.run(
       `INSERT INTO scene_geometry (
@@ -64,6 +61,12 @@ export class GeometryRepository {
       'SELECT * FROM scene_geometry WHERE scene_id = ? AND owner_key = ?', sceneId, ownerKey
     )
     return row ? mapGeometry(row) : undefined
+  }
+
+  list(sceneId: string): StoredGeometry[] {
+    return this.#database.all<GeometryRow>(
+      'SELECT * FROM scene_geometry WHERE scene_id = ? ORDER BY owner_key', sceneId
+    ).map(mapGeometry)
   }
 
   discardInvalid(sceneId: string): number {

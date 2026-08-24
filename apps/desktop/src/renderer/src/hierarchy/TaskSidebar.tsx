@@ -7,8 +7,8 @@ import { taskDeleteFlow } from './terminal-close-flow'
 
 const TASK_TRANSFER = 'application/x-matou-task'
 
-export function TaskSidebar({ projection, commands }: {
-  projection: HierarchyProjection; commands: HierarchyCommands
+export function TaskSidebar({ projection, commands, pathValid = true }: {
+  projection: HierarchyProjection; commands: HierarchyCommands; pathValid?: boolean
 }) {
   const workspaceId = projection.navigation.activeWorkspaceId
   const placedIds = new Set(projection.taskPlacements
@@ -16,7 +16,7 @@ export function TaskSidebar({ projection, commands }: {
     .map(({ taskId }) => taskId))
   const tasks = projection.tasks.filter((task) =>
     task.workspaceId === workspaceId && (projection.taskPlacements.length === 0 || placedIds.has(task.id))
-  )
+  ).sort((left, right) => (left.sortKey ?? '').localeCompare(right.sortKey ?? '') || left.id.localeCompare(right.id))
   const focusedTaskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
   const activeTaskId = tasks.some(({ id }) => id === focusedTaskId) ? focusedTaskId : tasks[0]?.id
   const [menuTask, setMenuTask] = useState<TaskView | null>(null)
@@ -27,7 +27,8 @@ export function TaskSidebar({ projection, commands }: {
     activeRef.current?.scrollIntoView?.({ block: 'nearest' })
   }, [activeTaskId])
   return <aside aria-label="事项列表">
-    <button onClick={() => workspaceId && commands.createTask(workspaceId)}>+ 新事项</button>
+    <button disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+      onClick={() => workspaceId && commands.createTask(workspaceId)}>+ 新事项</button>
     <div role="list">
       {tasks.map((task) => <div role="listitem" key={task.id} data-testid={`task-${task.id}`}
         draggable onDragStart={(event) => event.dataTransfer.setData(TASK_TRANSFER, JSON.stringify({ workspaceId, taskId: task.id }))}
@@ -35,7 +36,7 @@ export function TaskSidebar({ projection, commands }: {
         onDrop={(event) => {
           const source = parseTransfer(event.dataTransfer.getData(TASK_TRANSFER))
           if (source && source.workspaceId === workspaceId) {
-            void commands.reorderTask(source.taskId, task.id)
+            void commands.reorderTask(workspaceId!, source.taskId, task.id)
           }
         }}>
         <button ref={task.id === activeTaskId ? activeRef : undefined}
@@ -45,6 +46,16 @@ export function TaskSidebar({ projection, commands }: {
       </div>)}
     </div>
     {menuTask && <div role="menu">
+      {tasks.findIndex(({ id }) => id === menuTask.id) > 0 && <button role="menuitem" onClick={() => {
+        const index = tasks.findIndex(({ id }) => id === menuTask.id)
+        void commands.reorderTask(workspaceId!, menuTask.id, tasks[index - 1]!.id)
+        setMenuTask(null)
+      }}>上移事项</button>}
+      {tasks.findIndex(({ id }) => id === menuTask.id) < tasks.length - 1 && <button role="menuitem" onClick={() => {
+        const index = tasks.findIndex(({ id }) => id === menuTask.id)
+        void commands.reorderTask(workspaceId!, menuTask.id, tasks[index + 2]?.id)
+        setMenuTask(null)
+      }}>下移事项</button>}
       <button role="menuitem" onClick={() => { setRenameTask(menuTask); setMenuTask(null) }}>重命名</button>
       <button role="menuitem" onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}>删除事项</button>
     </div>}
@@ -67,6 +78,7 @@ export function TaskSidebar({ projection, commands }: {
   </aside>
 }
 
+const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}
 
 function parseTransfer(value: string): { workspaceId: string; taskId: string } | undefined {

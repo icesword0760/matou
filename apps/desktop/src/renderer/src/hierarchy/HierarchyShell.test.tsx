@@ -36,9 +36,30 @@ describe('PRD 05 hierarchy shell', () => {
     data.pathStates = [{ workspaceId: 'workspace-a', status: 'invalid', reason: 'missing' }]
     render(<HierarchyShell fixture={data} />)
 
-    expect(screen.getByText('工作区目录不可用')).toBeTruthy()
+    expect(screen.getByText('工作区目录不可用，请先在本地恢复原路径，或移出该工作区')).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
     expect(screen.getByTestId('xterm-session-a2')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '+ 新事项' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '水平分屏' })).toHaveProperty('disabled', true)
+  })
+
+  it('restores a persisted divider ratio for an independent Scene layout', () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.scene.rootNodeId = 'split-a1'
+    first.scene.layoutRevision = 2
+    first.nodes = [
+      { id: 'split-a1', sceneId: first.scene.id, kind: 'split', direction: 'horizontal', ordinal: 0 },
+      { id: 'node-a1', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 0 },
+      { id: 'node-a1b', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 1 }
+    ]
+    first.mounts.push({ id: 'mount-a1b', sceneId: first.scene.id, sceneNodeId: 'node-a1b', sessionId: 'session-a2' })
+    first.geometry = [{ sceneId: first.scene.id, ownerKey: 'node:split-a1', layoutRevision: 2, geometry: { ratio: 0.35 }, now: 20 }]
+
+    render(<HierarchyShell fixture={data} />)
+
+    expect(screen.getByTestId('split-child-split-a1-0').style.flexBasis).toBe('35%')
   })
 
   it('shows an ownership placeholder while the same Session lives in a detached window', () => {

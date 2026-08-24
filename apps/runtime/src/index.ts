@@ -53,10 +53,20 @@ const runtimeReady = migrationReady.then(async () => {
   await hostControl.start()
 })
 
-process.once('exit', () => {
+let shutdownStarted = false
+function shutdown(): void {
+  if (shutdownStarted) return
+  shutdownStarted = true
+  for (const server of servers) server.close()
+  servers.clear()
   sessions.disposeAll()
   database.close()
+}
+process.once('SIGTERM', () => {
+  shutdown()
+  process.exit(0)
 })
+process.once('exit', shutdown)
 
 parentPort.on('message', async (event) => {
   const request = event.data as Partial<RuntimeConnectRequest>

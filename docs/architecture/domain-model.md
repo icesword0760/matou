@@ -14,10 +14,14 @@ Workspace
     ├── SessionRelation
     ├── Annotation
     ├── Artifact
-    └── ValidationRun
+    ├── ValidationRun
+    └── Scene
+        └── SessionMount → Session
 ```
 
 Workspace 是项目容器，Task 是用户工作的核心单位，Session 是某个 Task 下的一次 Shell 或 Agent 交互。DAG 是 SessionRelation 的投影，不是另一套数据模型。
+
+Scene 是用户看到的页签和布局边界；SessionMount 表示某个 Session 在 Scene 中的可见位置。Session 是运行实体，Scene/SessionMount 是组织实体，因此切换页签、拖出窗口和迁移事项不改变 SessionId 或 PTY 身份。
 
 ## 2. 聚合与实体
 
@@ -197,6 +201,41 @@ interface ValidationRun {
 
 产物和检查是 Task 投影，可由多个 Session 共同贡献。
 
+### 2.9 Scene、SessionMount 与窗口
+
+```ts
+interface Scene {
+  id: SceneId
+  taskId: TaskId
+  name: string
+  mode: 'tile' | 'card' | 'dag'
+  rootNodeId?: SceneNodeId
+  titlePinned: boolean
+  sortKey: string
+  layoutRevision: number
+}
+
+interface SessionMount {
+  id: SessionMountId
+  sceneId: SceneId
+  sceneNodeId?: SceneNodeId
+  sceneWindowId?: string
+  sessionId: SessionId
+}
+```
+
+约束：
+
+- 一个活跃 Scene 至少有一个逻辑 SessionMount；脱出窗口时 mount 仍归原 Scene；
+- `layoutRevision` 为结构替换的 CAS 版本，拖动产生的几何数据防抖写入且不进入 Outbox；
+- `SceneWindow` 只表达临时独立窗口状态，重启时统一归一为 attached；
+- `window_task_placements` 保证一个 Task 同时只出现在一个主窗口；迁移过程使用 prepare/ack/rollback，不改变 Workspace 归属；
+- `window_navigation` 及各级 focus 表分别记住每个窗口的工作区、事项、页签和终端焦点。
+
+### 2.10 WorkspacePathState
+
+`WorkspacePathState` 是 Runtime 派生的可重建状态。目录失效时保留所有领域实体与 Journal，但拒绝新建层级、终端输入和 Agent 恢复；恢复原路径后继续使用原 ExecutionContext，不替换 cwd。
+
 ## 3. 锚点
 
 ```ts
@@ -263,6 +302,13 @@ execution-context.created
 worktree.state-changed
 session.created
 session.status-changed
+scene.created
+scene.layout-replaced
+scene.session-detached
+scene.session-returned
+task.window-migration-prepared
+task.window-migration-committed
+task.window-migration-failed
 session.relation-created
 annotation.created
 annotation.status-changed

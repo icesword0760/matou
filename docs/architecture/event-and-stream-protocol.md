@@ -280,3 +280,12 @@ Claude Code Adapter 优先从 hooks、transcript 或结构化 stream-json 获取
 5. 发布 session exited 事件。
 
 端口意外关闭时 Runtime 将订阅者移除，但不立即结束 PTY。是否继续运行由 Session/Task 生命周期决定。
+
+## 11. 四级层级 RPC 与布局数据
+
+- Workspace、Task、Scene、Session 的结构性修改走 `hierarchy.*` RPC，并与对应领域事件在一个事务中提交；
+- Renderer 每次修改后以 Runtime snapshot/Outbox 重建投影，不导出完整权威对象快照；
+- Scene 分屏树使用 `layoutRevision` 做结构性 CAS；过期的树替换会被拒绝；
+- 分割线比例等几何状态使用 `geometry.put`，以 100 ms 防抖写入 `scene_geometry`，不进入 Outbox；同一结构版本允许连续覆盖，低于当前结构版本的写入被拒绝；
+- `window_task_placements` 约束一个 Task 同时只属于一个主窗口显示槽位；迁移事件只改变窗口投影，不改变 Workspace、ExecutionContext、Session 或 PTY 身份；
+- 工作区路径无效时，Runtime 在 spawn/input 和所有执行型层级命令两端都执行拦截，不使用其它 cwd 代替。

@@ -138,6 +138,16 @@ describe('RuntimeRpcRouter', () => {
     await router.handle('scene.mount-session', payload('mount', {
       id: 'mount-1', sceneId: 'scene-1', sceneNodeId: 'root', sessionId: 'child', now: 6
     }))
+    await router.handle('geometry.put', {
+      sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 0,
+      geometry: { ratio: 0.35 }, now: 7
+    })
+
+    const snapshot = await router.handle('projection.snapshot', {}) as {
+      sceneSnapshots: Array<{ scene: { id: string }; geometry: Array<{ geometry: { ratio: number } }> }>
+    }
+    expect(snapshot.sceneSnapshots.find(({ scene }) => scene.id === 'scene-1')?.geometry)
+      .toEqual([expect.objectContaining({ geometry: { ratio: 0.35 } })])
 
     const replay = await router.handle('events.replay', { afterSequence: 0, limit: 100 }) as {
       events: Array<{ eventType: string }>

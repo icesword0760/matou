@@ -100,6 +100,7 @@ describe('HierarchyApplicationService Workspace workflows', () => {
     })
 
     expect(removed.workspace).toBeNull()
+    expect(removed.disposedSessionIds).toEqual([initial.session!.id])
     await expect(access(workspaceRoot)).resolves.toBeUndefined()
     expect(readBootstrapFlag('default-workspace-removed')).toBe(true)
 

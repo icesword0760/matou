@@ -72,6 +72,7 @@ export class RuntimeServer {
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
   #handshakeComplete = false
+  #closed = false
 
   constructor(
     port: RuntimePort,
@@ -109,11 +110,22 @@ export class RuntimeServer {
         this.#sendError('INVALID_MESSAGE', errorMessage(error))
       })
     })
-    port.on('close', () => this.#detachAll())
+    port.on('close', () => {
+      this.#closed = true
+      this.#detachAll()
+    })
     port.start()
   }
 
+  close(): void {
+    if (this.#closed) return
+    this.#closed = true
+    this.#detachAll()
+    this.#port.close()
+  }
+
   async #receive(rawMessage: unknown): Promise<void> {
+    if (this.#closed) return
     let message: RendererMessage
     try {
       message = parseRendererMessage(rawMessage)
@@ -158,6 +170,7 @@ export class RuntimeServer {
       case 'terminal.input':
         try {
           await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
+          if (this.#closed) break
           this.#session(message.sessionId)?.write(message.data)
         } catch (error) {
           if (error instanceof WorkspacePathInvalidError) {
@@ -168,7 +181,9 @@ export class RuntimeServer {
         }
         break
       case 'terminal.resize':
-        this.#session(message.sessionId)?.resize(message.cols, message.rows)
+        if (this.#attachedSessionIds.has(message.sessionId)) {
+          this.#sessions.get(message.sessionId)?.resize(message.cols, message.rows)
+        }
         break
       case 'terminal.ack':
         this.#acknowledge(message.sessionId, message.throughSequence)
@@ -337,10 +352,11 @@ export class RuntimeServer {
   }
 
   #acknowledge(sessionId: string, throughSequence: number): void {
-    const session = this.#attachedSessionIds.has(sessionId) ? this.#sessions.get(sessionId) : undefined
+    const wasAttached = this.#attachedSessionIds.has(sessionId)
+    const session = wasAttached ? this.#sessions.get(sessionId) : undefined
     const replay = this.#replays.get(sessionId)
     if (!session && !replay) {
-      if (this.#endedSessionIds.has(sessionId)) return
+      if (wasAttached || this.#endedSessionIds.has(sessionId)) return
       this.#sendError('SESSION_FORBIDDEN', `session ${sessionId} is not attached to this connection`)
       return
     }

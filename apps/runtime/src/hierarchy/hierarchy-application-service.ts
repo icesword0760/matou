@@ -350,7 +350,7 @@ export class HierarchyApplicationService {
   removeWorkspace(
     command: DomainCommandMetadata,
     input: RemoveWorkspaceInput
-  ): WorkspaceHierarchyResult {
+  ): HierarchyMutationResult {
     if (input.confirmedIntent !== `remove-workspace:${input.workspaceId}`) {
       throw new Error('Workspace removal intent is stale')
     }
@@ -361,6 +361,12 @@ export class HierarchyApplicationService {
         input.workspaceId
       )
       if (!workspace) throw new Error(`Workspace ${input.workspaceId} does not exist`)
+      const disposedSessionIds = tx.all<{ id: string }>(
+        `SELECT sessions.id FROM sessions
+         JOIN tasks ON tasks.id = sessions.task_id
+         WHERE tasks.workspace_id = ? AND sessions.archived_at IS NULL`,
+        input.workspaceId
+      ).map(({ id }) => id)
 
       tx.run(
         `UPDATE sessions SET status = 'archived', archived_at = ?, updated_at = ?, version = version + 1
@@ -443,7 +449,7 @@ export class HierarchyApplicationService {
         payload: { archivedAt: input.now },
         occurredAt: input.now
       })
-      return readHierarchyResult(tx, input.windowId)
+      return { ...readHierarchyResult(tx, input.windowId), disposedSessionIds }
     }).result
   }
 

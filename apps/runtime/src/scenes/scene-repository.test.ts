@@ -85,14 +85,15 @@ describe('GeometryRepository', () => {
     })
   })
 
-  it('writes geometry directly without adding Outbox noise and rejects stale revisions', () => {
+  it('writes geometry without Outbox noise, accepts drag updates, and rejects stale structure revisions', () => {
     const before = database.get<{ count: number }>('SELECT COUNT(*) AS count FROM domain_events')!.count
     geometry.put({ sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 2, geometry: { x: 20 }, now: 5 })
+    geometry.put({ sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 2, geometry: { x: 30 }, now: 6 })
 
     expect(() => geometry.put({
-      sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 1, geometry: { x: 10 }, now: 6
+      sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 1, geometry: { x: 10 }, now: 7
     })).toThrow('stale layout revision 1; current revision is 2')
-    expect(geometry.get('scene-1', 'node:root')).toMatchObject({ layoutRevision: 2, geometry: { x: 20 } })
+    expect(geometry.get('scene-1', 'node:root')).toMatchObject({ layoutRevision: 2, geometry: { x: 30 } })
     expect(database.get<{ count: number }>('SELECT COUNT(*) AS count FROM domain_events')!.count).toBe(before)
   })
 

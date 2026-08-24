@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
@@ -17,9 +16,10 @@ const windows = new WindowManager()
 const browserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
+let mainWindowSequence = 0
 
 async function createWindow(): Promise<BrowserWindow> {
-  const windowId = randomUUID()
+  const windowId = `main-window-${++mainWindowSequence}`
   const defaultRootDirectory = process.env.MATOU_DEFAULT_WORKSPACE ?? join(app.getPath('home'), 'matou_workspace')
   await mkdir(defaultRootDirectory, { recursive: true })
   const window = new BrowserWindow({
@@ -177,6 +177,9 @@ ipcMain.handle(DESKTOP_CHANNELS.closeDetachedTerminalWindow, (_event, windowId: 
 app.on('before-quit', () => {
   quitting = true
   tray?.destroy()
+})
+
+app.on('will-quit', () => {
   runtimeHost?.stop()
 })
 

@@ -172,6 +172,48 @@ describe('RuntimeServer domain RPC', () => {
     expect(port.findRpcError('cancelled')).toMatchObject({ code: 'CANCELLED', retryable: false })
   })
 
+  it('drops terminal callbacks already queued when the Renderer port disconnects', async () => {
+    const errorsBefore = port.sent.filter(({ type }) => type === 'protocol.error').length
+    port.disconnect()
+    port.receive({
+      type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'late-renderer-frame', throughSequence: 1
+    })
+    await settle()
+
+    expect(port.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(errorsBefore)
+  })
+
+  it('treats an ACK for a just-disposed attached PTY as a harmless shutdown callback', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    const shutdownPort = new MockPort()
+    new RuntimeServer(shutdownPort, root, database, undefined, undefined, sessions)
+    shutdownPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'shutdown-renderer'
+    })
+    shutdownPort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'shutdown-session', executionContextId: 'local-default',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => sessions.has('shutdown-session'))
+    const errorsBefore = shutdownPort.sent.filter(({ type }) => type === 'protocol.error').length
+
+    sessions.disposeAll()
+    shutdownPort.receive({
+      type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'shutdown-session', throughSequence: 1
+    })
+    shutdownPort.receive({
+      type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'shutdown-session', cols: 100, rows: 30
+    })
+    await settle()
+
+    expect(shutdownPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(errorsBefore)
+    shutdownPort.disconnect()
+  })
+
   it('pushes replayable domain batches directly to a subscribed Renderer', async () => {
     port.receive({
       type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,

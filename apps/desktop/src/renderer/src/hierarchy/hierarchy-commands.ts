@@ -28,8 +28,8 @@ export function createHierarchyCommands(
     activateTask: (taskId) => command('hierarchy.activate-task', { taskId }),
     createTask: (workspaceId) => command('hierarchy.create-task', { workspaceId }),
     renameTask: (taskId, title) => command('hierarchy.rename-task', { taskId, title }),
-    reorderTask: (taskId, beforeTaskId) => command('hierarchy.reorder-task', {
-      taskId, ...(beforeTaskId ? { beforeTaskId } : {})
+    reorderTask: (workspaceId, taskId, beforeTaskId) => command('hierarchy.reorder-task', {
+      workspaceId, taskId, ...(beforeTaskId ? { beforeTaskId } : {})
     }),
     deleteTask: (taskId) => command('hierarchy.delete-task', {
       taskId, confirmedIntent: `delete-task:${taskId}`
@@ -45,6 +45,9 @@ export function createHierarchyCommands(
     }),
     splitSession: (sceneId, sourceSessionId, direction) => command('hierarchy.split-session', {
       sceneId, sourceSessionId, direction
+    }),
+    putGeometry: (sceneId, ownerKey, layoutRevision, geometry) => client.request('geometry.put', {
+      sceneId, ownerKey, layoutRevision, geometry, now: Date.now()
     }),
     activateSession: (sessionId) => command('hierarchy.activate-session', { sessionId }),
     deleteSession: (sessionId, confirmed = false) => command('hierarchy.delete-session', {

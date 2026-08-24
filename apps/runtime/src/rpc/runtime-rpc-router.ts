@@ -424,7 +424,10 @@ export class RuntimeRpcRouter {
     const sessionRuns = sessions.flatMap(({ id }) => this.#sessions.listRuns(id))
     const providerBindings = sessions.flatMap(({ id }) => this.#sessions.listProviderBindings(id))
     const relations = this.#database.all<{ relation_id: string }>('SELECT relation_id FROM session_relations_current ORDER BY created_at').map(({ relation_id }) => this.#relations.getCurrent(relation_id)!)
-    const sceneSnapshots = this.#database.all<{ id: string }>('SELECT id FROM scenes ORDER BY created_at').map(({ id }) => this.#scenes.snapshot(id)!)
+    const sceneSnapshots = this.#database.all<{ id: string }>('SELECT id FROM scenes ORDER BY created_at').map(({ id }) => ({
+      ...this.#scenes.snapshot(id)!,
+      geometry: this.#geometry.list(id)
+    }))
     const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const requestedWindowId = typeof payload === 'object' && payload !== null &&
       'windowId' in payload && typeof payload.windowId === 'string'

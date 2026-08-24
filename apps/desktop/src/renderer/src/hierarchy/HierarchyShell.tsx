@@ -129,6 +129,12 @@ function HierarchyProduct({ projection, commands }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
 }) {
+  const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
+  const ratioTimers = useRef(new Map<string, number>())
+  useEffect(() => () => {
+    for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
+    ratioTimers.current.clear()
+  }, [])
   useEffect(() => {
     const unsubscribe = window.matouDesktop?.onDetachedWindowClosed((event) => {
       if (event.mainWindowId === projection.windowId) {
@@ -166,22 +172,34 @@ function HierarchyProduct({ projection, commands }: {
       <div className="hierarchy-window-title">{task?.title ?? '终端工作区'}</div>
     </header>
     <div className="hierarchy-body">
-      <TaskSidebar projection={projection} commands={commands} />
+      <TaskSidebar projection={projection} commands={commands} pathValid={pathValid} />
       <section className="workspace-stage" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
         {task && <>
           <div className="task-stage-heading">
             <strong data-testid="active-task">{task.title}</strong>
             <span>{scenes.length} 个页签 · {projection.sessions.filter(({ taskId: owner }) => owner === task.id).length} 个终端</span>
           </div>
-          <SceneTabBar projection={projection} commands={commands} />
+          <SceneTabBar projection={projection} commands={commands} pathValid={pathValid} />
           <div className="scene-stack">
             {scenes.map((scene) => {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)
               const layout = snapshot ? layoutFromSnapshot(snapshot) : undefined
+              const ratios = snapshot ? layoutRatios(snapshot, liveRatios) : {}
               return <section className="scene-stage" key={scene.id} hidden={scene.id !== activeSceneId}
                 aria-label={`${scene.name} 终端布局`}>
                 {layout && snapshot
-                  ? <SplitTree root={layout} renderMount={(mountId) => {
+                  ? <SplitTree root={layout} ratios={ratios} onRatio={(nodeId, ratio) => {
+                      const key = `${scene.id}:${nodeId}`
+                      setLiveRatios((current) => ({ ...current, [key]: ratio }))
+                      const pending = ratioTimers.current.get(key)
+                      if (pending !== undefined) window.clearTimeout(pending)
+                      ratioTimers.current.set(key, window.setTimeout(() => {
+                        ratioTimers.current.delete(key)
+                        void Promise.resolve(commands.putGeometry(
+                          scene.id, `node:${nodeId}`, scene.layoutRevision ?? 0, { ratio }
+                        )).catch(() => {})
+                      }, 100))
+                    }} renderMount={(mountId) => {
                       const mount = snapshot.mounts.find(({ id }) => id === mountId)
                       const session = projection.sessions.find(({ id }) => id === mount?.sessionId)
                       if (!session) return <div role="status">终端记录正在恢复</div>
@@ -226,6 +244,20 @@ function HierarchyProduct({ projection, commands }: {
       </section>
     </div>
   </main>
+}
+
+function layoutRatios(snapshot: SceneSnapshotView, live: Record<string, number>): Record<string, number> {
+  const ratios: Record<string, number> = {}
+  for (const item of snapshot.geometry ?? []) {
+    if (!item.ownerKey.startsWith('node:')) continue
+    const ratio = typeof item.geometry.ratio === 'number' ? item.geometry.ratio : undefined
+    if (ratio !== undefined) ratios[item.ownerKey.slice('node:'.length)] = ratio
+  }
+  for (const node of snapshot.nodes) {
+    const ratio = live[`${snapshot.scene.id}:${node.id}`]
+    if (ratio !== undefined) ratios[node.id] = ratio
+  }
+  return ratios
 }
 
 function layoutFromSnapshot(snapshot: SceneSnapshotView): LayoutNode | undefined {
@@ -291,7 +323,7 @@ function createFixtureCommands(
     createWorkspace: NOOP, renameWorkspace: NOOP, removeWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     createScene: NOOP, renameScene: NOOP, reorderScene: NOOP, closeScene: NOOP,
-    splitSession: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP
+    splitSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP
   }
 }
 

@@ -16,6 +16,26 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByTitle('/Users/demo/projects/frontend/app').textContent).toContain('frontend/app')
   })
 
+  it('shows path state inside the Workspace list and confirms removal without touching the directory', async () => {
+    const user = userEvent.setup()
+    const target = commands()
+    render(<WorkspaceSwitcher projection={fixture()} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '切换工作区' }))
+    expect(screen.getByRole('menuitem', { name: /Frontend.*路径失效/ })).toBeTruthy()
+    await user.click(screen.getByRole('menuitem', { name: '移出工作区' }))
+    expect(screen.getByRole('alertdialog', { name: '删除工作区' }).textContent).toContain(
+      '删除“Frontend”不会删除磁盘上的工作区目录，但该工作区下所有终端会话都会被丢弃，无法恢复。是否继续？'
+    )
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(target.removeWorkspace).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '切换工作区' }))
+    await user.click(screen.getByRole('menuitem', { name: '移出工作区' }))
+    await user.click(screen.getByRole('button', { name: '确认删除' }))
+    expect(target.removeWorkspace).toHaveBeenCalledWith('workspace-1')
+  })
+
   it('disables duplicate Task rename while displaying the product error', async () => {
     const user = userEvent.setup()
     render(<TaskSidebar projection={fixture()} commands={commands()} />)
@@ -37,6 +57,16 @@ describe('Workspace and Task navigation', () => {
       workspaceId: 'workspace-other', taskId: 'task-other'
     }) } })
     expect(target.reorderTask).not.toHaveBeenCalled()
+  })
+
+  it('offers a keyboard-accessible way to move a Task', async () => {
+    const user = userEvent.setup()
+    const target = commands()
+    render(<TaskSidebar projection={fixture()} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '事项菜单：线上 bug' }))
+    await user.click(screen.getByRole('menuitem', { name: '上移事项' }))
+    expect(target.reorderTask).toHaveBeenCalledWith('workspace-1', 'task-b', 'task-a')
   })
 
   it('requires both warnings before deleting a Task with one or fewer terminals', async () => {
@@ -80,6 +110,7 @@ function commands(): HierarchyCommands {
     renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
     reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn(),
+    putGeometry: vi.fn(),
     activateSession: vi.fn(), deleteSession: vi.fn(), detachSession: vi.fn(),
     returnSession: vi.fn()
   }
