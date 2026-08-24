@@ -27,6 +27,22 @@ export function createHierarchyCommands(client: RuntimeClient, windowId: string)
     }),
     deleteTask: (taskId) => command('hierarchy.delete-task', {
       taskId, confirmedIntent: `delete-task:${taskId}`
+    }),
+    activateScene: (sceneId) => command('hierarchy.activate-scene', { sceneId }),
+    createScene: (taskId) => command('hierarchy.create-scene', { taskId }),
+    renameScene: (sceneId, name) => command('hierarchy.rename-scene', { sceneId, name }),
+    reorderScene: (sceneId, beforeSceneId) => command('hierarchy.reorder-scene', {
+      sceneId, ...(beforeSceneId ? { beforeSceneId } : {})
+    }),
+    closeScene: (sceneId, confirmed = false) => command('hierarchy.close-scene', {
+      sceneId, ...(confirmed ? { confirmedIntent: `close-scene:${sceneId}` } : {})
+    }),
+    splitSession: (sceneId, sourceSessionId, direction) => command('hierarchy.split-session', {
+      sceneId, sourceSessionId, direction
+    }),
+    activateSession: (sessionId) => command('hierarchy.activate-session', { sessionId }),
+    deleteSession: (sessionId, confirmed = false) => command('hierarchy.delete-session', {
+      sessionId, ...(confirmed ? { confirmedIntent: `delete-session:${sessionId}` } : {})
     })
   }
 }

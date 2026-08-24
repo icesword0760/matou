@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { ConfirmDialog } from './ConfirmDialog'
+import { ConfirmationSequence } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection, TaskView } from './hierarchy-types'
+import { taskDeleteFlow } from './terminal-close-flow'
 
 const TASK_TRANSFER = 'application/x-matou-task'
 
@@ -45,13 +46,20 @@ export function TaskSidebar({ projection, commands }: {
       onCancel={() => setRenameTask(null)} onConfirm={(title) => {
         void commands.renameTask(renameTask.id, title); setRenameTask(null)
       }} />}
-    {deleteTask && <ConfirmDialog title="删除事项"
-      body={`删除“${deleteTask.title}”会丢失该事项下所有终端会话，但不会删除本地目录。是否继续？`}
-      confirmLabel="确认删除" onCancel={() => setDeleteTask(null)} onConfirm={() => {
-        void commands.deleteTask(deleteTask.id); setDeleteTask(null)
+    {deleteTask && <ConfirmationSequence
+      steps={taskDeleteFlow({
+        taskName: deleteTask.title,
+        sessionCount: projection.sessions.filter(({ taskId }) => taskId === deleteTask.id).length
+      }).steps}
+      onCancel={() => setDeleteTask(null)} onComplete={() => {
+        const taskId = deleteTask.id
+        setDeleteTask(null)
+        void Promise.resolve(commands.deleteTask(taskId)).catch(NOOP)
       }} />}
   </aside>
 }
+
+function NOOP(): void {}
 
 function parseTransfer(value: string): { workspaceId: string; taskId: string } | undefined {
   try {

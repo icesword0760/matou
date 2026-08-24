@@ -6,23 +6,42 @@ import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 
-const SESSION_ID = 'foundation-shell'
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
+const NOOP = () => {}
 
 export type RuntimeStatus =
   | 'waiting-for-port' | 'handshaking' | 'starting-session'
   | 'streaming' | 'error' | 'exited'
 
 interface TerminalSurfaceProps {
-  onStatusChange: (status: RuntimeStatus) => void
-  onSmokeMarker: (marker: string) => void
-  onReplayComplete: (marker: string) => void
+  sessionId?: string
+  executionContextId?: string
+  profile?: 'shell' | 'claude-code' | 'codex'
+  visible?: boolean
+  inputDisabled?: boolean
+  onStatusChange?: (status: RuntimeStatus) => void
+  onSmokeMarker?: (marker: string) => void
+  onReplayComplete?: (marker: string) => void
 }
 
 export function TerminalSurface(props: TerminalSurfaceProps) {
-  const { onStatusChange, onSmokeMarker, onReplayComplete } = props
+  const {
+    sessionId = 'foundation-shell', executionContextId = 'local-default',
+    profile = 'shell', visible = true, inputDisabled = false,
+    onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP
+  } = props
   const client = useRuntimeClient()
   const containerRef = useRef<HTMLDivElement>(null)
+  const fitRef = useRef<FitAddon | null>(null)
+  const visibleRef = useRef(visible)
+  const inputDisabledRef = useRef(inputDisabled)
+
+  useEffect(() => {
+    visibleRef.current = visible
+    if (visible) requestAnimationFrame(() => fitRef.current?.fit())
+  }, [visible])
+
+  useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
 
   useEffect(() => {
     const container = containerRef.current
@@ -45,6 +64,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     terminal.loadAddon(fit)
     terminal.open(container)
     fit.fit()
+    fitRef.current = fit
     const decoder = new TextDecoder()
     let observed = ''
     let replayRequested = false
@@ -55,10 +75,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         onStatusChange('streaming')
         if (message.reattached && !replayRequested) {
           replayRequested = true
-          client.requestTerminalReplay(SESSION_ID)
+          client.requestTerminalReplay(sessionId)
         }
         if (new URLSearchParams(window.location.search).get('e2e') === '1') {
-          client.sendTerminalInput(SESSION_ID, `printf '${SMOKE_MARKER}\\n'\r`)
+          client.sendTerminalInput(sessionId, `printf '${SMOKE_MARKER}\\n'\r`)
         }
       } else if (message.type === 'terminal.data') {
         const bytes = message.data instanceof Uint8Array
@@ -69,10 +89,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           onSmokeMarker(SMOKE_MARKER)
           if (!replayRequested && new URLSearchParams(window.location.search).get('e2e') === '1') {
             replayRequested = true
-            client.requestTerminalReplay(SESSION_ID)
+            client.requestTerminalReplay(sessionId)
           }
         }
-        terminal.write(bytes, () => client.acknowledgeTerminal(SESSION_ID, message.sequence))
+        terminal.write(bytes, () => client.acknowledgeTerminal(sessionId, message.sequence))
       } else if (message.type === 'terminal.exited') {
         onStatusChange('exited')
       } else if (message.type === 'protocol.error') {
@@ -84,25 +104,29 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       }
     }
     const detach = client.attachTerminal({
-      sessionId: SESSION_ID,
-      executionContextId: 'local-default',
-      profile: 'shell',
+      sessionId,
+      executionContextId,
+      profile,
       cols: terminal.cols,
       rows: terminal.rows
     }, onMessage)
-    const input = terminal.onData((data) => client.sendTerminalInput(SESSION_ID, data))
+    const input = terminal.onData((data) => {
+      if (!inputDisabledRef.current) client.sendTerminalInput(sessionId, data)
+    })
     const observer = new ResizeObserver(() => {
+      if (!visibleRef.current) return
       fit.fit()
-      client.resizeTerminal(SESSION_ID, terminal.cols, terminal.rows)
+      client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
     })
     observer.observe(container)
     return () => {
       observer.disconnect()
       input.dispose()
       detach()
+      fitRef.current = null
       terminal.dispose()
     }
-  }, [client, onReplayComplete, onSmokeMarker, onStatusChange])
+  }, [client, executionContextId, onReplayComplete, onSmokeMarker, onStatusChange, profile, sessionId])
 
-  return <div className="terminal-surface" ref={containerRef} />
+  return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible} />
 }

@@ -38,6 +38,21 @@ describe('Workspace and Task navigation', () => {
     }) } })
     expect(target.reorderTask).not.toHaveBeenCalled()
   })
+
+  it('requires both warnings before deleting a Task with one or fewer terminals', async () => {
+    const user = userEvent.setup()
+    const target = commands()
+    render(<TaskSidebar projection={fixture()} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '事项菜单：事项 A' }))
+    await user.click(screen.getByRole('menuitem', { name: '删除事项' }))
+    expect(screen.getByText('删除最后一个终端将连带删除对应事项，是否继续？')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '继续' }))
+    expect(screen.getByText('删除“事项 A”会丢失该事项下所有终端会话，但不会删除本地目录。是否继续？')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '确认删除' }))
+
+    expect(target.deleteTask).toHaveBeenCalledWith('task-a')
+  })
 })
 
 function fixture(): HierarchyProjection {
@@ -62,6 +77,9 @@ function commands(): HierarchyCommands {
   return {
     activateWorkspace: vi.fn(), createWorkspace: vi.fn(), renameWorkspace: vi.fn(),
     removeWorkspace: vi.fn(), activateTask: vi.fn(), createTask: vi.fn(),
-    renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn()
+    renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
+    activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
+    reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn(),
+    activateSession: vi.fn(), deleteSession: vi.fn()
   }
 }
