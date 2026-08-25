@@ -1,11 +1,15 @@
 import { chmod, mkdtemp, readdir, readFile, rename, rm, truncate } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { _electron as electron, expect, test } from '@playwright/test'
 
-test('packaged app runs SQLite, node-pty, replay, and torn-tail recovery', async () => {
+import { FOUNDATION_MIGRATIONS } from '../../apps/runtime/src/storage/migrations'
+
+test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema compatibility', async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-packaged-e2e-'))
   const executablePath = await packagedExecutable()
   try {
@@ -15,7 +19,9 @@ test('packaged app runs SQLite, node-pty, replay, and torn-tail recovery', async
     expect(existsSync(databasePath)).toBe(true)
     const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite')
     const database = new DatabaseSync(databasePath, { readOnly: true })
-    expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({ version: 9 })
+    expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual({
+      version: FOUNDATION_MIGRATIONS.at(-1)!.version
+    })
     expect(database.prepare('SELECT COUNT(*) AS count FROM window_task_placements').get())
       .toEqual({ count: 1 })
     expect(database.prepare("SELECT value FROM _runtime_meta WHERE key = 'runtime_generation'").get()).toEqual({
@@ -33,6 +39,19 @@ test('packaged app runs SQLite, node-pty, replay, and torn-tail recovery', async
     await runPackagedSmoke(executablePath, dataDirectory, false)
     const after = await readFile(activePath)
     expect(after.byteLength).toBeGreaterThan(before.byteLength - 3)
+
+    const newer = new DatabaseSync(databasePath)
+    newer.prepare(
+      'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)'
+    ).run(999, 'future-version', 'future-checksum', Date.now())
+    newer.close()
+    await runPackagedSmoke(executablePath, dataDirectory, false)
+    const untouched = new DatabaseSync(databasePath)
+    expect(untouched.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
+      .toEqual({ version: 999 })
+    untouched.prepare('DELETE FROM schema_migrations WHERE version = 999').run()
+    untouched.close()
+    await runPackagedSmoke(executablePath, dataDirectory, false)
   } finally {
     await rm(dataDirectory, { recursive: true, force: true })
   }
@@ -44,13 +63,15 @@ async function runPackagedSmoke(
   exerciseProduct: boolean
 ): Promise<void> {
   await chmod(executablePath, 0o755)
+  const launchEnvironment = {
+    ...process.env, MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
+    MATOU_DEFAULT_WORKSPACE: join(dataDirectory, 'matou_workspace'),
+    MATOU_E2E_WINDOW_CLOSE: 'hide'
+  }
   const app = await electron.launch({
     executablePath,
     args: [],
-    env: {
-      ...process.env, MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
-      MATOU_DEFAULT_WORKSPACE: join(dataDirectory, 'matou_workspace')
-    }
+    env: launchEnvironment
   })
   try {
     const page = await app.firstWindow()
@@ -69,7 +90,8 @@ async function runPackagedSmoke(
       const embedded = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
       await expect(embedded).toHaveAttribute('data-pid', /\d+/)
       const pid = await embedded.getAttribute('data-pid')
-      await page.getByRole('button', { name: /^脱出终端：/ }).first().click({ force: true })
+      await page.locator('.terminal-pane-header').first()
+        .dispatchEvent('dragend', { screenX: -1, screenY: -1 })
       await expect(page.getByTestId('detached-placeholder')).toContainText('已脱出')
       await expect.poll(async () => (await app.windows()).length).toBe(2)
       const detached = (await app.windows()).find((candidate) => candidate !== page)!
@@ -85,12 +107,27 @@ async function runPackagedSmoke(
       await rename(moved, workspace)
       await expect(page.getByText('路径失效')).toHaveCount(0, { timeout: 10_000 })
 
-      const id = new URL(page.url()).searchParams.get('windowId')!
       await page.getByRole('button', { name: /^关闭页签：/ }).click()
+      await expect(page.getByRole('alertdialog', { name: '提示' })).toContainText(
+        '最后一个事项下的最后一个标签'
+      )
+      await page.getByRole('button', { name: '我知道了' }).click()
+      await expect.poll(() => app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.isVisible()
+      )).toBe(true)
+
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.close())
       await expect.poll(() => app.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()[0]?.isVisible()
       )).toBe(false)
-      await page.evaluate((windowId) => window.matouDesktop.showWindow(windowId), id)
+      const secondLaunch = spawn(executablePath, [], {
+        env: launchEnvironment, stdio: 'ignore'
+      })
+      const [exitCode] = await once(secondLaunch, 'exit')
+      expect(exitCode).toBe(0)
+      await expect.poll(() => app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.isVisible()
+      )).toBe(true)
       await expect(page.getByTestId('terminal-pane')).toHaveCount(2)
     }
   } finally {

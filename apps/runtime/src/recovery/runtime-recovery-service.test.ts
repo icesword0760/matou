@@ -80,6 +80,14 @@ describe('RuntimeRecoveryService', () => {
       { kind: 'output', sequence: 1, data: Uint8Array.from([65]) },
       { kind: 'domain-cursor', sequence: 2, domainEventSequence: 2 }
     ])
+
+    const repeated = await new RuntimeRecoveryService(root, after).recoverAll()
+    expect(repeated.interruptedRuns).toEqual([])
+    expect(repeated.recovered).toEqual([
+      expect.objectContaining({ sessionId: 'session-corrupt', repairedAlignment: false }),
+      expect.objectContaining({ sessionId: 'session-good', repairedAlignment: false })
+    ])
+    expect(repeated.failed).toEqual([])
   })
 })
 

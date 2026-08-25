@@ -132,6 +132,15 @@ describe('parseRendererMessage', () => {
     ]))
   })
 
+  it('allowlists the PRD 04 permission-mode persistence workflow', () => {
+    expect(RPC_METHODS).toContain('session.set-permission-mode')
+    expect(parseRendererMessage({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'permission-1',
+      method: 'session.set-permission-mode', capability: 'renderer',
+      deadlineAt: Date.now() + 1000, payload: {}
+    })).toMatchObject({ type: 'rpc.request', method: 'session.set-permission-mode' })
+  })
+
   it('rejects RPC methods outside the explicit allowlist', () => {
     expect(() => parseRendererMessage({
       type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'request-1',

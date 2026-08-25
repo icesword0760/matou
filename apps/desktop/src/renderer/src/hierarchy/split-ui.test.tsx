@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SceneTabBar, type SceneCommands } from './SceneTabBar'
 import { SplitDivider } from './SplitDivider'
 import type { HierarchyProjection } from './hierarchy-types'
+import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
 
 afterEach(cleanup)
 
@@ -28,6 +29,25 @@ describe('Scene tabs and split actions', () => {
     expect(commands.splitSession).toHaveBeenCalledWith('scene-1', 'session-1', 'vertical')
   })
 
+  it('keeps the add-tab control beside the last visible tab like Kooky', () => {
+    const { container } = render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
+
+    const add = screen.getByRole('button', { name: '新建页签' })
+    expect(add.parentElement?.classList.contains('tab-bar-left')).toBe(true)
+    expect(container.querySelector('.tab-bar-overflow-actions')).toBeNull()
+  })
+
+  it('uses the Kooky split and file toolbar artwork', () => {
+    render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
+
+    expect(screen.getByRole('button', { name: '水平分屏' }).querySelector('img')?.getAttribute('src') ?? '')
+      .toContain('vertical.png')
+    expect(screen.getByRole('button', { name: '垂直分屏' }).querySelector('img')?.getAttribute('src') ?? '')
+      .toContain('horizontal.png')
+    expect(screen.getByRole('button', { name: '文件' }).querySelector('img')?.getAttribute('src'))
+      .toBe(folderIcon)
+  })
+
   it('opens overflow and centers the selected Scene', async () => {
     const user = userEvent.setup()
     const scrollIntoView = vi.fn()
@@ -37,6 +57,8 @@ describe('Scene tabs and split actions', () => {
     await user.click(screen.getByRole('button', { name: '更多页签' }))
     await user.click(screen.getByRole('menuitem', { name: '页签 20' }))
     expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'center' }))
+    expect(screen.getByRole('button', { name: '新建页签' }).parentElement?.classList
+      .contains('tab-bar-overflow-actions')).toBe(true)
   })
 
   it('renames a Scene and blocks a duplicate pinned title', async () => {

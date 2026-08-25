@@ -86,6 +86,7 @@ button { -webkit-app-region: no-drag; }
 .tab-add-btn { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin-left: 4px; padding: 0; border: 0; border-radius: 6px; color: #888; background: rgba(255,255,255,.04); cursor: pointer; font-size: 16px; }
 .tab-add-btn:hover, .tab-overflow-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
 .toolbar-btn { display: flex; align-items: center; padding: 4px; border: 0; border-radius: 4px; color: #7b7b7b; background: transparent; cursor: pointer; font-size: 12px; }
+.toolbar-btn img { display: block; width: 16px; height: 16px; object-fit: contain; }
 .toolbar-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
 .toolbar-btn:disabled, .tab-add-btn:disabled, .workbench-sidebar__add-btn:disabled { cursor: not-allowed; opacity: .5; }
 .tab-bar-separator { flex: 0 0 auto; width: 1px; height: 16px; margin: 0 4px; background: #333; }

@@ -66,6 +66,7 @@ interface SessionRow {
   kind: Session['kind']
   status: Session['status']
   title: string
+  cwd: string
   created_at: number
   updated_at: number
   last_activity_at: number
@@ -1975,7 +1976,12 @@ function readBootstrapFlag(tx: DatabaseTransaction, key: string): unknown {
     'SELECT value_json FROM bootstrap_state WHERE key = ?',
     key
   )
-  return row === undefined ? undefined : JSON.parse(row.value_json)
+  if (row === undefined) return undefined
+  try {
+    return JSON.parse(row.value_json) as unknown
+  } catch {
+    return undefined
+  }
 }
 
 function mapWorkspace(row: WorkspaceRow): Workspace {
@@ -2032,6 +2038,7 @@ function mapSession(row: SessionRow): Session {
     kind: row.kind,
     status: row.status,
     title: row.title,
+    cwd: row.cwd,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastActivityAt: row.last_activity_at,
@@ -2098,11 +2105,14 @@ function assertWorkspacePathAvailable(tx: DatabaseTransaction, workspaceId: stri
 }
 
 function parseStringArray(value: string): string[] {
-  const parsed = JSON.parse(value) as unknown
-  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
-    throw new Error('stored task order is invalid')
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')
+      ? parsed
+      : []
+  } catch {
+    return []
   }
-  return parsed
 }
 
 function requireRow<T>(row: T | undefined, label: string): T {

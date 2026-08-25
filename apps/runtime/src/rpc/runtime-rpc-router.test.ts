@@ -121,6 +121,34 @@ describe('RuntimeRpcRouter', () => {
     expect(snapshot.scenes[0]).toMatchObject({ id: 'scene-1', archivedAt: 8 })
   })
 
+  it('persists a permission switch against the same resumable AI conversation', async () => {
+    await seedHierarchy()
+    await router.handle('session.create', payload('session', {
+      id: 'session-1', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Claude', now: 4
+    }))
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 5, 5, 5)`,
+      'binding-1', 'session-1', 'claude-session-1',
+      JSON.stringify({ permissionMode: 'bypassPermissions', cwd: '/tmp/workspace' })
+    )
+
+    const changed = await router.handle('session.set-permission-mode', payload('permission-plan', {
+      sessionId: 'session-1', provider: 'claude-code', permissionMode: 'plan', now: 6
+    })) as { result: { providerSessionId: string; validatedAt: number; metadata: unknown } }
+
+    expect(changed.result).toMatchObject({
+      providerSessionId: 'claude-session-1', validatedAt: 5,
+      metadata: { permissionMode: 'plan', cwd: '/tmp/workspace' }
+    })
+    await expect(router.handle('session.set-permission-mode', payload('permission-invalid', {
+      sessionId: 'session-1', provider: 'claude-code', permissionMode: 'owner', now: 7
+    }))).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
   it('supports relation and Scene structural commands with synchronous event replay', async () => {
     await seedHierarchy()
     await router.handle('session.create', payload('parent', {

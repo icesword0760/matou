@@ -6,6 +6,7 @@ import * as pty from 'node-pty'
 
 import { CreditWindow } from '../flow-control/credit-window'
 import { SegmentJournal } from '../journal/segment-journal'
+import { resolvePtyCommand } from './provider-launch-plan'
 
 interface PtySessionOptions {
   sessionId: string
@@ -15,9 +16,13 @@ interface PtySessionOptions {
   cwd: string
   dataRoot: string
   profile?: 'shell' | 'claude-code' | 'codex'
+  providerSessionId?: string
+  permissionMode?: string
+  settingsPath?: string
   env?: Record<string, string>
   send: (message: RuntimeMessage) => void
-  onExit?: (session: PtySession, exitCode: number, signal?: number) => void
+  onExit?: (session: PtySession, exitCode: number, signal?: number) => boolean | void
+  onOutput?: (data: string) => void
   runId?: string
 }
 
@@ -27,17 +32,20 @@ export class PtySession {
   readonly executionContextId: string
   readonly profile: 'shell' | 'claude-code' | 'codex'
   readonly runId: string | undefined
+  readonly replayFromSequence: number
 
   readonly #pty: pty.IPty
   readonly #journal: SegmentJournal
   #send: ((message: RuntimeMessage) => void) | undefined
   #creditWindow: CreditWindow
-  readonly #onExit: ((session: PtySession, exitCode: number, signal?: number) => void) | undefined
+  readonly #onExit: ((session: PtySession, exitCode: number, signal?: number) => boolean | void) | undefined
+  readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
 
   #sequence: number
   #writeChain = Promise.resolve()
   #disposed = false
+  #notifyExit = true
   #pendingReplayFrom: number | undefined
 
   get lastSequence(): number { return this.#sequence }
@@ -51,9 +59,11 @@ export class PtySession {
     this.#pty = terminal
     this.#journal = journal
     this.#sequence = journal.lastSequence
+    this.replayFromSequence = journal.lastSequence + 1
     this.#send = options.send
     this.#creditWindow = this.#newCreditWindow()
     this.#onExit = options.onExit
+    this.#onOutput = options.onOutput
 
     terminal.onData((data) => this.#enqueueOutput(data))
     terminal.onExit(({ exitCode, signal }) => this.#enqueueExit(exitCode, signal))
@@ -61,7 +71,20 @@ export class PtySession {
 
   static async create(options: PtySessionOptions): Promise<PtySession> {
     const journal = await SegmentJournal.open(options.dataRoot, options.sessionId)
-    const command = resolveCommand(options.profile ?? 'shell')
+    const profile = options.profile ?? 'shell'
+    const command = resolvePtyCommand({
+      profile,
+      executable: resolveExecutable(profile),
+      ...(options.providerSessionId === undefined ? {} : {
+        providerSessionId: options.providerSessionId
+      }),
+      ...(options.permissionMode === undefined ? {} : {
+        permissionMode: options.permissionMode
+      }),
+      ...(options.settingsPath === undefined ? {} : {
+        settingsPath: options.settingsPath
+      })
+    })
     const terminal = pty.spawn(command.file, command.args, {
       name: 'xterm-256color',
       cols: options.cols,
@@ -77,6 +100,11 @@ export class PtySession {
       throw new Error('session is disposed')
     }
     this.#pty.write(data)
+  }
+
+  display(data: string): void {
+    if (this.#disposed) return
+    this.#enqueueOutput(data)
   }
 
   resize(cols: number, rows: number): void {
@@ -110,15 +138,17 @@ export class PtySession {
     }
   }
 
-  dispose(): void {
+  dispose(options: { notifyExit?: boolean } = {}): void {
     if (this.#disposed) {
       return
     }
+    this.#notifyExit = options.notifyExit ?? true
     this.#disposed = true
     this.#pty.kill()
   }
 
   #enqueueOutput(data: string): void {
+    this.#onOutput?.(data)
     const bytes = this.#encoder.encode(data)
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(async () => {
@@ -137,8 +167,9 @@ export class PtySession {
     this.#writeChain = this.#writeChain.then(async () => {
       await this.#journal.appendExit(sequence, exitCode, signal)
       await this.#journal.close()
+      const allowNotification = this.#onExit?.(this, exitCode, signal) !== false
+      if (!this.#notifyExit || !allowNotification) return
       if (!this.#send) {
-        this.#onExit?.(this, exitCode, signal)
         return
       }
       if (this.#creditWindow.isPaused) {
@@ -154,7 +185,6 @@ export class PtySession {
         exitCode,
         ...(signal === undefined ? {} : { signal })
       })
-      this.#onExit?.(this, exitCode, signal)
     })
   }
 
@@ -207,7 +237,6 @@ export class PtySession {
             exitCode: frame.exitCode,
             ...(frame.signal === undefined ? {} : { signal: frame.signal })
           })
-          this.#onExit?.(this, frame.exitCode, frame.signal)
         }
       }
     })
@@ -221,15 +250,12 @@ function resolveShell(): string {
   return process.env.SHELL ?? (os.platform() === 'darwin' ? '/bin/zsh' : '/bin/bash')
 }
 
-function resolveCommand(profile: 'shell' | 'claude-code' | 'codex'): {
-  file: string
-  args: string[]
-} {
+function resolveExecutable(profile: 'shell' | 'claude-code' | 'codex'): string {
   if (profile === 'claude-code') {
-    return { file: process.env.MATOU_CLAUDE_COMMAND ?? 'claude', args: [] }
+    return process.env.MATOU_CLAUDE_COMMAND ?? 'claude'
   }
   if (profile === 'codex') {
-    return { file: process.env.MATOU_CODEX_COMMAND ?? 'codex', args: [] }
+    return process.env.MATOU_CODEX_COMMAND ?? 'codex'
   }
-  return { file: resolveShell(), args: [] }
+  return resolveShell()
 }

@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
 const NOOP = () => {}
@@ -85,17 +86,22 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const decoder = new TextDecoder()
     let observed = ''
     let replayRequested = false
+    const replayProbe = shouldRunReplayProbe(
+      sessionId,
+      new URLSearchParams(window.location.search).get('e2e') === '1'
+    )
     onStatusChange('starting-session')
 
     const onMessage = (message: RuntimeMessage) => {
       if (message.type === 'terminal.spawned') {
         setPid(message.pid)
         onStatusChange('streaming')
-        if (message.reattached && !replayRequested) {
+        const replayFromSequence = replayFromSequenceForSpawn(message)
+        if (replayFromSequence !== undefined && !replayRequested) {
           replayRequested = true
-          client.requestTerminalReplay(sessionId)
+          client.requestTerminalReplay(sessionId, replayFromSequence)
         }
-        if (new URLSearchParams(window.location.search).get('e2e') === '1') {
+        if (replayProbe) {
           client.sendTerminalInput(sessionId, `printf '${SMOKE_MARKER}\\n'\r`)
         }
       } else if (message.type === 'terminal.data') {
@@ -105,7 +111,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         observed = (observed + decoder.decode(bytes, { stream: true })).slice(-8192)
         if (observed.includes(SMOKE_MARKER)) {
           onSmokeMarker(SMOKE_MARKER)
-          if (!replayRequested && new URLSearchParams(window.location.search).get('e2e') === '1') {
+          if (!replayRequested && replayProbe) {
             replayRequested = true
             client.requestTerminalReplay(sessionId)
           }

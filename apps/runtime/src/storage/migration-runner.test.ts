@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
-    expect(result.currentVersion).toBe(9)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    expect(result.currentVersion).toBe(10)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -86,6 +86,8 @@ describe('MigrationRunner', () => {
     expect(sceneColumns).toEqual(expect.arrayContaining([
       'title_pinned', 'sort_key', 'layout_revision'
     ]))
+    expect(database.all<{ name: string }>('PRAGMA table_info(sessions)').map(({ name }) => name))
+      .toContain('cwd')
   })
 
   it('is idempotent when every migration is already applied', async () => {
@@ -95,7 +97,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 9,
+      currentVersion: 10,
       backupPath: undefined
     })
   })
@@ -112,7 +114,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[5]!,
       FOUNDATION_MIGRATIONS[6]!,
       FOUNDATION_MIGRATIONS[7]!,
-      FOUNDATION_MIGRATIONS[8]!
+      FOUNDATION_MIGRATIONS[8]!,
+      FOUNDATION_MIGRATIONS[9]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -133,7 +136,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 9')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 10')
   })
 
   it('rolls back a failed migration without recording its version', async () => {

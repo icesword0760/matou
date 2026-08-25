@@ -115,6 +115,21 @@ describe('GeometryRepository', () => {
     expect(geometry.discardInvalid('scene-1')).toBe(1)
     expect(geometry.get('scene-1', 'node:root')).toBeUndefined()
   })
+
+  it('ignores one malformed geometry record and keeps the Scene available', () => {
+    geometry.put({
+      sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 1,
+      geometry: { ratio: 35 }, now: 4
+    })
+    database.run(
+      'UPDATE scene_geometry SET geometry_json = ? WHERE scene_id = ? AND owner_key = ?',
+      '{broken-json', 'scene-1', 'node:root'
+    )
+
+    expect(geometry.get('scene-1', 'node:root')).toBeUndefined()
+    expect(geometry.list('scene-1')).toEqual([])
+    expect(scenes.snapshot('scene-1')?.scene).toMatchObject({ id: 'scene-1' })
+  })
 })
 
 function command(commandId: string) {

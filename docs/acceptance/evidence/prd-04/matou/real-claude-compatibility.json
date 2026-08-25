@@ -1,0 +1,24 @@
+{
+  "verifiedAt": "2026-08-25",
+  "claudeCodeVersion": "2.1.241",
+  "validResume": {
+    "settingsAccepted": true,
+    "historyRepaintedByClaudeCode": true,
+    "inputPromptReady": true,
+    "hookEventObserved": "SessionEnd",
+    "hookSessionIdentityMatched": true,
+    "promptSubmittedDuringVerification": false
+  },
+  "invalidResume": {
+    "exitCode": 1,
+    "message": "No conversation found with session ID: <UUID>",
+    "usesHorizontalCursorPositioningBetweenWords": true,
+    "capturedByRegressionTest": "apps/runtime/src/session/provider-resume-monitor.test.ts"
+  },
+  "launchArgumentsVerified": [
+    "--settings",
+    "--resume",
+    "--dangerously-skip-permissions"
+  ],
+  "notes": "The real valid conversation identifier and conversation text are intentionally omitted from this evidence artifact."
+}

@@ -594,5 +594,32 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE UNIQUE INDEX active_task_window_migration_idx
       ON task_window_migrations(task_id) WHERE state = 'preparing';
     `
+  },
+  {
+    version: 10,
+    name: 'session-working-directory',
+    sql: `
+      ALTER TABLE sessions ADD COLUMN cwd TEXT NOT NULL DEFAULT '';
+      UPDATE sessions
+      SET cwd = COALESCE((
+        SELECT execution_contexts.cwd
+        FROM execution_contexts
+        WHERE execution_contexts.id = sessions.execution_context_id
+      ), '')
+      WHERE cwd = '';
+
+      CREATE TRIGGER sessions_default_cwd_after_insert
+      AFTER INSERT ON sessions
+      WHEN NEW.cwd = ''
+      BEGIN
+        UPDATE sessions
+        SET cwd = COALESCE((
+          SELECT execution_contexts.cwd
+          FROM execution_contexts
+          WHERE execution_contexts.id = NEW.execution_context_id
+        ), '')
+        WHERE id = NEW.id;
+      END;
+    `
   }
 ]

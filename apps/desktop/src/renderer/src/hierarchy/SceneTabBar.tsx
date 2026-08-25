@@ -5,6 +5,9 @@ import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
+import splitRightIcon from '../assets/kooky/terminal/vertical.png'
+import splitDownIcon from '../assets/kooky/terminal/horizontal.png'
+import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
 
 export interface SceneCommands {
   activateScene(sceneId: string): unknown
@@ -70,26 +73,36 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
           className="tab-title" aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}>{scene.name}</button>
         <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
       </div>)}
+      {overflow.length === 0 && <button className="tab-add-btn" aria-label="新建页签"
+        disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        onClick={() => taskId && commands.createScene(taskId)}>+</button>}
     </div>
-    <div className="tab-bar-overflow-actions">
-    {overflow.length > 0 && <div>
+    {overflow.length > 0 && <div className="tab-bar-overflow-actions">
+      <div>
       <button className="tab-overflow-btn" aria-label="更多页签" onClick={() => setOverflowOpen(!overflowOpen)}>···</button>
       {overflowOpen && <SceneOverflowMenu scenes={overflow} onSelect={(scene) => {
         setOverflowOpen(false); select(scene.id, true)
       }} />}
+      </div>
+      <button className="tab-add-btn" aria-label="新建页签" disabled={!pathValid}
+        title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        onClick={() => taskId && commands.createScene(taskId)}>+</button>
     </div>}
-    <button className="tab-add-btn" aria-label="新建页签" disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-      onClick={() => taskId && commands.createScene(taskId)}>+</button>
-    </div>
     <div className="tab-bar-right">
     <button className="toolbar-btn split-horizontal-icon" aria-label="水平分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
       title={!pathValid ? WORKSPACE_PATH_MESSAGE : '水平分屏（左右）'}
-      onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'horizontal')}>↔</button>
+      onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'horizontal')}>
+      <img src={splitRightIcon} alt="" aria-hidden="true" />
+    </button>
     <button className="toolbar-btn split-vertical-icon" aria-label="垂直分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
       title={!pathValid ? WORKSPACE_PATH_MESSAGE : '垂直分屏（上下）'}
-      onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'vertical')}>↕</button>
+      onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'vertical')}>
+      <img src={splitDownIcon} alt="" aria-hidden="true" />
+    </button>
     <span className="tab-bar-separator" />
-    <button className="toolbar-btn file-panel-icon" aria-label="文件面板" title="文件面板">▱</button>
+    <button className="toolbar-btn file-panel-icon" aria-label="文件" title="文件">
+      <img src={folderIcon} alt="" aria-hidden="true" />
+    </button>
     </div>
     {menuSceneId && <div role="menu" className="scene-tab-menu">
       <button role="menuitem" onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>

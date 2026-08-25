@@ -115,10 +115,7 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   }, [client, fixture, projection?.navigation.activeWorkspaceId, refresh, windowId])
 
   if (!projection || !commands) {
-    return <main className="hierarchy-loading" aria-busy="true">
-      <strong>正在恢复工作现场…</strong>
-      {loadError && <p role="alert">{loadError}</p>}
-    </main>
+    return <main className="hierarchy-loading" aria-busy="true" data-load-error={loadError || undefined} />
   }
   return <HierarchyProduct projection={projection} commands={commands} />
 }
@@ -191,7 +188,7 @@ function HierarchyProduct({ projection, commands }: {
                     }} renderMount={(mountId) => {
                       const mount = snapshot.mounts.find(({ id }) => id === mountId)
                       const session = projection.sessions.find(({ id }) => id === mount?.sessionId)
-                      if (!session) return <div role="status">终端记录正在恢复</div>
+                      if (!session) return <div className="scene-recovery" aria-hidden="true" />
                       const detachedWindow = snapshot.windows.find(({ id, state }) =>
                         id === mount?.sceneWindowId && state === 'detached'
                       )
@@ -224,7 +221,7 @@ function HierarchyProduct({ projection, commands }: {
                             } }
                           : {})} />
                     }} />
-                  : <div className="scene-recovery" role="status">正在恢复页签布局…</div>}
+                  : <div className="scene-recovery" aria-hidden="true" />}
               </section>
             })}
           </div>

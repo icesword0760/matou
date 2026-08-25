@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events'
-import { mkdtemp } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { chmod, mkdir, mkdtemp, readFile, readlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -11,6 +13,9 @@ import { SegmentJournal } from './journal/segment-journal'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import { RuntimeServer, type PortMessageEvent, type RuntimePort } from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
+import { ProviderHookServer } from './session/provider-hook-server'
+import { SessionRepository } from './domain/session-repository'
+import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeDatabase } from './storage/database'
 import { MigrationRunner } from './storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
@@ -18,6 +23,7 @@ import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 let root: string
 let database: RuntimeDatabase
 let port: MockPort
+const execFileAsync = promisify(execFile)
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-server-'))
@@ -260,6 +266,9 @@ describe('RuntimeServer domain RPC', () => {
   })
 
   it('keeps a live PTY in the Runtime registry across Renderer disconnect and reattach', async () => {
+    const priorRun = await SegmentJournal.open(root, 'reload-session')
+    await priorRun.appendOutput(1, new TextEncoder().encode('output from an earlier app run'))
+    await priorRun.close()
     const sessions = new RuntimeSessionRegistry()
     const firstPort = new MockPort()
     new RuntimeServer(firstPort, root, database, undefined, undefined, sessions)
@@ -282,9 +291,55 @@ describe('RuntimeServer domain RPC', () => {
     })
     await settle()
 
-    expect(secondPort.last('terminal.spawned')).toMatchObject({ pid: firstPid, reattached: true })
+    expect(secondPort.last('terminal.spawned')).toMatchObject({
+      pid: firstPid, reattached: true, replayFromSequence: 2
+    })
+    secondPort.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'reload-session', fromSequence: 2
+    })
+    await waitUntil(() => secondPort.last('terminal.replay-complete') !== undefined)
+    secondPort.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'reload-session', data: "printf '__LIVE_AFTER_REPLAY__\\n'\r"
+    })
+    await waitUntil(() => secondPort.sent.some((message) =>
+      message.type === 'terminal.data' &&
+      new TextDecoder().decode(message.data).includes('__LIVE_AFTER_REPLAY__')
+    ))
     secondPort.receive({
       type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'reload-session'
+    })
+    await settle()
+  })
+
+  it('serializes duplicate attach requests so one persisted Session owns one live PTY', async () => {
+    registerSession(database, 'duplicate-spawn-session')
+    const message = {
+      type: 'terminal.spawn' as const,
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'duplicate-spawn-session',
+      executionContextId: 'replay-context',
+      profile: 'shell' as const,
+      cols: 80,
+      rows: 24
+    }
+
+    port.receive(message)
+    port.receive(message)
+    await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.spawned').length >= 2)
+
+    const pids = port.sent
+      .filter((candidate) => candidate.type === 'terminal.spawned')
+      .map((candidate) => candidate.pid)
+    expect(new Set(pids).size).toBe(1)
+    expect(database.all(
+      'SELECT id FROM session_runs WHERE session_id = ?',
+      'duplicate-spawn-session'
+    )).toHaveLength(1)
+    port.receive({
+      type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'duplicate-spawn-session'
     })
     await settle()
   })
@@ -330,6 +385,403 @@ describe('RuntimeServer domain RPC', () => {
     })
     await settle()
   })
+
+  it('records each Shell working directory after a completed command', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    const cwdPort = new MockPort()
+    new RuntimeServer(cwdPort, root, database, undefined, undefined, sessions)
+    cwdPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'cwd-renderer'
+    })
+    registerSession(database, 'cwd-session')
+    const target = join(root, 'nested-working-directory')
+    await mkdir(target)
+    cwdPort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'cwd-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => sessions.has('cwd-session'))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    cwdPort.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'cwd-session', data: `cd ${JSON.stringify(target)}\r`
+    })
+
+    await waitUntil(() => database.get<{ cwd: string }>(
+      'SELECT cwd FROM sessions WHERE id = ?', 'cwd-session'
+    )?.cwd.endsWith('/nested-working-directory') === true, 5_000)
+    expect(database.get<{ cwd: string }>('SELECT cwd FROM sessions WHERE id = ?', 'cwd-session')?.cwd)
+      .toMatch(/\/nested-working-directory$/)
+    cwdPort.receive({
+      type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'cwd-session'
+    })
+    await settle()
+  }, 10_000)
+
+  it('starts a restored Shell in that Session own last working directory', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    const restorePort = new MockPort()
+    new RuntimeServer(restorePort, root, database, undefined, undefined, sessions)
+    restorePort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'cwd-restore-renderer'
+    })
+    registerSession(database, 'cwd-restore-session')
+    const target = join(root, 'restored-working-directory')
+    await mkdir(target)
+    database.run('UPDATE sessions SET cwd = ? WHERE id = ?', target, 'cwd-restore-session')
+
+    restorePort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'cwd-restore-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => sessions.has('cwd-restore-session'))
+
+    expect(await childProcessCwd(sessions.get('cwd-restore-session')!.pid))
+      .toMatch(/\/restored-working-directory$/)
+    restorePort.receive({
+      type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'cwd-restore-session'
+    })
+    await settle()
+  })
+
+  it('launches an AI panel with its validated resume identity and permission mode', async () => {
+    const executable = join(root, 'provider-fixture.sh')
+    const argumentFile = join(root, 'provider-arguments.txt')
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n'
+    )
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    try {
+      registerSession(database, 'provider-resume-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+        ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+        'binding-resume', 'provider-resume-session', 'provider-session-42',
+        JSON.stringify({ permissionMode: 'default' })
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const providerPort = new MockPort()
+      new RuntimeServer(providerPort, root, database, undefined, undefined, sessions)
+      providerPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-resume-renderer'
+      })
+      providerPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'permission-bypass', method: 'session.set-permission-mode',
+        capability: 'renderer', deadlineAt: Date.now() + 1000,
+        payload: {
+          command: {
+            commandId: 'permission-bypass', commandType: 'session.set-permission-mode',
+            requestHash: 'hash-permission-bypass'
+          },
+          input: {
+            sessionId: 'provider-resume-session', provider: 'claude-code',
+            permissionMode: 'bypassPermissions', now: 2
+          }
+        }
+      })
+      await waitUntil(() => providerPort.last('rpc.response')?.requestId === 'permission-bypass')
+      providerPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-resume-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--resume', 'provider-session-42', '--dangerously-skip-permissions'
+      ])
+      providerPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-resume-session'
+      })
+      await settle()
+    } finally {
+      if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
+      else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+      if (previousArgumentFile === undefined) delete process.env.MATOU_TEST_ARGUMENT_FILE
+      else process.env.MATOU_TEST_ARGUMENT_FILE = previousArgumentFile
+    }
+  })
+
+  it('captures a newly started Claude conversation for the next automatic restore', async () => {
+    const executable = join(root, 'new-provider-fixture.sh')
+    const argumentFile = join(root, 'new-provider-arguments.txt')
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n'
+    )
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    const providerHooks = new ProviderHookServer(root, repository)
+    await providerHooks.start()
+    try {
+      registerSession(database, 'provider-new-session', 'claude-code')
+      const registry = new RuntimeSessionRegistry()
+      const providerPort = new MockPort()
+      new RuntimeServer(
+        providerPort, root, database, undefined, undefined, registry, providerHooks
+      )
+      providerPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-new-renderer'
+      })
+      providerPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-new-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      expect(arguments_.slice(0, 2)).toEqual(['--settings', expect.any(String)])
+      const settings = JSON.parse(await readFile(arguments_[1]!, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const hookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+      expect((await fetch(hookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'Stop', session_id: 'claude-new-session-42', cwd: root
+        })
+      })).status).toBe(200)
+      expect(repository.getResumeBinding('provider-new-session', 'claude-code')).toMatchObject({
+        providerSessionId: 'claude-new-session-42', metadata: {
+          cwd: root, lastHookEvent: 'Stop'
+        }
+      })
+
+      providerPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-new-session'
+      })
+      await settle()
+    } finally {
+      await providerHooks.stop()
+      if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
+      else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+      if (previousArgumentFile === undefined) delete process.env.MATOU_TEST_ARGUMENT_FILE
+      else process.env.MATOU_TEST_ARGUMENT_FILE = previousArgumentFile
+    }
+  })
+
+  it('clears a missing AI resume identity and keeps the same panel usable as Shell', async () => {
+    const executable = join(root, 'missing-provider-session.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    try {
+      registerSession(database, 'provider-fallback-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+        'binding-fallback', 'provider-fallback-session', 'missing-provider-42'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const fallbackPort = new MockPort()
+      new RuntimeServer(fallbackPort, root, database, undefined, undefined, sessions)
+      fallbackPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-fallback-renderer'
+      })
+      fallbackPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-fallback-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => sessions.get('provider-fallback-session')?.profile === 'shell')
+
+      expect(database.get<{ kind: string }>(
+        'SELECT kind FROM sessions WHERE id = ?', 'provider-fallback-session'
+      )).toEqual({ kind: 'shell' })
+      expect(database.get<{ resume_state: string; invalidated_at: number | null }>(
+        'SELECT resume_state, invalidated_at FROM provider_bindings WHERE id = ?',
+        'binding-fallback'
+      )).toMatchObject({ resume_state: 'failed', invalidated_at: expect.any(Number) })
+      await waitUntil(() => terminalText(fallbackPort).includes('[上次会话无法续接，已回到普通终端]'))
+      expect(terminalText(fallbackPort)).toContain('[上次会话无法续接，已回到普通终端]')
+      expect(fallbackPort.sent.filter(({ type }) => type === 'terminal.exited')).toHaveLength(0)
+
+      fallbackPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-fallback-session'
+      })
+      await settle()
+    } finally {
+      if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
+      else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+    }
+  })
+
+  it('degrades an unresponsive AI resume to a usable Shell at the product deadline', async () => {
+    const executable = join(root, 'unresponsive-provider-session.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = new RuntimeSessionRegistry()
+    const timeoutPort = new MockPort()
+    try {
+      registerSession(database, 'provider-timeout-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+        'binding-timeout', 'provider-timeout-session', 'unresponsive-provider-42'
+      )
+      new RuntimeServer(
+        timeoutPort, root, database, undefined, undefined, sessions, undefined, undefined,
+        { providerResumeTimeoutMs: 25 }
+      )
+      timeoutPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-timeout-renderer'
+      })
+      timeoutPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-timeout-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => sessions.get('provider-timeout-session')?.profile === 'shell')
+      await waitUntil(() => terminalText(timeoutPort).includes(
+        '[上次会话无法续接，已回到普通终端]'
+      ))
+      expect(database.get<{ kind: string }>(
+        'SELECT kind FROM sessions WHERE id = ?', 'provider-timeout-session'
+      )).toEqual({ kind: 'shell' })
+      expect(database.get<{ resume_state: string }>(
+        'SELECT resume_state FROM provider_bindings WHERE id = ?', 'binding-timeout'
+      )).toEqual({ resume_state: 'failed' })
+    } finally {
+      timeoutPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-timeout-session'
+      })
+      await settle()
+      if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
+      else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+    }
+  })
+
+  it('degrades to Shell when the AI resume process cannot start', async () => {
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = join(root, 'provider-command-does-not-exist')
+    try {
+      registerSession(database, 'provider-launch-fallback', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+        'binding-launch-fallback', 'provider-launch-fallback', 'provider-session-9'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const launchPort = new MockPort()
+      new RuntimeServer(launchPort, root, database, undefined, undefined, sessions)
+      launchPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-launch-fallback-renderer'
+      })
+      launchPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-launch-fallback', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => sessions.get('provider-launch-fallback')?.profile === 'shell')
+      await waitUntil(() => terminalText(launchPort).includes('[上次会话无法续接，已回到普通终端]'))
+
+      expect(database.get<{ kind: string }>(
+        'SELECT kind FROM sessions WHERE id = ?', 'provider-launch-fallback'
+      )).toEqual({ kind: 'shell' })
+      expect(launchPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(0)
+      launchPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-launch-fallback'
+      })
+      await settle()
+    } finally {
+      if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
+      else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+    }
+  })
+
+  it('does not retry or repeat the fallback hint after a failed identity was cleared', async () => {
+    const executable = join(root, 'provider-must-not-run.sh')
+    const launchMarker = join(root, 'provider-launch-marker')
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf launched > "$MATOU_TEST_LAUNCH_MARKER"\n'
+    )
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousMarker = process.env.MATOU_TEST_LAUNCH_MARKER
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_LAUNCH_MARKER = launchMarker
+    try {
+      registerSession(database, 'cleared-provider-session', 'shell')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at, invalidated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'failed', ?, 1, 2, 1, 2)`,
+        'binding-already-cleared', 'cleared-provider-session', 'provider-old',
+        JSON.stringify({ invalidationReason: 'provider session not found' })
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const secondStartPort = new MockPort()
+      new RuntimeServer(secondStartPort, root, database, undefined, undefined, sessions)
+      secondStartPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'second-start-renderer'
+      })
+      secondStartPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'cleared-provider-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => sessions.get('cleared-provider-session')?.profile === 'shell')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(await readFile(launchMarker, 'utf8').catch(() => '')).toBe('')
+      expect(terminalText(secondStartPort)).not.toContain('[上次会话无法续接，已回到普通终端]')
+      expect(database.get<{ resume_state: string }>(
+        'SELECT resume_state FROM provider_bindings WHERE id = ?', 'binding-already-cleared'
+      )).toEqual({ resume_state: 'failed' })
+      secondStartPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'cleared-provider-session'
+      })
+      await settle()
+    } finally {
+      if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
+      else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+      if (previousMarker === undefined) delete process.env.MATOU_TEST_LAUNCH_MARKER
+      else process.env.MATOU_TEST_LAUNCH_MARKER = previousMarker
+    }
+  })
 })
 
 class MockPort extends EventEmitter implements RuntimePort {
@@ -369,6 +821,24 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
   }
 }
 
+async function waitUntilAsync(predicate: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error('async condition did not become true before timeout')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+function terminalText(port: MockPort): string {
+  const decoder = new TextDecoder()
+  return port.sent
+    .filter((message): message is Extract<RuntimeMessage, { type: 'terminal.data' }> =>
+      message.type === 'terminal.data'
+    )
+    .map(({ data }) => decoder.decode(data))
+    .join('')
+}
+
 function seedReplayAuthority(database: RuntimeDatabase, root: string): void {
   database.transaction((tx) => {
     tx.run(
@@ -386,12 +856,22 @@ function seedReplayAuthority(database: RuntimeDatabase, root: string): void {
   })
 }
 
-function registerSession(database: RuntimeDatabase, sessionId: string): void {
+function registerSession(
+  database: RuntimeDatabase,
+  sessionId: string,
+  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+): void {
   database.run(
     `INSERT INTO sessions (
        id, task_id, execution_context_id, kind, status, title,
        created_at, updated_at, last_activity_at
-     ) VALUES (?, 'replay-task', 'replay-context', 'shell', 'exited', ?, 1, 1, 1)`,
-    sessionId, sessionId
+     ) VALUES (?, 'replay-task', 'replay-context', ?, 'exited', ?, 1, 1, 1)`,
+    sessionId, kind, sessionId
   )
+}
+
+async function childProcessCwd(pid: number): Promise<string> {
+  if (process.platform === 'linux') return readlink(`/proc/${pid}/cwd`)
+  const { stdout } = await execFileAsync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'])
+  return stdout.split('\n').find((line) => line.startsWith('n'))?.slice(1) ?? ''
 }

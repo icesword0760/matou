@@ -439,11 +439,14 @@ function requireWorkspace<T>(workspace: T | undefined): asserts workspace is T {
 }
 
 function parseStringArray(value: string): string[] {
-  const parsed = JSON.parse(value) as unknown
-  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
-    throw new Error('stored task order is invalid')
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')
+      ? parsed
+      : []
+  } catch {
+    return []
   }
-  return parsed
 }
 
 function taskParentCreatesCycle(

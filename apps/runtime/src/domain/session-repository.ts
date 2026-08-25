@@ -19,6 +19,7 @@ interface SessionRow {
   kind: SessionKind
   status: SessionStatus
   title: string
+  cwd: string
   created_at: number
   updated_at: number
   last_activity_at: number
@@ -54,6 +55,12 @@ interface BindingRow {
   validated_at: number | null
   invalidated_at: number | null
 }
+
+export type ProviderPermissionMode =
+  | 'default'
+  | 'acceptEdits'
+  | 'plan'
+  | 'bypassPermissions'
 
 export class SessionRepository {
   readonly #database: RuntimeDatabase
@@ -238,6 +245,8 @@ export class SessionRepository {
       now: number
     }
   ): DomainCommit<ProviderBinding> {
+    const providerSessionId = input.providerSessionId.trim()
+    if (!providerSessionId) throw new Error('Provider session identity must not be empty')
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const session = requireRow(tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', input.sessionId), 'Session')
       tx.run(
@@ -248,7 +257,7 @@ export class SessionRepository {
         input.id,
         input.sessionId,
         input.provider,
-        input.providerSessionId,
+        providerSessionId,
         JSON.stringify(input.metadata),
         input.now,
         input.now
@@ -256,6 +265,145 @@ export class SessionRepository {
       const binding = mapBinding(requireRow(tx.get<BindingRow>('SELECT * FROM provider_bindings WHERE id = ?', input.id), 'ProviderBinding'))
       emitSessionEvent(emit, command.commandId, 'provider-binding.created', session, input.now, { binding })
       return binding
+    })
+  }
+
+  recordResumableProviderIdentity(
+    command: DomainCommandMetadata,
+    input: {
+      id: string
+      sessionId: string
+      provider: ProviderBinding['provider']
+      providerSessionId: string
+      metadata: unknown
+      now: number
+    }
+  ): DomainCommit<ProviderBinding> {
+    const providerSessionId = input.providerSessionId.trim()
+    if (!providerSessionId) throw new Error('Provider session identity must not be empty')
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const session = requireRow(
+        tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', input.sessionId),
+        'Session'
+      )
+      if (session.archived_at !== null) {
+        throw new Error('archived Session cannot record a provider identity')
+      }
+      const existing = tx.get<BindingRow>(
+        'SELECT * FROM provider_bindings WHERE provider = ? AND provider_session_id = ?',
+        input.provider,
+        providerSessionId
+      )
+      if (existing && existing.session_id !== input.sessionId) {
+        throw new Error('Provider conversation is already bound to another Session')
+      }
+      if (existing) {
+        const previousMetadata = parseMetadata(existing.metadata_json)
+        const metadata = {
+          ...(isObject(previousMetadata) ? previousMetadata : {}),
+          ...(isObject(input.metadata) ? input.metadata : {})
+        }
+        delete metadata.invalidationReason
+        tx.run(
+          `UPDATE provider_bindings
+           SET resume_state = 'available', metadata_json = ?, updated_at = ?,
+               validated_at = ?, invalidated_at = NULL
+           WHERE id = ?`,
+          JSON.stringify(metadata),
+          input.now,
+          input.now,
+          existing.id
+        )
+      } else {
+        tx.run(
+          `INSERT INTO provider_bindings (
+             id, session_id, provider, provider_session_id, resume_state,
+             metadata_json, created_at, updated_at, validated_at, invalidated_at
+           ) VALUES (?, ?, ?, ?, 'available', ?, ?, ?, ?, NULL)`,
+          input.id,
+          input.sessionId,
+          input.provider,
+          providerSessionId,
+          JSON.stringify(isObject(input.metadata) ? input.metadata : {}),
+          input.now,
+          input.now,
+          input.now
+        )
+      }
+      const binding = mapBinding(requireRow(
+        tx.get<BindingRow>(
+          'SELECT * FROM provider_bindings WHERE provider = ? AND provider_session_id = ?',
+          input.provider,
+          providerSessionId
+        ),
+        'ProviderBinding'
+      ))
+      emitSessionEvent(
+        emit,
+        command.commandId,
+        'provider-binding.recorded',
+        session,
+        input.now,
+        { binding }
+      )
+      return binding
+    })
+  }
+
+  updateProviderPermissionMode(
+    command: DomainCommandMetadata,
+    input: {
+      sessionId: string
+      provider: ProviderBinding['provider']
+      permissionMode: ProviderPermissionMode
+      now: number
+    }
+  ): DomainCommit<ProviderBinding> {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const session = requireRow(
+        tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', input.sessionId),
+        'Session'
+      )
+      if (session.archived_at !== null) {
+        throw new Error('archived Session permission mode cannot be modified')
+      }
+      const binding = requireRow(
+        tx.get<BindingRow>(
+          `SELECT * FROM provider_bindings
+           WHERE session_id = ? AND provider = ?
+             AND resume_state IN ('available', 'resumed')
+             AND validated_at IS NOT NULL AND invalidated_at IS NULL
+           ORDER BY validated_at DESC LIMIT 1`,
+          input.sessionId,
+          input.provider
+        ),
+        'resumable ProviderBinding'
+      )
+      const metadata = parseMetadata(binding.metadata_json)
+      tx.run(
+        `UPDATE provider_bindings
+         SET metadata_json = ?, updated_at = ?
+         WHERE id = ?`,
+        JSON.stringify({
+          ...(isObject(metadata) ? metadata : {}),
+          permissionMode: input.permissionMode
+        }),
+        input.now,
+        binding.id
+      )
+      const updated = mapBinding(requireRow(
+        tx.get<BindingRow>('SELECT * FROM provider_bindings WHERE id = ?', binding.id),
+        'ProviderBinding'
+      ))
+      emitSessionEvent(
+        emit,
+        command.commandId,
+        'provider-binding.permission-mode-updated',
+        session,
+        input.now,
+        { binding: updated, permissionMode: input.permissionMode }
+      )
+      return updated
     })
   }
 
@@ -284,6 +432,35 @@ export class SessionRepository {
         last_activity_at: input.now, version: before.version + 1
       })
       emitSessionEvent(emit, command.commandId, 'session.updated', before, input.now, { session })
+      return session
+    })
+  }
+
+  updateCwd(
+    command: DomainCommandMetadata,
+    sessionId: string,
+    cwd: string,
+    now: number
+  ): DomainCommit<Session> {
+    const normalized = cwd.trim()
+    if (!normalized) throw new Error('Session cwd must not be empty')
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(tx.get<SessionRow>(
+        'SELECT * FROM sessions WHERE id = ?', sessionId
+      ), 'Session')
+      if (before.archived_at !== null) throw new Error('archived Session cwd cannot be modified')
+      tx.run(
+        `UPDATE sessions SET cwd = ?, updated_at = ?, last_activity_at = ?,
+         version = version + 1 WHERE id = ?`,
+        normalized, now, now, sessionId
+      )
+      const session = mapSession({
+        ...before, cwd: normalized, updated_at: now,
+        last_activity_at: now, version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.cwd-updated', before, now, {
+        cwd: normalized
+      })
       return session
     })
   }
@@ -332,6 +509,62 @@ export class SessionRepository {
     return this.#changeBinding(command, bindingId, 'failed', now, reason)
   }
 
+  failResumeToShell(
+    command: DomainCommandMetadata,
+    sessionId: string,
+    bindingId: string,
+    reason: string,
+    now: number
+  ): DomainCommit<Session> {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(
+        tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', sessionId),
+        'Session'
+      )
+      const binding = requireRow(
+        tx.get<BindingRow>('SELECT * FROM provider_bindings WHERE id = ?', bindingId),
+        'ProviderBinding'
+      )
+      if (binding.session_id !== sessionId) {
+        throw new Error('ProviderBinding must belong to the failed Session')
+      }
+      const metadata = parseMetadata(binding.metadata_json)
+      tx.run(
+        `UPDATE provider_bindings
+         SET resume_state = 'failed', metadata_json = ?, updated_at = ?, invalidated_at = ?
+         WHERE id = ?`,
+        JSON.stringify({
+          ...(isObject(metadata) ? metadata : {}),
+          invalidationReason: reason
+        }),
+        now,
+        now,
+        bindingId
+      )
+      tx.run(
+        `UPDATE sessions
+         SET kind = 'shell', updated_at = ?, last_activity_at = ?, version = version + 1
+         WHERE id = ?`,
+        now,
+        now,
+        sessionId
+      )
+      const session = mapSession({
+        ...before,
+        kind: 'shell',
+        updated_at: now,
+        last_activity_at: now,
+        version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.resume-failed', before, now, {
+        session,
+        bindingId,
+        reason
+      })
+      return session
+    })
+  }
+
   getSession(id: string): Session | undefined {
     const row = this.#database.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', id)
     return row ? mapSession(row) : undefined
@@ -375,7 +608,7 @@ export class SessionRepository {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const before = requireRow(tx.get<BindingRow>('SELECT * FROM provider_bindings WHERE id = ?', bindingId), 'ProviderBinding')
       const session = requireRow(tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', before.session_id), 'Session')
-      const metadata = JSON.parse(before.metadata_json) as unknown
+      const metadata = parseMetadata(before.metadata_json)
       const nextMetadata = reason === undefined ? metadata : { ...(isObject(metadata) ? metadata : {}), invalidationReason: reason }
       tx.run(
         `UPDATE provider_bindings
@@ -434,6 +667,7 @@ function mapSession(row: SessionRow): Session {
     kind: row.kind,
     status: row.status,
     title: row.title,
+    cwd: row.cwd,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastActivityAt: row.last_activity_at,
@@ -467,11 +701,19 @@ function mapBinding(row: BindingRow): ProviderBinding {
     provider: row.provider,
     providerSessionId: row.provider_session_id,
     resumeState: row.resume_state,
-    metadata: JSON.parse(row.metadata_json) as unknown,
+    metadata: parseMetadata(row.metadata_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.validated_at === null ? {} : { validatedAt: row.validated_at }),
     ...(row.invalidated_at === null ? {} : { invalidatedAt: row.invalidated_at })
+  }
+}
+
+function parseMetadata(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return {}
   }
 }
 

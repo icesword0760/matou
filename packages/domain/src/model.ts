@@ -122,6 +122,7 @@ export interface Session {
   kind: SessionKind
   status: SessionStatus
   title: string
+  cwd: string
   createdAt: number
   updatedAt: number
   lastActivityAt: number

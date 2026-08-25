@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'electron'
 
 import { RuntimeHost } from './runtime-host'
+import { claimSingleInstance } from './single-instance-policy'
 import { WindowManager } from './window-manager'
 import {
   DESKTOP_CHANNELS,
@@ -17,6 +18,12 @@ const browserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
 let mainWindowSequence = 0
+
+const primaryInstance = claimSingleInstance({
+  requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
+  quit: () => app.quit(),
+  onSecondInstance: (listener) => { app.on('second-instance', listener) }
+}, windows, app.isPackaged)
 
 async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
@@ -40,7 +47,7 @@ async function createWindow(): Promise<BrowserWindow> {
   browserWindows.set(windowId, window)
   window.on('closed', () => { windows.unregister(windowId); browserWindows.delete(windowId) })
   window.on('close', (event) => {
-    if (!quitting && process.env.MATOU_E2E !== '1') {
+    if (!quitting && (process.env.MATOU_E2E !== '1' || process.env.MATOU_E2E_WINDOW_CLOSE === 'hide')) {
       event.preventDefault()
       window.hide()
     }
@@ -130,7 +137,7 @@ function resolveRuntimeEntry(): string {
   return resolve(app.getAppPath(), '../runtime/dist/index.cjs')
 }
 
-app.whenReady().then(async () => {
+if (primaryInstance) app.whenReady().then(async () => {
   runtimeHost = new RuntimeHost(resolveRuntimeEntry())
   await runtimeHost.start()
   await createWindow()

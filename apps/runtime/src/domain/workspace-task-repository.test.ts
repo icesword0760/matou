@@ -95,6 +95,22 @@ describe('WorkspaceTaskRepository', () => {
     expect(repository.getTask('task-1')).toMatchObject({ status: 'archived', archivedAt: 20 })
     expect(database.get('SELECT id FROM sessions WHERE id = ?', 'session-1')).toEqual({ id: 'session-1' })
   })
+
+  it('keeps a Workspace usable when only its stored Task order is malformed', () => {
+    seedWorkspace(repository)
+    database.run(
+      'UPDATE workspaces SET task_order_json = ? WHERE id = ?',
+      '{broken-json', 'workspace-1'
+    )
+
+    expect(repository.getWorkspace('workspace-1')).toMatchObject({
+      id: 'workspace-1', taskOrder: []
+    })
+    expect(() => repository.createTask(command('task-after-repair'), {
+      id: 'task-after-repair', workspaceId: 'workspace-1', executionContextId: 'context-1',
+      title: 'Still usable', status: 'active', sortKey: 'a', now: 3
+    })).not.toThrow()
+  })
 })
 
 function command(commandId: string) {

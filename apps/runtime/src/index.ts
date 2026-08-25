@@ -12,11 +12,13 @@ import {
 } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
-import { RuntimeDatabase } from './storage/database'
+import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
-import { MigrationRunner } from './storage/migration-runner'
+import { ProviderHookServer } from './session/provider-hook-server'
+import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
+import { openRecoverableRuntimeDatabase } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { NotificationProjection } from './product/experience-foundation'
@@ -33,29 +35,66 @@ if (!parentPort) {
 const servers = new Set<RuntimeServer>()
 const sessions = new RuntimeSessionRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
-const database = RuntimeDatabase.open(resolve(dataRoot, 'matou.sqlite'))
-const migrationReady = new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
-const notifications = new NotificationProjection()
-const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
-const controlBackend = new RuntimeControlBackend(database, dataRoot, telemetry, notifications)
-const rpcRouter = new RuntimeRpcRouter(database, notifications)
-const controlEndpoint = controlEndpointForPlatform(dataRoot)
-const hostControl = new HostControlServer({
-  socketPath: controlEndpoint,
-  tokenService: controlTokens,
-  backend: controlBackend
+interface RuntimeState {
+  dataRoot: string
+  controlEndpoint: string
+  database: RuntimeDatabase
+  telemetry: TaskTelemetryRepository
+  controlTokens: CapabilityTokenService
+  controlBackend: RuntimeControlBackend
+  rpcRouter: RuntimeRpcRouter
+  hostControl: HostControlServer
+  providerHooks: ProviderHookServer
+}
+
+let runtimeState: RuntimeState | undefined
+const runtimeReady = initializeRuntime().then((state) => {
+  runtimeState = state
+  return state
 })
-const runtimeReady = migrationReady.then(async () => {
-  new DetachedSessionService(database, new DomainTransactionManager(database))
+
+async function initializeRuntime(): Promise<RuntimeState> {
+  const opened = await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS)
+  const database = opened.database
+  const runtimeDataRoot = opened.effectiveDataRoot
+  const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
+  if (opened.recoveredFromCorruption) {
+    console.error(`[runtime.storage] corrupt database quarantined at ${opened.quarantinedPath}`)
+  }
+  const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
+  const notifications = new NotificationProjection()
+  const transactions = new DomainTransactionManager(database)
+  const sessionRepository = new SessionRepository(database, transactions)
+  const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
+  const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
+  const rpcRouter = new RuntimeRpcRouter(database, notifications)
+  const hostControl = new HostControlServer({
+    socketPath: controlEndpoint,
+    tokenService: controlTokens,
+    backend: controlBackend
+  })
+  const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository)
+  new DetachedSessionService(database, transactions)
     .normalizeOnStartup(Date.now())
-  const recovery = await new RuntimeRecoveryService(dataRoot, database).recoverAll()
+  const recovery = await new RuntimeRecoveryService(runtimeDataRoot, database).recoverAll()
   for (const failure of recovery.failed) {
     console.error(`[runtime.recovery] ${failure.sessionId} ${failure.code}: ${failure.message}`)
   }
   telemetry.purgeStaleGenerations()
   await hostControl.start()
-})
+  await providerHooks.start()
+  return {
+    dataRoot: runtimeDataRoot,
+    controlEndpoint,
+    database,
+    telemetry,
+    controlTokens,
+    controlBackend,
+    rpcRouter,
+    hostControl,
+    providerHooks
+  }
+}
 
 let shutdownStarted = false
 function shutdown(): void {
@@ -64,7 +103,9 @@ function shutdown(): void {
   for (const server of servers) server.close()
   servers.clear()
   sessions.disposeAll()
-  database.close()
+  runtimeState?.providerHooks.stop()
+  runtimeState?.hostControl.stop()
+  runtimeState?.database.close()
 }
 process.once('SIGTERM', () => {
   shutdown()
@@ -85,19 +126,22 @@ parentPort.on('message', async (event) => {
   }
 
   try {
-    await runtimeReady
+    const state = await runtimeReady
+    if (shutdownStarted) {
+      port.close()
+      return
+    }
+    const server = new RuntimeServer(port, state.dataRoot, state.database, state.rpcRouter, {
+      backend: state.controlBackend,
+      tokens: state.controlTokens,
+      endpoint: state.controlEndpoint
+    }, sessions, state.providerHooks)
+    servers.add(server)
+    port.once('close', () => servers.delete(server))
   } catch (error) {
     console.error('Matou Runtime schema migration failed', error)
     port.close()
     process.exitCode = 1
     return
   }
-
-  const server = new RuntimeServer(port, dataRoot, database, rpcRouter, {
-    backend: controlBackend,
-    tokens: controlTokens,
-    endpoint: controlEndpoint
-  }, sessions)
-  servers.add(server)
-  port.once('close', () => servers.delete(server))
 })

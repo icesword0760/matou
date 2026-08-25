@@ -1,0 +1,15 @@
+{
+  "scenario": "Kooky current main-window close hides and live terminal survives",
+  "closeState": {
+    "visible": false,
+    "destroyed": false
+  },
+  "hiddenState": {
+    "visible": false,
+    "destroyed": false
+  },
+  "beforeContains975": true,
+  "afterContains975": true,
+  "afterContains333": true,
+  "pageStillOpen": true
+}

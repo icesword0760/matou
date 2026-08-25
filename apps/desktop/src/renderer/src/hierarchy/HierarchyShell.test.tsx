@@ -14,6 +14,17 @@ vi.mock('../terminal/TerminalSurface', () => ({
 afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'matouDesktop') })
 
 describe('PRD 05 hierarchy shell', () => {
+  it('keeps startup and partial layout hydration silent for PRD 04', () => {
+    const loading = render(<HierarchyShell />)
+    expect(screen.queryByText(/恢复|加载/)).toBeNull()
+    loading.unmount()
+
+    const data = fixture()
+    data.sceneSnapshots = []
+    render(<HierarchyShell fixture={data} />)
+    expect(screen.queryByText(/恢复|加载/)).toBeNull()
+  })
+
   it('restores each Workspace navigation context after switching away', async () => {
     const user = userEvent.setup()
     render(<HierarchyShell fixture={fixture()} />)

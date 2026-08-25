@@ -369,6 +369,21 @@ export class RuntimeRpcRouter {
           ...(input.status === undefined ? {} : { status: enumeration(input.status, ['created', 'starting', 'running', 'waiting', 'interrupted', 'exited'] as const, 'status') as Exclude<SessionStatus, 'archived'> }),
           now: integer(input.now, 'now', 0)
         })
+      case 'session.set-permission-mode':
+        return this.#sessions.updateProviderPermissionMode(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          provider: enumeration(
+            input.provider,
+            ['claude-code', 'codex'] as const,
+            'provider'
+          ),
+          permissionMode: enumeration(
+            input.permissionMode,
+            ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const,
+            'permissionMode'
+          ),
+          now: integer(input.now, 'now', 0)
+        })
       case 'session.archive':
         return this.#sessions.archiveSession(command, text(input.id, 'id'), integer(input.now, 'now', 0))
       case 'relation.create':

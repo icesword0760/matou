@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
+import { promisify } from 'node:util'
 
 import {
   PROTOCOL_VERSION,
@@ -17,6 +20,12 @@ import type { RuntimeControlBackend } from './control/runtime-control-backend'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
+import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
+import { ProviderResumeMonitor } from './session/provider-resume-monitor'
+import type {
+  ProviderHookRegistration,
+  ProviderHookServer
+} from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
@@ -48,8 +57,19 @@ interface ReplayState {
   finishing?: boolean
 }
 
+interface PendingShellFallback {
+  session: PtySession
+  message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+}
+
+export interface RuntimeServerOptions {
+  providerResumeTimeoutMs?: number
+}
+
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
 const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
+const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
+const execFileAsync = promisify(execFile)
 
 export class RuntimeServer {
   readonly #runtimeId = randomUUID()
@@ -68,6 +88,12 @@ export class RuntimeServer {
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
+  readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  readonly #pendingShellFallbacks = new Map<string, PendingShellFallback>()
+  readonly #spawnQueues = new Map<string, Promise<void>>()
+  readonly #providerHooks: ProviderHookServer | undefined
+  readonly #providerResumeTimeoutMs: number
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
@@ -81,10 +107,12 @@ export class RuntimeServer {
     router = new RuntimeRpcRouter(database),
     control?: { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string },
     sessions = new RuntimeSessionRegistry(),
+    providerHooks?: ProviderHookServer,
     workspacePaths = new WorkspacePathService(
       database,
       new DomainTransactionManager(database)
-    )
+    ),
+    options: RuntimeServerOptions = {}
   ) {
     this.#port = port
     this.#dataRoot = dataRoot
@@ -94,6 +122,11 @@ export class RuntimeServer {
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#control = control
     this.#sessions = sessions
+    this.#providerHooks = providerHooks
+    this.#providerResumeTimeoutMs = positiveTimeout(
+      options.providerResumeTimeoutMs,
+      DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
+    )
     this.#workspacePaths = workspacePaths
     for (const session of [...this.#sessions.values()]) {
       const authority = this.#database.get<{ archived_at: number | null }>(
@@ -120,6 +153,10 @@ export class RuntimeServer {
   close(): void {
     if (this.#closed) return
     this.#closed = true
+    for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
+    this.#cwdTimers.clear()
+    for (const timer of this.#providerResumeTimers.values()) clearTimeout(timer)
+    this.#providerResumeTimers.clear()
     this.#detachAll()
     this.#port.close()
   }
@@ -165,13 +202,17 @@ export class RuntimeServer {
         this.#sendError('INVALID_MESSAGE', 'protocol handshake is already complete')
         break
       case 'terminal.spawn':
-        await this.#spawn(message)
+        await this.#spawnSerialized(message)
         break
       case 'terminal.input':
         try {
           await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
           if (this.#closed) break
-          this.#session(message.sessionId)?.write(message.data)
+          const session = this.#session(message.sessionId)
+          session?.write(message.data)
+          if (session?.profile === 'shell' && /[\r\n]/.test(message.data)) {
+            this.#scheduleCwdCapture(session)
+          }
         } catch (error) {
           if (error instanceof WorkspacePathInvalidError) {
             this.#sendError(error.code, error.message)
@@ -207,6 +248,39 @@ export class RuntimeServer {
         })
         this.#pumpSubscription(message.consumerId)
         break
+    }
+  }
+
+  #scheduleCwdCapture(session: PtySession): void {
+    const pending = this.#cwdTimers.get(session.sessionId)
+    if (pending) clearTimeout(pending)
+    this.#cwdTimers.set(session.sessionId, setTimeout(() => {
+      this.#cwdTimers.delete(session.sessionId)
+      void this.#captureCwd(session)
+    }, 1_200))
+  }
+
+  async #captureCwd(session: PtySession): Promise<void> {
+    if (this.#sessions.get(session.sessionId) !== session) return
+    const cwd = await processWorkingDirectory(session.pid).catch(() => undefined)
+    if (!cwd || this.#sessions.get(session.sessionId) !== session) return
+    await this.#persistCwd(session.sessionId, cwd)
+  }
+
+  async #persistCwd(sessionId: string, cwd: string): Promise<void> {
+    const directory = await stat(cwd).catch(() => undefined)
+    if (!directory?.isDirectory()) return
+    const authority = this.#sessionRepository.getSession(sessionId)
+    if (!authority || authority.cwd === cwd) return
+    try {
+      const now = Date.now()
+      this.#sessionRepository.updateCwd({
+        commandId: `runtime-cwd-${sessionId}-${now}-${randomUUID()}`,
+        commandType: 'session.cwd-update',
+        requestHash: `cwd:${sessionId}:${cwd}:${now}`
+      }, sessionId, cwd, now)
+    } catch (error) {
+      console.error(`[session.cwd-update] ${errorMessage(error)}`)
     }
   }
 
@@ -312,8 +386,7 @@ export class RuntimeServer {
           }
         }),
         availableFromSequence,
-        liveSequence,
-        ...(activeSession === undefined ? {} : { activeSession })
+        liveSequence
       })
       const requestedFrom = message.fromSequence === 0
         ? availableFromSequence
@@ -327,7 +400,8 @@ export class RuntimeServer {
         cursor: 0,
         pendingBytes: new Map(),
         unackedBytes: 0,
-        liveSequence
+        liveSequence,
+        ...(activeSession === undefined ? {} : { activeSession })
       })
       this.#pumpReplay(message.sessionId)
     } catch (error) {
@@ -485,12 +559,16 @@ export class RuntimeServer {
       this.#attachedSessionIds.add(message.sessionId)
       this.#port.postMessage({
         type: 'terminal.spawned', protocolVersion: PROTOCOL_VERSION,
-        sessionId: message.sessionId, pid: existing.pid, reattached: true
+        sessionId: message.sessionId, pid: existing.pid, reattached: true,
+        replayFromSequence: existing.replayFromSequence
       })
       return
     }
-    const persistentAuthority = this.#database.get<{ execution_context_id: string }>(
-      `SELECT execution_context_id FROM sessions
+    const persistentAuthority = this.#database.get<{
+      execution_context_id: string
+      cwd: string
+    }>(
+      `SELECT execution_context_id, cwd FROM sessions
        WHERE id = ? AND archived_at IS NULL`,
       message.sessionId
     )
@@ -504,15 +582,24 @@ export class RuntimeServer {
       )
       return
     }
-    const cwd = message.executionContextId === 'local-default'
-      ? process.env.HOME ?? os.homedir()
+    const contextCwd = message.executionContextId === 'local-default'
+      ? undefined
       : this.#database.get<{ cwd: string }>(
           'SELECT cwd FROM execution_contexts WHERE id = ? AND archived_at IS NULL',
           message.executionContextId
         )?.cwd
+    const cwd = await firstUsableDirectory([
+      persistentAuthority?.cwd,
+      contextCwd,
+      process.env.HOME,
+      os.homedir()
+    ])
     if (!cwd) {
       this.#sendError('SESSION_FORBIDDEN', 'execution context is not registered')
       return
+    }
+    if (persistentAuthority && persistentAuthority.cwd !== cwd) {
+      await this.#persistCwd(message.sessionId, cwd)
     }
 
     if (message.executionContextId !== 'local-default') {
@@ -529,8 +616,18 @@ export class RuntimeServer {
       }
     }
 
+    const resumeBinding = message.profile === 'shell'
+      ? undefined
+      : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
+    let providerProcessStarted = false
+    let hookRegistration: ProviderHookRegistration | undefined
     try {
       const runId = persistentAuthority ? randomUUID() : undefined
+      const cwdTracker = new TerminalCwdTracker()
+      const permissionMode = permissionModeFromMetadata(resumeBinding?.metadata)
+      const resumeMonitor = resumeBinding === undefined ? undefined : new ProviderResumeMonitor()
+      let activeSession: PtySession | undefined
+      let pendingResumeFailure: string | undefined
       let controlEnvironment: Record<string, string> | undefined
       if (message.profile !== 'shell' && this.#control) {
         const token = this.#control.tokens.issue(
@@ -549,6 +646,13 @@ export class RuntimeServer {
           MATOU_CONTROL_PROTOCOL: '1'
         }
       }
+      if (message.profile === 'claude-code' && runId && this.#providerHooks) {
+        hookRegistration = await this.#providerHooks.registerClaudeSession({
+          runId,
+          sessionId: message.sessionId,
+          ...(permissionMode === undefined ? {} : { permissionMode })
+        })
+      }
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -557,15 +661,51 @@ export class RuntimeServer {
         cwd,
         dataRoot: this.#dataRoot,
         profile: message.profile,
+        ...(resumeBinding === undefined ? {} : {
+          providerSessionId: resumeBinding.providerSessionId
+        }),
+        ...(permissionMode === undefined ? {} : { permissionMode }),
+        ...(hookRegistration === undefined ? {} : {
+          settingsPath: hookRegistration.settingsPath
+        }),
         ...(runId === undefined ? {} : { runId }),
         ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
         send: this.#sendToPort,
+        onOutput: (data) => {
+          const reportedCwd = cwdTracker.ingest(data)
+          if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
+          const resumeFailure = resumeMonitor?.ingest(data)
+          if (resumeFailure) {
+            pendingResumeFailure = resumeFailure
+            if (activeSession && resumeBinding) {
+              void hookRegistration?.dispose()
+              this.#beginResumeFallback(message, activeSession, resumeBinding.id, resumeFailure)
+            }
+          }
+        },
         onExit: (exited, exitCode, signal) => {
-          this.#sessions.delete(message.sessionId, exited)
-          this.#attachedSessionIds.delete(message.sessionId)
-          this.#endedSessionIds.add(message.sessionId)
-          this.#control?.backend.unregister(message.sessionId, exited)
-          this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
+          this.#clearProviderResumeTimer(message.sessionId)
+          void hookRegistration?.dispose()
+          const resumeExitFallback = Boolean(
+            resumeBinding &&
+            resumeMonitor?.isMonitoring &&
+            this.#sessions.get(message.sessionId) === exited &&
+            !this.#pendingShellFallbacks.has(message.sessionId) &&
+            this.#markResumeFailed(
+              message.sessionId,
+              resumeBinding.id,
+              `provider resume exited with code ${exitCode}`
+            )
+          )
+          const wasCurrent = this.#sessions.delete(message.sessionId, exited)
+          if (wasCurrent) {
+            if (!resumeExitFallback) {
+              this.#attachedSessionIds.delete(message.sessionId)
+              this.#endedSessionIds.add(message.sessionId)
+            }
+            this.#control?.backend.unregister(message.sessionId, exited)
+            this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
+          }
           if (exited.runId) {
             try {
               this.#sessionRepository.finishRun(
@@ -581,8 +721,18 @@ export class RuntimeServer {
               console.error(`[session.run-exit] ${errorMessage(error)}`)
             }
           }
+          if (resumeExitFallback) {
+            void this.#spawnShellFallback(message)
+            return false
+          }
+          const fallback = this.#pendingShellFallbacks.get(message.sessionId)
+          if (fallback?.session === exited) {
+            this.#pendingShellFallbacks.delete(message.sessionId)
+            void this.#spawnShellFallback(fallback.message)
+          }
         }
       })
+      providerProcessStarted = message.profile !== 'shell'
       if (runId) {
         try {
           this.#sessionRepository.startRun(
@@ -609,6 +759,7 @@ export class RuntimeServer {
         }
       }
       this.#sessions.set(session)
+      activeSession = session
       this.#endedSessionIds.delete(message.sessionId)
       this.#completedReplayThrough.delete(message.sessionId)
       this.#attachedSessionIds.add(message.sessionId)
@@ -619,8 +770,120 @@ export class RuntimeServer {
         sessionId: message.sessionId,
         pid: session.pid
       })
+      if (pendingResumeFailure && resumeBinding) {
+        this.#beginResumeFallback(message, session, resumeBinding.id, pendingResumeFailure)
+      } else if (resumeMonitor && resumeBinding) {
+        this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
+      }
     } catch (error) {
+      await hookRegistration?.dispose()
+      if (resumeBinding && !providerProcessStarted) {
+        if (this.#markResumeFailed(
+          message.sessionId,
+          resumeBinding.id,
+          `provider process could not start: ${errorMessage(error)}`
+        )) {
+          await this.#spawnShellFallbackWithinCurrentSpawn(message)
+          return
+        }
+      }
       this.#sendError('INTERNAL_ERROR', errorMessage(error))
+    }
+  }
+
+  #beginResumeFallback(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    session: PtySession,
+    bindingId: string,
+    reason: string
+  ): void {
+    if (this.#sessions.get(message.sessionId) !== session) return
+    this.#clearProviderResumeTimer(message.sessionId)
+    if (!this.#markResumeFailed(message.sessionId, bindingId, reason)) return
+    this.#sessions.delete(message.sessionId, session)
+    this.#control?.backend.unregister(message.sessionId, session)
+    this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
+    this.#pendingShellFallbacks.set(message.sessionId, { session, message })
+    session.dispose({ notifyExit: false })
+  }
+
+  #scheduleProviderResumeTimeout(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    session: PtySession,
+    bindingId: string,
+    monitor: ProviderResumeMonitor
+  ): void {
+    if (!monitor.isMonitoring) return
+    this.#clearProviderResumeTimer(message.sessionId)
+    this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
+      this.#providerResumeTimers.delete(message.sessionId)
+      const reason = monitor.timeout()
+      if (!reason || this.#sessions.get(message.sessionId) !== session) return
+      this.#beginResumeFallback(message, session, bindingId, reason)
+    }, this.#providerResumeTimeoutMs))
+  }
+
+  #clearProviderResumeTimer(sessionId: string): void {
+    const timer = this.#providerResumeTimers.get(sessionId)
+    if (!timer) return
+    clearTimeout(timer)
+    this.#providerResumeTimers.delete(sessionId)
+  }
+
+  #markResumeFailed(sessionId: string, bindingId: string, reason: string): boolean {
+    const now = Date.now()
+    try {
+      this.#sessionRepository.failResumeToShell(
+        {
+          commandId: `runtime-resume-failed-${sessionId}-${now}-${randomUUID()}`,
+          commandType: 'session.resume-failed',
+          requestHash: `resume-failed:${sessionId}:${bindingId}:${now}`
+        },
+        sessionId,
+        bindingId,
+        reason,
+        now
+      )
+      return true
+    } catch (error) {
+      console.error(`[session.resume-failed] ${errorMessage(error)}`)
+      return false
+    }
+  }
+
+  async #spawnShellFallback(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+  ): Promise<void> {
+    await this.#spawnSerialized({ ...message, profile: 'shell' })
+    this.#displayResumeFallback(message.sessionId)
+  }
+
+  async #spawnShellFallbackWithinCurrentSpawn(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+  ): Promise<void> {
+    await this.#spawn({ ...message, profile: 'shell' })
+    this.#displayResumeFallback(message.sessionId)
+  }
+
+  #displayResumeFallback(sessionId: string): void {
+    const shell = this.#sessions.get(sessionId)
+    if (shell?.profile === 'shell') {
+      shell.display('\r\n\u001b[33m[上次会话无法续接，已回到普通终端]\u001b[0m\r\n')
+    }
+  }
+
+  async #spawnSerialized(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+  ): Promise<void> {
+    const previous = this.#spawnQueues.get(message.sessionId) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(() => this.#spawn(message))
+    this.#spawnQueues.set(message.sessionId, current)
+    try {
+      await current
+    } finally {
+      if (this.#spawnQueues.get(message.sessionId) === current) {
+        this.#spawnQueues.delete(message.sessionId)
+      }
     }
   }
 
@@ -633,6 +896,7 @@ export class RuntimeServer {
   }
 
   #disposeSession(sessionId: string): void {
+    this.#clearProviderResumeTimer(sessionId)
     const session = this.#sessions.get(sessionId)
     if (!session) return
     this.#control?.backend.unregister(sessionId, session)
@@ -670,8 +934,43 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && Number(value) > 0 ? Number(value) : fallback
+}
+
+function permissionModeFromMetadata(metadata: unknown): string | undefined {
+  if (typeof metadata !== 'object' || metadata === null || !('permissionMode' in metadata)) {
+    return undefined
+  }
+  return typeof metadata.permissionMode === 'string' ? metadata.permissionMode : undefined
+}
+
 function isMissingFile(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'ENOENT'
+}
+
+async function processWorkingDirectory(pid: number): Promise<string | undefined> {
+  let cwd: string | undefined
+  if (process.platform === 'linux') {
+    cwd = await readlink(`/proc/${pid}/cwd`)
+  } else if (process.platform === 'darwin') {
+    const { stdout } = await execFileAsync('lsof', [
+      '-a', '-p', String(pid), '-d', 'cwd', '-Fn'
+    ])
+    cwd = stdout.split('\n').find((line) => line.startsWith('n'))?.slice(1)
+  }
+  if (!cwd) return undefined
+  const info = await stat(cwd)
+  return info.isDirectory() ? cwd : undefined
+}
+
+async function firstUsableDirectory(candidates: Array<string | undefined>): Promise<string | undefined> {
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    const info = await stat(candidate).catch(() => undefined)
+    if (info?.isDirectory()) return candidate
+  }
+  return undefined
 }
 
 function highestDomainCursorAtOrBefore(frames: DecodedJournalFrame[], terminalSequence: number): number {

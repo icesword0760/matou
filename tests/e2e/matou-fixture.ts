@@ -13,18 +13,26 @@ export interface MatouFixture {
   close(): Promise<void>
 }
 
-export async function launchMatou(): Promise<MatouFixture> {
-  const root = await mkdtemp(join(tmpdir(), 'matou-prd05-e2e-'))
-  return startMatou(root)
+export interface LaunchMatouOptions {
+  preserveMainWindowCloseBehavior?: boolean
+  env?: Record<string, string>
 }
 
-export async function restartMatou(fixture: MatouFixture): Promise<MatouFixture> {
+export async function launchMatou(options: LaunchMatouOptions = {}): Promise<MatouFixture> {
+  const root = await mkdtemp(join(tmpdir(), 'matou-prd05-e2e-'))
+  return startMatou(root, options)
+}
+
+export async function restartMatou(
+  fixture: MatouFixture,
+  options: LaunchMatouOptions = {}
+): Promise<MatouFixture> {
   await fixture.app.evaluate(({ app }) => { app.quit() }).catch(() => {})
   await fixture.app.close().catch(() => {})
-  return startMatou(fixture.rootDirectory)
+  return startMatou(fixture.rootDirectory, options)
 }
 
-async function startMatou(root: string): Promise<MatouFixture> {
+async function startMatou(root: string, options: LaunchMatouOptions = {}): Promise<MatouFixture> {
   const dataDirectory = join(root, 'data')
   const workspaceDirectory = join(root, 'matou_workspace')
   await mkdir(workspaceDirectory, { recursive: true })
@@ -32,8 +40,10 @@ async function startMatou(root: string): Promise<MatouFixture> {
     args: [resolve(import.meta.dirname, '../../apps/desktop')],
     env: {
       ...process.env,
+      ...options.env,
       MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
       MATOU_DEFAULT_WORKSPACE: workspaceDirectory,
+      ...(options.preserveMainWindowCloseBehavior ? { MATOU_E2E_WINDOW_CLOSE: 'hide' } : {}),
       MATOU_RUNTIME_ENTRY: resolve(import.meta.dirname, '../../apps/runtime/dist/index.cjs')
     }
   })

@@ -66,7 +66,10 @@ export class GeometryRepository {
   list(sceneId: string): StoredGeometry[] {
     return this.#database.all<GeometryRow>(
       'SELECT * FROM scene_geometry WHERE scene_id = ? ORDER BY owner_key', sceneId
-    ).map(mapGeometry)
+    ).flatMap((row) => {
+      const value = mapGeometry(row)
+      return value ? [value] : []
+    })
   }
 
   discardInvalid(sceneId: string): number {
@@ -132,12 +135,16 @@ export class GeometryWriteBuffer {
   }
 }
 
-function mapGeometry(row: GeometryRow): StoredGeometry {
-  return {
-    sceneId: row.scene_id,
-    ownerKey: row.owner_key,
-    layoutRevision: row.layout_revision,
-    geometry: JSON.parse(row.geometry_json) as unknown,
-    now: row.updated_at
+function mapGeometry(row: GeometryRow): StoredGeometry | undefined {
+  try {
+    return {
+      sceneId: row.scene_id,
+      ownerKey: row.owner_key,
+      layoutRevision: row.layout_revision,
+      geometry: JSON.parse(row.geometry_json) as unknown,
+      now: row.updated_at
+    }
+  } catch {
+    return undefined
   }
 }

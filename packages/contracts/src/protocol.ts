@@ -95,6 +95,7 @@ export const RPC_METHODS = [
   'task.archive',
   'session.create',
   'session.update',
+  'session.set-permission-mode',
   'session.archive',
   'relation.create',
   'relation.revoke',
@@ -189,6 +190,7 @@ export type RuntimeMessage =
       sessionId: string
       pid: number
       reattached?: boolean
+      replayFromSequence?: number
     }
   | {
       type: 'terminal.data'

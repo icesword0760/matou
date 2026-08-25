@@ -72,6 +72,126 @@ describe('SessionRepository', () => {
     expect(sessions.listProviderBindings('session-1')).toHaveLength(2)
   })
 
+  it('does not let an empty provider identity overwrite the last resumable conversation', () => {
+    seedSession()
+    sessions.bindProvider(command('binding-valid'), {
+      id: 'binding-valid', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-valid', metadata: {}, now: 3
+    })
+    sessions.validateProviderBinding(command('validate-valid'), 'binding-valid', 4)
+
+    expect(() => sessions.bindProvider(command('binding-empty'), {
+      id: 'binding-empty', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: '   ', metadata: {}, now: 5
+    })).toThrow('Provider session identity must not be empty')
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      id: 'binding-valid', providerSessionId: 'provider-valid'
+    })
+  })
+
+  it('records a hook-confirmed provider identity as resumable in one transaction', () => {
+    seedSession()
+
+    const recorded = sessions.recordResumableProviderIdentity(command('hook-identity'), {
+      id: 'binding-hook', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: ' provider-hook-1 ',
+      metadata: { permissionMode: 'bypassPermissions', cwd: '/tmp/workspace' }, now: 3
+    })
+
+    expect(recorded.result).toMatchObject({
+      id: 'binding-hook', sessionId: 'session-1', providerSessionId: 'provider-hook-1',
+      resumeState: 'available', validatedAt: 3, metadata: {
+        permissionMode: 'bypassPermissions', cwd: '/tmp/workspace'
+      }
+    })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      id: 'binding-hook', providerSessionId: 'provider-hook-1'
+    })
+    expect(recorded.firstEventSequence).toBe(recorded.lastEventSequence)
+    expect(database.get<{ event_type: string }>(
+      'SELECT event_type FROM domain_events WHERE seq = ?', recorded.firstEventSequence!
+    )).toEqual({ event_type: 'provider-binding.recorded' })
+  })
+
+  it('refreshes the same hook identity without creating duplicates or losing metadata', () => {
+    seedSession()
+    sessions.recordResumableProviderIdentity(command('hook-first'), {
+      id: 'binding-hook', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-hook-1',
+      metadata: { permissionMode: 'bypassPermissions', firstEvent: 'SessionStart' }, now: 3
+    })
+
+    const refreshed = sessions.recordResumableProviderIdentity(command('hook-refresh'), {
+      id: 'binding-unused', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-hook-1',
+      metadata: { cwd: '/tmp/workspace', lastEvent: 'Stop' }, now: 8
+    })
+
+    expect(refreshed.result).toMatchObject({
+      id: 'binding-hook', validatedAt: 8, metadata: {
+        permissionMode: 'bypassPermissions', firstEvent: 'SessionStart',
+        cwd: '/tmp/workspace', lastEvent: 'Stop'
+      }
+    })
+    expect(sessions.listProviderBindings('session-1')).toHaveLength(1)
+  })
+
+  it('changes permission mode without replacing the resumable conversation identity', () => {
+    seedSession()
+    sessions.recordResumableProviderIdentity(command('hook-identity'), {
+      id: 'binding-hook', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-hook-1',
+      metadata: { permissionMode: 'bypassPermissions', cwd: '/tmp/workspace' }, now: 3
+    })
+
+    const changed = sessions.updateProviderPermissionMode(command('permission-default'), {
+      sessionId: 'session-1', provider: 'claude-code', permissionMode: 'default', now: 8
+    })
+
+    expect(changed.result).toMatchObject({
+      id: 'binding-hook', providerSessionId: 'provider-hook-1',
+      resumeState: 'available', validatedAt: 3, updatedAt: 8,
+      metadata: { permissionMode: 'default', cwd: '/tmp/workspace' }
+    })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      id: 'binding-hook', providerSessionId: 'provider-hook-1',
+      metadata: { permissionMode: 'default', cwd: '/tmp/workspace' }
+    })
+    expect(database.get<{ event_type: string }>(
+      'SELECT event_type FROM domain_events WHERE seq = ?', changed.firstEventSequence!
+    )).toEqual({ event_type: 'provider-binding.permission-mode-updated' })
+  })
+
+  it('does not invent a resumable identity while changing permission mode', () => {
+    seedSession()
+
+    expect(() => sessions.updateProviderPermissionMode(command('permission-plan'), {
+      sessionId: 'session-1', provider: 'claude-code', permissionMode: 'plan', now: 3
+    })).toThrow('resumable ProviderBinding does not exist')
+    expect(sessions.listProviderBindings('session-1')).toEqual([])
+  })
+
+  it('does not let another panel claim an already-bound provider conversation', () => {
+    seedSession()
+    sessions.createSession(command('session-2'), {
+      id: 'session-2', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Claude 2', now: 2
+    })
+    sessions.recordResumableProviderIdentity(command('hook-owner'), {
+      id: 'binding-hook', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-hook-1', metadata: {}, now: 3
+    })
+
+    expect(() => sessions.recordResumableProviderIdentity(command('hook-wrong-panel'), {
+      id: 'binding-other', sessionId: 'session-2', provider: 'claude-code',
+      providerSessionId: 'provider-hook-1', metadata: {}, now: 4
+    })).toThrow('Provider conversation is already bound to another Session')
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-hook-1'
+    })
+    expect(sessions.getResumeBinding('session-2', 'claude-code')).toBeUndefined()
+  })
+
   it('isolates provider resume failure to its owning Session', () => {
     seedSession()
     sessions.createSession(command('session-2'), {
@@ -93,6 +213,63 @@ describe('SessionRepository', () => {
 
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
     expect(sessions.getResumeBinding('session-2', 'codex')).toMatchObject({ id: 'binding-2' })
+  })
+
+  it('clears a failed resume identity and degrades only that Session to Shell atomically', () => {
+    seedSession()
+    sessions.bindProvider(command('binding'), {
+      id: 'binding-1', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-1', metadata: { permissionMode: 'bypassPermissions' }, now: 3
+    })
+    sessions.validateProviderBinding(command('validate'), 'binding-1', 4)
+
+    sessions.failResumeToShell(
+      command('resume-failed'),
+      'session-1',
+      'binding-1',
+      'provider session not found',
+      5
+    )
+
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell' })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(sessions.listProviderBindings('session-1')).toEqual([
+      expect.objectContaining({
+        id: 'binding-1', resumeState: 'failed', invalidatedAt: 5,
+        metadata: expect.objectContaining({ invalidationReason: 'provider session not found' })
+      })
+    ])
+  })
+
+  it('persists the last confirmed working directory independently per Session', () => {
+    seedSession()
+    sessions.createSession(command('session-2'), {
+      id: 'session-2', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'shell', title: 'Shell 2', now: 2
+    })
+
+    sessions.updateCwd(command('cwd-1'), 'session-1', '/tmp/workspace/one', 3)
+    sessions.updateCwd(command('cwd-2'), 'session-2', '/tmp/workspace/two', 4)
+
+    expect(sessions.getSession('session-1')).toMatchObject({ cwd: '/tmp/workspace/one' })
+    expect(sessions.getSession('session-2')).toMatchObject({ cwd: '/tmp/workspace/two' })
+  })
+
+  it('isolates malformed provider metadata instead of blocking the remaining work scene', () => {
+    seedSession()
+    sessions.bindProvider(command('binding-corrupt'), {
+      id: 'binding-corrupt', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-corrupt', metadata: {}, now: 3
+    })
+    database.run(
+      'UPDATE provider_bindings SET metadata_json = ? WHERE id = ?',
+      '{broken-json', 'binding-corrupt'
+    )
+
+    expect(sessions.getSession('session-1')).toMatchObject({ id: 'session-1' })
+    expect(sessions.listProviderBindings('session-1')).toEqual([
+      expect.objectContaining({ id: 'binding-corrupt', metadata: {} })
+    ])
   })
 })
 
