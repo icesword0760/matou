@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
+import { basename } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
@@ -22,6 +23,7 @@ import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
 import { ProviderResumeMonitor } from './session/provider-resume-monitor'
+import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import type {
   ProviderHookRegistration,
   ProviderHookServer
@@ -61,9 +63,11 @@ interface PendingShellFallback {
   session: PtySession
   message: Extract<RendererMessage, { type: 'terminal.spawn' }>
 }
+type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 
 export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
+  hudRegistry?: SessionHudRegistry
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -90,10 +94,15 @@ export class RuntimeServer {
   readonly #replays = new Map<string, ReplayState>()
   readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
+  readonly #permissionOverrides = new Map<string, HudPermissionMode>()
+  readonly #shellInputBuffers = new Map<string, string>()
+  readonly #skipResumeSessionIds = new Set<string>()
   readonly #pendingShellFallbacks = new Map<string, PendingShellFallback>()
   readonly #spawnQueues = new Map<string, Promise<void>>()
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerResumeTimeoutMs: number
+  readonly #hud: SessionHudRegistry
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
@@ -123,6 +132,7 @@ export class RuntimeServer {
     this.#control = control
     this.#sessions = sessions
     this.#providerHooks = providerHooks
+    this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
       DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
@@ -196,7 +206,8 @@ export class RuntimeServer {
           'semantic-events-v1',
           'replay-v1',
           'domain-rpc-v1',
-          'projection-v1'
+          'projection-v1',
+          'hud-v1'
         ]
       })
       return
@@ -214,7 +225,10 @@ export class RuntimeServer {
           await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
           if (this.#closed) break
           const session = this.#session(message.sessionId)
-          session?.write(message.data)
+          const promoted = session?.profile === 'shell'
+            ? await this.#maybePromoteShellAgent(session, message.data)
+            : false
+          if (!promoted) session?.write(message.data)
           if (session?.profile === 'shell' && /[\r\n]/.test(message.data)) {
             this.#scheduleCwdCapture(session)
           }
@@ -235,7 +249,7 @@ export class RuntimeServer {
         this.#acknowledge(message.sessionId, message.throughSequence)
         break
       case 'terminal.dispose':
-        this.#disposeSession(message.sessionId)
+        await this.#disposeSession(message.sessionId)
         break
       case 'terminal.replay-request':
         await this.#replay(message)
@@ -266,18 +280,30 @@ export class RuntimeServer {
   }
 
   async #captureCwd(session: PtySession): Promise<void> {
-    if (this.#sessions.get(session.sessionId) !== session) return
+    if (this.#closed || this.#sessions.get(session.sessionId) !== session) return
     const cwd = await processWorkingDirectory(session.pid).catch(() => undefined)
-    if (!cwd || this.#sessions.get(session.sessionId) !== session) return
+    if (!cwd || this.#closed || this.#sessions.get(session.sessionId) !== session) return
     await this.#persistCwd(session.sessionId, cwd)
+    if (this.#closed) return
+    await this.refreshSessionHud(session.sessionId)
   }
 
   async #persistCwd(sessionId: string, cwd: string): Promise<void> {
-    const directory = await stat(cwd).catch(() => undefined)
-    if (!directory?.isDirectory()) return
-    const authority = this.#sessionRepository.getSession(sessionId)
-    if (!authority || authority.cwd === cwd) return
     try {
+      if (this.#closed) return
+      const directory = await stat(cwd).catch(() => undefined)
+      if (!directory?.isDirectory() || this.#closed) return
+      const hud = this.#hud.snapshot(sessionId)
+      if (hud && hud.cwd !== cwd) {
+        this.#hud.updateEnvironment(sessionId, {
+          cwd,
+          ...(hud.shell ? { shell: hud.shell } : {}),
+          ...(hud.gitBranch ? { gitBranch: hud.gitBranch, gitDirty: hud.gitDirty } : {})
+        })
+        await this.refreshSessionHud(sessionId)
+      }
+      const authority = this.#sessionRepository.getSession(sessionId)
+      if (!authority || authority.cwd === cwd) return
       const now = Date.now()
       this.#sessionRepository.updateCwd({
         commandId: `runtime-cwd-${sessionId}-${now}-${randomUUID()}`,
@@ -285,7 +311,7 @@ export class RuntimeServer {
         requestHash: `cwd:${sessionId}:${cwd}:${now}`
       }, sessionId, cwd, now)
     } catch (error) {
-      console.error(`[session.cwd-update] ${errorMessage(error)}`)
+      if (!this.#closed) console.error(`[session.cwd-update] ${errorMessage(error)}`)
     }
   }
 
@@ -299,9 +325,27 @@ export class RuntimeServer {
       return
     }
     try {
-      const result = await this.#router.handle(message.method, message.payload)
+      const beforeHud = message.method === 'session.set-permission-mode'
+        ? this.#hud.snapshot(textFromRpcInput(message.payload, 'sessionId') ?? '')
+        : undefined
+      const permissionSessionId = message.method === 'session.set-permission-mode'
+        ? textFromRpcInput(message.payload, 'sessionId') : undefined
+      const permissionSession = permissionSessionId === undefined
+        ? undefined : this.#sessions.get(permissionSessionId)
+      const ephemeralPermission = permissionSessionId !== undefined && permissionSession !== undefined &&
+        permissionSession.profile !== 'shell' &&
+        this.#sessionRepository.getResumeBinding(permissionSessionId, 'claude-code') === undefined
+      let result = ephemeralPermission
+        ? {
+            sessionId: permissionSessionId,
+            permissionMode: textFromRpcInput(message.payload, 'permissionMode'),
+            persisted: false
+          }
+        : await this.#router.handle(message.method, message.payload)
+      await this.#applyHudRpc(message.method, message.payload, beforeHud?.permissionMode)
+      if (message.method === 'projection.snapshot') result = withSessionHuds(result, this.#hud.snapshots())
       for (const sessionId of disposedSessionIds(result)) {
-        this.#disposeSession(sessionId)
+        await this.#disposeSession(sessionId)
       }
       if (this.#cancelledRequests.delete(message.requestId)) {
         this.#sendRpcError(message.requestId, 'CANCELLED', 'request was cancelled', false)
@@ -567,6 +611,15 @@ export class RuntimeServer {
         sessionId: message.sessionId, pid: existing.pid, reattached: true,
         replayFromSequence: existing.replayFromSequence
       })
+      if (!this.#hud.snapshot(message.sessionId)) {
+        this.#hud.spawn({
+          sessionId: message.sessionId, profile: existing.profile,
+          ...(shellName(existing.profile) ? { shell: shellName(existing.profile)! } : {}),
+          startedAt: Date.now()
+        })
+      }
+      this.publishSessionHud(message.sessionId)
+      void this.refreshSessionHud(message.sessionId)
       return
     }
     const persistentAuthority = this.#database.get<{
@@ -621,7 +674,8 @@ export class RuntimeServer {
       }
     }
 
-    const resumeBinding = message.profile === 'shell'
+    const skipResume = this.#skipResumeSessionIds.delete(message.sessionId)
+    const resumeBinding = message.profile === 'shell' || skipResume
       ? undefined
       : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
     let providerProcessStarted = false
@@ -629,7 +683,18 @@ export class RuntimeServer {
     try {
       const runId = persistentAuthority ? randomUUID() : undefined
       const cwdTracker = new TerminalCwdTracker()
-      const permissionMode = permissionModeFromMetadata(resumeBinding?.metadata)
+      const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
+        permissionModeFromMetadata(resumeBinding?.metadata)
+      if (!this.#hud.snapshot(message.sessionId)) {
+        this.#hud.spawn({
+          sessionId: message.sessionId,
+          profile: message.profile,
+          ...(shellName(message.profile) ? { shell: shellName(message.profile)! } : {}),
+          cwd,
+          startedAt: Date.now(),
+          ...(permissionMode === undefined ? {} : { permissionMode })
+        })
+      }
       const resumeMonitor = resumeBinding === undefined ? undefined : new ProviderResumeMonitor()
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
@@ -703,13 +768,20 @@ export class RuntimeServer {
             )
           )
           const wasCurrent = this.#sessions.delete(message.sessionId, exited)
+          const naturalAgentFallback = wasCurrent && exited.profile !== 'shell' && !resumeExitFallback
           if (wasCurrent) {
-            if (!resumeExitFallback) {
+            if (!resumeExitFallback && !naturalAgentFallback) {
               this.#attachedSessionIds.delete(message.sessionId)
               this.#endedSessionIds.add(message.sessionId)
             }
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
+            this.#hud.exit(message.sessionId, { fallbackToShell: exited.profile !== 'shell' })
+            this.publishSessionHud(message.sessionId)
+            if (!resumeExitFallback && !naturalAgentFallback) {
+              this.#spawnDescriptors.delete(message.sessionId)
+            }
+            this.#shellInputBuffers.delete(message.sessionId)
           }
           if (exited.runId) {
             try {
@@ -728,6 +800,20 @@ export class RuntimeServer {
           }
           if (resumeExitFallback) {
             void this.#spawnShellFallback(message)
+            return false
+          }
+          if (naturalAgentFallback) {
+            const now = Date.now()
+            try {
+              this.#sessionRepository.returnAgentToShell({
+                commandId: `runtime-agent-return-shell-${message.sessionId}-${now}-${randomUUID()}`,
+                commandType: 'session.agent-return-shell',
+                requestHash: `agent-return-shell:${message.sessionId}:${now}`
+              }, message.sessionId, now)
+              void this.#spawnSerialized({ ...message, profile: 'shell' })
+            } catch (error) {
+              console.error(`[session.agent-return-shell] ${errorMessage(error)}`)
+            }
             return false
           }
           const fallback = this.#pendingShellFallbacks.get(message.sessionId)
@@ -764,6 +850,8 @@ export class RuntimeServer {
         }
       }
       this.#sessions.set(session)
+      this.#permissionOverrides.delete(message.sessionId)
+      this.#spawnDescriptors.set(message.sessionId, message)
       activeSession = session
       this.#endedSessionIds.delete(message.sessionId)
       this.#completedReplayThrough.delete(message.sessionId)
@@ -775,6 +863,8 @@ export class RuntimeServer {
         sessionId: message.sessionId,
         pid: session.pid
       })
+      this.publishSessionHud(message.sessionId)
+      void this.refreshSessionHud(message.sessionId)
       if (pendingResumeFailure && resumeBinding) {
         this.#beginResumeFallback(message, session, resumeBinding.id, pendingResumeFailure)
       } else if (resumeMonitor && resumeBinding) {
@@ -900,17 +990,27 @@ export class RuntimeServer {
     return session
   }
 
-  #disposeSession(sessionId: string): void {
+  async #disposeSession(sessionId: string): Promise<void> {
     this.#clearProviderResumeTimer(sessionId)
+    const cwdTimer = this.#cwdTimers.get(sessionId)
+    if (cwdTimer) clearTimeout(cwdTimer)
+    this.#cwdTimers.delete(sessionId)
     const session = this.#sessions.get(sessionId)
     if (!session) return
     this.#control?.backend.unregister(sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? sessionId)
-    session.dispose()
     this.#sessions.delete(sessionId, session)
-    this.#attachedSessionIds.delete(sessionId)
     this.#endedSessionIds.delete(sessionId)
     this.#completedReplayThrough.delete(sessionId)
+    this.#spawnDescriptors.delete(sessionId)
+    this.#permissionOverrides.delete(sessionId)
+    this.#shellInputBuffers.delete(sessionId)
+    this.#skipResumeSessionIds.delete(sessionId)
+    this.#hud.delete(sessionId)
+    this.publishSessionHud(sessionId)
+    this.#attachedSessionIds.delete(sessionId)
+    session.dispose()
+    await session.whenClosed()
   }
 
   #detachAll(): void {
@@ -932,6 +1032,148 @@ export class RuntimeServer {
       code,
       message
     })
+  }
+
+  publishSessionHud(sessionId: string): void {
+    if (this.#closed || !this.#attachedSessionIds.has(sessionId)) return
+    this.#port.postMessage({
+      type: 'terminal.hud', protocolVersion: PROTOCOL_VERSION,
+      sessionId, hud: this.#hud.snapshot(sessionId) ?? null
+    })
+  }
+
+  async refreshSessionHud(sessionId: string): Promise<void> {
+    const current = this.#hud.snapshot(sessionId)
+    if (!current?.cwd) {
+      this.publishSessionHud(sessionId)
+      return
+    }
+    const git = await gitEnvironment(current.cwd)
+    this.#hud.updateEnvironment(sessionId, {
+      cwd: current.cwd,
+      ...(current.shell ? { shell: current.shell } : {}),
+      ...(git ?? {})
+    })
+    this.publishSessionHud(sessionId)
+  }
+
+  async #applyHudRpc(
+    method: string,
+    payload: unknown,
+    previousPermissionMode?: HudPermissionMode
+  ): Promise<void> {
+    const input = rpcInput(payload)
+    const sessionId = typeof input?.sessionId === 'string' ? input.sessionId : undefined
+    if (!sessionId || !input) return
+    const session = this.#sessions.get(sessionId)
+    if (method === 'session.set-model') {
+      const strategy = typeof input.modelStrategy === 'string' ? input.modelStrategy : ''
+      this.#hud.updateModel(sessionId, strategy)
+      session?.write(`/model ${strategy}\r`)
+      this.publishSessionHud(sessionId)
+      return
+    }
+    if (method !== 'session.set-permission-mode') return
+    const target = typeof input.permissionMode === 'string' ? input.permissionMode : ''
+    const respawn = input.respawn === true
+    if (respawn) {
+      await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
+    } else if (session) {
+      const order: HudPermissionMode[] = ['default', 'acceptEdits', 'plan']
+      const from = order.indexOf(previousPermissionMode ?? 'default')
+      const to = order.indexOf(target as HudPermissionMode)
+      if (from >= 0 && to >= 0) {
+        const steps = (to - from + order.length) % order.length
+        for (let index = 0; index < steps; index += 1) session.write('\u001b[Z')
+      }
+    }
+    this.#hud.updatePermission(sessionId, target)
+    this.publishSessionHud(sessionId)
+  }
+
+  async #respawnWithPermission(sessionId: string, target: HudPermissionMode): Promise<void> {
+    const session = this.#sessions.get(sessionId)
+    const descriptor = this.#spawnDescriptors.get(sessionId)
+    if (!session || !descriptor || session.profile === 'shell') {
+      throw new RpcFault('CONFLICT', 'active AI Session is required for permission respawn')
+    }
+    this.#clearProviderResumeTimer(sessionId)
+    this.#sessions.delete(sessionId, session)
+    this.#control?.backend.unregister(sessionId, session)
+    this.#control?.tokens.revokeRun(session.runId ?? sessionId)
+    session.dispose({ notifyExit: false })
+    await session.whenClosed()
+    this.#permissionOverrides.set(sessionId, target)
+    await this.#spawn(descriptor)
+    const replacement = this.#sessions.get(sessionId)
+    if (!replacement || replacement === session || replacement.profile === 'shell') {
+      this.#permissionOverrides.delete(sessionId)
+      throw new RpcFault('INTERNAL_ERROR', 'AI Session permission respawn failed')
+    }
+    await Promise.race([
+      replacement.whenClosed(),
+      new Promise<void>((resolve) => setTimeout(resolve, 150))
+    ])
+    if (this.#sessions.get(sessionId) !== replacement) {
+      this.#permissionOverrides.delete(sessionId)
+      throw new RpcFault('INTERNAL_ERROR', 'AI Session permission respawn failed')
+    }
+    replacement.display('\u001b[2J\u001b[3J\u001b[H')
+  }
+
+  async #maybePromoteShellAgent(session: PtySession, data: string): Promise<boolean> {
+    const previous = this.#shellInputBuffers.get(session.sessionId) ?? ''
+    const next = updateShellInputBuffer(previous, data)
+    this.#shellInputBuffers.set(session.sessionId, next.buffer)
+    if (!next.submitted) return false
+    this.#shellInputBuffers.delete(session.sessionId)
+    if (!isInteractiveClaudeCommand(next.command)) return false
+
+    const descriptor = this.#spawnDescriptors.get(session.sessionId)
+    if (!descriptor || this.#sessions.get(session.sessionId) !== session) return false
+    session.write('\u0015')
+    this.#sessions.delete(session.sessionId, session)
+    this.#control?.backend.unregister(session.sessionId, session)
+    this.#control?.tokens.revokeRun(session.runId ?? session.sessionId)
+    session.dispose({ notifyExit: false })
+    await session.whenClosed()
+    const now = Date.now()
+    try {
+      this.#sessionRepository.promoteShellToAgent({
+        commandId: `runtime-shell-promote-agent-${session.sessionId}-${now}-${randomUUID()}`,
+        commandType: 'session.shell-promote-agent',
+        requestHash: `shell-promote-agent:${session.sessionId}:${now}`
+      }, session.sessionId, 'claude-code', now)
+      const before = this.#hud.snapshot(session.sessionId)
+      this.#hud.spawn({
+        sessionId: session.sessionId,
+        profile: 'claude-code',
+        ...(before?.cwd ? { cwd: before.cwd } : {}),
+        startedAt: before?.startedAt ?? now,
+        permissionMode: 'default',
+        modelStrategy: 'opusplan'
+      })
+      this.publishSessionHud(session.sessionId)
+      this.#skipResumeSessionIds.add(session.sessionId)
+      await this.#spawn({ ...descriptor, profile: 'claude-code' })
+      const replacement = this.#sessions.get(session.sessionId)
+      if (!replacement || replacement.profile !== 'claude-code') {
+        throw new Error('Claude process did not start')
+      }
+      replacement.display('\u001b[2J\u001b[3J\u001b[H')
+      return true
+    } catch (error) {
+      console.error(`[session.shell-promote-agent] ${errorMessage(error)}`)
+      try {
+        this.#sessionRepository.returnAgentToShell({
+          commandId: `runtime-shell-promote-rollback-${session.sessionId}-${now}-${randomUUID()}`,
+          commandType: 'session.shell-promote-rollback',
+          requestHash: `shell-promote-rollback:${session.sessionId}:${now}`
+        }, session.sessionId, Date.now())
+      } catch {}
+      await this.#spawn({ ...descriptor, profile: 'shell' })
+      return true
+    }
   }
 }
 
@@ -995,4 +1237,70 @@ function disposedSessionIds(result: unknown): string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
     ? value
     : []
+}
+
+function rpcInput(payload: unknown): Record<string, unknown> | undefined {
+  if (typeof payload !== 'object' || payload === null || !('input' in payload)) return undefined
+  const input = payload.input
+  return typeof input === 'object' && input !== null && !Array.isArray(input)
+    ? input as Record<string, unknown> : undefined
+}
+
+function textFromRpcInput(payload: unknown, key: string): string | undefined {
+  const value = rpcInput(payload)?.[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function withSessionHuds(result: unknown, sessionHuds: ReturnType<SessionHudRegistry['snapshots']>): unknown {
+  if (typeof result !== 'object' || result === null || !('hierarchy' in result)) return result
+  const hierarchy = result.hierarchy
+  if (typeof hierarchy !== 'object' || hierarchy === null) return result
+  return { ...result, hierarchy: { ...hierarchy, sessionHuds } }
+}
+
+function shellName(profile: 'shell' | 'claude-code' | 'codex'): string | undefined {
+  if (profile !== 'shell') return undefined
+  const shell = process.env.SHELL
+  return shell ? basename(shell) : process.platform === 'win32' ? 'PowerShell' : undefined
+}
+
+async function gitEnvironment(cwd: string): Promise<{ gitBranch: string; gitDirty: boolean } | undefined> {
+  try {
+    const [{ stdout: branchOutput }, { stdout: statusOutput }] = await Promise.all([
+      execFileAsync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']),
+      execFileAsync('git', ['-C', cwd, 'status', '--porcelain', '--untracked-files=normal'])
+    ])
+    const gitBranch = branchOutput.trim()
+    return gitBranch ? { gitBranch, gitDirty: statusOutput.trim().length > 0 } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function updateShellInputBuffer(previous: string, data: string): {
+  buffer: string
+  submitted: boolean
+  command: string
+} {
+  let buffer = previous
+  let submitted = false
+  let command = ''
+  for (const character of data) {
+    if (character === '\r' || character === '\n') {
+      submitted = true
+      command = buffer
+      buffer = ''
+    } else if (character === '\u007f' || character === '\b') {
+      buffer = buffer.slice(0, -1)
+    } else if (character === '\u0003' || character === '\u0015') {
+      buffer = ''
+    } else if (character >= ' ' && character !== '\u007f') {
+      buffer += character
+    }
+  }
+  return { buffer, submitted, command }
+}
+
+function isInteractiveClaudeCommand(command: string): boolean {
+  return /^\s*claude\s*$/.test(command)
 }

@@ -14,6 +14,7 @@ interface HookRegistrationRecord {
   sessionId: string
   permissionMode?: string
   settingsPath: string
+  statusScriptPath: string
 }
 
 
@@ -26,6 +27,12 @@ export interface ProviderHookNotification {
 
 export interface ProviderHookServerOptions {
   onNotification?: (notification: ProviderHookNotification) => void
+  onHudPayload?: (event: {
+    runId: string
+    sessionId: string
+    provider: 'claude-code'
+    payload: Record<string, unknown>
+  }) => void
 }
 
 export interface ProviderHookRegistration {
@@ -39,6 +46,7 @@ export class ProviderHookServer {
   readonly #sessions: SessionRepository
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #onNotification: (notification: ProviderHookNotification) => void
+  readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   #server: Server | undefined
   #port: number | undefined
 
@@ -46,6 +54,7 @@ export class ProviderHookServer {
     this.#dataRoot = dataRoot
     this.#sessions = sessions
     this.#onNotification = options.onNotification ?? (() => {})
+    this.#onHudPayload = options.onHudPayload ?? (() => {})
   }
 
   async start(): Promise<void> {
@@ -70,7 +79,9 @@ export class ProviderHookServer {
     this.#port = undefined
     const records = [...this.#registrations.values()]
     this.#registrations.clear()
-    await Promise.all(records.map(({ settingsPath }) => rm(settingsPath, { force: true })))
+    await Promise.all(records.flatMap(({ settingsPath, statusScriptPath }) => [
+      rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+    ]))
     if (!server) return
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))
@@ -88,8 +99,11 @@ export class ProviderHookServer {
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
     const settingsPath = join(directory, `${token}.settings.json`)
+    const statusScriptPath = join(directory, `${token}.statusline.sh`)
     const temporaryPath = `${settingsPath}.tmp`
-    await writeFile(temporaryPath, JSON.stringify(claudeHookSettings(hookUrl), null, 2), {
+    await writeFile(statusScriptPath, statusLineScript(hookUrl), { encoding: 'utf8', mode: 0o700 })
+    await chmod(statusScriptPath, 0o700)
+    await writeFile(temporaryPath, JSON.stringify(claudeHookSettings(hookUrl, statusScriptPath), null, 2), {
       encoding: 'utf8', mode: 0o600
     })
     await rename(temporaryPath, settingsPath)
@@ -98,7 +112,8 @@ export class ProviderHookServer {
       runId: input.runId,
       sessionId: input.sessionId,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
-      settingsPath
+      settingsPath,
+      statusScriptPath
     })
     let disposed = false
     return {
@@ -108,7 +123,9 @@ export class ProviderHookServer {
         if (disposed) return
         disposed = true
         this.#registrations.delete(token)
-        await rm(settingsPath, { force: true })
+        await Promise.all([
+          rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+        ])
       }
     }
   }
@@ -126,6 +143,12 @@ export class ProviderHookServer {
     }
     try {
       const payload = await readJsonBody(request)
+      this.#onHudPayload({
+        runId: registration.runId,
+        sessionId: registration.sessionId,
+        provider: 'claude-code',
+        payload
+      })
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
       if (providerSessionId) {
@@ -176,7 +199,7 @@ export class ProviderHookServer {
   }
 }
 
-function claudeHookSettings(hookUrl: string): unknown {
+function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown {
   const hook = (timeout: number) => ({ type: 'http', url: hookUrl, timeout })
   return {
     hooks: {
@@ -187,13 +210,18 @@ function claudeHookSettings(hookUrl: string): unknown {
       SessionEnd: [{ hooks: [hook(3)] }],
       UserPromptSubmit: [{ hooks: [hook(5)] }],
       PreToolUse: [{
-        matcher: 'Bash|Write|Edit|Read|Glob|Grep', hooks: [hook(10)]
+        matcher: 'Bash|Write|Edit|Read|Glob|Grep|TodoWrite|TaskCreate|TaskUpdate|Agent|Skill', hooks: [hook(10)]
       }],
-      PostToolUse: [{ matcher: 'Bash|Write|Edit', hooks: [hook(10)] }],
+      PostToolUse: [{ matcher: 'Bash|Write|Edit|Read|Glob|Grep|TodoWrite|TaskCreate|TaskUpdate|Agent|Skill', hooks: [hook(10)] }],
       Stop: [{ hooks: [hook(5)] }],
       Notification: [{ hooks: [hook(5)] }]
-    }
+    },
+    statusLine: { type: 'command', command: statusScriptPath, padding: 0 }
   }
+}
+
+function statusLineScript(hookUrl: string): string {
+  return `#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '${hookUrl}' >/dev/null 2>&1 || true\n`
 }
 
 function tokenFromUrl(url: string | undefined): string | undefined {

@@ -96,6 +96,7 @@ export const RPC_METHODS = [
   'session.create',
   'session.update',
   'session.set-permission-mode',
+  'session.set-model',
   'session.archive',
   'relation.create',
   'relation.revoke',
@@ -165,6 +166,7 @@ export type RuntimeCapability =
   | 'replay-v1'
   | 'domain-rpc-v1'
   | 'projection-v1'
+  | 'hud-v1'
 
 export type RuntimeMessage =
   | {
@@ -183,6 +185,12 @@ export type RuntimeMessage =
         | 'WORKSPACE_PATH_INVALID'
         | 'INTERNAL_ERROR'
       message: string
+    }
+  | {
+      type: 'terminal.hud'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      hud: import('./hud').SessionHudWire | null
     }
   | {
       type: 'terminal.spawned'

@@ -1,13 +1,13 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { PROTOCOL_VERSION, type RuntimeMessage } from '@matou/contracts'
+import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/contracts'
 
 import { SegmentJournal } from './journal/segment-journal'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
@@ -41,6 +41,28 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeServer domain RPC', () => {
+  it('publishes live per-Session HUD state in projection snapshots and terminal updates', async () => {
+    registerSession(database, 'hud-session')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'hud-session',
+      executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('terminal.hud') !== undefined)
+    expect(port.last('terminal.hud')).toMatchObject({
+      sessionId: 'hud-session', hud: { sessionId: 'hud-session', mode: 'shell' }
+    })
+
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'hud-snapshot',
+      method: 'projection.snapshot', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: {}
+    })
+    await settle()
+    expect(port.findRpcResponse('hud-snapshot')).toMatchObject({
+      result: { hierarchy: { sessionHuds: [expect.objectContaining({ sessionId: 'hud-session' })] } }
+    })
+  })
+
   it('advertises replay and replays durable output after a Runtime reconnect', async () => {
     const journal = await SegmentJournal.open(root, 'persisted-session')
     registerSession(database, 'persisted-session')
@@ -444,6 +466,37 @@ describe('RuntimeServer domain RPC', () => {
     await settle()
   }, 10_000)
 
+  it('publishes the Shell HUD after a chained relative cd command', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    const cwdPort = new MockPort()
+    new RuntimeServer(cwdPort, root, database, undefined, undefined, sessions)
+    cwdPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'cwd-hud-renderer'
+    })
+    registerSession(database, 'cwd-hud-session')
+    cwdPort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'cwd-hud-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => sessions.has('cwd-hud-session'))
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    cwdPort.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'cwd-hud-session', data: 'mkdir -p outside && cd outside\r'
+    })
+
+    await waitUntil(() => cwdPort.last('terminal.hud')?.hud?.cwd?.endsWith('/outside') === true, 5_000)
+    expect(cwdPort.last('terminal.hud')).toMatchObject({
+      sessionId: 'cwd-hud-session', hud: { mode: 'shell', cwd: join(root, 'outside') }
+    })
+    cwdPort.receive({
+      type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'cwd-hud-session'
+    })
+    await settle()
+  }, 10_000)
+
   it('starts a restored Shell in that Session own last working directory', async () => {
     const sessions = new RuntimeSessionRegistry()
     const restorePort = new MockPort()
@@ -537,6 +590,280 @@ describe('RuntimeServer domain RPC', () => {
       else process.env.MATOU_CLAUDE_COMMAND = previousCommand
       if (previousArgumentFile === undefined) delete process.env.MATOU_TEST_ARGUMENT_FILE
       else process.env.MATOU_TEST_ARGUMENT_FILE = previousArgumentFile
+    }
+  })
+
+  it('switches live permission modes in place and respawns across the Bypass boundary', async () => {
+    const executable = join(root, 'provider-live-permission.sh')
+    const argumentFile = join(root, 'provider-live-permission-arguments.txt')
+    const inputFile = join(root, 'provider-live-permission-input.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+      'head -c 2100 /dev/zero | tr "\\0" x',
+      'stty raw -echo',
+      'cat >> "$MATOU_TEST_INPUT_FILE"'
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    const previousInputFile = process.env.MATOU_TEST_INPUT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    process.env.MATOU_TEST_INPUT_FILE = inputFile
+    const sessions = new RuntimeSessionRegistry()
+    const livePort = new MockPort()
+    try {
+      registerSession(database, 'provider-live-permission', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+        'binding-live-permission', 'provider-live-permission', 'provider-live-42',
+        JSON.stringify({ permissionMode: 'default' })
+      )
+      new RuntimeServer(livePort, root, database, undefined, undefined, sessions)
+      livePort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'live-permission-renderer'
+      })
+      livePort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-live-permission', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('provider-live-permission'))
+      const firstPid = sessions.get('provider-live-permission')!.pid
+
+      livePort.receive(rpc('permission-plan', 'session.set-permission-mode', {
+        sessionId: 'provider-live-permission', provider: 'claude-code',
+        permissionMode: 'plan', respawn: false, now: 2
+      }))
+      await waitUntil(() => livePort.findRpcResponse('permission-plan') !== undefined)
+      await waitUntilAsync(async () => (await readFile(inputFile, 'utf8').catch(() => '')).includes('\u001b[Z\u001b[Z'))
+      expect(sessions.get('provider-live-permission')?.pid).toBe(firstPid)
+
+      livePort.receive(rpc('model-sonnet', 'session.set-model', {
+        sessionId: 'provider-live-permission', modelStrategy: 'claude-sonnet-4-6'
+      }))
+      await waitUntil(() => livePort.findRpcResponse('model-sonnet') !== undefined)
+      await waitUntilAsync(async () => (await readFile(inputFile, 'utf8').catch(() => ''))
+        .includes('/model claude-sonnet-4-6\r'))
+      expect(sessions.get('provider-live-permission')?.pid).toBe(firstPid)
+      expect(livePort.last('terminal.hud')).toMatchObject({
+        hud: { modelStrategy: 'claude-sonnet-4-6', mode: 'agent' }
+      })
+
+      livePort.receive(rpc('permission-bypass-live', 'session.set-permission-mode', {
+        sessionId: 'provider-live-permission', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 3
+      }))
+      await waitUntil(() => sessions.get('provider-live-permission')?.pid !== firstPid)
+      await waitUntil(() => livePort.findRpcResponse('permission-bypass-live') !== undefined)
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('--dangerously-skip-permissions'))
+
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--resume', 'provider-live-42', '--dangerously-skip-permissions'
+      ])
+      expect(terminalText(livePort)).toContain('\u001b[2J\u001b[3J\u001b[H')
+      expect(livePort.last('terminal.hud')).toMatchObject({
+        hud: { permissionMode: 'bypassPermissions', mode: 'agent' }
+      })
+      expect(livePort.sent.filter(({ type }) => type === 'terminal.exited')).toHaveLength(0)
+    } finally {
+      livePort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-live-permission'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+      restoreEnv('MATOU_TEST_INPUT_FILE', previousInputFile)
+    }
+  })
+
+  it('starts a fresh live AI process when Bypass is confirmed before a resumable identity exists', async () => {
+    const executable = join(root, 'provider-fresh-permission.sh')
+    const argumentFile = join(root, 'provider-fresh-permission-arguments.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nstty raw -echo\ncat\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const sessions = new RuntimeSessionRegistry()
+    const freshPort = new MockPort()
+    try {
+      registerSession(database, 'provider-fresh-permission', 'claude-code')
+      new RuntimeServer(freshPort, root, database, undefined, undefined, sessions)
+      freshPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fresh-permission-renderer'
+      })
+      freshPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-fresh-permission', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('provider-fresh-permission'))
+      const firstPid = sessions.get('provider-fresh-permission')!.pid
+
+      freshPort.receive(rpc('fresh-permission-bypass', 'session.set-permission-mode', {
+        sessionId: 'provider-fresh-permission', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 2
+      }))
+
+      await waitUntil(() => freshPort.findRpcResponse('fresh-permission-bypass') !== undefined)
+      await waitUntil(() => sessions.get('provider-fresh-permission')?.pid !== firstPid)
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--dangerously-skip-permissions'
+      ])
+      expect(freshPort.findRpcError('fresh-permission-bypass')).toBeUndefined()
+    } finally {
+      freshPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-fresh-permission'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
+  it('reports a failed Bypass respawn instead of presenting the Shell fallback as success', async () => {
+    const executable = join(root, 'provider-failed-permission.sh')
+    await writeFile(executable, '#!/bin/sh\nstty raw -echo\ncat\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = new RuntimeSessionRegistry()
+    const failedPort = new MockPort()
+    try {
+      registerSession(database, 'provider-failed-permission', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+        'binding-failed-permission', 'provider-failed-permission', 'provider-failed-42',
+        JSON.stringify({ permissionMode: 'default' })
+      )
+      new RuntimeServer(failedPort, root, database, undefined, undefined, sessions)
+      failedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'failed-permission-renderer'
+      })
+      failedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-failed-permission', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.get('provider-failed-permission')?.profile === 'claude-code')
+      await rm(executable)
+
+      failedPort.receive(rpc('failed-permission-bypass', 'session.set-permission-mode', {
+        sessionId: 'provider-failed-permission', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 2
+      }))
+
+      await waitUntil(() => failedPort.findRpcError('failed-permission-bypass') !== undefined)
+      expect(failedPort.findRpcResponse('failed-permission-bypass')).toBeUndefined()
+      expect(failedPort.last('terminal.hud')).toMatchObject({ hud: { mode: 'shell' } })
+    } finally {
+      failedPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-failed-permission'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('returns a naturally completed Agent panel to a usable Shell HUD without an exit flash', async () => {
+    const executable = join(root, 'provider-completes.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 0.1\nexit 0\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = new RuntimeSessionRegistry()
+    const completedPort = new MockPort()
+    try {
+      registerSession(database, 'provider-completed', 'claude-code')
+      new RuntimeServer(completedPort, root, database, undefined, undefined, sessions)
+      completedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'completed-renderer'
+      })
+      completedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-completed', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => sessions.get('provider-completed')?.profile === 'shell')
+      expect(database.get<{ kind: string }>('SELECT kind FROM sessions WHERE id = ?', 'provider-completed'))
+        .toEqual({ kind: 'shell' })
+      expect(completedPort.last('terminal.hud')).toMatchObject({ hud: { mode: 'shell' } })
+      expect(completedPort.sent.filter(({ type }) => type === 'terminal.exited')).toHaveLength(0)
+    } finally {
+      completedPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'provider-completed'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('promotes a Shell panel to the full Agent HUD when the user runs claude', async () => {
+    const executable = join(root, 'claude')
+    const argumentFile = join(root, 'shell-promoted-provider-arguments.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nstty raw -echo\ncat\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    const previousPath = process.env.PATH
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    process.env.PATH = `${root}:${previousPath ?? ''}`
+    const sessions = new RuntimeSessionRegistry()
+    const promotedPort = new MockPort()
+    try {
+      registerSession(database, 'shell-promoted-provider', 'shell')
+      new RuntimeServer(promotedPort, root, database, undefined, undefined, sessions)
+      promotedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'shell-promoted-renderer'
+      })
+      promotedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'shell-promoted-provider', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'shell')
+
+      promotedPort.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'shell-promoted-provider', data: 'claude\r'
+      })
+
+      await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code')
+      expect(database.get<{ kind: string }>(
+        'SELECT kind FROM sessions WHERE id = ?', 'shell-promoted-provider'
+      )).toEqual({ kind: 'claude-code' })
+      expect(promotedPort.last('terminal.hud')).toMatchObject({
+        sessionId: 'shell-promoted-provider', hud: {
+          mode: 'agent', permissionMode: 'default', modelStrategy: 'opusplan'
+        }
+      })
+      await waitUntil(() => terminalText(promotedPort).includes('\u001b[2J\u001b[3J\u001b[H'))
+      expect(terminalText(promotedPort)).toContain('\u001b[2J\u001b[3J\u001b[H')
+    } finally {
+      promotedPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'shell-promoted-provider'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+      restoreEnv('PATH', previousPath)
     }
   })
 
@@ -829,6 +1156,12 @@ class MockPort extends EventEmitter implements RuntimePort {
         message.type === 'rpc.error' && message.requestId === requestId
     )
   }
+  findRpcResponse(requestId: string): Extract<RuntimeMessage, { type: 'rpc.response' }> | undefined {
+    return this.sent.find(
+      (message): message is Extract<RuntimeMessage, { type: 'rpc.response' }> =>
+        message.type === 'rpc.response' && message.requestId === requestId
+    )
+  }
 }
 
 async function settle(): Promise<void> {
@@ -892,6 +1225,23 @@ function registerSession(
      ) VALUES (?, 'replay-task', 'replay-context', ?, 'exited', ?, 1, 1, 1)`,
     sessionId, kind, sessionId
   )
+}
+
+function rpc(requestId: string, method: RpcMethod, input: Record<string, unknown>) {
+  return {
+    type: 'rpc.request' as const, protocolVersion: PROTOCOL_VERSION, requestId,
+    method, capability: 'renderer' as const,
+    deadlineAt: Date.now() + 2_000,
+    payload: {
+      command: { commandId: requestId, commandType: method, requestHash: `hash-${requestId}` },
+      input
+    }
+  }
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
 }
 
 async function childProcessCwd(pid: number): Promise<string> {

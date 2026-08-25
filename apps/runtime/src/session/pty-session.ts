@@ -47,6 +47,8 @@ export class PtySession {
   #disposed = false
   #notifyExit = true
   #pendingReplayFrom: number | undefined
+  readonly #closed: Promise<void>
+  #resolveClosed: () => void = () => {}
 
   get lastSequence(): number { return this.#sequence }
 
@@ -64,6 +66,7 @@ export class PtySession {
     this.#creditWindow = this.#newCreditWindow()
     this.#onExit = options.onExit
     this.#onOutput = options.onOutput
+    this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
 
     terminal.onData((data) => this.#enqueueOutput(data))
     terminal.onExit(({ exitCode, signal }) => this.#enqueueExit(exitCode, signal))
@@ -124,6 +127,8 @@ export class PtySession {
     return this.#writeChain.then(() => this.#journal.readFrames())
   }
 
+  whenClosed(): Promise<void> { return this.#closed }
+
   attach(send: (message: RuntimeMessage) => void): void {
     this.#send = send
     this.#pendingReplayFrom = undefined
@@ -168,6 +173,7 @@ export class PtySession {
       await this.#journal.appendExit(sequence, exitCode, signal)
       await this.#journal.close()
       const allowNotification = this.#onExit?.(this, exitCode, signal) !== false
+      this.#resolveClosed()
       if (!this.#notifyExit || !allowNotification) return
       if (!this.#send) {
         return

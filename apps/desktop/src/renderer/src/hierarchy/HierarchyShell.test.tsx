@@ -19,6 +19,32 @@ afterEach(() => {
 })
 
 describe('PRD 05 hierarchy shell', () => {
+  it('shows only the focused Session HUD and replaces it in one render when focus changes', async () => {
+    const data = fixture()
+    data.sessionHuds = [
+      { sessionId: 'session-a1', mode: 'shell', shell: 'zsh', cwd: '/tmp/a', startedAt: Date.now() },
+      {
+        sessionId: 'session-a2', mode: 'agent', permissionMode: 'plan', modelStrategy: 'opusplan',
+        cwd: '/tmp/b', startedAt: Date.now()
+      }
+    ]
+    const first = data.sceneSnapshots![0]!
+    first.scene.rootNodeId = 'split-a1'
+    first.nodes = [
+      { id: 'split-a1', sceneId: first.scene.id, kind: 'split', direction: 'horizontal', ordinal: 0 },
+      { id: 'node-a1', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 0 },
+      { id: 'node-a1b', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 1 }
+    ]
+    first.mounts.push({ id: 'mount-a1b', sceneId: first.scene.id, sceneNodeId: 'node-a1b', sessionId: 'session-a2' })
+    render(<HierarchyShell fixture={data} />)
+
+    expect(screen.getByLabelText('快捷指令栏').querySelector('[data-hud-mode="shell"]')).toBeTruthy()
+    await userEvent.setup().click(screen.getAllByTestId('terminal-pane')[1]!)
+    expect(screen.getByLabelText('快捷指令栏').querySelector('[data-hud-mode="agent"]')).toBeTruthy()
+    expect(screen.queryByText('zsh')).toBeNull()
+    expect(screen.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeTruthy()
+  })
+
   it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
     window.history.replaceState({}, '', '/?e2e=1')
     render(<HierarchyShell fixture={fixture()} />)

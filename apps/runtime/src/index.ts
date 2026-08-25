@@ -17,6 +17,7 @@ import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
+import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 import { openRecoverableRuntimeDatabase } from './storage/runtime-database-bootstrap'
@@ -36,6 +37,7 @@ if (!parentPort) {
 
 const servers = new Set<RuntimeServer>()
 const sessions = new RuntimeSessionRegistry()
+const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
 interface RuntimeState {
   dataRoot: string
@@ -86,6 +88,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
         requestHash: `${notification.runId}:${notification.sessionId}:${notification.event.eventType}:${now}`
       }, { ...notification, eventId, now })
       for (const server of servers) server.flushSemanticEvents()
+    },
+    onHudPayload: ({ sessionId, payload }) => {
+      sessionHuds.ingestProvider(sessionId, payload)
+      for (const server of servers) void server.refreshSessionHud(sessionId)
     }
   })
   new DetachedSessionService(database, transactions)
@@ -149,7 +155,7 @@ parentPort.on('message', async (event) => {
       backend: state.controlBackend,
       tokens: state.controlTokens,
       endpoint: state.controlEndpoint
-    }, sessions, state.providerHooks)
+    }, sessions, state.providerHooks, undefined, { hudRegistry: sessionHuds })
     servers.add(server)
     port.once('close', () => servers.delete(server))
   } catch (error) {

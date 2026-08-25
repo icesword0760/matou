@@ -1,0 +1,26 @@
+{
+  "capturedAt": "2026-08-25T08:09:30.787Z",
+  "viewport": {
+    "width": 725,
+    "height": 800
+  },
+  "cliModule": {
+    "x": 0,
+    "y": 64,
+    "width": 872,
+    "height": 728,
+    "top": 64,
+    "right": 872,
+    "bottom": 792,
+    "left": 0
+  },
+  "shortcutBar": {
+    "height": "50px",
+    "paddingLeft": "12px",
+    "paddingRight": "12px",
+    "display": "flex",
+    "visibleText": "+1×"
+  },
+  "statusInfoCount": 0,
+  "runtimeComponent": "src/modules/terminal/components/shortcut-bar/ShortcutBar.vue"
+}

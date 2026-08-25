@@ -11,6 +11,7 @@ import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
 import { NotificationProvider } from '../notifications/NotificationProvider'
 import { ingestAgentNotification } from '../notifications/agent-event-ingestion'
+import { TerminalHud } from '../hud/TerminalHud'
 import { createHierarchyCommands } from './hierarchy-commands'
 import { DetachedPlaceholder } from './DetachedPlaceholder'
 import type {
@@ -42,7 +43,18 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
     if (fixture || !client) return
     let alive = true
     const onProjection = (message: RuntimeMessage) => {
-      if (message.type !== 'events.batch' || !alive) return
+      if (!alive) return
+      if (message.type === 'terminal.hud') {
+        setProjection((current) => {
+          if (!current) return current
+          const next = structuredClone(current)
+          next.sessionHuds = (next.sessionHuds ?? []).filter(({ sessionId }) => sessionId !== message.sessionId)
+          if (message.hud) next.sessionHuds.push(message.hud)
+          return next
+        })
+        return
+      }
+      if (message.type !== 'events.batch') return
       try {
         storeRef.current.applyBatch(message.runtimeGeneration, message.events)
         const after = toHierarchyProjection(storeRef.current.view().hierarchy)
@@ -172,6 +184,8 @@ function HierarchyProduct({ projection, commands }: {
   )
   const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
+  const focusedSessionId = focusedSession(projection)
+  const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
 
   return <main className="hierarchy-shell cli-module">
               <div className="claude-code-view hierarchy-body">
@@ -241,7 +255,12 @@ function HierarchyProduct({ projection, commands }: {
           </div>
         </>}
         {!task && <div className="scene-recovery" role="status">选择或新建一个事项开始工作</div>}
-                  <div className="shortcut-bar" aria-label="快捷指令栏"><button aria-label="添加快捷指令">+</button></div>
+                  <div className="shortcut-bar" aria-label="快捷指令栏">
+                    <button className="add-btn" aria-label="添加快捷指令">+</button>
+                    <div className="btn-list" />
+                    <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
+                      onModel={commands.setModel} />
+                  </div>
                 </section>
               </div>
   </main>
@@ -324,7 +343,8 @@ function createFixtureCommands(
     createWorkspace: NOOP, renameWorkspace: NOOP, removeWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     createScene: NOOP, renameScene: NOOP, reorderScene: NOOP, closeScene: NOOP,
-    splitSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP
+    splitSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP,
+    setPermissionMode: NOOP, setModel: NOOP
   }
 }
 

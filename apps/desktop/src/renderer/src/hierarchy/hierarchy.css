@@ -12,7 +12,7 @@ button, input { font: inherit; }
 button { -webkit-app-region: no-drag; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-.hierarchy-shell.cli-module { position: relative; display: flex; width: 100%; height: 100%; min-width: 680px; overflow: hidden; color: #fafafa; background: var(--kooky-terminal); }
+.hierarchy-shell.cli-module { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; overflow: hidden; color: #fafafa; background: var(--kooky-terminal); }
 .claude-code-view.hierarchy-body { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 
 .workbench-sidebar { position: relative; z-index: 30; display: flex; flex: 0 0 196px; flex-direction: column; width: 196px; height: 100%; border-right: 1px solid var(--kooky-border); color: #dfdfdf; background: var(--kooky-chrome); }
@@ -127,15 +127,69 @@ button { -webkit-app-region: no-drag; }
 .pane-close:hover { color: #fff; background: rgba(255,255,255,.1); }
 .terminal-pane > [role="status"] { padding: 7px 10px; color: #e4aa78; background: #2a1e17; font-size: 11px; }
 .terminal-pane .terminal-surface { flex: 1; min-height: 0; padding: 4px 8px; background: var(--kooky-terminal); }
-.shortcut-bar { position: relative; z-index: 10; display: flex; flex: 0 0 50px; align-items: center; gap: 8px; width: 100%; height: 50px; padding: 0 12px; border-top: 1px solid var(--kooky-border); background: var(--kooky-chrome); }
-.shortcut-bar button { width: 24px; height: 24px; border: 0; border-radius: 5px; color: #7b7b7b; background: transparent; cursor: pointer; }
-.shortcut-bar button:hover { color: #fff; background: rgba(255,255,255,.08); }
+.shortcut-bar { position: relative; z-index: 10; display: flex; flex: 0 0 38px; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; height: 38px; padding: 0 20px; overflow: visible; border-top: 1px solid var(--kooky-border); background: var(--kooky-chrome); user-select: none; transform: translateZ(0); backface-visibility: hidden; }
+.shortcut-bar .add-btn { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; color: #8c8c8c; background: #2b2b2c; cursor: pointer; font-size: 16px; line-height: 1; }
+.shortcut-bar .add-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.12); }
+.shortcut-bar .btn-list { display: flex; flex: 0 1 auto; align-items: center; min-width: 0; height: 100%; gap: 8px; overflow: hidden; }
+.status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: min(46vw,760px); margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
+.status-field, .team-role-badge, .status-divider { flex-shrink: 0; }
+.status-info button.status-field { width: auto; height: auto; border: 0; background: transparent; font-family: inherit; }
+.status-info button.status-field:disabled { cursor: default; opacity: .7; }
+.status-model { color: #79c0ff; }
+.status-git { max-width: 150px; overflow: hidden; color: #ff6b35; text-overflow: ellipsis; }
+.status-divider { width: 1px; height: 12px; margin: 0 2px; background: #21262d; }
+.status-tool-running, .status-todos { display: inline-flex; align-items: center; gap: 3px; }
+.tool-icon { font-size: 11px; line-height: 1; }
+.tool-icon-running { color: #eab308; }
+.tool-icon-done { color: #22c55e; }
+.tool-name { color: #3bb9c9; }
+.tool-target, .tool-count { color: #6b7280; }
+.tool-count { font-size: 10px; }
+.is-clickable { padding: 1px 6px; border-radius: 4px; cursor: pointer; transition: background .15s ease; }
+.is-clickable:hover { background: rgba(255,255,255,.08) !important; }
+.status-perm-badge { font-size: 10px; font-weight: 600; letter-spacing: .2px; text-transform: uppercase; }
+.status-perm-badge.perm-default { color: #8b949e; }
+.status-perm-badge.perm-acceptEdits { color: #d29922; }
+.status-perm-badge.perm-plan { color: #58a6ff; }
+.status-perm-badge.perm-bypassPermissions { color: #ff6b35; }
+.perm-menu-overlay { position: fixed; z-index: 9999; inset: 0; pointer-events: auto; }
+.perm-menu { position: fixed; min-width: 180px; padding: 6px; border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; background: #1c2128; box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 12px; }
+.perm-menu__title { margin-bottom: 4px; padding: 6px 10px 8px; border-bottom: 1px solid #30363d; color: #6e7681; font-size: 11px; letter-spacing: .5px; text-transform: uppercase; }
+.perm-menu button.perm-menu__item { display: flex; align-items: center; box-sizing: border-box; width: 100%; height: auto; padding: 6px 10px; border: 0; border-radius: 4px; color: #c9d1d9; background: transparent; cursor: pointer; font: inherit; gap: 8px; text-align: left; transition: background .12s; }
+.perm-menu button.perm-menu__item:hover { background: #21262d; }
+.perm-menu button.perm-menu__item.is-active { color: #58a6ff; background: rgba(88,166,255,.1); }
+.perm-menu__dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
+.perm-menu__dot.perm-default { background: #8b949e; }
+.perm-menu__dot.perm-acceptEdits { background: #d29922; }
+.perm-menu__dot.perm-plan { background: #58a6ff; }
+.perm-menu__dot.perm-bypassPermissions { background: #ff6b35; }
+.perm-menu__label { flex: 1; }
+.perm-menu__check { color: #58a6ff; font-weight: 700; }
+.status-context-ring { display: inline-flex; align-items: center; gap: 4px; }
+.context-ring-svg { flex: 0 0 auto; width: 14px; height: 14px; }
+.context-ring-bg { stroke: #21262d; }
+.context-ring-fg { transition: stroke-dasharray .3s ease,stroke .3s ease; }
+.context-ring-label { font-size: 11px; font-variant-numeric: tabular-nums; }
+.team-role-badge { margin-left: 4px; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+.team-role-badge.team-running { color: #4c8dff; background: rgba(76,141,255,.15); }
+.team-role-badge.team-input { color: #ff9500; background: rgba(255,149,0,.15); }
+.team-role-badge.team-error { color: #ff3b30; background: rgba(255,59,48,.15); }
+.team-role-badge.team-idle { color: #8e8e93; background: rgba(142,142,147,.15); }
+@container (max-width:560px) { .status-priority-1 { display: none !important; } }
+@container (max-width:500px) { .status-priority-2 { display: none !important; } }
+@container (max-width:440px) { .status-priority-3 { display: none !important; } }
+@container (max-width:380px) { .status-priority-4 { display: none !important; } }
+@container (max-width:330px) { .status-priority-5 { display: none !important; } }
+@container (max-width:290px) { .status-priority-6 { display: none !important; } }
+@container (max-width:250px) { .status-priority-7 { display: none !important; } }
+@container (max-width:210px) { .status-priority-8 { display: none !important; } }
 
 .workbench-action-popover { position: fixed; z-index: 10000; display: grid; min-width: 120px; padding: 6px; transform: translateY(-50%); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #3b3b3b; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
 .workbench-action-popover button { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 0; border-radius: 6px; color: #e6edf3; background: transparent; font-size: 13px; text-align: left; white-space: nowrap; cursor: pointer; }
 .workbench-action-popover button:hover, .workbench-action-popover .is-delete:hover { color: #e6edf3; background: rgba(255,255,255,.08); }
 .workbench-action-popover .is-delete { color: #e6edf3; }
 .kooky-toast { position: fixed; z-index: 11000; top: 20px; left: 50%; padding: 9px 15px; transform: translateX(-50%); border: 1px solid rgba(103,194,58,.35); border-radius: 6px; color: #b3e19d; background: #1c2518; box-shadow: 0 6px 18px rgba(0,0,0,.3); font-size: 13px; }
+.kooky-toast.is-error { border-color: rgba(248,81,73,.35); color: #ffa198; background: #2b1718; }
 
 .notification-center { position: fixed; z-index: 200; top: 41px; bottom: 5px; left: 0; display: flex; flex-direction: column; box-sizing: border-box; width: 382px; overflow: hidden; border-radius: 12px; color: #dfdfdf; background: #212121; animation: notification-panel-drop-in .22s cubic-bezier(.16,1,.3,1); }
 .notification-center__header { display: flex; flex: 0 0 44px; align-items: center; justify-content: space-between; height: 44px; padding: 0 12px; }
@@ -203,7 +257,7 @@ button { -webkit-app-region: no-drag; }
 .detached-placeholder span { padding: 3px 6px; border-radius: 999px; color: #aac0ed; background: #202b42; font-size: 10px; }
 .detached-placeholder p { margin: 10px 0 14px; font-size: 11px; }
 .detached-placeholder button { padding: 6px 10px; border: 1px solid #35415a; border-radius: 6px; color: #cbd8f1; background: #1a2333; }
-.detached-terminal-app { display: grid; grid-template-rows: 42px minmax(0,1fr); width: 100%; height: 100%; background: #0b0e14; }
+.detached-terminal-app { display: grid; grid-template-rows: 42px minmax(0,1fr) 38px; width: 100%; height: 100%; background: #0b0e14; }
 .detached-terminal-app > header { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #252a33; color: #dce3ef; background: #11151c; -webkit-app-region: drag; }
 .detached-terminal-app > header span { color: #748096; font-size: 10px; }
 .e2e-diagnostics { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

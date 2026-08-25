@@ -178,7 +178,7 @@ export class RuntimeClient {
         listener(message)
       }
     }
-    if (message.type === 'events.batch') {
+    if (message.type === 'events.batch' || message.type === 'terminal.hud') {
       for (const listener of this.#projectionListeners) listener(message)
     }
   }

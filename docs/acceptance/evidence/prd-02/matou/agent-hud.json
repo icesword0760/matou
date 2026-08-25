@@ -1,0 +1,59 @@
+{
+  "mode": "agent",
+  "text": "DefaultOpus Plan72%任务中◐Read: src/App.tsx◐TodoWrite▸实现 HUD(1/2)~/matou_workspace⏱0s",
+  "fields": [
+    {
+      "className": "status-field status-perm-badge is-clickable perm-default",
+      "text": "Default"
+    },
+    {
+      "className": "status-field status-model status-priority-8 is-clickable",
+      "text": "Opus Plan"
+    },
+    {
+      "className": "status-field status-context-ring status-priority-7",
+      "text": "72%"
+    },
+    {
+      "className": "status-field status-priority-6",
+      "text": "任务中"
+    },
+    {
+      "className": "status-field status-tool-running status-priority-4",
+      "text": "◐Read: src/App.tsx"
+    },
+    {
+      "className": "status-field status-tool-running status-priority-4",
+      "text": "◐TodoWrite"
+    },
+    {
+      "className": "status-field status-todos status-priority-4",
+      "text": "▸实现 HUD(1/2)"
+    },
+    {
+      "className": "status-divider status-priority-3",
+      "text": ""
+    },
+    {
+      "className": "status-field status-priority-3",
+      "text": "~/matou_workspace"
+    },
+    {
+      "className": "status-field status-priority-1",
+      "text": "⏱0s"
+    }
+  ],
+  "bar": {
+    "height": "38px",
+    "paddingLeft": "20px",
+    "paddingRight": "20px",
+    "gap": "8px"
+  },
+  "hud": {
+    "maxWidth": "695.52px",
+    "fontSize": "10px",
+    "gap": "8px",
+    "whiteSpace": "nowrap",
+    "overflow": "hidden"
+  }
+}

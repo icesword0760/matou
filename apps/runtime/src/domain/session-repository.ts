@@ -565,6 +565,70 @@ export class SessionRepository {
     })
   }
 
+  returnAgentToShell(
+    command: DomainCommandMetadata,
+    sessionId: string,
+    now: number
+  ): DomainCommit<Session> {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(
+        tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', sessionId),
+        'Session'
+      )
+      if (before.archived_at !== null) throw new Error('archived Session cannot return to Shell')
+      tx.run(
+        `UPDATE sessions
+         SET kind = 'shell', updated_at = ?, last_activity_at = ?, version = version + 1
+         WHERE id = ?`,
+        now,
+        now,
+        sessionId
+      )
+      const session = mapSession({
+        ...before,
+        kind: 'shell',
+        updated_at: now,
+        last_activity_at: now,
+        version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.updated', before, now, { session })
+      return session
+    })
+  }
+
+  promoteShellToAgent(
+    command: DomainCommandMetadata,
+    sessionId: string,
+    kind: 'claude-code' | 'codex',
+    now: number
+  ): DomainCommit<Session> {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(
+        tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', sessionId),
+        'Session'
+      )
+      if (before.archived_at !== null) throw new Error('archived Session cannot start an Agent')
+      tx.run(
+        `UPDATE sessions
+         SET kind = ?, updated_at = ?, last_activity_at = ?, version = version + 1
+         WHERE id = ?`,
+        kind,
+        now,
+        now,
+        sessionId
+      )
+      const session = mapSession({
+        ...before,
+        kind,
+        updated_at: now,
+        last_activity_at: now,
+        version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.updated', before, now, { session })
+      return session
+    })
+  }
+
   getSession(id: string): Session | undefined {
     const row = this.#database.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', id)
     return row ? mapSession(row) : undefined

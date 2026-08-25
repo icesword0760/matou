@@ -384,6 +384,15 @@ export class RuntimeRpcRouter {
           ),
           now: integer(input.now, 'now', 0)
         })
+      case 'session.set-model':
+        return {
+          sessionId: text(input.sessionId, 'sessionId'),
+          modelStrategy: enumeration(
+            input.modelStrategy,
+            ['opusplan', 'claude-opus-4-6', 'claude-sonnet-4-6'] as const,
+            'modelStrategy'
+          )
+        }
       case 'session.archive':
         return this.#sessions.archiveSession(command, text(input.id, 'id'), integer(input.now, 'now', 0))
       case 'relation.create':

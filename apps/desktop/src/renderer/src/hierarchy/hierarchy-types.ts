@@ -17,6 +17,28 @@ export interface SessionView {
   status?: string
   executionContextId?: string
 }
+export type HudPermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+export type HudModelStrategy = 'opusplan' | 'claude-opus-4-6' | 'claude-sonnet-4-6'
+export interface SessionHudView {
+  sessionId: string
+  mode: 'shell' | 'agent'
+  shell?: string
+  cwd?: string
+  gitBranch?: string
+  gitDirty?: boolean
+  startedAt: number
+  permissionMode?: HudPermissionMode
+  modelStrategy?: HudModelStrategy
+  model?: string
+  contextPercent?: number
+  taskStatus?: 'idle' | 'running' | 'needs-input' | 'error'
+  teamRole?: string
+  teamStatus?: 'idle' | 'running' | 'needs-input' | 'error'
+  subagentCount?: number
+  runningTools?: Array<{ name: string; target?: string }>
+  todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>
+  resumable?: boolean
+}
 export interface SceneNodeView {
   id: string
   sceneId: string
@@ -68,6 +90,7 @@ export interface HierarchyProjection {
   navigation: NavigationView
   taskPlacements: Array<{ windowId: string; taskId: string; ordinal: number }>
   unreadByTask?: Record<string, number>
+  sessionHuds?: SessionHudView[]
 }
 
 export interface HierarchyCommands {
@@ -91,4 +114,6 @@ export interface HierarchyCommands {
   deleteSession(sessionId: string, confirmed?: boolean): unknown
   detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
   returnSession(sceneWindowId: string): unknown
+  setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown
+  setModel(sessionId: string, modelStrategy: HudModelStrategy): unknown
 }

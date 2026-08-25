@@ -29,6 +29,34 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('SessionRepository', () => {
+  it('returns a completed Agent panel to Shell without invalidating its resumable identity', () => {
+    seedSession()
+    sessions.recordResumableProviderIdentity(command('binding'), {
+      id: 'binding-1', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-1', metadata: { permissionMode: 'default' }, now: 3
+    })
+
+    sessions.returnAgentToShell(command('return-shell'), 'session-1', 4)
+
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell' })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-1', resumeState: 'available'
+    })
+  })
+
+  it('promotes the same Shell panel identity when the user starts Claude', () => {
+    sessions.createSession(command('shell-session'), {
+      id: 'shell-1', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'shell', title: 'Shell', now: 2
+    })
+
+    sessions.promoteShellToAgent(command('promote-agent'), 'shell-1', 'claude-code', 3)
+
+    expect(sessions.getSession('shell-1')).toMatchObject({
+      id: 'shell-1', kind: 'claude-code', title: 'Shell'
+    })
+  })
+
   it('keeps logical Session identity across multiple process runs', () => {
     sessions.createSession(command('session'), {
       id: 'session-1', taskId: 'task-1', executionContextId: 'context-1',

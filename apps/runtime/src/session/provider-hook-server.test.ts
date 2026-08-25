@@ -17,6 +17,7 @@ let database: RuntimeDatabase
 let sessions: SessionRepository
 let hooks: ProviderHookServer
 let notificationEvents: unknown[]
+let hudEvents: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -40,8 +41,10 @@ beforeEach(async () => {
     kind: 'claude-code', title: 'Claude', now: 2
   })
   notificationEvents = []
+  hudEvents = []
   hooks = new ProviderHookServer(root, sessions, {
-    onNotification: (event) => { notificationEvents.push(event) }
+    onNotification: (event) => { notificationEvents.push(event) },
+    onHudPayload: (event) => { hudEvents.push(event) }
   })
   await hooks.start()
 })
@@ -58,6 +61,7 @@ describe('ProviderHookServer', () => {
     })
     const settings = JSON.parse(await readFile(registration.settingsPath, 'utf8')) as {
       hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; url: string }> }>>
+      statusLine: { type: string; command: string; padding: number }
     }
 
     expect((await stat(registration.settingsPath)).mode & 0o777).toBe(0o600)
@@ -66,9 +70,32 @@ describe('ProviderHookServer', () => {
       'SessionStart', 'Stop', 'UserPromptSubmit'
     ])
     expect(settings.hooks.PreToolUse?.[0]).toMatchObject({
-      matcher: 'Bash|Write|Edit|Read|Glob|Grep',
+      matcher: expect.stringContaining('TodoWrite'),
       hooks: [{ type: 'http', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/hooks\//) }]
     })
+    expect(settings.statusLine).toMatchObject({ type: 'command', padding: 0 })
+    expect((await stat(settings.statusLine.command)).mode & 0o111).not.toBe(0)
+  })
+
+  it('forwards statusline metrics and tool hooks to the Session HUD authority', async () => {
+    const registration = await hooks.registerClaudeSession({ runId: 'run-1', sessionId: 'session-1' })
+    await postHook(registration.hookUrl, {
+      session_id: 'provider-1', model: { display_name: 'Claude Opus 4.6' },
+      context_window: { used_percentage: 72 }
+    })
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'PreToolUse', session_id: 'provider-1',
+      tool_name: 'Read', tool_use_id: 'tool-1', tool_input: { file_path: '/tmp/a.ts' }
+    })
+
+    expect(hudEvents).toEqual([
+      expect.objectContaining({ sessionId: 'session-1', payload: expect.objectContaining({
+        context_window: { used_percentage: 72 }
+      }) }),
+      expect.objectContaining({ sessionId: 'session-1', payload: expect.objectContaining({
+        hook_event_name: 'PreToolUse', tool_name: 'Read'
+      }) })
+    ])
   })
 
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {

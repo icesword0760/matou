@@ -196,6 +196,6 @@ function commands(): HierarchyCommands {
     activateTask: vi.fn(), createTask: vi.fn(), renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(), reorderScene: vi.fn(), closeScene: vi.fn(),
     splitSession: vi.fn(), putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
-    detachSession: vi.fn(), returnSession: vi.fn()
+    detachSession: vi.fn(), returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()
   }
 }

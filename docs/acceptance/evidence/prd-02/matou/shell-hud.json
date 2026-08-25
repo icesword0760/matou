@@ -1,0 +1,35 @@
+{
+  "mode": "shell",
+  "text": "zsh~/matou_workspacehud-main*⏱0s",
+  "fields": [
+    {
+      "className": "status-field",
+      "text": "zsh"
+    },
+    {
+      "className": "status-field status-priority-3",
+      "text": "~/matou_workspace"
+    },
+    {
+      "className": "status-field status-git status-priority-2",
+      "text": "hud-main*"
+    },
+    {
+      "className": "status-field status-priority-1",
+      "text": "⏱0s"
+    }
+  ],
+  "bar": {
+    "height": "38px",
+    "paddingLeft": "20px",
+    "paddingRight": "20px",
+    "gap": "8px"
+  },
+  "hud": {
+    "maxWidth": "552px",
+    "fontSize": "10px",
+    "gap": "8px",
+    "whiteSpace": "nowrap",
+    "overflow": "hidden"
+  }
+}
