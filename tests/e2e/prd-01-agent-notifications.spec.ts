@@ -1,0 +1,125 @@
+import { expect, test, type Page } from '@playwright/test'
+
+import { launchMatou } from './matou-fixture'
+
+test('shows the Kooky unread trail and navigates back to the originating terminal', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    await page.getByRole('button', { name: '水平分屏' }).click()
+    const panes = page.locator('[data-testid="terminal-pane"]:visible')
+    await expect(panes).toHaveCount(2)
+    const origin = panes.first()
+    const other = panes.last()
+    await other.dispatchEvent('pointerdown')
+    await expect(other).toHaveAttribute('data-active', 'true')
+
+    const ids = await hierarchyIds(page, origin)
+    await pushNotification(page, ids, {
+      eventId: 'permission-1', eventType: 'permission', title: 'Claude Code',
+      subtitle: 'Permission', body: 'Permission required to run the release verification command'
+    })
+
+    await expect(origin).toHaveClass(/has-notification/)
+    await expect(page.locator('.workbench-item__badge')).toHaveText('1')
+    await expect(page.getByTestId(`scene-unread-${ids.sceneId}`)).toBeVisible()
+    await expect(page.locator('.project-dropdown__notify img')).toHaveAttribute('src', /rongzhi_ani-.*\.gif/)
+
+    await page.getByRole('button', { name: '通知中心' }).click()
+    const center = page.getByRole('region', { name: '通知中心' })
+    await expect(center).toBeVisible()
+    await expect(center).toContainText('通知 (1)')
+    await expect(center).toContainText('Permission required to run the release verification command')
+    await expect.poll(async () => center.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      return { left: rect.left, top: rect.top, width: rect.width, bottomGap: innerHeight - rect.bottom }
+    })).toEqual({ left: 0, top: 41, width: 382, bottomGap: 5 })
+
+    await center.getByRole('button', { name: /打开通知/ }).click()
+    await expect(center).toHaveCount(0)
+    await expect(origin).toHaveAttribute('data-active', 'true')
+    await expect(origin).not.toHaveClass(/has-notification/)
+    await expect(page.locator('.workbench-item__badge')).toHaveCount(0)
+    await expect(page.getByTestId(`scene-unread-${ids.sceneId}`)).toHaveCount(0)
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('keeps focused events visible only on the pane until the user returns to it', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    const pane = page.locator('[data-testid="terminal-pane"]:visible').first()
+    const ids = await hierarchyIds(page, pane)
+    await pushNotification(page, ids, {
+      eventId: 'completed-1', eventType: 'completed', title: 'Claude Code',
+      subtitle: 'Completed', body: 'The task is complete', isFocusedSession: true
+    })
+
+    await expect(pane).toHaveClass(/has-notification/)
+    await expect(page.locator('.workbench-item__badge')).toHaveCount(0)
+    await expect(page.locator('.tab-status-dot')).toHaveCount(0)
+
+    await pane.dispatchEvent('pointerdown')
+    await expect(pane).not.toHaveClass(/has-notification/)
+  } finally {
+    await fixture.close()
+  }
+})
+
+test('closes outside or with Escape and remembers the sound preference', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    const pane = page.locator('[data-testid="terminal-pane"]:visible').first()
+    await pushNotification(page, await hierarchyIds(page, pane), {
+      eventId: 'waiting-1', eventType: 'waiting', title: 'Claude Code',
+      subtitle: 'Waiting', body: 'Waiting for your input'
+    })
+
+    await page.getByRole('button', { name: '通知中心' }).click()
+    const center = page.getByRole('region', { name: '通知中心' })
+    await expect(center).toBeVisible()
+    await center.locator('label.notification-center__sound-toggle').click()
+    await expect(center.getByRole('checkbox', { name: '通知声音' })).not.toBeChecked()
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('kc-notification-sound-enabled'))).toBe('false')
+
+    await page.keyboard.press('Escape')
+    await expect(center).toHaveCount(0)
+    await page.getByRole('button', { name: '通知中心' }).click()
+    await expect(page.getByRole('checkbox', { name: '通知声音' })).not.toBeChecked()
+    await page.locator('.workspace-stage').dispatchEvent('pointerdown')
+    await expect(center).toHaveCount(0)
+  } finally {
+    await fixture.close()
+  }
+})
+
+async function hierarchyIds(page: Page, pane: ReturnType<Page['locator']>) {
+  const workspaceId = await page.locator('.project-dropdown').getAttribute('data-workspace-id')
+  const taskTestId = await page.locator('.workbench-item.is-active').getAttribute('data-testid')
+  const sceneId = await page.locator('.scene-stage:not([hidden])').evaluate((element) => {
+    const label = element.getAttribute('aria-label') ?? ''
+    const activeTab = document.querySelector<HTMLElement>('.tab-item.active')
+    if (!activeTab?.dataset.sceneId) throw new Error(`Active Scene missing for ${label}`)
+    return activeTab.dataset.sceneId
+  })
+  const sessionId = await pane.locator('.terminal-surface').getAttribute('data-session-id')
+  if (!workspaceId || !taskTestId || !sessionId) throw new Error('Hierarchy identity is missing')
+  return { workspaceId, taskId: taskTestId.replace(/^task-/, ''), sceneId, sessionId }
+}
+
+async function pushNotification(
+  page: Page,
+  ids: { workspaceId: string; taskId: string; sceneId: string; sessionId: string },
+  input: {
+    eventId: string; eventType: string; title: string; subtitle: string; body: string
+    isFocusedSession?: boolean
+  }
+) {
+  await page.evaluate(({ ids, input }) => {
+    if (!window.matouE2e) throw new Error('Matou E2E bridge is missing')
+    window.matouE2e.pushNotification({ ...input, ...ids, sound: false })
+  }, { ids, input })
+}

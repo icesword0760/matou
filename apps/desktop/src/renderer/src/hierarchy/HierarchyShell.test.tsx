@@ -11,9 +11,27 @@ vi.mock('../terminal/TerminalSurface', () => ({
     <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled} />
 }))
 
-afterEach(() => { cleanup(); Reflect.deleteProperty(window, 'matouDesktop') })
+afterEach(() => {
+  cleanup()
+  Reflect.deleteProperty(window, 'matouDesktop')
+  Reflect.deleteProperty(window, 'matouE2e')
+  window.history.replaceState({}, '', '/')
+})
 
 describe('PRD 05 hierarchy shell', () => {
+  it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
+    window.history.replaceState({}, '', '/?e2e=1')
+    render(<HierarchyShell fixture={fixture()} />)
+
+    window.matouE2e!.pushNotification({
+      eventId: 'e2e-completed', eventType: 'completed', title: 'Claude Code', body: 'E2E 任务完成',
+      workspaceId: 'workspace-a', taskId: 'task-a1', sceneId: 'scene-a1', sessionId: 'session-a1'
+    })
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '通知中心' }))
+    expect(screen.getByRole('button', { name: '打开通知：E2E 任务完成' })).toBeTruthy()
+  })
+
   it('keeps startup and partial layout hydration silent for PRD 04', () => {
     const loading = render(<HierarchyShell />)
     expect(screen.queryByText(/恢复|加载/)).toBeNull()

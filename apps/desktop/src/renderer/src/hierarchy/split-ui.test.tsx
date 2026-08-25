@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { SceneTabBar, type SceneCommands } from './SceneTabBar'
+import { SceneOverflowMenu } from './SceneOverflowMenu'
 import { SplitDivider } from './SplitDivider'
 import type { HierarchyProjection } from './hierarchy-types'
 import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
@@ -59,6 +60,17 @@ describe('Scene tabs and split actions', () => {
     expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'center' }))
     expect(screen.getByRole('button', { name: '新建页签' }).parentElement?.classList
       .contains('tab-bar-overflow-actions')).toBe(true)
+  })
+
+  it('keeps the Kooky unread marker visible for a Scene inside the overflow menu', () => {
+    render(<SceneOverflowMenu
+      scenes={fixture(2).scenes}
+      hasUnread={(sceneId) => sceneId === 'scene-2'}
+      onSelect={vi.fn()}
+    />)
+
+    expect(screen.getByRole('menuitem', { name: '页签 1' }).querySelector('.tab-overflow-dot')).toBeNull()
+    expect(screen.getByRole('menuitem', { name: '页签 2' }).querySelector('.tab-overflow-dot')).not.toBeNull()
   })
 
   it('renames a Scene and blocks a duplicate pinned title', async () => {

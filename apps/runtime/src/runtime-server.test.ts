@@ -19,10 +19,12 @@ import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeDatabase } from './storage/database'
 import { MigrationRunner } from './storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
+import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 
 let root: string
 let database: RuntimeDatabase
 let port: MockPort
+let server: RuntimeServer
 const execFileAsync = promisify(execFile)
 
 beforeEach(async () => {
@@ -31,7 +33,7 @@ beforeEach(async () => {
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
   seedReplayAuthority(database, root)
   port = new MockPort()
-  new RuntimeServer(port, root, database)
+  server = new RuntimeServer(port, root, database)
   port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-1' })
   await settle()
 })
@@ -238,6 +240,28 @@ describe('RuntimeServer domain RPC', () => {
     expect(port.last('events.batch')).toMatchObject({
       consumerId: 'renderer-1', throughSequence: 1,
       events: [{ eventType: 'workspace.created' }]
+    })
+  })
+
+  it('flushes a provider notification to an already subscribed Renderer without waiting for another RPC', async () => {
+    port.receive({
+      type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+      consumerId: 'notification-renderer', afterSequence: 0, batchSize: 100
+    })
+    const transactions = new DomainTransactionManager(database)
+    new AgentNotificationRepository(database, transactions).publish(
+      { commandId: 'publish-notification', commandType: 'agent.notification.publish', requestHash: 'notification' },
+      {
+        eventId: 'provider-event', runId: 'run-1', sessionId: 'persisted-session', provider: 'claude-code',
+        event: { eventType: 'completed', title: 'Claude Code', subtitle: 'Completed', body: '完成', sound: true, cooldownKey: 'Stop' },
+        now: 10
+      }
+    )
+
+    server.flushSemanticEvents()
+
+    expect(port.last('events.batch')).toMatchObject({
+      consumerId: 'notification-renderer', events: [{ eventType: 'agent.notification' }]
     })
   })
 

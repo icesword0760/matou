@@ -1,0 +1,36 @@
+{
+  "evidence": {
+    "ids": {
+      "workspaceId": "d1695704-1d08-4a84-80f2-8816913e4c3b",
+      "taskId": "10fea837-99a1-4eba-ae80-7be6e80220a7",
+      "sceneId": "66f56d3c-ad2a-407d-9513-8a6e837864e6",
+      "sessionId": "e169e7f4-5fae-4b63-be3b-fa9ec690d4e0"
+    },
+    "cliRect": {
+      "x": 0,
+      "y": 0,
+      "width": 1200,
+      "height": 752
+    },
+    "centerRect": {
+      "x": 0,
+      "y": 41,
+      "width": 382,
+      "height": 706,
+      "right": 382,
+      "bottom": 747
+    },
+    "centerStyle": {
+      "backgroundColor": "rgb(33, 33, 33)",
+      "borderRadius": "12px",
+      "position": "fixed"
+    },
+    "title": "通知 (1)",
+    "itemText": "matou_workspace/默认Claude CodePermissionPermission required to run the release verification command13:03",
+    "contentClamp": "4",
+    "soundEnabled": "notification-center__switch is-on",
+    "taskBadge": "1",
+    "paneRingCount": 1
+  },
+  "pageErrors": []
+}

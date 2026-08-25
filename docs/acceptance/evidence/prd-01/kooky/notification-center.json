@@ -1,0 +1,33 @@
+{
+  "evidence": {
+    "source": {
+      "projectId": "proj_1777023122773_1",
+      "projectName": "kc_workspace",
+      "workbenchId": "wb_1779863346226_1",
+      "workbenchName": "新事项 3",
+      "panelId": "panel_1779863346226_2"
+    },
+    "cliRect": {
+      "x": 0,
+      "y": 64,
+      "width": 872,
+      "height": 728
+    },
+    "centerRect": {
+      "x": 0,
+      "y": 104.93871307373047,
+      "width": 382,
+      "height": 684,
+      "right": 382,
+      "bottom": 788.9387130737305
+    },
+    "centerStyle": {
+      "backgroundColor": "rgb(33, 33, 33)",
+      "borderRadius": "12px",
+      "position": "fixed"
+    },
+    "itemText": "kc_workspace/新事项 3Claude CodePermissionPermission required to run the release verification command13:01",
+    "paneRingCount": 0
+  },
+  "pageErrors": []
+}

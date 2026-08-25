@@ -5,6 +5,9 @@ import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection, TaskView } from './hierarchy-types'
 import { taskDeleteFlow } from './terminal-close-flow'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
+import { NotificationCenter } from '../notifications/NotificationCenter'
+import type { AgentNotification } from '../notifications/AgentNotificationStore'
+import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import workbenchIcon from '../assets/kooky/terminal/dark_lujing.svg'
 
 const TASK_TRANSFER = 'application/x-matou-task'
@@ -29,6 +32,9 @@ export function TaskSidebar({ projection, commands, pathValid = true }: {
   const [dragOverTaskId, setDragOverTaskId] = useState<string | null>(null)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
   const [toast, setToast] = useState('')
+  const [notificationCenterOpen, setNotificationCenterOpen] = useState(false)
+  const notificationStore = useNotificationStore()
+  useNotificationSnapshot()
   const activeRef = useRef<HTMLSpanElement>(null)
   useEffect(() => {
     activeRef.current?.scrollIntoView?.({ block: 'nearest' })
@@ -39,9 +45,17 @@ export function TaskSidebar({ projection, commands, pathValid = true }: {
       if (target instanceof Node && !document.querySelector('.workbench-action-popover')?.contains(target)) {
         setMenuTask(null)
       }
+      if (target instanceof Node && notificationCenterOpen &&
+        !document.querySelector('.notification-center')?.contains(target) &&
+        !document.querySelector('.project-dropdown__notify')?.contains(target)) {
+        setNotificationCenterOpen(false)
+      }
     }
     const onEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setMenuTask(null)
+      if (event.key === 'Escape') {
+        setMenuTask(null)
+        setNotificationCenterOpen(false)
+      }
     }
     window.addEventListener('pointerdown', closeMenus)
     window.addEventListener('keydown', onEscape)
@@ -49,7 +63,7 @@ export function TaskSidebar({ projection, commands, pathValid = true }: {
       window.removeEventListener('pointerdown', closeMenus)
       window.removeEventListener('keydown', onEscape)
     }
-  }, [])
+  }, [notificationCenterOpen])
   useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 2_000)
@@ -63,12 +77,57 @@ export function TaskSidebar({ projection, commands, pathValid = true }: {
     setMenuPosition({ top: rect.top + rect.height / 2, left: rect.right + 6 })
     setMenuTask(task)
   }
-  const unreadCount = (taskId: string) => projection.unreadByTask?.[taskId] ?? 0
+  const unreadCount = (taskId: string) => notificationStore.unreadForTask(taskId) || projection.unreadByTask?.[taskId] || 0
+  const navigateNotification = async (notification: AgentNotification) => {
+    const workspace = projection.workspaces.find(({ id }) => id === notification.workspaceId)
+    if (!workspace) return
+    await Promise.resolve(commands.activateWorkspace(workspace.id))
+    let navigationSucceeded = false
+    const originalTask = projection.tasks.find(({ id, workspaceId: owner }) =>
+      id === notification.taskId && owner === workspace.id
+    )
+    const fallbackTaskId = projection.navigation.taskByWorkspace[workspace.id]
+    const task = originalTask ?? projection.tasks.find(({ id, workspaceId: owner }) =>
+      id === fallbackTaskId && owner === workspace.id
+    ) ?? projection.tasks.find(({ workspaceId: owner }) => owner === workspace.id)
+    if (task) {
+      await Promise.resolve(commands.activateTask(task.id))
+      navigationSucceeded = true
+    }
+    let missingSession = false
+    if (notification.sessionId) {
+      const snapshot = projection.sceneSnapshots?.find(({ mounts }) =>
+        mounts.some(({ sessionId }) => sessionId === notification.sessionId)
+      )
+      const mount = snapshot?.mounts.find(({ sessionId }) => sessionId === notification.sessionId)
+      const detached = Boolean(mount?.sceneWindowId && snapshot?.windows.some(({ id, state }) =>
+        id === mount.sceneWindowId && state === 'detached'
+      ))
+      const scene = snapshot && projection.scenes.find(({ id }) => id === snapshot.scene.id)
+      const session = projection.sessions.find(({ id }) => id === notification.sessionId)
+      if (task && scene?.taskId === task.id && session && !detached) {
+        await Promise.resolve(commands.activateScene(scene.id))
+        await Promise.resolve(commands.activateSession(session.id))
+        navigationSucceeded = true
+      } else {
+        navigationSucceeded = false
+        missingSession = true
+      }
+    }
+    if (navigationSucceeded) notificationStore.remove(notification.id)
+    setNotificationCenterOpen(false)
+    if (missingSession) setToast('原面板已不存在或不在当前窗口')
+  }
   return <aside className="workbench-sidebar" aria-label="事项列表">
     <div className="workbench-sidebar__project-stack">
       <div className="workbench-sidebar__project" data-testid="workspace-name">
-        <WorkspaceSwitcher projection={projection} commands={commands} />
+        <WorkspaceSwitcher projection={projection} commands={commands}
+          notificationCenterOpen={notificationCenterOpen}
+          onWorkspaceMenuOpen={() => setNotificationCenterOpen(false)}
+          onNotificationToggle={() => setNotificationCenterOpen((current) => !current)} />
       </div>
+      {notificationCenterOpen && <NotificationCenter projection={projection}
+        onClose={() => setNotificationCenterOpen(false)} onNavigate={(notification) => { void navigateNotification(notification) }} />}
     </div>
     <div className="workbench-sidebar__header">
       <button className="workbench-sidebar__add-btn" disabled={!pathValid}

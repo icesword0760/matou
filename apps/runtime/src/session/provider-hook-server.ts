@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 
 import type { SessionRepository } from '../domain/session-repository'
+import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
 const MAX_HOOK_BYTES = 1024 * 1024
 
@@ -13,6 +14,18 @@ interface HookRegistrationRecord {
   sessionId: string
   permissionMode?: string
   settingsPath: string
+}
+
+
+export interface ProviderHookNotification {
+  runId: string
+  sessionId: string
+  provider: 'claude-code'
+  event: ProviderNotificationEvent
+}
+
+export interface ProviderHookServerOptions {
+  onNotification?: (notification: ProviderHookNotification) => void
 }
 
 export interface ProviderHookRegistration {
@@ -25,12 +38,14 @@ export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
   readonly #registrations = new Map<string, HookRegistrationRecord>()
+  readonly #onNotification: (notification: ProviderHookNotification) => void
   #server: Server | undefined
   #port: number | undefined
 
-  constructor(dataRoot: string, sessions: SessionRepository) {
+  constructor(dataRoot: string, sessions: SessionRepository, options: ProviderHookServerOptions = {}) {
     this.#dataRoot = dataRoot
     this.#sessions = sessions
+    this.#onNotification = options.onNotification ?? (() => {})
   }
 
   async start(): Promise<void> {
@@ -112,8 +127,8 @@ export class ProviderHookServer {
     try {
       const payload = await readJsonBody(request)
       const providerSessionId = providerSessionIdentity(payload)
+      const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
       if (providerSessionId) {
-        const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
         const cwd = nonEmptyText(payload.cwd)
         const hookPermissionMode = nonEmptyText(payload.permission_mode) ??
           nonEmptyText(payload.permissionMode)
@@ -143,6 +158,15 @@ export class ProviderHookServer {
             lastHookEvent: eventName
           },
           now
+        })
+      }
+      const notificationEvent = toProviderNotificationEvent(payload)
+      if (notificationEvent) {
+        this.#onNotification({
+          runId: registration.runId,
+          sessionId: registration.sessionId,
+          provider: 'claude-code',
+          event: notificationEvent
         })
       }
       sendJson(response, 200, {})

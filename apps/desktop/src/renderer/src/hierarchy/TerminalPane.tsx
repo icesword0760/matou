@@ -4,6 +4,8 @@ import { TerminalSurface } from '../terminal/TerminalSurface'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import type { SessionView } from './hierarchy-types'
 import { sessionDeleteFlow } from './terminal-close-flow'
+import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
+import { toOscNotification } from '../notifications/osc-notification'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -11,6 +13,8 @@ export function TerminalPane(props: {
   visible?: boolean
   workspaceSessionCount: number
   taskName: string
+  workspaceId?: string
+  sceneId?: string
   pathValid?: boolean
   onActivate(sessionId: string): unknown
   onDelete(sessionId: string, confirmed?: boolean): unknown
@@ -18,9 +22,11 @@ export function TerminalPane(props: {
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
-    pathValid = true, onActivate, onDelete, onDetach
+    pathValid = true, workspaceId, sceneId, onActivate, onDelete, onDetach
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
+  const notificationStore = useNotificationStore()
+  useNotificationSnapshot()
   const flow = sessionDeleteFlow({
     isWorkspaceFinal: workspaceSessionCount === 1,
     taskName
@@ -31,8 +37,12 @@ export function TerminalPane(props: {
     setConfirmationOpen(false)
     void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
   }
-  return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible} onPointerDown={() => onActivate(session.id)}>
+  const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
+  return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
+    data-active={active} hidden={!visible} onPointerDown={() => {
+      notificationStore.dismissSessionIndicator(session.id)
+      onActivate(session.id)
+    }}>
     <header className="terminal-pane-header split-pane-header" draggable={onDetach !== undefined}
       onDragEnd={(event) => {
         const outside = event.screenX <= window.screenX || event.screenY <= window.screenY ||
@@ -52,7 +62,16 @@ export function TerminalPane(props: {
     {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
     <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
-      profile={profile} visible={visible} active={active} inputDisabled={!pathValid} />
+      profile={profile} visible={visible} active={active} inputDisabled={!pathValid}
+      onOscNotification={(oscId, content) => {
+        const notification = toOscNotification(oscId, content)
+        if (!notification) return
+        notificationStore.push({
+          ...notification, eventId: `osc-${crypto.randomUUID()}`,
+          workspaceId: workspaceId ?? null, taskId: session.taskId, sceneId: sceneId ?? null, sessionId: session.id,
+          isFocusedSession: active && visible
+        })
+      }} />
     {confirmationOpen && flow.action === 'hide-window' && <ConfirmDialog title="提示"
       body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
       confirmLabel="我知道了" showCancel={false} onCancel={() => setConfirmationOpen(false)}

@@ -5,6 +5,7 @@ import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
+import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import splitRightIcon from '../assets/kooky/terminal/vertical.png'
 import splitDownIcon from '../assets/kooky/terminal/horizontal.png'
 import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
@@ -31,6 +32,8 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
   const [closingSceneId, setClosingSceneId] = useState<string | null>(null)
   const [menuSceneId, setMenuSceneId] = useState<string | null>(null)
   const [renamingSceneId, setRenamingSceneId] = useState<string | null>(null)
+  const notificationStore = useNotificationStore()
+  useNotificationSnapshot()
   const activeRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     activeRef.current?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
@@ -42,6 +45,11 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
     tab?.scrollIntoView({ inline: center ? 'center' : 'nearest', block: 'nearest' })
   }
   const task = projection.tasks.find(({ id }) => id === taskId)
+  const sceneHasUnread = (sceneId: string) => {
+    const sessionIds = projection.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)?.mounts
+      .map(({ sessionId }) => sessionId) ?? []
+    return sessionIds.some((sessionId) => notificationStore.sessionHasUnread(sessionId))
+  }
   const workspaceTasks = projection.tasks.filter(({ workspaceId: candidate }) => candidate === workspaceId)
   const closeFlow = sceneCloseFlow({
     isLastScene: scenes.length === 1,
@@ -71,6 +79,7 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
         onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
           className="tab-title" aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}>{scene.name}</button>
+        {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
         <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
       </div>)}
       {overflow.length === 0 && <button className="tab-add-btn" aria-label="新建页签"
@@ -80,7 +89,7 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
     {overflow.length > 0 && <div className="tab-bar-overflow-actions">
       <div>
       <button className="tab-overflow-btn" aria-label="更多页签" onClick={() => setOverflowOpen(!overflowOpen)}>···</button>
-      {overflowOpen && <SceneOverflowMenu scenes={overflow} onSelect={(scene) => {
+      {overflowOpen && <SceneOverflowMenu scenes={overflow} hasUnread={sceneHasUnread} onSelect={(scene) => {
         setOverflowOpen(false); select(scene.id, true)
       }} />}
       </div>

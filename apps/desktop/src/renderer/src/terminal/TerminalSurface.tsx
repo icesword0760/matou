@@ -24,13 +24,15 @@ interface TerminalSurfaceProps {
   onStatusChange?: (status: RuntimeStatus) => void
   onSmokeMarker?: (marker: string) => void
   onReplayComplete?: (marker: string) => void
+  onOscNotification?: (oscId: number, content: string) => void
 }
 
 export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
     profile = 'shell', visible = true, active = true, inputDisabled = false,
-    onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP
+    onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
+    onOscNotification = NOOP
   } = props
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
@@ -39,6 +41,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
   const inputDisabledRef = useRef(inputDisabled)
+  const onOscNotificationRef = useRef(onOscNotification)
 
   useEffect(() => {
     visibleRef.current = visible
@@ -46,6 +49,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [visible])
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
+  useEffect(() => { onOscNotificationRef.current = onOscNotification }, [onOscNotification])
 
   useEffect(() => {
     if (!active || !visible) return
@@ -86,6 +90,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const decoder = new TextDecoder()
     let observed = ''
     let replayRequested = false
+    let replaying = false
     const replayProbe = shouldRunReplayProbe(
       sessionId,
       new URLSearchParams(window.location.search).get('e2e') === '1'
@@ -122,8 +127,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'protocol.error') {
         onStatusChange('error')
       } else if (message.type === 'terminal.replay-start') {
+        replaying = true
         terminal.reset()
       } else if (message.type === 'terminal.replay-complete') {
+        replaying = false
         onReplayComplete(`replayed-through:${message.throughSequence}`)
       }
     }
@@ -137,6 +144,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const input = terminal.onData((data) => {
       if (!inputDisabledRef.current) client.sendTerminalInput(sessionId, data)
     })
+    const oscHandlers = [9, 99, 777].map((oscId) => terminal.parser.registerOscHandler(oscId, (content) => {
+      if (!replaying) onOscNotificationRef.current(oscId, content)
+      return false
+    }))
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       fit.fit()
@@ -148,6 +159,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     return () => {
       observer.disconnect()
       input.dispose()
+      for (const handler of oscHandlers) handler.dispose()
       detach()
       fitRef.current = null
       terminalRef.current = null

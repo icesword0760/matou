@@ -8,6 +8,9 @@ import type { RuntimeMessage } from '@matou/contracts'
 
 import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
+import { NotificationProvider } from '../notifications/NotificationProvider'
+import { ingestAgentNotification } from '../notifications/agent-event-ingestion'
 import { createHierarchyCommands } from './hierarchy-commands'
 import { DetachedPlaceholder } from './DetachedPlaceholder'
 import type {
@@ -25,6 +28,7 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   )
   const [loadError, setLoadError] = useState('')
   const storeRef = useRef(new RuntimeProjectionStore())
+  const notificationStoreRef = useRef(createBrowserNotificationStore())
 
   const refresh = useCallback(async () => {
     if (!client) return
@@ -41,7 +45,12 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
       if (message.type !== 'events.batch' || !alive) return
       try {
         storeRef.current.applyBatch(message.runtimeGeneration, message.events)
-        setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
+        const after = toHierarchyProjection(storeRef.current.view().hierarchy)
+        const focusedSessionId = focusedSession(after)
+        for (const event of message.events) {
+          ingestAgentNotification(event, after, focusedSessionId, notificationStoreRef.current)
+        }
+        setProjection(after)
       } catch {
         // A fresh snapshot below also repairs Runtime reconnects and event gaps.
       }
@@ -73,9 +82,11 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   )
 
   useEffect(() => {
-    if (!client || queryValue('e2e') !== '1') return
+    if (queryValue('e2e') !== '1') return
     window.matouE2e = {
+      pushNotification: (input) => { notificationStoreRef.current.push(input) },
       moveTaskToWindow: async (input) => {
+        if (!client) throw new Error('Runtime client is unavailable')
         const now = Date.now()
         const envelope = (phase: 'prepare' | 'acknowledge', commandId: string) => ({
           command: { commandId, commandType: 'hierarchy.move-task-to-window', requestHash: commandId },
@@ -117,7 +128,9 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   if (!projection || !commands) {
     return <main className="hierarchy-loading" aria-busy="true" data-load-error={loadError || undefined} />
   }
-  return <HierarchyProduct projection={projection} commands={commands} />
+  return <NotificationProvider store={notificationStoreRef.current}>
+    <HierarchyProduct projection={projection} commands={commands} />
+  </NotificationProvider>
 }
 
 function HierarchyProduct({ projection, commands }: {
@@ -199,7 +212,8 @@ function HierarchyProduct({ projection, commands }: {
                         active={projection.navigation.sessionByScene[scene.id] === session.id}
                         visible={scene.id === activeSceneId}
                         workspaceSessionCount={workspaceSessionCount}
-                        taskName={task.title} pathValid={pathValid}
+                        taskName={task.title} sceneId={scene.id} pathValid={pathValid}
+                        {...(workspace ? { workspaceId: workspace.id } : {})}
                         onActivate={commands.activateSession} onDelete={commands.deleteSession}
                         {...(window.matouDesktop?.createDetachedTerminalWindow
                           ? { onDetach: async () => {
@@ -322,4 +336,11 @@ function queryValue(name: string): string | null {
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function focusedSession(projection: HierarchyProjection): string | undefined {
+  const workspaceId = projection.navigation.activeWorkspaceId
+  const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
+  const sceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
+  return sceneId ? projection.navigation.sessionByScene[sceneId] : undefined
 }

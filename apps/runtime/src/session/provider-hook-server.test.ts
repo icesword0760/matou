@@ -16,6 +16,7 @@ let root: string
 let database: RuntimeDatabase
 let sessions: SessionRepository
 let hooks: ProviderHookServer
+let notificationEvents: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -38,7 +39,10 @@ beforeEach(async () => {
     id: 'session-1', taskId: 'task-1', executionContextId: 'context-1',
     kind: 'claude-code', title: 'Claude', now: 2
   })
-  hooks = new ProviderHookServer(root, sessions)
+  notificationEvents = []
+  hooks = new ProviderHookServer(root, sessions, {
+    onNotification: (event) => { notificationEvents.push(event) }
+  })
   await hooks.start()
 })
 
@@ -81,6 +85,26 @@ describe('ProviderHookServer', () => {
       providerSessionId: 'claude-session-42', resumeState: 'available',
       metadata: {
         permissionMode: 'bypassPermissions', cwd: root, lastHookEvent: 'UserPromptSubmit'
+      }
+    })
+  })
+
+  it('publishes Stop and Notification as semantic Agent events but ignores SessionEnd', async () => {
+    const registration = await hooks.registerClaudeSession({ runId: 'run-1', sessionId: 'session-1' })
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'claude-session', cwd: '/tmp/matou',
+      last_assistant_message: '任务完成'
+    })
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'SessionEnd', session_id: 'claude-session'
+    })
+
+    expect(notificationEvents).toHaveLength(1)
+    expect(notificationEvents[0]).toMatchObject({
+      runId: 'run-1', sessionId: 'session-1', provider: 'claude-code',
+      event: {
+        eventType: 'completed', title: 'Claude Code', subtitle: 'Completed in matou', body: '任务完成'
       }
     })
   })

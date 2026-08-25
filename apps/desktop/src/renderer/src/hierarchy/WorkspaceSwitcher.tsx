@@ -4,14 +4,23 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { EmptyWorkspaceState } from './EmptyWorkspaceState'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
+import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import notificationIcon from '../assets/kooky/terminal/dark_toongzhi.svg'
+import notificationAnimatedIcon from '../assets/kooky/terminal/rongzhi_ani.gif'
 
-export function WorkspaceSwitcher({ projection, commands }: {
+export function WorkspaceSwitcher({
+  projection, commands, notificationCenterOpen = false, onNotificationToggle, onWorkspaceMenuOpen
+}: {
   projection: HierarchyProjection; commands: HierarchyCommands
+  notificationCenterOpen?: boolean
+  onNotificationToggle?(): void
+  onWorkspaceMenuOpen?(): void
 }) {
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [removing, setRemoving] = useState(false)
+  const notificationStore = useNotificationStore()
+  const notificationSnapshot = useNotificationSnapshot()
   const active = projection.workspaces.find(({ id }) => id === projection.navigation.activeWorkspaceId)
   const chooseDirectory = async () => {
     const path = await window.matouDesktop?.selectWorkspaceDirectory()
@@ -19,14 +28,21 @@ export function WorkspaceSwitcher({ projection, commands }: {
   }
   if (!active) return <EmptyWorkspaceState onCreate={() => void chooseDirectory()} />
   const pathState = projection.pathStates.find(({ workspaceId }) => workspaceId === active.id)
-  return <div className="workspace-switcher project-dropdown">
-    <button className="project-dropdown__trigger" aria-label="切换工作区" onClick={() => setOpen(!open)}>
+  return <div className="workspace-switcher project-dropdown" data-workspace-id={active.id}>
+    <button className="project-dropdown__trigger" aria-label="切换工作区" onClick={() => {
+      const next = !open
+      setOpen(next)
+      if (next) onWorkspaceMenuOpen?.()
+    }}>
       <span className="project-dropdown__trigger-content"><strong className="project-dropdown__name">{active.name}</strong>
       <svg className={`project-dropdown__chevron${open ? ' open' : ''}`} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg></span>
       {pathState?.status === 'invalid' && <span className="workspace-invalid" title={reasonCopy(pathState.reason)}>路径失效</span>}
     </button>
     <span className="project-dropdown__notify-group"><i className="project-dropdown__divider" />
-      <button className="project-dropdown__notify" aria-label="通知中心"><img src={notificationIcon} alt="" /></button></span>
+      <button className="project-dropdown__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
+        onClick={(event) => { event.stopPropagation(); setOpen(false); onNotificationToggle?.() }}>
+        <img src={notificationSnapshot.unreadCount > 0 ? notificationAnimatedIcon : notificationIcon} alt="" />
+      </button></span>
     {open && <div role="menu" className="project-dropdown__panel">
       <div className="project-dropdown__header"><span>workspace</span>
         <button role="menuitem" onClick={() => void chooseDirectory()}>＋ 新增工作区</button></div>
@@ -34,8 +50,13 @@ export function WorkspaceSwitcher({ projection, commands }: {
       {projection.workspaces.map((workspace) => {
         const state = projection.pathStates.find(({ workspaceId }) => workspaceId === workspace.id)
         return <div className={`project-dropdown__item${workspace.id === active.id ? ' active' : ''}`} key={workspace.id}>
+          {notificationStore.unreadForWorkspace(workspace.id) > 0 && <span className="project-dropdown__item-dot" />}
           <button role="menuitem" aria-label={workspace.name}
-          onClick={() => { setOpen(false); void commands.activateWorkspace(workspace.id) }}>
+          onClick={() => {
+            notificationStore.markWorkspaceRead(workspace.id)
+            setOpen(false)
+            void commands.activateWorkspace(workspace.id)
+          }}>
           <span><strong>{workspace.name}</strong><small title={workspace.rootDirectory}>{pathTail(workspace.rootDirectory)}</small></span>
           {state?.status === 'invalid' && <span title={reasonCopy(state.reason)}>路径失效</span>}
           </button>

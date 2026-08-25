@@ -400,6 +400,7 @@ test('returns an unresponsive AI resume to a usable Shell after the ten-second d
       MATOU_CLAUDE_COMMAND: providerExecutable
     } })
     const fallback = visibleSurfaces(fixture).first()
+    await positivePid(fallback)
     await fixture.page.waitForTimeout(8_000)
     await expect(fallback.locator('.xterm-rows')).not.toContainText(
       '[上次会话无法续接，已回到普通终端]'

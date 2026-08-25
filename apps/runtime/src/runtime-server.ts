@@ -150,6 +150,11 @@ export class RuntimeServer {
     port.start()
   }
 
+  flushSemanticEvents(): void {
+    if (this.#closed) return
+    for (const consumerId of this.#subscriptions.keys()) this.#pumpSubscription(consumerId)
+  }
+
   close(): void {
     if (this.#closed) return
     this.#closed = true

@@ -1,4 +1,5 @@
 import type { MessagePortMain, ParentPort } from 'electron'
+import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import { resolve } from 'node:path'
 
@@ -23,6 +24,7 @@ import { DetachedSessionService } from './hierarchy/detached-session-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { NotificationProjection } from './product/experience-foundation'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
+import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -73,7 +75,19 @@ async function initializeRuntime(): Promise<RuntimeState> {
     tokenService: controlTokens,
     backend: controlBackend
   })
-  const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository)
+  const agentNotifications = new AgentNotificationRepository(database, transactions)
+  const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository, {
+    onNotification: (notification) => {
+      const now = Date.now()
+      const eventId = `agent-notification-${randomUUID()}`
+      agentNotifications.publish({
+        commandId: `publish-${eventId}`,
+        commandType: 'agent.notification.publish',
+        requestHash: `${notification.runId}:${notification.sessionId}:${notification.event.eventType}:${now}`
+      }, { ...notification, eventId, now })
+      for (const server of servers) server.flushSemanticEvents()
+    }
+  })
   new DetachedSessionService(database, transactions)
     .normalizeOnStartup(Date.now())
   const recovery = await new RuntimeRecoveryService(runtimeDataRoot, database).recoverAll()
