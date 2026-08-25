@@ -96,6 +96,8 @@ export class RuntimeServer {
   readonly #replays = new Map<string, ReplayState>()
   readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  readonly #providerLaunchRunIds = new Map<string, string>()
+  readonly #confirmedProviderRunIds = new Set<string>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #permissionOverrides = new Map<string, HudPermissionMode>()
   readonly #shellInputBuffers = new Map<string, string>()
@@ -168,6 +170,16 @@ export class RuntimeServer {
     for (const consumerId of this.#subscriptions.keys()) this.#pumpSubscription(consumerId)
   }
 
+  providerIdentityRecorded(sessionId: string, runId: string): void {
+    if (this.#providerLaunchRunIds.get(sessionId) !== runId) return
+    if (this.#providerResumeTimers.has(sessionId)) {
+      this.#clearProviderResumeTimer(sessionId)
+      this.#providerLaunchRunIds.delete(sessionId)
+      return
+    }
+    this.#confirmedProviderRunIds.add(runId)
+  }
+
   close(): void {
     if (this.#closed) return
     this.#closed = true
@@ -175,6 +187,8 @@ export class RuntimeServer {
     this.#cwdTimers.clear()
     for (const timer of this.#providerResumeTimers.values()) clearTimeout(timer)
     this.#providerResumeTimers.clear()
+    this.#providerLaunchRunIds.clear()
+    this.#confirmedProviderRunIds.clear()
     this.#detachAll()
     this.#port.close()
   }
@@ -733,8 +747,12 @@ export class RuntimeServer {
         hookRegistration = await this.#providerHooks.registerClaudeSession({
           runId,
           sessionId: message.sessionId,
+          acceptStatuslineIdentity: providerSessionId !== undefined,
           ...(permissionMode === undefined ? {} : { permissionMode })
         })
+        if (providerSessionId !== undefined) {
+          this.#providerLaunchRunIds.set(message.sessionId, runId)
+        }
       }
       const session = await PtySession.create({
         sessionId: message.sessionId,
@@ -760,17 +778,18 @@ export class RuntimeServer {
           if (resumeFailure) {
             pendingResumeFailure = resumeFailure
             if (activeSession && forkLaunch) {
-              void hookRegistration?.dispose()
+              hookRegistration?.retire()
               this.#beginForkFailure(message, activeSession, resumeFailure)
             } else if (activeSession && resumeBinding) {
-              void hookRegistration?.dispose()
+              hookRegistration?.retire()
               this.#beginResumeFallback(message, activeSession, resumeBinding.id, resumeFailure)
             }
           }
         },
         onExit: (exited, exitCode, signal) => {
           this.#clearProviderResumeTimer(message.sessionId)
-          void hookRegistration?.dispose()
+          this.#forgetProviderLaunch(message.sessionId, exited.runId)
+          hookRegistration?.retire()
           const resumeExitFallback = Boolean(
             resumeBinding &&
             resumeMonitor?.isMonitoring &&
@@ -944,6 +963,7 @@ export class RuntimeServer {
     session: PtySession,
     monitor: ProviderResumeMonitor
   ): void {
+    if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     if (!monitor.isMonitoring || this.#forkIntents.state(message.sessionId) === 'succeeded') return
     this.#clearProviderResumeTimer(message.sessionId)
     this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
@@ -1025,6 +1045,7 @@ export class RuntimeServer {
     bindingId: string,
     monitor: ProviderResumeMonitor
   ): void {
+    if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     if (!monitor.isMonitoring) return
     this.#clearProviderResumeTimer(message.sessionId)
     this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
@@ -1040,6 +1061,22 @@ export class RuntimeServer {
     if (!timer) return
     clearTimeout(timer)
     this.#providerResumeTimers.delete(sessionId)
+  }
+
+  #consumeProviderIdentityConfirmation(sessionId: string, runId: string | undefined): boolean {
+    if (!runId || !this.#confirmedProviderRunIds.delete(runId)) return false
+    if (this.#providerLaunchRunIds.get(sessionId) === runId) {
+      this.#providerLaunchRunIds.delete(sessionId)
+    }
+    return true
+  }
+
+  #forgetProviderLaunch(sessionId: string, runId: string | undefined): void {
+    if (!runId) return
+    this.#confirmedProviderRunIds.delete(runId)
+    if (this.#providerLaunchRunIds.get(sessionId) === runId) {
+      this.#providerLaunchRunIds.delete(sessionId)
+    }
   }
 
   #markResumeFailed(sessionId: string, bindingId: string, reason: string): boolean {

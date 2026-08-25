@@ -92,6 +92,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
     onHudPayload: ({ sessionId, payload }) => {
       sessionHuds.ingestProvider(sessionId, payload)
       for (const server of servers) void server.refreshSessionHud(sessionId)
+    },
+    onIdentityRecorded: ({ sessionId, runId }) => {
+      sessionHuds.markResumable(sessionId)
+      for (const server of servers) {
+        server.providerIdentityRecorded(sessionId, runId)
+        void server.refreshSessionHud(sessionId)
+      }
     }
   })
   new DetachedSessionService(database, transactions)

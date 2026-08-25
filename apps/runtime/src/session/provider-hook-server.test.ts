@@ -18,6 +18,7 @@ let sessions: SessionRepository
 let hooks: ProviderHookServer
 let notificationEvents: unknown[]
 let hudEvents: unknown[]
+let identityEvents: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -42,9 +43,11 @@ beforeEach(async () => {
   })
   notificationEvents = []
   hudEvents = []
+  identityEvents = []
   hooks = new ProviderHookServer(root, sessions, {
     onNotification: (event) => { notificationEvents.push(event) },
-    onHudPayload: (event) => { hudEvents.push(event) }
+    onHudPayload: (event) => { hudEvents.push(event) },
+    onIdentityRecorded: (event) => { identityEvents.push(event) }
   })
   await hooks.start()
 })
@@ -96,6 +99,46 @@ describe('ProviderHookServer', () => {
         hook_event_name: 'PreToolUse', tool_name: 'Read'
       }) })
     ])
+  })
+
+  it('keeps Fork unavailable when statusline reports an identity before the first conversation event', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-1', sessionId: 'session-1', permissionMode: 'bypassPermissions'
+    })
+
+    await postHook(registration.hookUrl, {
+      session_id: 'provider-not-durable-yet', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' }
+    })
+
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'UserPromptSubmit', session_id: 'provider-not-durable-yet', cwd: root
+    })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-not-durable-yet', resumeState: 'available'
+    })
+  })
+
+  it('accepts statusline identity as launch confirmation for a resume or Fork', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-resume', sessionId: 'session-1', acceptStatuslineIdentity: true
+    })
+
+    await postHook(registration.hookUrl, {
+      session_id: 'provider-resumed-or-forked', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' }
+    })
+
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-resumed-or-forked', resumeState: 'available',
+      metadata: { cwd: root, lastHookEvent: 'unknown' }
+    })
+    expect(identityEvents).toEqual([{
+      runId: 'run-resume', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-resumed-or-forked', eventName: 'unknown'
+    }])
   })
 
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {
@@ -194,6 +237,21 @@ describe('ProviderHookServer', () => {
       hook_event_name: 'Stop', session_id: 'claude-should-not-bind'
     })).status).toBe(404)
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+  })
+
+  it('keeps the hook token alive briefly so Claude can deliver SessionEnd after its PTY exits', async () => {
+    const registration = await hooks.registerClaudeSession({ runId: 'run-1', sessionId: 'session-1' })
+
+    registration.retire(50)
+    expect((await postHook(registration.hookUrl, {
+      hook_event_name: 'SessionEnd', session_id: 'provider-ending'
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+
+    await new Promise((resolve) => setTimeout(resolve, 75))
+    expect((await postHook(registration.hookUrl, {
+      hook_event_name: 'SessionEnd', session_id: 'provider-too-late'
+    })).status).toBe(404)
   })
 })
 

@@ -16,7 +16,7 @@
 | Shell / Claude 类型表达 | Shell 面板标题来自 Shell；Claude 面板 fallback 使用 `claude ~/cwd` | `normalizePanelTitle()` 根据 `claudeActive/mode` 区分 | 面板进入 Claude 时标题为 `Claude`，退出时为 `Shell` | 类型语义一致；Matou 当前短标题更明确 |
 | Shell 内通过 `cc` 启动 Claude | Claude 状态上报后将 Shell 面板提升为 Claude | `updateAiStatus()` 以新 Claude 身份提升 `mode/claudeActive` | 仅当当前 Shell 将 `cc` 配置为 Claude 别名时接管启动，保留 bypass 权限并切换标题 | 一致；普通系统 `cc` 仍作为编译器命令执行 |
 | Shell 右键 | 菜单隐藏 | `canForkSession` 为 false | Fork 隐藏 | 一致 |
-| 身份尚未形成 | 菜单隐藏 | 缺少 `claudeSessionId` 时隐藏 | HUD `resumable=false` 时隐藏 | 一致 |
+| 首轮对话尚未形成 | 菜单隐藏 | 缺少可恢复的 `claudeSessionId` 时隐藏 | 状态栏临时 ID 只更新展示；首个对话 Hook 确认前 HUD `resumable=false` | 一致，并避免提前开放后 Fork 到空会话 |
 | 团队队友 | 菜单隐藏 | `teamId/teamRole` 存在时隐藏 | `agent-team-member` 隐藏 | 一致 |
 | 独立窗口 | 菜单隐藏 | detached panel 排除 | Detached App 无 Fork 菜单 | 一致 |
 | 菜单容器 | 没有可采样菜单 | fixed、z 9999、min 140、padding 4×0、radius 6、blur 12 | 逐项相同 | 一致 |
@@ -50,5 +50,6 @@
 - Matou 激活后的两项菜单和计算样式：`docs/acceptance/evidence/prd-06/matou/fork-menu.png`、`fork-menu.json`。
 - Matou 连续 Fork 后的三个并列会话：`docs/acceptance/evidence/prd-06/matou/forked-conversations.png`。
 - Matou 失败面板：`docs/acceptance/evidence/prd-06/matou/fork-failure.png`。
+- Matou 使用真实 Claude Code 完成首轮、Fork、双侧隔离输入、重启恢复与重启后继续输入：`docs/acceptance/evidence/prd-06/matou/real-claude-fork-validation.png`、`real-claude-fork-validation.json`。
 
 运行截图均只截取黑色 CLI 模块。Kooky 的当前空菜单与 dormant 源码分开记录，避免把“当前尚未开放”误写成最终产品行为。

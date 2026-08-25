@@ -128,14 +128,17 @@ export class SessionHudRegistry {
     current.model = modelNameForStrategy(normalized)
   }
 
+  markResumable(sessionId: string): void {
+    const current = this.#states.get(sessionId)
+    if (current?.mode === 'agent') current.resumable = true
+  }
+
   ingestProvider(sessionId: string, payload: Record<string, unknown>): void {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent') return
 
     const cwd = text(payload.cwd)
     if (cwd) current.cwd = cwd
-    const providerId = text(payload.session_id) ?? text(payload.sessionId)
-    if (providerId) current.resumable = true
     const permission = normalizePermission(text(payload.permission_mode) ?? text(payload.permissionMode))
     if (permission) current.permissionMode = permission
 

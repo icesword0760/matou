@@ -13,8 +13,10 @@ interface HookRegistrationRecord {
   runId: string
   sessionId: string
   permissionMode?: string
+  acceptStatuslineIdentity: boolean
   settingsPath: string
   statusScriptPath: string
+  retirementTimer?: ReturnType<typeof setTimeout>
 }
 
 
@@ -33,13 +35,23 @@ export interface ProviderHookServerOptions {
     provider: 'claude-code'
     payload: Record<string, unknown>
   }) => void
+  onIdentityRecorded?: (event: {
+    runId: string
+    sessionId: string
+    provider: 'claude-code'
+    providerSessionId: string
+    eventName: string
+  }) => void
 }
 
 export interface ProviderHookRegistration {
   settingsPath: string
   hookUrl: string
+  retire(graceMs?: number): void
   dispose(): Promise<void>
 }
+
+const DEFAULT_RETIREMENT_GRACE_MS = 2_000
 
 export class ProviderHookServer {
   readonly #dataRoot: string
@@ -47,6 +59,7 @@ export class ProviderHookServer {
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #onNotification: (notification: ProviderHookNotification) => void
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
+  readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
   #server: Server | undefined
   #port: number | undefined
 
@@ -55,6 +68,7 @@ export class ProviderHookServer {
     this.#sessions = sessions
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
+    this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
   }
 
   async start(): Promise<void> {
@@ -79,6 +93,7 @@ export class ProviderHookServer {
     this.#port = undefined
     const records = [...this.#registrations.values()]
     this.#registrations.clear()
+    for (const record of records) clearTimeout(record.retirementTimer)
     await Promise.all(records.flatMap(({ settingsPath, statusScriptPath }) => [
       rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
     ]))
@@ -91,6 +106,7 @@ export class ProviderHookServer {
     runId: string
     sessionId: string
     permissionMode?: string
+    acceptStatuslineIdentity?: boolean
   }): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
     const token = randomBytes(32).toString('base64url')
@@ -108,25 +124,34 @@ export class ProviderHookServer {
     })
     await rename(temporaryPath, settingsPath)
     await chmod(settingsPath, 0o600)
-    this.#registrations.set(token, {
+    const record: HookRegistrationRecord = {
       runId: input.runId,
       sessionId: input.sessionId,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
+      acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
       settingsPath,
       statusScriptPath
-    })
+    }
+    this.#registrations.set(token, record)
     let disposed = false
+    const dispose = async () => {
+      if (disposed) return
+      disposed = true
+      clearTimeout(record.retirementTimer)
+      this.#registrations.delete(token)
+      await Promise.all([
+        rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+      ])
+    }
     return {
       settingsPath,
       hookUrl,
-      dispose: async () => {
-        if (disposed) return
-        disposed = true
-        this.#registrations.delete(token)
-        await Promise.all([
-          rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
-        ])
-      }
+      retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS) => {
+        if (disposed || record.retirementTimer) return
+        record.retirementTimer = setTimeout(() => { void dispose() }, Math.max(0, graceMs))
+        record.retirementTimer.unref?.()
+      },
+      dispose
     }
   }
 
@@ -151,7 +176,10 @@ export class ProviderHookServer {
       })
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
-      if (providerSessionId) {
+      const confirmsConversation = eventName !== 'SessionEnd' && (
+        eventName !== 'unknown' || registration.acceptStatuslineIdentity
+      )
+      if (providerSessionId && confirmsConversation) {
         const cwd = nonEmptyText(payload.cwd)
         const hookPermissionMode = nonEmptyText(payload.permission_mode) ??
           nonEmptyText(payload.permissionMode)
@@ -181,6 +209,13 @@ export class ProviderHookServer {
             lastHookEvent: eventName
           },
           now
+        })
+        this.#onIdentityRecorded({
+          runId: registration.runId,
+          sessionId: registration.sessionId,
+          provider: 'claude-code',
+          providerSessionId,
+          eventName
         })
       }
       const notificationEvent = toProviderNotificationEvent(payload)

@@ -593,6 +593,78 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('keeps a quiet restored Claude conversation running when statusline confirms its launch', async () => {
+    const executable = join(root, 'provider-quiet-resume-fixture.sh')
+    const argumentFile = join(root, 'provider-quiet-resume-arguments.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let resumeServer: RuntimeServer | undefined
+    const providerHooks = new ProviderHookServer(root, repository, {
+      onIdentityRecorded: ({ sessionId, runId }) => {
+        resumeServer?.providerIdentityRecorded(sessionId, runId)
+        void resumeServer?.refreshSessionHud(sessionId)
+      }
+    })
+    await providerHooks.start()
+    try {
+      registerSession(database, 'quiet-resume-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+        'binding-quiet-resume', 'quiet-resume-session', 'provider-quiet-resume'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const resumePort = new MockPort()
+      resumeServer = new RuntimeServer(
+        resumePort, root, database, undefined, undefined, sessions,
+        providerHooks, undefined, { providerResumeTimeoutMs: 500 }
+      )
+      resumePort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'quiet-resume-renderer'
+      })
+      resumePort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'quiet-resume-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      const settingsIndex = arguments_.indexOf('--settings')
+      const settings = JSON.parse(await readFile(arguments_[settingsIndex + 1]!, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const hookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+      expect((await fetch(hookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session_id: 'provider-quiet-resume', cwd: root })
+      })).status).toBe(200)
+
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      expect(sessions.get('quiet-resume-session')?.profile).toBe('claude-code')
+      expect(repository.getResumeBinding('quiet-resume-session', 'claude-code')).toMatchObject({
+        providerSessionId: 'provider-quiet-resume', resumeState: 'available'
+      })
+
+      resumePort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'quiet-resume-session'
+      })
+      await settle()
+    } finally {
+      resumeServer?.close()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
   it('consumes a fork launch exactly once and passes Claude the Kooky fork arguments', async () => {
     const executable = join(root, 'provider-fork-fixture.sh')
     const argumentFile = join(root, 'provider-fork-arguments.txt')
@@ -677,6 +749,83 @@ describe('RuntimeServer domain RPC', () => {
       await settle()
       restoredServer.close()
     } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
+  it('keeps a quiet real-style Fork running once its statusline confirms the new conversation', async () => {
+    const executable = join(root, 'provider-quiet-fork-fixture.sh')
+    const argumentFile = join(root, 'provider-quiet-fork-arguments.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let forkServer: RuntimeServer | undefined
+    const providerHooks = new ProviderHookServer(root, repository, {
+      onIdentityRecorded: ({ sessionId, runId }) => {
+        forkServer?.providerIdentityRecorded(sessionId, runId)
+        void forkServer?.refreshSessionHud(sessionId)
+      }
+    })
+    await providerHooks.start()
+    try {
+      registerSession(database, 'fork-quiet-source', 'claude-code')
+      registerSession(database, 'fork-quiet-derived', 'claude-code')
+      database.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
+        'fork-quiet-derived', 'fork-quiet-source', 'provider-source-quiet'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const forkPort = new MockPort()
+      forkServer = new RuntimeServer(
+        forkPort, root, database, undefined, undefined, sessions,
+        providerHooks, undefined, { providerResumeTimeoutMs: 500 }
+      )
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-quiet-renderer'
+      })
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-quiet-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      const settingsIndex = arguments_.indexOf('--settings')
+      expect(settingsIndex).toBeGreaterThanOrEqual(0)
+      const settings = JSON.parse(await readFile(arguments_[settingsIndex + 1]!, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const hookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+      expect((await fetch(hookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          session_id: 'provider-derived-quiet', cwd: root,
+          model: { display_name: 'Claude Opus 4.6' }
+        })
+      })).status).toBe(200)
+
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      expect(sessions.has('fork-quiet-derived')).toBe(true)
+      expect(database.get<{ state: string }>(
+        'SELECT state FROM session_fork_intents WHERE session_id = ?', 'fork-quiet-derived'
+      )).toEqual({ state: 'succeeded' })
+
+      forkPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'fork-quiet-derived'
+      })
+      await settle()
+    } finally {
+      forkServer?.close()
+      await providerHooks.stop()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
     }
@@ -1125,6 +1274,67 @@ describe('RuntimeServer domain RPC', () => {
       else process.env.MATOU_CLAUDE_COMMAND = previousCommand
       if (previousArgumentFile === undefined) delete process.env.MATOU_TEST_ARGUMENT_FILE
       else process.env.MATOU_TEST_ARGUMENT_FILE = previousArgumentFile
+    }
+  })
+
+  it('lets Claude finish its SessionEnd hook after the provider PTY exits', async () => {
+    const executable = join(root, 'provider-session-end-fixture.sh')
+    const argumentFile = join(root, 'provider-session-end-arguments.txt')
+    await writeFile(
+      executable,
+      '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 0.2\n'
+    )
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    const providerHooks = new ProviderHookServer(root, repository)
+    await providerHooks.start()
+    const registry = new RuntimeSessionRegistry()
+    const providerPort = new MockPort()
+    const server = new RuntimeServer(
+      providerPort, root, database, undefined, undefined, registry, providerHooks
+    )
+    try {
+      registerSession(database, 'provider-session-end', 'claude-code')
+      providerPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-session-end-renderer'
+      })
+      providerPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-session-end', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      const settingsIndex = arguments_.indexOf('--settings')
+      const settings = JSON.parse(await readFile(arguments_[settingsIndex + 1]!, 'utf8')) as {
+        hooks: { SessionEnd: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const hookUrl = settings.hooks.SessionEnd[0]!.hooks[0]!.url
+      await waitUntil(() => registry.get('provider-session-end')?.profile === 'shell')
+
+      expect((await fetch(hookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'SessionEnd', session_id: 'provider-ending-after-pty'
+        })
+      })).status).toBe(200)
+      expect(repository.getResumeBinding('provider-session-end', 'claude-code')).toBeUndefined()
+    } finally {
+      providerPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-session-end'
+      })
+      await settle()
+      server.close()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
     }
   })
 

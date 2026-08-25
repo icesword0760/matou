@@ -1,0 +1,27 @@
+{
+  "verifiedAt": "2026-08-25T15:54:43.789Z",
+  "root": "/private/tmp/matou-prd06-real-final-1787673208430",
+  "workspaceDirectory": "/private/tmp/matou-prd06-real-final-1787673208430/workspace",
+  "sourceSessionId": "8ec58588-99ca-4484-80f6-dd8b876804f8",
+  "forkSessionId": "760f5257-8ea9-4588-94a1-2d9cc3fc3a5c",
+  "sourceProviderSessionId": "7a292417-1561-47cc-9728-27d3fae98f0d",
+  "forkProviderSessionId": "21b87dc1-5f9d-4c7e-a4c2-5316fc1f645f",
+  "forkState": "succeeded",
+  "relation": {
+    "from_session_id": "760f5257-8ea9-4588-94a1-2d9cc3fc3a5c",
+    "to_session_id": "8ec58588-99ca-4484-80f6-dd8b876804f8",
+    "relation_kind": "forked-from"
+  },
+  "checks": {
+    "forkHiddenBeforeFirstPrompt": true,
+    "sourceConversationDurable": true,
+    "forkSurvivedStartupDeadline": true,
+    "forkLoadedSourceHistory": true,
+    "branchInputsIsolated": true,
+    "providerIdentitiesDistinct": true,
+    "restartRestoredBothConversations": true,
+    "postRestartForkInteractive": true,
+    "noForkFailureBanner": true,
+    "noHook404": true
+  }
+}

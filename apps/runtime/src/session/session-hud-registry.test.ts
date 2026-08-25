@@ -43,7 +43,7 @@ describe('PRD 02 authoritative Session HUD state', () => {
     expect(registry.snapshot('agent-1')).not.toHaveProperty('runningTools')
   })
 
-  it('parses Claude statusline fields while clamping only ring geometry at the UI boundary', () => {
+  it('parses Claude statusline fields without exposing Fork before durable identity confirmation', () => {
     const registry = new SessionHudRegistry()
     registry.spawn({ sessionId: 'agent-1', profile: 'claude-code', cwd: '/tmp/project', startedAt: 1 })
     registry.ingestProvider('agent-1', {
@@ -54,8 +54,11 @@ describe('PRD 02 authoritative Session HUD state', () => {
 
     expect(registry.snapshot('agent-1')).toMatchObject({
       mode: 'agent', cwd: '/tmp/new-project', model: 'Claude Sonnet 4.6',
-      modelStrategy: 'opusplan', contextPercent: 108, resumable: true
+      modelStrategy: 'opusplan', contextPercent: 108, resumable: false
     })
+
+    registry.markResumable('agent-1')
+    expect(registry.snapshot('agent-1')).toMatchObject({ resumable: true })
   })
 
   it('tracks running tools, last-two display data, todos, task state and subagents from hooks', () => {
