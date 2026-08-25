@@ -17,6 +17,7 @@ interface PtySessionOptions {
   dataRoot: string
   profile?: 'shell' | 'claude-code' | 'codex'
   providerSessionId?: string
+  forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
   env?: Record<string, string>
@@ -81,6 +82,7 @@ export class PtySession {
       ...(options.providerSessionId === undefined ? {} : {
         providerSessionId: options.providerSessionId
       }),
+      ...(options.forkSession === undefined ? {} : { forkSession: options.forkSession }),
       ...(options.permissionMode === undefined ? {} : {
         permissionMode: options.permissionMode
       }),

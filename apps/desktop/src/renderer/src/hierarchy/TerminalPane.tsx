@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { TerminalSurface } from '../terminal/TerminalSurface'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
@@ -18,13 +19,17 @@ export function TerminalPane(props: {
   pathValid?: boolean
   onActivate(sessionId: string): unknown
   onDelete(sessionId: string, confirmed?: boolean): unknown
+  resumable?: boolean
+  onFork?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
-    pathValid = true, workspaceId, sceneId, onActivate, onDelete, onDetach
+    pathValid = true, workspaceId, sceneId, resumable = false,
+    onActivate, onDelete, onFork, onDetach
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
   const flow = sessionDeleteFlow({
@@ -38,6 +43,8 @@ export function TerminalPane(props: {
     void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
   }
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
+  const canFork = session.kind === 'claude-code' && resumable && onFork !== undefined
+  const hasPaneMenu = canFork || onDetach !== undefined
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
     data-active={active} hidden={!visible} onPointerDown={() => {
       notificationStore.dismissSessionIndicator(session.id)
@@ -50,7 +57,12 @@ export function TerminalPane(props: {
           event.screenY >= window.screenY + window.outerHeight
         if (outside) void onDetach?.(session.id)
       }}>
-      <div className="pane-header-content"><strong className="pane-title">{session.title}</strong></div>
+      <div className="pane-header-content" onContextMenu={(event) => {
+        if (!hasPaneMenu) return
+        event.preventDefault()
+        event.stopPropagation()
+        setContextMenu({ x: event.clientX, y: event.clientY })
+      }}><strong className="pane-title">{session.title}</strong></div>
       <div className="terminal-pane-actions">
         <button className="pane-close" aria-label={`删除终端：${session.title}`} onClick={(event) => {
           event.stopPropagation()
@@ -78,6 +90,21 @@ export function TerminalPane(props: {
       onConfirm={() => setConfirmationOpen(false)} />}
     {confirmationOpen && flow.action !== 'hide-window' && <ConfirmationSequence steps={flow.steps}
       onCancel={() => setConfirmationOpen(false)} onComplete={() => remove(true)} />}
+    {contextMenu && createPortal(<>
+      <div className="detach-context-overlay" onClick={() => setContextMenu(null)}
+        onContextMenu={(event) => { event.preventDefault(); setContextMenu(null) }} />
+      <div className="detach-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}
+        onClick={(event) => event.stopPropagation()}>
+        {canFork && <button className="detach-menu-item" role="menuitem" onClick={() => {
+          setContextMenu(null)
+          void onFork?.(session.id)
+        }}>⑂ Fork 会话</button>}
+        {onDetach && <button className="detach-menu-item" role="menuitem" onClick={() => {
+          setContextMenu(null)
+          void onDetach(session.id)
+        }}>↗ 独立窗口</button>}
+      </div>
+    </>, document.body)}
   </section>
 }
 

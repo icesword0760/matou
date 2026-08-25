@@ -227,8 +227,10 @@ function HierarchyProduct({ projection, commands }: {
                         visible={scene.id === activeSceneId}
                         workspaceSessionCount={workspaceSessionCount}
                         taskName={task.title} sceneId={scene.id} pathValid={pathValid}
+                        resumable={projection.sessionHuds?.find(({ sessionId }) => sessionId === session.id)?.resumable === true}
                         {...(workspace ? { workspaceId: workspace.id } : {})}
                         onActivate={commands.activateSession} onDelete={commands.deleteSession}
+                        onFork={() => commands.forkSession(scene.id, session.id)}
                         {...(window.matouDesktop?.createDetachedTerminalWindow
                           ? { onDetach: async () => {
                               const sceneWindowId = crypto.randomUUID()
@@ -343,7 +345,7 @@ function createFixtureCommands(
     createWorkspace: NOOP, renameWorkspace: NOOP, removeWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     createScene: NOOP, renameScene: NOOP, reorderScene: NOOP, closeScene: NOOP,
-    splitSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP,
+    splitSession: NOOP, forkSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP,
     setPermissionMode: NOOP, setModel: NOOP
   }
 }

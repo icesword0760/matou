@@ -127,6 +127,10 @@ button { -webkit-app-region: no-drag; }
 .pane-close:hover { color: #fff; background: rgba(255,255,255,.1); }
 .terminal-pane > [role="status"] { padding: 7px 10px; color: #e4aa78; background: #2a1e17; font-size: 11px; }
 .terminal-pane .terminal-surface { flex: 1; min-height: 0; padding: 4px 8px; background: var(--kooky-terminal); }
+.detach-context-overlay { position: fixed; z-index: 9998; inset: 0; }
+.detach-context-menu { position: fixed; z-index: 9999; min-width: 140px; padding: 4px 0; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; background: rgba(20,25,35,.95); box-shadow: 0 4px 12px rgba(0,0,0,.3); backdrop-filter: blur(12px); }
+.detach-menu-item { display: block; box-sizing: border-box; width: 100%; padding: 6px 14px; border: 0; color: rgba(255,255,255,.85); background: transparent; cursor: pointer; font: 13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-align: left; white-space: nowrap; }
+.detach-menu-item:hover { background: rgba(255,255,255,.1); }
 .shortcut-bar { position: relative; z-index: 10; display: flex; flex: 0 0 38px; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; height: 38px; padding: 0 20px; overflow: visible; border-top: 1px solid var(--kooky-border); background: var(--kooky-chrome); user-select: none; transform: translateZ(0); backface-visibility: hidden; }
 .shortcut-bar .add-btn { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; color: #8c8c8c; background: #2b2b2c; cursor: pointer; font-size: 16px; line-height: 1; }
 .shortcut-bar .add-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.12); }

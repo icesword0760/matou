@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 
 import type {
@@ -217,6 +218,13 @@ export interface SplitSessionWorkflowInput {
   sceneId: string
   sourceSessionId: string
   direction: 'horizontal' | 'vertical'
+  now: number
+}
+
+export interface ForkSessionWorkflowInput {
+  windowId: string
+  sceneId: string
+  sourceSessionId: string
   now: number
 }
 
@@ -1135,6 +1143,153 @@ export class HierarchyApplicationService {
         aggregateType: 'scene', aggregateId: scene.id,
         workspaceId: task.workspace_id, taskId: task.id, sessionId: session.id,
         payload: { mountId: ids.mountId, sourceSessionId: source.id, direction: input.direction },
+        occurredAt: input.now
+      })
+      return readHierarchyResult(tx, input.windowId)
+    }).result
+  }
+
+  forkSession(
+    command: DomainCommandMetadata,
+    input: ForkSessionWorkflowInput
+  ): WorkspaceHierarchyResult {
+    const ids = createHierarchyIds()
+    const relationId = randomUUID()
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const scene = requireRow<SceneRow>(tx.get(
+        'SELECT * FROM scenes WHERE id = ? AND archived_at IS NULL', input.sceneId
+      ), 'Scene')
+      const source = requireRow<SessionRow>(tx.get(
+        `SELECT sessions.* FROM sessions
+         JOIN session_mounts ON session_mounts.session_id = sessions.id
+         WHERE sessions.id = ? AND session_mounts.scene_id = ? AND sessions.archived_at IS NULL`,
+        input.sourceSessionId, input.sceneId
+      ), 'Session')
+      const sourceMount = requireRow<MountRow>(tx.get(
+        `SELECT * FROM session_mounts
+         WHERE scene_id = ? AND session_id = ? ORDER BY created_at LIMIT 1`,
+        input.sceneId, input.sourceSessionId
+      ), 'SessionMount')
+      const sourceBinding = tx.get<{
+        provider_session_id: string
+      }>(
+        `SELECT provider_session_id FROM provider_bindings
+         WHERE session_id = ? AND provider = 'claude-code'
+           AND resume_state IN ('available', 'resumed')
+           AND validated_at IS NOT NULL AND invalidated_at IS NULL
+         ORDER BY validated_at DESC LIMIT 1`,
+        input.sourceSessionId
+      )
+      if (
+        source.kind !== 'claude-code' ||
+        sourceMount.scene_window_id !== null ||
+        !sourceBinding
+      ) {
+        throw new Error('only resumable Claude Sessions can be forked')
+      }
+      const sourceNode = requireRow<{
+        id: string; parent_node_id: string | null; ordinal: number
+      }>(tx.get(
+        'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?',
+        sourceMount.scene_node_id
+      ), 'SceneNode')
+      const task = requireRow<TaskRow>(tx.get(
+        'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', scene.task_id
+      ), 'Task')
+      assertWorkspacePathAvailable(tx, task.workspace_id)
+
+      tx.run(
+        `INSERT INTO scene_nodes (
+           id, scene_id, parent_node_id, kind, direction, ordinal, created_at
+         ) VALUES (?, ?, ?, 'split', 'horizontal', ?, ?)`,
+        ids.secondaryNodeId, input.sceneId, sourceNode.parent_node_id,
+        sourceNode.ordinal, input.now
+      )
+      tx.run(
+        `UPDATE scene_nodes
+         SET parent_node_id = ?, kind = 'mount', direction = NULL, ordinal = 0
+         WHERE id = ?`,
+        ids.secondaryNodeId, sourceNode.id
+      )
+      tx.run(
+        `INSERT INTO scene_nodes (
+           id, scene_id, parent_node_id, kind, ordinal, created_at
+         ) VALUES (?, ?, ?, 'mount', 1, ?)`,
+        ids.rootNodeId, input.sceneId, ids.secondaryNodeId, input.now
+      )
+      tx.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at, version
+         ) VALUES (?, ?, ?, 'claude-code', 'created', 'Claude', ?, ?, ?, ?, 1)`,
+        ids.sessionId, task.id, source.execution_context_id,
+        source.cwd, input.now, input.now, input.now
+      )
+      tx.run(
+        `INSERT INTO session_mounts (
+           id, scene_id, scene_node_id, session_id, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+        ids.mountId, input.sceneId, ids.rootNodeId, ids.sessionId, input.now
+      )
+      tx.run(
+        `UPDATE scenes SET root_node_id = CASE WHEN root_node_id = ? THEN ? ELSE root_node_id END,
+           layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
+        sourceNode.id, ids.secondaryNodeId, input.now, input.sceneId
+      )
+      tx.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'pending', ?)`,
+        ids.sessionId, source.id, sourceBinding.provider_session_id, input.now
+      )
+      const relationInsertion = tx.run(
+        `INSERT INTO session_relation_events (
+           event_id, relation_id, operation, task_id, from_session_id,
+           to_session_id, relation_kind, metadata_json, command_id, occurred_at
+         ) VALUES (?, ?, 'created', ?, ?, ?, 'forked-from', '{}', ?, ?)`,
+        `${command.commandId}:fork-relation-created`, relationId, task.id,
+        ids.sessionId, source.id, command.commandId, input.now
+      )
+      tx.run(
+        `INSERT INTO session_relations_current (
+           relation_id, task_id, from_session_id, to_session_id, relation_kind,
+           metadata_json, created_at, updated_at, source_event_sequence
+         ) VALUES (?, ?, ?, ?, 'forked-from', '{}', ?, ?, ?)`,
+        relationId, task.id, ids.sessionId, source.id, input.now, input.now,
+        Number(relationInsertion.lastInsertRowid)
+      )
+      activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
+      const session = mapSession(requireRow<SessionRow>(tx.get(
+        'SELECT * FROM sessions WHERE id = ?', ids.sessionId
+      ), 'Session'))
+      emit({
+        eventId: `${command.commandId}:session-created`, eventType: 'session.created',
+        aggregateType: 'session', aggregateId: session.id,
+        workspaceId: task.workspace_id, taskId: task.id, sessionId: session.id,
+        payload: session, occurredAt: input.now
+      })
+      emit({
+        eventId: `${command.commandId}:session-forked`, eventType: 'scene.session-forked',
+        aggregateType: 'scene', aggregateId: scene.id,
+        workspaceId: task.workspace_id, taskId: task.id, sessionId: session.id,
+        payload: {
+          mountId: ids.mountId, sourceSessionId: source.id,
+          direction: 'horizontal', relationId
+        },
+        occurredAt: input.now
+      })
+      emit({
+        eventId: `${command.commandId}:domain-relation-created`,
+        eventType: 'session-relation.created', aggregateType: 'session-relation',
+        aggregateId: relationId, workspaceId: task.workspace_id, taskId: task.id,
+        sessionId: session.id,
+        payload: {
+          id: relationId, taskId: task.id, fromSessionId: session.id,
+          toSessionId: source.id, kind: 'forked-from', metadata: {},
+          createdAt: input.now, updatedAt: input.now
+        },
         occurredAt: input.now
       })
       return readHierarchyResult(tx, input.windowId)

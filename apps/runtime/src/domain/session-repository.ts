@@ -338,6 +338,13 @@ export class SessionRepository {
         ),
         'ProviderBinding'
       ))
+      tx.run(
+        `UPDATE session_fork_intents
+         SET state = 'succeeded', error_message = NULL, completed_at = ?
+         WHERE session_id = ? AND state IN ('pending', 'starting')`,
+        input.now,
+        input.sessionId
+      )
       emitSessionEvent(
         emit,
         command.commandId,

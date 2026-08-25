@@ -109,6 +109,7 @@ export interface HierarchyCommands {
   reorderScene(sceneId: string, beforeSceneId?: string): unknown
   closeScene(sceneId: string, confirmed?: boolean): unknown
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
+  forkSession(sceneId: string, sessionId: string): unknown
   putGeometry(sceneId: string, ownerKey: string, layoutRevision: number, geometry: unknown): unknown
   activateSession(sessionId: string): unknown
   deleteSession(sessionId: string, confirmed?: boolean): unknown

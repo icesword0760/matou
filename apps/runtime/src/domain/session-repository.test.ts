@@ -141,6 +141,30 @@ describe('SessionRepository', () => {
     )).toEqual({ event_type: 'provider-binding.recorded' })
   })
 
+  it('settles a one-shot fork intent when the derived provider identity arrives', () => {
+    seedSession()
+    sessions.createSession(command('fork-source'), {
+      id: 'source-1', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at
+       ) VALUES (?, ?, 'claude-code', ?, 'starting', 2, 3)`,
+      'session-1', 'source-1', 'provider-source'
+    )
+
+    sessions.recordResumableProviderIdentity(command('fork-hook-identity'), {
+      id: 'binding-forked', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 4
+    })
+
+    expect(database.get(
+      'SELECT state, completed_at FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'succeeded', completed_at: 4 })
+  })
+
   it('refreshes the same hook identity without creating duplicates or losing metadata', () => {
     seedSession()
     sessions.recordResumableProviderIdentity(command('hook-first'), {

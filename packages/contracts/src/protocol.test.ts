@@ -132,6 +132,15 @@ describe('parseRendererMessage', () => {
     ]))
   })
 
+  it('allowlists the PRD 06 one-shot Session fork workflow', () => {
+    expect(RPC_METHODS).toContain('hierarchy.fork-session')
+    expect(parseRendererMessage({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'fork-1',
+      method: 'hierarchy.fork-session', capability: 'renderer',
+      deadlineAt: Date.now() + 1000, payload: {}
+    })).toMatchObject({ type: 'rpc.request', method: 'hierarchy.fork-session' })
+  })
+
   it('allowlists the PRD 04 permission-mode persistence workflow', () => {
     expect(RPC_METHODS).toContain('session.set-permission-mode')
     expect(parseRendererMessage({

@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/contracts'
 
-import { SegmentJournal } from './journal/segment-journal'
+import { SegmentJournal, readSessionFrames } from './journal/segment-journal'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import { RuntimeServer, type PortMessageEvent, type RuntimePort } from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
@@ -590,6 +590,191 @@ describe('RuntimeServer domain RPC', () => {
       else process.env.MATOU_CLAUDE_COMMAND = previousCommand
       if (previousArgumentFile === undefined) delete process.env.MATOU_TEST_ARGUMENT_FILE
       else process.env.MATOU_TEST_ARGUMENT_FILE = previousArgumentFile
+    }
+  })
+
+  it('consumes a fork launch exactly once and passes Claude the Kooky fork arguments', async () => {
+    const executable = join(root, 'provider-fork-fixture.sh')
+    const argumentFile = join(root, 'provider-fork-arguments.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    try {
+      registerSession(database, 'fork-source', 'claude-code')
+      registerSession(database, 'fork-derived', 'claude-code')
+      database.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
+        'fork-derived', 'fork-source', 'provider-source-42'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const forkPort = new MockPort()
+      const forkServer = new RuntimeServer(
+        forkPort, root, database, undefined, undefined, sessions,
+        undefined, undefined, { providerResumeTimeoutMs: 1_000 }
+      )
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-renderer'
+      })
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--resume', 'provider-source-42', '--fork-session'
+      ])
+      expect(database.get(
+        'SELECT state, started_at FROM session_fork_intents WHERE session_id = ?', 'fork-derived'
+      )).toMatchObject({ state: 'starting', started_at: expect.any(Number) })
+
+      new SessionRepository(database, new DomainTransactionManager(database))
+        .recordResumableProviderIdentity({
+          commandId: 'fork-derived-binding', commandType: 'provider-hook',
+          requestHash: 'fork-derived-binding'
+        }, {
+          id: 'fork-derived-binding', sessionId: 'fork-derived', provider: 'claude-code',
+          providerSessionId: 'provider-derived-43', metadata: {}, now: 2
+        })
+      await forkServer.refreshSessionHud('fork-derived')
+      await new Promise((resolve) => setTimeout(resolve, 1_100))
+      expect(sessions.has('fork-derived')).toBe(true)
+
+      forkPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'fork-derived'
+      })
+      await settle()
+      forkServer.close()
+
+      await writeFile(argumentFile, '')
+      const restoredRegistry = new RuntimeSessionRegistry()
+      const restoredPort = new MockPort()
+      const restoredServer = new RuntimeServer(
+        restoredPort, root, database, undefined, undefined, restoredRegistry
+      )
+      restoredPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-restored-renderer'
+      })
+      restoredPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--resume', 'provider-derived-43'
+      ])
+      restoredPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'fork-derived'
+      })
+      await settle()
+      restoredServer.close()
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
+  it('keeps a failed fork panel inert and never falls back to Shell or repeats the fork', async () => {
+    const executable = join(root, 'provider-fork-failure.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    try {
+      registerSession(database, 'fork-failure-source', 'claude-code')
+      registerSession(database, 'fork-failure-derived', 'claude-code')
+      database.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
+        'fork-failure-derived', 'fork-failure-source', 'missing-provider-42'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const forkPort = new MockPort()
+      new RuntimeServer(forkPort, root, database, undefined, undefined, sessions)
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-failure-renderer'
+      })
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-failure-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => database.get<{ state: string }>(
+        'SELECT state FROM session_fork_intents WHERE session_id = ?', 'fork-failure-derived'
+      )?.state === 'failed')
+      await waitUntil(() => terminalText(forkPort).includes('[Fork 未完成，请检查上方原因后重试]'))
+      expect(database.get(
+        'SELECT kind FROM sessions WHERE id = ?', 'fork-failure-derived'
+      )).toEqual({ kind: 'claude-code' })
+      expect(sessions.has('fork-failure-derived')).toBe(false)
+      expect(forkPort.sent.filter(({ type }) => type === 'terminal.exited')).toHaveLength(0)
+
+      await settle()
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-failure-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => forkPort.last('terminal.spawned')?.pid === 0)
+      const durableText = new TextDecoder().decode(Uint8Array.from(
+        (await readSessionFrames(root, 'fork-failure-derived'))
+          .filter((frame) => frame.kind === 'output')
+          .flatMap((frame) => [...frame.data])
+      ))
+      expect(durableText.match(/\[Fork 未完成，请检查上方原因后重试\]/g)).toHaveLength(1)
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('shows the Kooky fork failure banner when the fork process exits before producing output', async () => {
+    const executable = join(root, 'provider-fork-exit.sh')
+    await writeFile(executable, '#!/bin/sh\nexit 7\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    try {
+      registerSession(database, 'fork-exit-source', 'claude-code')
+      registerSession(database, 'fork-exit-derived', 'claude-code')
+      database.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
+        'fork-exit-derived', 'fork-exit-source', 'provider-source-exit'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const forkPort = new MockPort()
+      new RuntimeServer(forkPort, root, database, undefined, undefined, sessions)
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-exit-renderer'
+      })
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-exit-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => database.get<{ state: string }>(
+        'SELECT state FROM session_fork_intents WHERE session_id = ?', 'fork-exit-derived'
+      )?.state === 'failed')
+      await waitUntil(() => terminalText(forkPort).includes('[Fork 未完成，请检查上方原因后重试]'))
+      expect(database.get('SELECT kind FROM sessions WHERE id = ?', 'fork-exit-derived'))
+        .toEqual({ kind: 'claude-code' })
+      expect(forkPort.sent.filter(({ type }) => type === 'terminal.exited')).toHaveLength(0)
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
 

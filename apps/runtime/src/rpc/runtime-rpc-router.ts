@@ -255,6 +255,13 @@ export class RuntimeRpcRouter {
           ),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.fork-session':
+        return this.#hierarchy.forkSession(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.activate-session':
         return this.#hierarchy.activateSession({
           windowId: text(input.windowId, 'windowId'),

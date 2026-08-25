@@ -621,5 +621,25 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         WHERE id = NEW.id;
       END;
     `
+  },
+  {
+    version: 11,
+    name: 'prd-06-session-fork-intents',
+    sql: `
+      CREATE TABLE session_fork_intents (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+        source_session_id TEXT NOT NULL REFERENCES sessions(id),
+        source_provider TEXT NOT NULL CHECK (source_provider IN ('claude-code')),
+        source_provider_session_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'starting', 'succeeded', 'failed')),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER,
+        CHECK (source_session_id <> session_id)
+      ) STRICT;
+      CREATE INDEX session_fork_intents_source_idx
+      ON session_fork_intents(source_session_id, created_at);
+    `
   }
 ]

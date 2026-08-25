@@ -45,6 +45,7 @@ export class SessionHudRegistry {
     permissionMode?: string
     modelStrategy?: string
     model?: string
+    resumable?: boolean
   }): void {
     const previous = this.#states.get(input.sessionId)
     const mode = input.profile === 'shell' ? 'shell' : 'agent'
@@ -64,7 +65,7 @@ export class SessionHudRegistry {
         subagentCount: 0,
         runningTools: [],
         todos: [],
-        resumable: false
+        resumable: input.resumable ?? previous?.resumable ?? false
       } : {}),
       activeTools: new Map(),
       observedSubagents: new Set()

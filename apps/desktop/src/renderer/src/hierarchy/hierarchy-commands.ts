@@ -46,6 +46,9 @@ export function createHierarchyCommands(
     splitSession: (sceneId, sourceSessionId, direction) => command('hierarchy.split-session', {
       sceneId, sourceSessionId, direction
     }),
+    forkSession: (sceneId, sourceSessionId) => command('hierarchy.fork-session', {
+      sceneId, sourceSessionId
+    }),
     putGeometry: (sceneId, ownerKey, layoutRevision, geometry) => client.request('geometry.put', {
       sceneId, ownerKey, layoutRevision, geometry, now: Date.now()
     }),

@@ -80,6 +80,7 @@ export const RPC_METHODS = [
   'hierarchy.close-scene',
   'hierarchy.activate-scene',
   'hierarchy.split-session',
+  'hierarchy.fork-session',
   'hierarchy.activate-session',
   'hierarchy.delete-session',
   'hierarchy.replace-layout',

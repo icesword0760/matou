@@ -1,0 +1,18 @@
+{
+  "runnableVersion": {
+    "menuCount": 0,
+    "menuText": []
+  },
+  "sourceBaseline": {
+    "menuItems": [
+      "⑂ Fork 会话",
+      "↗ 独立窗口"
+    ],
+    "menuMinWidth": "140px",
+    "menuPadding": "4px 0",
+    "menuRadius": "6px",
+    "itemPadding": "6px 14px",
+    "itemFontSize": "13px"
+  },
+  "note": "Runnable Kooky temporarily returns an empty menu; accepted product baseline activates the dormant source interaction."
+}

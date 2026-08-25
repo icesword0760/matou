@@ -43,4 +43,19 @@ describe('PRD 04 provider launch plan', () => {
     expect(command.args).toEqual(process.platform === 'win32' ? [] : ['-l'])
     expect(command.resuming).toBe(false)
   })
+
+  it('forks Claude Code from the source identity instead of resuming it in place', () => {
+    expect(resolvePtyCommand({
+      profile: 'claude-code', executable: '/fixture/claude',
+      providerSessionId: 'claude-source-1', forkSession: true,
+      settingsPath: '/private/matou/settings.json'
+    })).toEqual({
+      file: '/fixture/claude',
+      args: [
+        '--settings', '/private/matou/settings.json',
+        '--resume', 'claude-source-1', '--fork-session'
+      ],
+      resuming: true
+    })
+  })
 })

@@ -42,6 +42,40 @@ describe('Terminal pane', () => {
     await user.click(screen.getByRole('button', { name: '我知道了' }))
     expect(onDelete).not.toHaveBeenCalled()
   })
+
+  it('matches the Kooky fork source by showing Fork and Detach together only for a resumable Claude pane', async () => {
+    const onFork = vi.fn()
+    const onDetach = vi.fn()
+    const user = userEvent.setup()
+    render(<TerminalPane {...fixture()} resumable onFork={onFork} onDetach={onDetach} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
+
+    expect(screen.getByText('⑂ Fork 会话')).toBeTruthy()
+    expect(screen.getByText('↗ 独立窗口')).toBeTruthy()
+    await user.click(screen.getByText('⑂ Fork 会话'))
+    expect(onFork).toHaveBeenCalledWith('session-1')
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
+    await user.click(screen.getByText('↗ 独立窗口'))
+    expect(onDetach).toHaveBeenCalledWith('session-1')
+  })
+
+  it.each([
+    ['Shell', { kind: 'shell' as const }, false],
+    ['identity-less Claude', { kind: 'claude-code' as const }, false],
+    ['team teammate', { kind: 'agent-team-member' as const }, true]
+  ])('does not expose Fork for %s', async (_label, sessionPatch, resumable) => {
+    const user = userEvent.setup()
+    const props = fixture()
+    render(<TerminalPane {...props} session={{ ...props.session, ...sessionPatch }}
+      resumable={resumable} onDetach={vi.fn()} onFork={vi.fn()} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
+
+    expect(screen.queryByText('⑂ Fork 会话')).toBeNull()
+    expect(screen.getByText('↗ 独立窗口')).toBeTruthy()
+  })
 })
 
 function fixture() {

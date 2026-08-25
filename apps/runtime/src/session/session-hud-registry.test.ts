@@ -3,6 +3,18 @@ import { describe, expect, it } from 'vitest'
 import { SessionHudRegistry } from './session-hud-registry'
 
 describe('PRD 02 authoritative Session HUD state', () => {
+  it('publishes an already validated restored identity as immediately forkable', () => {
+    const registry = new SessionHudRegistry()
+    registry.spawn({
+      sessionId: 'restored-agent', profile: 'claude-code',
+      cwd: '/tmp/project', resumable: true
+    })
+
+    expect(registry.snapshot('restored-agent')).toMatchObject({
+      mode: 'agent', resumable: true
+    })
+  })
+
   it('keeps independent state per Session and demotes an ended Agent to Shell without stale fields', () => {
     const registry = new SessionHudRegistry(() => 20_000)
     registry.spawn({

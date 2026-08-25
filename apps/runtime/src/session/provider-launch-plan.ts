@@ -2,6 +2,7 @@ export interface PtyCommandInput {
   profile: 'shell' | 'claude-code' | 'codex'
   executable: string
   providerSessionId?: string
+  forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
 }
@@ -18,6 +19,7 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     const settingsPath = input.settingsPath?.trim()
     const args = settingsPath ? ['--settings', settingsPath] : []
     if (identity) args.push('--resume', identity)
+    if (identity && input.forkSession) args.push('--fork-session')
     if (input.permissionMode === 'bypassPermissions') {
       args.push('--dangerously-skip-permissions')
     }

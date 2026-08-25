@@ -272,6 +272,128 @@ describe('HierarchyApplicationService Scene workflows', () => {
 })
 
 describe('HierarchyApplicationService Session workflows', () => {
+  it('creates a focused Claude fork immediately to the source right and persists its parent edge', () => {
+    const initial = bootstrap('session-fork-bootstrap')
+    markPathValid(initial.workspace!.id)
+    database.run(
+      "UPDATE sessions SET kind = 'claude-code', title = 'Claude', cwd = '/tmp/source-subdir' WHERE id = ?",
+      initial.session!.id
+    )
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at, invalidated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 11, 11, 11, NULL)`,
+      'binding-source', initial.session!.id, 'provider-source'
+    )
+
+    const forked = service.forkSession(command('session-fork'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+
+    expect(forked.session).toMatchObject({
+      taskId: initial.task!.id,
+      executionContextId: initial.executionContext!.id,
+      kind: 'claude-code', title: 'Claude', cwd: '/tmp/source-subdir'
+    })
+    expect(forked.navigation.sessionByScene[initial.scene!.id]).toBe(forked.session!.id)
+    expect(database.get(
+      `SELECT direction FROM scene_nodes
+       WHERE scene_id = ? AND kind = 'split' AND parent_node_id IS NULL`,
+      initial.scene!.id
+    )).toEqual({ direction: 'horizontal' })
+    expect(database.get(
+      `SELECT ordinal FROM scene_nodes
+       JOIN session_mounts ON session_mounts.scene_node_id = scene_nodes.id
+       WHERE session_mounts.session_id = ?`, forked.session!.id
+    )).toEqual({ ordinal: 1 })
+    expect(database.get(
+      `SELECT source_session_id, source_provider_session_id, state
+       FROM session_fork_intents WHERE session_id = ?`, forked.session!.id
+    )).toEqual({
+      source_session_id: initial.session!.id,
+      source_provider_session_id: 'provider-source',
+      state: 'pending'
+    })
+    expect(database.get(
+      `SELECT from_session_id, to_session_id, relation_kind
+       FROM session_relations_current WHERE from_session_id = ?`, forked.session!.id
+    )).toEqual({
+      from_session_id: forked.session!.id,
+      to_session_id: initial.session!.id,
+      relation_kind: 'forked-from'
+    })
+  })
+
+  it('rejects Shell, detached, team-member, and identity-less fork sources without changing layout', () => {
+    const initial = bootstrap('session-fork-ineligible-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const beforeNodes = database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM scene_nodes WHERE scene_id = ?', initial.scene!.id
+    )!.count
+
+    expect(() => service.forkSession(command('fork-shell'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })).toThrow('only resumable Claude Sessions can be forked')
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM scene_nodes WHERE scene_id = ?', initial.scene!.id
+    )!.count).toBe(beforeNodes)
+
+    database.run(
+      "UPDATE sessions SET kind = 'claude-code', title = 'Claude' WHERE id = ?",
+      initial.session!.id
+    )
+    expect(() => service.forkSession(command('fork-identity-less'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 21
+    })).toThrow('only resumable Claude Sessions can be forked')
+
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at, invalidated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 22, 22, 22, NULL)`,
+      'binding-ineligible-source', initial.session!.id, 'provider-ineligible-source'
+    )
+    database.run(
+      `INSERT INTO scene_windows (
+         id, scene_id, native_window_key, state, created_at, updated_at
+       ) VALUES ('detached-window', ?, 'detached-native-window', 'detached', 23, 23)`,
+      initial.scene!.id
+    )
+    database.run(
+      `UPDATE session_mounts SET scene_window_id = 'detached-window'
+       WHERE scene_id = ? AND session_id = ?`,
+      initial.scene!.id, initial.session!.id
+    )
+    expect(() => service.forkSession(command('fork-detached'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 23
+    })).toThrow('only resumable Claude Sessions can be forked')
+
+    database.run(
+      'UPDATE session_mounts SET scene_window_id = NULL WHERE scene_id = ? AND session_id = ?',
+      initial.scene!.id, initial.session!.id
+    )
+    database.run(
+      "UPDATE sessions SET kind = 'agent-team-member' WHERE id = ?",
+      initial.session!.id
+    )
+    expect(() => service.forkSession(command('fork-team-member'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 24
+    })).toThrow('only resumable Claude Sessions can be forked')
+
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM scene_nodes WHERE scene_id = ?', initial.scene!.id
+    )!.count).toBe(beforeNodes)
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM session_fork_intents'
+    )!.count).toBe(0)
+  })
+
   it('deletes a sibling mount while preserving the Scene', () => {
     const initial = bootstrap('session-sibling-bootstrap')
     markPathValid(initial.workspace!.id)
