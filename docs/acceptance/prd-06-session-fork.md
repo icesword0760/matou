@@ -4,7 +4,7 @@
 
 ## 1. 用户可获得的结果
 
-- 用户在已经形成恢复身份的 Claude 面板标题区右键，会同时看到 `⑂ Fork 会话` 与 `↗ 独立窗口`；Shell、刚启动且尚未形成身份的 Claude、团队队友和脱出窗口均隐藏 Fork。Shell 启动 Claude 后，面板标题先同步为 `Claude`，避免用户把入口误认为 Shell 能力；Claude 退出后恢复为 `Shell`。
+- 用户在已经形成恢复身份的 Claude 面板标题区右键，会同时看到 `⑂ Fork 会话` 与 `↗ 独立窗口`；Shell、刚启动且尚未形成身份的 Claude、团队队友和脱出窗口均隐藏 Fork。Shell 通过 `claude` 或用户已配置为 Claude 的 `cc` 别名启动后，面板标题先同步为 `Claude`，避免用户把入口误认为 Shell 能力；Claude 退出后恢复为 `Shell`。
 - 点击 Fork 后，新 Claude 面板立即出现在源面板正右侧并自动聚焦；源面板内容、进程、滚动与输入现场继续保留。
 - 新面板以源会话身份执行一次 `--resume SOURCE --fork-session`，继承点击时的完整上下文；获得自己的身份后，新旧面板各自收发、各自恢复。
 - 用户可以在派生面板上继续 Fork；每次都创建新的右侧面板和独立会话，不复用此前结果。
@@ -27,7 +27,7 @@
 | # | 用户场景 | 当前用户结果 | 权威证据 | 状态 |
 |---:|---|---|---|---|
 | 1 | 可恢复 Claude 面板右键 | 同时显示 Fork 与独立窗口，顺序和文案与 Kooky dormant UI 一致 | Electron 成功场景 + `fork-menu.png/json` | 通过 |
-| 2 | Shell 面板右键 | 标题显示 `Shell`，Fork 隐藏；进入 Claude 后标题切为 `Claude` | Runtime title transition + Electron PRD 02 / 06 | 通过 |
+| 2 | Shell 面板右键 | 标题显示 `Shell`，Fork 隐藏；通过 `claude` 或已配置的 `cc` 进入 Claude 后标题切为 `Claude` | Runtime title transition + Electron PRD 02 / 06 | 通过 |
 | 3 | Claude 尚未形成身份 | Fork 隐藏；Hook 报告身份后立即出现 | component eligibility + Electron 成功场景 | 通过 |
 | 4 | 团队队友面板右键 | Fork 隐藏 | component + application-service eligibility tests | 通过 |
 | 5 | 脱出窗口右键 | Fork 隐藏 | Electron 成功场景 detached assertion | 通过 |

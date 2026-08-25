@@ -14,6 +14,7 @@
 |---|---|---|---|---|
 | 主窗口可恢复 Claude 右键 | 菜单临时隐藏 | `⑂ Fork 会话`、`↗ 独立窗口` 并列 | 两项并列，顺序一致 | 激活已存在交互 |
 | Shell / Claude 类型表达 | Shell 面板标题来自 Shell；Claude 面板 fallback 使用 `claude ~/cwd` | `normalizePanelTitle()` 根据 `claudeActive/mode` 区分 | 面板进入 Claude 时标题为 `Claude`，退出时为 `Shell` | 类型语义一致；Matou 当前短标题更明确 |
+| Shell 内通过 `cc` 启动 Claude | Claude 状态上报后将 Shell 面板提升为 Claude | `updateAiStatus()` 以新 Claude 身份提升 `mode/claudeActive` | 仅当当前 Shell 将 `cc` 配置为 Claude 别名时接管启动，保留 bypass 权限并切换标题 | 一致；普通系统 `cc` 仍作为编译器命令执行 |
 | Shell 右键 | 菜单隐藏 | `canForkSession` 为 false | Fork 隐藏 | 一致 |
 | 身份尚未形成 | 菜单隐藏 | 缺少 `claudeSessionId` 时隐藏 | HUD `resumable=false` 时隐藏 | 一致 |
 | 团队队友 | 菜单隐藏 | `teamId/teamRole` 存在时隐藏 | `agent-team-member` 隐藏 | 一致 |

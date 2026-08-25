@@ -19,10 +19,13 @@ test.describe('PRD 06 session fork', () => {
     await mkdir(inputDirectory)
     await writeFile(provider, providerScript())
     await chmod(provider, 0o755)
+    await writeFile(join(fixture.rootDirectory, '.zshrc'), "alias cc='claude --dangerously-skip-permissions'\n")
     const environment = {
       MATOU_CLAUDE_COMMAND: provider,
       MATOU_PRD06_INVOCATIONS: invocationLog,
-      MATOU_PRD06_INPUT_DIR: inputDirectory
+      MATOU_PRD06_INPUT_DIR: inputDirectory,
+      SHELL: '/bin/zsh',
+      ZDOTDIR: fixture.rootDirectory
     }
     try {
       fixture = await restartMatou(fixture, { env: environment })
@@ -35,10 +38,12 @@ test.describe('PRD 06 session fork', () => {
       await expect(fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' })).toHaveCount(0)
       await expect(fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeVisible()
       await fixture.page.locator('.detach-context-overlay').click()
-      await terminalCommand(source, 'claude')
+      await terminalCommand(source, 'cc')
       await expect(source.locator('.xterm-rows')).toContainText('READY:provider-source-e2e')
 
       await expect(sourcePane.locator('.pane-title')).toHaveText('Claude')
+      await expect.poll(async () => (await invocationLines(invocationLog))[0]?.args)
+        .toContain('--dangerously-skip-permissions')
       await openPaneMenu(sourcePane)
       await expect(fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeVisible()
       await expect(fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeVisible()

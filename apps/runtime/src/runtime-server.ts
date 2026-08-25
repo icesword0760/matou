@@ -1247,7 +1247,8 @@ export class RuntimeServer {
     this.#shellInputBuffers.set(session.sessionId, next.buffer)
     if (!next.submitted) return false
     this.#shellInputBuffers.delete(session.sessionId)
-    if (!isInteractiveClaudeCommand(next.command)) return false
+    const launch = await resolveInteractiveClaudeLaunch(next.command)
+    if (!launch) return false
 
     const descriptor = this.#spawnDescriptors.get(session.sessionId)
     if (!descriptor || this.#sessions.get(session.sessionId) !== session) return false
@@ -1265,12 +1266,13 @@ export class RuntimeServer {
         requestHash: `shell-promote-agent:${session.sessionId}:${now}`
       }, session.sessionId, 'claude-code', now)
       const before = this.#hud.snapshot(session.sessionId)
+      this.#permissionOverrides.set(session.sessionId, launch.permissionMode)
       this.#hud.spawn({
         sessionId: session.sessionId,
         profile: 'claude-code',
         ...(before?.cwd ? { cwd: before.cwd } : {}),
         startedAt: before?.startedAt ?? now,
-        permissionMode: 'default',
+        permissionMode: launch.permissionMode,
         modelStrategy: 'opusplan'
       })
       this.publishSessionHud(session.sessionId)
@@ -1284,6 +1286,7 @@ export class RuntimeServer {
       return true
     } catch (error) {
       console.error(`[session.shell-promote-agent] ${errorMessage(error)}`)
+      this.#permissionOverrides.delete(session.sessionId)
       try {
         this.#sessionRepository.returnAgentToShell({
           commandId: `runtime-shell-promote-rollback-${session.sessionId}-${now}-${randomUUID()}`,
@@ -1421,6 +1424,41 @@ function updateShellInputBuffer(previous: string, data: string): {
   return { buffer, submitted, command }
 }
 
-function isInteractiveClaudeCommand(command: string): boolean {
-  return /^\s*claude\s*$/.test(command)
+async function resolveInteractiveClaudeLaunch(command: string): Promise<{
+  permissionMode: HudPermissionMode
+} | undefined> {
+  const normalized = command.trim().replace(/\s+/g, ' ')
+  if (normalized === 'claude') return { permissionMode: 'default' }
+  if (normalized === 'claude --dangerously-skip-permissions') {
+    return { permissionMode: 'bypassPermissions' }
+  }
+  if (normalized !== 'cc') return undefined
+  const alias = await configuredShellAlias('cc')
+  if (alias === 'claude') return { permissionMode: 'default' }
+  if (alias === 'claude --dangerously-skip-permissions') {
+    return { permissionMode: 'bypassPermissions' }
+  }
+  return undefined
+}
+
+async function configuredShellAlias(name: string): Promise<string | undefined> {
+  const shell = process.env.SHELL ?? (process.platform === 'win32' ? undefined : '/bin/zsh')
+  if (!shell) return undefined
+  try {
+    const { stdout } = await execFileAsync(shell, [
+      '-ic', 'alias "$1"', 'matou-alias', name
+    ], { timeout: 2_000, maxBuffer: 64 * 1024 })
+    const prefix = `${name}=`
+    const line = stdout.split('\n').map((value) => value.trim())
+      .find((value) => value.startsWith(prefix) || value.startsWith(`alias ${prefix}`))
+    if (!line) return undefined
+    const value = line.slice(line.indexOf('=') + 1).trim()
+    if ((value.startsWith("'") && value.endsWith("'")) ||
+        (value.startsWith('"') && value.endsWith('"'))) {
+      return value.slice(1, -1).trim().replace(/\s+/g, ' ')
+    }
+    return value.replace(/\\ /g, ' ').trim().replace(/\s+/g, ' ')
+  } catch {
+    return undefined
+  }
 }

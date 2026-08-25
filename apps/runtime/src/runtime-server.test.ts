@@ -998,7 +998,7 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
-  it('promotes a Shell panel to the full Agent HUD when the user runs claude', async () => {
+  it('promotes a Shell panel to bypass Claude when the user runs the cc alias', async () => {
     const executable = join(root, 'claude')
     const argumentFile = join(root, 'shell-promoted-provider-arguments.txt')
     await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nstty raw -echo\ncat\n')
@@ -1006,9 +1006,14 @@ describe('RuntimeServer domain RPC', () => {
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
     const previousPath = process.env.PATH
+    const previousShell = process.env.SHELL
+    const previousZdotdir = process.env.ZDOTDIR
+    await writeFile(join(root, '.zshrc'), "alias cc='claude --dangerously-skip-permissions'\n")
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
     process.env.PATH = `${root}:${previousPath ?? ''}`
+    process.env.SHELL = '/bin/zsh'
+    process.env.ZDOTDIR = root
     const sessions = new RuntimeSessionRegistry()
     const promotedPort = new MockPort()
     try {
@@ -1026,16 +1031,20 @@ describe('RuntimeServer domain RPC', () => {
 
       promotedPort.receive({
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
-        sessionId: 'shell-promoted-provider', data: 'claude\r'
+        sessionId: 'shell-promoted-provider', data: 'cc\r'
       })
 
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code')
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--dangerously-skip-permissions'
+      ])
       expect(database.get<{ kind: string; title: string }>(
         'SELECT kind, title FROM sessions WHERE id = ?', 'shell-promoted-provider'
       )).toEqual({ kind: 'claude-code', title: 'Claude' })
       expect(promotedPort.last('terminal.hud')).toMatchObject({
         sessionId: 'shell-promoted-provider', hud: {
-          mode: 'agent', permissionMode: 'default', modelStrategy: 'opusplan'
+          mode: 'agent', permissionMode: 'bypassPermissions', modelStrategy: 'opusplan'
         }
       })
       await waitUntil(() => terminalText(promotedPort).includes('\u001b[2J\u001b[3J\u001b[H'))
@@ -1049,6 +1058,8 @@ describe('RuntimeServer domain RPC', () => {
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
       restoreEnv('PATH', previousPath)
+      restoreEnv('SHELL', previousShell)
+      restoreEnv('ZDOTDIR', previousZdotdir)
     }
   })
 
