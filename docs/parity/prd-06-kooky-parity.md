@@ -13,6 +13,7 @@
 | 用户场景 | 可运行 Kooky | Kooky dormant 源码 | Matou 实际结果 | 差异结论 |
 |---|---|---|---|---|
 | 主窗口可恢复 Claude 右键 | 菜单临时隐藏 | `⑂ Fork 会话`、`↗ 独立窗口` 并列 | 两项并列，顺序一致 | 激活已存在交互 |
+| Shell / Claude 类型表达 | Shell 面板标题来自 Shell；Claude 面板 fallback 使用 `claude ~/cwd` | `normalizePanelTitle()` 根据 `claudeActive/mode` 区分 | 面板进入 Claude 时标题为 `Claude`，退出时为 `Shell` | 类型语义一致；Matou 当前短标题更明确 |
 | Shell 右键 | 菜单隐藏 | `canForkSession` 为 false | Fork 隐藏 | 一致 |
 | 身份尚未形成 | 菜单隐藏 | 缺少 `claudeSessionId` 时隐藏 | HUD `resumable=false` 时隐藏 | 一致 |
 | 团队队友 | 菜单隐藏 | `teamId/teamRole` 存在时隐藏 | `agent-team-member` 隐藏 | 一致 |

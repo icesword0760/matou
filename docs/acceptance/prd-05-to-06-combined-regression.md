@@ -30,7 +30,7 @@
 
 ## 3. 当前全量证据
 
-- 单元 / 集成：368 项通过，其中 Contracts 16、Domain 3、Desktop 102、Runtime 247。
+- 单元 / 集成：369 项通过，其中 Contracts 16、Domain 3、Desktop 102、Runtime 248。
 - Electron：34 个真实用户场景通过，覆盖 PRD 05、03、04、01、02、06 及 UtilityProcess → MessagePort → xterm 主链路。
 - 生产构建与全工作区 TypeScript 类型检查通过。
 - 每个 PRD 均保留独立验收文档、Kooky 对照矩阵和黑色 CLI 模块运行证据。

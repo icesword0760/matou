@@ -4,7 +4,7 @@
 
 ## 1. 用户可获得的结果
 
-- 用户在已经形成恢复身份的 Claude 面板标题区右键，会同时看到 `⑂ Fork 会话` 与 `↗ 独立窗口`；Shell、刚启动且尚未形成身份的 Claude、团队队友和脱出窗口均隐藏 Fork。
+- 用户在已经形成恢复身份的 Claude 面板标题区右键，会同时看到 `⑂ Fork 会话` 与 `↗ 独立窗口`；Shell、刚启动且尚未形成身份的 Claude、团队队友和脱出窗口均隐藏 Fork。Shell 启动 Claude 后，面板标题先同步为 `Claude`，避免用户把入口误认为 Shell 能力；Claude 退出后恢复为 `Shell`。
 - 点击 Fork 后，新 Claude 面板立即出现在源面板正右侧并自动聚焦；源面板内容、进程、滚动与输入现场继续保留。
 - 新面板以源会话身份执行一次 `--resume SOURCE --fork-session`，继承点击时的完整上下文；获得自己的身份后，新旧面板各自收发、各自恢复。
 - 用户可以在派生面板上继续 Fork；每次都创建新的右侧面板和独立会话，不复用此前结果。
@@ -27,7 +27,7 @@
 | # | 用户场景 | 当前用户结果 | 权威证据 | 状态 |
 |---:|---|---|---|---|
 | 1 | 可恢复 Claude 面板右键 | 同时显示 Fork 与独立窗口，顺序和文案与 Kooky dormant UI 一致 | Electron 成功场景 + `fork-menu.png/json` | 通过 |
-| 2 | Shell 面板右键 | Fork 隐藏 | `TerminalPane.test.tsx` | 通过 |
+| 2 | Shell 面板右键 | 标题显示 `Shell`，Fork 隐藏；进入 Claude 后标题切为 `Claude` | Runtime title transition + Electron PRD 02 / 06 | 通过 |
 | 3 | Claude 尚未形成身份 | Fork 隐藏；Hook 报告身份后立即出现 | component eligibility + Electron 成功场景 | 通过 |
 | 4 | 团队队友面板右键 | Fork 隐藏 | component + application-service eligibility tests | 通过 |
 | 5 | 脱出窗口右键 | Fork 隐藏 | Electron 成功场景 detached assertion | 通过 |
@@ -54,7 +54,7 @@
 
 - PRD 06 Electron 场景覆盖：入口显隐、菜单样式、右侧布局、自动聚焦、三会话连续派生、输入隔离、cwd / 归属、内部父边、重启不重放、关闭隔离、Detach 共存、失败可见与输入无效。
 - Runtime 覆盖：Kooky 精确启动参数、一次消费、派生身份结算、恢复只 resume、自身身份丢失时失败、进程快速退出、Journal 单次警示、HUD 恢复可派生。
-- 完整工作区自动化共 368 项通过：Contracts 16 项、Domain 3 项、Desktop 102 项、Runtime 247 项。
+- 完整工作区自动化共 369 项通过：Contracts 16 项、Domain 3 项、Desktop 102 项、Runtime 248 项。
 - 全量 Electron 回归 34 个用户场景通过，其中 PRD 06 新增 2 个端到端场景；类型检查与生产构建通过。
 - 运行证据：
   - `docs/acceptance/evidence/prd-06/kooky/runnable-menu-hidden.png`

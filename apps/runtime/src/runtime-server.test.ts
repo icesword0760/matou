@@ -1030,9 +1030,9 @@ describe('RuntimeServer domain RPC', () => {
       })
 
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code')
-      expect(database.get<{ kind: string }>(
-        'SELECT kind FROM sessions WHERE id = ?', 'shell-promoted-provider'
-      )).toEqual({ kind: 'claude-code' })
+      expect(database.get<{ kind: string; title: string }>(
+        'SELECT kind, title FROM sessions WHERE id = ?', 'shell-promoted-provider'
+      )).toEqual({ kind: 'claude-code', title: 'Claude' })
       expect(promotedPort.last('terminal.hud')).toMatchObject({
         sessionId: 'shell-promoted-provider', hud: {
           mode: 'agent', permissionMode: 'default', modelStrategy: 'opusplan'

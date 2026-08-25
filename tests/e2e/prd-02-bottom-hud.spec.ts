@@ -73,6 +73,8 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
     await terminalCommand(surface, 'claude')
 
     const hud = fixture.page.locator('.shortcut-bar .status-info')
+    await expect(fixture.page.locator('[data-testid="terminal-pane"]:visible .pane-title'))
+      .toHaveText('Claude')
     await expect(hud).toHaveAttribute('data-hud-mode', 'agent')
     await expect.poll(() => positivePid(surface)).not.toBe(shellPid)
     await expect(hud.getByRole('button', { name: /当前权限模式：Default/ })).toBeVisible()
@@ -126,6 +128,8 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
 
     await writeFile(exitFile, 'exit')
     await expect(hud).toHaveAttribute('data-hud-mode', 'shell')
+    await expect(fixture.page.locator('[data-testid="terminal-pane"]:visible .pane-title'))
+      .toHaveText('Shell')
     await expect(hud.getByRole('button', { name: /当前权限模式/ })).toHaveCount(0)
     await expect.poll(() => positivePid(surface)).not.toBe(beforeBypassPid)
   } finally {

@@ -550,7 +550,8 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell', updated_at = ?, last_activity_at = ?, version = version + 1
+         SET kind = 'shell', title = 'Shell', updated_at = ?, last_activity_at = ?,
+             version = version + 1
          WHERE id = ?`,
         now,
         now,
@@ -559,6 +560,7 @@ export class SessionRepository {
       const session = mapSession({
         ...before,
         kind: 'shell',
+        title: 'Shell',
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1
@@ -585,7 +587,8 @@ export class SessionRepository {
       if (before.archived_at !== null) throw new Error('archived Session cannot return to Shell')
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell', updated_at = ?, last_activity_at = ?, version = version + 1
+         SET kind = 'shell', title = 'Shell', updated_at = ?, last_activity_at = ?,
+             version = version + 1
          WHERE id = ?`,
         now,
         now,
@@ -594,6 +597,7 @@ export class SessionRepository {
       const session = mapSession({
         ...before,
         kind: 'shell',
+        title: 'Shell',
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1
@@ -615,11 +619,13 @@ export class SessionRepository {
         'Session'
       )
       if (before.archived_at !== null) throw new Error('archived Session cannot start an Agent')
+      const title = kind === 'claude-code' ? 'Claude' : 'Codex'
       tx.run(
         `UPDATE sessions
-         SET kind = ?, updated_at = ?, last_activity_at = ?, version = version + 1
+         SET kind = ?, title = ?, updated_at = ?, last_activity_at = ?, version = version + 1
          WHERE id = ?`,
         kind,
+        title,
         now,
         now,
         sessionId
@@ -627,6 +633,7 @@ export class SessionRepository {
       const session = mapSession({
         ...before,
         kind,
+        title,
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1

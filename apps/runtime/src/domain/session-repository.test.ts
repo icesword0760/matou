@@ -38,7 +38,7 @@ describe('SessionRepository', () => {
 
     sessions.returnAgentToShell(command('return-shell'), 'session-1', 4)
 
-    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell' })
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: 'Shell' })
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
       providerSessionId: 'provider-1', resumeState: 'available'
     })
@@ -53,7 +53,7 @@ describe('SessionRepository', () => {
     sessions.promoteShellToAgent(command('promote-agent'), 'shell-1', 'claude-code', 3)
 
     expect(sessions.getSession('shell-1')).toMatchObject({
-      id: 'shell-1', kind: 'claude-code', title: 'Shell'
+      id: 'shell-1', kind: 'claude-code', title: 'Claude'
     })
   })
 
@@ -283,7 +283,7 @@ describe('SessionRepository', () => {
       5
     )
 
-    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell' })
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: 'Shell' })
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
     expect(sessions.listProviderBindings('session-1')).toEqual([
       expect.objectContaining({

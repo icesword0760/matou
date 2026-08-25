@@ -641,5 +641,14 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX session_fork_intents_source_idx
       ON session_fork_intents(source_session_id, created_at);
     `
+  },
+  {
+    version: 12,
+    name: 'session-kind-display-titles',
+    sql: `
+      UPDATE sessions SET title = 'Shell' WHERE kind = 'shell';
+      UPDATE sessions SET title = 'Claude' WHERE kind = 'claude-code';
+      UPDATE sessions SET title = 'Codex' WHERE kind = 'codex';
+    `
   }
 ]
