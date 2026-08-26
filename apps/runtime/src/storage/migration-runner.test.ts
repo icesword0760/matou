@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
-    expect(result.currentVersion).toBe(12)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+    expect(result.currentVersion).toBe(13)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -98,7 +98,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 12,
+      currentVersion: 13,
       backupPath: undefined
     })
   })
@@ -118,7 +118,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[8]!,
       FOUNDATION_MIGRATIONS[9]!,
       FOUNDATION_MIGRATIONS[10]!,
-      FOUNDATION_MIGRATIONS[11]!
+      FOUNDATION_MIGRATIONS[11]!,
+      FOUNDATION_MIGRATIONS[12]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -139,7 +140,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 12')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 13')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -174,7 +175,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12])
+    expect(result.appliedVersions).toEqual([12, 13])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([

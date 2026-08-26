@@ -77,8 +77,8 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
       },
       input: {
         windowId,
-        defaultRootDirectory: queryValue('defaultRootDirectory') ?? '/tmp/matou_workspace',
-        defaultName: 'matou_workspace', now
+        defaultRootDirectory: queryValue('defaultRootDirectory') ?? '/tmp',
+        defaultName: queryValue('defaultName') ?? 'home', now
       }
     }).then(refresh).catch((error: unknown) => alive && setLoadError(errorMessage(error)))
     return () => { alive = false; unsubscribe() }
@@ -342,8 +342,10 @@ function createFixtureCommands(
       const snapshot = value.sceneSnapshots?.find(({ mounts }) => mounts.some((mount) => mount.sessionId === sessionId))
       if (snapshot) value.navigation.sessionByScene[snapshot.scene.id] = sessionId
     }),
-    createWorkspace: NOOP, renameWorkspace: NOOP, removeWorkspace: NOOP,
+    createWorkspace: NOOP, renameWorkspace: NOOP, relinkWorkspace: NOOP, removeWorkspace: NOOP,
+    setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
+    setTaskPinned: NOOP, reorderPinnedTask: NOOP,
     createScene: NOOP, renameScene: NOOP, reorderScene: NOOP, closeScene: NOOP,
     splitSession: NOOP, forkSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP,
     setPermissionMode: NOOP, setModel: NOOP

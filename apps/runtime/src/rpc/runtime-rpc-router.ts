@@ -142,6 +142,12 @@ export class RuntimeRpcRouter {
           name: text(input.name, 'name'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.relink-workspace':
+        return this.#hierarchy.relinkWorkspace(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          rootDirectory: text(input.rootDirectory, 'rootDirectory'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.remove-workspace':
         return this.#hierarchy.removeWorkspace(command, {
           windowId: text(input.windowId, 'windowId'),
@@ -155,6 +161,20 @@ export class RuntimeRpcRouter {
           workspaceId: text(input.workspaceId, 'workspaceId'),
           now: integer(input.now, 'now', 0)
         }))
+      case 'hierarchy.set-workspace-pinned':
+        return this.#hierarchy.setWorkspacePinned(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          pinned: flag(input.pinned, 'pinned'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.reorder-pinned-workspace':
+        return this.#hierarchy.reorderPinnedWorkspace(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          ...(optionalText(input.beforeWorkspaceId, 'beforeWorkspaceId') === undefined ? {} : {
+            beforeWorkspaceId: optionalText(input.beforeWorkspaceId, 'beforeWorkspaceId')!
+          }),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.validate-workspace-path':
         return this.#workspacePaths.validateWorkspace(
           text(input.workspaceId, 'workspaceId')
@@ -201,6 +221,21 @@ export class RuntimeRpcRouter {
         if (result.mount) this.#notifications.markPanelRead(result.mount.id)
         return result
       }
+      case 'hierarchy.set-task-pinned':
+        return this.#hierarchy.setTaskPinned(command, {
+          taskId: text(input.taskId, 'taskId'),
+          pinned: flag(input.pinned, 'pinned'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.reorder-pinned-task':
+        return this.#hierarchy.reorderPinnedTask(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          taskId: text(input.taskId, 'taskId'),
+          ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined ? {} : {
+            beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')!
+          }),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.create-scene':
         return this.#hierarchy.createScene(command, {
           windowId: text(input.windowId, 'windowId'),
@@ -560,6 +595,10 @@ function integer(value: unknown, label: string, minimum: number): number {
     throw new RpcFault('INVALID_REQUEST', `${label} must be an integer >= ${minimum}`)
   }
   return value as number
+}
+function flag(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') throw new RpcFault('INVALID_REQUEST', `${label} must be a boolean`)
+  return value
 }
 function enumeration<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] {
   if (typeof value !== 'string' || !values.includes(value)) {

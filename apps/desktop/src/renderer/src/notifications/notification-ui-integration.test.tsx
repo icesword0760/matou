@@ -48,8 +48,7 @@ describe('Kooky notification hierarchy interactions', () => {
     const target = commands()
     renderWithStore(<TaskSidebar projection={fixture()} commands={target} />, store)
 
-    await user.click(screen.getByRole('button', { name: '切换工作区' }))
-    await user.click(screen.getByRole('menuitem', { name: 'Backend' }))
+    await user.click(screen.getByRole('button', { name: 'Backend' }))
 
     expect(store.unreadForWorkspace('workspace-2')).toBe(0)
     expect(target.activateWorkspace).toHaveBeenCalledWith('workspace-2')
@@ -192,8 +191,10 @@ function fixture(): HierarchyProjection {
 
 function commands(): HierarchyCommands {
   return {
-    activateWorkspace: vi.fn(), createWorkspace: vi.fn(), renameWorkspace: vi.fn(), removeWorkspace: vi.fn(),
+    activateWorkspace: vi.fn(), createWorkspace: vi.fn(), renameWorkspace: vi.fn(), relinkWorkspace: vi.fn(), removeWorkspace: vi.fn(),
+    setWorkspacePinned: vi.fn(), reorderPinnedWorkspace: vi.fn(),
     activateTask: vi.fn(), createTask: vi.fn(), renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
+    setTaskPinned: vi.fn(), reorderPinnedTask: vi.fn(),
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(), reorderScene: vi.fn(), closeScene: vi.fn(),
     splitSession: vi.fn(), forkSession: vi.fn(), putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
     detachSession: vi.fn(), returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()

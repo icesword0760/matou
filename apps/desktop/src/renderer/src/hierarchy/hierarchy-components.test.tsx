@@ -9,6 +9,67 @@ import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
 
 describe('Workspace and Task navigation', () => {
   afterEach(cleanup)
+  it('renders all Workspaces as flat groups and creates a Task in the selected group', async () => {
+    const user = userEvent.setup()
+    const data = fixture()
+    data.workspaces.unshift({
+      id: 'workspace-home', name: 'icesword', rootDirectory: '/Users/icesword',
+      isDefault: true, isPinned: true, pinSortKey: 'a0', lastOpenedAt: 1
+    })
+    data.tasks.unshift({
+      id: 'task-home', workspaceId: 'workspace-home', title: '默认',
+      isPinned: false, lastOpenedAt: 1
+    })
+    const target = commands()
+    render(<TaskSidebar projection={data} commands={target} />)
+
+    expect(screen.getByRole('button', { name: '新增工作空间' })).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'icesword 工作空间' })).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Frontend 工作空间' })).toBeTruthy()
+    expect(screen.getAllByText('默认')).toHaveLength(2)
+    await user.click(screen.getByRole('button', { name: '在 icesword 中新增事项' }))
+    expect(target.createTask).toHaveBeenCalledWith('workspace-home')
+  })
+
+  it('shows pin actions and protects the default Workspace menu', async () => {
+    const user = userEvent.setup()
+    const data = fixture()
+    data.workspaces[0] = {
+      ...data.workspaces[0]!, isDefault: true, isPinned: true,
+      pinSortKey: 'a0', lastOpenedAt: 10
+    }
+    const target = commands()
+    render(<TaskSidebar projection={data} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '工作空间菜单：Frontend' }))
+    expect(screen.getByRole('menuitem', { name: '取消置顶' })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: '重命名' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '移出码头' })).toBeNull()
+    await user.click(screen.getByRole('menuitem', { name: '取消置顶' }))
+    expect(target.setWorkspacePinned).toHaveBeenCalledWith('workspace-1', false)
+  })
+
+  it('orders unpinned Workspaces and Tasks by recent user use without mixing pinned items', () => {
+    const data = fixture()
+    data.workspaces = [
+      { id: 'ws-old', name: 'Old', rootDirectory: '/old', lastOpenedAt: 10 },
+      { id: 'ws-pinned', name: 'Pinned', rootDirectory: '/pinned', isPinned: true, pinSortKey: 'a1', lastOpenedAt: 1 },
+      { id: 'ws-new', name: 'New', rootDirectory: '/new', lastOpenedAt: 30 }
+    ]
+    data.tasks = [
+      { id: 'old-task', workspaceId: 'ws-new', title: '较早', lastOpenedAt: 20 },
+      { id: 'pinned-task', workspaceId: 'ws-new', title: '置顶事项', isPinned: true, pinSortKey: 'a0', lastOpenedAt: 1 },
+      { id: 'new-task', workspaceId: 'ws-new', title: '刚使用', lastOpenedAt: 40 }
+    ]
+    data.navigation.activeWorkspaceId = 'ws-new'
+    data.navigation.taskByWorkspace = { 'ws-new': 'new-task' }
+    render(<TaskSidebar projection={data} commands={commands()} />)
+
+    expect(screen.getAllByTestId('workspace-group').map((node) => node.getAttribute('data-workspace-id')))
+      .toEqual(['ws-pinned', 'ws-new', 'ws-old'])
+    expect(screen.getAllByTestId(/^task-/).map((node) => node.getAttribute('data-testid')))
+      .toEqual(['task-pinned-task', 'task-new-task', 'task-old-task'])
+  })
   it('shows invalid Workspace state and preserves the path tail', () => {
     render(<WorkspaceSwitcher projection={fixture()} commands={commands()} />)
 
@@ -93,7 +154,9 @@ describe('Workspace and Task navigation', () => {
 
   it('matches Kooky drag-and-drop Task ordering', async () => {
     const target = commands()
-    render(<TaskSidebar projection={fixture()} commands={target} />)
+    const data = fixture()
+    data.tasks = data.tasks.map((task, index) => ({ ...task, isPinned: true, pinSortKey: `a${index}` }))
+    render(<TaskSidebar projection={data} commands={target} />)
 
     const source = screen.getByTestId('task-task-b')
     const destination = screen.getByTestId('task-task-a')
@@ -103,7 +166,7 @@ describe('Workspace and Task navigation', () => {
     fireEvent.dragOver(destination, { dataTransfer: transfer })
     expect(destination.classList.contains('drag-over')).toBe(true)
     fireEvent.drop(destination, { dataTransfer: transfer })
-    expect(target.reorderTask).toHaveBeenCalledWith('workspace-1', 'task-b', 'task-a')
+    expect(target.reorderPinnedTask).toHaveBeenCalledWith('workspace-1', 'task-b', 'task-a')
     expect(source.classList.contains('is-dragging')).toBe(false)
     expect(destination.classList.contains('drag-over')).toBe(false)
     expect(screen.getByTestId('active-task').textContent).toBe('事项 A')
@@ -170,9 +233,11 @@ function fixture(): HierarchyProjection {
 
 function commands(): HierarchyCommands {
   return {
-    activateWorkspace: vi.fn(), createWorkspace: vi.fn(), renameWorkspace: vi.fn(),
-    removeWorkspace: vi.fn(), activateTask: vi.fn(), createTask: vi.fn(),
+    activateWorkspace: vi.fn(), createWorkspace: vi.fn(), renameWorkspace: vi.fn(), relinkWorkspace: vi.fn(),
+    removeWorkspace: vi.fn(), setWorkspacePinned: vi.fn(), reorderPinnedWorkspace: vi.fn(),
+    activateTask: vi.fn(), createTask: vi.fn(),
     renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
+    setTaskPinned: vi.fn(), reorderPinnedTask: vi.fn(),
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
     reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn(), forkSession: vi.fn(),
     putGeometry: vi.fn(),

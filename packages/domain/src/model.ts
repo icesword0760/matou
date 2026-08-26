@@ -44,6 +44,10 @@ export interface Workspace {
   rootDirectory: string
   pathIdentity?: string
   taskOrder: TaskId[]
+  isDefault: boolean
+  isPinned: boolean
+  pinSortKey: string
+  lastOpenedAt: number
   archivedAt?: number
   createdAt: number
   updatedAt: number
@@ -60,6 +64,9 @@ export interface Task {
   status: TaskStatus
   executionContextId: ExecutionContextId
   sortKey: string
+  isPinned: boolean
+  pinSortKey: string
+  lastOpenedAt: number
   archivedAt?: number
   createdAt: number
   updatedAt: number

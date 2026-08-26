@@ -26,6 +26,10 @@ interface WorkspaceRow {
   root_directory: string
   path_identity: string | null
   task_order_json: string
+  is_default: number
+  is_pinned: number
+  pin_sort_key: string
+  last_opened_at: number
   created_at: number
   updated_at: number
   archived_at: number | null
@@ -40,6 +44,9 @@ interface TaskRow {
   status: Task['status']
   execution_context_id: string
   sort_key: string
+  is_pinned: number
+  pin_sort_key: string
+  last_opened_at: number
   created_at: number
   updated_at: number
   archived_at: number | null
@@ -111,6 +118,7 @@ export interface RenameWorkspaceInput {
   name: string
   now: number
 }
+export interface RelinkWorkspaceInput { workspaceId: string; rootDirectory: string; now: number }
 
 export interface RemoveWorkspaceInput {
   windowId: string
@@ -124,6 +132,11 @@ export interface ActivateWorkspaceInput {
   workspaceId: string
   now: number
 }
+
+export interface SetWorkspacePinnedInput { workspaceId: string; pinned: boolean; now: number }
+export interface ReorderPinnedWorkspaceInput { workspaceId: string; beforeWorkspaceId?: string; now: number }
+export interface SetTaskPinnedInput { taskId: string; pinned: boolean; now: number }
+export interface ReorderPinnedTaskInput { workspaceId: string; taskId: string; beforeTaskId?: string; now: number }
 
 export interface WorkspaceHierarchyResult {
   workspace: Workspace | null
@@ -261,8 +274,17 @@ export class HierarchyApplicationService {
     const ids = createHierarchyIds()
     return this.#transactions.execute(command, (context) => {
       registerWindow(context.tx, input.windowId, input.now)
-      let workspace = firstActiveWorkspace(context.tx)
-      if (!workspace && !readBootstrapFlag(context.tx, 'default-workspace-removed')) {
+      const activeBefore = context.tx.get<WorkspaceRow>(
+        `SELECT workspaces.* FROM window_navigation
+         JOIN workspaces ON workspaces.id = window_navigation.active_workspace_id
+         WHERE window_navigation.window_id = ? AND workspaces.archived_at IS NULL`,
+        input.windowId
+      )
+      let workspace = context.tx.get<WorkspaceRow>(
+        'SELECT * FROM workspaces WHERE root_directory = ? AND archived_at IS NULL LIMIT 1',
+        resolve(input.defaultRootDirectory)
+      )
+      if (!workspace) {
         const created = this.#createCompleteHierarchy(context, {
           ids,
           windowId: input.windowId,
@@ -270,7 +292,9 @@ export class HierarchyApplicationService {
           rootDirectory: input.defaultRootDirectory,
           taskTitle: '默认',
           commandId: command.commandId,
-          now: input.now
+          now: input.now,
+          isDefault: true,
+          isPinned: true
         })
         writeBootstrapFlag(
           context.tx,
@@ -278,11 +302,21 @@ export class HierarchyApplicationService {
           created.id,
           input.now
         )
-      } else if (workspace) {
-        activateWorkspaceInTransaction(context.tx, input.windowId, workspace.id, input.now)
+        workspace = context.tx.get<WorkspaceRow>('SELECT * FROM workspaces WHERE id = ?', created.id)
       } else {
-        clearWindowNavigation(context.tx, input.windowId, input.now)
+        context.tx.run(
+          `UPDATE workspaces SET is_default = 0, updated_at = ?, version = version + 1
+           WHERE is_default = 1 AND id <> ?`,
+          input.now, workspace.id
+        )
+        context.tx.run(
+          `UPDATE workspaces SET is_default = 1, updated_at = ?, version = version + 1 WHERE id = ?`,
+          input.now, workspace.id
+        )
       }
+      activateWorkspaceInTransaction(
+        context.tx, input.windowId, activeBefore?.id ?? workspace!.id, input.now
+      )
       return readHierarchyResult(context.tx, input.windowId)
     }).result
   }
@@ -303,6 +337,7 @@ export class HierarchyApplicationService {
       )
       if (existing) {
         activateWorkspaceInTransaction(context.tx, input.windowId, existing.id, input.now)
+        context.tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, existing.id)
       } else {
         this.#createCompleteHierarchy(context, {
           ids,
@@ -329,6 +364,7 @@ export class HierarchyApplicationService {
         input.workspaceId
       )
       if (!row) throw new Error(`Workspace ${input.workspaceId} does not exist`)
+      if (row.is_default === 1) throw new Error('默认工作空间名称跟随 macOS 用户目录')
       tx.run(
         `UPDATE workspaces
          SET name = ?, updated_at = ?, version = version + 1
@@ -356,6 +392,37 @@ export class HierarchyApplicationService {
     }).result
   }
 
+  relinkWorkspace(command: DomainCommandMetadata, input: RelinkWorkspaceInput): Workspace {
+    const rootDirectory = resolve(input.rootDirectory)
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const row = requireRow<WorkspaceRow>(tx.get(
+        'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL', input.workspaceId
+      ), 'Workspace')
+      if (row.is_default === 1) throw new Error('默认工作空间始终指向 macOS 用户目录')
+      const duplicate = tx.get<{ id: string }>(
+        'SELECT id FROM workspaces WHERE root_directory = ? AND archived_at IS NULL AND id <> ?',
+        rootDirectory, input.workspaceId
+      )
+      if (duplicate) throw new Error('该目录已经属于另一个工作空间')
+      tx.run(`UPDATE workspaces SET root_directory = ?, path_identity = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+        rootDirectory, `path:${rootDirectory}`, input.now, input.workspaceId)
+      tx.run('UPDATE execution_contexts SET cwd = ? WHERE workspace_id = ? AND archived_at IS NULL', rootDirectory, input.workspaceId)
+      tx.run(`UPDATE sessions SET cwd = ?, updated_at = ?, version = version + 1
+        WHERE task_id IN (SELECT id FROM tasks WHERE workspace_id = ?) AND archived_at IS NULL`,
+        rootDirectory, input.now, input.workspaceId)
+      tx.run(`UPDATE scenes SET name = ?, updated_at = ?
+        WHERE task_id IN (SELECT id FROM tasks WHERE workspace_id = ?) AND archived_at IS NULL AND title_pinned = 0`,
+        `Shell · ${rootDirectory}`, input.now, input.workspaceId)
+      tx.run('DELETE FROM workspace_path_state WHERE workspace_id = ?', input.workspaceId)
+      const workspace = mapWorkspace({ ...row, root_directory: rootDirectory, path_identity: `path:${rootDirectory}`,
+        updated_at: input.now, version: row.version + 1 })
+      emit({ eventId: `${command.commandId}:workspace-relinked`, eventType: 'workspace.relinked',
+        aggregateType: 'workspace', aggregateId: row.id, workspaceId: row.id,
+        payload: { rootDirectory, pathIdentity: `path:${rootDirectory}` }, occurredAt: input.now })
+      return workspace
+    }).result
+  }
+
   removeWorkspace(
     command: DomainCommandMetadata,
     input: RemoveWorkspaceInput
@@ -370,6 +437,7 @@ export class HierarchyApplicationService {
         input.workspaceId
       )
       if (!workspace) throw new Error(`Workspace ${input.workspaceId} does not exist`)
+      if (workspace.is_default === 1) throw new Error('默认工作空间会保留在侧栏中')
       const disposedSessionIds = tx.all<{ id: string }>(
         `SELECT sessions.id FROM sessions
          JOIN tasks ON tasks.id = sessions.task_id
@@ -471,8 +539,48 @@ export class HierarchyApplicationService {
       )
       if (!workspace) throw new Error(`Workspace ${input.workspaceId} does not exist`)
       activateWorkspaceInTransaction(tx, input.windowId, input.workspaceId, input.now)
+      tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, input.workspaceId)
+      const taskId = tx.get<{ active_task_id: string | null }>(
+        'SELECT active_task_id FROM window_workspace_focus WHERE window_id = ? AND workspace_id = ?',
+        input.windowId, input.workspaceId
+      )?.active_task_id
+      if (taskId) tx.run('UPDATE tasks SET last_opened_at = ? WHERE id = ?', input.now, taskId)
       return readHierarchyResult(tx, input.windowId)
     })
+  }
+
+  setWorkspacePinned(command: DomainCommandMetadata, input: SetWorkspacePinnedInput): Workspace {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const row = requireRow<WorkspaceRow>(tx.get(
+        'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL', input.workspaceId
+      ), 'Workspace')
+      const nextKey = input.pinned ? nextPinnedKey(tx, 'workspaces') : ''
+      tx.run(`UPDATE workspaces SET is_pinned = ?, pin_sort_key = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+        input.pinned ? 1 : 0, nextKey, input.now, input.workspaceId)
+      const workspace = mapWorkspace({ ...row, is_pinned: input.pinned ? 1 : 0,
+        pin_sort_key: nextKey, updated_at: input.now, version: row.version + 1 })
+      emit({ eventId: `${command.commandId}:workspace-pinned`, eventType: 'workspace.pin-changed',
+        aggregateType: 'workspace', aggregateId: row.id, workspaceId: row.id,
+        payload: { isPinned: input.pinned, pinSortKey: nextKey }, occurredAt: input.now })
+      return workspace
+    }).result
+  }
+
+  reorderPinnedWorkspace(command: DomainCommandMetadata, input: ReorderPinnedWorkspaceInput): Workspace[] {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const rows = tx.all<WorkspaceRow>(
+        `SELECT * FROM workspaces WHERE archived_at IS NULL AND is_pinned = 1 ORDER BY pin_sort_key, id`
+      )
+      const order = moveBefore(rows.map(({ id }) => id), input.workspaceId, input.beforeWorkspaceId)
+      order.forEach((id, index) => tx.run(
+        'UPDATE workspaces SET pin_sort_key = ?, updated_at = ?, version = version + 1 WHERE id = ?',
+        sortKey(index), input.now, id
+      ))
+      emit({ eventId: `${command.commandId}:workspace-pin-order`, eventType: 'workspace.pin-order-changed',
+        aggregateType: 'workspace-navigation', aggregateId: 'global',
+        payload: { workspaceIds: order }, occurredAt: input.now })
+      return order.map((id) => mapWorkspace(requireRow<WorkspaceRow>(tx.get('SELECT * FROM workspaces WHERE id = ?', id), 'Workspace')))
+    }).result
   }
 
   createTask(
@@ -762,8 +870,44 @@ export class HierarchyApplicationService {
     return this.#database.transaction((tx) => {
       registerWindow(tx, input.windowId, input.now)
       activateTaskInTransaction(tx, input.windowId, input.taskId, input.now)
+      const task = requireRow<TaskRow>(tx.get('SELECT * FROM tasks WHERE id = ?', input.taskId), 'Task')
+      tx.run('UPDATE tasks SET last_opened_at = ? WHERE id = ?', input.now, input.taskId)
+      tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, task.workspace_id)
       return readHierarchyResult(tx, input.windowId)
     })
+  }
+
+  setTaskPinned(command: DomainCommandMetadata, input: SetTaskPinnedInput): Task {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const row = requireRow<TaskRow>(tx.get('SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', input.taskId), 'Task')
+      const nextKey = input.pinned ? nextPinnedKey(tx, 'tasks', row.workspace_id) : ''
+      tx.run(`UPDATE tasks SET is_pinned = ?, pin_sort_key = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+        input.pinned ? 1 : 0, nextKey, input.now, input.taskId)
+      const task = mapTask({ ...row, is_pinned: input.pinned ? 1 : 0, pin_sort_key: nextKey,
+        updated_at: input.now, version: row.version + 1 })
+      emit({ eventId: `${command.commandId}:task-pinned`, eventType: 'task.pin-changed', aggregateType: 'task',
+        aggregateId: row.id, workspaceId: row.workspace_id, taskId: row.id,
+        payload: { isPinned: input.pinned, pinSortKey: nextKey }, occurredAt: input.now })
+      return task
+    }).result
+  }
+
+  reorderPinnedTask(command: DomainCommandMetadata, input: ReorderPinnedTaskInput): Task[] {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const rows = tx.all<TaskRow>(
+        `SELECT * FROM tasks WHERE workspace_id = ? AND archived_at IS NULL AND is_pinned = 1 ORDER BY pin_sort_key, id`,
+        input.workspaceId
+      )
+      const order = moveBefore(rows.map(({ id }) => id), input.taskId, input.beforeTaskId)
+      order.forEach((id, index) => tx.run(
+        'UPDATE tasks SET pin_sort_key = ?, updated_at = ?, version = version + 1 WHERE id = ?',
+        sortKey(index), input.now, id
+      ))
+      emit({ eventId: `${command.commandId}:task-pin-order`, eventType: 'task.pin-order-changed',
+        aggregateType: 'workspace', aggregateId: input.workspaceId, workspaceId: input.workspaceId,
+        payload: { taskIds: order }, occurredAt: input.now })
+      return order.map((id) => mapTask(requireRow<TaskRow>(tx.get('SELECT * FROM tasks WHERE id = ?', id), 'Task')))
+    }).result
   }
 
   createScene(
@@ -1415,6 +1559,8 @@ export class HierarchyApplicationService {
       taskTitle: string
       commandId: string
       now: number
+      isDefault?: boolean
+      isPinned?: boolean
     }
   ): Workspace {
     const { tx, emit } = context
@@ -1425,14 +1571,18 @@ export class HierarchyApplicationService {
     tx.run(
       `INSERT INTO workspaces (
          id, name, root_directory, path_identity, task_order_json,
-         created_at, updated_at, version
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 2)`,
+         created_at, updated_at, version, is_default, is_pinned, pin_sort_key, last_opened_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?)`,
       ids.workspaceId,
       name,
       rootDirectory,
       `path:${rootDirectory}`,
       JSON.stringify([ids.taskId]),
       input.now,
+      input.now,
+      input.isDefault ? 1 : 0,
+      input.isPinned ? 1 : 0,
+      input.isPinned ? 'a0' : '',
       input.now
     )
     tx.run(
@@ -1446,12 +1596,13 @@ export class HierarchyApplicationService {
     tx.run(
       `INSERT INTO tasks (
          id, workspace_id, execution_context_id, title, status, sort_key,
-         created_at, updated_at, version
-       ) VALUES (?, ?, ?, ?, 'active', 'a0', ?, ?, 1)`,
+         created_at, updated_at, version, last_opened_at
+       ) VALUES (?, ?, ?, ?, 'active', 'a0', ?, ?, 1, ?)`,
       ids.taskId,
       ids.workspaceId,
       ids.executionContextId,
       input.taskTitle,
+      input.now,
       input.now,
       input.now
     )
@@ -1569,13 +1720,14 @@ export class HierarchyApplicationService {
     tx.run(
       `INSERT INTO tasks (
          id, workspace_id, execution_context_id, title, status, sort_key,
-         created_at, updated_at, version
-       ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 1)`,
+         created_at, updated_at, version, last_opened_at
+       ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 1, ?)`,
       ids.taskId,
       input.workspace.id,
       ids.executionContextId,
       requiredTrimmed(input.title, 'Task title'),
       sortKey(ordinal),
+      input.now,
       input.now,
       input.now
     )
@@ -1629,9 +1781,10 @@ export class HierarchyApplicationService {
       input.now
     )
     tx.run(
-      `UPDATE workspaces SET task_order_json = ?, updated_at = ?, version = version + 1
+      `UPDATE workspaces SET task_order_json = ?, last_opened_at = ?, updated_at = ?, version = version + 1
        WHERE id = ?`,
       JSON.stringify(activeOrder),
+      input.now,
       input.now,
       input.workspace.id
     )
@@ -2107,8 +2260,39 @@ function readNavigation(tx: DatabaseTransaction, windowId: string): WindowNaviga
 
 function firstActiveWorkspace(tx: DatabaseTransaction): WorkspaceRow | undefined {
   return tx.get<WorkspaceRow>(
-    'SELECT * FROM workspaces WHERE archived_at IS NULL ORDER BY created_at, id LIMIT 1'
+    `SELECT * FROM workspaces WHERE archived_at IS NULL
+     ORDER BY is_pinned DESC,
+       CASE WHEN is_pinned = 1 THEN pin_sort_key END,
+       CASE WHEN is_pinned = 0 THEN last_opened_at END DESC,
+       created_at DESC, id LIMIT 1`
   )
+}
+
+function nextPinnedKey(
+  tx: DatabaseTransaction,
+  table: 'workspaces' | 'tasks',
+  workspaceId?: string
+): string {
+  const count = table === 'tasks'
+    ? tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM tasks WHERE workspace_id = ? AND archived_at IS NULL AND is_pinned = 1`,
+        workspaceId!
+      )?.count ?? 0
+    : tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM workspaces WHERE archived_at IS NULL AND is_pinned = 1`
+      )?.count ?? 0
+  return sortKey(count)
+}
+
+function moveBefore(order: string[], sourceId: string, beforeId?: string): string[] {
+  if (!order.includes(sourceId)) throw new Error('Pinned item is outside the requested group')
+  if (beforeId !== undefined && !order.includes(beforeId)) {
+    throw new Error('Pinned destination is outside the requested group')
+  }
+  const next = order.filter((id) => id !== sourceId)
+  const target = beforeId === undefined ? next.length : next.indexOf(beforeId)
+  next.splice(target, 0, sourceId)
+  return next
 }
 
 function writeBootstrapFlag(
@@ -2146,6 +2330,10 @@ function mapWorkspace(row: WorkspaceRow): Workspace {
     rootDirectory: row.root_directory,
     ...(row.path_identity === null ? {} : { pathIdentity: row.path_identity }),
     taskOrder: parseStringArray(row.task_order_json),
+    isDefault: row.is_default === 1,
+    isPinned: row.is_pinned === 1,
+    pinSortKey: row.pin_sort_key,
+    lastOpenedAt: row.last_opened_at,
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -2162,6 +2350,9 @@ function mapTask(row: TaskRow): Task {
     status: row.status,
     executionContextId: row.execution_context_id,
     sortKey: row.sort_key,
+    isPinned: row.is_pinned === 1,
+    pinSortKey: row.pin_sort_key,
+    lastOpenedAt: row.last_opened_at,
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

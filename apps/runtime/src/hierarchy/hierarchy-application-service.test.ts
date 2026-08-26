@@ -83,7 +83,7 @@ describe('HierarchyApplicationService Workspace workflows', () => {
     expect(database.get<{ count: number }>('SELECT COUNT(*) AS count FROM workspaces')?.count).toBe(1)
   })
 
-  it('records explicit default removal, preserves the disk directory, and does not recreate it', async () => {
+  it('keeps the home Workspace as the protected system default', async () => {
     const initial = await service.bootstrapWindow(command('bootstrap-1'), {
       windowId: 'window-1',
       defaultRootDirectory: workspaceRoot,
@@ -92,25 +92,44 @@ describe('HierarchyApplicationService Workspace workflows', () => {
     })
     const workspaceId = initial.workspace!.id
 
-    const removed = await service.removeWorkspace(command('remove-1'), {
+    expect(initial.workspace).toMatchObject({
+      name: 'matou_workspace', isDefault: true, isPinned: true, lastOpenedAt: 10
+    })
+    expect(() => service.renameWorkspace(command('rename-default'), {
+      workspaceId, name: 'Renamed', now: 19
+    })).toThrow('默认工作空间名称跟随 macOS 用户目录')
+    expect(() => service.removeWorkspace(command('remove-1'), {
       windowId: 'window-1',
       workspaceId,
       confirmedIntent: `remove-workspace:${workspaceId}`,
       now: 20
-    })
-
-    expect(removed.workspace).toBeNull()
-    expect(removed.disposedSessionIds).toEqual([initial.session!.id])
+    })).toThrow('默认工作空间会保留在侧栏中')
+    expect(() => service.relinkWorkspace(command('relink-default'), {
+      workspaceId, rootDirectory: join(testRoot, 'other'), now: 21
+    })).toThrow('默认工作空间始终指向 macOS 用户目录')
     await expect(access(workspaceRoot)).resolves.toBeUndefined()
-    expect(readBootstrapFlag('default-workspace-removed')).toBe(true)
+  })
 
-    const next = await service.bootstrapWindow(command('bootstrap-2'), {
-      windowId: 'window-1',
-      defaultRootDirectory: workspaceRoot,
-      defaultName: 'matou_workspace',
-      now: 30
+  it('adds the home default even when custom Workspaces already exist', async () => {
+    const customRoot = join(testRoot, 'custom')
+    await mkdir(customRoot)
+    const custom = await service.createWorkspace(command('custom-first'), {
+      windowId: 'window-1', name: 'Custom', rootDirectory: customRoot, now: 5
     })
-    expect(next.workspace).toBeNull()
+
+    const bootstrapped = await service.bootstrapWindow(command('bootstrap-home'), {
+      windowId: 'window-1', defaultRootDirectory: workspaceRoot,
+      defaultName: 'icesword', now: 10
+    })
+
+    const rows = database.all<{ root_directory: string; is_default: number }>(
+      'SELECT root_directory, is_default FROM workspaces ORDER BY created_at'
+    )
+    expect(rows).toEqual([
+      { root_directory: custom.workspace!.rootDirectory, is_default: 0 },
+      { root_directory: workspaceRoot, is_default: 1 }
+    ])
+    expect(bootstrapped.navigation.activeWorkspaceId).toBe(custom.workspace!.id)
   })
 
   it('renames and activates an existing Workspace without changing its hierarchy', async () => {
@@ -127,10 +146,119 @@ describe('HierarchyApplicationService Workspace workflows', () => {
     expect(renamed.name).toBe('Renamed')
     expect(activated.navigation.activeWorkspaceId).toBe(renamed.id)
     expect(activated.task?.id).toBe(first.task?.id)
+    expect(activated.workspace?.lastOpenedAt).toBe(12)
+  })
+
+  it('relinks an invalid Workspace while keeping its Tasks and sessions', async () => {
+    const initial = await service.createWorkspace(command('relink-create'), {
+      windowId: 'window-1', name: 'Moved', rootDirectory: workspaceRoot, now: 10
+    })
+    const replacement = join(testRoot, 'replacement')
+    await mkdir(replacement)
+    const relinked = await service.relinkWorkspace(command('relink-workspace'), {
+      workspaceId: initial.workspace!.id, rootDirectory: replacement, now: 20
+    })
+
+    expect(relinked.rootDirectory).toBe(replacement)
+    expect(database.get<{ cwd: string }>(
+      'SELECT cwd FROM execution_contexts WHERE id = ?', initial.executionContext!.id
+    )?.cwd).toBe(replacement)
+    expect(database.get<{ cwd: string }>(
+      'SELECT cwd FROM sessions WHERE id = ?', initial.session!.id
+    )?.cwd).toBe(replacement)
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM tasks WHERE workspace_id = ? AND archived_at IS NULL',
+      initial.workspace!.id
+    )?.count).toBe(1)
+  })
+
+  it('pins Workspaces and reorders only the pinned group', async () => {
+    const roots = await Promise.all(['one', 'two', 'three'].map(async (name) => {
+      const root = join(testRoot, name); await mkdir(root); return root
+    }))
+    const one = await service.createWorkspace(command('create-one'), {
+      windowId: 'window-1', name: 'One', rootDirectory: roots[0]!, now: 10
+    })
+    const two = await service.createWorkspace(command('create-two'), {
+      windowId: 'window-1', name: 'Two', rootDirectory: roots[1]!, now: 20
+    })
+    const three = await service.createWorkspace(command('create-three'), {
+      windowId: 'window-1', name: 'Three', rootDirectory: roots[2]!, now: 30
+    })
+    await service.setWorkspacePinned(command('pin-one'), {
+      workspaceId: one.workspace!.id, pinned: true, now: 40
+    })
+    await service.setWorkspacePinned(command('pin-three'), {
+      workspaceId: three.workspace!.id, pinned: true, now: 41
+    })
+    await service.reorderPinnedWorkspace(command('reorder-pinned-workspace'), {
+      workspaceId: three.workspace!.id, beforeWorkspaceId: one.workspace!.id, now: 42
+    })
+
+    const pinned = database.all<{ id: string }>(
+      `SELECT id FROM workspaces WHERE is_pinned = 1 ORDER BY pin_sort_key, id`
+    ).map(({ id }) => id)
+    expect(pinned).toEqual([three.workspace!.id, one.workspace!.id])
+    expect(database.get<{ is_pinned: number }>(
+      'SELECT is_pinned FROM workspaces WHERE id = ?', two.workspace!.id
+    )?.is_pinned).toBe(0)
   })
 })
 
 describe('HierarchyApplicationService Task workflows', () => {
+  it('updates Task recency only when the user activates it', async () => {
+    const initial = await bootstrap('recency-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const other = await service.createTask(command('recency-other'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 20
+    })
+    await service.activateTask({ windowId: 'window-1', taskId: initial.task!.id, now: 30 })
+
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', initial.task!.id
+    )?.last_opened_at).toBe(30)
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', other.task!.id
+    )?.last_opened_at).toBe(20)
+  })
+
+  it('pins Tasks and reorders only pinned Tasks inside their Workspace', async () => {
+    const initial = await bootstrap('pin-task-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const second = await service.createTask(command('pin-task-second'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 20
+    })
+    const third = await service.createTask(command('pin-task-third'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 30
+    })
+    expect(new Set([initial.task!.id, second.task!.id, third.task!.id]).size).toBe(3)
+    await service.setTaskPinned(command('pin-task-first'), {
+      taskId: initial.task!.id, pinned: true, now: 40
+    })
+    await service.setTaskPinned(command('pin-task-third-action'), {
+      taskId: third.task!.id, pinned: true, now: 41
+    })
+    expect(database.all<{ id: string; is_pinned: number }>(
+      'SELECT id, is_pinned FROM tasks WHERE workspace_id = ? ORDER BY created_at',
+      initial.workspace!.id
+    )).toEqual(expect.arrayContaining([
+      { id: initial.task!.id, is_pinned: 1 },
+      { id: third.task!.id, is_pinned: 1 }
+    ]))
+    await service.reorderPinnedTask(command('reorder-pinned-task'), {
+      workspaceId: initial.workspace!.id, taskId: third.task!.id,
+      beforeTaskId: initial.task!.id, now: 42
+    })
+
+    const pinned = database.all<{ id: string }>(
+      `SELECT id FROM tasks WHERE workspace_id = ? AND is_pinned = 1 ORDER BY pin_sort_key, id`,
+      initial.workspace!.id
+    ).map(({ id }) => id)
+    expect(pinned).toEqual([third.task!.id, initial.task!.id])
+    expect(database.get<{ is_pinned: number }>(
+      'SELECT is_pinned FROM tasks WHERE id = ?', second.task!.id
+    )?.is_pinned).toBe(0)
+  })
   it('chooses the lowest available user Task name and preserves explicit order', async () => {
     const initial = await bootstrap('task-bootstrap')
     markPathValid(initial.workspace!.id)

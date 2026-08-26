@@ -14,7 +14,7 @@ test('preserves the work scene while the directory is missing and resumes after 
     await expect(page.getByText('路径失效')).toBeVisible({ timeout: 10_000 })
     await expect(page.getByText('工作区目录不可用，请先在本地恢复原路径，或移出该工作区')).toBeVisible()
     await expect(page.getByTestId('terminal-pane')).toHaveCount(1)
-    await expect(page.getByRole('button', { name: '事项', exact: true })).toBeDisabled()
+    await expect(page.getByRole('button', { name: '在 matou_workspace 中新增事项' })).toBeDisabled()
     await expect(page.getByRole('button', { name: '新建页签' })).toBeDisabled()
     await expect(page.getByRole('button', { name: '水平分屏' })).toBeDisabled()
 

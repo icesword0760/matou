@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
 
 import { RuntimeHost } from './runtime-host'
 import { claimSingleInstance } from './single-instance-policy'
@@ -27,7 +27,8 @@ const primaryInstance = claimSingleInstance({
 
 async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
-  const defaultRootDirectory = process.env.MATOU_DEFAULT_WORKSPACE ?? join(app.getPath('home'), 'matou_workspace')
+  const defaultRootDirectory = process.env.MATOU_DEFAULT_WORKSPACE ?? app.getPath('home')
+  const defaultName = basename(defaultRootDirectory)
   await mkdir(defaultRootDirectory, { recursive: true })
   const window = new BrowserWindow({
     width: 1200,
@@ -64,6 +65,7 @@ async function createWindow(): Promise<BrowserWindow> {
     const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)
     rendererUrl.searchParams.set('windowId', windowId)
     rendererUrl.searchParams.set('defaultRootDirectory', defaultRootDirectory)
+    rendererUrl.searchParams.set('defaultName', defaultName)
     if (process.env.MATOU_E2E === '1') {
       rendererUrl.searchParams.set('e2e', '1')
     }
@@ -73,6 +75,7 @@ async function createWindow(): Promise<BrowserWindow> {
       query: {
         windowId,
         defaultRootDirectory,
+        defaultName,
         ...(process.env.MATOU_E2E === '1' ? { e2e: '1' } : {})
       }
     })
@@ -167,6 +170,9 @@ ipcMain.handle(DESKTOP_CHANNELS.selectWorkspaceDirectory, async () => {
     properties: ['openDirectory', 'createDirectory']
   })
   return result.canceled ? null : result.filePaths[0] ?? null
+})
+ipcMain.handle(DESKTOP_CHANNELS.revealDirectory, async (_event, path: string) => {
+  await shell.openPath(path)
 })
 ipcMain.handle(DESKTOP_CHANNELS.hideWindow, (_event, windowId: string) => {
   windows.hideWindow(windowId)

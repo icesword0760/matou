@@ -650,5 +650,26 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       UPDATE sessions SET title = 'Claude' WHERE kind = 'claude-code';
       UPDATE sessions SET title = 'Codex' WHERE kind = 'codex';
     `
+  },
+  {
+    version: 13,
+    name: 'flat-workspace-navigation-order',
+    sql: `
+      ALTER TABLE workspaces ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0
+        CHECK (is_default IN (0, 1));
+      ALTER TABLE workspaces ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0
+        CHECK (is_pinned IN (0, 1));
+      ALTER TABLE workspaces ADD COLUMN pin_sort_key TEXT NOT NULL DEFAULT '';
+      ALTER TABLE workspaces ADD COLUMN last_opened_at INTEGER NOT NULL DEFAULT 0;
+      UPDATE workspaces SET last_opened_at = updated_at WHERE last_opened_at = 0;
+      CREATE UNIQUE INDEX one_active_default_workspace_idx
+      ON workspaces(is_default) WHERE is_default = 1 AND archived_at IS NULL;
+
+      ALTER TABLE tasks ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0
+        CHECK (is_pinned IN (0, 1));
+      ALTER TABLE tasks ADD COLUMN pin_sort_key TEXT NOT NULL DEFAULT '';
+      ALTER TABLE tasks ADD COLUMN last_opened_at INTEGER NOT NULL DEFAULT 0;
+      UPDATE tasks SET last_opened_at = updated_at WHERE last_opened_at = 0;
+    `
   }
 ]

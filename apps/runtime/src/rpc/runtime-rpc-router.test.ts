@@ -32,21 +32,24 @@ describe('RuntimeRpcRouter', () => {
     })) as { workspace: { id: string }; navigation: { activeWorkspaceId: string } }
     expect(bootstrapped.navigation.activeWorkspaceId).toBe(bootstrapped.workspace.id)
 
+    const custom = await router.handle('hierarchy.create-workspace', payload('create-workspace', {
+      windowId: 'window-1', rootDirectory: '/tmp/matou-rpc-custom', name: 'Custom', now: 2
+    })) as { workspace: { id: string } }
     const renamed = await router.handle('hierarchy.rename-workspace', payload('rename-workspace', {
-      workspaceId: bootstrapped.workspace.id,
+      workspaceId: custom.workspace.id,
       name: 'Renamed',
-      now: 2
+      now: 3
     })) as { name: string }
     expect(renamed.name).toBe('Renamed')
 
     const activated = await router.handle('hierarchy.activate-workspace', payload('activate-workspace', {
       windowId: 'window-2',
-      workspaceId: bootstrapped.workspace.id,
-      now: 3
+      workspaceId: custom.workspace.id,
+      now: 4
     })) as { navigation: { windowId: string; activeWorkspaceId: string } }
     expect(activated.navigation).toMatchObject({
       windowId: 'window-2',
-      activeWorkspaceId: bootstrapped.workspace.id
+      activeWorkspaceId: custom.workspace.id
     })
 
     database.run(
@@ -55,10 +58,10 @@ describe('RuntimeRpcRouter', () => {
        ) VALUES (?, 'valid', '', 4, 2)
        ON CONFLICT(workspace_id) DO UPDATE SET
          status = 'valid', reason = '', validation_generation = 2`,
-      bootstrapped.workspace.id
+      custom.workspace.id
     )
     const createdTask = await router.handle('hierarchy.create-task', payload('create-task', {
-      windowId: 'window-2', workspaceId: bootstrapped.workspace.id, now: 4
+      windowId: 'window-2', workspaceId: custom.workspace.id, now: 5
     })) as { task: { id: string; title: string } }
     expect(createdTask.task.title).toBe('新事项')
     await router.handle('hierarchy.rename-task', payload('rename-task', {

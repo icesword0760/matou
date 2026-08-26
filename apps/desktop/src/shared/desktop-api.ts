@@ -1,5 +1,6 @@
 export interface MatouDesktopApi {
   selectWorkspaceDirectory(): Promise<string | null>
+  revealDirectory(path: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
   showWindow(windowId: string): Promise<void>
   createDetachedTerminalWindow(input: DetachedTerminalWindowInput): Promise<void>
@@ -28,6 +29,7 @@ export interface DetachedWindowClosedEvent {
 
 export const DESKTOP_CHANNELS = {
   selectWorkspaceDirectory: 'matou:select-workspace-directory',
+  revealDirectory: 'matou:reveal-directory',
   hideWindow: 'matou:hide-window',
   showWindow: 'matou:show-window',
   createDetachedTerminalWindow: 'matou:create-detached-terminal-window',

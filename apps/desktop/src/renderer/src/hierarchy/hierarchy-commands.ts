@@ -22,8 +22,13 @@ export function createHierarchyCommands(
       rootDirectory, name: rootDirectory.split('/').filter(Boolean).at(-1) ?? '工作区'
     }),
     renameWorkspace: (workspaceId, name) => command('hierarchy.rename-workspace', { workspaceId, name }),
+    relinkWorkspace: (workspaceId, rootDirectory) => command('hierarchy.relink-workspace', { workspaceId, rootDirectory }),
     removeWorkspace: (workspaceId) => command('hierarchy.remove-workspace', {
       workspaceId, confirmedIntent: `remove-workspace:${workspaceId}`
+    }),
+    setWorkspacePinned: (workspaceId, pinned) => command('hierarchy.set-workspace-pinned', { workspaceId, pinned }),
+    reorderPinnedWorkspace: (workspaceId, beforeWorkspaceId) => command('hierarchy.reorder-pinned-workspace', {
+      workspaceId, ...(beforeWorkspaceId ? { beforeWorkspaceId } : {})
     }),
     activateTask: (taskId) => command('hierarchy.activate-task', { taskId }),
     createTask: (workspaceId) => command('hierarchy.create-task', { workspaceId }),
@@ -33,6 +38,10 @@ export function createHierarchyCommands(
     }),
     deleteTask: (taskId) => command('hierarchy.delete-task', {
       taskId, confirmedIntent: `delete-task:${taskId}`
+    }),
+    setTaskPinned: (taskId, pinned) => command('hierarchy.set-task-pinned', { taskId, pinned }),
+    reorderPinnedTask: (workspaceId, taskId, beforeTaskId) => command('hierarchy.reorder-pinned-task', {
+      workspaceId, taskId, ...(beforeTaskId ? { beforeTaskId } : {})
     }),
     activateScene: (sceneId) => command('hierarchy.activate-scene', { sceneId }),
     createScene: (taskId) => command('hierarchy.create-scene', { taskId }),

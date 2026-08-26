@@ -1,5 +1,11 @@
-export interface WorkspaceView { id: string; name: string; rootDirectory: string }
-export interface TaskView { id: string; workspaceId: string; title: string; sortKey?: string }
+export interface WorkspaceView {
+  id: string; name: string; rootDirectory: string
+  isDefault?: boolean; isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number
+}
+export interface TaskView {
+  id: string; workspaceId: string; title: string; sortKey?: string
+  isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number
+}
 export interface SceneView {
   id: string
   taskId: string
@@ -97,12 +103,17 @@ export interface HierarchyCommands {
   activateWorkspace(workspaceId: string): unknown
   createWorkspace(path: string): unknown
   renameWorkspace(workspaceId: string, name: string): unknown
+  relinkWorkspace(workspaceId: string, rootDirectory: string): unknown
   removeWorkspace(workspaceId: string): unknown
+  setWorkspacePinned(workspaceId: string, pinned: boolean): unknown
+  reorderPinnedWorkspace(workspaceId: string, beforeWorkspaceId?: string): unknown
   activateTask(taskId: string): unknown
   createTask(workspaceId: string): unknown
   renameTask(taskId: string, title: string): unknown
   reorderTask(workspaceId: string, taskId: string, beforeTaskId?: string): unknown
   deleteTask(taskId: string): unknown
+  setTaskPinned(taskId: string, pinned: boolean): unknown
+  reorderPinnedTask(workspaceId: string, taskId: string, beforeTaskId?: string): unknown
   activateScene(sceneId: string): unknown
   createScene(taskId: string): unknown
   renameScene(sceneId: string, name: string): unknown

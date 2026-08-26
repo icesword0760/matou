@@ -18,6 +18,10 @@ interface WorkspaceRow {
   root_directory: string
   path_identity: string | null
   task_order_json: string
+  is_default: number
+  is_pinned: number
+  pin_sort_key: string
+  last_opened_at: number
   created_at: number
   updated_at: number
   archived_at: number | null
@@ -32,6 +36,9 @@ interface TaskRow {
   status: TaskStatus
   execution_context_id: string
   sort_key: string
+  is_pinned: number
+  pin_sort_key: string
+  last_opened_at: number
   created_at: number
   updated_at: number
   archived_at: number | null
@@ -64,12 +71,13 @@ export class WorkspaceTaskRepository {
       tx.run(
         `INSERT INTO workspaces (
            id, name, root_directory, path_identity, task_order_json,
-           created_at, updated_at, version
-         ) VALUES (?, ?, ?, ?, '[]', ?, ?, 1)`,
+           created_at, updated_at, version, last_opened_at
+         ) VALUES (?, ?, ?, ?, '[]', ?, ?, 1, ?)`,
         input.id,
         name,
         rootDirectory,
         pathIdentity,
+        input.now,
         input.now,
         input.now
       )
@@ -79,6 +87,10 @@ export class WorkspaceTaskRepository {
         rootDirectory,
         pathIdentity,
         taskOrder: [],
+        isDefault: false,
+        isPinned: false,
+        pinSortKey: '',
+        lastOpenedAt: input.now,
         createdAt: input.now,
         updatedAt: input.now,
         version: 1
@@ -236,8 +248,8 @@ export class WorkspaceTaskRepository {
       tx.run(
         `INSERT INTO tasks (
            id, workspace_id, parent_task_id, execution_context_id, title,
-           status, sort_key, created_at, updated_at, version
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+           status, sort_key, created_at, updated_at, version, last_opened_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
         input.id,
         input.workspaceId,
         input.parentTaskId ?? null,
@@ -245,6 +257,7 @@ export class WorkspaceTaskRepository {
         title,
         input.status,
         input.sortKey,
+        input.now,
         input.now,
         input.now
       )
@@ -266,6 +279,9 @@ export class WorkspaceTaskRepository {
         status: input.status,
         executionContextId: input.executionContextId,
         sortKey: input.sortKey,
+        isPinned: false,
+        pinSortKey: '',
+        lastOpenedAt: input.now,
         createdAt: input.now,
         updatedAt: input.now,
         version: 1
@@ -405,6 +421,10 @@ function mapWorkspace(row: WorkspaceRow): Workspace {
     rootDirectory: row.root_directory,
     ...(row.path_identity === null ? {} : { pathIdentity: row.path_identity }),
     taskOrder: parseStringArray(row.task_order_json),
+    isDefault: row.is_default === 1,
+    isPinned: row.is_pinned === 1,
+    pinSortKey: row.pin_sort_key,
+    lastOpenedAt: row.last_opened_at,
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -421,6 +441,9 @@ function mapTask(row: TaskRow): Task {
     status: row.status,
     executionContextId: row.execution_context_id,
     sortKey: row.sort_key,
+    isPinned: row.is_pinned === 1,
+    pinSortKey: row.pin_sort_key,
+    lastOpenedAt: row.last_opened_at,
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

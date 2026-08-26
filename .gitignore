@@ -11,3 +11,4 @@ playwright-report/
 apps/desktop/package-resources/
 apps/desktop/release/
 .worktrees/
+.superpowers/

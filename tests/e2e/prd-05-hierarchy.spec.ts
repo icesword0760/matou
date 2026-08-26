@@ -6,7 +6,7 @@ test('first launch presents the complete Workspace, Task, Scene, and terminal hi
   const fixture = await launchMatou()
   try {
     const { page } = fixture
-    await expect(page.getByTestId('workspace-name')).toContainText('matou_workspace')
+    await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByRole('tab')).toHaveCount(1)
     await expect(page.getByTestId('terminal-pane')).toHaveCount(1)
@@ -19,7 +19,7 @@ test('creates and renames a Task, adds a Scene, splits, and deletes one terminal
   try {
     const { page } = fixture
     await expect(page.getByTestId('active-task')).toHaveText('默认')
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await page.getByRole('button', { name: '在 matou_workspace 中新增事项' }).click()
     await expect(page.getByTestId('active-task')).toHaveText('新事项')
 
     await page.getByRole('button', { name: '事项菜单：新事项' }).click()
