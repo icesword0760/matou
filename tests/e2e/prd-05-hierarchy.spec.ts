@@ -92,7 +92,7 @@ test('keeps navigation order stable on clicks, then promotes the Task after real
   } finally { await fixture.close() }
 })
 
-test('shows distinct Workspace and Task selection levels and keeps pin controls separate', async () => {
+test('uses the Kooky light palette to separate the sidebar, active Workspace, and active Task levels', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
@@ -101,10 +101,23 @@ test('shows distinct Workspace and Task selection levels and keeps pin controls 
     const task = page.getByTestId('active-task').locator('..').locator('..')
     await expect(header).toHaveAttribute('aria-current', 'location')
     await expect(task).toHaveAttribute('aria-current', 'true')
-    const colors = await Promise.all([header, task].map((locator) => locator.evaluate((node) =>
+    const colors = await Promise.all([page.locator('.flat-sidebar'), workspace, task].map((locator) => locator.evaluate((node) =>
       getComputedStyle(node).backgroundColor
     )))
-    expect(colors[0]).not.toBe(colors[1])
+    expect(colors).toEqual([
+      'rgb(255, 255, 255)',
+      'rgb(247, 248, 250)',
+      'rgb(236, 238, 243)'
+    ])
+    const badge = workspace.locator('.workspace-group__badge')
+    expect(await badge.evaluate((node) => {
+      const style = getComputedStyle(node)
+      return [style.color, style.backgroundColor]
+    })).toEqual(['rgb(145, 148, 158)', 'rgb(236, 238, 243)'])
+    const taskMore = page.getByRole('button', { name: '事项菜单：默认' })
+    expect(await taskMore.evaluate((node) => getComputedStyle(node).color)).toBe('rgb(101, 109, 118)')
+    await taskMore.hover()
+    expect(await taskMore.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgba(0, 0, 0, 0.06)')
 
     await page.getByRole('button', { name: '工作空间菜单：matou_workspace' }).click()
     await page.getByRole('menuitem', { name: '取消置顶' }).click()
