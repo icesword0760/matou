@@ -61,6 +61,16 @@ describe('Terminal pane', () => {
     expect(onDetach).toHaveBeenCalledWith('session-1')
   })
 
+  it('opens the pane actions when the user right-clicks the terminal content area', async () => {
+    const user = userEvent.setup()
+    render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
+
+    expect(screen.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeTruthy()
+  })
+
   it.each([
     ['Shell', { kind: 'shell' as const }, false],
     ['identity-less Claude', { kind: 'claude-code' as const }, false],

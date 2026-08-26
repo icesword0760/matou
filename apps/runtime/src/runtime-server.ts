@@ -1484,7 +1484,7 @@ async function configuredShellAlias(name: string): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync(shell, [
       '-ic', 'alias "$1"', 'matou-alias', name
-    ], { timeout: 2_000, maxBuffer: 64 * 1024 })
+    ], { timeout: 10_000, maxBuffer: 64 * 1024 })
     const prefix = `${name}=`
     const line = stdout.split('\n').map((value) => value.trim())
       .find((value) => value.startsWith(prefix) || value.startsWith(`alias ${prefix}`))

@@ -1147,7 +1147,7 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
-  it('promotes a Shell panel to bypass Claude when the user runs the cc alias', async () => {
+  it('promotes a Shell panel to bypass Claude when a real-world zsh config loads slowly', async () => {
     const executable = join(root, 'claude')
     const argumentFile = join(root, 'shell-promoted-provider-arguments.txt')
     await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nstty raw -echo\ncat\n')
@@ -1157,7 +1157,7 @@ describe('RuntimeServer domain RPC', () => {
     const previousPath = process.env.PATH
     const previousShell = process.env.SHELL
     const previousZdotdir = process.env.ZDOTDIR
-    await writeFile(join(root, '.zshrc'), "alias cc='claude --dangerously-skip-permissions'\n")
+    await writeFile(join(root, '.zshrc'), "sleep 2.2\nalias cc='claude --dangerously-skip-permissions'\n")
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
     process.env.PATH = `${root}:${previousPath ?? ''}`
@@ -1183,8 +1183,8 @@ describe('RuntimeServer domain RPC', () => {
         sessionId: 'shell-promoted-provider', data: 'cc\r'
       })
 
-      await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code')
-      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
+      await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code', 6_000)
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0, 6_000)
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
         '--dangerously-skip-permissions'
       ])

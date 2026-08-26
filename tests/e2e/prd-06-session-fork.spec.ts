@@ -202,7 +202,7 @@ function paneForSession(page: Page, sessionId: string): Locator {
 }
 
 async function openPaneMenu(pane: Locator): Promise<void> {
-  await pane.locator('.pane-header-content').click({ button: 'right' })
+  await pane.locator('.terminal-surface').click({ button: 'right', position: { x: 24, y: 80 } })
 }
 
 async function terminalCommand(surface: Locator, command: string): Promise<void> {

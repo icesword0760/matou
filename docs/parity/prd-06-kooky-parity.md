@@ -12,7 +12,7 @@
 
 | 用户场景 | 可运行 Kooky | Kooky dormant 源码 | Matou 实际结果 | 差异结论 |
 |---|---|---|---|---|
-| 主窗口可恢复 Claude 右键 | 菜单临时隐藏 | `⑂ Fork 会话`、`↗ 独立窗口` 并列 | 两项并列，顺序一致 | 激活已存在交互 |
+| 主窗口可恢复 Claude 内容区右键 | 菜单临时隐藏；终端内容区现有菜单只含复制/粘贴 | dormant 面板菜单含 `⑂ Fork 会话`、`↗ 独立窗口`；PRD 要求面板可操作区域右键 | 终端内容区直接显示两项，顺序一致 | 按已确认 PRD 扩大命中区域，修复标题条入口不易发现的问题 |
 | Shell / Claude 类型表达 | Shell 面板标题来自 Shell；Claude 面板 fallback 使用 `claude ~/cwd` | `normalizePanelTitle()` 根据 `claudeActive/mode` 区分 | 面板进入 Claude 时标题为 `Claude`，退出时为 `Shell` | 类型语义一致；Matou 当前短标题更明确 |
 | Shell 内通过 `cc` 启动 Claude | Claude 状态上报后将 Shell 面板提升为 Claude | `updateAiStatus()` 以新 Claude 身份提升 `mode/claudeActive` | 仅当当前 Shell 将 `cc` 配置为 Claude 别名时接管启动，保留 bypass 权限并切换标题 | 一致；普通系统 `cc` 仍作为编译器命令执行 |
 | Shell 右键 | 菜单隐藏 | `canForkSession` 为 false | Fork 隐藏 | 一致 |
@@ -50,6 +50,6 @@
 - Matou 激活后的两项菜单和计算样式：`docs/acceptance/evidence/prd-06/matou/fork-menu.png`、`fork-menu.json`。
 - Matou 连续 Fork 后的三个并列会话：`docs/acceptance/evidence/prd-06/matou/forked-conversations.png`。
 - Matou 失败面板：`docs/acceptance/evidence/prd-06/matou/fork-failure.png`。
-- Matou 使用真实 Claude Code 完成首轮、Fork、双侧隔离输入、重启恢复与重启后继续输入：`docs/acceptance/evidence/prd-06/matou/real-claude-fork-validation.png`、`real-claude-fork-validation.json`。
+- Matou 使用真实 Claude Code、系统级鼠标与键盘，在终端内容区完成右键、Fork、双侧隔离输入、重启恢复与重启后继续输入：`docs/acceptance/evidence/prd-06/matou/real-system-fork-menu.png`、`real-system-fork-validation.png`、`real-system-fork-validation.json`。
 
 运行截图均只截取黑色 CLI 模块。Kooky 的当前空菜单与 dormant 源码分开记录，避免把“当前尚未开放”误写成最终产品行为。

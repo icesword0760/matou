@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 import { TerminalSurface } from '../terminal/TerminalSurface'
@@ -45,8 +45,14 @@ export function TerminalPane(props: {
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
   const canFork = session.kind === 'claude-code' && resumable && onFork !== undefined
   const hasPaneMenu = canFork || onDetach !== undefined
+  const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
+    if (!hasPaneMenu || (event.target as HTMLElement).closest('button')) return
+    event.preventDefault()
+    event.stopPropagation()
+    setContextMenu({ x: event.clientX, y: event.clientY })
+  }
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible} onPointerDown={() => {
+    data-active={active} hidden={!visible} onContextMenu={openPaneMenu} onPointerDown={() => {
       notificationStore.dismissSessionIndicator(session.id)
       onActivate(session.id)
     }}>
@@ -57,12 +63,7 @@ export function TerminalPane(props: {
           event.screenY >= window.screenY + window.outerHeight
         if (outside) void onDetach?.(session.id)
       }}>
-      <div className="pane-header-content" onContextMenu={(event) => {
-        if (!hasPaneMenu) return
-        event.preventDefault()
-        event.stopPropagation()
-        setContextMenu({ x: event.clientX, y: event.clientY })
-      }}><strong className="pane-title">{session.title}</strong></div>
+      <div className="pane-header-content"><strong className="pane-title">{session.title}</strong></div>
       <div className="terminal-pane-actions">
         <button className="pane-close" aria-label={`删除终端：${session.title}`} onClick={(event) => {
           event.stopPropagation()

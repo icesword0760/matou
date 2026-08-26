@@ -1,0 +1,75 @@
+{
+  "verifiedAt": "2026-08-26T02:14:20.970812+00:00",
+  "validationMode": "real desktop system input; no provider fixture; no DOM-dispatched input",
+  "inputDriver": "macOS accessibility mouse and keyboard via @oai/sky",
+  "provider": "installed Claude Code v2.1.241",
+  "root": "/private/tmp/matou-prd06-system-real-1787709299",
+  "workspaceDirectory": "/private/tmp/matou-prd06-system-real-1787709299/workspace",
+  "sessions": [
+    {
+      "id": "a0fa5efe-81f4-4a23-9c65-ac2cfcf70bdc",
+      "title": "Claude",
+      "kind": "claude-code",
+      "cwd": "/private/tmp/matou-prd06-system-real-1787709299/workspace"
+    },
+    {
+      "id": "63a557bc-a71e-4e30-8e6d-b86549edbaf8",
+      "title": "Claude",
+      "kind": "claude-code",
+      "cwd": "/private/tmp/matou-prd06-system-real-1787709299/workspace"
+    }
+  ],
+  "bindings": [
+    {
+      "session_id": "a0fa5efe-81f4-4a23-9c65-ac2cfcf70bdc",
+      "provider_session_id": "4d0d971a-e209-4155-94b5-69f5f22be868",
+      "resume_state": "available",
+      "metadata_json": "{\"permissionMode\":\"bypassPermissions\",\"cwd\":\"/private/tmp/matou-prd06-system-real-1787709299/workspace\",\"lastHookEvent\":\"unknown\"}"
+    },
+    {
+      "session_id": "63a557bc-a71e-4e30-8e6d-b86549edbaf8",
+      "provider_session_id": "69d9f9e9-5b10-4aa5-ac9c-afc96cf3abe4",
+      "resume_state": "available",
+      "metadata_json": "{\"cwd\":\"/private/tmp/matou-prd06-system-real-1787709299/workspace\",\"lastHookEvent\":\"Notification\",\"permissionMode\":\"auto\"}"
+    }
+  ],
+  "forkIntents": [
+    {
+      "session_id": "63a557bc-a71e-4e30-8e6d-b86549edbaf8",
+      "source_session_id": "a0fa5efe-81f4-4a23-9c65-ac2cfcf70bdc",
+      "source_provider_session_id": "4d0d971a-e209-4155-94b5-69f5f22be868",
+      "state": "succeeded",
+      "error_message": null
+    }
+  ],
+  "relations": [
+    {
+      "from_session_id": "63a557bc-a71e-4e30-8e6d-b86549edbaf8",
+      "to_session_id": "a0fa5efe-81f4-4a23-9c65-ac2cfcf70bdc",
+      "relation_kind": "forked-from"
+    }
+  ],
+  "providerProcesses": [
+    "6583  6357 claude --settings /private/tmp/matou-prd06-system-real-1787709299/data/provider-hooks/TwV5b6nzGdOkvQ2Swulbe1Hv4FzJb1AeBnD-4YHcuxM.settings.json --resume 4d0d971a-e209-4155-94b5-69f5f22be868 --dangerously-skip-permissions",
+    "6603  6357 claude --settings /private/tmp/matou-prd06-system-real-1787709299/data/provider-hooks/DVbswbf2msxok3mXYX1vyvQTU1NKfrvzGr8d_q4P8Iw.settings.json --resume 69d9f9e9-5b10-4aa5-ac9c-afc96cf3abe4"
+  ],
+  "failureMarkers": [],
+  "checks": {
+    "blankClaudeContentRightClickOpenedMenu": true,
+    "forkHiddenBeforeFirstConversation": true,
+    "sourceFirstConversationCompleted": true,
+    "contentAreaRightClickDisplayedForkAndDetach": true,
+    "forkInheritedSourceHistory": true,
+    "sourceAndForkInputsStayedSeparate": true,
+    "providerIdentitiesDistinct": true,
+    "forkIntentSucceeded": true,
+    "forkRelationPersisted": true,
+    "restartRestoredBothConversations": true,
+    "postRestartForkInputSucceeded": true,
+    "noForkFailureOrHook404": true
+  },
+  "screenshots": [
+    "real-system-fork-menu.png",
+    "real-system-fork-validation.png"
+  ]
+}
