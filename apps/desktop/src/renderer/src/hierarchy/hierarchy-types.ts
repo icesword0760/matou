@@ -4,7 +4,7 @@ export interface WorkspaceView {
 }
 export interface TaskView {
   id: string; workspaceId: string; title: string; sortKey?: string
-  isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number
+  isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number; createdAt?: number
 }
 export interface SceneView {
   id: string

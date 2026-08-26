@@ -572,7 +572,8 @@ export class HierarchyApplicationService {
         workspace,
         title,
         commandId: command.commandId,
-        now: input.now
+        now: input.now,
+        lastOpenedAt: 0
       })
       return readHierarchyResult(context.tx, input.windowId)
     }).result
@@ -1560,6 +1561,7 @@ export class HierarchyApplicationService {
       taskTitle: string
       commandId: string
       now: number
+      lastOpenedAt?: number
       isDefault?: boolean
       isPinned?: boolean
     }
@@ -1584,7 +1586,7 @@ export class HierarchyApplicationService {
       input.isDefault ? 1 : 0,
       input.isPinned ? 1 : 0,
       input.isPinned ? 'a0' : '',
-      input.now
+      input.lastOpenedAt ?? input.now
     )
     tx.run(
       `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
@@ -1699,6 +1701,7 @@ export class HierarchyApplicationService {
       title: string
       commandId: string
       now: number
+      lastOpenedAt?: number
     }
   ): Task {
     const { tx } = context
@@ -1730,7 +1733,7 @@ export class HierarchyApplicationService {
       sortKey(ordinal),
       input.now,
       input.now,
-      input.now
+      input.lastOpenedAt ?? input.now
     )
     tx.run(
       `INSERT INTO scenes (

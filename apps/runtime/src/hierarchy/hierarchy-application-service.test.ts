@@ -218,7 +218,7 @@ describe('HierarchyApplicationService Task workflows', () => {
     )?.last_opened_at).toBe(10)
     expect(database.get<{ last_opened_at: number }>(
       'SELECT last_opened_at FROM tasks WHERE id = ?', other.task!.id
-    )?.last_opened_at).toBe(20)
+    )?.last_opened_at).toBe(0)
     expect(database.get<{ last_opened_at: number }>(
       'SELECT last_opened_at FROM workspaces WHERE id = ?', initial.workspace!.id
     )?.last_opened_at).toBe(10)

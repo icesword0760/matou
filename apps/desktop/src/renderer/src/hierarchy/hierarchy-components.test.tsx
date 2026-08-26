@@ -75,7 +75,22 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByTestId('task-task-a').getAttribute('aria-current')).toBe('true')
     expect(group.querySelector('.workspace-group__status .pin-icon')).toBeTruthy()
     expect(screen.getByTestId('task-task-a').querySelector('.workbench-item__status .pin-icon')).toBeTruthy()
+    expect(group.querySelector('.workspace-group__status .pin-icon')?.getAttribute('data-icon')).toBe('pushpin')
     expect(screen.getByTestId('task-task-a').querySelector('.workbench-item__actions button')).toBeTruthy()
+  })
+
+  it('keeps newly created unvisited Tasks at the end in creation order', () => {
+    const data = fixture()
+    data.tasks = [
+      { id: 'default-task', workspaceId: 'workspace-1', title: '默认', lastOpenedAt: 50, createdAt: 10 },
+      { id: 'new-task-z', workspaceId: 'workspace-1', title: '新事项', lastOpenedAt: 0, createdAt: 20 },
+      { id: 'new-task-a', workspaceId: 'workspace-1', title: '新事项 2', lastOpenedAt: 0, createdAt: 30 }
+    ]
+    data.navigation.taskByWorkspace = { 'workspace-1': 'new-task-a' }
+    render(<TaskSidebar projection={data} commands={commands()} />)
+
+    expect(screen.getAllByTestId(/^task-/).map((node) => node.getAttribute('data-testid')))
+      .toEqual(['task-default-task', 'task-new-task-z', 'task-new-task-a'])
   })
 
   it('orders unpinned Workspaces and Tasks by recent user use without mixing pinned items', () => {

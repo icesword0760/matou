@@ -14,6 +14,31 @@ test('first launch presents the complete Workspace, Task, Scene, and terminal hi
   } finally { await fixture.close() }
 })
 
+test('integrates the existing top controls into the macOS window chrome', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { app, page } = fixture
+    await expect(page.getByRole('button', { name: '新增工作空间' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '通知中心' })).toBeVisible()
+    const [sidebarBar, sceneBar, newWorkspace] = await Promise.all([
+      page.locator('.flat-sidebar__topbar').boundingBox(),
+      page.locator('.scene-bar.tab-bar').boundingBox(),
+      page.getByRole('button', { name: '新增工作空间' }).boundingBox()
+    ])
+    expect(sidebarBar).not.toBeNull()
+    expect(sceneBar).not.toBeNull()
+    expect(newWorkspace).not.toBeNull()
+    expect(sidebarBar!.height).toBe(sceneBar!.height)
+    if (process.platform === 'darwin') {
+      expect(newWorkspace!.x).toBeGreaterThanOrEqual(78)
+      expect(await app.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0]!
+        return window.getBounds().height - window.getContentBounds().height
+      })).toBe(0)
+    }
+  } finally { await fixture.close() }
+})
+
 test('creates and renames a Task, adds a Scene, splits, and deletes one terminal', async () => {
   const fixture = await launchMatou()
   try {
@@ -49,19 +74,21 @@ test('keeps navigation order stable on clicks, then promotes the Task after real
     const { page } = fixture
     await page.getByRole('button', { name: '在 matou_workspace 中新增事项' }).click()
     const taskItems = page.locator('[data-testid^="task-"]')
-    await expect(taskItems.first()).toContainText('新事项')
-    await expect(taskItems.last()).toContainText('默认')
+    await expect(taskItems.first()).toContainText('默认')
+    await expect(taskItems.last()).toContainText('新事项')
 
-    await taskItems.last().click()
+    await taskItems.first().click()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
-    await expect(taskItems.first()).toContainText('新事项')
-    await expect(taskItems.last()).toContainText('默认')
+    await taskItems.last().click()
+    await expect(page.getByTestId('active-task')).toHaveText('新事项')
+    await expect(taskItems.first()).toContainText('默认')
+    await expect(taskItems.last()).toContainText('新事项')
 
     await expect(page.locator('.scene-stage:not([hidden]) .xterm-helper-textarea')).toBeFocused()
     await page.keyboard.type('printf MATOU_RECENCY')
     await page.keyboard.press('Enter')
-    await expect(taskItems.first()).toContainText('默认')
-    await expect(taskItems.last()).toContainText('新事项')
+    await expect(taskItems.first()).toContainText('新事项')
+    await expect(taskItems.last()).toContainText('默认')
   } finally { await fixture.close() }
 })
 

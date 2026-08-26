@@ -33,7 +33,7 @@ test('shows the Kooky unread trail and navigates back to the originating termina
     await expect.poll(async () => center.evaluate((element) => {
       const rect = element.getBoundingClientRect()
       return { left: rect.left, top: rect.top, width: rect.width, bottomGap: innerHeight - rect.bottom }
-    })).toEqual({ left: 0, top: 41, width: 382, bottomGap: 5 })
+    })).toEqual({ left: 0, top: 49, width: 382, bottomGap: 5 })
 
     await center.getByRole('button', { name: /打开通知/ }).click()
     await expect(center).toHaveCount(0)

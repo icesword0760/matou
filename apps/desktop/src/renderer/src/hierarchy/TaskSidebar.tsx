@@ -238,12 +238,13 @@ export function TaskSidebar({ projection, commands }: {
   </aside>
 }
 
-type NavigationItem = { id: string; isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number }
+type NavigationItem = { id: string; isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number; createdAt?: number }
 export function orderNavigation<T extends NavigationItem>(items: T[]): T[] {
   return [...items].sort((left, right) => {
     if (Boolean(left.isPinned) !== Boolean(right.isPinned)) return left.isPinned ? -1 : 1
     if (left.isPinned) return (left.pinSortKey ?? '').localeCompare(right.pinSortKey ?? '') || left.id.localeCompare(right.id)
-    return (right.lastOpenedAt ?? 0) - (left.lastOpenedAt ?? 0) || left.id.localeCompare(right.id)
+    return (right.lastOpenedAt ?? 0) - (left.lastOpenedAt ?? 0) ||
+      (left.createdAt ?? 0) - (right.createdAt ?? 0) || left.id.localeCompare(right.id)
   })
 }
 function toggleSet(current: Set<string>, id: string): Set<string> {
@@ -253,7 +254,7 @@ function PlusIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fil
 function ComposeIcon() { return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> }
 function ChevronIcon({ collapsed }: { collapsed: boolean }) { return <svg className="workspace-group__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d={collapsed ? 'm9 18 6-6-6-6' : 'm6 9 6 6 6-6'}/></svg> }
 function FolderIcon({ home }: { home?: boolean }) { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{home ? <><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/></> : <path d="M3 6h7l2 2h9v10H3Z"/>}</svg> }
-function PinIcon() { return <svg className="pin-icon" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m14 4 6 6-3 1-4 4-1 5-2-2-2-2 5-1 4-4 1-3Z"/></svg> }
+function PinIcon() { return <svg className="pin-icon" data-icon="pushpin" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5"/><path d="M5 17h14"/><path d="M15 2.5a1 1 0 0 0-1 1V7a3 3 0 0 0 3 3v2H7v-2a3 3 0 0 0 3-3V3.5a1 1 0 0 0-1-1Z"/></svg> }
 function EditIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> }
 function TrashIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/></svg> }
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
