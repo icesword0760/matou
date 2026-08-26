@@ -21,6 +21,12 @@ import { SceneTabBar } from './SceneTabBar'
 import { SplitTree } from './SplitTree'
 import { TaskSidebar } from './TaskSidebar'
 import { TerminalPane } from './TerminalPane'
+import { ShortcutPanel } from './ShortcutPanel'
+import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
+import { useTerminalShortcuts } from './useTerminalShortcuts'
+import {
+  DEFAULT_TERMINAL_THEME, type TerminalThemeKey
+} from '../terminal/terminal-themes'
 export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   const client = useRuntimeClient()
   const windowId = fixture?.windowId ?? queryValue('windowId') ?? 'window-1'
@@ -150,6 +156,17 @@ function HierarchyProduct({ projection, commands }: {
   commands: HierarchyCommands
 }) {
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
+  const [themeKey, setThemeKey] = useState<TerminalThemeKey>(DEFAULT_TERMINAL_THEME)
+  const [fontSize, setFontSize] = useState(11)
+  const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchRequest, setSearchRequest] = useState({
+    query: '', options: { caseSensitive: false, regex: false, wholeWord: false } as TerminalSearchOptions,
+    direction: 'next' as 'next' | 'previous', sequence: 0
+  })
+  const [searchResults, setSearchResults] = useState({ resultIndex: 0, resultCount: 0 })
+  const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
+  const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
   const ratioTimers = useRef(new Map<string, number>())
   useEffect(() => () => {
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
@@ -186,8 +203,79 @@ function HierarchyProduct({ projection, commands }: {
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
+  const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
+  const paneSessionIds = activeSnapshot ? orderedSessionIds(activeSnapshot) : []
+  const activeRatios = activeSnapshot ? layoutRatios(activeSnapshot, liveRatios) : {}
+  const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
+  const focusPane = (offset: number) => {
+    if (paneSessionIds.length <= 1) return
+    const current = Math.max(0, paneSessionIds.indexOf(focusedSessionId ?? ''))
+    const next = (current + offset + paneSessionIds.length) % paneSessionIds.length
+    run(commands.activateSession(paneSessionIds[next]!))
+  }
+  const focusScene = (index: number) => {
+    if (index >= 0 && index < scenes.length) run(commands.activateScene(scenes[index]!.id))
+  }
+  const updateSearch = (query: string, options: TerminalSearchOptions, direction: 'next' | 'previous' = 'next') => {
+    setSearchRequest((current) => ({ query, options, direction, sequence: current.sequence + 1 }))
+  }
+  const shortcutHandlers = useMemo(() => ({
+    splitHorizontal: () => {
+      if (pathValid && activeSceneId && focusedSessionId) run(commands.splitSession(activeSceneId, focusedSessionId, 'horizontal'))
+    },
+    splitVertical: () => {
+      if (pathValid && activeSceneId && focusedSessionId) run(commands.splitSession(activeSceneId, focusedSessionId, 'vertical'))
+    },
+    nextPane: () => focusPane(1),
+    prevPane: () => focusPane(-1),
+    switchPaneByDirection: (direction: 'up' | 'down' | 'left' | 'right') => {
+      const target = activeSnapshot && focusedSessionId
+        ? directionalSessionId(activeSnapshot, focusedSessionId, direction, activeRatios)
+        : undefined
+      if (target) run(commands.activateSession(target))
+    },
+    closePane: () => {
+      if (focusedSessionId) {
+        setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
+      }
+    },
+    newTab: () => { if (pathValid && task) run(commands.createScene(task.id)) },
+    nextTab: () => focusScene((scenes.findIndex(({ id }) => id === activeSceneId) + 1) % Math.max(1, scenes.length)),
+    prevTab: () => {
+      const index = scenes.findIndex(({ id }) => id === activeSceneId)
+      focusScene((index - 1 + scenes.length) % Math.max(1, scenes.length))
+    },
+    jumpToTab: focusScene,
+    moveTabPosition: (direction: 'left' | 'right') => {
+      const index = scenes.findIndex(({ id }) => id === activeSceneId)
+      if (!activeSceneId || index < 0) return
+      if (direction === 'left' && index > 0) run(commands.reorderScene(activeSceneId, scenes[index - 1]!.id))
+      if (direction === 'right' && index < scenes.length - 1) run(commands.reorderScene(activeSceneId, scenes[index + 2]?.id))
+    },
+    openSearch: () => setSearchOpen(true),
+    increaseFontSize: () => setFontSize((value) => Math.min(24, value + 1)),
+    decreaseFontSize: () => setFontSize((value) => Math.max(10, value - 1)),
+    resetFontSize: () => setFontSize(11),
+    cycleTheme: () => {
+      setThemeKey((value) => value === 'light' ? 'dark' : 'light')
+      setTerminalFocusRequest((value) => value + 1)
+    },
+    toggleShortcutPanel: () => {
+      if (shortcutPanelOpen) setTerminalFocusRequest((value) => value + 1)
+      setShortcutPanelOpen(!shortcutPanelOpen)
+    }
+  }), [activeRatios, activeSceneId, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, scenes, shortcutPanelOpen, task])
+  const isMac = useTerminalShortcuts(shortcutHandlers)
+  useEffect(() => {
+    document.body.classList.toggle('light-theme', themeKey === 'light')
+    document.documentElement.dataset.theme = themeKey
+    return () => {
+      document.body.classList.remove('light-theme')
+      delete document.documentElement.dataset.theme
+    }
+  }, [themeKey])
 
-  return <main className="hierarchy-shell cli-module">
+  return <main className="hierarchy-shell cli-module" data-theme={themeKey}>
               <div className="claude-code-view hierarchy-body">
                 <TaskSidebar projection={projection} commands={commands} pathValid={pathValid} />
                 <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
@@ -227,6 +315,14 @@ function HierarchyProduct({ projection, commands }: {
                         visible={scene.id === activeSceneId}
                         workspaceSessionCount={workspaceSessionCount}
                         taskName={task.title} sceneId={scene.id} pathValid={pathValid}
+                        themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
+                        closeRequest={session.id === closeRequest.sessionId ? closeRequest.sequence : 0}
+                        {...(searchOpen && scene.id === activeSceneId && session.id === focusedSessionId
+                          ? { searchRequest } : {})}
+                        {...(scene.id === activeSceneId && session.id === focusedSessionId
+                          ? { onSearchResults: setSearchResults } : {})}
+                        focusRequest={scene.id === activeSceneId && session.id === focusedSessionId
+                          ? terminalFocusRequest : 0}
                         resumable={projection.sessionHuds?.find(({ sessionId }) => sessionId === session.id)?.resumable === true}
                         {...(workspace ? { workspaceId: workspace.id } : {})}
                         onActivate={commands.activateSession} onDelete={commands.deleteSession}
@@ -257,6 +353,16 @@ function HierarchyProduct({ projection, commands }: {
           </div>
         </>}
         {!task && <div className="scene-recovery" role="status">选择或新建一个事项开始工作</div>}
+                  <TerminalSearchBar open={searchOpen} themeKey={themeKey}
+                    resultIndex={searchResults.resultIndex} resultCount={searchResults.resultCount}
+                    onSearch={(query, options) => updateSearch(query, options)}
+                    onNext={() => updateSearch(searchRequest.query, searchRequest.options, 'next')}
+                    onPrevious={() => updateSearch(searchRequest.query, searchRequest.options, 'previous')}
+                    onClose={() => {
+                      updateSearch('', searchRequest.options)
+                      setSearchOpen(false)
+                      setTerminalFocusRequest((value) => value + 1)
+                    }} />
                   <div className="shortcut-bar" aria-label="快捷指令栏">
                     <button className="add-btn" aria-label="添加快捷指令">+</button>
                     <div className="btn-list" />
@@ -265,6 +371,11 @@ function HierarchyProduct({ projection, commands }: {
                   </div>
                 </section>
               </div>
+              <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}
+                onClose={() => {
+                  setShortcutPanelOpen(false)
+                  setTerminalFocusRequest((value) => value + 1)
+                }} />
   </main>
 }
 
@@ -316,6 +427,69 @@ function layoutFromSnapshot(snapshot: SceneSnapshotView): LayoutNode | undefined
   return read(rootId)
 }
 
+function orderedSessionIds(snapshot: SceneSnapshotView): string[] {
+  const layout = layoutFromSnapshot(snapshot)
+  if (!layout) return []
+  const sessionByMount = new Map(snapshot.mounts.map((mount) => [mount.id, mount.sessionId]))
+  const read = (node: LayoutNode): string[] => node.kind === 'mount'
+    ? [sessionByMount.get(node.mountId)].filter((value): value is string => Boolean(value))
+    : node.children.flatMap(read)
+  return read(layout)
+}
+
+function directionalSessionId(
+  snapshot: SceneSnapshotView,
+  currentSessionId: string,
+  direction: 'up' | 'down' | 'left' | 'right',
+  ratios: Record<string, number>
+): string | undefined {
+  const layout = layoutFromSnapshot(snapshot)
+  if (!layout) return undefined
+  type Rect = { x: number; y: number; width: number; height: number }
+  const byMount = new Map<string, Rect>()
+  const visit = (node: LayoutNode, rect: Rect) => {
+    if (node.kind === 'mount') {
+      byMount.set(node.mountId, rect)
+      return
+    }
+    const count = node.children.length
+    let cursor = node.direction === 'horizontal' ? rect.x : rect.y
+    node.children.forEach((child, index) => {
+      const share = count === 2 && ratios[node.id] !== undefined
+        ? (index === 0 ? ratios[node.id]! : 1 - ratios[node.id]!)
+        : 1 / count
+      const childRect = node.direction === 'horizontal'
+        ? { x: cursor, y: rect.y, width: rect.width * share, height: rect.height }
+        : { x: rect.x, y: cursor, width: rect.width, height: rect.height * share }
+      visit(child, childRect)
+      cursor += node.direction === 'horizontal' ? childRect.width : childRect.height
+    })
+  }
+  visit(layout, { x: 0, y: 0, width: 1, height: 1 })
+  const sessionByMount = new Map(snapshot.mounts.map((mount) => [mount.id, mount.sessionId]))
+  const currentEntry = [...byMount.entries()].find(([mountId]) => sessionByMount.get(mountId) === currentSessionId)
+  if (!currentEntry) return undefined
+  const current = currentEntry[1]
+  const center = (rect: Rect) => ({ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 })
+  const origin = center(current)
+  const candidates = [...byMount.entries()].flatMap(([mountId, rect]) => {
+    const sessionId = sessionByMount.get(mountId)
+    if (!sessionId || sessionId === currentSessionId) return []
+    const point = center(rect)
+    const primary = direction === 'left' ? origin.x - point.x
+      : direction === 'right' ? point.x - origin.x
+        : direction === 'up' ? origin.y - point.y
+          : point.y - origin.y
+    if (primary <= 0) return []
+    const perpendicular = direction === 'left' || direction === 'right'
+      ? Math.abs(point.y - origin.y)
+      : Math.abs(point.x - origin.x)
+    return [{ sessionId, score: primary * 4 + perpendicular }]
+  })
+  candidates.sort((left, right) => left.score - right.score)
+  return candidates[0]?.sessionId
+}
+
 function createFixtureCommands(
   setProjection: Dispatch<SetStateAction<HierarchyProjection | null>>
 ): HierarchyCommands {
@@ -346,8 +520,65 @@ function createFixtureCommands(
     setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
-    createScene: NOOP, renameScene: NOOP, reorderScene: NOOP, closeScene: NOOP,
-    splitSession: NOOP, forkSession: NOOP, putGeometry: NOOP, deleteSession: NOOP, detachSession: NOOP, returnSession: NOOP,
+    createScene: (taskId) => updateNavigation((value) => {
+      const ordinal = value.scenes.filter((scene) => scene.taskId === taskId).length + 1
+      const sceneId = `fixture-scene-${ordinal}`
+      const sessionId = `fixture-session-${ordinal}`
+      const nodeId = `fixture-node-${ordinal}`
+      const mountId = `fixture-mount-${ordinal}`
+      value.scenes.push({ id: sceneId, taskId, name: `Shell ${ordinal}`, rootNodeId: nodeId })
+      value.sessions.push({ id: sessionId, taskId, title: 'Shell', executionContextId: 'local-default' })
+      value.sceneSnapshots ??= []
+      value.sceneSnapshots.push({
+        scene: value.scenes.at(-1)!, nodes: [{ id: nodeId, sceneId, kind: 'mount', ordinal: 0 }],
+        mounts: [{ id: mountId, sceneId, sceneNodeId: nodeId, sessionId }], windows: []
+      })
+      value.navigation.sceneByTask[taskId] = sceneId
+      value.navigation.sessionByScene[sceneId] = sessionId
+    }), renameScene: NOOP, reorderScene: (sceneId, beforeSceneId) => updateNavigation((value) => {
+      const scene = value.scenes.find(({ id }) => id === sceneId)
+      if (!scene) return
+      const peers = value.scenes.filter(({ taskId }) => taskId === scene.taskId)
+      const reordered = peers.filter(({ id }) => id !== sceneId)
+      const targetIndex = beforeSceneId
+        ? reordered.findIndex(({ id }) => id === beforeSceneId)
+        : reordered.length
+      reordered.splice(targetIndex < 0 ? reordered.length : targetIndex, 0, scene)
+      let peerIndex = 0
+      value.scenes = value.scenes.map((candidate) =>
+        candidate.taskId === scene.taskId ? reordered[peerIndex++]! : candidate
+      )
+    }), closeScene: NOOP,
+    splitSession: (sceneId, sourceSessionId, direction) => updateNavigation((value) => {
+      const snapshot = value.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
+      const source = value.sessions.find(({ id }) => id === sourceSessionId)
+      if (!snapshot || !source || !snapshot.scene.rootNodeId) return
+      const suffix = snapshot.mounts.length + 1
+      const sessionId = `fixture-split-session-${sceneId}-${suffix}`
+      const rootId = `fixture-split-root-${sceneId}-${suffix}`
+      const nodeId = `fixture-split-node-${sceneId}-${suffix}`
+      const mountId = `fixture-split-mount-${sceneId}-${suffix}`
+      const previousRootId = snapshot.scene.rootNodeId
+      const previousRoot = snapshot.nodes.find(({ id }) => id === previousRootId)
+      if (previousRoot) previousRoot.parentNodeId = rootId
+      snapshot.nodes.push(
+        { id: rootId, sceneId, kind: 'split', direction, ordinal: 0 },
+        { id: nodeId, sceneId, parentNodeId: rootId, kind: 'mount', ordinal: 1 }
+      )
+      snapshot.scene.rootNodeId = rootId
+      snapshot.mounts.push({ id: mountId, sceneId, sceneNodeId: nodeId, sessionId })
+      value.sessions.push({ ...source, id: sessionId, title: 'Shell' })
+      value.navigation.sessionByScene[sceneId] = sessionId
+    }), forkSession: NOOP, putGeometry: NOOP, deleteSession: (sessionId) => updateNavigation((value) => {
+      const snapshot = value.sceneSnapshots?.find(({ mounts }) => mounts.some((mount) => mount.sessionId === sessionId))
+      const mount = snapshot?.mounts.find((candidate) => candidate.sessionId === sessionId)
+      if (!snapshot || !mount || snapshot.mounts.length <= 1) return
+      snapshot.mounts = snapshot.mounts.filter(({ sessionId: candidate }) => candidate !== sessionId)
+      if (mount.sceneNodeId) snapshot.nodes = snapshot.nodes.filter(({ id }) => id !== mount.sceneNodeId)
+      value.sessions = value.sessions.filter(({ id }) => id !== sessionId)
+      const fallback = snapshot.mounts[0]?.sessionId
+      if (fallback) value.navigation.sessionByScene[snapshot.scene.id] = fallback
+    }), detachSession: NOOP, returnSession: NOOP,
     setPermissionMode: NOOP, setModel: NOOP
   }
 }

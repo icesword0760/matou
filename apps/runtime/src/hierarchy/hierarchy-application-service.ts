@@ -208,7 +208,6 @@ export interface RenameSceneWorkflowInput {
 
 export interface ReorderSceneWorkflowInput {
   windowId: string
-  taskId: string
   sceneId: string
   beforeSceneId?: string
   now: number
@@ -1054,10 +1053,14 @@ export class HierarchyApplicationService {
   ): WorkspaceHierarchyResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
+      const scene = requireRow<{ task_id: string }>(tx.get(
+        'SELECT task_id FROM scenes WHERE id = ? AND archived_at IS NULL', input.sceneId
+      ), 'Scene')
+      const taskId = scene.task_id
       const scenes = tx.all<{ id: string }>(
         `SELECT id FROM scenes WHERE task_id = ? AND archived_at IS NULL
          ORDER BY sort_key, created_at, id`,
-        input.taskId
+        taskId
       ).map(({ id }) => id)
       if (!scenes.includes(input.sceneId)) throw new Error('Scene must belong to the Task')
       if (input.beforeSceneId !== undefined && !scenes.includes(input.beforeSceneId)) {
@@ -1073,13 +1076,13 @@ export class HierarchyApplicationService {
         )
       }
       const task = requireRow<{ workspace_id: string }>(tx.get(
-        'SELECT workspace_id FROM tasks WHERE id = ?', input.taskId
+        'SELECT workspace_id FROM tasks WHERE id = ?', taskId
       ), 'Task')
       emit({
         eventId: `${command.commandId}:scene-order-changed`,
         eventType: 'task.scene-order-changed',
-        aggregateType: 'task', aggregateId: input.taskId,
-        workspaceId: task.workspace_id, taskId: input.taskId,
+        aggregateType: 'task', aggregateId: taskId,
+        workspaceId: task.workspace_id, taskId,
         payload: { sceneOrder: order }, occurredAt: input.now
       })
       activateSceneInTransaction(tx, input.windowId, input.sceneId, input.now)

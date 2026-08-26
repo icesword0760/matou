@@ -36,7 +36,7 @@ async function createWindow(): Promise<BrowserWindow> {
     minWidth: 720,
     minHeight: 480,
     show: false,
-    backgroundColor: '#0b0e14',
+    backgroundColor: '#F7F8FA',
     ...(process.platform === 'darwin' ? {
       titleBarStyle: 'hiddenInset' as const,
       trafficLightPosition: { x: 14, y: 16 }
@@ -95,7 +95,7 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   }
   const window = new BrowserWindow({
     width: 760, height: 520, minWidth: 420, minHeight: 260,
-    show: false, backgroundColor: '#0b0e14',
+    show: false, backgroundColor: '#F7F8FA',
     title: input.title,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),

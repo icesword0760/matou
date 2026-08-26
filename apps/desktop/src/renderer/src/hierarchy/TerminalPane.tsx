@@ -1,12 +1,13 @@
-import { useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
-import { TerminalSurface } from '../terminal/TerminalSurface'
+import { TerminalSurface, type TerminalSearchRequest } from '../terminal/TerminalSurface'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import type { SessionView } from './hierarchy-types'
 import { sessionDeleteFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import { toOscNotification } from '../notifications/osc-notification'
+import type { TerminalThemeKey } from '../terminal/terminal-themes'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -17,6 +18,13 @@ export function TerminalPane(props: {
   workspaceId?: string
   sceneId?: string
   pathValid?: boolean
+  themeKey?: TerminalThemeKey
+  fontSize?: number
+  onFontSizeChange?(fontSize: number): void
+  closeRequest?: number
+  searchRequest?: TerminalSearchRequest
+  onSearchResults?(result: { resultIndex: number; resultCount: number }): void
+  focusRequest?: number
   onActivate(sessionId: string): unknown
   onDelete(sessionId: string, confirmed?: boolean): unknown
   resumable?: boolean
@@ -26,6 +34,8 @@ export function TerminalPane(props: {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
     pathValid = true, workspaceId, sceneId, resumable = false,
+    themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
+    searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onDetach
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
@@ -38,10 +48,17 @@ export function TerminalPane(props: {
   })
   const profile = session.kind === 'claude-code' || session.kind === 'codex'
     ? session.kind : 'shell'
-  const remove = (confirmed: boolean) => {
+  const remove = useCallback((confirmed: boolean) => {
     setConfirmationOpen(false)
     void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
-  }
+  }, [onDelete, session.id])
+  const requestRemove = useCallback(() => {
+    if (flow.action === 'silent') remove(false)
+    else setConfirmationOpen(true)
+  }, [flow.action, remove])
+  useEffect(() => {
+    if (closeRequest > 0) requestRemove()
+  }, [closeRequest, requestRemove])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
   const canFork = session.kind === 'claude-code' && resumable && onFork !== undefined
   const hasPaneMenu = canFork || onDetach !== undefined
@@ -67,8 +84,7 @@ export function TerminalPane(props: {
       <div className="terminal-pane-actions">
         <button className="pane-close" aria-label={`删除终端：${session.title}`} onClick={(event) => {
           event.stopPropagation()
-          if (flow.action === 'silent') remove(false)
-          else setConfirmationOpen(true)
+          requestRemove()
         }}>×</button>
       </div>
     </header>
@@ -76,6 +92,11 @@ export function TerminalPane(props: {
     <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} inputDisabled={!pathValid}
+      themeKey={themeKey} fontSize={fontSize}
+      {...(onFontSizeChange ? { onFontSizeChange } : {})}
+      {...(searchRequest ? { searchRequest } : {})}
+      {...(onSearchResults ? { onSearchResults } : {})}
+      focusRequest={focusRequest}
       onOscNotification={(oscId, content) => {
         const notification = toOscNotification(oscId, content)
         if (!notification) return

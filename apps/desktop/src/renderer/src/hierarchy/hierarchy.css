@@ -263,6 +263,7 @@ button { -webkit-app-region: no-drag; }
 .detached-placeholder p { margin: 10px 0 14px; font-size: 11px; }
 .detached-placeholder button { padding: 6px 10px; border: 1px solid #35415a; border-radius: 6px; color: #cbd8f1; background: #1a2333; }
 .detached-terminal-app { display: grid; grid-template-rows: 42px minmax(0,1fr) 38px; width: 100%; height: 100%; background: #0b0e14; }
+.detached-terminal-app:has(.terminal-search-bar) { grid-template-rows: 42px 40px minmax(0,1fr) 38px; }
 .detached-terminal-app > header { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #252a33; color: #dce3ef; background: #11151c; -webkit-app-region: drag; }
 .detached-terminal-app > header span { color: #748096; font-size: 10px; }
 .e2e-diagnostics { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -299,3 +300,138 @@ button { -webkit-app-region: no-drag; }
 .flat-sidebar .workbench-item__right { gap: 5px; }
 .flat-sidebar .pin-icon { flex: 0 0 auto; color: #777; }
 .flat-sidebar .workspace-invalid { margin-left: auto; padding: 1px 4px; border-radius: 4px; color: #d99d3c; background: rgba(217,157,60,.1); font-size: 9px; }
+
+/* Kooky keyboard panel */
+.shortcut-panel-overlay { position: fixed; z-index: 9999; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.6); animation: shortcut-overlay-in .2s ease; }
+.shortcut-panel { display: flex; flex-direction: column; width: 800px; max-width: 90vw; max-height: 85vh; padding-bottom: 32px; overflow: hidden; border-radius: 12px; animation: shortcut-panel-in .2s ease; }
+.shortcut-panel.theme-dark { background: #1e1e1e; }
+.shortcut-panel.theme-light { background: #fff; }
+.shortcut-panel__header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; padding: 16px 20px 12px; }
+.shortcut-panel__header h2 { margin: 0; color: #d1d1d1; font-family: 'PingFang SC',sans-serif; font-size: 16px; font-weight: 600; line-height: 22px; }
+.shortcut-panel.theme-light .shortcut-panel__header h2 { color: #2f3547; }
+.shortcut-panel__header button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; color: #7b7b7b; background: transparent; cursor: pointer; font-size: 24px; font-weight: 300; line-height: 1; }
+.shortcut-panel__header button:hover { background: rgba(128,128,128,.15); }
+.shortcut-panel__content { padding: 0 20px; overflow-y: auto; }
+.shortcut-panel__content img { display: block; width: 100%; height: auto; }
+.shortcut-panel__content::-webkit-scrollbar { width: 4px; }
+.shortcut-panel__content::-webkit-scrollbar-track { background: transparent; }
+.shortcut-panel__content::-webkit-scrollbar-thumb { border-radius: 2px; background: rgba(128,128,128,.25); }
+@keyframes shortcut-overlay-in { from { opacity: 0; } }
+@keyframes shortcut-panel-in { from { transform: scale(.95); } }
+
+/* Kooky terminal search */
+.terminal-search-bar { position: relative; z-index: 12; display: flex; flex: 0 0 40px; align-items: center; box-sizing: border-box; width: 100%; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--kooky-border); background: var(--kooky-chrome); color: #fafafa; font-size: 12px; user-select: none; }
+.terminal-search-bar input { flex: 1; min-width: 0; height: 28px; padding: 0; border: 0; outline: 0; color: inherit; background: transparent; font: 12px 'SF Mono','Monaco','Menlo',monospace; }
+.terminal-search-bar input::placeholder { color: #747474; }
+.terminal-search-bar__count { min-width: 42px; padding: 0 8px; color: #7b7b7b; font: 11px 'SF Mono','Monaco','Menlo',monospace; text-align: right; white-space: nowrap; }
+.terminal-search-bar button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin-left: 4px; padding: 0; border: 0; border-radius: 4px; color: #7b7b7b; background: transparent; cursor: pointer; font-size: 11px; }
+.terminal-search-bar button:hover { border-radius: 6px; color: #fafafa; background: rgba(255,255,255,.1); }
+.terminal-search-bar button.is-active { color: #ff8c00; }
+
+/* Kooky white theme: the complete CLI surface, not the outer app shell. */
+.hierarchy-shell[data-theme="light"] {
+  --kooky-shell: #f4f5f5;
+  --kooky-terminal: #f7f8fa;
+  --kooky-chrome: #fff;
+  --kooky-active: #eceef3;
+  --kooky-border: #e8e8e8;
+  --kooky-muted: #606572;
+  color: #2f3547;
+  background: #f7f8fa;
+}
+.hierarchy-shell[data-theme="light"] .workspace-stage,
+.hierarchy-shell[data-theme="light"] .scene-stage,
+.hierarchy-shell[data-theme="light"] .terminal-pane,
+.hierarchy-shell[data-theme="light"] .terminal-pane .terminal-surface { color: #2f3547; background: #f7f8fa; }
+.hierarchy-shell[data-theme="light"] .workbench-sidebar,
+.hierarchy-shell[data-theme="light"] .flat-sidebar,
+.hierarchy-shell[data-theme="light"] .flat-sidebar__topbar,
+.hierarchy-shell[data-theme="light"] .scene-bar,
+.hierarchy-shell[data-theme="light"] .terminal-pane-header,
+.hierarchy-shell[data-theme="light"] .shortcut-bar { color: #2f3547; background: #fff; }
+.hierarchy-shell[data-theme="light"] .flat-sidebar__new-workspace,
+.hierarchy-shell[data-theme="light"] .workspace-group__name,
+.hierarchy-shell[data-theme="light"] .workspace-group.is-active > .workspace-group__header .workspace-group__name { color: #2f3547; }
+.hierarchy-shell[data-theme="light"] .workspace-group__toggle,
+.hierarchy-shell[data-theme="light"] .workbench-item { color: #606572; }
+.hierarchy-shell[data-theme="light"] .workspace-group__header:hover,
+.hierarchy-shell[data-theme="light"] .flat-sidebar__new-workspace:hover,
+.hierarchy-shell[data-theme="light"] .flat-sidebar__notify:hover { background: rgba(0,0,0,.045); }
+.hierarchy-shell[data-theme="light"] .workspace-group.is-active > .workspace-group__header { background: transparent; box-shadow: inset 2px 0 #4078f2; }
+.hierarchy-shell[data-theme="light"] .workspace-group.is-active > .workspace-group__header .workspace-group__toggle > svg:not(.workspace-group__chevron) { color: #4078f2; }
+.hierarchy-shell[data-theme="light"] .flat-sidebar .workbench-item.is-active { color: #2f3547; background: #eceef3; }
+.hierarchy-shell[data-theme="light"] .workbench-item:hover:not(.is-active) { color: #2f3547; background: #f0f1f4; }
+.hierarchy-shell[data-theme="light"] .workbench-item__more-btn,
+.hierarchy-shell[data-theme="light"] .workspace-group__add,
+.hierarchy-shell[data-theme="light"] .workspace-group__more,
+.hierarchy-shell[data-theme="light"] .flat-sidebar .pin-icon { color: #81848d; }
+.hierarchy-shell[data-theme="light"] .workbench-item__more-btn:hover,
+.hierarchy-shell[data-theme="light"] .workspace-group__add:hover,
+.hierarchy-shell[data-theme="light"] .workspace-group__more:hover { color: #2f3547; background: rgba(0,0,0,.08); }
+.hierarchy-shell[data-theme="light"] .tab-item { color: rgba(0,0,0,.4); }
+.hierarchy-shell[data-theme="light"] .tab-item:hover { color: rgba(0,0,0,.65); }
+.hierarchy-shell[data-theme="light"] .tab-item.active { color: #2f3547; background: #eceef3; }
+.hierarchy-shell[data-theme="light"] .tab-close,
+.hierarchy-shell[data-theme="light"] .tab-add-btn,
+.hierarchy-shell[data-theme="light"] .toolbar-btn,
+.hierarchy-shell[data-theme="light"] .pane-close { color: #606572; }
+.hierarchy-shell[data-theme="light"] .tab-add-btn { background: #eff0f4; }
+.hierarchy-shell[data-theme="light"] .tab-close:hover,
+.hierarchy-shell[data-theme="light"] .tab-add-btn:hover,
+.hierarchy-shell[data-theme="light"] .tab-overflow-btn:hover,
+.hierarchy-shell[data-theme="light"] .toolbar-btn:hover,
+.hierarchy-shell[data-theme="light"] .pane-close:hover { color: #2f3547; background: rgba(0,0,0,.08); }
+.hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
+.hierarchy-shell[data-theme="light"] .pane-title { color: rgba(0,0,0,.6); }
+.hierarchy-shell[data-theme="light"] .terminal-pane.active-pane { outline-color: rgba(64,120,242,.35); }
+.hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn { color: rgba(0,0,0,.4); background: #eff0f4; }
+.hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn:hover,
+.hierarchy-shell[data-theme="light"] .is-clickable:hover { color: #2f3547; background: rgba(0,0,0,.08) !important; }
+.hierarchy-shell[data-theme="light"] .status-info { border-left-color: #e8e8e8; color: #606572; }
+.hierarchy-shell[data-theme="light"] .status-divider { background: #e8e8e8; }
+.hierarchy-shell[data-theme="light"] .terminal-search-bar { color: #2f3547; }
+.hierarchy-shell[data-theme="light"] .terminal-search-bar input::placeholder,
+.hierarchy-shell[data-theme="light"] .terminal-search-bar__count,
+.hierarchy-shell[data-theme="light"] .terminal-search-bar button { color: #606572; }
+.hierarchy-shell[data-theme="light"] .terminal-search-bar button:hover { color: #2f3547; background: rgba(0,0,0,.08); }
+.hierarchy-shell[data-theme="light"] .terminal-search-bar button.is-active { color: #ff8c00; }
+
+.light-theme .detach-context-menu,
+.light-theme .scene-tab-menu,
+.light-theme .scene-overflow-menu,
+.light-theme .workbench-action-popover,
+.light-theme .perm-menu { border-color: transparent; color: #2f3547; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.1); }
+.light-theme .detach-menu-item,
+.light-theme .scene-tab-menu button,
+.light-theme .scene-overflow-menu button,
+.light-theme .workbench-action-popover button,
+.light-theme .perm-menu button.perm-menu__item { color: #2f3547; }
+.light-theme .detach-menu-item:hover,
+.light-theme .scene-tab-menu button:hover,
+.light-theme .scene-overflow-menu button:hover,
+.light-theme .workbench-action-popover button:hover,
+.light-theme .perm-menu button.perm-menu__item:hover { background: #eceef3; }
+.light-theme .kooky-rename-dialog,
+.light-theme [role="alertdialog"] { color: #2f3547; background: #fff; }
+.light-theme .kooky-rename-dialog h2,
+.light-theme [role="alertdialog"] h2 { color: rgba(0,0,0,.85); }
+.light-theme .rename-input-wrap input { color: rgba(0,0,0,.85); background: rgba(0,0,0,.04); }
+.light-theme [role="alertdialog"] > p { color: rgba(0,0,0,.65); }
+.light-theme .kooky-rename-dialog footer button,
+.light-theme [role="alertdialog"] footer button { border-color: rgba(0,0,0,.12); color: rgba(0,0,0,.7); }
+.light-theme .notification-center { color: #2f3547; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.1); }
+.light-theme .notification-center__title,
+.light-theme .notification-item__title,
+.light-theme .notification-item__content { color: #2f3547; }
+.light-theme .notification-item { background: #f7f8fa; }
+.light-theme .notification-item:hover { background: #eceef3; }
+
+html[data-theme="light"] { color-scheme: light; }
+html[data-theme="dark"] { color-scheme: dark; }
+html[data-theme="light"], body.light-theme { color: #2f3547; background: #f7f8fa; }
+.detached-terminal-app[data-theme="light"] { color: #2f3547; background: #f7f8fa; }
+.detached-terminal-app[data-theme="light"] > header,
+.detached-terminal-app[data-theme="light"] .shortcut-bar,
+.detached-terminal-app[data-theme="light"] .terminal-search-bar { color: #2f3547; background: #fff; border-color: #e8e8e8; }
+.detached-terminal-app[data-theme="light"] > header span { color: #606572; }
+.detached-terminal-app[data-theme="light"] .terminal-surface { background: #f7f8fa; }

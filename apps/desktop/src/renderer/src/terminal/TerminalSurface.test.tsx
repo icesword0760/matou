@@ -6,6 +6,10 @@ import { TerminalSurface } from './TerminalSurface'
 
 const state = vi.hoisted(() => ({
   focus: vi.fn(),
+  searchNext: vi.fn(),
+  searchPrevious: vi.fn(),
+  clearDecorations: vi.fn(),
+  searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void)
 }))
 
@@ -26,6 +30,17 @@ vi.mock('@xterm/xterm', () => ({
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class { fit = vi.fn() }
 }))
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: class {
+    findNext = state.searchNext
+    findPrevious = state.searchPrevious
+    clearDecorations = state.clearDecorations
+    onDidChangeResults = (listener: (result: { resultIndex: number; resultCount: number }) => void) => {
+      state.searchResultsListener = listener
+      return { dispose: vi.fn() }
+    }
+  }
+}))
 vi.mock('../runtime/RuntimeProvider', () => ({
   useRuntimeClient: () => ({
     attachTerminal: (_descriptor: unknown, onMessage: (message: unknown) => void) => {
@@ -42,6 +57,10 @@ vi.mock('../runtime/RuntimeProvider', () => ({
 describe('TerminalSurface focus continuity', () => {
   beforeEach(() => {
     state.focus.mockClear()
+    state.searchNext.mockClear()
+    state.searchPrevious.mockClear()
+    state.clearDecorations.mockClear()
+    state.searchResultsListener = undefined
     state.onMessage = undefined
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
@@ -78,5 +97,51 @@ describe('TerminalSurface focus continuity', () => {
     button.focus()
     state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([66]), sequence: 2 })
     expect(state.focus).toHaveBeenCalledTimes(1)
+  })
+
+  it('searches the real terminal buffer in both directions and reports result counts', async () => {
+    const onSearchResults = vi.fn()
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'MATOU_TOKEN', direction: 'next', sequence: 1,
+        options: { caseSensitive: true, regex: false, wholeWord: true }
+      }} onSearchResults={onSearchResults} />)
+
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalledWith('MATOU_TOKEN', expect.objectContaining({
+      caseSensitive: true, regex: false, wholeWord: true, incremental: true
+    })))
+    state.searchResultsListener?.({ resultIndex: 2, resultCount: 5 })
+    expect(onSearchResults).toHaveBeenCalledWith({ resultIndex: 2, resultCount: 5 })
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'MATOU_TOKEN', direction: 'previous', sequence: 2,
+        options: { caseSensitive: true, regex: false, wholeWord: true }
+      }} onSearchResults={onSearchResults} />)
+    await waitFor(() => expect(state.searchPrevious).toHaveBeenCalled())
+  })
+
+  it('clears terminal search decorations when the query becomes empty', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: '', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} />)
+
+    await waitFor(() => expect(state.clearDecorations).toHaveBeenCalled())
+  })
+
+  it('focuses the active terminal when its owner requests focus restoration', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible focusRequest={0} />)
+    await waitFor(() => expect(state.focus).toHaveBeenCalled())
+    const button = document.createElement('button')
+    view.container.append(button)
+    button.focus()
+    state.focus.mockClear()
+    expect(state.focus).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible focusRequest={1} />)
+
+    await waitFor(() => expect(state.focus).toHaveBeenCalledTimes(1))
   })
 })

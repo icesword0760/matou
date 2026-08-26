@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { DetachedTerminalApp } from './DetachedTerminalApp'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId }: { sessionId: string }) => <div data-testid={`terminal-${sessionId}`} />
+  TerminalSurface: ({ sessionId, themeKey, fontSize }: {
+    sessionId: string; themeKey?: string; fontSize?: number
+  }) => <div data-testid={`terminal-${sessionId}`} data-theme={themeKey} data-font-size={fontSize} />
 }))
 const runtime = vi.hoisted(() => ({
   request: vi.fn(async (method: string) => method === 'projection.snapshot' ? { hierarchy: {} } : {}),
@@ -22,6 +24,18 @@ afterEach(() => {
 })
 
 describe('PRD 02 detached HUD', () => {
+  it('uses the same default white skin and Kooky theme shortcut as the main terminal', () => {
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
+    window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')
+    render(<DetachedTerminalApp />)
+
+    expect(screen.getByRole('main').dataset.theme).toBe('light')
+    expect(screen.getByTestId('terminal-agent-1').dataset.theme).toBe('light')
+
+    fireEvent.keyDown(document, { key: 'i', metaKey: true })
+    expect(screen.getByRole('main').dataset.theme).toBe('dark')
+  })
+
   it('gives an Agent detached window the same bottom HUD controls immediately', () => {
     window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code&title=Claude')
     render(<DetachedTerminalApp />)

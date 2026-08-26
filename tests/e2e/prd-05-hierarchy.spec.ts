@@ -147,3 +147,76 @@ test('matches Kooky when deleting a Task from its sidebar menu', async () => {
     await expect(page.getByTestId('terminal-pane')).toHaveCount(1)
   } finally { await fixture.close() }
 })
+
+test('matches Kooky terminal shortcuts, real search, focus, zoom, and white skin end to end', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
+    const shell = page.locator('.hierarchy-shell')
+    const activeStage = page.locator('.scene-stage:not([hidden])')
+    await expect(shell).toHaveAttribute('data-theme', 'light')
+    expect(await shell.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgb(247, 248, 250)')
+
+    await page.keyboard.press(`${mod}+/`)
+    await expect(page.getByRole('dialog', { name: '快捷键列表' })).toBeVisible()
+    await expect(page.getByRole('img', { name: '快捷键说明' })).toHaveAttribute('src', /white_mac/)
+    await page.keyboard.press(`${mod}+i`)
+    await expect(shell).toHaveAttribute('data-theme', 'dark')
+    await expect(page.getByRole('img', { name: '快捷键说明' })).toHaveAttribute('src', /dark_mac/)
+    await page.keyboard.press(`${mod}+/`)
+    await expect(page.getByRole('dialog', { name: '快捷键列表' })).toHaveCount(0)
+
+    await page.keyboard.down('Alt')
+    await page.keyboard.up('Alt')
+    await page.keyboard.down('Alt')
+    await page.keyboard.up('Alt')
+    await expect(page.getByRole('dialog', { name: '快捷键列表' })).toBeVisible()
+    await page.getByRole('button', { name: '关闭快捷键列表' }).click()
+    await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .xterm-helper-textarea')).toBeFocused()
+
+    await page.keyboard.press(`${mod}+i`)
+    await expect(shell).toHaveAttribute('data-theme', 'light')
+    await page.keyboard.press(`${mod}+t`)
+    await expect(page.getByRole('tab')).toHaveCount(2)
+    await page.keyboard.press(`${mod}+Shift+ArrowLeft`)
+    await expect(page.getByRole('tab').first()).toHaveAttribute('aria-selected', 'true')
+
+    await page.keyboard.press(`${mod}+d`)
+    await expect(page.locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"]')).toHaveCount(2)
+    const activeBefore = await activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .terminal-surface')
+      .getAttribute('data-session-id')
+    await page.keyboard.press(`${mod}+[`)
+    await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .terminal-surface'))
+      .not.toHaveAttribute('data-session-id', activeBefore!)
+
+    const terminal = activeStage.locator('.terminal-surface[data-session-id]').first()
+    await terminal.hover()
+    await page.keyboard.down(mod)
+    await page.mouse.wheel(0, -120)
+    await page.keyboard.up(mod)
+    await expect(terminal).toHaveAttribute('data-font-size', '12')
+    await page.keyboard.press(`${mod}+0`)
+    await expect(terminal).toHaveAttribute('data-font-size', '11')
+
+    await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .xterm-helper-textarea')).toBeFocused()
+    await page.keyboard.type("printf 'MATOU_SEARCH_TOKEN\\n'")
+    await page.keyboard.press('Enter')
+    await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .xterm-rows'))
+      .toContainText('MATOU_SEARCH_TOKEN')
+    await page.keyboard.press(`${mod}+f`)
+    const search = page.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' })
+    await search.fill('MATOU_SEARCH_TOKEN')
+    await expect(page.locator('.terminal-search-bar__count')).toHaveText('1/1')
+    await search.press(`${mod}+c`)
+    await expect(page.getByRole('button', { name: '大小写敏感' })).toHaveClass(/is-active/)
+    await search.press(`${mod}+r`)
+    await expect(page.getByRole('button', { name: '正则表达式' })).toHaveClass(/is-active/)
+    await search.press('Escape')
+    await expect(search).toHaveCount(0)
+    await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .xterm-helper-textarea')).toBeFocused()
+
+    await page.keyboard.press(`${mod}+w`)
+    await expect(page.locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"]')).toHaveCount(1)
+  } finally { await fixture.close() }
+})

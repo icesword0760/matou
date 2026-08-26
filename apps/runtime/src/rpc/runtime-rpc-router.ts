@@ -251,7 +251,6 @@ export class RuntimeRpcRouter {
       case 'hierarchy.reorder-scene':
         return this.#hierarchy.reorderScene(command, {
           windowId: text(input.windowId, 'windowId'),
-          taskId: text(input.taskId, 'taskId'),
           sceneId: text(input.sceneId, 'sceneId'),
           ...(optionalText(input.beforeSceneId, 'beforeSceneId') === undefined
             ? {}
@@ -500,7 +499,9 @@ export class RuntimeRpcRouter {
     const sessionRuns = sessions.flatMap(({ id }) => this.#sessions.listRuns(id))
     const providerBindings = sessions.flatMap(({ id }) => this.#sessions.listProviderBindings(id))
     const relations = this.#database.all<{ relation_id: string }>('SELECT relation_id FROM session_relations_current ORDER BY created_at').map(({ relation_id }) => this.#relations.getCurrent(relation_id)!)
-    const sceneSnapshots = this.#database.all<{ id: string }>('SELECT id FROM scenes ORDER BY created_at').map(({ id }) => ({
+    const sceneSnapshots = this.#database.all<{ id: string }>(
+      'SELECT id FROM scenes ORDER BY task_id, sort_key, created_at, id'
+    ).map(({ id }) => ({
       ...this.#scenes.snapshot(id)!,
       geometry: this.#geometry.list(id)
     }))

@@ -2,10 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 
 import type { RuntimeMessage } from '@matou/contracts'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
 import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
+import {
+  DEFAULT_TERMINAL_THEME, TERMINAL_THEMES, type TerminalThemeKey
+} from './terminal-themes'
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
 const NOOP = () => {}
@@ -14,6 +18,13 @@ export type RuntimeStatus =
   | 'waiting-for-port' | 'handshaking' | 'starting-session'
   | 'streaming' | 'error' | 'exited'
 
+export interface TerminalSearchRequest {
+  query: string
+  options: { caseSensitive: boolean; regex: boolean; wholeWord: boolean }
+  direction: 'next' | 'previous'
+  sequence: number
+}
+
 interface TerminalSurfaceProps {
   sessionId?: string
   executionContextId?: string
@@ -21,6 +32,12 @@ interface TerminalSurfaceProps {
   visible?: boolean
   active?: boolean
   inputDisabled?: boolean
+  themeKey?: TerminalThemeKey
+  fontSize?: number
+  onFontSizeChange?: (fontSize: number) => void
+  searchRequest?: TerminalSearchRequest
+  onSearchResults?: (result: { resultIndex: number; resultCount: number }) => void
+  focusRequest?: number
   onStatusChange?: (status: RuntimeStatus) => void
   onSmokeMarker?: (marker: string) => void
   onReplayComplete?: (marker: string) => void
@@ -31,6 +48,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
     profile = 'shell', visible = true, active = true, inputDisabled = false,
+    themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
+    searchRequest, onSearchResults = NOOP, focusRequest = 0,
     onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
     onOscNotification = NOOP
   } = props
@@ -38,11 +57,15 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const [pid, setPid] = useState<number | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const searchRef = useRef<SearchAddon | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
   const activeRef = useRef(active)
   const inputDisabledRef = useRef(inputDisabled)
   const onOscNotificationRef = useRef(onOscNotification)
+  const onFontSizeChangeRef = useRef(onFontSizeChange)
+  const onSearchResultsRef = useRef(onSearchResults)
+  const fontSizeRef = useRef(fontSize)
 
   useEffect(() => {
     visibleRef.current = visible
@@ -52,6 +75,18 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
   useEffect(() => { onOscNotificationRef.current = onOscNotification }, [onOscNotification])
+  useEffect(() => { onFontSizeChangeRef.current = onFontSizeChange }, [onFontSizeChange])
+  useEffect(() => { onSearchResultsRef.current = onSearchResults }, [onSearchResults])
+  useEffect(() => {
+    fontSizeRef.current = fontSize
+    if (!terminalRef.current) return
+    terminalRef.current.options.fontSize = fontSize
+    requestAnimationFrame(() => fitRef.current?.fit())
+  }, [fontSize])
+  useEffect(() => {
+    if (!terminalRef.current) return
+    terminalRef.current.options.theme = TERMINAL_THEMES[themeKey]
+  }, [themeKey])
 
   useEffect(() => {
     if (!active || !visible) return
@@ -62,7 +97,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const frame = requestAnimationFrame(() => terminalRef.current?.focus())
     return () => cancelAnimationFrame(frame)
   }, [active, sessionId, visible])
-
   useEffect(() => {
     const container = containerRef.current
     if (!container || !client) {
@@ -73,22 +107,20 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       cursorBlink: true,
       cursorStyle: 'bar',
       fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
-      fontSize: 14,
+      fontSize,
       scrollback: 10_000,
-      theme: {
-        background: '#1B1B1B', foreground: '#FAFAFA', cursor: '#FF7809', cursorAccent: '#0d1117',
-        selectionBackground: '#264f78', black: '#484f58', red: '#ff7b72', green: '#3fb950',
-        yellow: '#d29922', blue: '#58a6ff', magenta: '#bc8cff', cyan: '#39d353', white: '#b1bac4',
-        brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
-        brightBlue: '#79c0ff', brightMagenta: '#d2a8ff', brightCyan: '#56d364', brightWhite: '#f0f6fc'
-      }
+      allowProposedApi: true,
+      theme: TERMINAL_THEMES[themeKey]
     })
     const fit = new FitAddon()
+    const search = new SearchAddon()
     terminal.loadAddon(fit)
+    terminal.loadAddon(search)
     terminal.open(container)
     terminalRef.current = terminal
     fit.fit()
     fitRef.current = fit
+    searchRef.current = search
     if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
       requestAnimationFrame(() => terminal.focus())
     }
@@ -156,6 +188,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (!replaying) onOscNotificationRef.current(oscId, content)
       return false
     }))
+    const searchResults = search.onDidChangeResults((result) => onSearchResultsRef.current(result))
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       fit.fit()
@@ -164,22 +197,65 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       }
     })
     observer.observe(container)
+    const wheel = (event: WheelEvent) => {
+      const zoom = (isMacPlatform() && (event.metaKey || event.ctrlKey)) || (!isMacPlatform() && event.ctrlKey)
+      if (!zoom || event.deltaY === 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      onFontSizeChangeRef.current(Math.max(10, Math.min(24, fontSizeRef.current + (event.deltaY < 0 ? 1 : -1))))
+    }
+    container.addEventListener('wheel', wheel, { passive: false })
     return () => {
+      container.removeEventListener('wheel', wheel)
       observer.disconnect()
       input.dispose()
+      searchResults.dispose()
       for (const handler of oscHandlers) handler.dispose()
       detach()
       fitRef.current = null
+      searchRef.current = null
       terminalRef.current = null
       terminal.dispose()
     }
   }, [client, executionContextId, onReplayComplete, onSmokeMarker, onStatusChange, profile, sessionId])
 
+  useEffect(() => {
+    if (!active || !visible || focusRequest <= 0) return
+    const frame = requestAnimationFrame(() => terminalRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [active, focusRequest, visible])
+
+  useEffect(() => {
+    const search = searchRef.current
+    if (!search || !searchRequest) return
+    if (!searchRequest.query) {
+      search.clearDecorations()
+      onSearchResultsRef.current({ resultIndex: 0, resultCount: 0 })
+      return
+    }
+    const options = {
+      ...searchRequest.options,
+      incremental: searchRequest.direction === 'next',
+      decorations: {
+        matchBackground: '#ffe792', matchBorder: '#d6a800', matchOverviewRuler: '#d6a800',
+        activeMatchBackground: '#ff9632', activeMatchBorder: '#c86400',
+        activeMatchColorOverviewRuler: '#ff9632'
+      }
+    }
+    if (searchRequest.direction === 'previous') search.findPrevious(searchRequest.query, options)
+    else search.findNext(searchRequest.query, options)
+  }, [searchRequest])
+
   return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible}
-    data-session-id={sessionId} {...(pid === undefined ? {} : { 'data-pid': pid })} />
+    data-session-id={sessionId} data-theme={themeKey} data-font-size={fontSize}
+    {...(pid === undefined ? {} : { 'data-pid': pid })} />
 }
 
 function terminalFocusAllowed(container: HTMLElement): boolean {
   const focused = document.activeElement as HTMLElement | null
   return !focused || focused === document.body || container.contains(focused)
+}
+
+function isMacPlatform(): boolean {
+  return /Mac/.test(navigator.platform ?? '') || /Mac/.test(navigator.userAgent ?? '')
 }
