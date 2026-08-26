@@ -15,7 +15,7 @@ test('moves one complete Task to another main window without restarting its term
     await source.evaluate(() => { window.open('about:blank') })
     await expect.poll(async () => (await app.windows()).length).toBe(2)
     const target = (await app.windows()).find((candidate) => candidate !== source)!
-    await expect(target.getByTestId('workspace-name')).toContainText('matou_workspace')
+    await expect(target.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
 
     await source.evaluate(async ({ taskId, sourceWindowId, targetWindowId }) => {
       await window.matouE2e!.moveTaskToWindow({

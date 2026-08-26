@@ -466,6 +466,37 @@ describe('RuntimeServer domain RPC', () => {
     await settle()
   }, 10_000)
 
+  it('changes Workspace and Task order only after submitted terminal input', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    const interactionPort = new MockPort()
+    new RuntimeServer(interactionPort, root, database, undefined, undefined, sessions)
+    interactionPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'recency-renderer'
+    })
+    registerSession(database, 'recency-session')
+    interactionPort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'recency-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => sessions.has('recency-session'))
+
+    interactionPort.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'recency-session', data: 'echo recency\r'
+    })
+
+    await waitUntil(() => (database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', 'replay-task'
+    )?.last_opened_at ?? 0) > 1)
+    const taskLastOpenedAt = database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', 'replay-task'
+    )?.last_opened_at
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM workspaces WHERE id = ?', 'replay-workspace'
+    )?.last_opened_at).toBe(taskLastOpenedAt)
+  })
+
   it('publishes the Shell HUD after a chained relative cd command', async () => {
     const sessions = new RuntimeSessionRegistry()
     const cwdPort = new MockPort()

@@ -181,6 +181,11 @@ export interface ActivateTaskInput {
   now: number
 }
 
+export interface RecordSessionInteractionInput {
+  sessionId: string
+  now: number
+}
+
 export interface TaskOrderResult extends WorkspaceHierarchyResult {
   taskOrder: string[]
 }
@@ -337,7 +342,6 @@ export class HierarchyApplicationService {
       )
       if (existing) {
         activateWorkspaceInTransaction(context.tx, input.windowId, existing.id, input.now)
-        context.tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, existing.id)
       } else {
         this.#createCompleteHierarchy(context, {
           ids,
@@ -354,42 +358,14 @@ export class HierarchyApplicationService {
   }
 
   renameWorkspace(
-    command: DomainCommandMetadata,
+    _command: DomainCommandMetadata,
     input: RenameWorkspaceInput
   ): Workspace {
-    const name = requiredTrimmed(input.name, 'Workspace name')
-    return this.#transactions.execute(command, ({ tx, emit }) => {
-      const row = tx.get<WorkspaceRow>(
-        'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL',
-        input.workspaceId
-      )
-      if (!row) throw new Error(`Workspace ${input.workspaceId} does not exist`)
-      if (row.is_default === 1) throw new Error('默认工作空间名称跟随 macOS 用户目录')
-      tx.run(
-        `UPDATE workspaces
-         SET name = ?, updated_at = ?, version = version + 1
-         WHERE id = ?`,
-        name,
-        input.now,
-        input.workspaceId
-      )
-      const workspace = mapWorkspace({
-        ...row,
-        name,
-        updated_at: input.now,
-        version: row.version + 1
-      })
-      emit({
-        eventId: `${command.commandId}:workspace-renamed`,
-        eventType: 'workspace.renamed',
-        aggregateType: 'workspace',
-        aggregateId: workspace.id,
-        workspaceId: workspace.id,
-        payload: { name },
-        occurredAt: input.now
-      })
-      return workspace
-    }).result
+    const row = this.#database.get<WorkspaceRow>(
+      'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL', input.workspaceId
+    )
+    if (!row) throw new Error(`Workspace ${input.workspaceId} does not exist`)
+    throw new Error('工作空间名称跟随目录名称')
   }
 
   relinkWorkspace(command: DomainCommandMetadata, input: RelinkWorkspaceInput): Workspace {
@@ -539,12 +515,6 @@ export class HierarchyApplicationService {
       )
       if (!workspace) throw new Error(`Workspace ${input.workspaceId} does not exist`)
       activateWorkspaceInTransaction(tx, input.windowId, input.workspaceId, input.now)
-      tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, input.workspaceId)
-      const taskId = tx.get<{ active_task_id: string | null }>(
-        'SELECT active_task_id FROM window_workspace_focus WHERE window_id = ? AND workspace_id = ?',
-        input.windowId, input.workspaceId
-      )?.active_task_id
-      if (taskId) tx.run('UPDATE tasks SET last_opened_at = ? WHERE id = ?', input.now, taskId)
       return readHierarchyResult(tx, input.windowId)
     })
   }
@@ -870,11 +840,42 @@ export class HierarchyApplicationService {
     return this.#database.transaction((tx) => {
       registerWindow(tx, input.windowId, input.now)
       activateTaskInTransaction(tx, input.windowId, input.taskId, input.now)
-      const task = requireRow<TaskRow>(tx.get('SELECT * FROM tasks WHERE id = ?', input.taskId), 'Task')
-      tx.run('UPDATE tasks SET last_opened_at = ? WHERE id = ?', input.now, input.taskId)
-      tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, task.workspace_id)
       return readHierarchyResult(tx, input.windowId)
     })
+  }
+
+  recordSessionInteraction(
+    command: DomainCommandMetadata,
+    input: RecordSessionInteractionInput
+  ): { sessionId: string; taskId: string; workspaceId: string; lastOpenedAt: number } {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const owner = requireRow<{ task_id: string; workspace_id: string }>(tx.get(
+        `SELECT sessions.task_id, tasks.workspace_id
+         FROM sessions JOIN tasks ON tasks.id = sessions.task_id
+         WHERE sessions.id = ? AND sessions.archived_at IS NULL AND tasks.archived_at IS NULL`,
+        input.sessionId
+      ), 'Session')
+      tx.run('UPDATE tasks SET last_opened_at = ? WHERE id = ?', input.now, owner.task_id)
+      tx.run('UPDATE workspaces SET last_opened_at = ? WHERE id = ?', input.now, owner.workspace_id)
+      const result = {
+        sessionId: input.sessionId,
+        taskId: owner.task_id,
+        workspaceId: owner.workspace_id,
+        lastOpenedAt: input.now
+      }
+      emit({
+        eventId: `${command.commandId}:navigation-recency`,
+        eventType: 'navigation.recency-changed',
+        aggregateType: 'task-navigation',
+        aggregateId: owner.task_id,
+        workspaceId: owner.workspace_id,
+        taskId: owner.task_id,
+        sessionId: input.sessionId,
+        payload: result,
+        occurredAt: input.now
+      })
+      return result
+    }).result
   }
 
   setTaskPinned(command: DomainCommandMetadata, input: SetTaskPinnedInput): Task {
@@ -1781,10 +1782,9 @@ export class HierarchyApplicationService {
       input.now
     )
     tx.run(
-      `UPDATE workspaces SET task_order_json = ?, last_opened_at = ?, updated_at = ?, version = version + 1
+      `UPDATE workspaces SET task_order_json = ?, updated_at = ?, version = version + 1
        WHERE id = ?`,
       JSON.stringify(activeOrder),
-      input.now,
       input.now,
       input.workspace.id
     )

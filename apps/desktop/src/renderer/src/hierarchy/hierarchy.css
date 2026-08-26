@@ -32,9 +32,10 @@ button { -webkit-app-region: no-drag; }
 .workbench-item__left { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
 .workbench-item__icon { display: block; flex: 0 0 auto; width: 12px; height: 12px; background: currentColor; mask-repeat: no-repeat; mask-position: center; mask-size: contain; }
 .workbench-item__name { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
-.workbench-item__right { position: relative; display: flex; flex: 0 0 auto; align-items: center; min-width: 20px; height: 20px; }
+.workbench-item__right { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; min-width: 22px; height: 22px; }
+.workbench-item__status, .workbench-item__actions { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .workbench-item__badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 999px; color: #fff; background: #f54c46; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; }
-.workbench-item__more-btn { position: absolute; right: 0; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: #7b7b7b; background: transparent; opacity: 0; cursor: pointer; font-size: 11px; letter-spacing: -1px; }
+.workbench-item__more-btn { display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: #7b7b7b; background: transparent; opacity: 0; cursor: pointer; font-size: 11px; letter-spacing: -1px; }
 .workbench-item:hover .workbench-item__more-btn, .workbench-item.is-active .workbench-item__more-btn, .workbench-item__more-btn.is-open { opacity: 1; }
 .workbench-item__more-btn:hover, .workbench-item__more-btn.is-open { color: #fff; background: rgba(255,255,255,.08); }
 .custom-scrollbar::-webkit-scrollbar { width: 4px; }
@@ -278,11 +279,14 @@ button { -webkit-app-region: no-drag; }
 .workspace-group.is-dragging { opacity: .6; transform: scale(.99); }
 .workspace-group.drag-over { background: rgba(88,166,255,.1); box-shadow: inset 0 1px #4697e8; }
 .workspace-group__header { display: flex; align-items: center; min-height: 34px; border-radius: 8px; }
-.workspace-group.is-active > .workspace-group__header { background: rgba(255,255,255,.075); }
+.workspace-group.is-active > .workspace-group__header { background: transparent; box-shadow: inset 2px 0 #6f9fd4; }
+.workspace-group.is-active > .workspace-group__header .workspace-group__name { color: #fff; }
+.workspace-group.is-active > .workspace-group__header .workspace-group__toggle > svg:not(.workspace-group__chevron) { color: #8db8e8; }
 .workspace-group__header:hover { background: rgba(255,255,255,.055); }
 .workspace-group__toggle { display: flex; flex: 1; align-items: center; gap: 7px; min-width: 0; height: 34px; padding: 0 5px 0 7px; border: 0; color: #c9c9c9; background: transparent; cursor: pointer; text-align: left; }
 .workspace-group__chevron { flex: 0 0 auto; color: #777; }
 .workspace-group__name { min-width: 0; overflow: hidden; color: #dedede; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-group__status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-width: 0; }
 .workspace-group__badge { flex: 0 0 auto; padding: 1px 5px; border-radius: 5px; color: #858585; background: rgba(255,255,255,.06); font-size: 9px; font-weight: 600; }
 .workspace-group__add, .workspace-group__more { display: grid; flex: 0 0 auto; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; color: #777; background: transparent; cursor: pointer; opacity: 0; }
 .workspace-group:hover .workspace-group__add, .workspace-group:hover .workspace-group__more, .workspace-group.is-active .workspace-group__add, .workspace-group.is-active .workspace-group__more { opacity: 1; }
@@ -292,6 +296,6 @@ button { -webkit-app-region: no-drag; }
 .flat-sidebar .workbench-item { min-height: 32px; padding: 6px 7px; border-left: 0; border-radius: 7px; cursor: default; }
 .flat-sidebar .workbench-item.is-active { background: #302f2f; }
 .flat-sidebar .workbench-item__left { gap: 7px; }
-.flat-sidebar .workbench-item__right { gap: 3px; }
+.flat-sidebar .workbench-item__right { gap: 5px; }
 .flat-sidebar .pin-icon { flex: 0 0 auto; color: #777; }
 .flat-sidebar .workspace-invalid { margin-left: auto; padding: 1px 4px; border-radius: 4px; color: #d99d3c; background: rgba(217,157,60,.1); font-size: 9px; }

@@ -75,7 +75,7 @@ async function runPackagedSmoke(
   })
   try {
     const page = await app.firstWindow()
-    await expect(page.getByTestId('workspace-name')).toContainText('matou_workspace')
+    await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 2)
     await expect(page.getByTestId('runtime-status')).toHaveText('streaming')

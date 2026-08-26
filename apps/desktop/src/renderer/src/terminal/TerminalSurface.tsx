@@ -40,6 +40,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const fitRef = useRef<FitAddon | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
+  const activeRef = useRef(active)
   const inputDisabledRef = useRef(inputDisabled)
   const onOscNotificationRef = useRef(onOscNotification)
 
@@ -47,6 +48,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     visibleRef.current = visible
     if (visible) requestAnimationFrame(() => fitRef.current?.fit())
   }, [visible])
+  useEffect(() => { activeRef.current = active }, [active])
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
   useEffect(() => { onOscNotificationRef.current = onOscNotification }, [onOscNotification])
@@ -87,6 +89,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     terminalRef.current = terminal
     fit.fit()
     fitRef.current = fit
+    if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
+      requestAnimationFrame(() => terminal.focus())
+    }
     const decoder = new TextDecoder()
     let observed = ''
     let replayRequested = false
@@ -121,7 +126,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             client.requestTerminalReplay(sessionId)
           }
         }
-        terminal.write(bytes, () => client.acknowledgeTerminal(sessionId, message.sequence))
+        terminal.write(bytes, () => {
+          client.acknowledgeTerminal(sessionId, message.sequence)
+          if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) terminal.focus()
+        })
       } else if (message.type === 'terminal.exited') {
         onStatusChange('exited')
       } else if (message.type === 'protocol.error') {
@@ -169,4 +177,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible}
     data-session-id={sessionId} {...(pid === undefined ? {} : { 'data-pid': pid })} />
+}
+
+function terminalFocusAllowed(container: HTMLElement): boolean {
+  const focused = document.activeElement as HTMLElement | null
+  return !focused || focused === document.body || container.contains(focused)
 }

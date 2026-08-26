@@ -26,7 +26,6 @@ export function TaskSidebar({ projection, commands }: {
   const [menuTask, setMenuTask] = useState<TaskView | null>(null)
   const [menuWorkspace, setMenuWorkspace] = useState<WorkspaceView | null>(null)
   const [renameTask, setRenameTask] = useState<TaskView | null>(null)
-  const [renameWorkspace, setRenameWorkspace] = useState<WorkspaceView | null>(null)
   const [renameFailure, setRenameFailure] = useState<{ title: string; message: string } | null>(null)
   const [deleteTask, setDeleteTask] = useState<TaskView | null>(null)
   const [removeWorkspace, setRemoveWorkspace] = useState<WorkspaceView | null>(null)
@@ -137,7 +136,7 @@ export function TaskSidebar({ projection, commands }: {
             if (sourceId && workspace.isPinned) void commands.reorderPinnedWorkspace(sourceId, workspace.id)
             resetDrag()
           }} onDragEnd={resetDrag}>
-          <div className="workspace-group__header">
+          <div className="workspace-group__header" aria-current={workspace.id === activeWorkspaceId ? 'location' : undefined}>
             <button className="workspace-group__toggle" aria-expanded={!isCollapsed}
               onClick={() => {
                 notificationStore.markWorkspaceRead(workspace.id)
@@ -150,9 +149,11 @@ export function TaskSidebar({ projection, commands }: {
               }}>
               <ChevronIcon collapsed={isCollapsed} /><FolderIcon home={Boolean(workspace.isDefault)} />
               <span className="workspace-group__name" title={workspace.rootDirectory}>{workspace.name}</span>
-              {workspace.isDefault && <span className="workspace-group__badge">默认</span>}
-              {workspace.isPinned && <PinIcon />}
-              {invalid && <span className="workspace-invalid">路径失效</span>}
+              <span className="workspace-group__status">
+                {workspace.isDefault && <span className="workspace-group__badge">默认</span>}
+                {workspace.isPinned && <PinIcon />}
+                {invalid && <span className="workspace-invalid">路径失效</span>}
+              </span>
             </button>
             <button className="workspace-group__add" aria-label={`在 ${workspace.name} 中新增事项`} title={invalid ? WORKSPACE_PATH_MESSAGE : '新增事项'}
               disabled={invalid} onClick={() => void commands.createTask(workspace.id)}><PlusIcon /></button>
@@ -182,11 +183,14 @@ export function TaskSidebar({ projection, commands }: {
                   ref={task.id === activeTaskId ? activeRef : undefined}>{task.title}</span>
               </div>
               <div className="workbench-item__right" onClick={(event) => event.stopPropagation()}>
-                {task.isPinned && <PinIcon />}
-                {unreadCount(task.id) > 0
-                  ? <span className="workbench-item__badge">{unreadCount(task.id) > 99 ? '99+' : unreadCount(task.id)}</span>
-                  : <button className={`workbench-item__more-btn${menuTask?.id === task.id ? ' is-open' : ''}`}
-                    aria-label={`事项菜单：${task.title}`} title="更多操作" onClick={(event) => openTaskMenu(task, event)}>•••</button>}
+                <span className="workbench-item__status">
+                  {task.isPinned && <PinIcon />}
+                  {unreadCount(task.id) > 0 && <span className="workbench-item__badge">{unreadCount(task.id) > 99 ? '99+' : unreadCount(task.id)}</span>}
+                </span>
+                {unreadCount(task.id) === 0 && <span className="workbench-item__actions">
+                  <button className={`workbench-item__more-btn${menuTask?.id === task.id ? ' is-open' : ''}`}
+                    aria-label={`事项菜单：${task.title}`} title="更多操作" onClick={(event) => openTaskMenu(task, event)}>•••</button>
+                </span>}
               </div>
             </div>)}
           </div>}
@@ -194,16 +198,17 @@ export function TaskSidebar({ projection, commands }: {
       })}
     </nav>
     {menuWorkspace && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
-      <button role="menuitem" onClick={() => { void commands.setWorkspacePinned(menuWorkspace.id, !menuWorkspace.isPinned); setMenuWorkspace(null) }}>
+      <button role="menuitem" onClick={() => {
+        const pinned = !menuWorkspace.isPinned
+        const workspaceId = menuWorkspace.id
+        setMenuWorkspace(null)
+        void Promise.resolve(commands.setWorkspacePinned(workspaceId, pinned))
+          .then(() => setToast(pinned ? '工作空间已置顶' : '已取消工作空间置顶'))
+          .catch(() => setToast('工作空间置顶状态更新失败'))
+      }}>
         <PinIcon />{menuWorkspace.isPinned ? '取消置顶' : '置顶'}</button>
-      {!menuWorkspace.isDefault && <button role="menuitem" onClick={() => { setRenameWorkspace(menuWorkspace); setMenuWorkspace(null) }}><EditIcon />重命名</button>}
       <button role="menuitem" onClick={() => { void window.matouDesktop?.revealDirectory(menuWorkspace.rootDirectory); setMenuWorkspace(null) }}>在 Finder 中显示</button>
       <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(menuWorkspace.rootDirectory); setToast('路径已复制'); setMenuWorkspace(null) }}>复制路径</button>
-      {!menuWorkspace.isDefault && projection.pathStates.some(({ workspaceId, status }) => workspaceId === menuWorkspace.id && status === 'invalid') &&
-        <button role="menuitem" onClick={() => {
-          const workspaceId = menuWorkspace.id; setMenuWorkspace(null)
-          void window.matouDesktop?.selectWorkspaceDirectory().then((path) => path && commands.relinkWorkspace(workspaceId, path))
-        }}>重新关联目录</button>}
       {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
     </div>}
     {menuTask && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
@@ -211,8 +216,6 @@ export function TaskSidebar({ projection, commands }: {
       <button role="menuitem" onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
       <button role="menuitem" className="is-delete" onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
     </div>}
-    {renameWorkspace && <RenameDialog label="工作空间名称" placeholder="请输入工作空间名称" initialValue={renameWorkspace.name}
-      onCancel={() => setRenameWorkspace(null)} onConfirm={(name) => { void commands.renameWorkspace(renameWorkspace.id, name); setRenameWorkspace(null) }} />}
     {removeWorkspace && <ConfirmDialog title="移出工作空间"
       body={`移出 "${removeWorkspace.name}" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？`}
       confirmLabel="移出" onCancel={() => setRemoveWorkspace(null)} onConfirm={() => {

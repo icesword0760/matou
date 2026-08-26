@@ -7,9 +7,9 @@ test('keeps Kooky Task naming, validation, drag focus, and order across restart'
   try {
     let { page } = fixture
     await expect(page.getByTestId('active-task')).toHaveText('默认')
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await addTask(page)
     await expect(page.getByTestId('active-task')).toHaveText('新事项')
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await addTask(page)
     await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
 
     await page.getByRole('button', { name: '事项菜单：新事项 2' }).click()
@@ -22,14 +22,16 @@ test('keeps Kooky Task naming, validation, drag focus, and order across restart'
     await expect(page.getByText('工作台名称不能为空')).toBeVisible()
     await page.getByRole('button', { name: '取消' }).click()
 
+    await pinTask(page, '新事项 2')
+    await pinTask(page, '默认')
     await dragTask(page, '默认', '新事项 2')
     await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
-    await expect(taskNames(page)).resolves.toEqual(['新事项', '新事项 2', '默认'])
+    await expect(taskNames(page)).resolves.toEqual(['默认', '新事项 2', '新事项'])
 
     fixture = await restartMatou(fixture)
     page = fixture.page
     await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
-    await expect(taskNames(page)).resolves.toEqual(['新事项', '新事项 2', '默认'])
+    await expect(taskNames(page)).resolves.toEqual(['默认', '新事项 2', '新事项'])
   } finally {
     await fixture.close()
   }
@@ -57,6 +59,15 @@ async function taskNames(page: Page): Promise<string[]> {
   return page.locator('.workbench-item__name').allTextContents()
 }
 
+async function addTask(page: Page): Promise<void> {
+  await page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
+}
+
+async function pinTask(page: Page, title: string): Promise<void> {
+  await page.getByRole('button', { name: `事项菜单：${title}` }).click()
+  await page.getByRole('menuitem', { name: '置顶' }).click()
+}
+
 async function activeTaskId(page: Page): Promise<string> {
   const row = page.locator('.workbench-item.is-active')
   const testId = await row.getAttribute('data-testid')
@@ -64,15 +75,8 @@ async function activeTaskId(page: Page): Promise<string> {
 }
 
 async function dragTask(page: Page, sourceTitle: string, targetTitle: string): Promise<void> {
-  await page.evaluate(({ sourceTitle, targetTitle }) => {
-    const rows = [...document.querySelectorAll<HTMLElement>('.workbench-item')]
-    const source = rows.find((row) => row.querySelector('.workbench-item__name')?.textContent === sourceTitle)
-    const target = rows.find((row) => row.querySelector('.workbench-item__name')?.textContent === targetTitle)
-    if (!source || !target) throw new Error('Task drag fixture is missing')
-    const transfer = new DataTransfer()
-    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }))
-    target.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: transfer }))
-    target.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }))
-    source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }))
-  }, { sourceTitle, targetTitle })
+  const row = (title: string) => page.locator('.workbench-item').filter({
+    has: page.locator('.workbench-item__name', { hasText: title })
+  })
+  await row(sourceTitle).dragTo(row(targetTitle))
 }

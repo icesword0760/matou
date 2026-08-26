@@ -49,6 +49,35 @@ describe('Workspace and Task navigation', () => {
     expect(target.setWorkspacePinned).toHaveBeenCalledWith('workspace-1', false)
   })
 
+  it('pins a custom Workspace and keeps directory identity actions only', async () => {
+    const user = userEvent.setup()
+    const data = fixture()
+    data.workspaces[0] = { ...data.workspaces[0]!, isPinned: false }
+    const target = commands()
+    render(<TaskSidebar projection={data} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '工作空间菜单：Frontend' }))
+    expect(screen.queryByRole('menuitem', { name: '重命名' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '重新关联目录' })).toBeNull()
+    await user.click(screen.getByRole('menuitem', { name: '置顶' }))
+
+    expect(target.setWorkspacePinned).toHaveBeenCalledWith('workspace-1', true)
+  })
+
+  it('uses separate selection levels and separate pin/action slots', () => {
+    const data = fixture()
+    data.workspaces[0] = { ...data.workspaces[0]!, isPinned: true }
+    data.tasks[0] = { ...data.tasks[0]!, isPinned: true }
+    render(<TaskSidebar projection={data} commands={commands()} />)
+
+    const group = screen.getByRole('group', { name: 'Frontend 工作空间' })
+    expect(group.querySelector('.workspace-group__header')?.getAttribute('aria-current')).toBe('location')
+    expect(screen.getByTestId('task-task-a').getAttribute('aria-current')).toBe('true')
+    expect(group.querySelector('.workspace-group__status .pin-icon')).toBeTruthy()
+    expect(screen.getByTestId('task-task-a').querySelector('.workbench-item__status .pin-icon')).toBeTruthy()
+    expect(screen.getByTestId('task-task-a').querySelector('.workbench-item__actions button')).toBeTruthy()
+  })
+
   it('orders unpinned Workspaces and Tasks by recent user use without mixing pinned items', () => {
     const data = fixture()
     data.workspaces = [

@@ -1,6 +1,5 @@
-import { access, mkdir, realpath } from 'node:fs/promises'
+import { access, realpath } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { expect, test } from '@playwright/test'
@@ -9,41 +8,26 @@ import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 
-test('confirms removing a Workspace, keeps its directory, and remembers explicit removal', async () => {
+test('keeps the default home Workspace protected across restart', async () => {
   let fixture = await launchMatou()
   try {
     const { page } = fixture
-    await page.getByRole('button', { name: '切换工作区' }).click()
-    await page.getByRole('menuitem', { name: '删除' }).click()
-    await expect(page.getByRole('alertdialog', { name: '提示' })).toContainText(
-      '不会删除磁盘上的工作区目录'
-    )
-    await page.getByRole('button', { name: '取消' }).click()
+    await page.getByRole('button', { name: '工作空间菜单：matou_workspace' }).click()
+    await expect(page.getByRole('menuitem', { name: '移出码头' })).toHaveCount(0)
+    await expect(page.getByRole('menuitem', { name: '重命名' })).toHaveCount(0)
+    await page.keyboard.press('Escape')
     await expect(page.getByTestId('active-task')).toHaveText('默认')
-
-    await page.getByRole('button', { name: '切换工作区' }).click()
-    await page.getByRole('menuitem', { name: '删除' }).click()
-    await page.getByRole('button', { name: '确定' }).click()
-    await expect(page.getByText('还没有工作区')).toBeVisible()
     await expect(access(fixture.workspaceDirectory)).resolves.toBeUndefined()
 
     fixture = await restartMatou(fixture)
-    await expect(fixture.page.getByText('还没有工作区')).toBeVisible()
+    await expect(fixture.page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
   } finally { await fixture.close() }
 })
 
-test('creates a selected-directory Workspace and opens its complete default hierarchy immediately', async () => {
+test('opens the selected default directory as a complete Workspace hierarchy', async () => {
   const fixture = await launchMatou()
-  const selectedDirectory = join(fixture.rootDirectory, 'selected-project')
-  await mkdir(selectedDirectory)
   try {
-    await fixture.app.evaluate(({ dialog }, path) => {
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] })
-    }, selectedDirectory)
-    await fixture.page.getByRole('button', { name: '切换工作区' }).click()
-    await fixture.page.getByRole('menuitem', { name: /新增工作区/ }).click()
-
-    await expect(fixture.page.getByTestId('workspace-name')).toContainText('selected-project')
+    await expect(fixture.page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(fixture.page.getByTestId('active-task')).toHaveText('默认')
     await expect(fixture.page.getByRole('tab')).toHaveCount(1)
     await expect(fixture.page.getByTestId('terminal-pane')).toHaveCount(1)
@@ -52,7 +36,7 @@ test('creates a selected-directory Workspace and opens its complete default hier
       .toHaveAttribute('data-pid', /\d+/)
     if (process.platform !== 'win32') {
       expect(await realpath(await processCwd(Number(await surface.getAttribute('data-pid')))))
-        .toBe(await realpath(selectedDirectory))
+        .toBe(await realpath(fixture.workspaceDirectory))
     }
   } finally { await fixture.close() }
 })
@@ -98,14 +82,14 @@ test('persists Task order and each Scene divider geometry across restart', async
   let fixture: MatouFixture = await launchMatou()
   try {
     const { page } = fixture
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(page.getByTestId('active-task')).toHaveText('新事项')
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
-    await dragTaskBefore(page, '新事项 2', '新事项')
+    await pinTask(page, '新事项 2')
+    await pinTask(page, '默认')
+    await dragTaskBefore(page, '默认', '新事项 2')
     await expect.poll(() => taskTitles(page)).toEqual(['默认', '新事项 2', '新事项'])
-    await dragTaskBefore(page, '新事项 2', '默认')
-    await expect.poll(() => taskTitles(page)).toEqual(['新事项 2', '默认', '新事项'])
 
     await page.getByRole('button', { name: '水平分屏' }).click()
     const separator = page.getByRole('separator').first()
@@ -123,7 +107,7 @@ test('persists Task order and each Scene divider geometry across restart', async
     await page.waitForTimeout(180)
 
     fixture = await restartMatou(fixture)
-    await expect.poll(() => taskTitles(fixture.page)).toEqual(['新事项 2', '默认', '新事项'])
+    await expect.poll(() => taskTitles(fixture.page)).toEqual(['默认', '新事项 2', '新事项'])
     await expect(fixture.page.locator('[data-testid^="split-child-"]').first())
       .toHaveAttribute('style', /flex-basis: 35%/)
   } finally { await fixture.close() }
@@ -133,17 +117,16 @@ async function taskTitles(page: MatouFixture['page']): Promise<string[]> {
   return page.locator('.workbench-item__name').allTextContents()
 }
 
+async function pinTask(page: MatouFixture['page'], title: string): Promise<void> {
+  await page.getByRole('button', { name: `事项菜单：${title}` }).click()
+  await page.getByRole('menuitem', { name: '置顶' }).click()
+}
+
 async function dragTaskBefore(page: MatouFixture['page'], sourceTitle: string, destinationTitle: string) {
-  await page.evaluate(({ sourceTitle, destinationTitle }) => {
-    const rows = [...document.querySelectorAll<HTMLElement>('.workbench-item')]
-    const source = rows.find((row) => row.querySelector('.workbench-item__name')?.textContent === sourceTitle)
-    const destination = rows.find((row) => row.querySelector('.workbench-item__name')?.textContent === destinationTitle)
-    if (!source || !destination) throw new Error('task row missing')
-    const dataTransfer = new DataTransfer()
-    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }))
-    destination.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer }))
-    destination.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer }))
-  }, { sourceTitle, destinationTitle })
+  const row = (title: string) => page.locator('.workbench-item').filter({
+    has: page.locator('.workbench-item__name', { hasText: title })
+  })
+  await row(sourceTitle).dragTo(row(destinationTitle))
 }
 
 async function processCwd(pid: number): Promise<string> {

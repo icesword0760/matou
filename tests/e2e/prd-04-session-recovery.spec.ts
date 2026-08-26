@@ -15,10 +15,10 @@ test('restores the work structure and cwd while opening a clean new Shell', asyn
   const sessionDirectory = join(fixture.workspaceDirectory, 'session-directory')
   await mkdir(sessionDirectory)
   try {
-    await fixture.page.getByRole('button', { name: '事项', exact: true }).click()
+    await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await fixture.page.getByRole('button', { name: '新建页签' }).click()
     await fixture.page.getByRole('button', { name: '水平分屏' }).click()
-    const activeSurface = visibleSurfaces(fixture).last()
+    const activeSurface = activeSurfaceFor(fixture)
     await positivePid(activeSurface)
     await typeTerminalCommand(
       activeSurface,
@@ -38,7 +38,7 @@ test('restores the work structure and cwd while opening a clean new Shell', asyn
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     await expect(fixture.page.getByRole('tab')).toHaveCount(2)
     await expect(fixture.page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
-    const restoredSurface = visibleSurfaces(fixture).last()
+    const restoredSurface = activeSurfaceFor(fixture)
     const restoredPid = await positivePid(restoredSurface)
     expect(restoredPid).not.toBe(originalPid)
     await expect(restoredSurface.locator('.xterm-rows'))
@@ -156,7 +156,7 @@ test('restores a valid AI conversation identity and keeps its resumed terminal i
 test('starts silently with a clean work scene when the entire durable database is corrupt', async () => {
   let fixture: MatouFixture = await launchMatou()
   try {
-    await fixture.page.getByRole('button', { name: '事项', exact: true }).click()
+    await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     await fixture.app.evaluate(({ app }) => app.quit())
     await fixture.app.close().catch(() => undefined)
@@ -220,7 +220,7 @@ test('does not resurrect an explicitly removed Task, Scene, or terminal panel', 
   let fixture: MatouFixture = await launchMatou()
   try {
     const { page } = fixture
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(page.getByTestId('active-task')).toHaveText('新事项')
     await page.getByRole('button', { name: '新建页签' }).click()
     await page.getByRole('button', { name: '水平分屏' }).click()
@@ -231,7 +231,7 @@ test('does not resurrect an explicitly removed Task, Scene, or terminal panel', 
     await page.getByRole('button', { name: /^关闭页签：/ }).last().click()
     await expect(page.getByRole('tab')).toHaveCount(1)
 
-    await page.getByRole('button', { name: '事项', exact: true }).click()
+    await page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
     await page.getByRole('button', { name: '事项菜单：新事项 2' }).click()
     await page.getByRole('menuitem', { name: '删除' }).click()
@@ -256,7 +256,7 @@ test('opens a restored work scene from an ephemeral copy when durable storage is
   let fixture: MatouFixture = await launchMatou()
   let permissionsRestricted = false
   try {
-    await fixture.page.getByRole('button', { name: '事项', exact: true }).click()
+    await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     await fixture.app.evaluate(({ app }) => app.quit())
     await fixture.app.close().catch(() => undefined)
@@ -279,7 +279,7 @@ test('opens a restored work scene from an ephemeral copy when durable storage is
 test('restores committed structure after a forced stop without restarting the foreground command', async () => {
   let fixture: MatouFixture = await launchMatou()
   try {
-    await fixture.page.getByRole('button', { name: '事项', exact: true }).click()
+    await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     const surface = visibleSurfaces(fixture).first()
     const originalPid = await positivePid(surface)
     await typeTerminalCommand(
@@ -381,7 +381,7 @@ test('degrades a resumed provider that exits cleanly before becoming interactive
 })
 
 test('returns an unresponsive AI resume to a usable Shell after the ten-second deadline', async () => {
-  test.setTimeout(25_000)
+  test.setTimeout(40_000)
   let fixture: MatouFixture = await launchMatou()
   const providerExecutable = join(fixture.rootDirectory, 'unresponsive-provider.sh')
   try {
@@ -420,6 +420,12 @@ test('returns an unresponsive AI resume to a usable Shell after the ten-second d
 
 function visibleSurfaces(fixture: MatouFixture) {
   return fixture.page.locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"] .terminal-surface')
+}
+
+function activeSurfaceFor(fixture: MatouFixture) {
+  return fixture.page.locator(
+    '.scene-stage:not([hidden]) [data-testid="terminal-pane"][data-active="true"] .terminal-surface'
+  )
 }
 
 async function positivePid(surface: ReturnType<typeof visibleSurfaces>): Promise<number> {

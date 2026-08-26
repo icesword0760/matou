@@ -23,7 +23,7 @@ test('shows the Kooky unread trail and navigates back to the originating termina
     await expect(origin).toHaveClass(/has-notification/)
     await expect(page.locator('.workbench-item__badge')).toHaveText('1')
     await expect(page.getByTestId(`scene-unread-${ids.sceneId}`)).toBeVisible()
-    await expect(page.locator('.project-dropdown__notify img')).toHaveAttribute('src', /rongzhi_ani-.*\.gif/)
+    await expect(page.locator('.flat-sidebar__notify img')).toHaveAttribute('src', /rongzhi_ani-.*\.gif/)
 
     await page.getByRole('button', { name: '通知中心' }).click()
     const center = page.getByRole('region', { name: '通知中心' })
@@ -81,8 +81,14 @@ test('closes outside or with Escape and remembers the sound preference', async (
     await page.getByRole('button', { name: '通知中心' }).click()
     const center = page.getByRole('region', { name: '通知中心' })
     await expect(center).toBeVisible()
-    await center.locator('label.notification-center__sound-toggle').click()
-    await expect(center.getByRole('checkbox', { name: '通知声音' })).not.toBeChecked()
+    const checkbox = center.getByRole('checkbox', { name: '通知声音' })
+    const switchTrack = center.locator('.notification-center__switch-track')
+    if (!await checkbox.isChecked()) {
+      await switchTrack.click()
+      await expect(checkbox).toBeChecked()
+    }
+    await switchTrack.click()
+    await expect(checkbox).not.toBeChecked()
     await expect.poll(() => page.evaluate(() => localStorage.getItem('kc-notification-sound-enabled'))).toBe('false')
 
     await page.keyboard.press('Escape')
@@ -97,7 +103,7 @@ test('closes outside or with Escape and remembers the sound preference', async (
 })
 
 async function hierarchyIds(page: Page, pane: ReturnType<Page['locator']>) {
-  const workspaceId = await page.locator('.project-dropdown').getAttribute('data-workspace-id')
+  const workspaceId = await page.locator('.workspace-group.is-active').getAttribute('data-workspace-id')
   const taskTestId = await page.locator('.workbench-item.is-active').getAttribute('data-testid')
   const sceneId = await page.locator('.scene-stage:not([hidden])').evaluate((element) => {
     const label = element.getAttribute('aria-label') ?? ''

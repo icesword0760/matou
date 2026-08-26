@@ -97,7 +97,7 @@ describe('HierarchyApplicationService Workspace workflows', () => {
     })
     expect(() => service.renameWorkspace(command('rename-default'), {
       workspaceId, name: 'Renamed', now: 19
-    })).toThrow('默认工作空间名称跟随 macOS 用户目录')
+    })).toThrow('工作空间名称跟随目录名称')
     expect(() => service.removeWorkspace(command('remove-1'), {
       windowId: 'window-1',
       workspaceId,
@@ -132,21 +132,20 @@ describe('HierarchyApplicationService Workspace workflows', () => {
     expect(bootstrapped.navigation.activeWorkspaceId).toBe(custom.workspace!.id)
   })
 
-  it('renames and activates an existing Workspace without changing its hierarchy', async () => {
+  it('keeps Workspace names bound to their directory instead of offering a separate rename', async () => {
     const first = await service.createWorkspace(command('create-1'), {
       windowId: 'window-1', name: 'First', rootDirectory: workspaceRoot, now: 10
     })
-    const renamed = await service.renameWorkspace(command('rename-1'), {
-      workspaceId: first.workspace!.id, name: '  Renamed  ', now: 11
-    })
-    const activated = await service.activateWorkspace({
-      windowId: 'window-2', workspaceId: renamed.id, now: 12
-    })
+    expect(() => service.renameWorkspace(command('rename-1'), {
+      workspaceId: first.workspace!.id, name: 'Renamed', now: 11
+    })).toThrow('工作空间名称跟随目录名称')
 
-    expect(renamed.name).toBe('Renamed')
-    expect(activated.navigation.activeWorkspaceId).toBe(renamed.id)
+    const activated = await service.activateWorkspace({
+      windowId: 'window-2', workspaceId: first.workspace!.id, now: 12
+    })
+    expect(activated.navigation.activeWorkspaceId).toBe(first.workspace!.id)
     expect(activated.task?.id).toBe(first.task?.id)
-    expect(activated.workspace?.lastOpenedAt).toBe(12)
+    expect(activated.workspace?.name).toBe('First')
   })
 
   it('relinks an invalid Workspace while keeping its Tasks and sessions', async () => {
@@ -206,7 +205,7 @@ describe('HierarchyApplicationService Workspace workflows', () => {
 })
 
 describe('HierarchyApplicationService Task workflows', () => {
-  it('updates Task recency only when the user activates it', async () => {
+  it('updates navigation recency only after terminal input is submitted', async () => {
     const initial = await bootstrap('recency-bootstrap')
     markPathValid(initial.workspace!.id)
     const other = await service.createTask(command('recency-other'), {
@@ -216,10 +215,24 @@ describe('HierarchyApplicationService Task workflows', () => {
 
     expect(database.get<{ last_opened_at: number }>(
       'SELECT last_opened_at FROM tasks WHERE id = ?', initial.task!.id
-    )?.last_opened_at).toBe(30)
+    )?.last_opened_at).toBe(10)
     expect(database.get<{ last_opened_at: number }>(
       'SELECT last_opened_at FROM tasks WHERE id = ?', other.task!.id
     )?.last_opened_at).toBe(20)
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM workspaces WHERE id = ?', initial.workspace!.id
+    )?.last_opened_at).toBe(10)
+
+    service.recordSessionInteraction(command('recency-submit'), {
+      sessionId: initial.session!.id, now: 40
+    })
+
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', initial.task!.id
+    )?.last_opened_at).toBe(40)
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM workspaces WHERE id = ?', initial.workspace!.id
+    )?.last_opened_at).toBe(40)
   })
 
   it('pins Tasks and reorders only pinned Tasks inside their Workspace', async () => {

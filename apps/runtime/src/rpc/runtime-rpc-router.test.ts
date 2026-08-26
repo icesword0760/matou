@@ -35,12 +35,11 @@ describe('RuntimeRpcRouter', () => {
     const custom = await router.handle('hierarchy.create-workspace', payload('create-workspace', {
       windowId: 'window-1', rootDirectory: '/tmp/matou-rpc-custom', name: 'Custom', now: 2
     })) as { workspace: { id: string } }
-    const renamed = await router.handle('hierarchy.rename-workspace', payload('rename-workspace', {
+    await expect(router.handle('hierarchy.rename-workspace', payload('rename-workspace', {
       workspaceId: custom.workspace.id,
       name: 'Renamed',
       now: 3
-    })) as { name: string }
-    expect(renamed.name).toBe('Renamed')
+    }))).rejects.toThrow('工作空间名称跟随目录名称')
 
     const activated = await router.handle('hierarchy.activate-workspace', payload('activate-workspace', {
       windowId: 'window-2',
