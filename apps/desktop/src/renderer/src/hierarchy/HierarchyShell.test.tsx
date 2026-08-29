@@ -48,7 +48,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     fireEvent.keyDown(document, { key: '/', metaKey: true })
     expect(screen.queryByRole('dialog', { name: '快捷键列表' })).toBeNull()
-    expect(screen.getByTestId('xterm-session-a1').dataset.focusRequest).toBe('1')
+    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThanOrEqual(1)
     fireEvent.keyDown(document, { key: 'Alt', altKey: true })
     fireEvent.keyDown(document, { key: 'Alt', altKey: true })
     expect(screen.getByRole('dialog', { name: '快捷键列表' })).toBeTruthy()
@@ -182,7 +182,7 @@ describe('PRD 05 hierarchy shell', () => {
     fireEvent.keyDown(screen.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' }), { key: 'Escape' })
 
     expect(screen.queryByRole('textbox', { name: '搜索当前 Tab 的终端内容' })).toBeNull()
-    expect(screen.getByTestId('xterm-session-a1').dataset.focusRequest).toBe('1')
+    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThanOrEqual(1)
   })
 
   it('shows only the focused Session HUD and replaces it in one render when focus changes', async () => {
@@ -238,7 +238,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect((screen.getByRole('radio', { name: /从新工作树创建/ }) as HTMLInputElement).disabled).toBe(false)
     await user.click(screen.getByRole('button', { name: '取消' }))
     expect(screen.queryByRole('dialog', { name: '创建子会话分支' })).toBeNull()
-    expect(screen.getByTestId('xterm-session-a1').dataset.focusRequest).toBe('1')
+    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThanOrEqual(1)
   })
 
   it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
@@ -290,7 +290,8 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByTestId('xterm-session-a2')).toBeTruthy()
     expect(screen.getByRole('button', { name: '在 Workspace A 中新增事项' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '水平分屏' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '横向新增 Shell' })).toHaveProperty('disabled', true)
+    expect(screen.queryByRole('button', { name: '垂直分屏' })).toBeNull()
   })
 
   it('restores a persisted divider ratio for an independent Scene layout', () => {

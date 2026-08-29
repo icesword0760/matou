@@ -7,16 +7,17 @@ import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import splitRightIcon from '../assets/kooky/terminal/vertical.png'
-import splitDownIcon from '../assets/kooky/terminal/horizontal.png'
 import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
 
 export interface SceneCommands {
   activateScene(sceneId: string): unknown
   createScene(taskId: string): unknown
+  createCanvas?(taskId: string): unknown
   renameScene(sceneId: string, name: string): unknown
   reorderScene(sceneId: string, beforeSceneId?: string): unknown
   closeScene(sceneId: string, confirmed?: boolean): unknown
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
+  createShellSibling?(sceneId: string, sessionId: string): unknown
 }
 
 export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid = true }: {
@@ -84,7 +85,11 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
       </div>)}
       {overflow.length === 0 && <button className="tab-add-btn" aria-label="新建页签"
         disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-        onClick={() => taskId && commands.createScene(taskId)}>+</button>}
+        onClick={() => {
+          if (!taskId) return
+          if (commands.createCanvas) commands.createCanvas(taskId)
+          else commands.createScene(taskId)
+        }}>+</button>}
     </div>
     {overflow.length > 0 && <div className="tab-bar-overflow-actions">
       <div>
@@ -95,18 +100,21 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
       </div>
       <button className="tab-add-btn" aria-label="新建页签" disabled={!pathValid}
         title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-        onClick={() => taskId && commands.createScene(taskId)}>+</button>
+        onClick={() => {
+          if (!taskId) return
+          if (commands.createCanvas) commands.createCanvas(taskId)
+          else commands.createScene(taskId)
+        }}>+</button>
     </div>}
     <div className="tab-bar-right">
-    <button className="toolbar-btn split-horizontal-icon" aria-label="水平分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
-      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '水平分屏（左右）'}
-      onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'horizontal')}>
+    <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell" disabled={!pathValid || !activeSceneId || !activeSessionId}
+      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
+      onClick={() => {
+        if (!activeSceneId || !activeSessionId) return
+        if (commands.createShellSibling) commands.createShellSibling(activeSceneId, activeSessionId)
+        else commands.splitSession(activeSceneId, activeSessionId, 'horizontal')
+      }}>
       <img src={splitRightIcon} alt="" aria-hidden="true" />
-    </button>
-    <button className="toolbar-btn split-vertical-icon" aria-label="垂直分屏" disabled={!pathValid || !activeSceneId || !activeSessionId}
-      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '垂直分屏（上下）'}
-      onClick={() => activeSceneId && activeSessionId && commands.splitSession(activeSceneId, activeSessionId, 'vertical')}>
-      <img src={splitDownIcon} alt="" aria-hidden="true" />
     </button>
     <span className="tab-bar-separator" />
     <button className="toolbar-btn file-panel-icon" aria-label="文件" title="文件">

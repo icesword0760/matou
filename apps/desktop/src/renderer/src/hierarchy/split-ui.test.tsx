@@ -12,22 +12,18 @@ import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
 afterEach(cleanup)
 
 describe('Scene tabs and split actions', () => {
-  it('requests a right-hand horizontal split for the active terminal', async () => {
+  it('creates a right-hand Shell sibling for the active terminal', async () => {
     const user = userEvent.setup()
     const commands = sceneCommands()
     render(<SceneTabBar projection={fixture(2)} commands={commands} />)
 
-    await user.click(screen.getByRole('button', { name: '水平分屏' }))
-    expect(commands.splitSession).toHaveBeenCalledWith('scene-1', 'session-1', 'horizontal')
+    await user.click(screen.getByRole('button', { name: '横向新增 Shell' }))
+    expect(commands.createShellSibling).toHaveBeenCalledWith('scene-1', 'session-1')
   })
 
-  it('requests a lower vertical split for the active terminal', async () => {
-    const user = userEvent.setup()
-    const commands = sceneCommands()
-    render(<SceneTabBar projection={fixture(2)} commands={commands} />)
-
-    await user.click(screen.getByRole('button', { name: '垂直分屏' }))
-    expect(commands.splitSession).toHaveBeenCalledWith('scene-1', 'session-1', 'vertical')
+  it('removes the downward split entry from the session-canvas toolbar', () => {
+    render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
+    expect(screen.queryByRole('button', { name: '垂直分屏' })).toBeNull()
   })
 
   it('keeps the add-tab control beside the last visible tab like Kooky', () => {
@@ -38,13 +34,11 @@ describe('Scene tabs and split actions', () => {
     expect(container.querySelector('.tab-bar-overflow-actions')).toBeNull()
   })
 
-  it('uses the Kooky split and file toolbar artwork', () => {
+  it('keeps the horizontal-add and file toolbar artwork', () => {
     render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
 
-    expect(screen.getByRole('button', { name: '水平分屏' }).querySelector('img')?.getAttribute('src') ?? '')
+    expect(screen.getByRole('button', { name: '横向新增 Shell' }).querySelector('img')?.getAttribute('src') ?? '')
       .toContain('vertical.png')
-    expect(screen.getByRole('button', { name: '垂直分屏' }).querySelector('img')?.getAttribute('src') ?? '')
-      .toContain('horizontal.png')
     expect(screen.getByRole('button', { name: '文件' }).querySelector('img')?.getAttribute('src'))
       .toBe(folderIcon)
   })
@@ -129,6 +123,7 @@ function fixture(count: number): HierarchyProjection {
 function sceneCommands(): SceneCommands {
   return {
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
+    createCanvas: vi.fn(), createShellSibling: vi.fn(),
     reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn()
   }
 }

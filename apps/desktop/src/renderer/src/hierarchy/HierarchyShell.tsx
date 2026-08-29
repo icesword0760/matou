@@ -24,6 +24,8 @@ import { TerminalPane } from './TerminalPane'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
+import { SessionCanvas } from '../session-canvas/SessionCanvas'
+import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
@@ -212,7 +214,14 @@ function HierarchyProduct({ projection, commands }: {
   const focusedSessionId = focusedSession(projection)
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
   const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
-  const paneSessionIds = activeSnapshot ? orderedSessionIds(activeSnapshot) : []
+  const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
+  const activeGraphFocused = activeGraph?.nodes.find(({ sessionId }) => sessionId === focusedSessionId) ??
+    activeGraph?.nodes.find(({ sessionId }) => sessionId === activeGraph.focusedSessionId)
+  const paneSessionIds = activeGraph && activeGraphFocused
+    ? activeGraph.nodes.filter(({ archivedAt, parentSessionId }) =>
+        archivedAt === undefined && parentSessionId === activeGraphFocused.parentSessionId
+      ).map(({ sessionId }) => sessionId)
+    : activeSnapshot ? orderedSessionIds(activeSnapshot) : []
   const activeRatios = activeSnapshot ? layoutRatios(activeSnapshot, liveRatios) : {}
   const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
   const focusPane = (offset: number) => {
@@ -229,11 +238,9 @@ function HierarchyProduct({ projection, commands }: {
   }
   const shortcutHandlers = useMemo(() => ({
     splitHorizontal: () => {
-      if (pathValid && activeSceneId && focusedSessionId) run(commands.splitSession(activeSceneId, focusedSessionId, 'horizontal'))
+      if (pathValid && activeSceneId && focusedSessionId) run(commands.createShellSibling(activeSceneId, focusedSessionId))
     },
-    splitVertical: () => {
-      if (pathValid && activeSceneId && focusedSessionId) run(commands.splitSession(activeSceneId, focusedSessionId, 'vertical'))
-    },
+    splitVertical: () => {},
     nextPane: () => focusPane(1),
     prevPane: () => focusPane(-1),
     switchPaneByDirection: (direction: 'up' | 'down' | 'left' | 'right') => {
@@ -247,7 +254,7 @@ function HierarchyProduct({ projection, commands }: {
         setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
       }
     },
-    newTab: () => { if (pathValid && task) run(commands.createScene(task.id)) },
+    newTab: () => { if (pathValid && task) run(commands.createCanvas(task.id)) },
     nextTab: () => focusScene((scenes.findIndex(({ id }) => id === activeSceneId) + 1) % Math.max(1, scenes.length)),
     prevTab: () => {
       const index = scenes.findIndex(({ id }) => id === activeSceneId)
@@ -294,9 +301,87 @@ function HierarchyProduct({ projection, commands }: {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)
               const layout = snapshot ? layoutFromSnapshot(snapshot) : undefined
               const ratios = snapshot ? layoutRatios(snapshot, liveRatios) : {}
+              const graph = projection.sessionGraphs?.[scene.id]
+              const activeSessionId = graph?.focusedSessionId ?? projection.navigation.sessionByScene[scene.id]
+              const renderSession = (sessionId: string, cardVisible: boolean) => {
+                const mount = snapshot?.mounts.find((candidate) => candidate.sessionId === sessionId)
+                const session = projection.sessions.find(({ id }) => id === sessionId)
+                if (!session || !mount) return <div className="scene-recovery" aria-hidden="true" />
+                const detachedWindow = snapshot?.windows.find(({ id, state }) =>
+                  id === mount.sceneWindowId && state === 'detached'
+                )
+                if (detachedWindow) {
+                  return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
+                }
+                const graphNode = graph?.nodes.find(({ sessionId: candidate }) => candidate === session.id)
+                const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
+                const isFocused = activeSessionId === session.id
+                return <TerminalPane session={session}
+                  active={isFocused} visible={scene.id === activeSceneId && cardVisible}
+                  workspaceSessionCount={workspaceSessionCount}
+                  taskName={task.title} sceneId={scene.id} pathValid={pathValid}
+                  themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
+                  closeRequest={session.id === closeRequest.sessionId ? closeRequest.sequence : 0}
+                  {...(searchOpen && scene.id === activeSceneId && isFocused ? { searchRequest } : {})}
+                  {...(scene.id === activeSceneId && isFocused ? { onSearchResults: setSearchResults } : {})}
+                  focusRequest={scene.id === activeSceneId && isFocused ? terminalFocusRequest : 0}
+                  resumable={sessionHud?.resumable === true}
+                  {...(graphNode ? {
+                    forkReady: graphNode.canFork,
+                    providerRestoreState: graphNode.providerRestoreState,
+                    forkState: graphNode.forkState,
+                    spawnRevision: graphNode.forkAttempt ?? 0,
+                    ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
+                    ...(graphNode.providerRestoreError ? { restoreError: graphNode.providerRestoreError } : {})
+                  } : {})}
+                  {...(workspace ? { workspaceId: workspace.id } : {})}
+                  onActivate={(id) => commands.setFocusedSession(scene.id, id)}
+                  onDelete={commands.deleteSession}
+                  onRetryRestore={commands.retryProviderRestore}
+                  onRetryFork={() => commands.retryFork(session.id)}
+                  onRemoveFailedFork={() => commands.removeFailedFork(session.id)}
+                  onFork={() => setBranchDialog({
+                    sceneId: scene.id, sourceSessionId: session.id, sourceTitle: session.title,
+                    relationMode: 'child', gitAvailable: Boolean(sessionHud?.gitBranch)
+                  })}
+                  {...(window.matouDesktop?.createDetachedTerminalWindow
+                    ? { onDetach: async () => {
+                        const sceneWindowId = crypto.randomUUID()
+                        await commands.detachSession(scene.id, mount.id, session.id, sceneWindowId)
+                        try {
+                          await window.matouDesktop.createDetachedTerminalWindow({
+                            windowId: sceneWindowId, mainWindowId: projection.windowId,
+                            sceneId: scene.id, mountId: mount.id, sessionId: session.id,
+                            executionContextId: session.executionContextId ?? 'local-default',
+                            profile: session.kind === 'claude-code' || session.kind === 'codex'
+                              ? session.kind : 'shell', title: session.title
+                          })
+                        } catch (error) {
+                          await commands.returnSession(sceneWindowId)
+                          throw error
+                        }
+                      } }
+                    : {})} />
+              }
               return <section className="scene-stage" key={scene.id} hidden={scene.id !== activeSceneId}
                 aria-label={`${scene.name} 终端布局`}>
-                {layout && snapshot
+                {graph && snapshot
+                  ? <SessionCanvas graph={graph} disabled={!pathValid}
+                      renderSession={(node, cardVisible) => renderSession(node.sessionId, cardVisible)}
+                      onActivate={(sessionId) => run(commands.setFocusedSession(scene.id, sessionId))}
+                      onCreateShellSibling={(sessionId) => run(commands.createShellSibling(scene.id, sessionId))}
+                      onCreateForkSibling={(source, parent) => {
+                        const parentHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === parent.sessionId)
+                        setBranchDialog({
+                          sceneId: scene.id, sourceSessionId: source.sessionId,
+                          sourceTitle: parent.title, relationMode: 'sibling',
+                          gitAvailable: Boolean(parentHud?.gitBranch)
+                        })
+                      }}
+                      onEnsureSessionVisible={(sessionId) => {
+                        if (sessionId === activeSessionId) setTerminalFocusRequest((value) => value + 1)
+                      }} />
+                  : layout && snapshot
                   ? <SplitTree root={layout} ratios={ratios} onRatio={(nodeId, ratio) => {
                       const key = `${scene.id}:${nodeId}`
                       setLiveRatios((current) => ({ ...current, [key]: ratio }))
@@ -310,72 +395,7 @@ function HierarchyProduct({ projection, commands }: {
                       }, 100))
                     }} renderMount={(mountId) => {
                       const mount = snapshot.mounts.find(({ id }) => id === mountId)
-                      const session = projection.sessions.find(({ id }) => id === mount?.sessionId)
-                      if (!session) return <div className="scene-recovery" aria-hidden="true" />
-                      const detachedWindow = snapshot.windows.find(({ id, state }) =>
-                        id === mount?.sceneWindowId && state === 'detached'
-                      )
-                      if (detachedWindow) {
-                        return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
-                      }
-                      const graphNode = projection.sessionGraphs?.[scene.id]?.nodes
-                        .find(({ sessionId }) => sessionId === session.id)
-                      const sessionHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === session.id)
-                      return <TerminalPane session={session}
-                        active={projection.navigation.sessionByScene[scene.id] === session.id}
-                        visible={scene.id === activeSceneId}
-                        workspaceSessionCount={workspaceSessionCount}
-                        taskName={task.title} sceneId={scene.id} pathValid={pathValid}
-                        themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
-                        closeRequest={session.id === closeRequest.sessionId ? closeRequest.sequence : 0}
-                        {...(searchOpen && scene.id === activeSceneId && session.id === focusedSessionId
-                          ? { searchRequest } : {})}
-                        {...(scene.id === activeSceneId && session.id === focusedSessionId
-                          ? { onSearchResults: setSearchResults } : {})}
-                        focusRequest={scene.id === activeSceneId && session.id === focusedSessionId
-                          ? terminalFocusRequest : 0}
-                        resumable={sessionHud?.resumable === true}
-                        {...(graphNode ? {
-                          forkReady: graphNode.canFork,
-                          providerRestoreState: graphNode.providerRestoreState,
-                          forkState: graphNode.forkState,
-                          spawnRevision: graphNode.forkAttempt ?? 0,
-                          ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
-                          ...(graphNode.providerRestoreError
-                            ? { restoreError: graphNode.providerRestoreError }
-                            : {})
-                        } : {})}
-                        {...(workspace ? { workspaceId: workspace.id } : {})}
-                        onActivate={commands.activateSession} onDelete={commands.deleteSession}
-                        onRetryRestore={commands.retryProviderRestore}
-                        onRetryFork={() => commands.retryFork(session.id)}
-                        onRemoveFailedFork={() => commands.removeFailedFork(session.id)}
-                        onFork={() => setBranchDialog({
-                          sceneId: scene.id,
-                          sourceSessionId: session.id,
-                          sourceTitle: session.title,
-                          relationMode: 'child',
-                          gitAvailable: Boolean(sessionHud?.gitBranch)
-                        })}
-                        {...(window.matouDesktop?.createDetachedTerminalWindow
-                          ? { onDetach: async () => {
-                              const sceneWindowId = crypto.randomUUID()
-                              await commands.detachSession(scene.id, mountId, session.id, sceneWindowId)
-                              try {
-                                await window.matouDesktop.createDetachedTerminalWindow({
-                                  windowId: sceneWindowId, mainWindowId: projection.windowId,
-                                  sceneId: scene.id, mountId, sessionId: session.id,
-                                  executionContextId: session.executionContextId ?? 'local-default',
-                                  profile: session.kind === 'claude-code' || session.kind === 'codex'
-                                    ? session.kind : 'shell',
-                                  title: session.title
-                                })
-                              } catch (error) {
-                                await commands.returnSession(sceneWindowId)
-                                throw error
-                              }
-                            } }
-                          : {})} />
+                      return mount ? renderSession(mount.sessionId, true) : <div className="scene-recovery" aria-hidden="true" />
                     }} />
                   : <div className="scene-recovery" aria-hidden="true" />}
               </section>
@@ -552,6 +572,47 @@ function createFixtureCommands(
     })
   }
   const NOOP = () => {}
+  const createFixtureCanvas = (taskId: string) => updateNavigation((value) => {
+    const ordinal = value.scenes.filter((scene) => scene.taskId === taskId).length + 1
+    const sceneId = `fixture-scene-${ordinal}`
+    const sessionId = `fixture-session-${ordinal}`
+    const nodeId = `fixture-node-${ordinal}`
+    const mountId = `fixture-mount-${ordinal}`
+    value.scenes.push({ id: sceneId, taskId, name: `Shell ${ordinal}`, rootNodeId: nodeId })
+    value.sessions.push({ id: sessionId, taskId, title: 'Shell', executionContextId: 'local-default' })
+    value.sceneSnapshots ??= []
+    value.sceneSnapshots.push({
+      scene: value.scenes.at(-1)!, nodes: [{ id: nodeId, sceneId, kind: 'mount', ordinal: 0 }],
+      mounts: [{ id: mountId, sceneId, sceneNodeId: nodeId, sessionId }], windows: []
+    })
+    value.navigation.sceneByTask[taskId] = sceneId
+    value.navigation.sessionByScene[sceneId] = sessionId
+  })
+  const createFixtureSibling = (
+    sceneId: string,
+    sourceSessionId: string,
+    direction: 'horizontal' | 'vertical' = 'horizontal'
+  ) => updateNavigation((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
+    const source = value.sessions.find(({ id }) => id === sourceSessionId)
+    if (!snapshot || !source || !snapshot.scene.rootNodeId) return
+    const suffix = snapshot.mounts.length + 1
+    const sessionId = `fixture-split-session-${sceneId}-${suffix}`
+    const rootId = `fixture-split-root-${sceneId}-${suffix}`
+    const nodeId = `fixture-split-node-${sceneId}-${suffix}`
+    const mountId = `fixture-split-mount-${sceneId}-${suffix}`
+    const previousRootId = snapshot.scene.rootNodeId
+    const previousRoot = snapshot.nodes.find(({ id }) => id === previousRootId)
+    if (previousRoot) previousRoot.parentNodeId = rootId
+    snapshot.nodes.push(
+      { id: rootId, sceneId, kind: 'split', direction, ordinal: 0 },
+      { id: nodeId, sceneId, parentNodeId: rootId, kind: 'mount', ordinal: 1 }
+    )
+    snapshot.scene.rootNodeId = rootId
+    snapshot.mounts.push({ id: mountId, sceneId, sceneNodeId: nodeId, sessionId })
+    value.sessions.push({ ...source, id: sessionId, title: 'Shell' })
+    value.navigation.sessionByScene[sceneId] = sessionId
+  })
   return {
     activateWorkspace: (workspaceId) => updateNavigation((value) => { value.navigation.activeWorkspaceId = workspaceId }),
     activateTask: (taskId) => updateNavigation((value) => {
@@ -570,26 +631,17 @@ function createFixtureCommands(
     setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
-    createCanvas: NOOP, createShellSibling: NOOP, createForkChild: NOOP, createForkSibling: NOOP,
+    createCanvas: createFixtureCanvas,
+    createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
+    createForkChild: NOOP, createForkSibling: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
     retryProviderRestore: NOOP, reopenHistoricalSession: NOOP, getSceneSessionGraph: NOOP,
-    recordSessionInteraction: NOOP, setFocusedSession: NOOP,
-    createScene: (taskId) => updateNavigation((value) => {
-      const ordinal = value.scenes.filter((scene) => scene.taskId === taskId).length + 1
-      const sceneId = `fixture-scene-${ordinal}`
-      const sessionId = `fixture-session-${ordinal}`
-      const nodeId = `fixture-node-${ordinal}`
-      const mountId = `fixture-mount-${ordinal}`
-      value.scenes.push({ id: sceneId, taskId, name: `Shell ${ordinal}`, rootNodeId: nodeId })
-      value.sessions.push({ id: sessionId, taskId, title: 'Shell', executionContextId: 'local-default' })
-      value.sceneSnapshots ??= []
-      value.sceneSnapshots.push({
-        scene: value.scenes.at(-1)!, nodes: [{ id: nodeId, sceneId, kind: 'mount', ordinal: 0 }],
-        mounts: [{ id: mountId, sceneId, sceneNodeId: nodeId, sessionId }], windows: []
-      })
-      value.navigation.sceneByTask[taskId] = sceneId
+    recordSessionInteraction: NOOP,
+    setFocusedSession: (sceneId, sessionId) => updateNavigation((value) => {
       value.navigation.sessionByScene[sceneId] = sessionId
-    }), renameScene: NOOP, reorderScene: (sceneId, beforeSceneId) => updateNavigation((value) => {
+      if (value.sessionGraphs?.[sceneId]) value.sessionGraphs[sceneId]!.focusedSessionId = sessionId
+    }),
+    createScene: createFixtureCanvas, renameScene: NOOP, reorderScene: (sceneId, beforeSceneId) => updateNavigation((value) => {
       const scene = value.scenes.find(({ id }) => id === sceneId)
       if (!scene) return
       const peers = value.scenes.filter(({ taskId }) => taskId === scene.taskId)
@@ -603,27 +655,7 @@ function createFixtureCommands(
         candidate.taskId === scene.taskId ? reordered[peerIndex++]! : candidate
       )
     }), closeScene: NOOP,
-    splitSession: (sceneId, sourceSessionId, direction) => updateNavigation((value) => {
-      const snapshot = value.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
-      const source = value.sessions.find(({ id }) => id === sourceSessionId)
-      if (!snapshot || !source || !snapshot.scene.rootNodeId) return
-      const suffix = snapshot.mounts.length + 1
-      const sessionId = `fixture-split-session-${sceneId}-${suffix}`
-      const rootId = `fixture-split-root-${sceneId}-${suffix}`
-      const nodeId = `fixture-split-node-${sceneId}-${suffix}`
-      const mountId = `fixture-split-mount-${sceneId}-${suffix}`
-      const previousRootId = snapshot.scene.rootNodeId
-      const previousRoot = snapshot.nodes.find(({ id }) => id === previousRootId)
-      if (previousRoot) previousRoot.parentNodeId = rootId
-      snapshot.nodes.push(
-        { id: rootId, sceneId, kind: 'split', direction, ordinal: 0 },
-        { id: nodeId, sceneId, parentNodeId: rootId, kind: 'mount', ordinal: 1 }
-      )
-      snapshot.scene.rootNodeId = rootId
-      snapshot.mounts.push({ id: mountId, sceneId, sceneNodeId: nodeId, sessionId })
-      value.sessions.push({ ...source, id: sessionId, title: 'Shell' })
-      value.navigation.sessionByScene[sceneId] = sessionId
-    }), forkSession: NOOP, putGeometry: NOOP, deleteSession: (sessionId) => updateNavigation((value) => {
+    splitSession: createFixtureSibling, forkSession: NOOP, putGeometry: NOOP, deleteSession: (sessionId) => updateNavigation((value) => {
       const snapshot = value.sceneSnapshots?.find(({ mounts }) => mounts.some((mount) => mount.sessionId === sessionId))
       const mount = snapshot?.mounts.find((candidate) => candidate.sessionId === sessionId)
       if (!snapshot || !mount || snapshot.mounts.length <= 1) return
