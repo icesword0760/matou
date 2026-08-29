@@ -27,6 +27,7 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
     task.workspaceId === workspaceId && (projection.taskPlacements.length === 0 || placedIds.has(task.id))))
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
   const [menuTask, setMenuTask] = useState<TaskView | null>(null)
+  const [closedTaskId, setClosedTaskId] = useState<string | null>(null)
   const [menuWorkspace, setMenuWorkspace] = useState<WorkspaceView | null>(null)
   const [renameTask, setRenameTask] = useState<TaskView | null>(null)
   const [renameFailure, setRenameFailure] = useState<{ title: string; message: string } | null>(null)
@@ -49,14 +50,14 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
     const closeMenus = (event: PointerEvent) => {
       const target = event.target
       if (target instanceof Node && !document.querySelector('.workbench-action-popover')?.contains(target)) {
-        setMenuTask(null); setMenuWorkspace(null)
+        setMenuTask(null); setMenuWorkspace(null); setClosedTaskId(null)
       }
       if (target instanceof Node && notificationCenterOpen &&
         !document.querySelector('.notification-center')?.contains(target) &&
         !document.querySelector('.flat-sidebar__notify')?.contains(target)) setNotificationCenterOpen(false)
     }
     const onEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setMenuTask(null); setMenuWorkspace(null); setNotificationCenterOpen(false) }
+      if (event.key === 'Escape') { setMenuTask(null); setMenuWorkspace(null); setClosedTaskId(null); setNotificationCenterOpen(false) }
     }
     window.addEventListener('pointerdown', closeMenus); window.addEventListener('keydown', onEscape)
     return () => { window.removeEventListener('pointerdown', closeMenus); window.removeEventListener('keydown', onEscape) }
@@ -75,7 +76,7 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
     event.stopPropagation()
     const rect = event.currentTarget.getBoundingClientRect()
     setMenuPosition({ top: rect.top + rect.height / 2, left: rect.right + 6 })
-    setMenuWorkspace(null); setMenuTask(menuTask?.id === task.id ? null : task)
+    setMenuWorkspace(null); setClosedTaskId(null); setMenuTask(menuTask?.id === task.id ? null : task)
   }
   const openWorkspaceMenu = (workspace: WorkspaceView, event: MouseEvent<HTMLElement>) => {
     event.stopPropagation()
@@ -218,9 +219,20 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
       {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
     </div>}
     {menuTask && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
-      <button role="menuitem" onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
-      <button role="menuitem" onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
-      <button role="menuitem" className="is-delete" onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
+      {closedTaskId === menuTask.id ? <>
+        <button role="menuitem" onClick={() => setClosedTaskId(null)}>‹ 返回事项菜单</button>
+        {(projection.closedScenes ?? []).filter(({ taskId }) => taskId === menuTask.id).map((scene) =>
+          <button key={scene.id} role="menuitem" aria-label={`重新打开画布：${scene.name}`} onClick={() => {
+            setClosedTaskId(null); setMenuTask(null)
+            void Promise.resolve(commands.reopenScene?.(scene.id)).catch(NOOP)
+          }}><span>↻</span>{scene.name}</button>)}
+      </> : <>
+        <button role="menuitem" onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
+        <button role="menuitem" onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
+        {(projection.closedScenes ?? []).some(({ taskId }) => taskId === menuTask.id) && <button role="menuitem"
+          onClick={() => setClosedTaskId(menuTask.id)}>已关闭画布 {(projection.closedScenes ?? []).filter(({ taskId }) => taskId === menuTask.id).length}</button>}
+        <button role="menuitem" className="is-delete" onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
+      </>}
     </div>}
     {removeWorkspace && <ConfirmDialog title="移出工作空间"
       body={`移出 "${removeWorkspace.name}" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？`}

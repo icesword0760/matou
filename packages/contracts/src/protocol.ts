@@ -102,6 +102,8 @@ export const RPC_METHODS = [
   'hierarchy.record-session-interaction',
   'hierarchy.retry-provider-restore',
   'hierarchy.reopen-historical-session',
+  'hierarchy.remove-historical-session',
+  'hierarchy.reopen-scene',
   'hierarchy.get-scene-session-graph',
   'hierarchy.set-focused-session',
   'hierarchy.activate-session',

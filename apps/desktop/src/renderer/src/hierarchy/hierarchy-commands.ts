@@ -52,6 +52,7 @@ export function createHierarchyCommands(
     closeScene: (sceneId, confirmed = false) => command('hierarchy.close-scene', {
       sceneId, ...(confirmed ? { confirmedIntent: `close-scene:${sceneId}` } : {})
     }),
+    reopenScene: (sceneId) => command('hierarchy.reopen-scene', { sceneId }),
     splitSession: (sceneId, sourceSessionId, direction) => command('hierarchy.split-session', {
       sceneId, sourceSessionId, direction
     }),
@@ -72,6 +73,9 @@ export function createHierarchyCommands(
     removeFailedFork: (sessionId) => command('hierarchy.remove-failed-fork', { sessionId }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
     reopenHistoricalSession: (sessionId) => command('hierarchy.reopen-historical-session', { sessionId }),
+    removeHistoricalSession: (sceneId, sessionId, includeDescendants) => command(
+      'hierarchy.remove-historical-session', { sceneId, sessionId, includeDescendants }
+    ),
     getSceneSessionGraph: (sceneId) => client.request('hierarchy.get-scene-session-graph', {
       sceneId, windowId
     }),

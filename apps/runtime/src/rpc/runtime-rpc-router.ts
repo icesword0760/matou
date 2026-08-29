@@ -365,6 +365,20 @@ export class RuntimeRpcRouter {
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.remove-historical-session':
+        return this.#sessionCanvas.removeHistoricalSession(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          sessionId: text(input.sessionId, 'sessionId'),
+          includeDescendants: flag(input.includeDescendants, 'includeDescendants'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.reopen-scene':
+        return this.#hierarchy.reopenScene(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.create-fork-child':
         return this.#forkWorkflows.createForkChild(command, {
           windowId: text(input.windowId, 'windowId'),

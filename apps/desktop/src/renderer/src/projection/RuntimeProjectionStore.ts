@@ -27,6 +27,7 @@ export interface HierarchyProjection {
   tasks: Entity[]
   sessions: Entity[]
   scenes: Entity[]
+  closedScenes?: Entity[]
   navigation: Record<string, unknown>
   pathStates?: unknown[]
   taskPlacements?: unknown[]
@@ -110,6 +111,7 @@ export class RuntimeProjectionStore {
         tasks: tasks.filter(isActive),
         sessions: sessions.filter(isActive),
         scenes: scenes.filter(isActive),
+        closedScenes: scenes.filter((scene) => !isActive(scene)),
         sessionGraphs: structuredClone(this.#sessionGraphs)
       }
     }
@@ -145,6 +147,8 @@ export class RuntimeProjectionStore {
       if (scene) this.#scenes.set(event.aggregateId, scene)
     } else if (event.eventType === 'scene.renamed') {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
+    } else if (event.eventType === 'scene.reopened') {
+      unarchiveEntity(this.#scenes, event.aggregateId, event.payload)
     } else if (event.eventType === 'scene.mode-changed' || event.eventType === 'scene.archived') {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
     } else if (isSessionGraphEvent(event.eventType)) {
@@ -185,6 +189,14 @@ function patchEntity(target: Map<string, Entity>, id: string, patch: unknown): v
   const current = target.get(id)
   const object = asObject(patch)
   if (current && object) target.set(id, { ...current, ...object })
+}
+function unarchiveEntity(target: Map<string, Entity>, id: string, patch: unknown): void {
+  const current = target.get(id)
+  const object = asObject(patch)
+  if (!current) return
+  const next = { ...current, ...(object ?? {}) }
+  delete next.archivedAt
+  target.set(id, next)
 }
 function asObject(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

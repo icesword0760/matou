@@ -56,12 +56,18 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
     return sessionIds.some((sessionId) => notificationStore.sessionHasUnread(sessionId))
   }
   const workspaceTasks = projection.tasks.filter(({ workspaceId: candidate }) => candidate === workspaceId)
-  const closeFlow = sceneCloseFlow({
-    isLastScene: scenes.length === 1,
-    isLastTask: workspaceTasks.length === 1,
-    taskName: task?.title ?? '当前事项'
-  })
+  const closeFlowFor = (sceneId: string) => {
+    const nodes = projection.sessionGraphs?.[sceneId]?.nodes.filter(({ archivedAt }) => archivedAt === undefined) ?? []
+    return sceneCloseFlow({
+      isLastScene: scenes.length === 1,
+      isLastTask: workspaceTasks.length === 1,
+      taskName: task?.title ?? '当前事项',
+      runningCount: nodes.filter(({ workStatus }) => workStatus === 'running' || workStatus === 'starting').length,
+      needsInputCount: nodes.filter(({ workStatus }) => workStatus === 'needs-input').length
+    })
+  }
   const close = (sceneId: string) => {
+    const closeFlow = closeFlowFor(sceneId)
     if (closeFlow.action === 'hide-window') {
       setClosingSceneId(sceneId)
     } else if (closeFlow.action === 'silent') {
@@ -83,7 +89,9 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
         className={`tab-item${scene.id === activeSceneId ? ' active' : ''}`}
         onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
-          className="tab-title" aria-selected={scene.id === activeSceneId} onClick={() => select(scene.id)}>{scene.name}</button>
+          className="tab-title" aria-selected={scene.id === activeSceneId}
+          title="双击重命名画布" onDoubleClick={() => setRenamingSceneId(scene.id)}
+          onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
         <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
       </div>)}
@@ -142,11 +150,11 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
           void Promise.resolve(commands.renameScene(scene.id, name)).catch(NOOP)
         }} />
     })()}
-    {closingSceneId && closeFlow.action === 'hide-window' && <ConfirmDialog title="提示"
+    {closingSceneId && closeFlowFor(closingSceneId).action === 'hide-window' && <ConfirmDialog title="提示"
       body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
       confirmLabel="我知道了" showCancel={false} onCancel={() => setClosingSceneId(null)}
       onConfirm={() => setClosingSceneId(null)} />}
-    {closingSceneId && closeFlow.action !== 'hide-window' && <ConfirmationSequence steps={closeFlow.steps}
+    {closingSceneId && closeFlowFor(closingSceneId).action !== 'hide-window' && <ConfirmationSequence steps={closeFlowFor(closingSceneId).steps}
       onCancel={() => setClosingSceneId(null)} onComplete={() => {
         const sceneId = closingSceneId
         setClosingSceneId(null)

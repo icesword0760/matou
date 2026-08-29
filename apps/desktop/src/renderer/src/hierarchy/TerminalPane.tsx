@@ -41,6 +41,7 @@ export function TerminalPane(props: {
   onRemoveFailedFork?(sessionId: string): unknown
   childNodes?: SessionGraphNodeView[]
   historicalChildCount?: number
+  workStatus?: SessionGraphNodeView['workStatus']
   onOpenChildren?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
@@ -50,7 +51,7 @@ export function TerminalPane(props: {
     pathValid = true, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError,
     spawnRevision = 0, onRetryRestore, onRetryFork, onRemoveFailedFork,
-    childNodes = [], historicalChildCount = 0, onOpenChildren,
+    childNodes = [], historicalChildCount = 0, workStatus = 'idle', onOpenChildren,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onDetach
@@ -61,7 +62,8 @@ export function TerminalPane(props: {
   useNotificationSnapshot()
   const flow = sessionDeleteFlow({
     isWorkspaceFinal: workspaceSessionCount === 1,
-    taskName
+    taskName, sessionTitle: session.title, workStatus,
+    childCount: childNodes.length + historicalChildCount
   })
   const profile = session.kind === 'claude-code' || session.kind === 'codex'
     ? session.kind : 'shell'
@@ -77,7 +79,8 @@ export function TerminalPane(props: {
     if (closeRequest > 0) requestRemove()
   }, [closeRequest, requestRemove])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
-  const canFork = session.kind === 'claude-code' && (forkReady ?? resumable) && onFork !== undefined
+  const showFork = session.kind === 'claude-code' && onFork !== undefined
+  const canFork = showFork && (forkReady ?? resumable)
   const hasPaneMenu = canFork || onDetach !== undefined
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
     if (!hasPaneMenu || (event.target as HTMLElement).closest('button')) return
@@ -104,8 +107,9 @@ export function TerminalPane(props: {
           onOpen={() => void onOpenChildren(session.id)} />}
       </div>
       <div className="terminal-pane-actions">
-        {canFork && <button className="pane-fork" type="button" draggable={false}
-          aria-label={`从“${session.title}”创建子分支`} title="创建子分支"
+        {showFork && <button className="pane-fork" type="button" draggable={false}
+          aria-label={`从“${session.title}”创建子分支`} disabled={!canFork}
+          title={canFork ? '创建子分支' : '完成首轮对话后可创建分支'}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()

@@ -185,6 +185,15 @@ describe('PRD 05 hierarchy shell', () => {
     expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThanOrEqual(1)
   })
 
+  it('returns keyboard focus to the active terminal when a hidden main window is shown again', () => {
+    render(<HierarchyShell fixture={fixture()} />)
+    const before = Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)
+
+    fireEvent.focus(window)
+
+    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThan(before)
+  })
+
   it('shows only the focused Session HUD and replaces it in one render when focus changes', async () => {
     const data = fixture()
     data.sessionHuds = [

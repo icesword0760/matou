@@ -69,6 +69,42 @@ describe('RuntimeProjectionStore', () => {
     expect(store.view().hierarchy.sessions).toEqual([])
   })
 
+  it('keeps archived Scenes discoverable as closed canvases without rendering them as active tabs', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-1' }],
+      tasks: [{ id: 'task-1', workspaceId: 'workspace-1', status: 'active' }],
+      sessions: [], relations: [],
+      scenes: [
+        { id: 'scene-active', taskId: 'task-1', name: '开发' },
+        { id: 'scene-closed', taskId: 'task-1', name: '历史排查', archivedAt: 9 }
+      ]
+    })
+
+    expect(store.view().hierarchy.scenes.map(({ id }) => id)).toEqual(['scene-active'])
+    expect(store.view().hierarchy.closedScenes).toEqual([
+      expect.objectContaining({ id: 'scene-closed', name: '历史排查', archivedAt: 9 })
+    ])
+  })
+
+  it('moves a reopened canvas out of closed canvases and back into active tabs', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], sessions: [], relations: [],
+      scenes: [{ id: 'scene-closed', taskId: 'task-1', name: '排查', archivedAt: 8 }]
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'reopen-scene', eventType: 'scene.reopened',
+      aggregateType: 'scene', aggregateId: 'scene-closed', payload: { reopenedAt: 9 },
+      schemaVersion: 1, commandId: 'reopen', occurredAt: 9
+    }])
+
+    expect(store.view().hierarchy.scenes.map(({ id }) => id)).toEqual(['scene-closed'])
+    expect(store.view().hierarchy.closedScenes).toEqual([])
+  })
+
   it('replaces and incrementally updates Runtime-owned Scene session graphs', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

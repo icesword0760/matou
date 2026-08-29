@@ -7,13 +7,15 @@ import { HistoricalSessionCard } from './HistoricalSessionCard'
 
 export function SessionCanvas(props: {
   graph: SessionGraphView
-  levelParentSessionId?: string
+  levelParentSessionId?: string | null
   disabled?: boolean
   renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
   onActivate(sessionId: string): void
   onCreateShellSibling(sourceSessionId: string, parentSessionId?: string): void
   onCreateForkSibling(source: SessionGraphNodeView, parent: SessionGraphNodeView): void
   onReopenHistorical(sessionId: string): void
+  onNavigateToChildren?(sessionId: string): void
+  onRemoveHistorical?(sessionId: string, includeDescendants: boolean): void
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
   geometry?: Array<{ ownerKey: string; geometry: Record<string, unknown> }>
@@ -21,7 +23,8 @@ export function SessionCanvas(props: {
 }) {
   const {
     graph, levelParentSessionId, disabled = false, renderSession, onActivate,
-    onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onReturnParent,
+    onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onNavigateToChildren,
+    onRemoveHistorical, onReturnParent,
     onEnsureSessionVisible, geometry, onPutGeometry
   } = props
   const geometryTimer = useRef<number | undefined>(undefined)
@@ -30,7 +33,9 @@ export function SessionCanvas(props: {
   const [showHistory, setShowHistory] = useState(false)
   const activeNodes = graph.nodes.filter(({ archivedAt }) => archivedAt === undefined)
   const focused = activeNodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? activeNodes[0]
-  const parentId = levelParentSessionId !== undefined ? levelParentSessionId : focused?.parentSessionId
+  const parentId = levelParentSessionId !== undefined
+    ? levelParentSessionId ?? undefined
+    : focused?.parentSessionId
   const direct = graph.nodes.filter((node) => node.parentSessionId === parentId)
   const activeDirect = direct.filter(({ archivedAt }) => archivedAt === undefined)
   const historicalCount = direct.length - activeDirect.length
@@ -71,7 +76,12 @@ export function SessionCanvas(props: {
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
       renderSession={(node, inViewport) => node.archivedAt === undefined
         ? renderSession(node, inViewport)
-        : <HistoricalSessionCard node={node} onReopen={onReopenHistorical} />}
+        : <HistoricalSessionCard node={node}
+            directChildCount={directChildren(graph, node.sessionId).length}
+            descendantCount={descendants(graph, node.sessionId).length}
+            onReopen={onReopenHistorical}
+            {...(onNavigateToChildren ? { onNavigateToChildren } : {})}
+            onRemove={onRemoveHistorical ?? NOOP_REMOVE} />}
       onActivate={(sessionId) => {
         const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
         if (node?.archivedAt === undefined) onActivate(sessionId)
@@ -85,3 +95,22 @@ export function SessionCanvas(props: {
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
 }
+
+function directChildren(graph: SessionGraphView, sessionId: string): string[] {
+  return graph.edges.filter(({ parentSessionId }) => parentSessionId === sessionId)
+    .map(({ childSessionId }) => childSessionId)
+}
+
+function descendants(graph: SessionGraphView, sessionId: string): string[] {
+  const found: string[] = []
+  const queue = [...directChildren(graph, sessionId)]
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    if (found.includes(current)) continue
+    found.push(current)
+    queue.push(...directChildren(graph, current))
+  }
+  return found
+}
+
+function NOOP_REMOVE(): void {}

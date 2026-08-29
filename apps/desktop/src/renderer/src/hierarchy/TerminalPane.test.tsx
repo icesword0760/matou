@@ -75,7 +75,6 @@ describe('Terminal pane', () => {
 
   it.each([
     ['Shell', { kind: 'shell' as const }, false],
-    ['identity-less Claude', { kind: 'claude-code' as const }, false],
     ['team teammate', { kind: 'agent-team-member' as const }, true]
   ])('does not expose Fork for %s', async (_label, sessionPatch, resumable) => {
     const user = userEvent.setup()
@@ -88,6 +87,28 @@ describe('Terminal pane', () => {
     expect(screen.queryByText('⑂ Fork 会话')).toBeNull()
     expect(screen.queryByRole('button', { name: '从“Claude 主会话”创建子分支' })).toBeNull()
     expect(screen.getByText('↗ 独立窗口')).toBeTruthy()
+  })
+
+  it('keeps Fork visible but disabled until the Claude conversation is ready', () => {
+    const props = fixture()
+    render(<TerminalPane {...props} forkReady={false} onFork={vi.fn()} />)
+
+    const button = screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })
+    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('title')).toContain('完成首轮对话')
+  })
+
+  it('confirms before ending a running parent while preserving its children as live work', async () => {
+    const user = userEvent.setup()
+    const onDelete = vi.fn()
+    render(<TerminalPane {...fixture()} workspaceSessionCount={4} workStatus="running"
+      childNodes={[childNode('child-1'), childNode('child-2')]} onDelete={onDelete} />)
+
+    await user.click(screen.getByRole('button', { name: '删除终端：Claude 主会话' }))
+    expect(screen.getByRole('alertdialog', { name: '结束会话' }).textContent)
+      .toContain('正在运行，并有 2 个子会话')
+    await user.click(screen.getByRole('button', { name: '结束会话' }))
+    expect(onDelete).toHaveBeenCalledWith('session-1', true)
   })
 
   it('keeps a failed Claude restore usable as Shell with one retry action', async () => {
@@ -163,5 +184,15 @@ function fixture() {
     pathValid: true,
     onActivate: vi.fn(),
     onDelete: vi.fn()
+  }
+}
+
+function childNode(sessionId: string) {
+  return {
+    sessionId, sceneId: 'scene-1', parentSessionId: 'session-1',
+    currentMode: 'shell' as const, workStatus: 'idle' as const,
+    providerRestoreState: 'none' as const, canFork: false, title: sessionId,
+    cwd: '/tmp', activeChildCount: 0, historicalChildCount: 0,
+    childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }

@@ -186,6 +186,22 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', false)
   })
 
+  it('lists closed canvases in the owning Task menu and reopens the selected canvas', async () => {
+    const user = userEvent.setup()
+    const target = commands()
+    const data = fixture()
+    data.closedScenes = [{
+      id: 'scene-closed', taskId: 'task-a', name: '接口排查', archivedAt: 20
+    }]
+    render(<TaskSidebar projection={data} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '事项菜单：事项 A' }))
+    await user.click(screen.getByRole('menuitem', { name: '已关闭画布 1' }))
+    await user.click(screen.getByRole('menuitem', { name: '重新打开画布：接口排查' }))
+
+    expect(target.reopenScene).toHaveBeenCalledWith('scene-closed')
+  })
+
   it('rejects a Task drop from another Workspace without issuing a reorder', () => {
     const target = commands()
     render(<TaskSidebar projection={fixture()} commands={target} />)
@@ -283,10 +299,10 @@ function commands(): HierarchyCommands {
     renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
     setTaskPinned: vi.fn(), reorderPinnedTask: vi.fn(),
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
-    reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn(), forkSession: vi.fn(),
+    reorderScene: vi.fn(), closeScene: vi.fn(), reopenScene: vi.fn(), splitSession: vi.fn(), forkSession: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
     retryFork: vi.fn(), removeFailedFork: vi.fn(),
-    retryProviderRestore: vi.fn(), reopenHistoricalSession: vi.fn(), getSceneSessionGraph: vi.fn(),
+    retryProviderRestore: vi.fn(), reopenHistoricalSession: vi.fn(), removeHistoricalSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(),
     activateSession: vi.fn(), deleteSession: vi.fn(), detachSession: vi.fn(),

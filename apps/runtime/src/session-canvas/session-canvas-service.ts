@@ -89,6 +89,20 @@ export interface ReopenHistoricalSessionInput {
   now: number
 }
 
+export interface RemoveHistoricalSessionInput {
+  windowId: string
+  sceneId: string
+  sessionId: string
+  includeDescendants: boolean
+  now: number
+}
+
+export interface RemoveHistoricalSessionResult {
+  graph: SceneSessionGraph
+  removedSessionIds: string[]
+  disposedSessionIds: string[]
+}
+
 export interface SessionCanvasMutationResult extends WorkspaceHierarchyResult {
   graph: SceneSessionGraph
 }
@@ -384,9 +398,10 @@ export class SessionCanvasService {
          FROM session_mounts AS mounts
          JOIN sessions ON sessions.id = mounts.session_id
          WHERE mounts.scene_id = ? AND mounts.scene_node_id IS NOT NULL
-           AND sessions.archived_at IS NULL
-         ORDER BY sessions.last_activity_at DESC, mounts.created_at, mounts.id LIMIT 1`,
-        scene.id
+           AND (sessions.archived_at IS NULL OR sessions.id = ?)
+         ORDER BY CASE WHEN sessions.archived_at IS NULL THEN 0 ELSE 1 END,
+                  sessions.last_activity_at DESC, mounts.created_at, mounts.id LIMIT 1`,
+        scene.id, source.id
       ), 'Active Session anchor')
       const sourceNode = requireRow(tx.get<SceneNodeRow>(
         'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?', anchor.scene_node_id
@@ -468,6 +483,86 @@ export class SessionCanvasService {
       })
       emitMembership(command.commandId, membership, task.workspace_id, task.id, emit, input.now)
       return { ...hierarchy, graph }
+    }).result
+  }
+
+  removeHistoricalSession(
+    command: DomainCommandMetadata,
+    input: RemoveHistoricalSessionInput
+  ): RemoveHistoricalSessionResult {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const target = requireRow(tx.get<{
+        session_id: string
+        task_id: string
+        workspace_id: string
+        archived_at: number | null
+      }>(
+        `SELECT sessions.id AS session_id, sessions.task_id, tasks.workspace_id,
+                sessions.archived_at
+         FROM sessions
+         JOIN tasks ON tasks.id = sessions.task_id
+         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+         WHERE sessions.id = ? AND membership.scene_id = ?`,
+        input.sessionId, input.sceneId
+      ), 'Historical Session')
+      if (target.archived_at === null) throw new Error('Session must be exited before removal')
+
+      const descendants = tx.all<{ session_id: string }>(
+        `WITH RECURSIVE branch(session_id) AS (
+           SELECT ?
+           UNION ALL
+           SELECT relation.from_session_id
+           FROM session_relations_current AS relation
+           JOIN branch ON relation.to_session_id = branch.session_id
+           JOIN session_canvas_memberships AS membership
+             ON membership.session_id = relation.from_session_id
+            AND membership.scene_id = ?
+           WHERE relation.relation_kind IN ('derived-from', 'forked-from')
+         )
+         SELECT session_id FROM branch`,
+        input.sessionId, input.sceneId
+      ).map(({ session_id }) => session_id)
+      if (!input.includeDescendants && descendants.length > 1) {
+        throw new Error('Historical Session has descendants')
+      }
+      const removedSessionIds = input.includeDescendants
+        ? descendants
+        : [input.sessionId]
+      const placeholders = removedSessionIds.map(() => '?').join(', ')
+      const disposedSessionIds = tx.all<{ id: string }>(
+        `SELECT id FROM sessions WHERE id IN (${placeholders}) AND archived_at IS NULL
+         ORDER BY created_at, id`,
+        ...removedSessionIds
+      ).map(({ id }) => id)
+      tx.run(
+        `UPDATE sessions SET status = 'archived', archived_at = COALESCE(archived_at, ?),
+           updated_at = ?, version = version + 1
+         WHERE id IN (${placeholders})`,
+        input.now, input.now, ...removedSessionIds
+      )
+      tx.run(
+        `DELETE FROM session_mounts WHERE session_id IN (${placeholders})`,
+        ...removedSessionIds
+      )
+      tx.run(
+        `DELETE FROM session_relations_current
+         WHERE from_session_id IN (${placeholders}) OR to_session_id IN (${placeholders})`,
+        ...removedSessionIds, ...removedSessionIds
+      )
+      tx.run(
+        `DELETE FROM session_canvas_memberships WHERE session_id IN (${placeholders})`,
+        ...removedSessionIds
+      )
+      const graph = projectSceneGraphFrom(tx, input.sceneId, input.windowId)
+      emit({
+        eventId: `${command.commandId}:historical-session-removed`,
+        eventType: 'session.graph-summary-changed', aggregateType: 'scene',
+        aggregateId: input.sceneId, workspaceId: target.workspace_id,
+        taskId: target.task_id, sessionId: input.sessionId,
+        payload: { graph, removedSessionIds, disposedSessionIds }, occurredAt: input.now
+      })
+      return { graph, removedSessionIds, disposedSessionIds }
     }).result
   }
 

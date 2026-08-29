@@ -173,6 +173,11 @@ function HierarchyProduct({ projection, commands }: {
   const [searchResults, setSearchResults] = useState({ resultIndex: 0, resultCount: 0 })
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  useEffect(() => {
+    const restoreTerminalFocus = () => setTerminalFocusRequest((value) => value + 1)
+    window.addEventListener('focus', restoreTerminalFocus)
+    return () => window.removeEventListener('focus', restoreTerminalFocus)
+  }, [])
   const [branchDialog, setBranchDialog] = useState<{
     sceneId: string
     sourceSessionId: string
@@ -180,7 +185,7 @@ function HierarchyProduct({ projection, commands }: {
     relationMode: 'child' | 'sibling'
     gitAvailable: boolean
   } | null>(null)
-  const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | undefined>>({})
+  const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | null | undefined>>({})
   const ratioTimers = useRef(new Map<string, number>())
   useEffect(() => () => {
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
@@ -375,6 +380,7 @@ function HierarchyProduct({ projection, commands }: {
                   resumable={sessionHud?.resumable === true}
                   {...(graphNode ? {
                     forkReady: graphNode.canFork,
+                    workStatus: graphNode.workStatus,
                     providerRestoreState: graphNode.providerRestoreState,
                     forkState: graphNode.forkState,
                     spawnRevision: graphNode.forkAttempt ?? 0,
@@ -443,6 +449,15 @@ function HierarchyProduct({ projection, commands }: {
                         })
                       }}
                       onReopenHistorical={(sessionId) => run(commands.reopenHistoricalSession(sessionId))}
+                      onNavigateToChildren={(sessionId) => {
+                        setLevelParentByScene((current) => ({ ...current, [scene.id]: sessionId }))
+                        const firstChild = graph.nodes.find((node) =>
+                          node.parentSessionId === sessionId && node.archivedAt === undefined)
+                        if (firstChild) run(commands.setFocusedSession(scene.id, firstChild.sessionId))
+                      }}
+                      onRemoveHistorical={(sessionId, includeDescendants) => run(
+                        commands.removeHistoricalSession?.(scene.id, sessionId, includeDescendants)
+                      )}
                       onReturnParent={(parentSessionId) => {
                         const parentNode = graph.nodes.find(({ sessionId }) => sessionId === parentSessionId)
                         setLevelParentByScene((current) => ({

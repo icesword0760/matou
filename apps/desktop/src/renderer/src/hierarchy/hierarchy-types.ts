@@ -14,6 +14,7 @@ export interface SceneView {
   titlePinned?: boolean
   rootNodeId?: string
   layoutRevision?: number
+  archivedAt?: number
 }
 export interface SessionView {
   id: string
@@ -127,6 +128,7 @@ export interface HierarchyProjection {
   workspaces: WorkspaceView[]
   tasks: TaskView[]
   scenes: SceneView[]
+  closedScenes?: SceneView[]
   sceneSnapshots?: SceneSnapshotView[]
   sessions: SessionView[]
   pathStates: WorkspacePathView[]
@@ -157,6 +159,7 @@ export interface HierarchyCommands {
   renameScene(sceneId: string, name: string): unknown
   reorderScene(sceneId: string, beforeSceneId?: string): unknown
   closeScene(sceneId: string, confirmed?: boolean): unknown
+  reopenScene?(sceneId: string): unknown
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
   forkSession(sceneId: string, sessionId: string): unknown
   createCanvas(taskId: string): unknown
@@ -167,6 +170,7 @@ export interface HierarchyCommands {
   removeFailedFork(sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
   reopenHistoricalSession(sessionId: string): unknown
+  removeHistoricalSession?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown
   getSceneSessionGraph(sceneId: string): unknown
   recordSessionInteraction(sessionId: string, interactionKind: 'submit' | 'control' | 'provider-action'): unknown
   setFocusedSession(sceneId: string, sessionId: string): unknown

@@ -80,6 +80,52 @@ describe('SessionCanvas', () => {
     expect(onCreateShellSibling).toHaveBeenCalledWith('archived', 'parent')
   })
 
+  it('removes an exited leaf only after a clear confirmation', async () => {
+    const data = graph()
+    data.nodes.push({ ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
+    const onRemoveHistorical = vi.fn()
+    renderCanvas(data, { onRemoveHistorical })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '显示历史会话 (1)' }))
+    await user.click(screen.getByRole('button', { name: '移除历史会话：历史 Shell' }))
+    expect(screen.getByRole('alertdialog', { name: '移除历史会话' }).textContent)
+      .toContain('只会从当前画布移除这个历史节点')
+    await user.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(onRemoveHistorical).toHaveBeenCalledWith('archived', false)
+  })
+
+  it('keeps a historical parent navigable and double-confirms whole-branch removal', async () => {
+    const data = graph()
+    data.nodes = [
+      { ...node('archived-parent', '历史父会话'), archivedAt: 20, workStatus: 'exited' },
+      { ...node('descendant', '仍在工作的子会话', 'archived-parent'), workStatus: 'running' },
+      { ...node('grandchild', '孙会话', 'descendant'), workStatus: 'idle' }
+    ]
+    data.edges = [
+      { parentSessionId: 'archived-parent', childSessionId: 'descendant', relationKind: 'derived-from', createdAt: 1 },
+      { parentSessionId: 'descendant', childSessionId: 'grandchild', relationKind: 'derived-from', createdAt: 2 }
+    ]
+    data.focusedSessionId = 'descendant'
+    const onNavigateToChildren = vi.fn()
+    const onRemoveHistorical = vi.fn()
+    render(<SessionCanvas graph={data} levelParentSessionId={null} onActivate={() => undefined}
+      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()} onReopenHistorical={vi.fn()}
+      onNavigateToChildren={onNavigateToChildren} onRemoveHistorical={onRemoveHistorical}
+      renderSession={(item) => <div>{item.title}</div>} />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '查看 1 个子会话' }))
+    expect(onNavigateToChildren).toHaveBeenCalledWith('archived-parent')
+    await user.click(screen.getByRole('button', { name: '移除整条分支：历史父会话' }))
+    expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
+      .toContain('2 个后代节点')
+    await user.click(screen.getByRole('button', { name: '继续' }))
+    expect(screen.getByRole('alertdialog', { name: '再次确认' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除整条分支' }))
+    expect(onRemoveHistorical).toHaveBeenCalledWith('archived-parent', true)
+  })
+
   it('provides an explicit keyboard-accessible return to the parent', async () => {
     const onReturnParent = vi.fn()
     render(<SessionCanvas graph={graph()} onActivate={() => undefined}
@@ -121,11 +167,13 @@ function renderCanvas(data: SessionGraphView, handlers?: {
   onCreateShellSibling?: (sourceSessionId: string, parentSessionId?: string) => void
   onCreateForkSibling?: (source: SessionGraphNodeView, parent: SessionGraphNodeView) => void
   onReopenHistorical?: (sessionId: string) => void
+  onRemoveHistorical?: (sessionId: string, includeDescendants: boolean) => void
 }) {
   return render(<SessionCanvas graph={data} onActivate={() => undefined}
     onCreateShellSibling={handlers?.onCreateShellSibling ?? vi.fn()}
     onCreateForkSibling={handlers?.onCreateForkSibling ?? vi.fn()}
     onReopenHistorical={handlers?.onReopenHistorical ?? vi.fn()}
+    onRemoveHistorical={handlers?.onRemoveHistorical ?? vi.fn()}
     renderSession={(item) => <div>{item.title}</div>} />)
 }
 

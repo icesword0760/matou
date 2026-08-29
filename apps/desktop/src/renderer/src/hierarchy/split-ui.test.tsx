@@ -85,6 +85,40 @@ describe('Scene tabs and split actions', () => {
     expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', true)
   })
 
+  it('opens canvas rename on a discoverable tab double-click and pins the chosen name', async () => {
+    const user = userEvent.setup()
+    const commands = sceneCommands()
+    render(<SceneTabBar projection={fixture(2)} commands={commands} />)
+
+    await user.dblClick(screen.getByRole('tab', { name: '页签 1' }))
+    const input = screen.getByRole('textbox', { name: '页签名称' })
+    await user.clear(input)
+    await user.type(input, '登录方案')
+    await user.click(screen.getByRole('button', { name: '确定' }))
+
+    expect(commands.renameScene).toHaveBeenCalledWith('scene-1', '登录方案')
+  })
+
+  it('shows affected running and waiting counts before closing a busy canvas', async () => {
+    const user = userEvent.setup()
+    const commands = sceneCommands()
+    const projection = fixture(2)
+    projection.sessionGraphs = {
+      'scene-1': {
+        sceneId: 'scene-1', nodes: [
+          graphNode('running', 'running'), graphNode('waiting', 'needs-input'), graphNode('idle', 'idle')
+        ], edges: []
+      }
+    }
+    render(<SceneTabBar projection={projection} commands={commands} />)
+
+    await user.click(screen.getByRole('button', { name: '关闭页签：页签 1' }))
+    expect(screen.getByRole('alertdialog', { name: '关闭画布' }).textContent)
+      .toContain('1 个运行中会话和 1 个待输入会话')
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(commands.closeScene).not.toHaveBeenCalled()
+  })
+
   it('measures divider movement against the whole split and keeps pointer capture', () => {
     const onRatio = vi.fn()
     render(<div className="split-node" data-testid="split"><div><SplitDivider direction="horizontal" onRatio={onRatio} /></div></div>)
@@ -125,5 +159,14 @@ function sceneCommands(): SceneCommands {
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(),
     reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn()
+  }
+}
+
+function graphNode(sessionId: string, workStatus: 'running' | 'needs-input' | 'idle') {
+  return {
+    sessionId, sceneId: 'scene-1', currentMode: 'shell' as const, workStatus,
+    providerRestoreState: 'none' as const, canFork: false, title: sessionId,
+    cwd: '/tmp', activeChildCount: 0, historicalChildCount: 0,
+    childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }

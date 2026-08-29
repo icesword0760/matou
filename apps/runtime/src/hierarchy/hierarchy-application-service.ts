@@ -226,6 +226,12 @@ export interface ActivateSceneInput {
   now: number
 }
 
+export interface ReopenSceneWorkflowInput {
+  windowId: string
+  sceneId: string
+  now: number
+}
+
 export interface CloseSceneResult extends HierarchyMutationResult {
   action: 'hide-window' | 'closed'
 }
@@ -1121,8 +1127,15 @@ export class HierarchyApplicationService {
           disposedSessionIds: []
         }
       }
+      const affectedWorkCount = tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM session_mounts
+         JOIN sessions ON sessions.id = session_mounts.session_id
+         WHERE session_mounts.scene_id = ? AND sessions.archived_at IS NULL
+           AND sessions.work_status IN ('starting', 'running', 'needs-input')`,
+        input.sceneId
+      )?.count ?? 0
       if (
-        scenes.length === 1 &&
+        affectedWorkCount > 0 &&
         input.confirmedIntent !== `close-scene:${input.sceneId}`
       ) {
         throw new Error('Scene close intent is stale')
@@ -1163,34 +1176,14 @@ export class HierarchyApplicationService {
         activateSceneInTransaction(tx, input.windowId, nextSceneId, input.now)
       } else {
         tx.run(
-          `UPDATE tasks SET status = 'archived', archived_at = ?, updated_at = ?, version = version + 1
-           WHERE id = ?`,
-          input.now,
-          input.now,
-          task.id
-        )
-        tx.run('DELETE FROM window_task_focus WHERE task_id = ?', task.id)
-        tx.run('DELETE FROM window_task_placements WHERE task_id = ?', task.id)
-        const workspace = requireRow<WorkspaceRow>(tx.get(
-          'SELECT * FROM workspaces WHERE id = ?', task.workspace_id
-        ), 'Workspace')
-        const taskOrder = parseStringArray(workspace.task_order_json)
-          .filter((taskId) => taskId !== task.id)
-        tx.run(
-          `UPDATE workspaces SET task_order_json = ?, updated_at = ?, version = version + 1
-           WHERE id = ?`,
-          JSON.stringify(taskOrder),
-          input.now,
-          task.workspace_id
+          `UPDATE window_task_focus SET active_scene_id = NULL, updated_at = ?
+           WHERE task_id = ? AND active_scene_id = ?`,
+          input.now, task.id, input.sceneId
         )
         const nextTask = preferredTask(tx, input.windowId, task.workspace_id)
-        if (nextTask) activateTaskInTransaction(tx, input.windowId, nextTask.id, input.now)
-        emit({
-          eventId: `${command.commandId}:task-archived`, eventType: 'task.archived',
-          aggregateType: 'task', aggregateId: task.id,
-          workspaceId: task.workspace_id, taskId: task.id,
-          payload: { archivedAt: input.now }, occurredAt: input.now
-        })
+        if (nextTask && nextTask.id !== task.id) {
+          activateTaskInTransaction(tx, input.windowId, nextTask.id, input.now)
+        }
       }
       return {
         ...readHierarchyResult(tx, input.windowId),
@@ -1206,6 +1199,33 @@ export class HierarchyApplicationService {
       activateSceneInTransaction(tx, input.windowId, input.sceneId, input.now)
       return readHierarchyResult(tx, input.windowId)
     })
+  }
+
+  reopenScene(
+    command: DomainCommandMetadata,
+    input: ReopenSceneWorkflowInput
+  ): WorkspaceHierarchyResult {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const scene = requireRow<SceneRow>(tx.get(
+        'SELECT * FROM scenes WHERE id = ? AND archived_at IS NOT NULL', input.sceneId
+      ), 'Closed Scene')
+      const task = requireRow<TaskRow>(tx.get(
+        'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', scene.task_id
+      ), 'Task')
+      tx.run(
+        'UPDATE scenes SET archived_at = NULL, updated_at = ? WHERE id = ?',
+        input.now, scene.id
+      )
+      activateSceneInTransaction(tx, input.windowId, scene.id, input.now)
+      emit({
+        eventId: `${command.commandId}:scene-reopened`, eventType: 'scene.reopened',
+        aggregateType: 'scene', aggregateId: scene.id,
+        workspaceId: task.workspace_id, taskId: task.id,
+        payload: { reopenedAt: input.now }, occurredAt: input.now
+      })
+      return readHierarchyResult(tx, input.windowId)
+    }).result
   }
 
   splitSession(
@@ -1466,8 +1486,18 @@ export class HierarchyApplicationService {
            AND tasks.archived_at IS NULL`,
         task.workspace_id
       )?.count ?? 0
+      const structuralChildCount = tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM session_relations_current
+         WHERE to_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')`,
+        input.sessionId
+      )?.count ?? 0
+      const hasActiveWork = tx.get<{ work_status: string }>(
+        'SELECT work_status FROM sessions WHERE id = ?', input.sessionId
+      )?.work_status
+      const requiresConfirmation = workspaceSessionCount === 1 || structuralChildCount > 0 ||
+        hasActiveWork === 'starting' || hasActiveWork === 'running' || hasActiveWork === 'needs-input'
       if (
-        workspaceSessionCount === 1 &&
+        requiresConfirmation &&
         input.confirmedIntent !== `delete-session:${input.sessionId}`
       ) {
         throw new Error('Session deletion intent is stale')

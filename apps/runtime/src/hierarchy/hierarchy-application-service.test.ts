@@ -386,7 +386,7 @@ describe('HierarchyApplicationService Scene workflows', () => {
     })).toThrow('当前事项下已存在同名页签')
   })
 
-  it('requires the Scene close intent before removing a final Scene when another Task exists', () => {
+  it('keeps an idle Task discoverable after archiving its final Scene', () => {
     const initial = bootstrap('scene-task-cascade-bootstrap')
     markPathValid(initial.workspace!.id)
     const otherTask = service.createTask(command('scene-other-task'), {
@@ -396,19 +396,61 @@ describe('HierarchyApplicationService Scene workflows', () => {
       windowId: 'window-1', sceneId: initial.scene!.id, now: 21
     })
 
-    expect(() => service.closeScene(command('scene-stale-close'), {
-      windowId: 'window-1', sceneId: initial.scene!.id, now: 22
-    })).toThrow('Scene close intent is stale')
-    const closed = service.closeScene(command('scene-confirmed-close'), {
-      windowId: 'window-1', sceneId: initial.scene!.id,
-      confirmedIntent: `close-scene:${initial.scene!.id}`, now: 23
+    const closed = service.closeScene(command('scene-idle-close'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 23
     })
 
     expect(closed.action).toBe('closed')
-    expect(closed.task?.id).toBe(otherTask.task?.id)
+    expect(closed.task?.id).toBe(initial.task!.id)
+    expect(closed.scene).toBeNull()
     expect(database.get<{ archived_at: number | null }>(
       'SELECT archived_at FROM tasks WHERE id = ?', initial.task!.id
-    )?.archived_at).toBe(23)
+    )?.archived_at).toBeNull()
+  })
+
+  it('requires fresh confirmation before closing a Scene with running work', () => {
+    const initial = bootstrap('scene-busy-close-bootstrap')
+    markPathValid(initial.workspace!.id)
+    service.createScene(command('scene-busy-close-second'), {
+      windowId: 'window-1', taskId: initial.task!.id, now: 20
+    })
+    database.run("UPDATE sessions SET work_status = 'running' WHERE id = ?", initial.session!.id)
+
+    expect(() => service.closeScene(command('scene-busy-stale-close'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 21
+    })).toThrow('Scene close intent is stale')
+    const closed = service.closeScene(command('scene-busy-confirmed-close'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      confirmedIntent: `close-scene:${initial.scene!.id}`, now: 22
+    })
+    expect(closed.action).toBe('closed')
+  })
+
+  it('reopens a closed Scene with its historical graph and focuses it again', () => {
+    const initial = bootstrap('scene-reopen-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const second = service.createScene(command('scene-reopen-second'), {
+      windowId: 'window-1', taskId: initial.task!.id, now: 20
+    })
+    service.closeScene(command('scene-close-for-reopen'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 21
+    })
+
+    const reopened = service.reopenScene(command('scene-reopen'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, now: 22
+    })
+
+    expect(reopened.scene?.id).toBe(initial.scene!.id)
+    expect(reopened.scene?.archivedAt).toBeUndefined()
+    expect(reopened.session).toBeNull()
+    expect(database.all<{ id: string }>(
+      `SELECT id FROM scenes WHERE task_id = ? AND archived_at IS NULL
+       ORDER BY sort_key, created_at, id`, initial.task!.id
+    ).map(({ id }) => id)).toEqual([initial.scene!.id, second.scene!.id])
+    expect(database.get<{ active_scene_id: string | null }>(
+      'SELECT active_scene_id FROM window_task_focus WHERE window_id = ? AND task_id = ?',
+      'window-1', initial.task!.id
+    )?.active_scene_id).toBe(initial.scene!.id)
   })
 })
 
@@ -554,6 +596,57 @@ describe('HierarchyApplicationService Session workflows', () => {
     expect(deleted.outcome).toBe('scene-remains')
     expect(deleted.scene?.id).toBe(initial.scene!.id)
     expect(deleted.disposedSessionIds).toEqual([split.session!.id])
+  })
+
+  it('requires confirmation before ending a parent Session and retains its child relation', () => {
+    const initial = bootstrap('session-parent-close-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const child = service.splitSession(command('session-parent-child'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, direction: 'horizontal', now: 20
+    })
+    const relationInsert = database.run(
+      `INSERT INTO session_relation_events (
+         event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+         relation_kind, metadata_json, command_id, occurred_at
+       ) VALUES ('parent-close-event', 'parent-close-relation', 'created', ?, ?, ?,
+                 'derived-from', '{}', 'parent-close-command', 21)`,
+      initial.task!.id, child.session!.id, initial.session!.id
+    )
+    database.run(
+      `INSERT INTO session_relations_current (
+         relation_id, task_id, from_session_id, to_session_id, relation_kind,
+         metadata_json, created_at, updated_at, source_event_sequence
+       ) VALUES ('parent-close-relation', ?, ?, ?, 'derived-from', '{}', 21, 21, ?)`,
+      initial.task!.id, child.session!.id, initial.session!.id, Number(relationInsert.lastInsertRowid)
+    )
+
+    expect(() => service.deleteSession(command('session-parent-close-stale'), {
+      windowId: 'window-1', sessionId: initial.session!.id, now: 22
+    })).toThrow('Session deletion intent is stale')
+    service.deleteSession(command('session-parent-close-confirmed'), {
+      windowId: 'window-1', sessionId: initial.session!.id,
+      confirmedIntent: `delete-session:${initial.session!.id}`, now: 23
+    })
+
+    expect(database.get(
+      `SELECT from_session_id, to_session_id FROM session_relations_current
+       WHERE relation_id = 'parent-close-relation'`
+    )).toEqual({ from_session_id: child.session!.id, to_session_id: initial.session!.id })
+  })
+
+  it('requires confirmation before ending a running Session even when it is a leaf', () => {
+    const initial = bootstrap('session-running-close-bootstrap')
+    markPathValid(initial.workspace!.id)
+    service.splitSession(command('session-running-sibling'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, direction: 'horizontal', now: 20
+    })
+    database.run("UPDATE sessions SET work_status = 'running' WHERE id = ?", initial.session!.id)
+
+    expect(() => service.deleteSession(command('session-running-close-stale'), {
+      windowId: 'window-1', sessionId: initial.session!.id, now: 21
+    })).toThrow('Session deletion intent is stale')
   })
 
   it('deletes a final Session and creates a fresh default Task hierarchy', () => {
