@@ -520,6 +520,9 @@ function createFixtureCommands(
     setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
+    createCanvas: NOOP, createShellSibling: NOOP, createForkChild: NOOP, createForkSibling: NOOP,
+    retryProviderRestore: NOOP, reopenHistoricalSession: NOOP, getSceneSessionGraph: NOOP,
+    recordSessionInteraction: NOOP, setFocusedSession: NOOP,
     createScene: (taskId) => updateNavigation((value) => {
       const ordinal = value.scenes.filter((scene) => scene.taskId === taskId).length + 1
       const sceneId = `fixture-scene-${ordinal}`

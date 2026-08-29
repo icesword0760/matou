@@ -196,7 +196,11 @@ function commands(): HierarchyCommands {
     activateTask: vi.fn(), createTask: vi.fn(), renameTask: vi.fn(), reorderTask: vi.fn(), deleteTask: vi.fn(),
     setTaskPinned: vi.fn(), reorderPinnedTask: vi.fn(),
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(), reorderScene: vi.fn(), closeScene: vi.fn(),
-    splitSession: vi.fn(), forkSession: vi.fn(), putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
+    splitSession: vi.fn(), forkSession: vi.fn(),
+    createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
+    retryProviderRestore: vi.fn(), reopenHistoricalSession: vi.fn(), getSceneSessionGraph: vi.fn(),
+    recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
+    putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
     detachSession: vi.fn(), returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()
   }
 }

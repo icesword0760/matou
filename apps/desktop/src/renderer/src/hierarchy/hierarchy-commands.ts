@@ -58,6 +58,27 @@ export function createHierarchyCommands(
     forkSession: (sceneId, sourceSessionId) => command('hierarchy.fork-session', {
       sceneId, sourceSessionId
     }),
+    createCanvas: (taskId) => command('hierarchy.create-canvas', { taskId }),
+    createShellSibling: (sceneId, sourceSessionId) => command('hierarchy.create-shell-sibling', {
+      sceneId, sourceSessionId
+    }),
+    createForkChild: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-child', {
+      sceneId, sourceSessionId, name, worktreeMode
+    }),
+    createForkSibling: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-sibling', {
+      sceneId, sourceSessionId, name, worktreeMode
+    }),
+    retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
+    reopenHistoricalSession: (sessionId) => command('hierarchy.reopen-historical-session', { sessionId }),
+    getSceneSessionGraph: (sceneId) => client.request('hierarchy.get-scene-session-graph', {
+      sceneId, windowId
+    }),
+    recordSessionInteraction: (sessionId, interactionKind) => command('hierarchy.record-session-interaction', {
+      sessionId, interactionKind
+    }),
+    setFocusedSession: (sceneId, sessionId) => command('hierarchy.set-focused-session', {
+      sceneId, sessionId
+    }),
     putGeometry: (sceneId, ownerKey, layoutRevision, geometry) => client.request('geometry.put', {
       sceneId, ownerKey, layoutRevision, geometry, now: Date.now()
     }),

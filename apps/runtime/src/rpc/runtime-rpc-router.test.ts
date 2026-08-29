@@ -172,6 +172,12 @@ describe('RuntimeRpcRouter', () => {
       id: 'relation-1', taskId: 'task-1', fromSessionId: 'child', toSessionId: 'parent',
       kind: 'forked-from', metadata: {}, now: 7
     }))
+    database.run(
+      `INSERT INTO session_canvas_memberships (
+         session_id, scene_id, sibling_created_seq, last_user_interaction_seq, created_at, updated_at
+       ) VALUES ('parent', 'scene-1', 1, 0, 6, 6),
+                ('child', 'scene-1', 2, 0, 6, 6)`
+    )
     await router.handle('geometry.put', {
       sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 0,
       geometry: { ratio: 0.35 }, now: 7
@@ -182,6 +188,14 @@ describe('RuntimeRpcRouter', () => {
     }
     expect(snapshot.sceneSnapshots.find(({ scene }) => scene.id === 'scene-1')?.geometry)
       .toEqual([expect.objectContaining({ geometry: { ratio: 0.35 } })])
+
+    const graph = await router.handle('hierarchy.get-scene-session-graph', {
+      sceneId: 'scene-1', windowId: 'window-1'
+    }) as { nodes: Array<{ sessionId: string; parentSessionId?: string }> }
+    expect(graph.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: 'parent' }),
+      expect.objectContaining({ sessionId: 'child', parentSessionId: 'parent' })
+    ]))
 
     const replay = await router.handle('events.replay', { afterSequence: 0, limit: 100 }) as {
       events: Array<{ eventType: string }>

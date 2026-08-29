@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseDomainEventEnvelope } from './domain-events'
+import { SESSION_GRAPH_EVENT_TYPES, parseDomainEventEnvelope } from './domain-events'
 
 describe('domain event wire contract', () => {
   it('accepts a complete versioned envelope', () => {
@@ -37,5 +37,18 @@ describe('domain event wire contract', () => {
         occurredAt: 1
       })
     ).toThrow()
+  })
+
+  it('publishes the complete session graph event vocabulary', () => {
+    expect(SESSION_GRAPH_EVENT_TYPES).toEqual([
+      'scene.canvas-created',
+      'session.canvas-membership-created',
+      'session.structural-relation-created',
+      'session.user-interacted',
+      'session.mode-changed',
+      'session.restore-state-changed',
+      'session.graph-summary-changed',
+      'session.historical-state-changed'
+    ])
   })
 })

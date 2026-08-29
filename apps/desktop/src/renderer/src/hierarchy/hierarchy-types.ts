@@ -23,6 +23,35 @@ export interface SessionView {
   status?: string
   executionContextId?: string
 }
+export interface SessionGraphNodeView {
+  sessionId: string
+  sceneId: string
+  parentSessionId?: string
+  relationKind?: 'derived-from' | 'forked-from'
+  currentMode: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+  workStatus: 'starting' | 'idle' | 'running' | 'needs-input' | 'error' | 'interrupted' | 'exited'
+  providerRestoreState: 'none' | 'restoring' | 'failed'
+  title: string
+  cwd: string
+  activeChildCount: number
+  historicalChildCount: number
+  childModeCounts: { shell: number; claudeCode: number }
+  latestLines: string[]
+  lastUserInteractionSeq: number
+  archivedAt?: number
+  detachedWindowId?: string
+}
+export interface SessionGraphView {
+  sceneId: string
+  focusedSessionId?: string
+  nodes: SessionGraphNodeView[]
+  edges: Array<{
+    parentSessionId: string
+    childSessionId: string
+    relationKind: 'derived-from' | 'forked-from'
+    createdAt: number
+  }>
+}
 export type HudPermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'
 export type HudModelStrategy = 'opusplan' | 'claude-opus-4-6' | 'claude-sonnet-4-6'
 export interface SessionHudView {
@@ -97,6 +126,7 @@ export interface HierarchyProjection {
   taskPlacements: Array<{ windowId: string; taskId: string; ordinal: number }>
   unreadByTask?: Record<string, number>
   sessionHuds?: SessionHudView[]
+  sessionGraphs?: Record<string, SessionGraphView>
 }
 
 export interface HierarchyCommands {
@@ -121,6 +151,15 @@ export interface HierarchyCommands {
   closeScene(sceneId: string, confirmed?: boolean): unknown
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
   forkSession(sceneId: string, sessionId: string): unknown
+  createCanvas(taskId: string): unknown
+  createShellSibling(sceneId: string, sessionId: string): unknown
+  createForkChild(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
+  createForkSibling(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
+  retryProviderRestore(sessionId: string): unknown
+  reopenHistoricalSession(sessionId: string): unknown
+  getSceneSessionGraph(sceneId: string): unknown
+  recordSessionInteraction(sessionId: string, interactionKind: 'submit' | 'control' | 'provider-action'): unknown
+  setFocusedSession(sceneId: string, sessionId: string): unknown
   putGeometry(sceneId: string, ownerKey: string, layoutRevision: number, geometry: unknown): unknown
   activateSession(sessionId: string): unknown
   deleteSession(sessionId: string, confirmed?: boolean): unknown

@@ -21,6 +21,7 @@ import { NavigationRepository } from '../hierarchy/navigation-repository'
 import { SessionRelationRepository } from '../relations/session-relation-repository'
 import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
+import { SessionGraphRepository } from '../session-canvas/session-graph-repository'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -58,6 +59,7 @@ export class RuntimeRpcRouter {
   readonly #detachedSessions: DetachedSessionService
   readonly #taskWindowMigrations: TaskWindowMigrationService
   readonly #notifications: NotificationProjection
+  readonly #sessionGraphs: SessionGraphRepository
 
   constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
@@ -75,6 +77,7 @@ export class RuntimeRpcRouter {
     this.#detachedSessions = new DetachedSessionService(database, transactions)
     this.#taskWindowMigrations = new TaskWindowMigrationService(database, transactions)
     this.#notifications = notifications
+    this.#sessionGraphs = new SessionGraphRepository(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -93,6 +96,13 @@ export class RuntimeRpcRouter {
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
     if (method === 'projection.snapshot') return this.#snapshot(payload)
+    if (method === 'hierarchy.get-scene-session-graph') {
+      const input = record(payload)
+      return this.#sessionGraphs.projectSceneGraph(
+        text(input.sceneId, 'sceneId'),
+        optionalText(input.windowId, 'windowId')
+      )
+    }
     if (method === 'events.replay') {
       const value = record(payload)
       const afterSequence = integer(value.afterSequence, 'afterSequence', 0)
@@ -505,11 +515,15 @@ export class RuntimeRpcRouter {
       ...this.#scenes.snapshot(id)!,
       geometry: this.#geometry.list(id)
     }))
-    const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const requestedWindowId = typeof payload === 'object' && payload !== null &&
       'windowId' in payload && typeof payload.windowId === 'string'
       ? payload.windowId
       : undefined
+    const sessionGraphs = Object.fromEntries(sceneSnapshots.map(({ scene }) => [
+      scene.id,
+      this.#sessionGraphs.projectSceneGraph(scene.id, requestedWindowId)
+    ]))
+    const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const windowId = requestedWindowId ?? this.#database.get<{ id: string }>(
       `SELECT id FROM app_windows WHERE kind = 'main' AND state <> 'closed'
        ORDER BY created_at LIMIT 1`
@@ -540,6 +554,7 @@ export class RuntimeRpcRouter {
       relations,
       scenes: sceneSnapshots.map(({ scene }) => scene),
       sceneSnapshots,
+      sessionGraphs,
       hierarchy: {
         windowId,
         workspaces: activeWorkspaces,
@@ -547,6 +562,9 @@ export class RuntimeRpcRouter {
         sessions: activeSessions,
         scenes: activeSceneSnapshots.map(({ scene }) => scene),
         sceneSnapshots: activeSceneSnapshots,
+        sessionGraphs: Object.fromEntries(
+          activeSceneSnapshots.map(({ scene }) => [scene.id, sessionGraphs[scene.id]])
+        ),
         pathStates,
         unreadByTask,
         navigation: this.#navigation.get(windowId),

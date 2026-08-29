@@ -1,5 +1,18 @@
 import { z } from 'zod'
 
+export const SESSION_GRAPH_EVENT_TYPES = [
+  'scene.canvas-created',
+  'session.canvas-membership-created',
+  'session.structural-relation-created',
+  'session.user-interacted',
+  'session.mode-changed',
+  'session.restore-state-changed',
+  'session.graph-summary-changed',
+  'session.historical-state-changed'
+] as const
+
+export type SessionGraphEventWireType = (typeof SESSION_GRAPH_EVENT_TYPES)[number]
+
 export const domainEventEnvelopeSchema = z.object({
   sequence: z.number().int().positive(),
   eventId: z.string().min(1),

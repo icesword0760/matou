@@ -68,4 +68,41 @@ describe('RuntimeProjectionStore', () => {
 
     expect(store.view().hierarchy.sessions).toEqual([])
   })
+
+  it('replaces and incrementally updates Runtime-owned Scene session graphs', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], sessions: [], relations: [], scenes: [],
+      sessionGraphs: {
+        'scene-1': { sceneId: 'scene-1', nodes: [], edges: [] }
+      }
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2,
+      eventId: 'graph-2',
+      eventType: 'session.graph-summary-changed',
+      aggregateType: 'scene',
+      aggregateId: 'scene-1',
+      payload: {
+        graph: {
+          sceneId: 'scene-1',
+          focusedSessionId: 'session-1',
+          nodes: [{ sessionId: 'session-1', currentMode: 'shell' }],
+          edges: []
+        }
+      },
+      schemaVersion: 1,
+      commandId: 'graph-command',
+      occurredAt: 2
+    }])
+
+    expect(store.view().sessionGraphs['scene-1']).toMatchObject({
+      focusedSessionId: 'session-1',
+      nodes: [expect.objectContaining({ sessionId: 'session-1' })]
+    })
+    expect(store.view().hierarchy.sessionGraphs?.['scene-1']).toMatchObject({
+      focusedSessionId: 'session-1'
+    })
+  })
 })

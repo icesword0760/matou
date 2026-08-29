@@ -141,6 +141,25 @@ describe('parseRendererMessage', () => {
     })).toMatchObject({ type: 'rpc.request', method: 'hierarchy.fork-session' })
   })
 
+  it('allowlists every session canvas and DAG workflow', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'hierarchy.create-canvas',
+      'hierarchy.create-shell-sibling',
+      'hierarchy.create-fork-child',
+      'hierarchy.create-fork-sibling',
+      'hierarchy.record-session-interaction',
+      'hierarchy.retry-provider-restore',
+      'hierarchy.reopen-historical-session',
+      'hierarchy.get-scene-session-graph',
+      'hierarchy.set-focused-session'
+    ]))
+    expect(parseRendererMessage({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'graph-1',
+      method: 'hierarchy.get-scene-session-graph', capability: 'renderer',
+      deadlineAt: Date.now() + 1000, payload: { sceneId: 'scene-1' }
+    })).toMatchObject({ type: 'rpc.request', method: 'hierarchy.get-scene-session-graph' })
+  })
+
   it('allowlists the PRD 04 permission-mode persistence workflow', () => {
     expect(RPC_METHODS).toContain('session.set-permission-mode')
     expect(parseRendererMessage({

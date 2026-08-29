@@ -10,7 +10,15 @@ export interface RuntimeProjectionSnapshot {
   sessions: Entity[]
   relations: Entity[]
   scenes: Entity[]
+  sessionGraphs?: Record<string, SessionGraphProjection>
   hierarchy?: HierarchyProjection
+}
+
+export interface SessionGraphProjection {
+  sceneId: string
+  focusedSessionId?: string
+  nodes: Array<Record<string, unknown> & { sessionId: string }>
+  edges: Array<Record<string, unknown>>
 }
 
 export interface HierarchyProjection {
@@ -25,9 +33,11 @@ export interface HierarchyProjection {
   sceneSnapshots?: unknown[]
   unreadByTask?: Record<string, number>
   sessionHuds?: unknown[]
+  sessionGraphs?: Record<string, SessionGraphProjection>
 }
 
-export interface RuntimeProjectionView extends RuntimeProjectionSnapshot {
+export interface RuntimeProjectionView extends Omit<RuntimeProjectionSnapshot, 'sessionGraphs'> {
+  sessionGraphs: Record<string, SessionGraphProjection>
   hierarchy: HierarchyProjection
 }
 
@@ -39,6 +49,7 @@ export class RuntimeProjectionStore {
   readonly #sessions = new Map<string, Entity>()
   readonly #relations = new Map<string, Entity>()
   readonly #scenes = new Map<string, Entity>()
+  #sessionGraphs: Record<string, SessionGraphProjection> = {}
   #hierarchyMeta: Omit<HierarchyProjection, 'workspaces' | 'tasks' | 'sessions' | 'scenes'> = {
     windowId: 'window-1', navigation: { windowId: 'window-1' }
   }
@@ -55,6 +66,7 @@ export class RuntimeProjectionStore {
     replaceMap(this.#sessions, snapshot.sessions)
     replaceMap(this.#relations, snapshot.relations)
     replaceMap(this.#scenes, snapshot.scenes)
+    this.#sessionGraphs = structuredClone(snapshot.sessionGraphs ?? {})
     if (snapshot.hierarchy) {
       const { workspaces: _workspaces, tasks: _tasks, sessions: _sessions, scenes: _scenes, ...meta } = snapshot.hierarchy
       this.#hierarchyMeta = structuredClone(meta)
@@ -91,12 +103,14 @@ export class RuntimeProjectionStore {
       sessions,
       relations: [...this.#relations.values()],
       scenes,
+      sessionGraphs: structuredClone(this.#sessionGraphs),
       hierarchy: {
         ...structuredClone(this.#hierarchyMeta),
         workspaces: workspaces.filter(isActive),
         tasks: tasks.filter(isActive),
         sessions: sessions.filter(isActive),
-        scenes: scenes.filter(isActive)
+        scenes: scenes.filter(isActive),
+        sessionGraphs: structuredClone(this.#sessionGraphs)
       }
     }
   }
@@ -133,8 +147,30 @@ export class RuntimeProjectionStore {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
     } else if (event.eventType === 'scene.mode-changed' || event.eventType === 'scene.archived') {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
+    } else if (isSessionGraphEvent(event.eventType)) {
+      const graph = asSessionGraph(asObject(event.payload)?.graph)
+      if (graph) this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
     }
   }
+}
+
+function isSessionGraphEvent(eventType: string): boolean {
+  return eventType === 'scene.canvas-created' ||
+    eventType === 'session.canvas-membership-created' ||
+    eventType === 'session.structural-relation-created' ||
+    eventType === 'session.user-interacted' ||
+    eventType === 'session.mode-changed' ||
+    eventType === 'session.restore-state-changed' ||
+    eventType === 'session.graph-summary-changed' ||
+    eventType === 'session.historical-state-changed'
+}
+
+function asSessionGraph(value: unknown): SessionGraphProjection | undefined {
+  const object = asObject(value)
+  if (!object || typeof object.sceneId !== 'string' || !Array.isArray(object.nodes) || !Array.isArray(object.edges)) {
+    return undefined
+  }
+  return object as unknown as SessionGraphProjection
 }
 
 function isActive(entity: Entity): boolean {
