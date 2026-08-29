@@ -571,3 +571,112 @@ App 启动时必须将 Runtime 数据指向 `$MATOU_DATA_DIR`，将 Electron pro
 | SPEC-Q14 | 异常通过临时 Git/文件权限、真实 setup script、真实 provider 身份失效和真实 Runtime 终止构造；测试配置只选择隔离根目录。 | REL-011/012, ISO-002/007 |
 | SPEC-Q15 | 复用 PRD 01 通知视觉和定位；恢复失败、待输入、错误都可从通知跳转到目标节点。 | STA-006/008/010 |
 | SPEC-Q16 | 纯 Shell 没有子列表时仅提供同层新增；节点已有子列表时，列表横向 `+` 可添加共享该父节点的普通 Shell 子会话。 | REL-002/014/015, EDGE-015 |
+
+## 11. 第三步独立黑盒执行结果索引
+
+> 完整记录见 [`EXECUTION-Matou-会话画布与DAG分支交互.md`](./EXECUTION-Matou-会话画布与DAG分支交互.md)。本轮合计：PASS 26 / FAIL 49 / BLOCKED 27。
+
+| 用例 ID | 结果 | 执行记录 | 证据 |
+|---|---|---|---|
+| E2E-CAN-001 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results.json` |
+| E2E-CAN-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results.json` |
+| E2E-CAN-003 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN003-r2/evidence/results.json` |
+| E2E-CAN-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results-cont.json` |
+| E2E-CAN-005 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results-cont.json` |
+| E2E-CAN-006 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results.json` |
+| E2E-CAN-007 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
+| E2E-CAN-008 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/evidence/INCIDENT-001.txt` |
+| E2E-REL-001 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-REL-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NONROOT-results.json` |
+| E2E-REL-003 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-REL-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
+| E2E-REL-005 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
+| E2E-REL-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/FORK-results.json` |
+| E2E-REL-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png` |
+| E2E-REL-008 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-REL-009 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-dialog.png` |
+| E2E-REL-010 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-REL-011 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-REL-012 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/FORK-results.json` |
+| E2E-REL-013 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-REL-014 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-REL-015 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
+| E2E-REL-016 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
+| E2E-REL-017 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
+| E2E-REL-018 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png` |
+| E2E-REL-019 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
+| E2E-NAV-001 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-NAV-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-NAV-003 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-NAV-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-NAV-005 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
+| E2E-NAV-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
+| E2E-NAV-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
+| E2E-NAV-008 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
+| E2E-NAV-009 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/NAV9-r1/evidence/results.json` |
+| E2E-NAV-010 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
+| E2E-DAG-001 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-DAG-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
+| E2E-DAG-003 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-DAG-004 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-DAG-005 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-INFO-r1/evidence/results.json` |
+| E2E-DAG-006 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-LIVE-r2/evidence/results.json` |
+| E2E-DAG-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-DAG-008 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-DAG-009 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/DAG-parent-results.json` |
+| E2E-DAG-010 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG100-r2/evidence/results.json` |
+| E2E-STA-001 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
+| E2E-STA-002 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
+| E2E-STA-003 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
+| E2E-STA-004 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-STA-005 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/DAG-parent-results.json` |
+| E2E-STA-006 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
+| E2E-STA-007 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
+| E2E-STA-008 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-STA-009 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-STA-010 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-STA-011 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-LIVE-r2/evidence/results.json` |
+| E2E-STA-012 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-SORT-001 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-003 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-REAL-r2/evidence/SORT003-results.json` |
+| E2E-SORT-004 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
+| E2E-SORT-005 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png` |
+| E2E-SORT-008 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SORT8-r1/evidence/results.json` |
+| E2E-SORT-009 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-LIFE-001 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json` |
+| E2E-LIFE-002 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/LIFE-CORE-r1/evidence/E2E-LIFE-002.png` |
+| E2E-LIFE-003 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.png` |
+| E2E-LIFE-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json` |
+| E2E-LIFE-005 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLOSE-r3/evidence/after-close-click.png` |
+| E2E-LIFE-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/HISTORY-r1/evidence/results.json` |
+| E2E-LIFE-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/HIDE-r2/evidence/results.json` |
+| E2E-LIFE-008 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CAN003-r2/evidence/results.json` |
+| E2E-LIFE-009 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/QUIT-r1/evidence/results.json` |
+| E2E-LIFE-010 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-ISO-001 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-ISO-002 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-ISO-003 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-ISO-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/INDEPENDENT-r2/evidence/results.json` |
+| E2E-ISO-005 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/environment/display.txt` |
+| E2E-ISO-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/THEME-r3/evidence/results.json` |
+| E2E-ISO-007 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-ISO-008 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-EDGE-001 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-EDGE-002 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-EDGE-003 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
+| E2E-EDGE-004 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
+| E2E-EDGE-005 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
+| E2E-EDGE-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/EDGE006-final.json` |
+| E2E-EDGE-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLOSE-r3/evidence/after-close-click.png` |
+| E2E-EDGE-008 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/LONGPATH-r2/evidence/results.json` |
+| E2E-EDGE-009 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/FORK-results.json` |
+| E2E-EDGE-010 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json` |
+| E2E-EDGE-011 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/EDGE11-r2/evidence/results.json` |
+| E2E-EDGE-012 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NONROOT-results.json` |
+| E2E-EDGE-013 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/HISTORY-r1/evidence/results.json` |
+| E2E-EDGE-014 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/THEME-STATE-r2/evidence/results.json` |
+| E2E-EDGE-015 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NONROOT-results.json` |
+| E2E-EDGE-016 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-20260830/environment/build.txt` |
