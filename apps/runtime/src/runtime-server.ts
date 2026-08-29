@@ -107,6 +107,8 @@ export class RuntimeServer {
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #permissionOverrides = new Map<string, HudPermissionMode>()
   readonly #shellInputBuffers = new Map<string, string>()
+  readonly #summaryBuffers = new Map<string, string>()
+  readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
   readonly #pendingShellFallbacks = new Map<string, PendingShellFallback>()
   readonly #spawnQueues = new Map<string, Promise<void>>()
@@ -211,6 +213,9 @@ export class RuntimeServer {
 
   close(): void {
     if (this.#closed) return
+    for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
+    this.#summaryTimers.clear()
+    for (const sessionId of this.#summaryBuffers.keys()) this.#flushSessionSummary(sessionId)
     this.#closed = true
     for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
     this.#cwdTimers.clear()
@@ -374,6 +379,34 @@ export class RuntimeServer {
       }, sessionId, cwd, now)
     } catch (error) {
       if (!this.#closed) console.error(`[session.cwd-update] ${errorMessage(error)}`)
+    }
+  }
+
+  #recordSessionSummary(sessionId: string, data: string): void {
+    if (this.#closed) return
+    const current = this.#summaryBuffers.get(sessionId) ?? ''
+    this.#summaryBuffers.set(sessionId, (current + data).slice(-32_768))
+    if (this.#summaryTimers.has(sessionId)) return
+    this.#summaryTimers.set(sessionId, setTimeout(() => {
+      this.#summaryTimers.delete(sessionId)
+      this.#flushSessionSummary(sessionId)
+    }, 180))
+  }
+
+  #flushSessionSummary(sessionId: string): void {
+    const raw = this.#summaryBuffers.get(sessionId)
+    if (raw === undefined) return
+    try {
+      this.#database.run(
+        `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           latest_lines_json = excluded.latest_lines_json,
+           updated_at = excluded.updated_at`,
+        sessionId, JSON.stringify(terminalSummaryLines(raw)), Date.now()
+      )
+    } catch (error) {
+      if (!this.#closed) console.error(`[session.graph-summary] ${errorMessage(error)}`)
     }
   }
 
@@ -817,6 +850,7 @@ export class RuntimeServer {
         ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
         send: this.#sendToPort,
         onOutput: (data) => {
+          this.#recordSessionSummary(message.sessionId, data)
           const reportedCwd = cwdTracker.ingest(data)
           if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
           const resumeFailure = resumeMonitor?.ingest(data)
@@ -832,6 +866,7 @@ export class RuntimeServer {
           }
         },
         onExit: (exited, exitCode, signal) => {
+          this.#flushSessionSummary(message.sessionId)
           this.#clearProviderResumeTimer(message.sessionId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
           hookRegistration?.retire()
@@ -1501,6 +1536,16 @@ async function gitEnvironment(cwd: string): Promise<{ gitBranch: string; gitDirt
   } catch {
     return undefined
   }
+}
+
+export function terminalSummaryLines(raw: string): string[] {
+  const text = raw
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+  return text.split('\n').map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0).slice(-4)
 }
 
 function updateShellInputBuffer(previous: string, data: string): {

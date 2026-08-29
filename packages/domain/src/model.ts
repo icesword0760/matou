@@ -238,7 +238,9 @@ export interface SessionGraphNode {
     claudeCode: number
   }
   latestLines: string[]
+  siblingCreatedSeq?: number
   lastUserInteractionSeq: number
+  lastActivityAt?: number
   archivedAt?: number
   detachedWindowId?: string
 }

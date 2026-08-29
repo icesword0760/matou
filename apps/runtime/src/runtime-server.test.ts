@@ -11,7 +11,7 @@ import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/co
 
 import { SegmentJournal, readSessionFrames } from './journal/segment-journal'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
-import { RuntimeServer, type PortMessageEvent, type RuntimePort } from './runtime-server'
+import { RuntimeServer, terminalSummaryLines, type PortMessageEvent, type RuntimePort } from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
@@ -41,6 +41,11 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeServer domain RPC', () => {
+  it('keeps the latest four readable terminal lines for live DAG cards', () => {
+    expect(terminalSummaryLines('\u001b[31mone\u001b[0m\r\ntwo\nthree\nfour\nfive\n')).toEqual([
+      'two', 'three', 'four', 'five'
+    ])
+  })
   it('publishes live per-Session HUD state in projection snapshots and terminal updates', async () => {
     registerSession(database, 'hud-session')
     port.receive({

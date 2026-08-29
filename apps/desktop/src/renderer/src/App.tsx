@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
 import { HierarchyShell } from './hierarchy/HierarchyShell'
 import { DetachedTerminalApp } from './hierarchy/DetachedTerminalApp'
 import { TerminalSurface, type RuntimeStatus } from './terminal/TerminalSurface'
+import { DagWindowApp } from './dag/DagWindowApp'
 
 export function App() {
   const [status, setStatus] = useState<RuntimeStatus>('waiting-for-port')
@@ -13,7 +14,7 @@ export function App() {
   const dag = new URLSearchParams(window.location.search).get('kind') === 'dag'
 
   if (detached) return <DetachedTerminalApp />
-  if (dag) return <DagWindowLoading />
+  if (dag) return <DagWindowApp />
 
   return <>
     <HierarchyShell />
@@ -25,16 +26,4 @@ export function App() {
       <output data-testid="replay-marker">{replayMarker}</output>
     </div>}
   </>
-}
-
-function DagWindowLoading() {
-  const mainWindowId = new URLSearchParams(window.location.search).get('mainWindowId') ?? ''
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') void window.matouDesktop?.closeDagWindow?.(mainWindowId)
-    }
-    window.addEventListener('keydown', close)
-    return () => window.removeEventListener('keydown', close)
-  }, [mainWindowId])
-  return <main className="dag-window-loading" aria-label="会话 DAG" aria-busy="true">正在载入会话关系…</main>
 }

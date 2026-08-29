@@ -38,11 +38,14 @@ export interface SessionGraphNodeView {
   canFork: boolean
   title: string
   cwd: string
+  worktree?: { branch: string; path: string; shared: boolean }
   activeChildCount: number
   historicalChildCount: number
   childModeCounts: { shell: number; claudeCode: number }
   latestLines: string[]
+  siblingCreatedSeq?: number
   lastUserInteractionSeq: number
+  lastActivityAt?: number
   archivedAt?: number
   detachedWindowId?: string
 }

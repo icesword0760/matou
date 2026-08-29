@@ -46,6 +46,7 @@ interface GraphRow extends MembershipRow {
   worktree_path: string | null
   branch_name: string | null
   detached_window_id: string | null
+  latest_lines_json: string | null
 }
 
 interface EdgeRow {
@@ -187,6 +188,7 @@ export function projectSceneGraphFrom(
          worktrees.worktree_path,
          worktrees.branch_name,
          detached.native_window_key AS detached_window_id
+         , summary.latest_lines_json
        FROM session_canvas_memberships AS membership
        JOIN sessions ON sessions.id = membership.session_id
        LEFT JOIN session_relations_current AS structural
@@ -208,6 +210,7 @@ export function projectSceneGraphFrom(
           WHERE session_mounts.scene_window_id = detached.id
             AND session_mounts.session_id = sessions.id
         )
+       LEFT JOIN session_graph_summaries AS summary ON summary.session_id = sessions.id
        WHERE membership.scene_id = ?
        ORDER BY
          COALESCE(structural.to_session_id, ''),
@@ -278,8 +281,10 @@ export function projectSceneGraphFrom(
           shell: counts?.shell_count ?? 0,
           claudeCode: counts?.claude_count ?? 0
         },
-        latestLines: [],
+        latestLines: parseLatestLines(row.latest_lines_json),
+        siblingCreatedSeq: row.sibling_created_seq,
         lastUserInteractionSeq: row.last_user_interaction_seq,
+        lastActivityAt: row.last_activity_at,
         ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
         ...(row.detached_window_id === null ? {} : { detachedWindowId: row.detached_window_id })
       }
@@ -361,6 +366,18 @@ function providerCanFork(metadataJson: string | null): boolean {
       (metadata as Record<string, unknown>).canFork === true
   } catch {
     return false
+  }
+}
+
+function parseLatestLines(value: string | null): string[] {
+  if (value === null) return []
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return Array.isArray(parsed)
+      ? parsed.filter((line): line is string => typeof line === 'string').slice(-4)
+      : []
+  } catch {
+    return []
   }
 }
 

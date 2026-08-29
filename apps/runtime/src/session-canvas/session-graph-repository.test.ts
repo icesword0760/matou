@@ -78,6 +78,10 @@ afterEach(() => database.close())
 
 describe('SessionGraphRepository', () => {
   it('projects active and historical mixed-mode children with stable structural edges', () => {
+    database.run(
+      `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
+       VALUES ('claude-child', '["line one","line two"]', 20)`
+    )
     const graph = graphs.projectSceneGraph('scene')
 
     expect(graph.nodes).toHaveLength(4)
@@ -96,6 +100,8 @@ describe('SessionGraphRepository', () => {
       relationKind: 'forked-from',
       currentMode: 'claude-code',
       workStatus: 'needs-input',
+      siblingCreatedSeq: 3,
+      latestLines: ['line one', 'line two'],
       lastUserInteractionSeq: 12
     })
   })

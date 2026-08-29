@@ -803,5 +803,16 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       ALTER TABLE session_fork_intents ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
       UPDATE session_fork_intents SET updated_at = created_at WHERE updated_at = 0;
     `
+  },
+  {
+    version: 16,
+    name: 'session-graph-live-summaries',
+    sql: `
+      CREATE TABLE session_graph_summaries (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        latest_lines_json TEXT NOT NULL DEFAULT '[]',
+        updated_at INTEGER NOT NULL
+      );
+    `
   }
 ]
