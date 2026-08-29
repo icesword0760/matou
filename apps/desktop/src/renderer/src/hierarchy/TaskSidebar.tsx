@@ -14,8 +14,11 @@ import workbenchIcon from '../assets/kooky/terminal/dark_lujing.svg'
 const TASK_TRANSFER = 'application/x-matou-pinned-task'
 const WORKSPACE_TRANSFER = 'application/x-matou-pinned-workspace'
 
-export function TaskSidebar({ projection, commands }: {
-  projection: HierarchyProjection; commands: HierarchyCommands; pathValid?: boolean
+export function TaskSidebar({ projection, commands, onRevealSession }: {
+  projection: HierarchyProjection
+  commands: HierarchyCommands
+  pathValid?: boolean
+  onRevealSession?(sceneId: string, sessionId: string): void
 }) {
   const workspaces = useMemo(() => orderNavigation(projection.workspaces), [projection.workspaces])
   const placedIds = new Set(projection.taskPlacements
@@ -98,7 +101,10 @@ export function TaskSidebar({ projection, commands }: {
       const detached = Boolean(mount?.sceneWindowId && snapshot?.windows.some(({ id, state }) => id === mount.sceneWindowId && state === 'detached'))
       const scene = snapshot && projection.scenes.find(({ id }) => id === snapshot.scene.id)
       if (task && scene?.taskId === task.id && projection.sessions.some(({ id }) => id === notification.sessionId) && !detached) {
-        await Promise.resolve(commands.activateScene(scene.id)); await Promise.resolve(commands.activateSession(notification.sessionId)); success = true
+        await Promise.resolve(commands.activateScene(scene.id))
+        await Promise.resolve(commands.activateSession(notification.sessionId))
+        onRevealSession?.(scene.id, notification.sessionId)
+        success = true
       } else { success = false; setToast('原面板已不存在或不在当前窗口') }
     }
     if (success) notificationStore.remove(notification.id)

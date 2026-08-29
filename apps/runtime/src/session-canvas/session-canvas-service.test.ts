@@ -138,6 +138,89 @@ describe('SessionCanvasService', () => {
     }))
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
   })
+
+  it('adds a Shell to a child level after every prior child became historical', () => {
+    const initial = bootstrap()
+    const historical = service.createShellSibling(command('only-child-shell'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+    insertStructuralRelation('only-child-parent', historical.session!.id, initial.session!.id, 21)
+    archiveSession(historical.session!.id, 22)
+
+    const result = service.createShellSibling(command('new-child-after-history'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: historical.session!.id,
+      parentSessionId: initial.session!.id,
+      now: 23
+    })
+
+    expect(result.session).toMatchObject({ kind: 'shell', cwd: workspaceRoot })
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === result.session!.id))
+      .toMatchObject({
+        parentSessionId: initial.session!.id,
+        relationKind: 'derived-from',
+        currentMode: 'shell'
+      })
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === historical.session!.id)?.archivedAt)
+      .toBe(22)
+    expect(result.graph.focusedSessionId).toBe(result.session!.id)
+  })
+
+  it('reopens a historical Shell as a new live sibling while retaining the historical node', () => {
+    const initial = bootstrap()
+    const historical = service.createShellSibling(command('historical-shell'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+    insertStructuralRelation('historical-parent', historical.session!.id, initial.session!.id, 21)
+    archiveSession(historical.session!.id, 22)
+
+    const reopened = service.reopenHistoricalSession(command('reopen-shell'), {
+      windowId: 'window-1', sessionId: historical.session!.id, now: 23
+    })
+
+    expect(reopened.session).toMatchObject({ kind: 'shell', status: 'created' })
+    expect(reopened.session!.id).not.toBe(historical.session!.id)
+    expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === historical.session!.id)?.archivedAt).toBe(22)
+    expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === reopened.session!.id))
+      .toMatchObject({ parentSessionId: initial.session!.id, relationKind: 'derived-from' })
+    expect(reopened.graph.nodes.at(-1)?.sessionId).toBe(reopened.session!.id)
+    expect(reopened.graph.focusedSessionId).toBe(reopened.session!.id)
+  })
+
+  it('moves a durable Claude identity onto a new continuation Session', () => {
+    const initial = bootstrap()
+    const historical = service.createShellSibling(command('historical-claude'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+    database.run("UPDATE sessions SET kind = 'claude-code', title = '方案分支' WHERE id = ?", historical.session!.id)
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at, restore_state
+       ) VALUES ('historical-binding', ?, 'claude-code', 'provider-history', 'available',
+                 '{"canFork":true}', 20, 20, 20, 'none')`,
+      historical.session!.id
+    )
+    archiveSession(historical.session!.id, 22)
+
+    const reopened = service.reopenHistoricalSession(command('reopen-claude'), {
+      windowId: 'window-1', sessionId: historical.session!.id, now: 23
+    })
+
+    expect(reopened.session).toMatchObject({ kind: 'claude-code', title: '方案分支' })
+    expect(database.get(
+      `SELECT session_id, provider_session_id, resume_state, restore_state
+       FROM provider_bindings WHERE id = 'historical-binding'`
+    )).toEqual({
+      session_id: reopened.session!.id,
+      provider_session_id: 'provider-history',
+      resume_state: 'available',
+      restore_state: 'none'
+    })
+  })
 })
 
 function bootstrap() {
@@ -194,4 +277,12 @@ function insertStructuralRelation(
     `relation-${id}`, childSessionId, parentSessionId, now, now,
     Number(insertion.lastInsertRowid), childSessionId
   )
+}
+
+function archiveSession(sessionId: string, now: number): void {
+  database.run(
+    `UPDATE sessions SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?`,
+    now, now, sessionId
+  )
+  database.run('DELETE FROM session_mounts WHERE session_id = ?', sessionId)
 }

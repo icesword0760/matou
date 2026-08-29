@@ -29,7 +29,7 @@ describe('SessionCanvas', () => {
     const user = userEvent.setup()
 
     await user.click(screen.getByRole('button', { name: '新增同级 Shell' }))
-    expect(onCreateShellSibling).toHaveBeenCalledWith('child-claude')
+    expect(onCreateShellSibling).toHaveBeenCalledWith('child-claude', 'parent')
     await user.click(screen.getByRole('button', { name: '创建同级 Claude 分支' }))
     expect(onCreateForkSibling).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'child-claude' }),
@@ -48,15 +48,48 @@ describe('SessionCanvas', () => {
       .toEqual(['会话：父会话', '会话：根 Shell'])
     expect(screen.queryByRole('button', { name: '创建同级 Claude 分支' })).toBeNull()
   })
+
+  it('keeps history folded by default and reopens it as a new live continuation', async () => {
+    const data = graph()
+    data.nodes.push({ ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
+    const onReopenHistorical = vi.fn()
+    renderCanvas(data, { onReopenHistorical })
+    const user = userEvent.setup()
+
+    expect(screen.queryByText('历史 Shell')).toBeNull()
+    await user.click(screen.getByRole('button', { name: '显示历史会话 (1)' }))
+    expect(screen.getByText('历史 Shell')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '重新打开 Shell' }))
+    expect(onReopenHistorical).toHaveBeenCalledWith('archived')
+  })
+
+  it('keeps the current parent when adding a Shell after all children became history', async () => {
+    const data = graph()
+    data.nodes = [
+      data.nodes[0]!,
+      { ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' }
+    ]
+    data.focusedSessionId = 'parent'
+    const onCreateShellSibling = vi.fn()
+    render(<SessionCanvas graph={data} levelParentSessionId="parent" onActivate={() => undefined}
+      onCreateShellSibling={onCreateShellSibling} onCreateForkSibling={vi.fn()}
+      onReopenHistorical={vi.fn()} renderSession={(item) => <div>{item.title}</div>} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '新增同级 Shell' }))
+
+    expect(onCreateShellSibling).toHaveBeenCalledWith('archived', 'parent')
+  })
 })
 
 function renderCanvas(data: SessionGraphView, handlers?: {
-  onCreateShellSibling?: (sourceSessionId: string) => void
+  onCreateShellSibling?: (sourceSessionId: string, parentSessionId?: string) => void
   onCreateForkSibling?: (source: SessionGraphNodeView, parent: SessionGraphNodeView) => void
+  onReopenHistorical?: (sessionId: string) => void
 }) {
   return render(<SessionCanvas graph={data} onActivate={() => undefined}
     onCreateShellSibling={handlers?.onCreateShellSibling ?? vi.fn()}
     onCreateForkSibling={handlers?.onCreateForkSibling ?? vi.fn()}
+    onReopenHistorical={handlers?.onReopenHistorical ?? vi.fn()}
     renderSession={(item) => <div>{item.title}</div>} />)
 }
 

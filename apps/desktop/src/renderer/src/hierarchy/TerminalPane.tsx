@@ -8,6 +8,8 @@ import { sessionDeleteFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import { toOscNotification } from '../notifications/osc-notification'
 import type { TerminalThemeKey } from '../terminal/terminal-themes'
+import { ChildSessionBadge } from '../session-canvas/ChildSessionBadge'
+import type { SessionGraphNodeView } from './hierarchy-types'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -37,6 +39,9 @@ export function TerminalPane(props: {
   onRetryRestore?(sessionId: string): unknown
   onRetryFork?(sessionId: string): unknown
   onRemoveFailedFork?(sessionId: string): unknown
+  childNodes?: SessionGraphNodeView[]
+  historicalChildCount?: number
+  onOpenChildren?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
 }) {
@@ -45,6 +50,7 @@ export function TerminalPane(props: {
     pathValid = true, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError,
     spawnRevision = 0, onRetryRestore, onRetryFork, onRemoveFailedFork,
+    childNodes = [], historicalChildCount = 0, onOpenChildren,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onDetach
@@ -91,7 +97,11 @@ export function TerminalPane(props: {
           event.screenY >= window.screenY + window.outerHeight
         if (outside) void onDetach?.(session.id)
       }}>
-      <div className="pane-header-content"><strong className="pane-title">{session.title}</strong></div>
+      <div className="pane-header-content"><strong className="pane-title">{session.title}</strong>
+        {onOpenChildren && <ChildSessionBadge children={childNodes}
+          historicalCount={historicalChildCount}
+          onOpen={() => void onOpenChildren(session.id)} />}
+      </div>
       <div className="terminal-pane-actions">
         {canFork && <button className="pane-fork" type="button"
           aria-label={`从“${session.title}”创建子分支`} title="创建子分支"

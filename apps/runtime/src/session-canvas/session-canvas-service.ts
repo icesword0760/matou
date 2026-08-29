@@ -72,12 +72,19 @@ export interface CreateShellSiblingInput {
   windowId: string
   sceneId: string
   sourceSessionId: string
+  parentSessionId?: string
   now: number
 }
 
 export interface SetFocusedSessionInput {
   windowId: string
   sceneId: string
+  sessionId: string
+  now: number
+}
+
+export interface ReopenHistoricalSessionInput {
+  windowId: string
   sessionId: string
   now: number
 }
@@ -203,16 +210,22 @@ export class SessionCanvasService {
       const source = requireRow(tx.get<SourceSessionRow>(
         `SELECT sessions.id, sessions.task_id, sessions.execution_context_id, sessions.cwd
          FROM sessions
-         JOIN session_mounts ON session_mounts.session_id = sessions.id
-         WHERE sessions.id = ? AND session_mounts.scene_id = ?
-           AND sessions.archived_at IS NULL`,
-        input.sourceSessionId, input.sceneId
+         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+         WHERE sessions.id = ? AND membership.scene_id = ?
+           AND (sessions.archived_at IS NULL OR ? IS NOT NULL)`,
+        input.sourceSessionId, input.sceneId, input.parentSessionId ?? null
       ), 'Session')
       const sourceMount = requireRow(tx.get<SourceMountRow>(
-        `SELECT id, scene_node_id, scene_window_id FROM session_mounts
-         WHERE scene_id = ? AND session_id = ?
-         ORDER BY created_at, id LIMIT 1`,
-        input.sceneId, input.sourceSessionId
+        `SELECT mounts.id, mounts.scene_node_id, mounts.scene_window_id
+         FROM session_mounts AS mounts
+         JOIN sessions ON sessions.id = mounts.session_id
+         WHERE mounts.scene_id = ? AND mounts.scene_node_id IS NOT NULL
+           AND mounts.scene_window_id IS NULL AND sessions.archived_at IS NULL
+         ORDER BY
+           CASE WHEN mounts.session_id = ? THEN 0
+                WHEN mounts.session_id = ? THEN 1 ELSE 2 END,
+           sessions.last_activity_at DESC, mounts.created_at, mounts.id LIMIT 1`,
+        input.sceneId, input.sourceSessionId, input.parentSessionId ?? null
       ), 'SessionMount')
       if (sourceMount.scene_window_id !== null || sourceMount.scene_node_id === null) {
         throw new Error('独立窗口中的会话需要先回到原会话列表')
@@ -221,7 +234,9 @@ export class SessionCanvasService {
         `SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?`,
         sourceMount.scene_node_id
       ), 'SceneNode')
-      const structuralParent = tx.get<{ parent_session_id: string }>(
+      const structuralParent = input.parentSessionId
+        ? { parent_session_id: input.parentSessionId }
+        : tx.get<{ parent_session_id: string }>(
         `SELECT to_session_id AS parent_session_id
          FROM session_relations_current
          WHERE from_session_id = ?
@@ -332,6 +347,130 @@ export class SessionCanvasService {
     }).result
   }
 
+  reopenHistoricalSession(
+    command: DomainCommandMetadata,
+    input: ReopenHistoricalSessionInput
+  ): SessionCanvasMutationResult {
+    const ids = createHierarchyIds()
+    const relationId = randomUUID()
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      registerWindow(tx, input.windowId, input.now)
+      const source = requireRow(tx.get<{
+        id: string
+        task_id: string
+        execution_context_id: string
+        kind: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+        title: string
+        cwd: string
+        scene_id: string
+      }>(
+        `SELECT sessions.id, sessions.task_id, sessions.execution_context_id,
+                sessions.kind, sessions.title, sessions.cwd, membership.scene_id
+         FROM sessions
+         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+         WHERE sessions.id = ? AND sessions.archived_at IS NOT NULL`,
+        input.sessionId
+      ), 'Historical Session')
+      const scene = requireRow(tx.get<SceneRow>(
+        'SELECT id, task_id FROM scenes WHERE id = ? AND archived_at IS NULL', source.scene_id
+      ), 'Scene')
+      const task = requireRow(tx.get<TaskRow>(
+        `SELECT id, workspace_id, execution_context_id FROM tasks
+         WHERE id = ? AND archived_at IS NULL`, scene.task_id
+      ), 'Task')
+      assertWorkspacePathAvailable(tx, task.workspace_id)
+      const anchor = requireRow(tx.get<{ scene_node_id: string }>(
+        `SELECT mounts.scene_node_id
+         FROM session_mounts AS mounts
+         JOIN sessions ON sessions.id = mounts.session_id
+         WHERE mounts.scene_id = ? AND mounts.scene_node_id IS NOT NULL
+           AND sessions.archived_at IS NULL
+         ORDER BY sessions.last_activity_at DESC, mounts.created_at, mounts.id LIMIT 1`,
+        scene.id
+      ), 'Active Session anchor')
+      const sourceNode = requireRow(tx.get<SceneNodeRow>(
+        'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?', anchor.scene_node_id
+      ), 'SceneNode')
+      const structuralParent = tx.get<{ parent_session_id: string }>(
+        `SELECT to_session_id AS parent_session_id FROM session_relations_current
+         WHERE from_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')`,
+        source.id
+      )
+      const providerBinding = source.kind === 'claude-code' ? tx.get<{ id: string }>(
+        `SELECT id FROM provider_bindings
+         WHERE session_id = ? AND provider = 'claude-code'
+           AND resume_state IN ('available', 'resumed')
+           AND validated_at IS NOT NULL AND invalidated_at IS NULL
+         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+        source.id
+      ) : undefined
+      const nextKind = providerBinding ? 'claude-code' : 'shell'
+
+      insertHorizontalNode(tx, scene.id, sourceNode, ids, input.now)
+      tx.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at, version
+         ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, 1)`,
+        ids.sessionId, source.task_id, source.execution_context_id, nextKind,
+        source.title, source.cwd, input.now, input.now, input.now
+      )
+      tx.run(
+        `INSERT INTO session_mounts (
+           id, scene_id, scene_node_id, session_id, created_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+        ids.mountId, scene.id, ids.rootNodeId, ids.sessionId, input.now
+      )
+      tx.run(
+        `UPDATE scenes SET root_node_id = CASE WHEN root_node_id = ? THEN ? ELSE root_node_id END,
+           layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
+        sourceNode.id, ids.secondaryNodeId, input.now, scene.id
+      )
+      if (structuralParent) {
+        const relationEvent = tx.run(
+          `INSERT INTO session_relation_events (
+             event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+             relation_kind, metadata_json, command_id, occurred_at
+           ) VALUES (?, ?, 'created', ?, ?, ?, 'derived-from', ?, ?, ?)`,
+          `${command.commandId}:historical-relation-created`, relationId, task.id,
+          ids.sessionId, structuralParent.parent_session_id,
+          JSON.stringify({ reopenedFromSessionId: source.id }), command.commandId, input.now
+        )
+        tx.run(
+          `INSERT INTO session_relations_current (
+             relation_id, task_id, from_session_id, to_session_id, relation_kind,
+             metadata_json, created_at, updated_at, source_event_sequence
+           ) VALUES (?, ?, ?, ?, 'derived-from', ?, ?, ?, ?)`,
+          relationId, task.id, ids.sessionId, structuralParent.parent_session_id,
+          JSON.stringify({ reopenedFromSessionId: source.id }), input.now, input.now,
+          Number(relationEvent.lastInsertRowid)
+        )
+      }
+      if (providerBinding) {
+        tx.run(
+          `UPDATE provider_bindings SET session_id = ?, resume_state = 'available',
+             restore_state = 'none', restore_error = NULL, user_exited_at = NULL,
+             updated_at = ? WHERE id = ?`,
+          ids.sessionId, input.now, providerBinding.id
+        )
+      }
+      activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
+      const hierarchy = readHierarchyResult(tx, input.windowId)
+      const membership = readMembership(tx, ids.sessionId)
+      const graph = projectSceneGraphFrom(tx, scene.id, input.windowId)
+      emit({
+        eventId: `${command.commandId}:historical-session-reopened`,
+        eventType: 'session.historical-reopened', aggregateType: 'session',
+        aggregateId: ids.sessionId, workspaceId: task.workspace_id, taskId: task.id,
+        sessionId: ids.sessionId,
+        payload: { session: hierarchy.session, reopenedFromSessionId: source.id, graph },
+        occurredAt: input.now
+      })
+      emitMembership(command.commandId, membership, task.workspace_id, task.id, emit, input.now)
+      return { ...hierarchy, graph }
+    }).result
+  }
+
   projectSceneGraph(sceneId: string, windowId?: string): SceneSessionGraph {
     return projectSceneGraphFrom(this.#database, sceneId, windowId)
   }
@@ -407,6 +546,32 @@ function nextCanvasName(tx: DatabaseTransaction, taskId: string): string {
 
 function sortKey(index: number): string {
   return `a${index.toString().padStart(8, '0')}`
+}
+
+function insertHorizontalNode(
+  tx: DatabaseTransaction,
+  sceneId: string,
+  sourceNode: SceneNodeRow,
+  ids: ReturnType<typeof createHierarchyIds>,
+  now: number
+): void {
+  tx.run(
+    `INSERT INTO scene_nodes (
+       id, scene_id, parent_node_id, kind, direction, ordinal, created_at
+     ) VALUES (?, ?, ?, 'split', 'horizontal', ?, ?)`,
+    ids.secondaryNodeId, sceneId, sourceNode.parent_node_id, sourceNode.ordinal, now
+  )
+  tx.run(
+    `UPDATE scene_nodes SET parent_node_id = ?, kind = 'mount', direction = NULL, ordinal = 0
+     WHERE id = ?`,
+    ids.secondaryNodeId, sourceNode.id
+  )
+  tx.run(
+    `INSERT INTO scene_nodes (
+       id, scene_id, parent_node_id, kind, ordinal, created_at
+     ) VALUES (?, ?, ?, 'mount', 1, ?)`,
+    ids.rootNodeId, sceneId, ids.secondaryNodeId, now
+  )
 }
 
 function requireRow<T>(row: T | undefined, label: string): T {

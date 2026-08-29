@@ -335,6 +335,9 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          ...(optionalText(input.parentSessionId, 'parentSessionId') === undefined
+            ? {}
+            : { parentSessionId: optionalText(input.parentSessionId, 'parentSessionId')! }),
           now: integer(input.now, 'now', 0)
         }))
       case 'hierarchy.record-session-interaction':
@@ -349,6 +352,12 @@ export class RuntimeRpcRouter {
         })
       case 'hierarchy.retry-provider-restore':
         return this.#providerModes.retryRestore(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.reopen-historical-session':
+        return this.#sessionCanvas.reopenHistoricalSession(command, {
+          windowId: text(input.windowId, 'windowId'),
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })

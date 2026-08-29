@@ -177,6 +177,7 @@ function HierarchyProduct({ projection, commands }: {
     relationMode: 'child' | 'sibling'
     gitAvailable: boolean
   } | null>(null)
+  const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | undefined>>({})
   const ratioTimers = useRef(new Map<string, number>())
   useEffect(() => () => {
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
@@ -292,7 +293,16 @@ function HierarchyProduct({ projection, commands }: {
 
   return <main className="hierarchy-shell cli-module" data-theme={themeKey}>
               <div className="claude-code-view hierarchy-body">
-                <TaskSidebar projection={projection} commands={commands} pathValid={pathValid} />
+                <TaskSidebar projection={projection} commands={commands} pathValid={pathValid}
+                  onRevealSession={(sceneId, sessionId) => {
+                    const node = projection.sessionGraphs?.[sceneId]?.nodes.find((candidate) =>
+                      candidate.sessionId === sessionId)
+                    setLevelParentByScene((current) => ({
+                      ...current,
+                      [sceneId]: node?.parentSessionId
+                    }))
+                    setTerminalFocusRequest((value) => value + 1)
+                  }} />
                 <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
         {task && <>
           <SceneTabBar projection={projection} commands={commands} pathValid={pathValid} />
@@ -314,6 +324,7 @@ function HierarchyProduct({ projection, commands }: {
                   return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
                 }
                 const graphNode = graph?.nodes.find(({ sessionId: candidate }) => candidate === session.id)
+                const childNodes = graph?.nodes.filter(({ parentSessionId }) => parentSessionId === session.id) ?? []
                 const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
@@ -340,6 +351,13 @@ function HierarchyProduct({ projection, commands }: {
                   onRetryRestore={commands.retryProviderRestore}
                   onRetryFork={() => commands.retryFork(session.id)}
                   onRemoveFailedFork={() => commands.removeFailedFork(session.id)}
+                  childNodes={childNodes}
+                  historicalChildCount={graphNode?.historicalChildCount ?? 0}
+                  onOpenChildren={() => {
+                    setLevelParentByScene((current) => ({ ...current, [scene.id]: session.id }))
+                    const firstActiveChild = childNodes.find(({ archivedAt }) => archivedAt === undefined)
+                    if (firstActiveChild) run(commands.setFocusedSession(scene.id, firstActiveChild.sessionId))
+                  }}
                   onFork={() => setBranchDialog({
                     sceneId: scene.id, sourceSessionId: session.id, sourceTitle: session.title,
                     relationMode: 'child', gitAvailable: Boolean(sessionHud?.gitBranch)
@@ -367,9 +385,13 @@ function HierarchyProduct({ projection, commands }: {
                 aria-label={`${scene.name} 终端布局`}>
                 {graph && snapshot
                   ? <SessionCanvas graph={graph} disabled={!pathValid}
+                      {...(levelParentByScene[scene.id] !== undefined
+                        ? { levelParentSessionId: levelParentByScene[scene.id]! }
+                        : {})}
                       renderSession={(node, cardVisible) => renderSession(node.sessionId, cardVisible)}
                       onActivate={(sessionId) => run(commands.setFocusedSession(scene.id, sessionId))}
-                      onCreateShellSibling={(sessionId) => run(commands.createShellSibling(scene.id, sessionId))}
+                      onCreateShellSibling={(sessionId, parentSessionId) =>
+                        run(commands.createShellSibling(scene.id, sessionId, parentSessionId))}
                       onCreateForkSibling={(source, parent) => {
                         const parentHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === parent.sessionId)
                         setBranchDialog({
@@ -378,6 +400,7 @@ function HierarchyProduct({ projection, commands }: {
                           gitAvailable: Boolean(parentHud?.gitBranch)
                         })
                       }}
+                      onReopenHistorical={(sessionId) => run(commands.reopenHistoricalSession(sessionId))}
                       onEnsureSessionVisible={(sessionId) => {
                         if (sessionId === activeSessionId) setTerminalFocusRequest((value) => value + 1)
                       }} />

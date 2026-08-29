@@ -132,6 +132,23 @@ describe('Terminal pane', () => {
     await user.click(screen.getByRole('button', { name: '移除失败分支' }))
     expect(onRemoveFailedFork).toHaveBeenCalledWith('session-1')
   })
+
+  it('keeps child navigation on a Shell-shaped parent after Claude exits', async () => {
+    const user = userEvent.setup()
+    const onOpenChildren = vi.fn()
+    const props = fixture()
+    render(<TerminalPane {...props} session={{ ...props.session, kind: 'shell', title: 'Shell' }}
+      childNodes={[{
+        sessionId: 'child-1', sceneId: 'scene-1', parentSessionId: 'session-1',
+        currentMode: 'claude-code', workStatus: 'running', providerRestoreState: 'none',
+        canFork: true, title: '子会话', cwd: '/tmp', activeChildCount: 0,
+        historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+        latestLines: [], lastUserInteractionSeq: 0
+      }]} historicalChildCount={1} onOpenChildren={onOpenChildren} />)
+
+    await user.click(screen.getByRole('button', { name: '查看 2 个子会话' }))
+    expect(onOpenChildren).toHaveBeenCalledWith('session-1')
+  })
 })
 
 function fixture() {

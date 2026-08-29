@@ -254,6 +254,46 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('button', { name: '打开通知：E2E 任务完成' })).toBeTruthy()
   })
 
+  it('opens a child notification on its sibling level and keeps the target card in view', async () => {
+    window.history.replaceState({}, '', '/?e2e=1')
+    const data = fixture()
+    data.sessions.push({
+      id: 'session-child', taskId: 'task-a1', title: '子会话', executionContextId: 'context-a'
+    })
+    data.sceneSnapshots![0]!.nodes.push({
+      id: 'node-child', sceneId: 'scene-a1', kind: 'mount', ordinal: 1
+    })
+    data.sceneSnapshots![0]!.mounts.push({
+      id: 'mount-child', sceneId: 'scene-a1', sceneNodeId: 'node-child', sessionId: 'session-child'
+    })
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1',
+        edges: [{
+          parentSessionId: 'session-a1', childSessionId: 'session-child',
+          relationKind: 'derived-from', createdAt: 2
+        }],
+        nodes: [
+          graphNode('session-a1', '父会话'),
+          { ...graphNode('session-child', '子会话'), parentSessionId: 'session-a1', relationKind: 'derived-from' }
+        ]
+      }
+    }
+    render(<HierarchyShell fixture={data} />)
+    window.matouE2e!.pushNotification({
+      eventId: 'child-completed', eventType: 'completed', title: 'Claude Code', body: '子会话完成',
+      workspaceId: 'workspace-a', taskId: 'task-a1', sceneId: 'scene-a1', sessionId: 'session-child'
+    })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '通知中心' }))
+    await user.click(screen.getByRole('button', { name: '打开通知：子会话完成' }))
+
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+      .toBe('session-a1')
+    expect(screen.getByTestId('xterm-session-child')).toBeTruthy()
+  })
+
   it('keeps startup and partial layout hydration silent for PRD 04', () => {
     const loading = render(<HierarchyShell />)
     expect(screen.queryByText(/恢复|加载/)).toBeNull()
@@ -371,5 +411,15 @@ function snapshot(sceneId: string, taskId: string, name: string, nodeId: string,
     nodes: [{ id: nodeId, sceneId, kind: 'mount' as const, ordinal: 0 }],
     mounts: [{ id: mountId, sceneId, sceneNodeId: nodeId, sessionId }],
     windows: []
+  }
+}
+
+function graphNode(sessionId: string, title: string) {
+  return {
+    sessionId, sceneId: 'scene-a1', currentMode: 'shell' as const,
+    workStatus: 'idle' as const, providerRestoreState: 'none' as const, canFork: false,
+    title, cwd: '/tmp/a', activeChildCount: sessionId === 'session-a1' ? 1 : 0,
+    historicalChildCount: 0, childModeCounts: { shell: sessionId === 'session-a1' ? 1 : 0, claudeCode: 0 },
+    latestLines: [], lastUserInteractionSeq: 0
   }
 }

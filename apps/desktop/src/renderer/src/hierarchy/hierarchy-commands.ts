@@ -59,8 +59,8 @@ export function createHierarchyCommands(
       sceneId, sourceSessionId
     }),
     createCanvas: (taskId) => command('hierarchy.create-canvas', { taskId }),
-    createShellSibling: (sceneId, sourceSessionId) => command('hierarchy.create-shell-sibling', {
-      sceneId, sourceSessionId
+    createShellSibling: (sceneId, sourceSessionId, parentSessionId) => command('hierarchy.create-shell-sibling', {
+      sceneId, sourceSessionId, ...(parentSessionId ? { parentSessionId } : {})
     }),
     createForkChild: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-child', {
       sceneId, sourceSessionId, name, worktreeMode
