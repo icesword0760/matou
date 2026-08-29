@@ -387,6 +387,15 @@ function HierarchyProduct({ projection, commands }: {
                     ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
                     ...(graphNode.providerRestoreError ? { restoreError: graphNode.providerRestoreError } : {})
                   } : {})}
+                  {...(sessionHud?.cwd ?? graphNode?.cwd
+                    ? { cwd: (sessionHud?.cwd ?? graphNode?.cwd)! }
+                    : {})}
+                  {...(sessionHud?.gitBranch || graphNode?.git ? {
+                    git: graphNode?.git ?? {
+                      branch: sessionHud!.gitBranch!, dirty: sessionHud?.gitDirty === true
+                    }
+                  } : {})}
+                  sharedWorkingDirectory={graphNode?.sharedWorkingDirectory === true || graphNode?.worktree?.shared === true}
                   {...(workspace ? { workspaceId: workspace.id } : {})}
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
                   onDelete={commands.deleteSession}

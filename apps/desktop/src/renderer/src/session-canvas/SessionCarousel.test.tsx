@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
-import { SessionCarousel } from './SessionCarousel'
+import { SessionCarousel, visibleColumnsForWidth } from './SessionCarousel'
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn()
@@ -12,6 +12,13 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('SessionCarousel', () => {
+  it('reduces visible columns before terminal cards become unreadable in a narrow window', () => {
+    expect(visibleColumnsForWidth(7, 1440)).toBe(4)
+    expect(visibleColumnsForWidth(7, 900)).toBe(3)
+    expect(visibleColumnsForWidth(7, 700)).toBe(2)
+    expect(visibleColumnsForWidth(7, 420)).toBe(1)
+  })
+
   it('shows at most four cards in the viewport while retaining every stable Session card', () => {
     const nodes = fixtures(7)
     render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"

@@ -154,13 +154,18 @@ function DagNodeCard(props: {
   onClick(): void
 }) {
   const { node, focused, style, onClick } = props
+  const branch = node.worktree?.branch ?? node.git?.branch
+  const shared = node.sharedWorkingDirectory === true || node.worktree?.shared === true
   return <button type="button" className={`dag-node-card status-${node.workStatus}${focused ? ' is-focused' : ''}`}
     style={style} aria-label={`打开会话：${node.title}`} onClick={onClick}>
     <span className="dag-node-card__top"><i />{statusLabel(node.workStatus)}<em>{node.currentMode === 'claude-code' ? 'Claude' : 'Shell'}</em></span>
     <strong>{node.title}</strong>
-    <span className="dag-node-card__path">{node.worktree?.branch ?? node.cwd}</span>
+    <span className="dag-node-card__path" title={node.cwd}>
+      {branch ? `${branch}${node.git?.dirty ? '*' : ''}` : node.cwd}
+    </span>
     <pre>{node.latestLines.slice(-4).join('\n') || '等待会话输出…'}</pre>
     <span className="dag-node-card__meta">子会话 {node.activeChildCount}{node.archivedAt ? ' · 历史节点' : ''} · {activityLabel(node)}</span>
+    {shared && <span className="dag-node-card__shared">{branch ? '共享工作树' : '共享目录'}</span>}
   </button>
 }
 

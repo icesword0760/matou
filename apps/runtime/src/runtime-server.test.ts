@@ -11,7 +11,10 @@ import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/co
 
 import { SegmentJournal, readSessionFrames } from './journal/segment-journal'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
-import { RuntimeServer, terminalSummaryLines, type PortMessageEvent, type RuntimePort } from './runtime-server'
+import {
+  RuntimeServer, terminalSummaryLines, withSessionRuntimeEnvironment,
+  type PortMessageEvent, type RuntimePort
+} from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
@@ -41,6 +44,24 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeServer domain RPC', () => {
+  it('adds current cwd and Git information to a direct DAG graph response', () => {
+    const result = withSessionRuntimeEnvironment({
+      sceneId: 'scene-1',
+      nodes: [{ sessionId: 'session-1', cwd: '/old' }],
+      edges: []
+    }, [{
+      sessionId: 'session-1', mode: 'shell', cwd: '/repo/deep',
+      gitBranch: 'feature/dag', gitDirty: true, startedAt: 1
+    }])
+
+    expect(result).toMatchObject({
+      nodes: [{
+        sessionId: 'session-1', cwd: '/repo/deep',
+        git: { branch: 'feature/dag', dirty: true }
+      }]
+    })
+  })
+
   it('keeps the latest four readable terminal lines for live DAG cards', () => {
     expect(terminalSummaryLines('\u001b[31mone\u001b[0m\r\ntwo\nthree\nfour\nfive\n')).toEqual([
       'two', 'three', 'four', 'five'

@@ -31,6 +31,7 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter((scene) => scene.taskId === taskId)
+    .map((scene) => ({ ...scene, name: sceneDisplayName(scene, projection) }))
   const visible = scenes.slice(0, visibleLimit)
   const overflow = scenes.slice(visibleLimit)
   const [overflowOpen, setOverflowOpen] = useState(false)
@@ -90,7 +91,7 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
         onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
           className="tab-title" aria-selected={scene.id === activeSceneId}
-          title="双击重命名画布" onDoubleClick={() => setRenamingSceneId(scene.id)}
+          title={`${scene.name}\n双击重命名画布`} onDoubleClick={() => setRenamingSceneId(scene.id)}
           onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
         <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
@@ -165,6 +166,19 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
 
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}
+
+export function sceneDisplayName(
+  scene: HierarchyProjection['scenes'][number],
+  projection: HierarchyProjection
+): string {
+  if (scene.titlePinned || !scene.name.startsWith('Shell · ')) return scene.name
+  const graph = projection.sessionGraphs?.[scene.id]
+  const focusedId = graph?.focusedSessionId ?? projection.navigation.sessionByScene[scene.id]
+  const node = graph?.nodes.find(({ sessionId }) => sessionId === focusedId)
+  if (!node?.cwd) return scene.name
+  const label = node.currentMode === 'claude-code' ? 'Claude' : node.currentMode === 'codex' ? 'Codex' : 'Shell'
+  return `${label} · ${node.cwd}`
+}
 
 function DagIcon() {
   return <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none"

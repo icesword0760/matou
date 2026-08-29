@@ -35,6 +35,9 @@ export function TerminalPane(props: {
   restoreError?: string
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
+  cwd?: string
+  git?: { branch: string; dirty: boolean }
+  sharedWorkingDirectory?: boolean
   spawnRevision?: number
   onRetryRestore?(sessionId: string): unknown
   onRetryFork?(sessionId: string): unknown
@@ -49,7 +52,8 @@ export function TerminalPane(props: {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
     pathValid = true, workspaceId, sceneId, resumable = false, forkReady,
-    providerRestoreState = 'none', restoreError, forkState, forkError,
+    providerRestoreState = 'none', restoreError, forkState, forkError, cwd, git,
+    sharedWorkingDirectory = false,
     spawnRevision = 0, onRetryRestore, onRetryFork, onRemoveFailedFork,
     childNodes = [], historicalChildCount = 0, workStatus = 'idle', onOpenChildren,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
@@ -102,6 +106,13 @@ export function TerminalPane(props: {
         if (outside) void onDetach?.(session.id)
       }}>
       <div className="pane-header-content"><strong className="pane-title">{session.title}</strong>
+        {cwd && <span className="pane-cwd" title={cwd}>{cwd}</span>}
+        {git && <span className="pane-environment-badge" title={`Git 分支 ${git.branch}${git.dirty ? '，有未提交修改' : ''}`}>
+          {git.branch}{git.dirty ? '*' : ''}
+        </span>}
+        {sharedWorkingDirectory && <span className="pane-environment-badge is-shared">
+          {git ? '共享工作树' : '共享目录'}
+        </span>}
         {onOpenChildren && <ChildSessionBadge children={childNodes}
           historicalCount={historicalChildCount}
           onOpen={() => void onOpenChildren(session.id)} />}

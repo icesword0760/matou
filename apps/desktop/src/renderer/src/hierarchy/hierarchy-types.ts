@@ -39,6 +39,8 @@ export interface SessionGraphNodeView {
   canFork: boolean
   title: string
   cwd: string
+  git?: { branch: string; dirty: boolean }
+  sharedWorkingDirectory?: boolean
   worktree?: { branch: string; path: string; shared: boolean }
   activeChildCount: number
   historicalChildCount: number

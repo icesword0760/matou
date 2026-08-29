@@ -448,7 +448,11 @@ export class RuntimeServer {
           }
         : await this.#router.handle(message.method, message.payload)
       await this.#applyHudRpc(message.method, message.payload, beforeHud?.permissionMode)
-      if (message.method === 'projection.snapshot') result = withSessionHuds(result, this.#hud.snapshots())
+      const sessionHuds = this.#hud.snapshots()
+      if (message.method === 'projection.snapshot') result = withSessionHuds(result, sessionHuds)
+      if (message.method === 'hierarchy.get-scene-session-graph') {
+        result = withSessionRuntimeEnvironment(result, sessionHuds)
+      }
       for (const sessionId of disposedSessionIds(result)) {
         await this.#disposeSession(sessionId)
       }
@@ -1552,10 +1556,58 @@ function textFromRpcInput(payload: unknown, key: string): string | undefined {
 }
 
 function withSessionHuds(result: unknown, sessionHuds: ReturnType<SessionHudRegistry['snapshots']>): unknown {
-  if (typeof result !== 'object' || result === null || !('hierarchy' in result)) return result
-  const hierarchy = result.hierarchy
+  const enriched = withSessionRuntimeEnvironment(result, sessionHuds)
+  if (typeof enriched !== 'object' || enriched === null || !('hierarchy' in enriched)) return enriched
+  const hierarchy = enriched.hierarchy
   if (typeof hierarchy !== 'object' || hierarchy === null) return result
-  return { ...result, hierarchy: { ...hierarchy, sessionHuds } }
+  return { ...enriched, hierarchy: { ...hierarchy, sessionHuds } }
+}
+
+export function withSessionRuntimeEnvironment(
+  result: unknown,
+  sessionHuds: ReturnType<SessionHudRegistry['snapshots']>
+): unknown {
+  const hudBySession = new Map(sessionHuds.map((hud) => [hud.sessionId, hud] as const))
+  const enrichGraph = (candidate: unknown): unknown => {
+    if (!isRecord(candidate) || !Array.isArray(candidate.nodes) || !Array.isArray(candidate.edges)) return candidate
+    return {
+      ...candidate,
+      nodes: candidate.nodes.map((node) => {
+        if (!isRecord(node) || typeof node.sessionId !== 'string') return node
+        const hud = hudBySession.get(node.sessionId)
+        if (!hud) return node
+        return {
+          ...node,
+          ...(hud.cwd ? { cwd: hud.cwd } : {}),
+          ...(hud.gitBranch ? { git: { branch: hud.gitBranch, dirty: hud.gitDirty === true } } : {})
+        }
+      })
+    }
+  }
+  const enrichGraphMap = (candidate: unknown): unknown => {
+    if (!isRecord(candidate)) return candidate
+    return Object.fromEntries(Object.entries(candidate).map(([key, graph]) => [key, enrichGraph(graph)]))
+  }
+  if (isRecord(result) && Array.isArray(result.nodes) && Array.isArray(result.edges)) return enrichGraph(result)
+  if (!isRecord(result)) return result
+  const next = {
+    ...result,
+    ...('sessionGraphs' in result ? { sessionGraphs: enrichGraphMap(result.sessionGraphs) } : {})
+  }
+  if (!isRecord(result.hierarchy)) return next
+  return {
+    ...next,
+    hierarchy: {
+      ...result.hierarchy,
+      ...('sessionGraphs' in result.hierarchy
+        ? { sessionGraphs: enrichGraphMap(result.hierarchy.sessionGraphs) }
+        : {})
+    }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function shellName(profile: 'shell' | 'claude-code' | 'codex'): string | undefined {

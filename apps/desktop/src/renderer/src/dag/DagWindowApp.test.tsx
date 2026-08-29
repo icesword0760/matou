@@ -31,6 +31,18 @@ describe('DagWindowApp', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(window.matouDesktop.closeDagWindow).toHaveBeenCalledWith('main-1')
   })
+
+  it('shows Git branch, dirty state and shared-worktree impact on a node card', () => {
+    const data = graph()
+    data.nodes[1] = {
+      ...data.nodes[1]!, git: { branch: 'feature/dag', dirty: true },
+      sharedWorkingDirectory: true
+    }
+    render(<DagWindowApp fixtureGraph={data} />)
+
+    expect(screen.getByText('feature/dag*')).toBeTruthy()
+    expect(screen.getByText('共享工作树')).toBeTruthy()
+  })
 })
 
 function graph(): SessionGraphView {

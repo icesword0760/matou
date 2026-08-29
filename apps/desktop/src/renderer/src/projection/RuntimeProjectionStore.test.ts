@@ -141,4 +141,28 @@ describe('RuntimeProjectionStore', () => {
       focusedSessionId: 'session-1'
     })
   })
+
+  it('updates the visible terminal path when a live Shell changes directory', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], relations: [], scenes: [],
+      sessions: [{ id: 'session-1', cwd: '/old' }],
+      sessionGraphs: {
+        'scene-1': {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'session-1', cwd: '/old' }], edges: []
+        }
+      }
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'cwd-2', eventType: 'session.cwd-updated',
+      aggregateType: 'session', aggregateId: 'session-1', payload: { cwd: '/deep/new/path' },
+      schemaVersion: 1, commandId: 'cwd-command', occurredAt: 2
+    }])
+
+    expect(store.view().sessions).toEqual([expect.objectContaining({ cwd: '/deep/new/path' })])
+    expect(store.view().sessionGraphs['scene-1']?.nodes).toEqual([
+      expect.objectContaining({ sessionId: 'session-1', cwd: '/deep/new/path' })
+    ])
+  })
 })

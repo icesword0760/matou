@@ -99,6 +99,24 @@ describe('Scene tabs and split actions', () => {
     expect(commands.renameScene).toHaveBeenCalledWith('scene-1', '登录方案')
   })
 
+  it('refreshes an unpinned generated tab from the focused Session path and keeps the full path on hover', () => {
+    const projection = fixture(1)
+    const longPath = `/repo/${'nested/'.repeat(28)}project`
+    projection.scenes[0] = {
+      ...projection.scenes[0]!, name: 'Shell · /old', titlePinned: false
+    }
+    projection.sessionGraphs = {
+      'scene-1': {
+        sceneId: 'scene-1', focusedSessionId: 'session-1',
+        nodes: [{ ...graphNode('session-1', 'idle'), cwd: longPath }], edges: []
+      }
+    }
+    render(<SceneTabBar projection={projection} commands={sceneCommands()} />)
+
+    const tab = screen.getByRole('tab', { name: `Shell · ${longPath}` })
+    expect(tab.getAttribute('title')).toContain(longPath)
+  })
+
   it('shows affected running and waiting counts before closing a busy canvas', async () => {
     const user = userEvent.setup()
     const commands = sceneCommands()

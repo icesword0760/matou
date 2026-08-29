@@ -170,6 +170,16 @@ describe('Terminal pane', () => {
     await user.click(screen.getByRole('button', { name: '查看 2 个子会话' }))
     expect(onOpenChildren).toHaveBeenCalledWith('session-1')
   })
+
+  it('keeps the full working path discoverable while prioritizing Git and shared-worktree status', () => {
+    const longPath = `/repo/${'nested-directory/'.repeat(16)}project`
+    render(<TerminalPane {...fixture()} cwd={longPath}
+      git={{ branch: 'feature/dag', dirty: true }} sharedWorkingDirectory />)
+
+    expect(screen.getByTitle(longPath).textContent).toBe(longPath)
+    expect(screen.getByText('feature/dag*')).toBeTruthy()
+    expect(screen.getByText('共享工作树')).toBeTruthy()
+  })
 })
 
 function fixture() {

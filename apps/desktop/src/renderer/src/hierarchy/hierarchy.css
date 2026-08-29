@@ -122,7 +122,10 @@ button { -webkit-app-region: no-drag; }
 }
 .terminal-pane-header.split-pane-header { display: flex; flex: 0 0 32px; align-items: center; justify-content: space-between; box-sizing: border-box; height: 32px; min-height: 32px; padding: 2px 8px; border: 0; background: var(--kooky-chrome); cursor: grab; }
 .pane-header-content { display: flex; flex: 1; align-items: center; min-width: 0; gap: 8px; }
-.pane-title { flex: 1; overflow: hidden; color: rgba(255,255,255,.5); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.pane-title { flex: 0 1 auto; max-width: 34%; overflow: hidden; color: rgba(255,255,255,.5); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.pane-cwd { min-width: 0; flex: 1 1 120px; overflow: hidden; color: rgba(255,255,255,.32); font: 9px/1.2 "SF Mono",monospace; text-overflow: ellipsis; white-space: nowrap; }
+.pane-environment-badge { flex: 0 0 auto; max-width: 120px; overflow: hidden; padding: 2px 5px; border-radius: 8px; color: rgba(210,222,239,.72); background: rgba(255,255,255,.055); font: 8px/1.2 "SF Mono",monospace; text-overflow: ellipsis; white-space: nowrap; }
+.pane-environment-badge.is-shared { color: #e0ad55; background: rgba(224,173,85,.11); }
 .terminal-pane-actions { display: flex; align-items: center; gap: 2px; }
 .pane-fork { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; color: rgba(255,255,255,.55); background: transparent; cursor: pointer; }
 .pane-fork:hover { color: rgba(255,255,255,.9); background: rgba(255,255,255,.08); }
@@ -395,6 +398,9 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .pane-close:hover { color: #2f3547; background: rgba(0,0,0,.08); }
 .hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
 .hierarchy-shell[data-theme="light"] .pane-title { color: rgba(0,0,0,.6); }
+.hierarchy-shell[data-theme="light"] .pane-cwd { color: rgba(37,47,61,.42); }
+.hierarchy-shell[data-theme="light"] .pane-environment-badge { color: #596577; background: #edf0f4; }
+.hierarchy-shell[data-theme="light"] .pane-environment-badge.is-shared { color: #936410; background: #fff4d9; }
 .hierarchy-shell[data-theme="light"] .pane-fork { color: rgba(0,0,0,.52); }
 .hierarchy-shell[data-theme="light"] .pane-fork:hover { color: rgba(0,0,0,.82); background: rgba(0,0,0,.06); }
 .fork-failure-card { display: grid; place-content: center; gap: 14px; flex: 1; min-height: 0; padding: 28px; color: #d9dce2; background: #181a1e; text-align: center; }

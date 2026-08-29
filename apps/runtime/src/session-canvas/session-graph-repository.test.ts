@@ -91,6 +91,7 @@ describe('SessionGraphRepository', () => {
       expect.objectContaining({ parentSessionId: 'parent', childSessionId: 'history-child', relationKind: 'derived-from' })
     ]))
     expect(graph.nodes.find(({ sessionId }) => sessionId === 'parent')).toMatchObject({
+      sharedWorkingDirectory: true,
       activeChildCount: 2,
       historicalChildCount: 1,
       childModeCounts: { shell: 1, claudeCode: 1 }

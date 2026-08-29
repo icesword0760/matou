@@ -46,7 +46,7 @@ export function SessionCarousel(props: {
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [scrolling, setScrolling] = useState(false)
   const [pull, setPull] = useState({ distance: 0, progress: 0, springBack: false })
-  const visibleCount = Math.min(4, Math.max(1, nodes.length))
+  const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
   const inViewport = useMemo(() => new Set(
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
@@ -56,6 +56,19 @@ export function SessionCarousel(props: {
     if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
     if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
   }, [])
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const measure = () => setVisibleCount(visibleColumnsForWidth(nodes.length, viewport.clientWidth))
+    measure()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', measure)
+      return () => window.removeEventListener('resize', measure)
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [nodes.length])
   useEffect(() => { ensureVisibleRef.current = onEnsureSessionVisible }, [onEnsureSessionVisible])
   useLayoutEffect(() => {
     const viewport = viewportRef.current
@@ -277,4 +290,9 @@ export function SessionCarousel(props: {
 
 function reducedMotion(): boolean {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+export function visibleColumnsForWidth(nodeCount: number, width: number): number {
+  const available = width > 0 ? Math.floor((width + 12) / (280 + 12)) : 4
+  return Math.min(4, Math.max(1, nodeCount, 1), Math.max(1, available))
 }

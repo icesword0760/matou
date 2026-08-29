@@ -274,6 +274,7 @@ export function projectSceneGraphFrom(
           providerCanFork(row.provider_metadata_json),
         title: row.title,
         cwd: row.cwd,
+        sharedWorkingDirectory: (contextUseCounts.get(row.execution_context_id) ?? 0) > 1,
         ...(row.worktree_path === null || row.branch_name === null ? {} : {
           worktree: {
             branch: row.branch_name,
