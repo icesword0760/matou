@@ -165,6 +165,37 @@ describe('SessionRepository', () => {
     )).toEqual({ state: 'succeeded', completed_at: 4 })
   })
 
+  it('does not settle a Fork intent from a provisional statusline identity', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-provisional'), {
+      id: 'source-provisional', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at
+       ) VALUES ('session-1', 'source-provisional', 'claude-code', 'provider-source',
+                 'starting', 2, 3, 3)`
+    )
+
+    const recorded = sessions.recordResumableProviderIdentity(command('fork-provisional'), {
+      id: 'binding-provisional', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: { lastHookEvent: 'unknown' },
+      provisional: true, now: 4
+    })
+
+    expect(recorded.result).toMatchObject({
+      resumeState: 'unknown',
+      metadata: { lastHookEvent: 'unknown', provisional: true }
+    })
+    expect(recorded.result.validatedAt).toBeUndefined()
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(database.get(
+      'SELECT state, completed_at FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'starting', completed_at: null })
+  })
+
   it('refreshes the same hook identity without creating duplicates or losing metadata', () => {
     seedSession()
     sessions.recordResumableProviderIdentity(command('hook-first'), {

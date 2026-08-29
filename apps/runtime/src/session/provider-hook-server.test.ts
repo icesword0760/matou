@@ -141,6 +141,51 @@ describe('ProviderHookServer', () => {
     }])
   })
 
+  it('keeps a Fork statusline identity provisional until a real conversation event arrives', async () => {
+    sessions.createSession(command('fork-source'), {
+      id: 'session-source', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at
+       ) VALUES ('session-1', 'session-source', 'claude-code', 'provider-source',
+                 'starting', 2, 3, 3)`
+    )
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-fork', sessionId: 'session-1',
+      acceptStatuslineIdentity: true, provisionalStatuslineIdentity: true
+    })
+
+    await postHook(registration.hookUrl, {
+      session_id: 'provider-derived', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' }
+    })
+
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(sessions.listProviderBindings('session-1')).toContainEqual(expect.objectContaining({
+      providerSessionId: 'provider-derived', resumeState: 'unknown',
+      metadata: expect.objectContaining({ provisional: true })
+    }))
+    expect(database.get<{ state: string }>(
+      'SELECT state FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'starting' })
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'UserPromptSubmit', session_id: 'provider-derived', cwd: root
+    })
+
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-derived', resumeState: 'available'
+    })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')?.metadata)
+      .not.toHaveProperty('provisional')
+    expect(database.get<{ state: string }>(
+      'SELECT state FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'succeeded' })
+  })
+
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {
     const registration = await hooks.registerClaudeSession({
       runId: 'run-1', sessionId: 'session-1', permissionMode: 'bypassPermissions'
@@ -252,6 +297,22 @@ describe('ProviderHookServer', () => {
     expect((await postHook(registration.hookUrl, {
       hook_event_name: 'SessionEnd', session_id: 'provider-too-late'
     })).status).toBe(404)
+  })
+
+  it('keeps final notifications but blocks late identity changes after a provider run retires', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-retiring', sessionId: 'session-1', acceptStatuslineIdentity: true
+    })
+
+    registration.retire(100)
+    expect((await postHook(registration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-too-late',
+      last_assistant_message: '已结束'
+    })).status).toBe(200)
+
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(identityEvents).toEqual([])
+    expect(notificationEvents).toHaveLength(1)
   })
 })
 

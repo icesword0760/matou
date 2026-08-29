@@ -829,6 +829,7 @@ export class RuntimeServer {
           runId,
           sessionId: message.sessionId,
           acceptStatuslineIdentity: providerSessionId !== undefined,
+          provisionalStatuslineIdentity: forkLaunch !== undefined,
           ...(permissionMode === undefined ? {} : { permissionMode })
         })
         if (providerSessionId !== undefined) {

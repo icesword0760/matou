@@ -14,6 +14,8 @@ interface HookRegistrationRecord {
   sessionId: string
   permissionMode?: string
   acceptStatuslineIdentity: boolean
+  provisionalStatuslineIdentity: boolean
+  acceptIdentity: boolean
   settingsPath: string
   statusScriptPath: string
   retirementTimer?: ReturnType<typeof setTimeout>
@@ -107,6 +109,7 @@ export class ProviderHookServer {
     sessionId: string
     permissionMode?: string
     acceptStatuslineIdentity?: boolean
+    provisionalStatuslineIdentity?: boolean
   }): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
     const token = randomBytes(32).toString('base64url')
@@ -129,6 +132,8 @@ export class ProviderHookServer {
       sessionId: input.sessionId,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
+      provisionalStatuslineIdentity: input.provisionalStatuslineIdentity === true,
+      acceptIdentity: true,
       settingsPath,
       statusScriptPath
     }
@@ -148,6 +153,10 @@ export class ProviderHookServer {
       hookUrl,
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS) => {
         if (disposed || record.retirementTimer) return
+        // Keep the endpoint alive briefly for the final HUD/notification hooks, while
+        // preventing a process that has already returned to Shell from resurrecting
+        // its Claude conversation identity.
+        record.acceptIdentity = false
         record.retirementTimer = setTimeout(() => { void dispose() }, Math.max(0, graceMs))
         record.retirementTimer.unref?.()
       },
@@ -179,7 +188,7 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
-      if (providerSessionId && confirmsConversation) {
+      if (providerSessionId && confirmsConversation && registration.acceptIdentity) {
         const cwd = nonEmptyText(payload.cwd)
         const hookPermissionMode = nonEmptyText(payload.permission_mode) ??
           nonEmptyText(payload.permissionMode)
@@ -208,6 +217,7 @@ export class ProviderHookServer {
             ...(cwd === undefined ? {} : { cwd }),
             lastHookEvent: eventName
           },
+          provisional: eventName === 'unknown' && registration.provisionalStatuslineIdentity,
           now
         })
         this.#onIdentityRecorded({

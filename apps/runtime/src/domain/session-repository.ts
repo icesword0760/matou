@@ -279,6 +279,7 @@ export class SessionRepository {
       provider: ProviderBinding['provider']
       providerSessionId: string
       metadata: unknown
+      provisional?: boolean
       now: number
     }
   ): DomainCommit<ProviderBinding> {
@@ -307,30 +308,38 @@ export class SessionRepository {
           ...(isObject(input.metadata) ? input.metadata : {})
         }
         delete metadata.invalidationReason
+        if (input.provisional) metadata.provisional = true
+        else delete metadata.provisional
         tx.run(
           `UPDATE provider_bindings
-           SET resume_state = 'available', metadata_json = ?, updated_at = ?,
+           SET resume_state = ?, metadata_json = ?, updated_at = ?,
                validated_at = ?, invalidated_at = NULL
            WHERE id = ?`,
+          input.provisional ? 'unknown' : 'available',
           JSON.stringify(metadata),
           input.now,
-          input.now,
+          input.provisional ? null : input.now,
           existing.id
         )
       } else {
+        const metadata = {
+          ...(isObject(input.metadata) ? input.metadata : {}),
+          ...(input.provisional ? { provisional: true } : {})
+        }
         tx.run(
           `INSERT INTO provider_bindings (
              id, session_id, provider, provider_session_id, resume_state,
              metadata_json, created_at, updated_at, validated_at, invalidated_at
-           ) VALUES (?, ?, ?, ?, 'available', ?, ?, ?, ?, NULL)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
           input.id,
           input.sessionId,
           input.provider,
           providerSessionId,
-          JSON.stringify(isObject(input.metadata) ? input.metadata : {}),
+          input.provisional ? 'unknown' : 'available',
+          JSON.stringify(metadata),
           input.now,
           input.now,
-          input.now
+          input.provisional ? null : input.now
         )
       }
       const binding = mapBinding(requireRow(
@@ -341,13 +350,15 @@ export class SessionRepository {
         ),
         'ProviderBinding'
       ))
-      tx.run(
-        `UPDATE session_fork_intents
-         SET state = 'succeeded', error_message = NULL, completed_at = ?
-         WHERE session_id = ? AND state IN ('pending', 'starting')`,
-        input.now,
-        input.sessionId
-      )
+      if (!input.provisional) {
+        tx.run(
+          `UPDATE session_fork_intents
+           SET state = 'succeeded', error_message = NULL, completed_at = ?
+           WHERE session_id = ? AND state IN ('pending', 'starting')`,
+          input.now,
+          input.sessionId
+        )
+      }
       emitSessionEvent(
         emit,
         command.commandId,

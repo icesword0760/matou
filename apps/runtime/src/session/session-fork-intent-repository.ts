@@ -32,19 +32,15 @@ export class SessionForkIntentRepository {
       if (row.state === 'failed') {
         return { kind: 'failed', error: row.error_message ?? 'Fork 会话启动失败' }
       }
-      if (row.state === 'starting') {
-        const error = 'Fork 会话启动被中断，请重新分叉'
-        tx.run(
-          `UPDATE session_fork_intents
-           SET state = 'failed', error_message = ?, completed_at = ? WHERE session_id = ?`,
-          error, now, sessionId
-        )
-        return { kind: 'failed', error }
-      }
+      // A newly forked Claude process does not persist its derived conversation
+      // until the first real prompt. If the App restarts before then, launch the
+      // same logical node from the original source again instead of attempting to
+      // resume a provisional derived identity.
       tx.run(
         `UPDATE session_fork_intents
-         SET state = 'starting', started_at = ?, error_message = NULL WHERE session_id = ?`,
-        now, sessionId
+         SET state = 'starting', started_at = ?, error_message = NULL,
+             attempt_count = attempt_count + 1, updated_at = ? WHERE session_id = ?`,
+        now, now, sessionId
       )
       return {
         kind: 'launch',
