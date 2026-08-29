@@ -25,11 +25,32 @@ beforeEach(async () => {
   workspaces.createPlainExecutionContext(command('context'), { id: 'context-1', workspaceId: 'workspace-1', cwd: '/tmp/workspace', now: 1 })
   workspaces.createTask(command('task'), { id: 'task-1', workspaceId: 'workspace-1', executionContextId: 'context-1', title: 'Task', status: 'active', sortKey: 'a', now: 1 })
   const sessions = new SessionRepository(database, transactions)
-  for (const id of ['parent', 'child-a', 'child-b', 'other', 'node-0', 'node-1', 'node-2', 'node-3', 'node-4', 'node-5']) {
+  for (const id of ['parent', 'child-a', 'child-b', 'other', 'node-0', 'node-1', 'node-2', 'node-3', 'node-4', 'node-5', 'cross-scene']) {
     sessions.createSession(command(`session-${id}`), {
       id, taskId: 'task-1', executionContextId: 'context-1', kind: 'shell', title: id, now: 2
     })
   }
+  database.run(
+    `INSERT INTO scenes (
+       id, task_id, name, mode, created_at, updated_at, title_pinned, sort_key, layout_revision
+     ) VALUES ('scene-1', 'task-1', 'Scene 1', 'tile', 3, 3, 0, 'a', 1),
+              ('scene-2', 'task-1', 'Scene 2', 'tile', 3, 3, 0, 'b', 1)`
+  )
+  let sequence = 0
+  for (const id of ['parent', 'child-a', 'child-b', 'other', 'node-0', 'node-1', 'node-2', 'node-3', 'node-4', 'node-5']) {
+    sequence += 1
+    database.run(
+      `INSERT INTO session_canvas_memberships (
+         session_id, scene_id, sibling_created_seq, last_user_interaction_seq, created_at, updated_at
+       ) VALUES (?, 'scene-1', ?, 0, 3, 3)`,
+      id, sequence
+    )
+  }
+  database.run(
+    `INSERT INTO session_canvas_memberships (
+       session_id, scene_id, sibling_created_seq, last_user_interaction_seq, created_at, updated_at
+     ) VALUES ('cross-scene', 'scene-2', 11, 0, 3, 3)`
+  )
   relations = new SessionRelationRepository(database, transactions)
 })
 
@@ -70,6 +91,44 @@ describe('SessionRelationRepository', () => {
     )).toBeUndefined()
   })
 
+  it.each(['derived-from', 'forked-from'] as const)(
+    'uses %s as a structural parent relation',
+    (kind) => {
+      relations.appendStructuralRelation(command(`structural-${kind}`), {
+        id: `relation-${kind}`,
+        taskId: 'task-1',
+        childSessionId: 'child-a',
+        parentSessionId: 'parent',
+        kind,
+        metadata: {},
+        now: 10
+      })
+
+      expect(relations.getStructuralParent('child-a')).toMatchObject({
+        fromSessionId: 'child-a',
+        toSessionId: 'parent',
+        kind
+      })
+      expect(relations.listStructuralChildren('parent')).toEqual([
+        expect.objectContaining({ fromSessionId: 'child-a', kind })
+      ])
+    }
+  )
+
+  it('derives mixed Shell and Claude siblings from both structural relation kinds', () => {
+    relations.appendStructuralRelation(command('derived-a'), {
+      id: 'relation-a', taskId: 'task-1', childSessionId: 'child-a', parentSessionId: 'parent',
+      kind: 'derived-from', metadata: {}, now: 10
+    })
+    relations.appendStructuralRelation(command('fork-b'), {
+      id: 'relation-b', taskId: 'task-1', childSessionId: 'child-b', parentSessionId: 'parent',
+      kind: 'forked-from', metadata: {}, now: 11
+    })
+
+    expect(relations.listSiblings('child-a').map(({ id }) => id)).toEqual(['child-b'])
+    expect(relations.deriveSiblings('child-b').map(({ id }) => id)).toEqual(['child-a'])
+  })
+
   it('enforces one active direct fork parent', () => {
     relations.create(command('fork-a'), {
       id: 'relation-a', taskId: 'task-1', fromSessionId: 'child-a', toSessionId: 'parent',
@@ -79,7 +138,38 @@ describe('SessionRelationRepository', () => {
     expect(() => relations.create(command('fork-again'), {
       id: 'relation-again', taskId: 'task-1', fromSessionId: 'child-a', toSessionId: 'other',
       kind: 'forked-from', metadata: {}, now: 11
-    })).toThrow('Session child-a already has an active fork parent')
+    })).toThrow('Session child-a already has an active structural parent')
+  })
+
+  it('enforces one active parent across ordinary and Fork relations', () => {
+    relations.appendStructuralRelation(command('derived-a'), {
+      id: 'relation-a', taskId: 'task-1', childSessionId: 'child-a', parentSessionId: 'parent',
+      kind: 'derived-from', metadata: {}, now: 10
+    })
+
+    expect(() => relations.appendStructuralRelation(command('fork-again'), {
+      id: 'relation-again', taskId: 'task-1', childSessionId: 'child-a', parentSessionId: 'other',
+      kind: 'forked-from', metadata: {}, now: 11
+    })).toThrow('Session child-a already has an active structural parent')
+  })
+
+  it('rejects structural relations across Scene boundaries', () => {
+    expect(() => relations.appendStructuralRelation(command('cross-scene'), {
+      id: 'relation-cross', taskId: 'task-1', childSessionId: 'cross-scene', parentSessionId: 'parent',
+      kind: 'derived-from', metadata: {}, now: 10
+    })).toThrow('structural relation endpoints must belong to the same Scene')
+  })
+
+  it('rejects cycles that mix ordinary and Fork parent edges', () => {
+    relations.appendStructuralRelation(command('derived-a'), {
+      id: 'relation-a', taskId: 'task-1', childSessionId: 'child-a', parentSessionId: 'parent',
+      kind: 'derived-from', metadata: {}, now: 10
+    })
+
+    expect(() => relations.appendStructuralRelation(command('fork-back'), {
+      id: 'relation-back', taskId: 'task-1', childSessionId: 'parent', parentSessionId: 'child-a',
+      kind: 'forked-from', metadata: {}, now: 11
+    })).toThrow('creating structural relation would introduce a cycle')
   })
 
   it.each(['forked-from', 'depends-on'] as const)('rejects a %s cycle', (kind) => {
@@ -91,7 +181,9 @@ describe('SessionRelationRepository', () => {
     expect(() => relations.create(command(`${kind}-2`), {
       id: `${kind}-2`, taskId: 'task-1', fromSessionId: 'parent', toSessionId: 'child-a',
       kind, metadata: {}, now: 11
-    })).toThrow(`creating ${kind} would introduce a cycle`)
+    })).toThrow(kind === 'forked-from'
+      ? 'creating structural relation would introduce a cycle'
+      : 'creating depends-on would introduce a cycle')
   })
 
   it.each(['forked-from', 'depends-on'] as const)(
@@ -109,7 +201,9 @@ describe('SessionRelationRepository', () => {
           id: `${kind}-back-${index}`, taskId: 'task-1',
           fromSessionId: 'node-0', toSessionId: `node-${index}`,
           kind, metadata: {}, now: 40 + index
-        })).toThrow(`creating ${kind} would introduce a cycle`)
+        })).toThrow(kind === 'forked-from'
+          ? 'creating structural relation would introduce a cycle'
+          : 'creating depends-on would introduce a cycle')
       }
       expect(database.get<{ count: number }>(
         'SELECT COUNT(*) AS count FROM session_relations_current WHERE relation_kind = ?', kind

@@ -2,6 +2,7 @@ import type {
   DomainCommandMetadata,
   DomainCommit,
   RelationKind,
+  Session,
   SessionRelation
 } from '@matou/domain'
 
@@ -32,6 +33,21 @@ interface HistoryRow {
   metadata_json: string
   command_id: string
   occurred_at: number
+}
+
+interface SessionRow {
+  id: string
+  task_id: string
+  execution_context_id: string
+  kind: Session['kind']
+  status: Session['status']
+  title: string
+  cwd: string
+  created_at: number
+  updated_at: number
+  last_activity_at: number
+  archived_at: number | null
+  version: number
 }
 
 export type RelationOperation = 'created' | 'revoked' | 'restored' | 'metadata-updated'
@@ -243,6 +259,96 @@ export class SessionRelationRepository {
     return row ? mapCurrent(row) : undefined
   }
 
+  appendStructuralRelation(
+    command: DomainCommandMetadata,
+    input: {
+      id: string
+      taskId: string
+      childSessionId: string
+      parentSessionId: string
+      kind: 'derived-from' | 'forked-from'
+      metadata: unknown
+      now: number
+    }
+  ): DomainCommit<SessionRelation> {
+    return this.create(command, {
+      id: input.id,
+      taskId: input.taskId,
+      fromSessionId: input.childSessionId,
+      toSessionId: input.parentSessionId,
+      kind: input.kind,
+      metadata: input.metadata,
+      now: input.now
+    })
+  }
+
+  getStructuralParent(sessionId: string): SessionRelation | undefined {
+    const row = this.#database.get<CurrentRow>(
+      `SELECT * FROM session_relations_current
+       WHERE from_session_id = ?
+         AND relation_kind IN ('derived-from', 'forked-from')`,
+      sessionId
+    )
+    return row ? mapCurrent(row) : undefined
+  }
+
+  listStructuralChildren(
+    parentSessionId: string,
+    options: { includeArchived?: boolean } = {}
+  ): SessionRelation[] {
+    return this.#database.all<CurrentRow>(
+      `SELECT relation.*
+       FROM session_relations_current AS relation
+       JOIN sessions ON sessions.id = relation.from_session_id
+       WHERE relation.to_session_id = ?
+         AND relation.relation_kind IN ('derived-from', 'forked-from')
+         AND (? = 1 OR sessions.archived_at IS NULL)
+       ORDER BY relation.created_at, relation.relation_id`,
+      parentSessionId,
+      options.includeArchived ? 1 : 0
+    ).map(mapCurrent)
+  }
+
+  listSiblings(
+    sessionId: string,
+    options: { includeArchived?: boolean } = {}
+  ): Session[] {
+    const parent = this.getStructuralParent(sessionId)
+    const parameters: Array<string | number> = []
+    let structuralScope: string
+    if (parent) {
+      structuralScope = `EXISTS (
+        SELECT 1 FROM session_relations_current AS sibling_relation
+        WHERE sibling_relation.from_session_id = sessions.id
+          AND sibling_relation.to_session_id = ?
+          AND sibling_relation.relation_kind IN ('derived-from', 'forked-from')
+      )`
+      parameters.push(parent.toSessionId)
+    } else {
+      const sceneId = this.#resolveSceneId(this.#database, sessionId)
+      if (!sceneId) return []
+      structuralScope = `membership.scene_id = ? AND NOT EXISTS (
+        SELECT 1 FROM session_relations_current AS sibling_relation
+        WHERE sibling_relation.from_session_id = sessions.id
+          AND sibling_relation.relation_kind IN ('derived-from', 'forked-from')
+      )`
+      parameters.push(sceneId)
+    }
+    parameters.push(sessionId, options.includeArchived ? 1 : 0)
+    return this.#database.all<SessionRow>(
+      `SELECT sessions.*
+       FROM sessions
+       JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+       WHERE ${structuralScope}
+         AND sessions.id <> ?
+         AND (? = 1 OR sessions.archived_at IS NULL)
+       ORDER BY membership.last_user_interaction_seq DESC,
+                membership.sibling_created_seq ASC,
+                sessions.id ASC`,
+      ...parameters
+    ).map(mapSession)
+  }
+
   history(relationId: string): RelationHistoryEntry[] {
     return this.#database
       .all<HistoryRow>(
@@ -265,23 +371,7 @@ export class SessionRelationRepository {
   }
 
   deriveSiblings(sessionId: string): Array<{ id: string; title: string }> {
-    const parent = this.#database.get<{ to_session_id: string }>(
-      `SELECT to_session_id FROM session_relations_current
-       WHERE from_session_id = ? AND relation_kind = 'forked-from'`,
-      sessionId
-    )
-    if (!parent) return []
-    return this.#database.all<{ id: string; title: string }>(
-      `SELECT sessions.id, sessions.title
-       FROM session_relations_current
-       JOIN sessions ON sessions.id = session_relations_current.from_session_id
-       WHERE session_relations_current.to_session_id = ?
-         AND session_relations_current.relation_kind = 'forked-from'
-         AND session_relations_current.from_session_id <> ?
-       ORDER BY session_relations_current.created_at, sessions.id`,
-      parent.to_session_id,
-      sessionId
-    )
+    return this.listSiblings(sessionId).map(({ id, title }) => ({ id, title }))
   }
 
   #validateNewEdge(
@@ -306,21 +396,71 @@ export class SessionRelationRepository {
     ) {
       throw new Error('relation endpoints must exist in the same Task')
     }
-    if (input.kind === 'forked-from') {
+    if (isStructuralKind(input.kind)) {
       const parent = tx.get<{ relation_id: string }>(
         `SELECT relation_id FROM session_relations_current
-         WHERE from_session_id = ? AND relation_kind = 'forked-from'`,
+         WHERE from_session_id = ?
+           AND relation_kind IN ('derived-from', 'forked-from')`,
         input.fromSessionId
       )
-      if (parent) throw new Error(`Session ${input.fromSessionId} already has an active fork parent`)
+      if (parent) throw new Error(`Session ${input.fromSessionId} already has an active structural parent`)
+      const fromSceneId = this.#resolveSceneId(tx, input.fromSessionId)
+      const toSceneId = this.#resolveSceneId(tx, input.toSessionId)
+      if (!fromSceneId || fromSceneId !== toSceneId) {
+        throw new Error('structural relation endpoints must belong to the same Scene')
+      }
+      if (createsStructuralCycle(tx, input.fromSessionId, input.toSessionId)) {
+        throw new Error('creating structural relation would introduce a cycle')
+      }
     }
     if (
-      (input.kind === 'forked-from' || input.kind === 'depends-on') &&
+      input.kind === 'depends-on' &&
       createsCycle(tx, input.fromSessionId, input.toSessionId, input.kind)
     ) {
       throw new Error(`creating ${input.kind} would introduce a cycle`)
     }
   }
+
+  #resolveSceneId(
+    database: Pick<RuntimeDatabase, 'get'> | Pick<DatabaseTransaction, 'get'>,
+    sessionId: string
+  ): string | undefined {
+    return database.get<{ scene_id: string }>(
+      `SELECT scene_id FROM session_canvas_memberships WHERE session_id = ?
+       UNION ALL
+       SELECT scene_id FROM session_mounts WHERE session_id = ? ORDER BY scene_id LIMIT 1`,
+      sessionId,
+      sessionId
+    )?.scene_id
+  }
+}
+
+function isStructuralKind(kind: RelationKind): kind is 'derived-from' | 'forked-from' {
+  return kind === 'derived-from' || kind === 'forked-from'
+}
+
+function createsStructuralCycle(
+  tx: DatabaseTransaction,
+  fromSessionId: string,
+  toSessionId: string
+): boolean {
+  return Boolean(
+    tx.get(
+      `WITH RECURSIVE reachable(id) AS (
+         SELECT to_session_id FROM session_relations_current
+         WHERE from_session_id = ?
+           AND relation_kind IN ('derived-from', 'forked-from')
+         UNION
+         SELECT relation.to_session_id
+         FROM session_relations_current AS relation
+         JOIN reachable ON relation.from_session_id = reachable.id
+         WHERE relation.relation_kind IN ('derived-from', 'forked-from')
+       )
+       SELECT 1 AS found FROM reachable WHERE id = ? LIMIT 1`,
+      toSessionId,
+      fromSessionId
+    )
+  )
 }
 
 function createsCycle(
@@ -359,6 +499,23 @@ function mapCurrent(row: CurrentRow): SessionRelation {
     metadata: JSON.parse(row.metadata_json) as unknown,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  }
+}
+
+function mapSession(row: SessionRow): Session {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    executionContextId: row.execution_context_id,
+    kind: row.kind,
+    status: row.status,
+    title: row.title,
+    cwd: row.cwd,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastActivityAt: row.last_activity_at,
+    ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
+    version: row.version
   }
 }
 

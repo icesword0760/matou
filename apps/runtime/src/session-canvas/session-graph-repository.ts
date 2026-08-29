@@ -1,0 +1,328 @@
+import type {
+  DomainCommandMetadata,
+  DomainCommit,
+  ProviderRestoreState,
+  SceneSessionGraph,
+  SessionCanvasMembership,
+  SessionGraphEdge,
+  SessionGraphNode,
+  SessionKind,
+  SessionStatus,
+  SessionWorkStatus
+} from '@matou/domain'
+
+import type { RuntimeDatabase } from '../storage/database'
+import type { DomainTransactionManager } from '../storage/domain-transaction'
+
+interface MembershipRow {
+  session_id: string
+  scene_id: string
+  sibling_created_seq: number
+  last_user_interaction_seq: number
+  created_at: number
+  updated_at: number
+}
+
+interface GraphRow extends MembershipRow {
+  task_id: string
+  execution_context_id: string
+  kind: SessionKind
+  status: SessionStatus
+  title: string
+  cwd: string
+  session_created_at: number
+  session_updated_at: number
+  last_activity_at: number
+  archived_at: number | null
+  parent_session_id: string | null
+  relation_kind: 'derived-from' | 'forked-from' | null
+  relation_created_at: number | null
+  restore_state: ProviderRestoreState | null
+  worktree_path: string | null
+  branch_name: string | null
+  detached_window_id: string | null
+}
+
+interface EdgeRow {
+  parent_session_id: string
+  child_session_id: string
+  relation_kind: 'derived-from' | 'forked-from'
+  created_at: number
+}
+
+interface ChildCountRow {
+  parent_session_id: string
+  active_count: number
+  historical_count: number
+  shell_count: number
+  claude_count: number
+}
+
+export class SessionGraphRepository {
+  readonly #database: RuntimeDatabase
+  readonly #transactions: DomainTransactionManager
+
+  constructor(database: RuntimeDatabase, transactions: DomainTransactionManager) {
+    this.#database = database
+    this.#transactions = transactions
+  }
+
+  getMembership(sessionId: string): SessionCanvasMembership | undefined {
+    const row = this.#database.get<MembershipRow>(
+      'SELECT * FROM session_canvas_memberships WHERE session_id = ?',
+      sessionId
+    )
+    return row ? mapMembership(row) : undefined
+  }
+
+  createMembership(
+    command: DomainCommandMetadata,
+    input: {
+      sessionId: string
+      sceneId: string
+      siblingCreatedSeq: number
+      lastUserInteractionSeq: number
+      now: number
+    }
+  ): DomainCommit<SessionCanvasMembership> {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const ownership = tx.get<{ session_task_id: string; scene_task_id: string }>(
+        `SELECT sessions.task_id AS session_task_id, scenes.task_id AS scene_task_id
+         FROM sessions CROSS JOIN scenes
+         WHERE sessions.id = ? AND scenes.id = ?`,
+        input.sessionId,
+        input.sceneId
+      )
+      if (!ownership || ownership.session_task_id !== ownership.scene_task_id) {
+        throw new Error('canvas membership Session and Scene must belong to the same Task')
+      }
+      tx.run(
+        `INSERT INTO session_canvas_memberships (
+           session_id, scene_id, sibling_created_seq, last_user_interaction_seq,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+        input.sessionId,
+        input.sceneId,
+        input.siblingCreatedSeq,
+        input.lastUserInteractionSeq,
+        input.now,
+        input.now
+      )
+      tx.run(
+        `UPDATE runtime_sequences SET value = MAX(value, ?)
+         WHERE name = 'session-sibling-created'`,
+        input.siblingCreatedSeq
+      )
+      const membership = mapMembership(requireRow(tx.get<MembershipRow>(
+        'SELECT * FROM session_canvas_memberships WHERE session_id = ?',
+        input.sessionId
+      ), 'SessionCanvasMembership'))
+      emit({
+        eventId: `${command.commandId}:canvas-membership-created`,
+        eventType: 'session.canvas-membership-created',
+        aggregateType: 'session',
+        aggregateId: input.sessionId,
+        taskId: ownership.session_task_id,
+        sessionId: input.sessionId,
+        payload: { membership },
+        occurredAt: input.now
+      })
+      return membership
+    })
+  }
+
+  nextSequence(name: 'session-sibling-created' | 'session-user-interaction'): number {
+    return this.#database.transaction((tx) => {
+      tx.run('UPDATE runtime_sequences SET value = value + 1 WHERE name = ?', name)
+      return requireRow(tx.get<{ value: number }>(
+        'SELECT value FROM runtime_sequences WHERE name = ?',
+        name
+      ), `runtime sequence ${name}`).value
+    })
+  }
+
+  projectSceneGraph(sceneId: string, windowId?: string): SceneSessionGraph {
+    const scene = this.#database.get<{ id: string }>(
+      'SELECT id FROM scenes WHERE id = ?',
+      sceneId
+    )
+    if (!scene) throw new Error(`Scene ${sceneId} does not exist`)
+
+    const rows = this.#database.all<GraphRow>(
+      `SELECT
+         membership.*,
+         sessions.task_id,
+         sessions.execution_context_id,
+         sessions.kind,
+         sessions.status,
+         sessions.title,
+         sessions.cwd,
+         sessions.created_at AS session_created_at,
+         sessions.updated_at AS session_updated_at,
+         sessions.last_activity_at,
+         sessions.archived_at,
+         structural.to_session_id AS parent_session_id,
+         structural.relation_kind,
+         structural.created_at AS relation_created_at,
+         provider.restore_state,
+         worktrees.worktree_path,
+         worktrees.branch_name,
+         detached.native_window_key AS detached_window_id
+       FROM session_canvas_memberships AS membership
+       JOIN sessions ON sessions.id = membership.session_id
+       LEFT JOIN session_relations_current AS structural
+         ON structural.from_session_id = sessions.id
+        AND structural.relation_kind IN ('derived-from', 'forked-from')
+       LEFT JOIN provider_bindings AS provider
+         ON provider.id = (
+           SELECT binding.id FROM provider_bindings AS binding
+           WHERE binding.session_id = sessions.id
+           ORDER BY binding.updated_at DESC, binding.id DESC LIMIT 1
+         )
+       LEFT JOIN worktrees ON worktrees.execution_context_id = sessions.execution_context_id
+       LEFT JOIN scene_windows AS detached
+         ON detached.scene_id = membership.scene_id
+        AND detached.state = 'detached'
+        AND EXISTS (
+          SELECT 1 FROM session_mounts
+          WHERE session_mounts.scene_window_id = detached.id
+            AND session_mounts.session_id = sessions.id
+        )
+       WHERE membership.scene_id = ?
+       ORDER BY membership.sibling_created_seq, sessions.id`,
+      sceneId
+    )
+
+    const childCounts = new Map(
+      this.#database.all<ChildCountRow>(
+        `SELECT
+           relation.to_session_id AS parent_session_id,
+           SUM(CASE WHEN child.archived_at IS NULL THEN 1 ELSE 0 END) AS active_count,
+           SUM(CASE WHEN child.archived_at IS NOT NULL THEN 1 ELSE 0 END) AS historical_count,
+           SUM(CASE WHEN child.archived_at IS NULL AND child.kind = 'shell' THEN 1 ELSE 0 END) AS shell_count,
+           SUM(CASE WHEN child.archived_at IS NULL AND child.kind = 'claude-code' THEN 1 ELSE 0 END) AS claude_count
+         FROM session_relations_current AS relation
+         JOIN sessions AS child ON child.id = relation.from_session_id
+         JOIN session_canvas_memberships AS membership ON membership.session_id = child.id
+         WHERE relation.relation_kind IN ('derived-from', 'forked-from')
+           AND membership.scene_id = ?
+         GROUP BY relation.to_session_id`,
+        sceneId
+      ).map((row) => [row.parent_session_id, row] as const)
+    )
+
+    const contextUseCounts = new Map(
+      this.#database.all<{ execution_context_id: string; count: number }>(
+        `SELECT sessions.execution_context_id, COUNT(*) AS count
+         FROM sessions
+         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+         WHERE membership.scene_id = ? AND sessions.archived_at IS NULL
+         GROUP BY sessions.execution_context_id`,
+        sceneId
+      ).map((row) => [row.execution_context_id, row.count] as const)
+    )
+
+    const nodes: SessionGraphNode[] = rows.map((row) => {
+      const counts = childCounts.get(row.session_id)
+      return {
+        sessionId: row.session_id,
+        sceneId: row.scene_id,
+        ...(row.parent_session_id === null ? {} : { parentSessionId: row.parent_session_id }),
+        ...(row.relation_kind === null ? {} : { relationKind: row.relation_kind }),
+        currentMode: row.kind,
+        workStatus: mapWorkStatus(row.status),
+        providerRestoreState: row.restore_state ?? 'none',
+        title: row.title,
+        cwd: row.cwd,
+        ...(row.worktree_path === null || row.branch_name === null ? {} : {
+          worktree: {
+            branch: row.branch_name,
+            path: row.worktree_path,
+            shared: (contextUseCounts.get(row.execution_context_id) ?? 0) > 1
+          }
+        }),
+        activeChildCount: counts?.active_count ?? 0,
+        historicalChildCount: counts?.historical_count ?? 0,
+        childModeCounts: {
+          shell: counts?.shell_count ?? 0,
+          claudeCode: counts?.claude_count ?? 0
+        },
+        latestLines: [],
+        lastUserInteractionSeq: row.last_user_interaction_seq,
+        ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
+        ...(row.detached_window_id === null ? {} : { detachedWindowId: row.detached_window_id })
+      }
+    })
+
+    const edges = this.#database.all<EdgeRow>(
+      `SELECT
+         relation.to_session_id AS parent_session_id,
+         relation.from_session_id AS child_session_id,
+         relation.relation_kind,
+         relation.created_at
+       FROM session_relations_current AS relation
+       JOIN session_canvas_memberships AS membership
+         ON membership.session_id = relation.from_session_id
+       WHERE membership.scene_id = ?
+         AND relation.relation_kind IN ('derived-from', 'forked-from')
+       ORDER BY relation.created_at, relation.relation_id`,
+      sceneId
+    ).map(mapEdge)
+
+    const focusedSessionId = windowId === undefined ? undefined : this.#database.get<{ active_session_id: string | null }>(
+      `SELECT active_session_id FROM window_scene_focus
+       WHERE window_id = ? AND scene_id = ?`,
+      windowId,
+      sceneId
+    )?.active_session_id ?? undefined
+
+    return {
+      sceneId,
+      nodes,
+      edges,
+      ...(focusedSessionId === undefined ? {} : { focusedSessionId })
+    }
+  }
+}
+
+function mapMembership(row: MembershipRow): SessionCanvasMembership {
+  return {
+    sessionId: row.session_id,
+    sceneId: row.scene_id,
+    siblingCreatedSeq: row.sibling_created_seq,
+    lastUserInteractionSeq: row.last_user_interaction_seq,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  }
+}
+
+function mapEdge(row: EdgeRow): SessionGraphEdge {
+  return {
+    parentSessionId: row.parent_session_id,
+    childSessionId: row.child_session_id,
+    relationKind: row.relation_kind,
+    createdAt: row.created_at
+  }
+}
+
+function mapWorkStatus(status: SessionStatus): SessionWorkStatus {
+  switch (status) {
+    case 'created':
+    case 'starting':
+      return 'starting'
+    case 'running':
+      return 'running'
+    case 'waiting':
+      return 'needs-input'
+    case 'interrupted':
+      return 'interrupted'
+    case 'exited':
+    case 'archived':
+      return 'exited'
+  }
+}
+
+function requireRow<T>(row: T | undefined, label: string): T {
+  if (row === undefined) throw new Error(`${label} does not exist`)
+  return row
+}

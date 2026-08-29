@@ -159,15 +159,18 @@ describe('RuntimeRpcRouter', () => {
     await router.handle('session.create', payload('child', {
       id: 'child', taskId: 'task-1', executionContextId: 'context-1', kind: 'shell', title: 'Child', now: 4
     }))
-    await router.handle('relation.create', payload('relation', {
-      id: 'relation-1', taskId: 'task-1', fromSessionId: 'child', toSessionId: 'parent',
-      kind: 'forked-from', metadata: {}, now: 5
-    }))
     await router.handle('scene.create', payload('scene', {
       id: 'scene-1', rootNodeId: 'root', taskId: 'task-1', name: 'Main', mode: 'tile', now: 5
     }))
+    await router.handle('scene.mount-session', payload('mount-parent', {
+      id: 'mount-parent', sceneId: 'scene-1', sceneNodeId: 'root', sessionId: 'parent', now: 6
+    }))
     await router.handle('scene.mount-session', payload('mount', {
       id: 'mount-1', sceneId: 'scene-1', sceneNodeId: 'root', sessionId: 'child', now: 6
+    }))
+    await router.handle('relation.create', payload('relation', {
+      id: 'relation-1', taskId: 'task-1', fromSessionId: 'child', toSessionId: 'parent',
+      kind: 'forked-from', metadata: {}, now: 7
     }))
     await router.handle('geometry.put', {
       sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 0,

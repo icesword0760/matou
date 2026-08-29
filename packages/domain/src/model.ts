@@ -121,7 +121,7 @@ export interface Worktree {
 
 export type SessionKind = 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
 export type SessionStatus = 'created' | 'starting' | 'running' | 'waiting' | 'interrupted' | 'exited' | 'archived'
-export type SessionCurrentMode = 'shell' | 'claude-code'
+export type SessionCurrentMode = SessionKind
 export type SessionWorkStatus =
   | 'starting'
   | 'idle'
