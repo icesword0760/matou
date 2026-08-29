@@ -72,7 +72,7 @@ describe('SessionCarousel', () => {
     expect(viewport.setPointerCapture).not.toHaveBeenCalled()
   })
 
-  it('requires a completed edge gesture before a second right pull can return to the parent', () => {
+  it('separates an oversized list scroll from a fresh edge pull that returns to the parent', () => {
     vi.useFakeTimers()
     const onCommitParent = vi.fn()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
@@ -86,12 +86,12 @@ describe('SessionCarousel', () => {
     fireEvent.wheel(viewport, { deltaX: -600, deltaY: 0 })
     expect(viewport.scrollLeft).toBe(0)
     expect(screen.queryByTestId('parent-projection')).toBeNull()
-    vi.advanceTimersByTime(110)
+    vi.advanceTimersByTime(240)
     expect(onCommitParent).not.toHaveBeenCalled()
 
     fireEvent.wheel(viewport, { deltaX: -500, deltaY: 0 })
     expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
-    vi.advanceTimersByTime(110)
+    vi.advanceTimersByTime(240)
     expect(onCommitParent).toHaveBeenCalledWith('parent')
     vi.useRealTimers()
   })

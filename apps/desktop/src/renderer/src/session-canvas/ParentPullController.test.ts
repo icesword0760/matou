@@ -12,7 +12,7 @@ describe('ParentPullController', () => {
   })
 
   it('springs back when a fresh edge gesture stays below the threshold', () => {
-    const controller = armedController()
+    const controller = new ParentPullController()
     expect(controller.begin({ scrollLeft: 0, hasParent: true })).toBe('pulling')
     const movement = controller.move({ deltaTowardParent: 80, viewportWidth: 800 })
     expect(movement.consume).toBe(true)
@@ -24,7 +24,7 @@ describe('ParentPullController', () => {
   })
 
   it('commits the parent after a fresh edge gesture crosses the clamped threshold', () => {
-    const controller = armedController()
+    const controller = new ParentPullController()
     controller.begin({ scrollLeft: 0, hasParent: true })
     controller.move({ deltaTowardParent: 420, viewportWidth: 800 })
 
@@ -46,10 +46,3 @@ describe('ParentPullController', () => {
     expect(parentPullThreshold(1200)).toBe(180)
   })
 })
-
-function armedController(): ParentPullController {
-  const controller = new ParentPullController()
-  controller.begin({ scrollLeft: 100, hasParent: true })
-  controller.end({ scrollLeft: 0, viewportWidth: 800 })
-  return controller
-}

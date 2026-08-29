@@ -61,11 +61,24 @@ export function SessionCarousel(props: {
     const viewport = viewportRef.current
     if (!viewport) return
     restoringGeometry.current = true
-    viewport.scrollLeft = Math.max(0, initialScrollLeft)
+    const restore = () => {
+      viewport.scrollLeft = Math.max(0, initialScrollLeft)
+      updateVisibleWindow()
+    }
+    restore()
     skipFocusScrollAfterRestore.current = initialScrollLeft > 0
-    updateVisibleWindow()
-    const frame = requestAnimationFrame(() => { restoringGeometry.current = false })
-    return () => cancelAnimationFrame(frame)
+    let secondFrame = 0
+    const firstFrame = requestAnimationFrame(() => {
+      restore()
+      secondFrame = requestAnimationFrame(() => {
+        restore()
+        restoringGeometry.current = false
+      })
+    })
+    return () => {
+      cancelAnimationFrame(firstFrame)
+      if (secondFrame) cancelAnimationFrame(secondFrame)
+    }
   }, [geometryKey, initialScrollLeft])
 
   useLayoutEffect(() => {
@@ -158,7 +171,7 @@ export function SessionCarousel(props: {
     wheelTimer.current = window.setTimeout(() => {
       wheelTimer.current = undefined
       finishPullGesture()
-    }, 110)
+    }, 240)
   }
   const wheel = (event: WheelEvent<HTMLDivElement>) => {
     if (event.ctrlKey || event.metaKey) return
@@ -247,7 +260,7 @@ export function SessionCarousel(props: {
       {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
-      }} className="session-card-slot">
+      }} className={`session-card-slot${!scrolling && hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}>
         <SessionCard node={node} focused={node.sessionId === focusedSessionId}
           inViewport={inViewport.has(node.sessionId)}
           expanded={!scrolling && hoveredSessionId === node.sessionId}

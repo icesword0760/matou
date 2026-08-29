@@ -20,9 +20,12 @@ export class ParentPullController {
     this.#rawDistance = 0
     this.#pullDistance = 0
     this.#progress = 0
-    this.#phase = input.hasParent && this.#edgeArmed && input.scrollLeft <= 1
+    // The gesture must begin at the edge. A gesture that starts inside the list
+    // remains ordinary scrolling even if one large delta reaches scrollLeft=0.
+    this.#phase = input.hasParent && input.scrollLeft <= 1
       ? 'pulling'
       : 'scrolling'
+    this.#edgeArmed = input.hasParent && input.scrollLeft <= 1
     return this.#phase
   }
 

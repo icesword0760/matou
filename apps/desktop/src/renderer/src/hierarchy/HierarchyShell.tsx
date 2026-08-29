@@ -159,6 +159,8 @@ function HierarchyProduct({ projection, commands }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
 }) {
+  const projectionRef = useRef(projection)
+  useEffect(() => { projectionRef.current = projection }, [projection])
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
   const [themeKey, setThemeKey] = useState<TerminalThemeKey>(DEFAULT_TERMINAL_THEME)
   const [fontSize, setFontSize] = useState(11)
@@ -302,8 +304,9 @@ function HierarchyProduct({ projection, commands }: {
     else window.dispatchEvent(new Event('matou:forward-terminal-tab'))
   }), [activeSceneId, focusedSessionId, projection.windowId, themeKey])
   useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
-    if (selection.mainWindowId !== projection.windowId) return
-    const graph = projection.sessionGraphs?.[selection.sceneId]
+    const currentProjection = projectionRef.current
+    if (selection.mainWindowId !== currentProjection.windowId) return
+    const graph = currentProjection.sessionGraphs?.[selection.sceneId]
     const target = graph?.nodes.find(({ sessionId }) => sessionId === selection.sessionId)
     if (!target || target.archivedAt !== undefined) return
     setLevelParentByScene((current) => ({
@@ -313,7 +316,7 @@ function HierarchyProduct({ projection, commands }: {
     run(Promise.resolve(commands.activateScene(selection.sceneId))
       .then(() => commands.setFocusedSession(selection.sceneId, selection.sessionId))
       .then(() => setTerminalFocusRequest((value) => value + 1)))
-  }), [commands, projection.sessionGraphs, projection.windowId])
+  }), [commands])
   useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
     document.documentElement.dataset.theme = themeKey

@@ -11,6 +11,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   const [context, setContext] = useState(readContext)
   const [graph, setGraph] = useState<SessionGraphView | null>(fixtureGraph ?? null)
   const [initialTransform, setInitialTransform] = useState<DagTransform | undefined>(undefined)
+  const [geometryReady, setGeometryReady] = useState(Boolean(fixtureGraph))
   const geometryTimer = useRef<number | undefined>(undefined)
   const pendingTransform = useRef<DagTransform | undefined>(undefined)
   const [error, setError] = useState('')
@@ -32,9 +33,11 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     setContext(next)
     setGraph(null)
     setInitialTransform(undefined)
+    setGeometryReady(false)
   }), [])
   useEffect(() => {
     if (fixtureGraph || !client) return
+    setGeometryReady(false)
     void client.request<Array<{ ownerKey: string; geometry: Record<string, unknown> }>>('geometry.list', {
       sceneId: context.sceneId
     }).then((items) => {
@@ -42,7 +45,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
       if (typeof value?.panX === 'number' && typeof value.panY === 'number' && typeof value.zoom === 'number') {
         setInitialTransform({ x: value.panX, y: value.panY, scale: value.zoom })
       }
-    }).catch(() => {})
+    }).catch(() => {}).finally(() => setGeometryReady(true))
   }, [client, context.sceneId, fixtureGraph])
   useEffect(() => {
     void refresh()
@@ -92,7 +95,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     geometryTimer.current = window.setTimeout(flushGeometry, 180)
   }
 
-  if (!graph) return <main className="dag-window dag-window-state" aria-label="会话 DAG">
+  if (!graph || !geometryReady) return <main className="dag-window dag-window-state" aria-label="会话 DAG">
     <strong>{error ? '会话关系载入异常' : '正在载入会话关系…'}</strong>
     {error && <><p>{error}</p><button onClick={() => void refresh()}>重试</button></>}
   </main>
