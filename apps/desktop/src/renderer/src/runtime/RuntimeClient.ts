@@ -122,6 +122,16 @@ export class RuntimeClient {
     this.#post({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data })
   }
 
+  recordTerminalInteraction(
+    sessionId: string,
+    interactionKind: 'submit' | 'control' | 'provider-action'
+  ): void {
+    this.#post({
+      type: 'terminal.user-interaction', protocolVersion: PROTOCOL_VERSION,
+      sessionId, interactionKind
+    })
+  }
+
   resizeTerminal(sessionId: string, cols: number, rows: number): void {
     this.#post({ type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION, sessionId, cols, rows })
   }

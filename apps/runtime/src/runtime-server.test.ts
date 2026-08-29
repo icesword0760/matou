@@ -311,6 +311,35 @@ describe('RuntimeServer domain RPC', () => {
     })
   })
 
+  it('persists an attached terminal interaction marker before its input is processed', async () => {
+    registerCanvasSession(database, 'interaction-session')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'interaction-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('terminal.spawned') !== undefined)
+
+    port.receive({
+      type: 'terminal.user-interaction', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'interaction-session', interactionKind: 'submit'
+    })
+    port.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'interaction-session', data: "printf '__ORDERED_INPUT__\\n'\r"
+    })
+
+    await waitUntil(() => database.get<{ last_user_interaction_seq: number }>(
+      `SELECT last_user_interaction_seq FROM session_canvas_memberships
+       WHERE session_id = 'interaction-session'`
+    )?.last_user_interaction_seq === 1)
+    expect(database.get<{ event_type: string }>(
+      `SELECT event_type FROM domain_events
+       WHERE session_id = 'interaction-session' AND event_type = 'session.user-interacted'`
+    )).toEqual({ event_type: 'session.user-interacted' })
+    await waitUntil(() => terminalText(port).includes('__ORDERED_INPUT__'))
+  })
+
   it('keeps a live PTY in the Runtime registry across Renderer disconnect and reattach', async () => {
     const priorRun = await SegmentJournal.open(root, 'reload-session')
     await priorRun.appendOutput(1, new TextEncoder().encode('output from an earlier app run'))
@@ -473,17 +502,32 @@ describe('RuntimeServer domain RPC', () => {
     interactionPort.receive({
       type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'recency-renderer'
     })
-    registerSession(database, 'recency-session')
+    registerCanvasSession(database, 'recency-session')
     interactionPort.receive({
       type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'recency-session', executionContextId: 'replay-context',
       profile: 'shell', cols: 80, rows: 24
     })
     await waitUntil(() => sessions.has('recency-session'))
+    const priorLastOpenedAt = database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', 'replay-task'
+    )?.last_opened_at
 
     interactionPort.receive({
       type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
-      sessionId: 'recency-session', data: 'echo recency\r'
+      sessionId: 'recency-session', data: 'echo recency'
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(database.get<{ last_opened_at: number }>(
+      'SELECT last_opened_at FROM tasks WHERE id = ?', 'replay-task'
+    )?.last_opened_at).toBe(priorLastOpenedAt)
+    interactionPort.receive({
+      type: 'terminal.user-interaction', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'recency-session', interactionKind: 'submit'
+    })
+    interactionPort.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'recency-session', data: '\r'
     })
 
     await waitUntil(() => (database.get<{ last_opened_at: number }>(
@@ -1661,6 +1705,27 @@ function registerSession(
        created_at, updated_at, last_activity_at
      ) VALUES (?, 'replay-task', 'replay-context', ?, 'exited', ?, 1, 1, 1)`,
     sessionId, kind, sessionId
+  )
+}
+
+function registerCanvasSession(database: RuntimeDatabase, sessionId: string): void {
+  registerSession(database, sessionId)
+  database.run(
+    `INSERT INTO scenes (
+       id, task_id, name, mode, root_node_id, title_pinned, sort_key,
+       layout_revision, created_at, updated_at
+     ) VALUES (?, 'replay-task', 'Canvas', 'tile', ?, 0, 'a0', 1, 1, 1)`,
+    `scene-${sessionId}`, `node-${sessionId}`
+  )
+  database.run(
+    `INSERT INTO scene_nodes (id, scene_id, kind, ordinal, created_at)
+     VALUES (?, ?, 'root', 0, 1)`,
+    `node-${sessionId}`, `scene-${sessionId}`
+  )
+  database.run(
+    `INSERT INTO session_mounts (id, scene_id, scene_node_id, session_id, created_at)
+     VALUES (?, ?, ?, ?, 1)`,
+    `mount-${sessionId}`, `scene-${sessionId}`, `node-${sessionId}`, sessionId
   )
 }
 

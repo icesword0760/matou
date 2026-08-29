@@ -182,7 +182,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       rows: terminal.rows
     }, onMessage)
     const input = terminal.onData((data) => {
-      if (!inputDisabledRef.current) client.sendTerminalInput(sessionId, data)
+      if (inputDisabledRef.current) return
+      const interactionKind = classifyCompletedUserInteraction(data)
+      if (interactionKind !== undefined) {
+        client.recordTerminalInteraction(sessionId, interactionKind)
+      }
+      client.sendTerminalInput(sessionId, data)
     })
     const oscHandlers = [9, 99, 777].map((oscId) => terminal.parser.registerOscHandler(oscId, (content) => {
       if (!replaying) onOscNotificationRef.current(oscId, content)
@@ -258,4 +263,12 @@ function terminalFocusAllowed(container: HTMLElement): boolean {
 
 function isMacPlatform(): boolean {
   return /Mac/.test(navigator.platform ?? '') || /Mac/.test(navigator.userAgent ?? '')
+}
+
+export function classifyCompletedUserInteraction(
+  data: string
+): 'submit' | 'control' | undefined {
+  if (data === '\u0003' || data === '\u0004') return 'control'
+  if (data === '\r' || data === '\n') return 'submit'
+  return undefined
 }

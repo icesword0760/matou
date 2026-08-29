@@ -83,6 +83,30 @@ describe('parseRendererMessage', () => {
     })
   })
 
+  it.each(['submit', 'control', 'provider-action'])(
+    'accepts a completed %s interaction marker',
+    (interactionKind) => {
+      expect(parseRendererMessage({
+        type: 'terminal.user-interaction',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-1',
+        interactionKind
+      })).toMatchObject({ type: 'terminal.user-interaction', interactionKind })
+    }
+  )
+
+  it.each(['click', 'output', 'draft'])(
+    'rejects a non-ordering %s interaction marker',
+    (interactionKind) => {
+      expect(() => parseRendererMessage({
+        type: 'terminal.user-interaction',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-1',
+        interactionKind
+      })).toThrow()
+    }
+  )
+
   it('rejects unknown message types', () => {
     expect(() =>
       parseRendererMessage({

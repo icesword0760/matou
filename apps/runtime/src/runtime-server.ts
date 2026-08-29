@@ -37,6 +37,7 @@ import {
   WorkspacePathService
 } from './hierarchy/workspace-path-service'
 import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
+import { SessionInteractionService } from './session-canvas/session-interaction-service'
 
 export interface PortMessageEvent {
   data: unknown
@@ -93,6 +94,7 @@ export class RuntimeServer {
   readonly #forkIntents: SessionForkIntentRepository
   readonly #workspacePaths: WorkspacePathService
   readonly #hierarchy: HierarchyApplicationService
+  readonly #sessionInteractions: SessionInteractionService
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
@@ -134,7 +136,9 @@ export class RuntimeServer {
     this.#database = database
     this.#router = router
     this.#eventStore = new DomainEventStore(database)
-    this.#hierarchy = new HierarchyApplicationService(database, new DomainTransactionManager(database))
+    const transactions = new DomainTransactionManager(database)
+    this.#hierarchy = new HierarchyApplicationService(database, transactions)
+    this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#control = control
@@ -240,6 +244,22 @@ export class RuntimeServer {
       case 'terminal.spawn':
         await this.#spawnSerialized(message)
         break
+      case 'terminal.user-interaction': {
+        const session = this.#session(message.sessionId)
+        if (!session) break
+        const now = Date.now()
+        this.#sessionInteractions.record({
+          commandId: `terminal-interaction-${message.sessionId}-${randomUUID()}`,
+          commandType: 'session.user-interaction',
+          requestHash: `${message.sessionId}:${message.interactionKind}:${now}`
+        }, {
+          sessionId: message.sessionId,
+          interactionKind: message.interactionKind,
+          now
+        })
+        this.flushSemanticEvents()
+        break
+      }
       case 'terminal.input':
         try {
           await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
@@ -249,19 +269,6 @@ export class RuntimeServer {
             ? await this.#maybePromoteShellAgent(session, message.data)
             : false
           if (!promoted) session?.write(message.data)
-          const interactionOwner = session && /[\r\n]/.test(message.data)
-            ? this.#database.get<{ id: string }>(
-                'SELECT id FROM sessions WHERE id = ? AND archived_at IS NULL', message.sessionId
-              )
-            : undefined
-          if (interactionOwner) {
-            const now = Date.now()
-            this.#hierarchy.recordSessionInteraction({
-              commandId: `terminal-interaction-${message.sessionId}-${randomUUID()}`,
-              commandType: 'navigation.record-session-interaction',
-              requestHash: `${message.sessionId}:${now}`
-            }, { sessionId: message.sessionId, now })
-          }
           if (session?.profile === 'shell' && /[\r\n]/.test(message.data)) {
             this.#scheduleCwdCapture(session)
           }

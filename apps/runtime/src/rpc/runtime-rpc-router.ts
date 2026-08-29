@@ -23,6 +23,7 @@ import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
 import { SessionGraphRepository } from '../session-canvas/session-graph-repository'
 import { SessionCanvasService } from '../session-canvas/session-canvas-service'
+import { SessionInteractionService } from '../session-canvas/session-interaction-service'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -62,6 +63,7 @@ export class RuntimeRpcRouter {
   readonly #notifications: NotificationProjection
   readonly #sessionGraphs: SessionGraphRepository
   readonly #sessionCanvas: SessionCanvasService
+  readonly #sessionInteractions: SessionInteractionService
 
   constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
@@ -81,6 +83,7 @@ export class RuntimeRpcRouter {
     this.#notifications = notifications
     this.#sessionGraphs = new SessionGraphRepository(database, transactions)
     this.#sessionCanvas = new SessionCanvasService(database, transactions)
+    this.#sessionInteractions = new SessionInteractionService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -320,6 +323,16 @@ export class RuntimeRpcRouter {
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
           now: integer(input.now, 'now', 0)
         }))
+      case 'hierarchy.record-session-interaction':
+        return this.#sessionInteractions.record(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          interactionKind: enumeration(
+            input.interactionKind,
+            ['submit', 'control', 'provider-action'] as const,
+            'interactionKind'
+          ),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.fork-session':
         return this.#hierarchy.forkSession(command, {
           windowId: text(input.windowId, 'windowId'),

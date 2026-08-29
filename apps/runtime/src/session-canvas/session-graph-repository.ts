@@ -198,7 +198,11 @@ export function projectSceneGraphFrom(
             AND session_mounts.session_id = sessions.id
         )
        WHERE membership.scene_id = ?
-       ORDER BY membership.sibling_created_seq, sessions.id`,
+       ORDER BY
+         COALESCE(structural.to_session_id, ''),
+         membership.last_user_interaction_seq DESC,
+         membership.sibling_created_seq ASC,
+         sessions.id`,
       sceneId
     )
 

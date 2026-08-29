@@ -72,6 +72,25 @@ describe('RuntimeClient', () => {
       type: 'events.subscribe', afterSequence: 12
     }))
   })
+
+  it('posts the interaction marker before its related terminal bytes', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+
+    client.recordTerminalInteraction('session-1', 'submit')
+    client.sendTerminalInput('session-1', '\r')
+
+    expect(port.sent.slice(-2)).toEqual([
+      expect.objectContaining({
+        type: 'terminal.user-interaction', sessionId: 'session-1', interactionKind: 'submit'
+      }),
+      expect.objectContaining({ type: 'terminal.input', sessionId: 'session-1', data: '\r' })
+    ])
+  })
 })
 
 class FakePort implements RuntimeClientPort {

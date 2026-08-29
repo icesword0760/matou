@@ -323,7 +323,7 @@ export class SessionCanvasService {
       }
       emit({
         eventId: `${command.commandId}:shell-sibling-created`,
-        eventType: 'session.shell-sibling-created', aggregateType: 'scene',
+        eventType: 'session.graph-summary-changed', aggregateType: 'scene',
         aggregateId: scene.id, workspaceId: task.workspace_id, taskId: task.id,
         sessionId: ids.sessionId,
         payload: { graph, sourceSessionId: source.id }, occurredAt: input.now

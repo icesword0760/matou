@@ -10,7 +10,10 @@ const state = vi.hoisted(() => ({
   searchPrevious: vi.fn(),
   clearDecorations: vi.fn(),
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
-  onMessage: undefined as undefined | ((message: unknown) => void)
+  onMessage: undefined as undefined | ((message: unknown) => void),
+  onData: undefined as undefined | ((data: string) => void),
+  sendTerminalInput: vi.fn(),
+  recordTerminalInteraction: vi.fn()
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -22,7 +25,10 @@ vi.mock('@xterm/xterm', () => ({
     open = vi.fn()
     focus = state.focus
     write = vi.fn((_data: unknown, done?: () => void) => done?.())
-    onData = vi.fn(() => ({ dispose: vi.fn() }))
+    onData = vi.fn((listener: (data: string) => void) => {
+      state.onData = listener
+      return { dispose: vi.fn() }
+    })
     reset = vi.fn()
     dispose = vi.fn()
   }
@@ -50,7 +56,8 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     acknowledgeTerminal: vi.fn(),
     requestTerminalReplay: vi.fn(),
     resizeTerminal: vi.fn(),
-    sendTerminalInput: vi.fn()
+    sendTerminalInput: state.sendTerminalInput,
+    recordTerminalInteraction: state.recordTerminalInteraction
   })
 }))
 
@@ -62,6 +69,9 @@ describe('TerminalSurface focus continuity', () => {
     state.clearDecorations.mockClear()
     state.searchResultsListener = undefined
     state.onMessage = undefined
+    state.onData = undefined
+    state.sendTerminalInput.mockClear()
+    state.recordTerminalInteraction.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -143,5 +153,30 @@ describe('TerminalSurface focus continuity', () => {
     view.rerender(<TerminalSurface sessionId="session-1" active visible focusRequest={1} />)
 
     await waitFor(() => expect(state.focus).toHaveBeenCalledTimes(1))
+  })
+
+  it('moves a session only for submitted or control input, before sending related bytes', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+
+    state.onData?.('draft text')
+    expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
+    expect(state.sendTerminalInput).toHaveBeenLastCalledWith('session-1', 'draft text')
+
+    const callOrder: string[] = []
+    state.recordTerminalInteraction.mockImplementation(() => callOrder.push('interaction'))
+    state.sendTerminalInput.mockImplementation(() => callOrder.push('input'))
+    state.onData?.('\r')
+    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'submit')
+    expect(callOrder).toEqual(['interaction', 'input'])
+
+    callOrder.length = 0
+    state.onData?.('\u0003')
+    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'control')
+    expect(callOrder).toEqual(['interaction', 'input'])
+
+    state.recordTerminalInteraction.mockClear()
+    state.onData?.('\u001b[200~pasted\ntext\u001b[201~')
+    expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
   })
 })

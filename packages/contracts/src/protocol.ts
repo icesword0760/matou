@@ -33,6 +33,13 @@ const inputSchema = z.object({
   data: z.string().max(1024 * 1024)
 })
 
+const userInteractionSchema = z.object({
+  type: z.literal('terminal.user-interaction'),
+  protocolVersion,
+  sessionId,
+  interactionKind: z.enum(['submit', 'control', 'provider-action'])
+})
+
 const resizeSchema = z.object({
   type: z.literal('terminal.resize'),
   protocolVersion,
@@ -160,6 +167,7 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   helloSchema,
   spawnSchema,
   inputSchema,
+  userInteractionSchema,
   resizeSchema,
   disposeSchema,
   ackSchema,
