@@ -787,5 +787,21 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       ON session_relations_current(from_session_id)
       WHERE relation_kind IN ('forked-from', 'derived-from');
     `
+  },
+  {
+    version: 15,
+    name: 'session-fork-workflow-state',
+    sql: `
+      ALTER TABLE session_fork_intents ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+      ALTER TABLE session_fork_intents ADD COLUMN worktree_mode TEXT NOT NULL DEFAULT 'current'
+        CHECK (worktree_mode IN ('current', 'new'));
+      ALTER TABLE session_fork_intents ADD COLUMN worktree_id TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN target_execution_context_id TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN worktree_path TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN branch_name TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE session_fork_intents ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+      UPDATE session_fork_intents SET updated_at = created_at WHERE updated_at = 0;
+    `
   }
 ]

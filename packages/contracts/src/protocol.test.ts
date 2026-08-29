@@ -171,6 +171,8 @@ describe('parseRendererMessage', () => {
       'hierarchy.create-shell-sibling',
       'hierarchy.create-fork-child',
       'hierarchy.create-fork-sibling',
+      'hierarchy.retry-fork',
+      'hierarchy.remove-failed-fork',
       'hierarchy.record-session-interaction',
       'hierarchy.retry-provider-restore',
       'hierarchy.reopen-historical-session',

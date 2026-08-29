@@ -32,6 +32,9 @@ export interface SessionGraphNodeView {
   workStatus: 'starting' | 'idle' | 'running' | 'needs-input' | 'error' | 'interrupted' | 'exited'
   providerRestoreState: 'none' | 'restoring' | 'failed'
   providerRestoreError?: string
+  forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
+  forkError?: string
+  forkAttempt?: number
   canFork: boolean
   title: string
   cwd: string
@@ -157,6 +160,8 @@ export interface HierarchyCommands {
   createShellSibling(sceneId: string, sessionId: string): unknown
   createForkChild(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
   createForkSibling(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
+  retryFork(sessionId: string): unknown
+  removeFailedFork(sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
   reopenHistoricalSession(sessionId: string): unknown
   getSceneSessionGraph(sceneId: string): unknown

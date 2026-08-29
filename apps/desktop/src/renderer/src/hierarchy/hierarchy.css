@@ -123,7 +123,9 @@ button { -webkit-app-region: no-drag; }
 .terminal-pane-header.split-pane-header { display: flex; flex: 0 0 32px; align-items: center; justify-content: space-between; box-sizing: border-box; height: 32px; min-height: 32px; padding: 2px 8px; border: 0; background: var(--kooky-chrome); cursor: grab; }
 .pane-header-content { display: flex; flex: 1; align-items: center; min-width: 0; gap: 8px; }
 .pane-title { flex: 1; overflow: hidden; color: rgba(255,255,255,.5); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
-.terminal-pane-actions { display: flex; align-items: center; }
+.terminal-pane-actions { display: flex; align-items: center; gap: 2px; }
+.pane-fork { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; color: rgba(255,255,255,.55); background: transparent; cursor: pointer; }
+.pane-fork:hover { color: rgba(255,255,255,.9); background: rgba(255,255,255,.08); }
 .pane-close { display: flex; align-items: center; justify-content: center; padding: 3px; border: 0; border-radius: 3px; color: rgba(255,255,255,.35); background: transparent; cursor: pointer; font-size: 12px; }
 .pane-close:hover { color: #fff; background: rgba(255,255,255,.1); }
 .terminal-pane > [role="status"] { padding: 7px 10px; color: #e4aa78; background: #2a1e17; font-size: 11px; }
@@ -393,11 +395,56 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .pane-close:hover { color: #2f3547; background: rgba(0,0,0,.08); }
 .hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
 .hierarchy-shell[data-theme="light"] .pane-title { color: rgba(0,0,0,.6); }
+.hierarchy-shell[data-theme="light"] .pane-fork { color: rgba(0,0,0,.52); }
+.hierarchy-shell[data-theme="light"] .pane-fork:hover { color: rgba(0,0,0,.82); background: rgba(0,0,0,.06); }
+.fork-failure-card { display: grid; place-content: center; gap: 14px; flex: 1; min-height: 0; padding: 28px; color: #d9dce2; background: #181a1e; text-align: center; }
+.fork-failure-card strong { display: block; font-size: 14px; }
+.fork-failure-reason { display: block; max-width: 520px; margin-top: 8px; color: #f08a80; font-size: 12px; line-height: 1.5; }
+.fork-failure-actions { display: flex; justify-content: center; gap: 8px; }
+.fork-failure-actions button { height: 30px; padding: 0 13px; border: 1px solid #434955; border-radius: 7px; color: #d9dce2; background: #282b31; cursor: pointer; }
+.hierarchy-shell[data-theme="light"] .fork-failure-card { color: #333b48; background: #f7f8fa; }
+.hierarchy-shell[data-theme="light"] .fork-failure-actions button { border-color: #cbd1da; color: #333b48; background: #fff; }
 .hierarchy-shell[data-theme="light"] .terminal-pane.active-pane { outline-color: rgba(64,120,242,.35); }
 .hierarchy-shell[data-theme="light"] .terminal-pane > .provider-restore-banner { color: #8a4d10; background: #fff7eb; border-color: #efcfaa; }
 .hierarchy-shell[data-theme="light"] .provider-restore-reason { color: #966b43; }
 .hierarchy-shell[data-theme="light"] .provider-restore-banner button { color: #7c440d; border-color: #daa86d; background: #fff; }
 .hierarchy-shell[data-theme="light"] .provider-restore-banner.restoring { color: #315f9d; background: #edf5ff; border-color: #c5dcf8; }
+
+.branch-dialog-overlay { position: fixed; z-index: 500; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.44); backdrop-filter: blur(5px); }
+.branch-dialog { box-sizing: border-box; width: min(520px, calc(100vw - 48px)); padding: 20px; border: 1px solid #343942; border-radius: 16px; color: #e8eaed; background: #1d1f23; box-shadow: 0 24px 80px rgba(0,0,0,.46); }
+.branch-dialog__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.branch-dialog__header h2 { margin: 0; font-size: 18px; }
+.branch-dialog__header p { margin: 6px 0 0; color: #9298a3; font-size: 12px; }
+.branch-dialog__header button { border: 0; color: #a5abb4; background: transparent; font-size: 22px; cursor: pointer; }
+.branch-dialog__field { position: relative; display: grid; gap: 7px; margin-top: 20px; color: #c9cdd4; font-size: 12px; }
+.branch-dialog__field input { box-sizing: border-box; width: 100%; height: 38px; padding: 0 52px 0 11px; border: 1px solid #414752; border-radius: 9px; outline: none; color: #f2f3f5; background: #15171a; }
+.branch-dialog__field input:focus { border-color: #5b9de9; box-shadow: 0 0 0 3px rgba(91,157,233,.16); }
+.branch-dialog__field small { position: absolute; right: 10px; bottom: 12px; color: #747b86; }
+.branch-dialog__worktrees { display: grid; gap: 9px; margin: 18px 0 0; padding: 0; border: 0; }
+.branch-dialog__worktrees legend { margin-bottom: 8px; color: #c9cdd4; font-size: 12px; }
+.branch-worktree-card { display: flex; gap: 10px; padding: 12px; border: 1px solid #343942; border-radius: 10px; background: #181a1e; cursor: pointer; }
+.branch-worktree-card.is-selected { border-color: #5b9de9; background: rgba(91,157,233,.09); }
+.branch-worktree-card.is-disabled { opacity: .55; cursor: default; }
+.branch-worktree-card input { margin-top: 2px; accent-color: #5b9de9; }
+.branch-worktree-card span { display: grid; gap: 4px; }
+.branch-worktree-card strong { font-size: 13px; }
+.branch-worktree-card small { color: #8f96a1; font-size: 11px; line-height: 1.45; }
+.branch-worktree-card em { color: #e6a44a; font-size: 11px; font-style: normal; }
+.branch-dialog__notice { margin: 12px 0 0; padding: 9px 11px; border-radius: 8px; color: #aeb7c3; background: rgba(91,157,233,.09); font-size: 11px; line-height: 1.5; }
+.branch-dialog__error { margin: 12px 0 0; color: #ff8276; font-size: 12px; }
+.branch-dialog__progress { margin: 12px 0 0; color: #8ebcf4; font-size: 12px; }
+.branch-dialog__footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.branch-dialog__footer button { height: 34px; padding: 0 16px; border: 1px solid #3b414a; border-radius: 8px; color: #d9dce1; background: #26292e; cursor: pointer; }
+.branch-dialog__footer button.primary { border-color: #4b8edc; color: #fff; background: #347bc8; }
+.branch-dialog__footer button:disabled { opacity: .55; cursor: default; }
+.light-theme .branch-dialog { border-color: #d7dbe2; color: #252b36; background: #fff; box-shadow: 0 24px 70px rgba(35,43,56,.2); }
+.light-theme .branch-dialog__header p, .light-theme .branch-worktree-card small { color: #737b89; }
+.light-theme .branch-dialog__field { color: #4c5564; }
+.light-theme .branch-dialog__field input { border-color: #ccd2dc; color: #252b36; background: #f8f9fb; }
+.light-theme .branch-worktree-card { border-color: #d8dde5; background: #f7f8fa; }
+.light-theme .branch-worktree-card.is-selected { border-color: #458bd7; background: #eef6ff; }
+.light-theme .branch-dialog__footer button { border-color: #ccd2dc; color: #394250; background: #f4f5f7; }
+.light-theme .branch-dialog__footer button.primary { color: #fff; background: #347bc8; }
 .hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn { color: rgba(0,0,0,.4); background: #eff0f4; }
 .hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn:hover,
 .hierarchy-shell[data-theme="light"] .is-clickable:hover { color: #2f3547; background: rgba(0,0,0,.08) !important; }

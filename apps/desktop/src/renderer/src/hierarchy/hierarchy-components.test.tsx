@@ -285,6 +285,7 @@ function commands(): HierarchyCommands {
     activateScene: vi.fn(), createScene: vi.fn(), renameScene: vi.fn(),
     reorderScene: vi.fn(), closeScene: vi.fn(), splitSession: vi.fn(), forkSession: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
+    retryFork: vi.fn(), removeFailedFork: vi.fn(),
     retryProviderRestore: vi.fn(), reopenHistoricalSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(),

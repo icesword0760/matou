@@ -145,7 +145,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 14')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 15')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {

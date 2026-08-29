@@ -31,14 +31,20 @@ export function TerminalPane(props: {
   forkReady?: boolean
   providerRestoreState?: 'none' | 'restoring' | 'failed'
   restoreError?: string
+  forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
+  forkError?: string
+  spawnRevision?: number
   onRetryRestore?(sessionId: string): unknown
+  onRetryFork?(sessionId: string): unknown
+  onRemoveFailedFork?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
     pathValid = true, workspaceId, sceneId, resumable = false, forkReady,
-    providerRestoreState = 'none', restoreError, onRetryRestore,
+    providerRestoreState = 'none', restoreError, forkState, forkError,
+    spawnRevision = 0, onRetryRestore, onRetryFork, onRemoveFailedFork,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onDetach
@@ -87,6 +93,12 @@ export function TerminalPane(props: {
       }}>
       <div className="pane-header-content"><strong className="pane-title">{session.title}</strong></div>
       <div className="terminal-pane-actions">
+        {canFork && <button className="pane-fork" type="button"
+          aria-label={`从“${session.title}”创建子分支`} title="创建子分支"
+          onClick={(event) => {
+            event.stopPropagation()
+            void onFork?.(session.id)
+          }}>⑂</button>}
         <button className="pane-close" aria-label={`删除终端：${session.title}`} onClick={(event) => {
           event.stopPropagation()
           requestRemove()
@@ -94,7 +106,22 @@ export function TerminalPane(props: {
       </div>
     </header>
     {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
-    {providerRestoreState === 'failed' && visible && <div className="provider-restore-banner" role="status">
+    {forkState === 'failed' && visible && <div className="fork-failure-card" role="status">
+      <div><strong>分支创建失败</strong>
+        {forkError && <span className="fork-failure-reason">{forkError}</span>}
+      </div>
+      <div className="fork-failure-actions">
+        {onRetryFork && <button type="button" aria-label="重试创建分支" onClick={(event) => {
+          event.stopPropagation()
+          void onRetryFork(session.id)
+        }}>重试</button>}
+        {onRemoveFailedFork && <button type="button" aria-label="移除失败分支" onClick={(event) => {
+          event.stopPropagation()
+          void onRemoveFailedFork(session.id)
+        }}>移除</button>}
+      </div>
+    </div>}
+    {providerRestoreState === 'failed' && forkState !== 'failed' && visible && <div className="provider-restore-banner" role="status">
       <div><strong>Claude Code 恢复失败</strong>
         {restoreError && <span className="provider-restore-reason">{restoreError}</span>}
       </div>
@@ -103,10 +130,10 @@ export function TerminalPane(props: {
         void onRetryRestore(session.id)
       }}>重试恢复</button>}
     </div>}
-    {providerRestoreState === 'restoring' && visible && <div className="provider-restore-banner restoring" role="status">
+    {providerRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
       <strong>正在恢复 Claude Code 会话…</strong>
     </div>}
-    <TerminalSurface sessionId={session.id}
+    {forkState !== 'failed' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} inputDisabled={!pathValid}
       themeKey={themeKey} fontSize={fontSize}
@@ -114,6 +141,7 @@ export function TerminalPane(props: {
       {...(searchRequest ? { searchRequest } : {})}
       {...(onSearchResults ? { onSearchResults } : {})}
       focusRequest={focusRequest}
+      spawnRevision={spawnRevision}
       onOscNotification={(oscId, content) => {
         const notification = toOscNotification(oscId, content)
         if (!notification) return
@@ -122,7 +150,7 @@ export function TerminalPane(props: {
           workspaceId: workspaceId ?? null, taskId: session.taskId, sceneId: sceneId ?? null, sessionId: session.id,
           isFocusedSession: active && visible
         })
-      }} />
+      }} />}
     {confirmationOpen && flow.action === 'hide-window' && <ConfirmDialog title="提示"
       body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
       confirmLabel="我知道了" showCancel={false} onCancel={() => setConfirmationOpen(false)}

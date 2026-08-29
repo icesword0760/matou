@@ -211,6 +211,36 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeTruthy()
   })
 
+  it('opens the named Fork workflow from a valid Claude title line and restores terminal focus on cancel', async () => {
+    const data = fixture()
+    data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code', title: 'Claude 主会话' }
+    data.sessionHuds = [{
+      sessionId: 'session-a1', mode: 'agent', cwd: '/tmp/a', gitBranch: 'main',
+      startedAt: 1, resumable: true
+    }]
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+        nodes: [{
+          sessionId: 'session-a1', sceneId: 'scene-a1', currentMode: 'claude-code',
+          workStatus: 'idle', providerRestoreState: 'none', canFork: true,
+          title: 'Claude 主会话', cwd: '/tmp/a', activeChildCount: 0,
+          historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+          latestLines: [], lastUserInteractionSeq: 0
+        }]
+      }
+    }
+    render(<HierarchyShell fixture={data} />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' }))
+    expect(screen.getByRole('dialog', { name: '创建子会话分支' })).toBeTruthy()
+    expect((screen.getByRole('radio', { name: /从新工作树创建/ }) as HTMLInputElement).disabled).toBe(false)
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(screen.queryByRole('dialog', { name: '创建子会话分支' })).toBeNull()
+    expect(screen.getByTestId('xterm-session-a1').dataset.focusRequest).toBe('1')
+  })
+
   it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
     window.history.replaceState({}, '', '/?e2e=1')
     render(<HierarchyShell fixture={fixture()} />)

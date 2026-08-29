@@ -49,6 +49,8 @@ describe('Terminal pane', () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={onFork} onDetach={onDetach} />)
 
+    expect(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })).toBeTruthy()
+
     await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
 
     expect(screen.getByText('⑂ Fork 会话')).toBeTruthy()
@@ -84,6 +86,7 @@ describe('Terminal pane', () => {
     await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
 
     expect(screen.queryByText('⑂ Fork 会话')).toBeNull()
+    expect(screen.queryByRole('button', { name: '从“Claude 主会话”创建子分支' })).toBeNull()
     expect(screen.getByText('↗ 独立窗口')).toBeTruthy()
   })
 
@@ -112,6 +115,22 @@ describe('Terminal pane', () => {
     expect(screen.queryByText('Claude Code 恢复失败')).toBeNull()
     expect(screen.queryByText('Claude Code 已退出')).toBeNull()
     expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+  })
+
+  it('keeps a failed Fork as a retryable card without starting a terminal process', async () => {
+    const user = userEvent.setup()
+    const onRetryFork = vi.fn()
+    const onRemoveFailedFork = vi.fn()
+    render(<TerminalPane {...fixture()} forkState="failed" forkError="依赖安装失败"
+      onRetryFork={onRetryFork} onRemoveFailedFork={onRemoveFailedFork} />)
+
+    expect(screen.getByRole('status').textContent).toContain('分支创建失败')
+    expect(screen.getByText('依赖安装失败')).toBeTruthy()
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    await user.click(screen.getByRole('button', { name: '重试创建分支' }))
+    expect(onRetryFork).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '移除失败分支' }))
+    expect(onRemoveFailedFork).toHaveBeenCalledWith('session-1')
   })
 })
 

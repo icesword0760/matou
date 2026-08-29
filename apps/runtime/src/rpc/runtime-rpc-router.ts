@@ -1,3 +1,5 @@
+import { dirname } from 'node:path'
+
 import type { RpcMethod } from '@matou/contracts'
 import type {
   DomainCommandMetadata,
@@ -25,6 +27,7 @@ import { SessionGraphRepository } from '../session-canvas/session-graph-reposito
 import { SessionCanvasService } from '../session-canvas/session-canvas-service'
 import { SessionInteractionService } from '../session-canvas/session-interaction-service'
 import { ProviderModeService } from '../session-canvas/provider-mode-service'
+import { ForkWorkflowError, ForkWorkflowService } from '../session-canvas/fork-workflow-service'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -66,6 +69,7 @@ export class RuntimeRpcRouter {
   readonly #sessionCanvas: SessionCanvasService
   readonly #sessionInteractions: SessionInteractionService
   readonly #providerModes: ProviderModeService
+  readonly #forkWorkflows: ForkWorkflowService
 
   constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
@@ -87,6 +91,9 @@ export class RuntimeRpcRouter {
     this.#sessionCanvas = new SessionCanvasService(database, transactions)
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#providerModes = new ProviderModeService(database, transactions)
+    this.#forkWorkflows = new ForkWorkflowService(
+      dirname(database.path), database, transactions, { stopRuns: async () => undefined }
+    )
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -94,6 +101,10 @@ export class RuntimeRpcRouter {
       return await this.#dispatch(method, payload)
     } catch (error) {
       if (error instanceof RpcFault) throw error
+      if (error instanceof ForkWorkflowError) {
+        const invalidName = ['EMPTY_NAME', 'TOO_LONG_NAME'].includes(error.code)
+        throw new RpcFault(invalidName ? 'INVALID_REQUEST' : 'CONFLICT', error.message)
+      }
       const message = errorMessage(error)
       if (/does not exist|missing/i.test(message)) throw new RpcFault('NOT_FOUND', message)
       if (/already|conflict|stale|must|cannot|archived|cycle|belong/i.test(message)) {
@@ -338,6 +349,38 @@ export class RuntimeRpcRouter {
         })
       case 'hierarchy.retry-provider-restore':
         return this.#providerModes.retryRestore(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.create-fork-child':
+        return this.#forkWorkflows.createForkChild(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          name: text(input.name, 'name'),
+          worktreeMode: enumeration(input.worktreeMode, ['current', 'new'] as const, 'worktreeMode'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.create-fork-sibling':
+        return this.#forkWorkflows.createForkSibling(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          name: text(input.name, 'name'),
+          worktreeMode: enumeration(input.worktreeMode, ['current', 'new'] as const, 'worktreeMode'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.retry-fork':
+        return this.#forkWorkflows.retryFork(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.remove-failed-fork':
+        return this.#forkWorkflows.removeFailedFork(command, {
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })

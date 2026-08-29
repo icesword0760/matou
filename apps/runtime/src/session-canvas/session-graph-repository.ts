@@ -40,6 +40,9 @@ interface GraphRow extends MembershipRow {
   restore_state: ProviderRestoreState | null
   restore_error: string | null
   provider_metadata_json: string | null
+  fork_state: 'pending' | 'starting' | 'succeeded' | 'failed' | null
+  fork_error: string | null
+  fork_attempt: number | null
   worktree_path: string | null
   branch_name: string | null
   detached_window_id: string | null
@@ -178,6 +181,9 @@ export function projectSceneGraphFrom(
          provider.restore_state,
          provider.restore_error,
          provider.metadata_json AS provider_metadata_json,
+         fork.state AS fork_state,
+         fork.error_message AS fork_error,
+         fork.attempt_count AS fork_attempt,
          worktrees.worktree_path,
          worktrees.branch_name,
          detached.native_window_key AS detached_window_id
@@ -192,6 +198,7 @@ export function projectSceneGraphFrom(
            WHERE binding.session_id = sessions.id
            ORDER BY binding.updated_at DESC, binding.id DESC LIMIT 1
          )
+       LEFT JOIN session_fork_intents AS fork ON fork.session_id = sessions.id
        LEFT JOIN worktrees ON worktrees.execution_context_id = sessions.execution_context_id
        LEFT JOIN scene_windows AS detached
          ON detached.scene_id = membership.scene_id
@@ -247,9 +254,12 @@ export function projectSceneGraphFrom(
         ...(row.parent_session_id === null ? {} : { parentSessionId: row.parent_session_id }),
         ...(row.relation_kind === null ? {} : { relationKind: row.relation_kind }),
         currentMode: row.kind,
-        workStatus: mapWorkStatus(row.status),
+        workStatus: row.fork_state === 'failed' ? 'error' : mapWorkStatus(row.status),
         providerRestoreState: row.restore_state ?? 'none',
         ...(row.restore_error === null ? {} : { providerRestoreError: row.restore_error }),
+        ...(row.fork_state === null ? {} : { forkState: row.fork_state }),
+        ...(row.fork_error === null ? {} : { forkError: row.fork_error }),
+        ...(row.fork_attempt === null ? {} : { forkAttempt: row.fork_attempt }),
         canFork: row.kind === 'claude-code' &&
           row.restore_state !== 'failed' &&
           providerCanFork(row.provider_metadata_json),

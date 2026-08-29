@@ -23,6 +23,7 @@ import { TaskSidebar } from './TaskSidebar'
 import { TerminalPane } from './TerminalPane'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
+import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
@@ -167,6 +168,13 @@ function HierarchyProduct({ projection, commands }: {
   const [searchResults, setSearchResults] = useState({ resultIndex: 0, resultCount: 0 })
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  const [branchDialog, setBranchDialog] = useState<{
+    sceneId: string
+    sourceSessionId: string
+    sourceTitle: string
+    relationMode: 'child' | 'sibling'
+    gitAvailable: boolean
+  } | null>(null)
   const ratioTimers = useRef(new Map<string, number>())
   useEffect(() => () => {
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
@@ -312,6 +320,7 @@ function HierarchyProduct({ projection, commands }: {
                       }
                       const graphNode = projection.sessionGraphs?.[scene.id]?.nodes
                         .find(({ sessionId }) => sessionId === session.id)
+                      const sessionHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === session.id)
                       return <TerminalPane session={session}
                         active={projection.navigation.sessionByScene[scene.id] === session.id}
                         visible={scene.id === activeSceneId}
@@ -325,10 +334,13 @@ function HierarchyProduct({ projection, commands }: {
                           ? { onSearchResults: setSearchResults } : {})}
                         focusRequest={scene.id === activeSceneId && session.id === focusedSessionId
                           ? terminalFocusRequest : 0}
-                        resumable={projection.sessionHuds?.find(({ sessionId }) => sessionId === session.id)?.resumable === true}
+                        resumable={sessionHud?.resumable === true}
                         {...(graphNode ? {
                           forkReady: graphNode.canFork,
                           providerRestoreState: graphNode.providerRestoreState,
+                          forkState: graphNode.forkState,
+                          spawnRevision: graphNode.forkAttempt ?? 0,
+                          ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
                           ...(graphNode.providerRestoreError
                             ? { restoreError: graphNode.providerRestoreError }
                             : {})
@@ -336,7 +348,15 @@ function HierarchyProduct({ projection, commands }: {
                         {...(workspace ? { workspaceId: workspace.id } : {})}
                         onActivate={commands.activateSession} onDelete={commands.deleteSession}
                         onRetryRestore={commands.retryProviderRestore}
-                        onFork={() => commands.forkSession(scene.id, session.id)}
+                        onRetryFork={() => commands.retryFork(session.id)}
+                        onRemoveFailedFork={() => commands.removeFailedFork(session.id)}
+                        onFork={() => setBranchDialog({
+                          sceneId: scene.id,
+                          sourceSessionId: session.id,
+                          sourceTitle: session.title,
+                          relationMode: 'child',
+                          gitAvailable: Boolean(sessionHud?.gitBranch)
+                        })}
                         {...(window.matouDesktop?.createDetachedTerminalWindow
                           ? { onDetach: async () => {
                               const sceneWindowId = crypto.randomUUID()
@@ -386,6 +406,26 @@ function HierarchyProduct({ projection, commands }: {
                   setShortcutPanelOpen(false)
                   setTerminalFocusRequest((value) => value + 1)
                 }} />
+              {branchDialog && <BranchDialog relationMode={branchDialog.relationMode}
+                sourceTitle={branchDialog.sourceTitle} gitAvailable={branchDialog.gitAvailable}
+                onCancel={() => {
+                  setBranchDialog(null)
+                  setTerminalFocusRequest((value) => value + 1)
+                }}
+                onConfirm={async (input: BranchDialogSubmit) => {
+                  const { sceneId, sourceSessionId, relationMode } = branchDialog
+                  if (relationMode === 'child') {
+                    await Promise.resolve(commands.createForkChild(
+                      sceneId, sourceSessionId, input.name, input.worktreeMode
+                    ))
+                  } else {
+                    await Promise.resolve(commands.createForkSibling(
+                      sceneId, sourceSessionId, input.name, input.worktreeMode
+                    ))
+                  }
+                  setBranchDialog(null)
+                  setTerminalFocusRequest((value) => value + 1)
+                }} />}
   </main>
 }
 
@@ -531,6 +571,7 @@ function createFixtureCommands(
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
     createCanvas: NOOP, createShellSibling: NOOP, createForkChild: NOOP, createForkSibling: NOOP,
+    retryFork: NOOP, removeFailedFork: NOOP,
     retryProviderRestore: NOOP, reopenHistoricalSession: NOOP, getSceneSessionGraph: NOOP,
     recordSessionInteraction: NOOP, setFocusedSession: NOOP,
     createScene: (taskId) => updateNavigation((value) => {

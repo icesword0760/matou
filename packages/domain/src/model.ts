@@ -131,6 +131,7 @@ export type SessionWorkStatus =
   | 'interrupted'
   | 'exited'
 export type ProviderRestoreState = 'none' | 'restoring' | 'failed'
+export type SessionForkState = 'pending' | 'starting' | 'succeeded' | 'failed'
 
 export interface Session {
   id: SessionId
@@ -219,6 +220,9 @@ export interface SessionGraphNode {
   workStatus: SessionWorkStatus
   providerRestoreState: ProviderRestoreState
   providerRestoreError?: string
+  forkState?: SessionForkState
+  forkError?: string
+  forkAttempt?: number
   canFork: boolean
   title: string
   cwd: string

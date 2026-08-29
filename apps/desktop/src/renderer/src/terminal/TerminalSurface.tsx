@@ -38,6 +38,7 @@ interface TerminalSurfaceProps {
   searchRequest?: TerminalSearchRequest
   onSearchResults?: (result: { resultIndex: number; resultCount: number }) => void
   focusRequest?: number
+  spawnRevision?: number
   onStatusChange?: (status: RuntimeStatus) => void
   onSmokeMarker?: (marker: string) => void
   onReplayComplete?: (marker: string) => void
@@ -49,7 +50,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
     profile = 'shell', visible = true, active = true, inputDisabled = false,
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
-    searchRequest, onSearchResults = NOOP, focusRequest = 0,
+    searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
     onOscNotification = NOOP
   } = props
@@ -222,7 +223,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminalRef.current = null
       terminal.dispose()
     }
-  }, [client, executionContextId, onReplayComplete, onSmokeMarker, onStatusChange, profile, sessionId])
+  }, [client, executionContextId, onReplayComplete, onSmokeMarker, onStatusChange, profile, sessionId, spawnRevision])
 
   useEffect(() => {
     if (!active || !visible || focusRequest <= 0) return

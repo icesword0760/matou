@@ -236,6 +236,42 @@ describe('RuntimeRpcRouter', () => {
     expect(focused.focusedSessionId).toBe(canvas.session.id)
   })
 
+  it('routes named Claude Fork child and sibling workflows through the canvas graph', async () => {
+    const workspaceRoot = join(testRoot, 'fork-workspace')
+    await mkdir(workspaceRoot)
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('fork-bootstrap', {
+      windowId: 'window-fork', defaultRootDirectory: workspaceRoot,
+      defaultName: 'workspace', now: 2
+    })) as { scene: { id: string }; session: { id: string } }
+    database.run(
+      "UPDATE sessions SET kind = 'claude-code', title = 'Claude' WHERE id = ?",
+      initial.session.id
+    )
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES ('binding-parent', ?, 'claude-code', 'provider-parent', 'available', 'none',
+                 '{"canFork":true}', 3, 3, 3)`,
+      initial.session.id
+    )
+
+    const child = await router.handle('hierarchy.create-fork-child', payload('fork-child', {
+      windowId: 'window-fork', sceneId: initial.scene.id,
+      sourceSessionId: initial.session.id, name: '第一分支', worktreeMode: 'current', now: 4
+    })) as { session: { id: string; title: string }; graph: { nodes: Array<{ title: string }> } }
+    const sibling = await router.handle('hierarchy.create-fork-sibling', payload('fork-sibling', {
+      windowId: 'window-fork', sceneId: initial.scene.id,
+      sourceSessionId: child.session.id, name: '第二分支', worktreeMode: 'current', now: 5
+    })) as { session: { id: string }; graph: { nodes: Array<{ title: string }> } }
+
+    expect(child.session.title).toBe('第一分支')
+    expect(sibling.graph.nodes.map(({ title }) => title)).toEqual(['Claude', '第一分支', '第二分支'])
+    expect(database.get(
+      'SELECT source_session_id FROM session_fork_intents WHERE session_id = ?', sibling.session.id
+    )).toEqual({ source_session_id: initial.session.id })
+  })
+
   it('rejects malformed payloads before reaching repositories', async () => {
     await expect(router.handle('workspace.create', { command: {}, input: { name: '' } })).rejects.toMatchObject({
       code: 'INVALID_REQUEST'
