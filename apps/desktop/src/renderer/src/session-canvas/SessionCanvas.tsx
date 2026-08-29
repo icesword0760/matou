@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
 import { SessionCarousel } from './SessionCarousel'
@@ -16,12 +16,17 @@ export function SessionCanvas(props: {
   onReopenHistorical(sessionId: string): void
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
+  geometry?: Array<{ ownerKey: string; geometry: Record<string, unknown> }>
+  onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): void
 }) {
   const {
     graph, levelParentSessionId, disabled = false, renderSession, onActivate,
     onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onReturnParent,
-    onEnsureSessionVisible
+    onEnsureSessionVisible, geometry, onPutGeometry
   } = props
+  const geometryTimer = useRef<number | undefined>(undefined)
+  const pendingGeometry = useRef<{ ownerKey: string; geometry: Record<string, unknown> } | undefined>(undefined)
+  const onPutGeometryRef = useRef(onPutGeometry)
   const [showHistory, setShowHistory] = useState(false)
   const activeNodes = graph.nodes.filter(({ archivedAt }) => archivedAt === undefined)
   const focused = activeNodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? activeNodes[0]
@@ -32,8 +37,27 @@ export function SessionCanvas(props: {
   const historyVisible = showHistory || (activeDirect.length === 0 && historicalCount > 0)
   const siblings = historyVisible ? direct : activeDirect
   const parent = parentId ? graph.nodes.find(({ sessionId }) => sessionId === parentId) : undefined
+  const ownerKey = `session-group:${graph.sceneId}:${parentId ?? 'root'}`
+  const storedGeometry = geometry?.find((item) => item.ownerKey === ownerKey)?.geometry
+  const initialScrollLeft = typeof storedGeometry?.scrollLeft === 'number' ? storedGeometry.scrollLeft : 0
   const levelFocus = focused && focused.parentSessionId === parentId ? focused : activeDirect[0] ?? direct[0]
   useEffect(() => { setShowHistory(false) }, [parentId])
+  useEffect(() => { onPutGeometryRef.current = onPutGeometry }, [onPutGeometry])
+  useEffect(() => () => {
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    const pending = pendingGeometry.current
+    if (pending) onPutGeometryRef.current?.(pending.ownerKey, pending.geometry)
+  }, [])
+  const putGeometry = (next: { scrollLeft: number; focusedSessionId?: string }) => {
+    pendingGeometry.current = { ownerKey, geometry: next }
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    geometryTimer.current = window.setTimeout(() => {
+      geometryTimer.current = undefined
+      const pending = pendingGeometry.current
+      pendingGeometry.current = undefined
+      if (pending) onPutGeometryRef.current?.(pending.ownerKey, pending.geometry)
+    }, 180)
+  }
   if (!levelFocus) return <div className="session-canvas-empty" role="status">当前画布没有活跃会话</div>
 
   return <section className="session-canvas" aria-label="会话画布" data-parent-session-id={parentId ?? ''}>
@@ -56,6 +80,8 @@ export function SessionCanvas(props: {
       {...(parent && onReturnParent
         ? { onCommitParent: () => onReturnParent(parent.sessionId) }
         : {})}
+      geometryKey={ownerKey} initialScrollLeft={initialScrollLeft}
+      onGeometryChange={putGeometry}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
 }

@@ -10,11 +10,14 @@ import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeKey } from '../terminal/terminal-themes'
+import { useDagShortcut } from '../dag/useDagShortcut'
 
 export function DetachedTerminalApp() {
   const client = useRuntimeClient()
   const query = new URLSearchParams(window.location.search)
   const sessionId = query.get('sessionId') ?? ''
+  const mainWindowId = query.get('mainWindowId') ?? ''
+  const sceneId = query.get('sceneId') ?? ''
   const executionContextId = query.get('executionContextId') ?? 'local-default'
   const requestedProfile = query.get('profile')
   const profile = requestedProfile === 'claude-code' || requestedProfile === 'codex'
@@ -83,6 +86,16 @@ export function DetachedTerminalApp() {
     }
   }), [shortcutPanelOpen])
   const isMac = useTerminalShortcuts(shortcutHandlers)
+  useDagShortcut({
+    enabled: Boolean(mainWindowId && sceneId && sessionId),
+    onShortPress: () => window.dispatchEvent(new Event('matou:forward-terminal-tab')),
+    onLongPress: () => {
+      void window.matouDesktop?.openDagWindow?.({
+        mainWindowId, sceneId, sessionId,
+        theme: themeKey === 'dark' ? 'dark' : 'light'
+      })
+    }
+  })
   useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
     document.documentElement.dataset.theme = themeKey

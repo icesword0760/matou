@@ -135,6 +135,7 @@ export const RPC_METHODS = [
   'scene.unmount-session',
   'scene.archive',
   'geometry.put',
+  'geometry.list',
   'events.replay',
   'events.ack'
 ] as const

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -90,6 +90,29 @@ describe('SessionCanvas', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '返回父会话' }))
 
     expect(onReturnParent).toHaveBeenCalledWith('parent')
+  })
+
+  it('restores the sibling viewport and persists navigation geometry after a short debounce', () => {
+    vi.useFakeTimers()
+    const onPutGeometry = vi.fn()
+    render(<SessionCanvas graph={graph()} onActivate={() => undefined}
+      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
+      onReopenHistorical={vi.fn()} onPutGeometry={onPutGeometry}
+      geometry={[{ ownerKey: 'session-group:scene-1:parent', geometry: { scrollLeft: 77 } }]}
+      renderSession={(item) => <div>{item.title}</div>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+
+    expect(viewport.scrollLeft).toBe(77)
+    viewport.scrollLeft = 128
+    fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
+    vi.advanceTimersByTime(179)
+    expect(onPutGeometry).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(onPutGeometry).toHaveBeenCalledWith(
+      'session-group:scene-1:parent',
+      expect.objectContaining({ scrollLeft: 128, focusedSessionId: 'child-shell' })
+    )
+    vi.useRealTimers()
   })
 })
 

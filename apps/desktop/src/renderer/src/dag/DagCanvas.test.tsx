@@ -35,6 +35,18 @@ describe('DagCanvas', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '打开会话：Child' }))
     expect(onSelect).toHaveBeenCalledWith('child')
   })
+
+  it('restores a persisted viewport before rendering and reports later canvas movement', () => {
+    const onTransformChange = vi.fn()
+    render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()}
+      initialTransform={{ x: 123, y: -45, scale: 1.4 }} onTransformChange={onTransformChange} />)
+    const canvas = screen.getByRole('application', { name: '会话 DAG 画布' })
+
+    expect(canvas.getAttribute('data-pan')).toBe('123,-45')
+    expect(canvas.getAttribute('data-scale')).toBe('1.4')
+    fireEvent.wheel(canvas, { deltaX: 20, deltaY: 10 })
+    expect(onTransformChange).toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 })
+  })
 })
 
 function graph(): SessionGraphView {

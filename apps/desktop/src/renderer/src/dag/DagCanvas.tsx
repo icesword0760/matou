@@ -28,6 +28,9 @@ export function DagCanvas(props: {
     setTransform(next)
     onTransformChange?.(next)
   }
+  useEffect(() => {
+    if (initialTransform) setTransform(initialTransform)
+  }, [initialTransform])
   const focusNode = (sessionId: string, animate = true) => {
     const node = layout.nodes.find((candidate) => candidate.sessionId === sessionId)
     const viewport = viewportRef.current
@@ -43,11 +46,12 @@ export function DagCanvas(props: {
     window.setTimeout(() => viewport.classList.remove('is-animating'), reducedMotion() ? 1 : 240)
   }
   useEffect(() => {
+    if (initialTransform) return
     const frame = requestAnimationFrame(() => focusNode(focusedSessionId, false))
     return () => cancelAnimationFrame(frame)
     // Initial focus only; live summary refresh must preserve the user's viewport.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedSessionId])
+  }, [focusedSessionId, initialTransform])
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return

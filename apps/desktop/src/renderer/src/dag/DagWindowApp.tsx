@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { DagWindowContext } from '../../../shared/desktop-api'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
-import { DagCanvas } from './DagCanvas'
+import { DagCanvas, type DagTransform } from './DagCanvas'
 import './dag.css'
 
 export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView }) {
   const client = useRuntimeClient()
   const [context, setContext] = useState(readContext)
   const [graph, setGraph] = useState<SessionGraphView | null>(fixtureGraph ?? null)
+  const [initialTransform, setInitialTransform] = useState<DagTransform | undefined>(undefined)
+  const geometryTimer = useRef<number | undefined>(undefined)
+  const pendingTransform = useRef<DagTransform | undefined>(undefined)
   const [error, setError] = useState('')
   const refresh = useCallback(async () => {
     if (fixtureGraph || !client) return
@@ -28,7 +31,19 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   useEffect(() => window.matouDesktop?.onDagContext?.((next) => {
     setContext(next)
     setGraph(null)
+    setInitialTransform(undefined)
   }), [])
+  useEffect(() => {
+    if (fixtureGraph || !client) return
+    void client.request<Array<{ ownerKey: string; geometry: Record<string, unknown> }>>('geometry.list', {
+      sceneId: context.sceneId
+    }).then((items) => {
+      const value = items.find(({ ownerKey }) => ownerKey === `dag-viewport:${context.sceneId}`)?.geometry
+      if (typeof value?.panX === 'number' && typeof value.panY === 'number' && typeof value.zoom === 'number') {
+        setInitialTransform({ x: value.panX, y: value.panY, scale: value.zoom })
+      }
+    }).catch(() => {})
+  }, [client, context.sceneId, fixtureGraph])
   useEffect(() => {
     void refresh()
     if (fixtureGraph) return
@@ -50,6 +65,32 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     window.addEventListener('keydown', keyDown)
     return () => window.removeEventListener('keydown', keyDown)
   }, [context.mainWindowId])
+  const flushGeometry = useCallback(() => {
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    geometryTimer.current = undefined
+    const value = pendingTransform.current
+    pendingTransform.current = undefined
+    if (!client || !value || fixtureGraph) return
+    void client.request('geometry.put', {
+      sceneId: context.sceneId,
+      ownerKey: `dag-viewport:${context.sceneId}`,
+      layoutRevision: 0,
+      geometry: { panX: value.x, panY: value.y, zoom: value.scale },
+      now: Date.now()
+    }).catch(() => {})
+  }, [client, context.sceneId, fixtureGraph])
+  useEffect(() => {
+    window.addEventListener('beforeunload', flushGeometry)
+    return () => {
+      window.removeEventListener('beforeunload', flushGeometry)
+      flushGeometry()
+    }
+  }, [flushGeometry])
+  const persistTransform = (value: DagTransform) => {
+    pendingTransform.current = value
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    geometryTimer.current = window.setTimeout(flushGeometry, 180)
+  }
 
   if (!graph) return <main className="dag-window dag-window-state" aria-label="会话 DAG">
     <strong>{error ? '会话关系载入异常' : '正在载入会话关系…'}</strong>
@@ -62,7 +103,9 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     <div className="dag-window-title"><span>Matou 会话画布</span>
       <button aria-label="关闭 DAG" onClick={() => void window.matouDesktop?.closeDagWindow?.(context.mainWindowId)}>×</button>
     </div>
-    <DagCanvas graph={graph} focusedSessionId={focusedSessionId} onSelect={(sessionId) => {
+    <DagCanvas key={context.sceneId} graph={graph} focusedSessionId={focusedSessionId}
+      {...(initialTransform ? { initialTransform } : {})} onTransformChange={persistTransform}
+      onSelect={(sessionId) => {
       const target = graph.nodes.find((node) => node.sessionId === sessionId)
       if (!target) return
       void window.matouDesktop?.selectDagNode?.({

@@ -10,10 +10,12 @@ import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { SessionGraphRepository } from '../session-canvas/session-graph-repository'
 
 let database: RuntimeDatabase
 let hierarchy: HierarchyApplicationService
 let detached: DetachedSessionService
+let graph: SessionGraphRepository
 
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), 'matou-detached-'))
@@ -22,6 +24,7 @@ beforeEach(async () => {
   const transactions = new DomainTransactionManager(database)
   hierarchy = new HierarchyApplicationService(database, transactions)
   detached = new DetachedSessionService(database, transactions)
+  graph = new SessionGraphRepository(database, transactions)
 })
 
 afterEach(() => database.close())
@@ -38,6 +41,9 @@ describe('DetachedSessionService', () => {
       sessionId: initial.session!.id, mountId: initial.mount!.id,
       sceneId: initial.scene!.id, state: 'detached'
     })
+    expect(graph.projectSceneGraph(initial.scene!.id, 'window-1').nodes).toEqual([
+      expect.objectContaining({ sessionId: initial.session!.id, detachedWindowId: 'native-1' })
+    ])
 
     const returned = detached.returnSession(command('return'), {
       sceneWindowId: 'detached-1', mainWindowId: 'window-1', now: 11
@@ -49,6 +55,9 @@ describe('DetachedSessionService', () => {
     expect(database.get<{ scene_window_id: string | null }>(
       'SELECT scene_window_id FROM session_mounts WHERE id = ?', initial.mount!.id
     )?.scene_window_id).toBeNull()
+    expect(graph.projectSceneGraph(initial.scene!.id, 'window-1').nodes).toEqual([
+      expect.not.objectContaining({ detachedWindowId: expect.anything() })
+    ])
   })
 
   it('normalizes detached mounts back to attached on restart', () => {

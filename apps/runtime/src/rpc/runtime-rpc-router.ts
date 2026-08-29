@@ -147,6 +147,10 @@ export class RuntimeRpcRouter {
         now: integer(input.now, 'now', 0)
       })
     }
+    if (method === 'geometry.list') {
+      const input = record(payload)
+      return this.#geometry.list(text(input.sceneId, 'sceneId'))
+    }
 
     const envelope = record(payload)
     const command = commandMetadata(envelope.command)

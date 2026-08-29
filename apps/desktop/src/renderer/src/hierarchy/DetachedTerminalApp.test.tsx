@@ -21,6 +21,8 @@ afterEach(() => {
   runtime.request.mockClear()
   runtime.subscribeProjection.mockClear()
   window.history.replaceState({}, '', '/')
+  Object.defineProperty(window, 'matouDesktop', { configurable: true, writable: true, value: undefined })
+  vi.useRealTimers()
 })
 
 describe('PRD 02 detached HUD', () => {
@@ -57,5 +59,21 @@ describe('PRD 02 detached HUD', () => {
     expect(runtime.request).toHaveBeenCalledWith('session.set-model', expect.objectContaining({
       input: expect.objectContaining({ sessionId: 'agent-1', modelStrategy: 'claude-sonnet-4-6' })
     }))
+  })
+
+  it('opens the same scene DAG after a long Option Tab hold from a detached session', () => {
+    vi.useFakeTimers()
+    const openDagWindow = vi.fn(async () => undefined)
+    window.matouDesktop = { openDagWindow } as unknown as typeof window.matouDesktop
+    window.history.replaceState({}, '',
+      '/?kind=detached-terminal&windowId=detached-1&mainWindowId=main-1&sceneId=scene-1&sessionId=agent-1&profile=claude-code')
+    render(<DetachedTerminalApp />)
+
+    fireEvent.keyDown(window, { key: 'Tab', altKey: true })
+    vi.advanceTimersByTime(450)
+
+    expect(openDagWindow).toHaveBeenCalledWith({
+      mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'agent-1', theme: 'light'
+    })
   })
 })

@@ -178,6 +178,10 @@ describe('RuntimeRpcRouter', () => {
       geometry: { ratio: 0.35 }, now: 7
     })
 
+    expect(await router.handle('geometry.list', { sceneId: 'scene-1' })).toEqual([
+      expect.objectContaining({ ownerKey: 'node:root', geometry: { ratio: 0.35 } })
+    ])
+
     const snapshot = await router.handle('projection.snapshot', {}) as {
       sceneSnapshots: Array<{ scene: { id: string }; geometry: Array<{ geometry: { ratio: number } }> }>
     }

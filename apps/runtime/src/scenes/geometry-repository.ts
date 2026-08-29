@@ -94,6 +94,18 @@ export class GeometryRepository {
     if (ownerKey === 'scene') {
       return Boolean(this.#database.get('SELECT id FROM scenes WHERE id = ?', sceneId))
     }
+    const canvasOwner = parseCanvasOwner(ownerKey)
+    if (canvasOwner) {
+      if (canvasOwner.sceneId !== sceneId || !this.#database.get('SELECT id FROM scenes WHERE id = ?', sceneId)) {
+        return false
+      }
+      if (canvasOwner.kind === 'dag-viewport' || canvasOwner.value === 'root') return true
+      return Boolean(this.#database.get(
+        `SELECT session_id FROM session_canvas_memberships
+         WHERE scene_id = ? AND session_id = ?`,
+        sceneId, canvasOwner.value
+      ))
+    }
     const separator = ownerKey.indexOf(':')
     if (separator < 1) return false
     const kind = ownerKey.slice(0, separator)
@@ -110,7 +122,7 @@ export class GeometryWriteBuffer {
   readonly #pending = new Map<string, GeometryUpdate>()
   #timer: ReturnType<typeof setTimeout> | undefined
 
-  constructor(repository: GeometryRepository, delayMs = 100) {
+  constructor(repository: GeometryRepository, delayMs = 180) {
     this.#repository = repository
     this.#delayMs = delayMs
   }
@@ -133,6 +145,22 @@ export class GeometryWriteBuffer {
     this.#pending.clear()
     for (const update of updates) this.#repository.put(update)
   }
+}
+
+function parseCanvasOwner(ownerKey: string): {
+  kind: 'session-group' | 'dag-viewport' | 'dag-node-layout'
+  sceneId: string
+  value: string
+} | undefined {
+  const parts = ownerKey.split(':')
+  if (parts[0] === 'dag-viewport' && parts.length === 2 && parts[1]) {
+    return { kind: 'dag-viewport', sceneId: parts[1], value: 'viewport' }
+  }
+  if ((parts[0] === 'session-group' || parts[0] === 'dag-node-layout') &&
+      parts.length === 3 && parts[1] && parts[2]) {
+    return { kind: parts[0], sceneId: parts[1], value: parts[2] }
+  }
+  return undefined
 }
 
 function mapGeometry(row: GeometryRow): StoredGeometry | undefined {

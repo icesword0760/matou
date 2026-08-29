@@ -16,10 +16,13 @@ export function SessionCarousel(props: {
   onEnsureSessionVisible?(sessionId: string): void
   parent?: SessionGraphNodeView
   onCommitParent?(parentSessionId: string): void
+  geometryKey?: string
+  initialScrollLeft?: number
+  onGeometryChange?(geometry: { scrollLeft: number; focusedSessionId?: string }): void
 }) {
   const {
     nodes, focusedSessionId, renderSession, onActivate, onEnsureSessionVisible,
-    parent, onCommitParent
+    parent, onCommitParent, geometryKey, initialScrollLeft = 0, onGeometryChange
   } = props
   const viewportRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef(new Map<string, HTMLElement>())
@@ -36,6 +39,7 @@ export function SessionCarousel(props: {
     initialScrollLeft: number
   } | null>(null)
   const pullController = useRef(new ParentPullController())
+  const restoringGeometry = useRef(false)
   const [firstVisible, setFirstVisible] = useState(0)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [scrolling, setScrolling] = useState(false)
@@ -50,6 +54,15 @@ export function SessionCarousel(props: {
     if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
   }, [])
   useEffect(() => { ensureVisibleRef.current = onEnsureSessionVisible }, [onEnsureSessionVisible])
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    restoringGeometry.current = true
+    viewport.scrollLeft = Math.max(0, initialScrollLeft)
+    updateVisibleWindow()
+    const frame = requestAnimationFrame(() => { restoringGeometry.current = false })
+    return () => cancelAnimationFrame(frame)
+  }, [geometryKey, initialScrollLeft])
 
   useLayoutEffect(() => {
     const next = new Map<string, DOMRect>()
@@ -92,6 +105,12 @@ export function SessionCarousel(props: {
     setScrolling(true)
     setHoveredSessionId(null)
     updateVisibleWindow()
+    if (!restoringGeometry.current && viewportRef.current) {
+      onGeometryChange?.({
+        scrollLeft: viewportRef.current.scrollLeft,
+        ...(focusedSessionId ? { focusedSessionId } : {})
+      })
+    }
     if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
     scrollTimer.current = window.setTimeout(() => setScrolling(false), 120)
   }
@@ -210,7 +229,10 @@ export function SessionCarousel(props: {
         <SessionCard node={node} focused={node.sessionId === focusedSessionId}
           inViewport={inViewport.has(node.sessionId)}
           expanded={!scrolling && hoveredSessionId === node.sessionId}
-          onActivate={onActivate} onHover={setHoveredSessionId}>
+          onActivate={(sessionId) => {
+            onGeometryChange?.({ scrollLeft: viewportRef.current?.scrollLeft ?? 0, focusedSessionId: sessionId })
+            onActivate(sessionId)
+          }} onHover={setHoveredSessionId}>
           {renderSession(node, inViewport.has(node.sessionId))}
         </SessionCard>
       </div>)}
