@@ -671,5 +671,92 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       ALTER TABLE tasks ADD COLUMN last_opened_at INTEGER NOT NULL DEFAULT 0;
       UPDATE tasks SET last_opened_at = updated_at WHERE last_opened_at = 0;
     `
+  },
+  {
+    version: 14,
+    name: 'session-canvas-graph-state',
+    sql: `
+      CREATE TABLE session_canvas_memberships (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+        scene_id TEXT NOT NULL REFERENCES scenes(id),
+        sibling_created_seq INTEGER NOT NULL,
+        last_user_interaction_seq INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE INDEX session_canvas_memberships_scene_idx
+      ON session_canvas_memberships(
+        scene_id,
+        last_user_interaction_seq DESC,
+        sibling_created_seq ASC
+      );
+
+      CREATE TABLE runtime_sequences (
+        name TEXT PRIMARY KEY,
+        value INTEGER NOT NULL
+      ) STRICT;
+
+      WITH ranked_mounts AS (
+        SELECT
+          session_id,
+          scene_id,
+          created_at,
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY session_id
+            ORDER BY created_at ASC, id ASC
+          ) AS session_mount_rank
+        FROM session_mounts
+      ),
+      first_mounts AS (
+        SELECT session_id, scene_id, created_at
+        FROM ranked_mounts
+        WHERE session_mount_rank = 1
+      ),
+      ordered_memberships AS (
+        SELECT
+          first_mounts.session_id,
+          first_mounts.scene_id,
+          first_mounts.created_at,
+          ROW_NUMBER() OVER (
+            ORDER BY first_mounts.created_at ASC, first_mounts.session_id ASC
+          ) AS sibling_created_seq
+        FROM first_mounts
+      )
+      INSERT INTO session_canvas_memberships (
+        session_id,
+        scene_id,
+        sibling_created_seq,
+        last_user_interaction_seq,
+        created_at,
+        updated_at
+      )
+      SELECT
+        ordered_memberships.session_id,
+        ordered_memberships.scene_id,
+        ordered_memberships.sibling_created_seq,
+        0,
+        ordered_memberships.created_at,
+        sessions.updated_at
+      FROM ordered_memberships
+      JOIN sessions ON sessions.id = ordered_memberships.session_id;
+
+      INSERT INTO runtime_sequences(name, value)
+      SELECT 'session-sibling-created', COALESCE(MAX(sibling_created_seq), 0)
+      FROM session_canvas_memberships;
+      INSERT INTO runtime_sequences(name, value)
+      VALUES ('session-user-interaction', 0);
+
+      ALTER TABLE provider_bindings ADD COLUMN restore_state TEXT NOT NULL DEFAULT 'none'
+        CHECK (restore_state IN ('none', 'restoring', 'failed'));
+      ALTER TABLE provider_bindings ADD COLUMN restore_error TEXT;
+      ALTER TABLE provider_bindings ADD COLUMN user_exited_at INTEGER;
+
+      DROP INDEX one_fork_parent_idx;
+      CREATE UNIQUE INDEX one_structural_parent_idx
+      ON session_relations_current(from_session_id)
+      WHERE relation_kind IN ('forked-from', 'derived-from');
+    `
   }
 ]

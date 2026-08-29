@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
-    expect(result.currentVersion).toBe(13)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+    expect(result.currentVersion).toBe(14)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -44,6 +44,8 @@ describe('MigrationRunner', () => {
         'session_runs',
         'provider_bindings',
         'session_fork_intents',
+        'session_canvas_memberships',
+        'runtime_sequences',
         'domain_events',
         'consumer_cursors',
         'command_deduplication',
@@ -89,6 +91,8 @@ describe('MigrationRunner', () => {
     ]))
     expect(database.all<{ name: string }>('PRAGMA table_info(sessions)').map(({ name }) => name))
       .toContain('cwd')
+    expect(database.all<{ name: string }>('PRAGMA table_info(provider_bindings)').map(({ name }) => name))
+      .toEqual(expect.arrayContaining(['restore_state', 'restore_error', 'user_exited_at']))
   })
 
   it('is idempotent when every migration is already applied', async () => {
@@ -98,7 +102,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 13,
+      currentVersion: 14,
       backupPath: undefined
     })
   })
@@ -119,7 +123,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[9]!,
       FOUNDATION_MIGRATIONS[10]!,
       FOUNDATION_MIGRATIONS[11]!,
-      FOUNDATION_MIGRATIONS[12]!
+      FOUNDATION_MIGRATIONS[12]!,
+      FOUNDATION_MIGRATIONS[13]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -140,7 +145,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 13')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 14')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -175,13 +180,85 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13])
+    expect(result.appliedVersions).toEqual([12, 13, 14])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
       { id: 'claude', title: 'Claude' },
       { id: 'codex', title: 'Codex' },
       { id: 'shell', title: 'Shell' }
+    ])
+  })
+
+  it('backfills stable canvas memberships without changing existing Fork relations', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 13)).migrate()
+    database.run(
+      `INSERT INTO workspaces (
+         id, name, root_directory, created_at, updated_at, last_opened_at
+       ) VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('context', 'workspace', 'plain-directory', '/tmp/workspace', 1)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at,
+         sort_key, last_opened_at
+       ) VALUES ('task', 'workspace', 'context', 'Task', 'active', 1, 1, 'a', 1)`
+    )
+    database.run(
+      `INSERT INTO scenes (
+         id, task_id, name, mode, created_at, updated_at, title_pinned, sort_key, layout_revision
+       ) VALUES ('scene', 'task', 'Scene', 'tile', 1, 1, 0, 'a', 1)`
+    )
+    for (const [id, createdAt] of [['parent', 2], ['child', 3]] as const) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', 'context', 'claude-code', 'created', ?, '/tmp/workspace', ?, ?, ?)`,
+        id, id, createdAt, createdAt, createdAt
+      )
+      database.run(
+        `INSERT INTO session_mounts (id, scene_id, session_id, created_at)
+         VALUES (?, 'scene', ?, ?)`,
+        `mount-${id}`, id, createdAt
+      )
+    }
+    const event = database.run(
+      `INSERT INTO session_relation_events (
+         event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+         relation_kind, metadata_json, command_id, occurred_at
+       ) VALUES ('event-fork', 'relation-fork', 'created', 'task', 'child', 'parent',
+                 'forked-from', '{}', 'command-fork', 4)`
+    )
+    database.run(
+      `INSERT INTO session_relations_current (
+         relation_id, task_id, from_session_id, to_session_id, relation_kind,
+         metadata_json, created_at, updated_at, source_event_sequence
+       ) VALUES ('relation-fork', 'task', 'child', 'parent', 'forked-from', '{}', 4, 4, ?)`,
+      Number(event.lastInsertRowid)
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.appliedVersions).toEqual([14])
+    expect(database.all(
+      `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
+       FROM session_canvas_memberships ORDER BY sibling_created_seq`
+    )).toEqual([
+      { session_id: 'parent', scene_id: 'scene', sibling_created_seq: 1, last_user_interaction_seq: 0 },
+      { session_id: 'child', scene_id: 'scene', sibling_created_seq: 2, last_user_interaction_seq: 0 }
+    ])
+    expect(database.get(
+      `SELECT from_session_id, to_session_id, relation_kind
+       FROM session_relations_current WHERE relation_id = 'relation-fork'`
+    )).toEqual({ from_session_id: 'child', to_session_id: 'parent', relation_kind: 'forked-from' })
+    expect(database.all('SELECT name, value FROM runtime_sequences ORDER BY name')).toEqual([
+      { name: 'session-sibling-created', value: 2 },
+      { name: 'session-user-interaction', value: 0 }
     ])
   })
 

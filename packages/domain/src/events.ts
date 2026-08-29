@@ -37,6 +37,16 @@ export interface DomainCommit<T> {
   replayed: boolean
 }
 
+export type SessionGraphEventType =
+  | 'scene.canvas-created'
+  | 'session.canvas-membership-created'
+  | 'session.structural-relation-created'
+  | 'session.user-interacted'
+  | 'session.mode-changed'
+  | 'session.restore-state-changed'
+  | 'session.graph-summary-changed'
+  | 'session.historical-state-changed'
+
 export type AgentSemanticKind =
   | 'agent.message'
   | 'agent.todo'

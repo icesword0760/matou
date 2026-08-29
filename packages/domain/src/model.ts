@@ -121,6 +121,16 @@ export interface Worktree {
 
 export type SessionKind = 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
 export type SessionStatus = 'created' | 'starting' | 'running' | 'waiting' | 'interrupted' | 'exited' | 'archived'
+export type SessionCurrentMode = 'shell' | 'claude-code'
+export type SessionWorkStatus =
+  | 'starting'
+  | 'idle'
+  | 'running'
+  | 'needs-input'
+  | 'error'
+  | 'interrupted'
+  | 'exited'
+export type ProviderRestoreState = 'none' | 'restoring' | 'failed'
 
 export interface Session {
   id: SessionId
@@ -161,6 +171,9 @@ export interface ProviderBinding {
   provider: 'claude-code' | 'codex' | 'generic'
   providerSessionId: string
   resumeState: 'unknown' | 'available' | 'resuming' | 'resumed' | 'failed' | 'expired'
+  restoreState?: ProviderRestoreState
+  restoreError?: string
+  userExitedAt?: number
   metadata: unknown
   createdAt: number
   updatedAt: number
@@ -186,6 +199,56 @@ export interface SessionRelation {
   metadata: unknown
   createdAt: number
   updatedAt: number
+}
+
+export interface SessionCanvasMembership {
+  sessionId: SessionId
+  sceneId: SceneId
+  siblingCreatedSeq: number
+  lastUserInteractionSeq: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface SessionGraphNode {
+  sessionId: SessionId
+  sceneId: SceneId
+  parentSessionId?: SessionId
+  relationKind?: 'derived-from' | 'forked-from'
+  currentMode: SessionCurrentMode
+  workStatus: SessionWorkStatus
+  providerRestoreState: ProviderRestoreState
+  title: string
+  cwd: string
+  worktree?: {
+    branch: string
+    path: string
+    shared: boolean
+  }
+  activeChildCount: number
+  historicalChildCount: number
+  childModeCounts: {
+    shell: number
+    claudeCode: number
+  }
+  latestLines: string[]
+  lastUserInteractionSeq: number
+  archivedAt?: number
+  detachedWindowId?: string
+}
+
+export interface SessionGraphEdge {
+  parentSessionId: SessionId
+  childSessionId: SessionId
+  relationKind: 'derived-from' | 'forked-from'
+  createdAt: number
+}
+
+export interface SceneSessionGraph {
+  sceneId: SceneId
+  nodes: SessionGraphNode[]
+  edges: SessionGraphEdge[]
+  focusedSessionId?: SessionId
 }
 
 export type SceneMode = 'tile' | 'card' | 'dag'
