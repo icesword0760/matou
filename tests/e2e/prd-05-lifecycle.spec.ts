@@ -90,6 +90,7 @@ test('persists Task order and each canvas horizontal position across restart', a
     await pinTask(page, '默认')
     await dragTaskBefore(page, '默认', '新事项 2')
     await expect.poll(() => taskTitles(page)).toEqual(['默认', '新事项 2', '新事项'])
+    await expect(page.getByTestId('active-task')).toHaveText('新事项 2')
 
     for (let index = 0; index < 4; index += 1) {
       await page.getByRole('button', { name: '横向新增 Shell' }).click()
@@ -102,12 +103,27 @@ test('persists Task order and each canvas horizontal position across restart', a
       savedScrollLeft = await carousel.evaluate((element) => element.scrollLeft)
       return savedScrollLeft
     }).toBeGreaterThan(0)
-    await page.waitForTimeout(350)
-    savedScrollLeft = await carousel.evaluate((element) => element.scrollLeft)
-    await page.waitForTimeout(250)
+    // Scroll snapping and card-width animation are real user-facing motion.
+    // Capture the position only after that motion has settled, then verify the
+    // same settled viewport is restored after restart.
+    let previousScrollLeft = savedScrollLeft
+    let stableSamples = 0
+    await expect.poll(async () => {
+      const current = await carousel.evaluate((element) => element.scrollLeft)
+      stableSamples = Math.abs(current - previousScrollLeft) < 1 ? stableSamples + 1 : 0
+      previousScrollLeft = current
+      savedScrollLeft = current
+      return stableSamples
+    }, { intervals: [100, 100, 100, 100] }).toBeGreaterThanOrEqual(3)
+    const activeCanvas = page.locator('.scene-stage:not([hidden]) .session-canvas')
+    await expect.poll(async () => Math.abs(
+      Number(await activeCanvas.getAttribute('data-last-saved-scroll-left')) - savedScrollLeft
+    )).toBeLessThan(5)
+    await expect(activeCanvas).toHaveAttribute('aria-busy', 'false')
 
     fixture = await restartMatou(fixture)
     await expect.poll(() => taskTitles(fixture.page)).toEqual(['默认', '新事项 2', '新事项'])
+    await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项 2')
     await expect.poll(async () => Math.abs(
       await fixture.page.getByRole('region', { name: '同级会话列表' })
         .evaluate((element) => element.scrollLeft) - savedScrollLeft

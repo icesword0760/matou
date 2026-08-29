@@ -8,9 +8,9 @@
 .session-level-actions button:hover { color: rgba(255,255,255,.92); background: rgba(255,255,255,.08); }
 .session-level-actions button:disabled { opacity: .35; cursor: default; }
 .session-carousel-shell { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--kooky-terminal); }
-.session-carousel { position: relative; z-index: 2; display: flex; flex: 1; min-width: 0; min-height: 0; align-items: stretch; gap: 12px; overflow-x: auto; overflow-y: hidden; padding: 0; background: var(--kooky-terminal); scroll-behavior: smooth; overscroll-behavior-x: contain; scrollbar-width: thin; scroll-snap-type: x proximity; transform: translateX(var(--parent-pull-distance,0)); will-change: transform; }
+.session-carousel { position: relative; z-index: 2; display: flex; flex: 1; min-width: 0; min-height: 0; align-items: stretch; gap: 12px; overflow-x: auto; overflow-y: hidden; padding: 0; background: var(--kooky-terminal); scroll-behavior: auto; overscroll-behavior-x: contain; scrollbar-width: thin; transform: translateX(var(--parent-pull-distance,0)); will-change: transform; }
 .session-carousel-shell.is-springing .session-carousel { transition: transform 260ms cubic-bezier(.2,.9,.2,1.12); }
-.session-card-slot { box-sizing: border-box; flex: 0 0 calc((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns)); min-width: 0; min-height: 0; transition: flex-basis 180ms cubic-bezier(.2,.8,.2,1); scroll-snap-align: start; }
+.session-card-slot { box-sizing: border-box; flex: 0 0 calc((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns)); min-width: 0; min-height: 0; transition: flex-basis 180ms cubic-bezier(.2,.8,.2,1); }
 .session-card-slot.is-expanded { flex-basis: clamp(420px,44vw,760px); }
 .session-card { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid transparent; background: var(--kooky-terminal); transition: border-color 140ms ease, box-shadow 140ms ease; }
 .session-card.is-focused { z-index: 1; border-color: rgba(91,157,233,.72); box-shadow: inset 0 0 0 1px rgba(91,157,233,.18); }

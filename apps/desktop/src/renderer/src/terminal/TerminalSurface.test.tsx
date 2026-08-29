@@ -192,6 +192,22 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', "printf '%s\\n' 808")
   })
 
+  it('keeps a partially typed command intact while the same Session changes provider mode', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" profile="claude-code" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onData?.("printf '%s\\n' \"$((800 + 8)")
+
+    const providerInput = state.onData
+    view.rerender(<TerminalSurface sessionId="session-1" profile="shell" active visible />)
+    await waitFor(() => expect(state.onData).not.toBe(providerInput))
+    state.onData?.(")\"\r")
+    state.onMessage?.({ type: 'terminal.spawned', pid: 789 })
+
+    expect(state.sendTerminalInput).toHaveBeenCalledWith(
+      'session-1', "printf '%s\\n' \"$((800 + 8))\"\r"
+    )
+  })
+
   it('treats live terminal output as proof that a reattached input channel is ready', async () => {
     render(<TerminalSurface sessionId="session-1" profile="claude-code" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))

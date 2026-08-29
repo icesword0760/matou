@@ -56,9 +56,10 @@ describe('SessionCarousel', () => {
     fireEvent.pointerMove(card)
     act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
-    fireEvent.scroll(screen.getByRole('region', { name: '同级会话列表' }))
+    fireEvent.wheel(screen.getByRole('region', { name: '同级会话列表' }), { deltaX: 20, deltaY: 0 })
     expect(card.classList.contains('is-expanded')).toBe(false)
     act(() => vi.advanceTimersByTime(120))
+    expect(card.classList.contains('is-expanded')).toBe(false)
     fireEvent.pointerMove(card)
     act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
@@ -100,6 +101,26 @@ describe('SessionCarousel', () => {
     expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
     vi.advanceTimersByTime(240)
     expect(onCommitParent).toHaveBeenCalledWith('parent')
+    vi.useRealTimers()
+  })
+
+  it('persists an immediate user scroll even while initial geometry frames are settling', () => {
+    vi.useFakeTimers()
+    const onGeometryChange = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      initialScrollLeft={120} onGeometryChange={onGeometryChange}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 800 })
+    viewport.scrollLeft = 120
+
+    fireEvent.wheel(viewport, { deltaX: 200, deltaY: 0 })
+
+    expect(viewport.scrollLeft).toBe(320)
+    expect(onGeometryChange).toHaveBeenCalledWith({
+      scrollLeft: 320,
+      focusedSessionId: 'session-1'
+    }, { continuous: true })
     vi.useRealTimers()
   })
 })

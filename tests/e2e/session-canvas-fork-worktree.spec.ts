@@ -16,13 +16,31 @@ test.describe('real Claude Fork and Git worktree', () => {
       const source = activeSurface(fixture.page)
       await terminalCommand(source, 'claude --dangerously-skip-permissions')
       await expect(fixture.page.locator('.pane-title').filter({ hasText: 'Claude' })).toBeVisible({ timeout: 60_000 })
+      await expect(source).toHaveAttribute('data-profile', 'claude-code', { timeout: 60_000 })
       await expect(source.locator('.xterm-rows')).toContainText('Yes, I trust this folder', { timeout: 30_000 })
-      // Current Claude Code starts on the conservative "No, exit" choice.
-      // Select the visible trust choice explicitly rather than relying on a
-      // version-dependent default selection.
-      await source.locator('.xterm-helper-textarea').press('ArrowDown')
-      await expect.poll(async () => (await source.locator('.xterm-rows').textContent() ?? '')
-        .includes('❯ Yes, I trust this folder')).toBe(true)
+      // Claude may preserve either trust choice between releases. Move only
+      // after the initial full-screen redraw settles, then require two stable
+      // "Yes" frames so Enter cannot race stale terminal output.
+      const trustRows = source.locator('.xterm-rows')
+      let settledChoice = ''
+      let stableChoiceFrames = 0
+      await expect.poll(async () => {
+        const text = await trustRows.textContent() ?? ''
+        const choice = text.includes('❯ Yes, I trust this folder')
+          ? 'yes' : text.includes('❯ No, exit') ? 'no' : ''
+        stableChoiceFrames = choice && choice === settledChoice ? stableChoiceFrames + 1 : choice ? 1 : 0
+        settledChoice = choice
+        return stableChoiceFrames
+      }, { intervals: [100, 100, 100] }).toBeGreaterThanOrEqual(2)
+      if (settledChoice !== 'yes') {
+        await source.locator('.xterm-helper-textarea').press('ArrowDown')
+      }
+      let stableTrustedFrames = 0
+      await expect.poll(async () => {
+        const selected = (await trustRows.textContent() ?? '').includes('❯ Yes, I trust this folder')
+        stableTrustedFrames = selected ? stableTrustedFrames + 1 : 0
+        return stableTrustedFrames
+      }, { intervals: [100, 100, 100] }).toBeGreaterThanOrEqual(2)
       await source.locator('.xterm-helper-textarea').press('Enter')
       await expect(source.locator('.xterm-rows')).toContainText('Claude Code v', { timeout: 60_000 })
       const marker = `MATOU_${Date.now()}`

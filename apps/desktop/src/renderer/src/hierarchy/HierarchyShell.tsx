@@ -443,9 +443,9 @@ function HierarchyProduct({ projection, commands }: {
                       {...(snapshot.geometry
                         ? { geometry: snapshot.geometry as Array<{ ownerKey: string; geometry: Record<string, unknown> }> }
                         : {})}
-                      onPutGeometry={(ownerKey, geometry) => run(commands.putGeometry(
+                      onPutGeometry={(ownerKey, geometry) => commands.putGeometry(
                         scene.id, ownerKey, scene.layoutRevision ?? 0, geometry
-                      ))}
+                      )}
                       onActivate={(sessionId) => run(commands.setFocusedSession(scene.id, sessionId))}
                       onCreateShellSibling={(sessionId, parentSessionId) =>
                         run(commands.createShellSibling(scene.id, sessionId, parentSessionId))}

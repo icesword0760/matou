@@ -19,7 +19,7 @@ export function SessionCanvas(props: {
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
   geometry?: Array<{ ownerKey: string; geometry: Record<string, unknown> }>
-  onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): void
+  onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): unknown
 }) {
   const {
     graph, levelParentSessionId, disabled = false, renderSession, onActivate,
@@ -29,8 +29,15 @@ export function SessionCanvas(props: {
   } = props
   const geometryTimer = useRef<number | undefined>(undefined)
   const pendingGeometry = useRef<{ ownerKey: string; geometry: Record<string, unknown> } | undefined>(undefined)
+  const lastContinuousGeometryWrite = useRef<number | undefined>(undefined)
+  const geometryRetryCount = useRef(0)
+  const geometryWritesInFlight = useRef(0)
+  const geometryWriteSequence = useRef(0)
+  const geometryAckSequence = useRef(0)
   const onPutGeometryRef = useRef(onPutGeometry)
   const [showHistory, setShowHistory] = useState(false)
+  const [geometryPending, setGeometryPending] = useState(false)
+  const [lastSavedScrollLeft, setLastSavedScrollLeft] = useState<number | undefined>(undefined)
   const activeNodes = graph.nodes.filter(({ archivedAt }) => archivedAt === undefined)
   const focused = activeNodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? activeNodes[0]
   const parentId = levelParentSessionId !== undefined
@@ -53,19 +60,66 @@ export function SessionCanvas(props: {
     const pending = pendingGeometry.current
     if (pending) onPutGeometryRef.current?.(pending.ownerKey, pending.geometry)
   }, [])
-  const putGeometry = (next: { scrollLeft: number; focusedSessionId?: string }) => {
+  const flushGeometry = () => {
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    geometryTimer.current = undefined
+    const pending = pendingGeometry.current
+    pendingGeometry.current = undefined
+    if (!pending) return
+    lastContinuousGeometryWrite.current = performance.now()
+    geometryWritesInFlight.current += 1
+    const writeSequence = ++geometryWriteSequence.current
+    const write = onPutGeometryRef.current?.(pending.ownerKey, pending.geometry)
+    void Promise.resolve(write).then(() => {
+      geometryRetryCount.current = 0
+      if (writeSequence >= geometryAckSequence.current) {
+        geometryAckSequence.current = writeSequence
+        if (typeof pending.geometry.scrollLeft === 'number') {
+          setLastSavedScrollLeft(pending.geometry.scrollLeft)
+        }
+      }
+    }).catch(() => {
+      // A Session added immediately before the scroll may leave this render on
+      // the prior layout revision for a brief moment. Retry through the latest
+      // callback after the authoritative projection catches up.
+      if (geometryWriteSequence.current !== writeSequence || pendingGeometry.current !== undefined) return
+      if (geometryRetryCount.current >= 3) return
+      geometryRetryCount.current += 1
+      pendingGeometry.current = pending
+      geometryTimer.current = window.setTimeout(flushGeometry, 120)
+    }).finally(() => {
+      geometryWritesInFlight.current = Math.max(0, geometryWritesInFlight.current - 1)
+      if (geometryWritesInFlight.current === 0 && geometryTimer.current === undefined &&
+        pendingGeometry.current === undefined) setGeometryPending(false)
+    })
+  }
+  const putGeometry = (
+    next: { scrollLeft: number; focusedSessionId?: string },
+    options?: { continuous?: boolean }
+  ) => {
+    geometryRetryCount.current = 0
+    setGeometryPending(true)
     pendingGeometry.current = { ownerKey, geometry: next }
     if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    if (options?.continuous) {
+      const lastWrite = lastContinuousGeometryWrite.current
+      const elapsed = lastWrite === undefined ? Number.POSITIVE_INFINITY : performance.now() - lastWrite
+      if (elapsed >= 50) {
+        flushGeometry()
+        return
+      }
+      geometryTimer.current = window.setTimeout(flushGeometry, Math.max(1, 50 - elapsed))
+      return
+    }
     geometryTimer.current = window.setTimeout(() => {
-      geometryTimer.current = undefined
-      const pending = pendingGeometry.current
-      pendingGeometry.current = undefined
-      if (pending) onPutGeometryRef.current?.(pending.ownerKey, pending.geometry)
+      flushGeometry()
     }, 180)
   }
   if (!levelFocus) return <div className="session-canvas-empty" role="status">当前画布没有活跃会话</div>
 
-  return <section className="session-canvas" aria-label="会话画布" data-parent-session-id={parentId ?? ''}>
+  return <section className="session-canvas" aria-label="会话画布" aria-busy={geometryPending}
+    data-last-saved-scroll-left={lastSavedScrollLeft}
+    data-parent-session-id={parentId ?? ''}>
     <SessionHeader {...(parent ? { parentTitle: parent.title } : {})} sessionCount={siblings.length}
       canForkSibling={parent?.canFork === true} disabled={disabled}
       historicalCount={historicalCount} showHistory={historyVisible}

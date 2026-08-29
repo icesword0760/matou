@@ -67,6 +67,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const onFontSizeChangeRef = useRef(onFontSizeChange)
   const onSearchResultsRef = useRef(onSearchResults)
   const fontSizeRef = useRef(fontSize)
+  const pendingInputRef = useRef('')
+
+  useEffect(() => { pendingInputRef.current = '' }, [sessionId])
 
   useEffect(() => {
     visibleRef.current = visible
@@ -104,6 +107,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       onStatusChange('waiting-for-port')
       return
     }
+    setPid(undefined)
     const terminal = new Terminal({
       cursorBlink: true,
       cursorStyle: 'bar',
@@ -130,17 +134,16 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let replayRequested = false
     let replaying = false
     let spawned = false
-    let pendingInput = ''
     const markSpawned = () => {
       spawned = true
-      if (pendingInput) {
-        client.sendTerminalInput(sessionId, pendingInput)
-        pendingInput = ''
+      if (pendingInputRef.current) {
+        client.sendTerminalInput(sessionId, pendingInputRef.current)
+        pendingInputRef.current = ''
       }
     }
     const sendOrBufferInput = (data: string) => {
       if (spawned) client.sendTerminalInput(sessionId, data)
-      else pendingInput += data
+      else pendingInputRef.current += data
     }
     const replayProbe = shouldRunReplayProbe(
       sessionId,
@@ -281,7 +284,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [searchRequest])
 
   return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible}
-    data-session-id={sessionId} data-theme={themeKey} data-font-size={fontSize}
+    data-session-id={sessionId} data-profile={profile} data-theme={themeKey} data-font-size={fontSize}
     {...(pid === undefined ? {} : { 'data-pid': pid })} />
 }
 

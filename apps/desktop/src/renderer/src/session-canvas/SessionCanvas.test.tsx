@@ -161,6 +161,58 @@ describe('SessionCanvas', () => {
     )
     vi.useRealTimers()
   })
+
+  it('retries a geometry write that races the latest authoritative layout revision', async () => {
+    vi.useFakeTimers()
+    const onPutGeometry = vi.fn()
+      .mockRejectedValueOnce(new Error('layout revision changed'))
+      .mockResolvedValueOnce(undefined)
+    render(<SessionCanvas graph={graph()} onActivate={() => undefined}
+      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
+      onReopenHistorical={vi.fn()} onPutGeometry={onPutGeometry}
+      renderSession={(item) => <div>{item.title}</div>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    viewport.scrollLeft = 96
+    fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('aria-busy')).toBe('true')
+
+    await vi.advanceTimersByTimeAsync(180)
+    expect(onPutGeometry).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(120)
+    expect(onPutGeometry).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
+  })
+
+  it('keeps newer geometry when an older in-flight write fails', async () => {
+    vi.useFakeTimers()
+    let rejectFirst: ((reason: Error) => void) | undefined
+    const firstWrite = new Promise<void>((_resolve, reject) => { rejectFirst = reject })
+    const onPutGeometry = vi.fn()
+      .mockReturnValueOnce(firstWrite)
+      .mockResolvedValueOnce(undefined)
+    render(<SessionCanvas graph={graph()} onActivate={() => undefined}
+      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
+      onReopenHistorical={vi.fn()} onPutGeometry={onPutGeometry}
+      renderSession={(item) => <div>{item.title}</div>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+
+    viewport.scrollLeft = 96
+    fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
+    await vi.advanceTimersByTimeAsync(180)
+    expect(onPutGeometry).toHaveBeenCalledTimes(1)
+
+    viewport.scrollLeft = 144
+    fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
+    rejectFirst?.(new Error('layout revision changed'))
+    await vi.advanceTimersByTimeAsync(180)
+
+    expect(onPutGeometry).toHaveBeenCalledTimes(2)
+    expect(onPutGeometry).toHaveBeenLastCalledWith(
+      'session-group:scene-1:parent',
+      expect.objectContaining({ scrollLeft: 144, focusedSessionId: 'child-shell' })
+    )
+    vi.useRealTimers()
+  })
 })
 
 function renderCanvas(data: SessionGraphView, handlers?: {

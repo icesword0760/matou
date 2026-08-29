@@ -286,6 +286,10 @@ test('restores committed structure after a forced stop without restarting the fo
   let fixture: MatouFixture = await launchMatou()
   try {
     await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
+    // This case verifies crash durability after the create transaction has
+    // committed. Wait for the authoritative projection before typing so the
+    // foreground command cannot race onto the previously active Task.
+    await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     const surface = visibleSurfaces(fixture).first()
     const originalPid = await positivePid(surface)
     await typeTerminalCommand(
@@ -411,7 +415,7 @@ test('returns an unresponsive AI resume to a usable Shell after the ten-second d
       MATOU_CLAUDE_COMMAND: providerExecutable
     } })
     const fallback = visibleSurfaces(fixture).first()
-    await positivePid(fallback)
+    const providerPid = await positivePid(fallback)
     await fixture.page.waitForTimeout(8_000)
     await expect(fallback.locator('.xterm-rows')).not.toContainText(
       '[上次会话无法续接，已回到普通终端]'
@@ -422,6 +426,11 @@ test('returns an unresponsive AI resume to a usable Shell after the ten-second d
     )
     await expect.poll(() => readSessionKind(join(fixture.dataDirectory, 'matou.sqlite')))
       .toBe('shell')
+    await expect(fallback).toHaveAttribute('data-profile', 'shell')
+    await expect.poll(async () => {
+      const pid = Number(await fallback.getAttribute('data-pid'))
+      return pid > 0 && pid !== providerPid ? pid : 0
+    }).toBeGreaterThan(0)
     await typeTerminalCommand(fallback, "printf '%s\\n' \"$((800 + 8))\"")
     await expect(fallback.locator('.xterm-rows')).toContainText('808')
   } finally {

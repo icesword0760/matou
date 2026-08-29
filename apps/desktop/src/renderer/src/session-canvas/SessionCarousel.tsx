@@ -1,6 +1,6 @@
 import {
   useEffect, useLayoutEffect, useMemo, useRef, useState,
-  type PointerEvent, type ReactNode, type WheelEvent
+  type PointerEvent, type ReactNode
 } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
@@ -18,7 +18,10 @@ export function SessionCarousel(props: {
   onCommitParent?(parentSessionId: string): void
   geometryKey?: string
   initialScrollLeft?: number
-  onGeometryChange?(geometry: { scrollLeft: number; focusedSessionId?: string }): void
+  onGeometryChange?(
+    geometry: { scrollLeft: number; focusedSessionId?: string },
+    options?: { continuous?: boolean }
+  ): void
 }) {
   const {
     nodes, focusedSessionId, renderSession, onActivate, onEnsureSessionVisible,
@@ -32,6 +35,9 @@ export function SessionCarousel(props: {
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverTimer = useRef<number | undefined>(undefined)
   const wheelGesture = useRef(false)
+  const userScrollUntil = useRef(0)
+  const focusScrollUntil = useRef(0)
+  const pageClosing = useRef(false)
   const pointerGesture = useRef<{
     id: number
     startX: number
@@ -51,10 +57,20 @@ export function SessionCarousel(props: {
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
 
-  useEffect(() => () => {
-    if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
-    if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
-    if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
+  useEffect(() => {
+    const stopScrollAuthority = () => { userScrollUntil.current = 0; focusScrollUntil.current = 0 }
+    const closePage = () => { pageClosing.current = true; stopScrollAuthority() }
+    window.addEventListener('blur', stopScrollAuthority)
+    window.addEventListener('pagehide', closePage)
+    window.addEventListener('beforeunload', closePage)
+    return () => {
+      window.removeEventListener('blur', stopScrollAuthority)
+      window.removeEventListener('pagehide', closePage)
+      window.removeEventListener('beforeunload', closePage)
+      if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
+      if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
+      if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
+    }
   }, [])
   useLayoutEffect(() => {
     const viewport = viewportRef.current
@@ -74,23 +90,36 @@ export function SessionCarousel(props: {
     const viewport = viewportRef.current
     if (!viewport) return
     restoringGeometry.current = true
+    const target = Math.max(0, initialScrollLeft)
+    let frame = 0
+    let attempts = 0
+    let reachedFrames = 0
     const restore = () => {
-      viewport.scrollLeft = Math.max(0, initialScrollLeft)
+      viewport.scrollLeft = target
       updateVisibleWindow()
     }
     restore()
     skipFocusScrollAfterRestore.current = initialScrollLeft > 0
-    let secondFrame = 0
-    const firstFrame = requestAnimationFrame(() => {
+    const continueRestore = () => {
+      if (!restoringGeometry.current) return
       restore()
-      secondFrame = requestAnimationFrame(() => {
-        restore()
+      attempts += 1
+      const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+      const expected = Math.min(target, maxScrollLeft)
+      reachedFrames = Math.abs(viewport.scrollLeft - expected) < 1 && target <= maxScrollLeft + 1
+        ? reachedFrames + 1 : 0
+      // Terminal surfaces and responsive columns settle over multiple frames.
+      // Keep applying a persisted non-zero viewport until its full scroll range
+      // exists instead of permanently accepting the first clamped value.
+      if (target === 0 || (attempts >= 15 && reachedFrames >= 3) || attempts >= 90) {
         restoringGeometry.current = false
-      })
-    })
+        return
+      }
+      frame = requestAnimationFrame(continueRestore)
+    }
+    frame = requestAnimationFrame(continueRestore)
     return () => {
-      cancelAnimationFrame(firstFrame)
-      if (secondFrame) cancelAnimationFrame(secondFrame)
+      cancelAnimationFrame(frame)
     }
   }, [geometryKey, initialScrollLeft, visibleCount])
 
@@ -120,6 +149,7 @@ export function SessionCarousel(props: {
       return
     }
     const frame = requestAnimationFrame(() => {
+      focusScrollUntil.current = performance.now() + 600
       cardsRef.current.get(focusedSessionId)?.scrollIntoView?.({ behavior: 'smooth', inline: 'center', block: 'nearest' })
       ensureVisibleRef.current?.(focusedSessionId)
     })
@@ -135,14 +165,34 @@ export function SessionCarousel(props: {
     const unit = viewport.clientWidth > 0 ? viewport.clientWidth / visibleCount : 1
     setFirstVisible(Math.max(0, Math.min(nodes.length - visibleCount, Math.round(viewport.scrollLeft / unit))))
   }
-  const markScrolling = () => {
+  const markScrolling = (userInitiated = false) => {
+    // A wheel or drag may arrive before the two geometry-restoration frames
+    // finish after a Session was added. User input is authoritative from that
+    // point onward and must not be mistaken for a programmatic restore event.
+    if (userInitiated) {
+      restoringGeometry.current = false
+      // Browser kinetic scrolling can keep emitting native scroll events long
+      // after the original wheel event. Keep treating that stream as user
+      // intent so long gestures are checkpointed rather than only debounced.
+      userScrollUntil.current = performance.now() + 1_000
+    }
+    const continuousScroll = userInitiated || performance.now() < userScrollUntil.current ||
+      performance.now() < focusScrollUntil.current
+    if (continuousScroll) {
+      if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
+      hoverTimer.current = undefined
+      // The card under the pointer changes while the strip moves. Requiring a
+      // fresh hover after scrolling prevents a stale card from expanding again
+      // and shifting the saved viewport underneath the user.
+      setHoveredSessionId(null)
+    }
     setScrolling(true)
     updateVisibleWindow()
-    if (!restoringGeometry.current && viewportRef.current) {
+    if (!pageClosing.current && continuousScroll && !restoringGeometry.current && viewportRef.current) {
       onGeometryChange?.({
         scrollLeft: viewportRef.current.scrollLeft,
         ...(focusedSessionId ? { focusedSessionId } : {})
-      })
+      }, { continuous: true })
     }
     if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
     scrollTimer.current = window.setTimeout(() => setScrolling(false), 120)
@@ -154,6 +204,11 @@ export function SessionCarousel(props: {
       setHoveredSessionId(null)
       return
     }
+    // A deliberate hover after scrolling is a fresh interaction: stop treating
+    // later layout notifications as part of the previous wheel gesture so the
+    // chosen card can expand immediately.
+    userScrollUntil.current = 0
+    focusScrollUntil.current = 0
     hoverTimer.current = window.setTimeout(() => {
       hoverTimer.current = undefined
       setHoveredSessionId(sessionId)
@@ -186,7 +241,7 @@ export function SessionCarousel(props: {
       finishPullGesture()
     }, 240)
   }
-  const wheel = (event: WheelEvent<HTMLDivElement>) => {
+  const wheel = (event: WheelEvent) => {
     if (event.ctrlKey || event.metaKey) return
     const viewport = viewportRef.current
     if (!viewport) return
@@ -212,9 +267,18 @@ export function SessionCarousel(props: {
     }
     event.preventDefault()
     viewport.scrollLeft = Math.max(0, viewport.scrollLeft + delta)
-    markScrolling()
+    markScrolling(true)
     scheduleWheelEnd()
   }
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    // React registers wheel handlers passively in Chromium. This interaction
+    // must cancel the browser's native scroll because Matou applies the same
+    // delta itself and reserves edge movement for the parent-pull gesture.
+    viewport.addEventListener('wheel', wheel, { passive: false })
+    return () => viewport.removeEventListener('wheel', wheel)
+  })
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement
@@ -251,7 +315,7 @@ export function SessionCarousel(props: {
     if (Math.abs(totalX) > Math.abs(totalY)) {
       event.preventDefault()
       viewport.scrollLeft = Math.max(0, gesture.initialScrollLeft - totalX)
-      markScrolling()
+      markScrolling(true)
     }
   }
   const pointerEnd = (event: PointerEvent<HTMLDivElement>) => {
@@ -266,7 +330,7 @@ export function SessionCarousel(props: {
     {parent && pull.distance > 0 && <ParentProjection parent={parent}
       pullDistance={pull.distance} progress={pull.progress} />}
     <div className="session-carousel" ref={viewportRef} role="region" aria-label="同级会话列表"
-      data-visible-columns={visibleCount} onScroll={markScrolling} onWheel={wheel}
+      data-visible-columns={visibleCount} onScroll={() => markScrolling()}
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
