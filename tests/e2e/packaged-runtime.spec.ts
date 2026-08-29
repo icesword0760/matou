@@ -84,7 +84,7 @@ async function runPackagedSmoke(
     await page.waitForTimeout(200)
     await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
     if (exerciseProduct) {
-      await page.getByRole('button', { name: '水平分屏' }).click()
+      await page.getByRole('button', { name: '横向新增 Shell' }).click()
       await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
 
       const embedded = page.getByTestId('terminal-pane').first().locator('.terminal-surface')

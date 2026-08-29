@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { FocusEvent, ReactNode } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 
@@ -15,8 +15,22 @@ export function SessionCard(props: {
   return <article className={`session-card${focused ? ' is-focused' : ''}${expanded ? ' is-expanded' : ''}`}
     data-session-card={node.sessionId} data-in-viewport={inViewport}
     aria-label={`会话：${node.title}`} aria-current={focused ? 'true' : undefined}
-    onPointerEnter={() => onHover(node.sessionId)} onPointerLeave={() => onHover(null)}
-    onFocusCapture={() => onActivate(node.sessionId)}>
+    onPointerMove={(event) => {
+      // Keep title-bar actions stationary. The card still expands when the
+      // pointer is over its terminal content, while close/Fork remain reliable.
+      onHover((event.target as HTMLElement).closest('.terminal-pane-header')
+        ? null
+        : node.sessionId)
+    }}
+    onPointerLeave={() => onHover(null)}
+    onFocusCapture={(event: FocusEvent<HTMLElement>) => {
+      // Header actions must complete on their original DOM node. Activating the
+      // card on button focus refreshes the projection between pointer-down and
+      // click, which otherwise drops the user's requested action.
+      if (!focused && !(event.target as HTMLElement).closest('button,[role="menuitem"]')) {
+        onActivate(node.sessionId)
+      }
+    }}>
     {children}
   </article>
 }

@@ -36,6 +36,18 @@ describe('DagShortcutController', () => {
     expect(shortPress).not.toHaveBeenCalled()
   })
 
+  it('opens from a real key repeat when a backgrounded renderer timer is delayed', () => {
+    vi.useFakeTimers()
+    const longPress = vi.fn()
+    const controller = new DagShortcutController({ shortPress: vi.fn(), longPress, holdDuration: 450 })
+
+    controller.keyDown(key('Tab', true))
+    vi.setSystemTime(Date.now() + 500)
+    controller.keyDown({ ...key('Tab', true), repeat: true })
+
+    expect(longPress).toHaveBeenCalledTimes(1)
+  })
+
   it('clamps settings and clears pending state on blur or cancel', () => {
     expect(clampDagHoldDuration(100)).toBe(350)
     expect(clampDagHoldDuration(900)).toBe(800)

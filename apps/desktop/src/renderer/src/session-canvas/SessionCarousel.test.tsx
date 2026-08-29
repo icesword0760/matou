@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
@@ -46,14 +46,30 @@ describe('SessionCarousel', () => {
     vi.runAllTimers()
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
 
-    fireEvent.pointerEnter(card)
+    fireEvent.pointerMove(card)
+    act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
     fireEvent.scroll(screen.getByRole('region', { name: '同级会话列表' }))
     expect(card.classList.contains('is-expanded')).toBe(false)
-    vi.advanceTimersByTime(120)
-    fireEvent.pointerEnter(card)
+    act(() => vi.advanceTimersByTime(120))
+    fireEvent.pointerMove(card)
+    act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
+  })
+
+  it('does not turn header actions or portal menu items into carousel drag gestures', () => {
+    render(<SessionCarousel nodes={fixtures(1)} focusedSessionId="session-1"
+      onActivate={() => undefined}
+      renderSession={() => <button type="button" role="menuitem">⑂ Fork 会话</button>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    viewport.setPointerCapture = vi.fn()
+
+    fireEvent.pointerDown(screen.getByRole('menuitem', { name: '⑂ Fork 会话' }), {
+      button: 0, pointerId: 7, clientX: 30, clientY: 30
+    })
+
+    expect(viewport.setPointerCapture).not.toHaveBeenCalled()
   })
 
   it('requires a completed edge gesture before a second right pull can return to the parent', () => {

@@ -44,10 +44,11 @@ export class RuntimeRecoveryService {
 
   async recoverAll(): Promise<RuntimeRecoveryReport> {
     const report: RuntimeRecoveryReport = { interruptedRuns: [], recovered: [], failed: [] }
+    const failedDuringInterruption = new Set<string>()
     const transactions = new DomainTransactionManager(this.#database)
     const sessions = new SessionRepository(this.#database, transactions)
-    for (const run of this.#database.all<{ id: string }>(
-      `SELECT id FROM session_runs
+    for (const run of this.#database.all<{ id: string; session_id: string; profile: string }>(
+      `SELECT id, session_id, profile FROM session_runs
        WHERE status IN ('starting', 'running') AND runtime_generation <> ?
        ORDER BY started_at`,
       this.#database.runtimeGeneration
@@ -62,6 +63,25 @@ export class RuntimeRecoveryService {
         Date.now()
       )
       report.interruptedRuns.push(run.id)
+      if (run.profile === 'shell') {
+        let journal: SegmentJournal | undefined
+        try {
+          journal = await SegmentJournal.open(this.#dataRoot, run.session_id)
+          await journal.appendOutput(
+            journal.lastSequence + 1,
+            new TextEncoder().encode('\r\n\u001b[33m[上次命令已中断，未自动重新执行]\u001b[0m\r\n')
+          )
+        } catch (error) {
+          failedDuringInterruption.add(run.session_id)
+          report.failed.push({
+            sessionId: run.session_id,
+            code: error instanceof JournalCorruptionError ? 'JOURNAL_CORRUPT' : 'RECOVERY_FAILED',
+            message: errorMessage(error)
+          })
+        } finally {
+          await journal?.close().catch(() => undefined)
+        }
+      }
     }
     const persistedSessions = new Set(
       this.#database.all<{ id: string }>('SELECT id FROM sessions').map(({ id }) => id)
@@ -82,6 +102,7 @@ export class RuntimeRecoveryService {
     const checkpoints = new CheckpointManager(this.#dataRoot, this.#database)
     for (const sessionId of entries.sort()) {
       if (!persistedSessions.has(sessionId)) continue
+      if (failedDuringInterruption.has(sessionId)) continue
       let journal: SegmentJournal | undefined
       try {
         journal = await SegmentJournal.open(this.#dataRoot, sessionId)

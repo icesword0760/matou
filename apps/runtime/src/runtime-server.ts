@@ -397,6 +397,9 @@ export class RuntimeServer {
     const raw = this.#summaryBuffers.get(sessionId)
     if (raw === undefined) return
     try {
+      // The channel smoke fixture intentionally creates a transient PTY without
+      // a durable Session. Only graph-owned Sessions own persisted summaries.
+      if (!this.#sessionRepository.getSession(sessionId)) return
       this.#database.run(
         `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
          VALUES (?, ?, ?)
@@ -997,7 +1000,10 @@ export class RuntimeServer {
         type: 'terminal.spawned',
         protocolVersion: PROTOCOL_VERSION,
         sessionId: message.sessionId,
-        pid: session.pid
+        pid: session.pid,
+        ...(persistentAuthority && session.replayFromSequence > 1
+          ? { reattached: true, replayFromSequence: 0 }
+          : {})
       })
       this.publishSessionHud(message.sessionId)
       void this.refreshSessionHud(message.sessionId)

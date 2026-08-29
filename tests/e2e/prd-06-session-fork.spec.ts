@@ -40,10 +40,14 @@ test.describe('PRD 06 session fork', () => {
       await fixture.page.locator('.detach-context-overlay').click()
       await terminalCommand(source, 'cc')
       await expect(source.locator('.xterm-rows')).toContainText('READY:provider-source-e2e')
+      await terminalCommand(source, 'INITIAL_CONVERSATION')
+      await expect(source.locator('.xterm-rows'))
+        .toContainText('REPLY:provider-source-e2e:INITIAL_CONVERSATION')
 
       await expect(sourcePane.locator('.pane-title')).toHaveText('Claude')
       await expect.poll(async () => (await invocationLines(invocationLog))[0]?.args)
         .toContain('--dangerously-skip-permissions')
+      await expect(sourcePane.getByRole('button', { name: '从“Claude”创建子分支' })).toBeVisible()
       await openPaneMenu(sourcePane)
       await expect(fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeVisible()
       await expect(fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeVisible()
@@ -55,34 +59,35 @@ test.describe('PRD 06 session fork', () => {
         await menuGeometry(fixture.page), null, 2
       ))
       await fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' }).click()
+      await confirmCurrentWorktreeFork(fixture.page, '第一子分支')
 
-      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       const firstFork = visibleSurfaces(fixture.page).filter({ hasText: 'READY:provider-fork-e2e-1' })
       await expect(firstFork).toHaveCount(1)
       const firstForkSessionId = await requiredAttribute(firstFork, 'data-session-id')
       await expect(firstFork.locator('.xterm-helper-textarea')).toBeFocused()
-      expect((await firstFork.boundingBox())!.x).toBeGreaterThan((await source.boundingBox())!.x)
-
-      await terminalCommand(source, 'SOURCE_ONLY')
-      await terminalCommand(firstFork, 'FIRST_FORK_ONLY')
-      await expect(source.locator('.xterm-rows')).toContainText('REPLY:provider-source-e2e:SOURCE_ONLY')
-      await expect(source.locator('.xterm-rows')).not.toContainText('FIRST_FORK_ONLY')
-      await expect(firstFork.locator('.xterm-rows')).toContainText('REPLY:provider-fork-e2e-1:FIRST_FORK_ONLY')
-      await expect(firstFork.locator('.xterm-rows')).not.toContainText('SOURCE_ONLY')
-
       const firstForkPane = paneForSession(fixture.page, firstForkSessionId)
+      await expect(firstForkPane.locator('.pane-title')).toHaveText('Claude')
+      await terminalCommand(firstFork, 'FIRST_FORK_ONLY')
+      await expect(firstFork.locator('.xterm-rows')).toContainText('REPLY:provider-fork-e2e-1:FIRST_FORK_ONLY')
+      expect(await readProviderInput(inputDirectory, 'provider-source-e2e'))
+        .not.toContain('FIRST_FORK_ONLY')
+
       await openPaneMenu(firstForkPane)
       await fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' }).click()
-      await expect(visibleSurfaces(fixture.page)).toHaveCount(3)
+      await confirmCurrentWorktreeFork(fixture.page, '孙分支')
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       const secondFork = visibleSurfaces(fixture.page).filter({ hasText: 'READY:provider-fork-e2e-2' })
       await expect(secondFork).toHaveCount(1)
       const secondForkSessionId = await requiredAttribute(secondFork, 'data-session-id')
       await expect(secondFork.locator('.xterm-helper-textarea')).toBeFocused()
-      expect((await secondFork.boundingBox())!.x).toBeGreaterThan((await firstFork.boundingBox())!.x)
+      await expect(paneForSession(fixture.page, secondForkSessionId).locator('.pane-title'))
+        .toHaveText('Claude')
       await terminalCommand(secondFork, 'SECOND_FORK_ONLY')
       await expect(secondFork.locator('.xterm-rows'))
         .toContainText('REPLY:provider-fork-e2e-2:SECOND_FORK_ONLY')
-      await expect(firstFork.locator('.xterm-rows')).not.toContainText('SECOND_FORK_ONLY')
+      expect(await readProviderInput(inputDirectory, 'provider-fork-e2e-1'))
+        .not.toContain('SECOND_FORK_ONLY')
 
       const databaseBeforeRestart = readForkDatabase(join(fixture.dataDirectory, 'matou.sqlite'))
       expect(databaseBeforeRestart.sessions).toEqual(expect.arrayContaining([
@@ -106,13 +111,15 @@ test.describe('PRD 06 session fork', () => {
         .filter(({ args }) => args.includes('--fork-session')).length
       expect(forkLaunchCount).toBe(2)
       fixture = await restartMatou(fixture, { env: environment })
-      await expect(visibleSurfaces(fixture.page)).toHaveCount(3)
-      await expect(paneForSession(fixture.page, sourceSessionId).locator('.xterm-rows'))
-        .toContainText('READY:provider-source-e2e')
-      await expect(paneForSession(fixture.page, firstForkSessionId).locator('.xterm-rows'))
-        .toContainText('READY:provider-fork-e2e-1')
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       await expect(paneForSession(fixture.page, secondForkSessionId).locator('.xterm-rows'))
         .toContainText('READY:provider-fork-e2e-2')
+      await fixture.page.getByRole('button', { name: '返回父会话' }).click()
+      await expect(paneForSession(fixture.page, firstForkSessionId).locator('.xterm-rows'))
+        .toContainText('READY:provider-fork-e2e-1')
+      await fixture.page.getByRole('button', { name: '返回父会话' }).click()
+      await expect(paneForSession(fixture.page, sourceSessionId).locator('.xterm-rows'))
+        .toContainText('READY:provider-source-e2e')
       await expect.poll(async () => (await invocationLines(invocationLog)).length).toBeGreaterThanOrEqual(6)
       const restoredInvocations = await invocationLines(invocationLog)
       expect(restoredInvocations.filter(({ args }) => args.includes('--fork-session'))).toHaveLength(2)
@@ -128,9 +135,6 @@ test.describe('PRD 06 session fork', () => {
 
       const sourceAfterRestart = paneForSession(fixture.page, sourceSessionId).locator('.terminal-surface')
       const sourcePid = await positivePid(sourceAfterRestart)
-      await paneForSession(fixture.page, secondForkSessionId)
-        .getByRole('button', { name: '删除终端：Claude' }).click()
-      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
       await expect(sourceAfterRestart).toHaveAttribute('data-pid', String(sourcePid))
 
       await openPaneMenu(paneForSession(fixture.page, sourceSessionId))
@@ -165,21 +169,26 @@ test.describe('PRD 06 session fork', () => {
       const source = visibleSurfaces(fixture.page).first()
       await terminalCommand(source, 'claude')
       await expect(source.locator('.xterm-rows')).toContainText('READY:provider-source-e2e')
+      await terminalCommand(source, 'INITIAL_CONVERSATION')
+      await expect(source.locator('.xterm-rows'))
+        .toContainText('REPLY:provider-source-e2e:INITIAL_CONVERSATION')
       const sourceSessionId = await requiredAttribute(source, 'data-session-id')
+      await expect(paneForSession(fixture.page, sourceSessionId)
+        .getByRole('button', { name: '从“Claude”创建子分支' })).toBeVisible()
       await openPaneMenu(paneForSession(fixture.page, sourceSessionId))
       await fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' }).click()
+      await confirmCurrentWorktreeFork(fixture.page, '失败分支')
 
-      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
-      const failed = visibleSurfaces(fixture.page).filter({
-        hasText: '[Fork 未完成，请检查上方原因后重试]'
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(0)
+      const failedCard = fixture.page.locator('[data-session-card]').filter({
+        has: fixture.page.locator('.fork-failure-card')
       })
-      await expect(failed).toHaveCount(1)
-      await expect(failed.locator('.xterm-rows')).toContainText('No session found for requested id')
-      const failedSessionId = await requiredAttribute(failed, 'data-session-id')
+      await expect(failedCard).toHaveCount(1)
+      await expect(failedCard).toContainText('分支创建失败')
+      await expect(failedCard).toContainText('provider session not found')
+      const failedSessionId = await requiredAttribute(failedCard, 'data-session-card')
       const beforeInputs = await allProviderInput(fixture.rootDirectory)
-      await failed.locator('.xterm-helper-textarea').focus()
-      await failed.locator('.xterm-helper-textarea').pressSequentially('MUST_NOT_EXECUTE')
-      await failed.locator('.xterm-helper-textarea').press('Enter')
+      await expect(failedCard.getByRole('textbox', { name: 'Terminal input' })).toHaveCount(0)
       await expect.poll(() => allProviderInput(fixture.rootDirectory)).toBe(beforeInputs)
       expect(readForkDatabase(join(fixture.dataDirectory, 'matou.sqlite')).intents)
         .toContainEqual({ sessionId: failedSessionId, sourceSessionId, state: 'failed' })
@@ -202,7 +211,17 @@ function paneForSession(page: Page, sessionId: string): Locator {
 }
 
 async function openPaneMenu(pane: Locator): Promise<void> {
-  await pane.locator('.terminal-surface').click({ button: 'right', position: { x: 24, y: 80 } })
+  // The menu overlay is mounted by this real context-menu pointer sequence.
+  // Avoid retrying that already-successful sequence after the overlay appears.
+  await pane.locator('.terminal-surface').click({
+    button: 'right', position: { x: 24, y: 80 }, force: true
+  })
+}
+
+async function confirmCurrentWorktreeFork(page: Page, name: string): Promise<void> {
+  await page.getByLabel('分支名称').fill(name)
+  await expect(page.getByRole('radio', { name: /使用当前工作树/ })).toBeChecked()
+  await page.getByRole('button', { name: '创建分支', exact: true }).click()
 }
 
 async function terminalCommand(surface: Locator, command: string): Promise<void> {
@@ -240,6 +259,10 @@ async function allProviderInput(root: string): Promise<string> {
     `${name}:${await readFile(join(directory, name), 'utf8').catch(() => '')}`
   ))
   return values.join('\n')
+}
+
+async function readProviderInput(directory: string, providerId: string): Promise<string> {
+  return readFile(join(directory, `${providerId}.txt`), 'utf8').catch(() => '')
 }
 
 function readForkDatabase(path: string): {
@@ -327,15 +350,19 @@ if fork and os.environ.get('MATOU_PRD06_FAIL_FORK') == '1':
 
 settings_data=json.load(open(settings))
 url=settings_data['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
-body=json.dumps({'hook_event_name':'UserPromptSubmit','session_id':provider_id,'cwd':os.getcwd()}).encode()
-request=urllib.request.Request(url, data=body, headers={'content-type':'application/json'}, method='POST')
-urllib.request.urlopen(request, timeout=3).read()
+def hook(name):
+    body=json.dumps({'hook_event_name':name,'session_id':provider_id,'cwd':os.getcwd()}).encode()
+    request=urllib.request.Request(url, data=body, headers={'content-type':'application/json'}, method='POST')
+    urllib.request.urlopen(request, timeout=3).read()
+hook('SessionStart')
 print('X' * 2050, flush=True)
 print('READY:' + provider_id, flush=True)
 input_path=pathlib.Path(os.environ['MATOU_PRD06_INPUT_DIR']) / (provider_id + '.txt')
 for line in sys.stdin:
     value=line.rstrip('\\r\\n')
+    hook('UserPromptSubmit')
     with input_path.open('a') as output: output.write(value + '\\n')
     print(f'REPLY:{provider_id}:{value}', flush=True)
+    hook('Stop')
 `
 }

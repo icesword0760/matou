@@ -30,6 +30,7 @@ export function SessionCarousel(props: {
   const ensureVisibleRef = useRef(onEnsureSessionVisible)
   const scrollTimer = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
+  const hoverTimer = useRef<number | undefined>(undefined)
   const wheelGesture = useRef(false)
   const pointerGesture = useRef<{
     id: number
@@ -40,6 +41,7 @@ export function SessionCarousel(props: {
   } | null>(null)
   const pullController = useRef(new ParentPullController())
   const restoringGeometry = useRef(false)
+  const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0)
   const [firstVisible, setFirstVisible] = useState(0)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [scrolling, setScrolling] = useState(false)
@@ -52,6 +54,7 @@ export function SessionCarousel(props: {
   useEffect(() => () => {
     if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
     if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
+    if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
   }, [])
   useEffect(() => { ensureVisibleRef.current = onEnsureSessionVisible }, [onEnsureSessionVisible])
   useLayoutEffect(() => {
@@ -59,6 +62,7 @@ export function SessionCarousel(props: {
     if (!viewport) return
     restoringGeometry.current = true
     viewport.scrollLeft = Math.max(0, initialScrollLeft)
+    skipFocusScrollAfterRestore.current = initialScrollLeft > 0
     updateVisibleWindow()
     const frame = requestAnimationFrame(() => { restoringGeometry.current = false })
     return () => cancelAnimationFrame(frame)
@@ -85,6 +89,10 @@ export function SessionCarousel(props: {
 
   useEffect(() => {
     if (!focusedSessionId) return
+    if (skipFocusScrollAfterRestore.current) {
+      skipFocusScrollAfterRestore.current = false
+      return
+    }
     const frame = requestAnimationFrame(() => {
       cardsRef.current.get(focusedSessionId)?.scrollIntoView?.({ behavior: 'smooth', inline: 'center', block: 'nearest' })
       ensureVisibleRef.current?.(focusedSessionId)
@@ -103,7 +111,6 @@ export function SessionCarousel(props: {
   }
   const markScrolling = () => {
     setScrolling(true)
-    setHoveredSessionId(null)
     updateVisibleWindow()
     if (!restoringGeometry.current && viewportRef.current) {
       onGeometryChange?.({
@@ -113,6 +120,18 @@ export function SessionCarousel(props: {
     }
     if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
     scrollTimer.current = window.setTimeout(() => setScrolling(false), 120)
+  }
+  const hover = (sessionId: string | null) => {
+    if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
+    hoverTimer.current = undefined
+    if (sessionId === null) {
+      setHoveredSessionId(null)
+      return
+    }
+    hoverTimer.current = window.setTimeout(() => {
+      hoverTimer.current = undefined
+      setHoveredSessionId(sessionId)
+    }, 160)
   }
   const finishPullGesture = () => {
     const viewport = viewportRef.current
@@ -172,7 +191,10 @@ export function SessionCarousel(props: {
   }
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest('.terminal-surface')) return
+    const target = event.target as HTMLElement
+    if (event.button !== 0 || target.closest(
+      '.terminal-surface,button,input,textarea,select,a,[role="menuitem"]'
+    )) return
     const viewport = viewportRef.current
     if (!viewport) return
     pointerGesture.current = {
@@ -232,7 +254,7 @@ export function SessionCarousel(props: {
           onActivate={(sessionId) => {
             onGeometryChange?.({ scrollLeft: viewportRef.current?.scrollLeft ?? 0, focusedSessionId: sessionId })
             onActivate(sessionId)
-          }} onHover={setHoveredSessionId}>
+          }} onHover={hover}>
           {renderSession(node, inViewport.has(node.sessionId))}
         </SessionCard>
       </div>)}

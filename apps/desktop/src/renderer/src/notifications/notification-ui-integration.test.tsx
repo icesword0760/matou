@@ -123,7 +123,7 @@ describe('Kooky notification hierarchy interactions', () => {
     expect(store.snapshot().notifications).toHaveLength(0)
   })
 
-  it('shows a blue ring even for a focused read event and clears all pane notifications on focus', () => {
+  it('clears a focused pane notification without redundantly reactivating that pane', () => {
     const store = new AgentNotificationStore({ now: () => 10_000 })
     store.push({
       eventId: 'focused', eventType: 'completed', title: 'Claude Code', body: '当前面板完成',
@@ -139,7 +139,7 @@ describe('Kooky notification hierarchy interactions', () => {
     fireEvent.pointerDown(pane)
     expect(store.snapshot().notifications).toHaveLength(0)
     expect(pane.classList.contains('has-notification')).toBe(false)
-    expect(onActivate).toHaveBeenCalledWith('session-a')
+    expect(onActivate).not.toHaveBeenCalled()
   })
 })
 

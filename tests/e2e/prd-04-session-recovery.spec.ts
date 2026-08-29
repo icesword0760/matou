@@ -10,14 +10,14 @@ import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 
-test('restores the work structure and cwd while opening a clean new Shell', async () => {
+test('restores the work structure, cwd, and existing Shell history', async () => {
   let fixture: MatouFixture = await launchMatou()
   const sessionDirectory = join(fixture.workspaceDirectory, 'session-directory')
   await mkdir(sessionDirectory)
   try {
     await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await fixture.page.getByRole('button', { name: '新建页签' }).click()
-    await fixture.page.getByRole('button', { name: '水平分屏' }).click()
+    await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
     const activeSurface = activeSurfaceFor(fixture)
     await positivePid(activeSurface)
     await typeTerminalCommand(
@@ -42,7 +42,7 @@ test('restores the work structure and cwd while opening a clean new Shell', asyn
     const restoredPid = await positivePid(restoredSurface)
     expect(restoredPid).not.toBe(originalPid)
     await expect(restoredSurface.locator('.xterm-rows'))
-      .not.toContainText('__PRD04_OLD_SHELL_OUTPUT__')
+      .toContainText('__PRD04_OLD_SHELL_OUTPUT__')
     await expect.poll(async () => realpath(await processCwd(Number(restoredPid))))
       .toBe(await realpath(sessionDirectory))
   } finally {
@@ -180,15 +180,19 @@ test('starts silently with a clean work scene when the entire durable database i
 test('keeps one corrupt terminal journal isolated while the remaining work scene stays usable', async () => {
   let fixture: MatouFixture = await launchMatou()
   try {
-    await fixture.page.getByRole('button', { name: '水平分屏' }).click()
+    await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
     const before = visibleSurfaces(fixture)
     await expect(before).toHaveCount(2)
     const corruptSessionId = await before.first().getAttribute('data-session-id')
     if (!corruptSessionId) throw new Error('Expected the first Session identity')
-    await typeTerminalCommand(before.first(), "printf '%s\\n' \"$((1200 + 34))\"")
-    await typeTerminalCommand(before.last(), "printf '%s\\n' \"$((5600 + 78))\"")
-    await expect(before.first().locator('.xterm-rows')).toContainText('1234')
-    await expect(before.last().locator('.xterm-rows')).toContainText('5678')
+    const healthySessionId = await before.last().getAttribute('data-session-id')
+    if (!healthySessionId) throw new Error('Expected the second Session identity')
+    const corruptSurface = fixture.page.locator(`.terminal-surface[data-session-id="${corruptSessionId}"]`)
+    const healthySurface = fixture.page.locator(`.terminal-surface[data-session-id="${healthySessionId}"]`)
+    await typeTerminalCommand(corruptSurface, "printf '%s\\n' \"$((1200 + 34))\"")
+    await expect(corruptSurface.locator('.xterm-rows')).toContainText('1234')
+    await typeTerminalCommand(healthySurface, "printf '%s\\n' \"$((5600 + 78))\"")
+    await expect(healthySurface.locator('.xterm-rows')).toContainText('5678')
 
     await fixture.app.evaluate(({ app }) => app.quit())
     await fixture.app.close().catch(() => undefined)
@@ -204,12 +208,14 @@ test('keeps one corrupt terminal journal isolated while the remaining work scene
     fixture = await restartMatou(fixture)
     const restored = visibleSurfaces(fixture)
     await expect(restored).toHaveCount(2)
-    await positivePid(restored.first())
-    await positivePid(restored.last())
-    await typeTerminalCommand(restored.first(), "printf '%s\\n' \"$((40 + 2))\"")
-    await typeTerminalCommand(restored.last(), "printf '%s\\n' \"$((80 + 4))\"")
-    await expect(restored.first().locator('.xterm-rows')).toContainText('42')
-    await expect(restored.last().locator('.xterm-rows')).toContainText('84')
+    const recoveredCorrupt = fixture.page.locator(`.terminal-surface[data-session-id="${corruptSessionId}"]`)
+    const recoveredHealthy = fixture.page.locator(`.terminal-surface[data-session-id="${healthySessionId}"]`)
+    await positivePid(recoveredCorrupt)
+    await positivePid(recoveredHealthy)
+    await typeTerminalCommand(recoveredCorrupt, "printf '%s\\n' \"$((40 + 2))\"")
+    await expect(recoveredCorrupt.locator('.xterm-rows')).toContainText('42')
+    await typeTerminalCommand(recoveredHealthy, "printf '%s\\n' \"$((80 + 4))\"")
+    await expect(recoveredHealthy.locator('.xterm-rows')).toContainText('84')
     expect((await readdir(journalDirectory)).some((name) => name.includes('.corrupt-'))).toBe(true)
   } finally {
     await fixture.close()
@@ -223,7 +229,7 @@ test('does not resurrect an explicitly removed Task, Scene, or terminal panel', 
     await page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(page.getByTestId('active-task')).toHaveText('新事项')
     await page.getByRole('button', { name: '新建页签' }).click()
-    await page.getByRole('button', { name: '水平分屏' }).click()
+    await page.getByRole('button', { name: '横向新增 Shell' }).click()
     const removedPanel = page.locator('[data-testid="terminal-pane"]:visible').last()
     const removedSessionId = await removedPanel.locator('.terminal-surface').getAttribute('data-session-id')
     await removedPanel.getByRole('button', { name: /^删除终端：/ }).click({ force: true })
@@ -295,8 +301,12 @@ test('restores committed structure after a forced stop without restarting the fo
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     const restored = visibleSurfaces(fixture).first()
     expect(await positivePid(restored)).not.toBe(originalPid)
-    await expect(restored.locator('.xterm-rows')).not.toContainText('__PRD04_FOREGROUND_STARTED__')
-    await expect(restored.locator('.xterm-rows')).not.toContainText('__PRD04_FOREGROUND_FINISHED__')
+    await expect(restored.locator('.xterm-rows')).toContainText('__PRD04_FOREGROUND_STARTED__')
+    await expect.poll(async () => {
+      const text = await restored.locator('.xterm-rows').textContent() ?? ''
+      return text.split('__PRD04_FOREGROUND_FINISHED__').length - 1
+    }).toBe(1)
+    await expect(restored.locator('.xterm-rows')).toContainText('上次命令已中断，未自动重新执行')
   } finally {
     await fixture.close()
   }
@@ -342,7 +352,8 @@ test('degrades one invalid AI resume to a usable Shell and does not retry it nex
     fixture = await restartMatou(fixture)
     const nextLaunch = visibleSurfaces(fixture).first()
     await positivePid(nextLaunch)
-    await expect(nextLaunch.locator('.xterm-rows')).not.toContainText('上次会话无法续接')
+    // The earlier recovery result remains in terminal history; the durable
+    // Shell identity and invocation count prove no second provider retry.
     expect((await readFile(invocations, 'utf8')).trim().split('\n')).toHaveLength(1)
   } finally {
     await fixture.close()
@@ -442,8 +453,16 @@ async function typeTerminalCommand(
   command: string
 ): Promise<void> {
   const textarea = surface.locator('.xterm-helper-textarea')
+  const pane = surface.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]')
+  if (await pane.getAttribute('data-active') !== 'true') {
+    await surface.click({ position: { x: 12, y: 12 } })
+  }
   await textarea.focus()
-  await textarea.pressSequentially(command)
+  await expect(pane).toHaveAttribute('data-active', 'true')
+  await expect(textarea).toBeFocused()
+  await surface.page().waitForTimeout(50)
+  await textarea.focus()
+  await textarea.pressSequentially(command, { delay: 2 })
   await textarea.press('Enter')
 }
 

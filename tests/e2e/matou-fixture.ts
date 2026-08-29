@@ -1,5 +1,4 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
@@ -10,6 +9,7 @@ export interface MatouFixture {
   dataDirectory: string
   workspaceDirectory: string
   rootDirectory: string
+  electronUserDataDirectory: string
   close(): Promise<void>
 }
 
@@ -19,7 +19,7 @@ export interface LaunchMatouOptions {
 }
 
 export async function launchMatou(options: LaunchMatouOptions = {}): Promise<MatouFixture> {
-  const root = await mkdtemp(join(tmpdir(), 'matou-prd05-e2e-'))
+  const root = await mkdtemp('/tmp/matou-e2e-')
   return startMatou(root, options)
 }
 
@@ -35,21 +35,27 @@ export async function restartMatou(
 async function startMatou(root: string, options: LaunchMatouOptions = {}): Promise<MatouFixture> {
   const dataDirectory = join(root, 'data')
   const workspaceDirectory = join(root, 'matou_workspace')
+  const electronUserDataDirectory = join(root, 'electron-user-data')
   await mkdir(workspaceDirectory, { recursive: true })
+  await mkdir(electronUserDataDirectory, { recursive: true })
   const app = await electron.launch({
-    args: [resolve(import.meta.dirname, '../../apps/desktop')],
+    args: [
+      resolve(import.meta.dirname, '../../apps/desktop'),
+      `--user-data-dir=${electronUserDataDirectory}`
+    ],
     env: {
       ...process.env,
       ...options.env,
       MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
       MATOU_DEFAULT_WORKSPACE: workspaceDirectory,
+      ELECTRON_USER_DATA_DIR: electronUserDataDirectory,
       ...(options.preserveMainWindowCloseBehavior ? { MATOU_E2E_WINDOW_CLOSE: 'hide' } : {}),
       MATOU_RUNTIME_ENTRY: resolve(import.meta.dirname, '../../apps/runtime/dist/index.cjs')
     }
   })
   const page = await app.firstWindow()
   return {
-    app, page, dataDirectory, workspaceDirectory, rootDirectory: root,
+    app, page, dataDirectory, workspaceDirectory, rootDirectory: root, electronUserDataDirectory,
     close: async () => {
       await app.close()
       await rm(root, { recursive: true, force: true })

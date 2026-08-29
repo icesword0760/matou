@@ -297,6 +297,10 @@ function HierarchyProduct({ projection, commands }: {
     onShortPress: () => window.dispatchEvent(new Event('matou:forward-terminal-tab')),
     onLongPress: openDag
   })
+  useEffect(() => window.matouDesktop?.onDagShortcut?.((kind) => {
+    if (kind === 'long') openDag()
+    else window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+  }), [activeSceneId, focusedSessionId, projection.windowId, themeKey])
   useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
     if (selection.mainWindowId !== projection.windowId) return
     const graph = projection.sessionGraphs?.[selection.sceneId]

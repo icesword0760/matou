@@ -103,6 +103,7 @@ describe('SessionCanvas', () => {
     const viewport = screen.getByRole('region', { name: '同级会话列表' })
 
     expect(viewport.scrollLeft).toBe(77)
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
     viewport.scrollLeft = 128
     fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
     vi.advanceTimersByTime(179)

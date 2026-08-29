@@ -15,6 +15,7 @@ export class DagShortcutController {
   #timer: ReturnType<typeof setTimeout> | undefined
   #pending = false
   #opened = false
+  #startedAt = 0
 
   constructor(input: { shortPress(): void; longPress(): void; holdDuration?: number }) {
     this.#shortPress = input.shortPress
@@ -26,13 +27,19 @@ export class DagShortcutController {
     if (event.key !== 'Tab' || !event.altKey) return false
     event.preventDefault()
     event.stopPropagation()
-    if (event.repeat || this.#pending || this.#opened) return true
+    if (event.repeat) {
+      if (this.#pending && !this.#opened && Date.now() - this.#startedAt >= this.#holdDuration) {
+        this.#open()
+      }
+      return true
+    }
+    if (this.#pending || this.#opened) return true
     this.#pending = true
+    this.#startedAt = Date.now()
     this.#timer = setTimeout(() => {
       this.#timer = undefined
       if (!this.#pending) return
-      this.#opened = true
-      this.#longPress()
+      this.#open()
     }, this.#holdDuration)
     return true
   }
@@ -45,6 +52,7 @@ export class DagShortcutController {
     this.#clearTimer()
     this.#pending = false
     this.#opened = false
+    this.#startedAt = 0
     if (forward) this.#shortPress()
     return true
   }
@@ -53,6 +61,13 @@ export class DagShortcutController {
     this.#clearTimer()
     this.#pending = false
     this.#opened = false
+    this.#startedAt = 0
+  }
+
+  #open(): void {
+    this.#clearTimer()
+    this.#opened = true
+    this.#longPress()
   }
 
   #clearTimer(): void {
@@ -78,15 +93,12 @@ export function useDagShortcut(input: {
     })
     const down = (event: KeyboardEvent) => { controller.keyDown(event) }
     const up = (event: KeyboardEvent) => { controller.keyUp(event) }
-    const cancel = () => controller.cancel()
     window.addEventListener('keydown', down, true)
     window.addEventListener('keyup', up, true)
-    window.addEventListener('blur', cancel)
     return () => {
       controller.cancel()
       window.removeEventListener('keydown', down, true)
       window.removeEventListener('keyup', up, true)
-      window.removeEventListener('blur', cancel)
     }
   }, [input.enabled, input.holdDuration])
 }

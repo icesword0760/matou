@@ -6,7 +6,7 @@ test('shows the Kooky unread trail and navigates back to the originating termina
   const fixture = await launchMatou()
   try {
     const { page } = fixture
-    await page.getByRole('button', { name: '水平分屏' }).click()
+    await page.getByRole('button', { name: '横向新增 Shell' }).click()
     const panes = page.locator('[data-testid="terminal-pane"]:visible')
     await expect(panes).toHaveCount(2)
     const origin = panes.first()

@@ -11,6 +11,7 @@ export interface MatouDesktopApi {
   closeDagWindow(mainWindowId: string): Promise<void>
   onDagContext(listener: (context: DagWindowContext) => void): () => void
   onDagNodeSelected(listener: (selection: DagNodeSelection) => void): () => void
+  onDagShortcut(listener: (kind: 'short' | 'long') => void): () => void
 }
 
 export interface DetachedTerminalWindowInput {
@@ -55,5 +56,6 @@ export const DESKTOP_CHANNELS = {
   selectDagNode: 'matou:select-dag-node',
   closeDagWindow: 'matou:close-dag-window',
   dagContext: 'matou:dag-context',
-  dagNodeSelected: 'matou:dag-node-selected'
+  dagNodeSelected: 'matou:dag-node-selected',
+  dagShortcut: 'matou:dag-shortcut'
 } as const

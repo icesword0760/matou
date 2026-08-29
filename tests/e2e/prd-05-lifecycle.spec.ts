@@ -78,7 +78,7 @@ test('matches Kooky by protecting the last work scene and keeping the terminal l
   } finally { await fixture.close() }
 })
 
-test('persists Task order and each Scene divider geometry across restart', async () => {
+test('persists Task order and each canvas horizontal position across restart', async () => {
   let fixture: MatouFixture = await launchMatou()
   try {
     const { page } = fixture
@@ -91,25 +91,27 @@ test('persists Task order and each Scene divider geometry across restart', async
     await dragTaskBefore(page, '默认', '新事项 2')
     await expect.poll(() => taskTitles(page)).toEqual(['默认', '新事项 2', '新事项'])
 
-    await page.getByRole('button', { name: '水平分屏' }).click()
-    const separator = page.getByRole('separator').first()
-    const box = await separator.locator('xpath=ancestor::*[contains(@class,"split-node")][1]').boundingBox()
-    if (!box) throw new Error('split layout has no visible bounds')
-    await separator.hover()
-    await page.mouse.down()
-    await page.mouse.move(box.x + box.width * 0.35, box.y + box.height / 2)
-    await page.mouse.up()
-    await expect.poll(async () => parseFloat(
-      await page.locator('[data-testid^="split-child-"]').first().evaluate((element) =>
-        (element as HTMLElement).style.flexBasis
-      )
-    )).toBeCloseTo(35, 0)
-    await page.waitForTimeout(180)
+    for (let index = 0; index < 4; index += 1) {
+      await page.getByRole('button', { name: '横向新增 Shell' }).click()
+    }
+    const carousel = page.getByRole('region', { name: '同级会话列表' })
+    await carousel.hover()
+    await carousel.dispatchEvent('wheel', { deltaX: 520, deltaY: 0 })
+    let savedScrollLeft = 0
+    await expect.poll(async () => {
+      savedScrollLeft = await carousel.evaluate((element) => element.scrollLeft)
+      return savedScrollLeft
+    }).toBeGreaterThan(0)
+    await page.waitForTimeout(350)
+    savedScrollLeft = await carousel.evaluate((element) => element.scrollLeft)
+    await page.waitForTimeout(250)
 
     fixture = await restartMatou(fixture)
     await expect.poll(() => taskTitles(fixture.page)).toEqual(['默认', '新事项 2', '新事项'])
-    await expect(fixture.page.locator('[data-testid^="split-child-"]').first())
-      .toHaveAttribute('style', /flex-basis: 35%/)
+    await expect.poll(async () => Math.abs(
+      await fixture.page.getByRole('region', { name: '同级会话列表' })
+        .evaluate((element) => element.scrollLeft) - savedScrollLeft
+    )).toBeLessThan(5)
   } finally { await fixture.close() }
 })
 

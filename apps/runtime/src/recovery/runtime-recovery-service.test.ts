@@ -31,6 +31,13 @@ describe('RuntimeRecoveryService', () => {
        ) VALUES (?, ?, 1, ?, 'shell', 'running', 80, 24, 2)`,
       'run-stale', 'session-good', before.runtimeGeneration
     )
+    before.run(
+      `INSERT INTO session_runs (
+         id, session_id, ordinal, runtime_generation, profile, status,
+         cols, rows, started_at
+       ) VALUES (?, ?, 1, ?, 'shell', 'running', 80, 24, 2)`,
+      'run-stale-corrupt', 'session-corrupt', before.runtimeGeneration
+    )
 
     const good = await SegmentJournal.open(root, 'session-good')
     await good.appendOutput(1, Uint8Array.from([65]))
@@ -66,8 +73,11 @@ describe('RuntimeRecoveryService', () => {
     const report = await new RuntimeRecoveryService(root, after).recoverAll()
 
     expect(after.runtimeGeneration).not.toBe(priorGeneration)
-    expect(report.interruptedRuns).toEqual(['run-stale'])
+    expect(report.interruptedRuns).toEqual(['run-stale', 'run-stale-corrupt'])
     expect(after.get('SELECT status FROM session_runs WHERE id = ?', 'run-stale')).toEqual({
+      status: 'interrupted'
+    })
+    expect(after.get('SELECT status FROM session_runs WHERE id = ?', 'run-stale-corrupt')).toEqual({
       status: 'interrupted'
     })
     expect(report.recovered).toEqual([
@@ -78,13 +88,17 @@ describe('RuntimeRecoveryService', () => {
     ])
     expect(await readSessionFrames(root, 'session-good')).toEqual([
       { kind: 'output', sequence: 1, data: Uint8Array.from([65]) },
-      { kind: 'domain-cursor', sequence: 2, domainEventSequence: 2 }
+      expect.objectContaining({
+        kind: 'output', sequence: 2,
+        data: new TextEncoder().encode('\r\n\u001b[33m[上次命令已中断，未自动重新执行]\u001b[0m\r\n')
+      }),
+      { kind: 'domain-cursor', sequence: 3, domainEventSequence: 2 }
     ])
 
     const repeated = await new RuntimeRecoveryService(root, after).recoverAll()
     expect(repeated.interruptedRuns).toEqual([])
     expect(repeated.recovered).toEqual([
-      expect.objectContaining({ sessionId: 'session-corrupt', repairedAlignment: false }),
+      expect.objectContaining({ sessionId: 'session-corrupt', repairedAlignment: true }),
       expect.objectContaining({ sessionId: 'session-good', repairedAlignment: false })
     ])
     expect(repeated.failed).toEqual([])

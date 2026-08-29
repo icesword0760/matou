@@ -86,9 +86,10 @@ export function TerminalPane(props: {
     setContextMenu({ x: event.clientX, y: event.clientY })
   }
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible} onContextMenu={openPaneMenu} onPointerDown={() => {
+    data-active={active} hidden={!visible} onContextMenu={openPaneMenu} onPointerDown={(event) => {
+      if ((event.target as HTMLElement).closest('button,[role="menuitem"]')) return
       notificationStore.dismissSessionIndicator(session.id)
-      onActivate(session.id)
+      if (!active) onActivate(session.id)
     }}>
     <header className="terminal-pane-header split-pane-header" draggable={onDetach !== undefined}
       onDragEnd={(event) => {
@@ -103,13 +104,15 @@ export function TerminalPane(props: {
           onOpen={() => void onOpenChildren(session.id)} />}
       </div>
       <div className="terminal-pane-actions">
-        {canFork && <button className="pane-fork" type="button"
+        {canFork && <button className="pane-fork" type="button" draggable={false}
           aria-label={`从“${session.title}”创建子分支`} title="创建子分支"
+          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
             void onFork?.(session.id)
           }}>⑂</button>}
-        <button className="pane-close" aria-label={`删除终端：${session.title}`} onClick={(event) => {
+        <button className="pane-close" draggable={false} aria-label={`删除终端：${session.title}`}
+          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => {
           event.stopPropagation()
           requestRemove()
         }}>×</button>
@@ -175,11 +178,11 @@ export function TerminalPane(props: {
         {canFork && <button className="detach-menu-item" role="menuitem" onClick={() => {
           setContextMenu(null)
           void onFork?.(session.id)
-        }}>⑂ Fork 会话</button>}
+        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
         {onDetach && <button className="detach-menu-item" role="menuitem" onClick={() => {
           setContextMenu(null)
           void onDetach(session.id)
-        }}>↗ 独立窗口</button>}
+        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>↗ 独立窗口</button>}
       </div>
     </>, document.body)}
   </section>

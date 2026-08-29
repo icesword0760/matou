@@ -39,7 +39,7 @@ test('integrates the existing top controls into the macOS window chrome', async 
   } finally { await fixture.close() }
 })
 
-test('creates and renames a Task, adds a Scene, splits, and deletes one terminal', async () => {
+test('creates and renames a Task, adds a Scene, appends a sibling, and deletes one terminal', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
@@ -59,11 +59,12 @@ test('creates and renames a Task, adds a Scene, splits, and deletes one terminal
     await page.getByRole('tab').first().click()
     await page.getByRole('tab').last().click()
     await expect(page.locator('.scene-stage:not([hidden]) .xterm-helper-textarea')).toBeFocused()
-    await page.getByRole('button', { name: '水平分屏' }).click()
+    await page.getByRole('button', { name: '横向新增 Shell' }).click()
     await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
 
     const visiblePane = page.locator('[data-testid="terminal-pane"]:visible').last()
-    await visiblePane.getByRole('button', { name: /^删除终端：/ }).click({ force: true })
+    const closeButton = visiblePane.getByRole('button', { name: /^删除终端：/ })
+    await closeButton.click()
     await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(1)
   } finally { await fixture.close() }
 })

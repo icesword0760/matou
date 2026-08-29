@@ -96,6 +96,16 @@ export function DetachedTerminalApp() {
       })
     }
   })
+  useEffect(() => window.matouDesktop?.onDagShortcut?.((kind) => {
+    if (kind === 'short') {
+      window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+      return
+    }
+    void window.matouDesktop?.openDagWindow?.({
+      mainWindowId, sceneId, sessionId,
+      theme: themeKey === 'dark' ? 'dark' : 'light'
+    })
+  }), [mainWindowId, sceneId, sessionId, themeKey])
   useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
     document.documentElement.dataset.theme = themeKey

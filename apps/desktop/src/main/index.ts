@@ -1,3 +1,4 @@
+import { mkdirSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 
@@ -22,6 +23,11 @@ const dagBrowserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
 let mainWindowSequence = 0
+
+if (process.env.ELECTRON_USER_DATA_DIR) {
+  mkdirSync(process.env.ELECTRON_USER_DATA_DIR, { recursive: true })
+  app.setPath('userData', process.env.ELECTRON_USER_DATA_DIR)
+}
 
 const dagWindows = new DagWindowManager({
   createWindow: ({ context, bounds }) => createDagBrowserWindow(context, bounds),
@@ -86,6 +92,7 @@ async function createWindow(): Promise<BrowserWindow> {
 
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
+  installNativeDagShortcut(window)
   window.webContents.setWindowOpenHandler(() => {
     void createWindow()
     return { action: 'deny' }
@@ -132,6 +139,7 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   browserWindows.set(input.windowId, window)
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
+  installNativeDagShortcut(window)
   window.on('closed', () => {
     windows.unregister(input.windowId)
     browserWindows.delete(input.windowId)
@@ -210,6 +218,35 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
     onReady: (listener) => { readyListeners.push(listener) },
     onClosed: (listener) => { closedListeners.push(listener) }
   }
+}
+
+function installNativeDagShortcut(window: BrowserWindow): void {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let opened = false
+  window.webContents.on('before-input-event', (event, input) => {
+    if (input.key !== 'Tab' || !input.alt || input.control || input.meta || input.shift) return
+    event.preventDefault()
+    if (input.type === 'keyDown') {
+      if (timer !== undefined || opened || input.isAutoRepeat) return
+      timer = setTimeout(() => {
+        timer = undefined
+        opened = true
+        if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.dagShortcut, 'long')
+      }, 450)
+      return
+    }
+    if (input.type !== 'keyUp') return
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      timer = undefined
+      if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.dagShortcut, 'short')
+    }
+    opened = false
+  })
+  window.on('closed', () => {
+    if (timer !== undefined) clearTimeout(timer)
+    timer = undefined
+  })
 }
 
 function resolveRuntimeEntry(): string {

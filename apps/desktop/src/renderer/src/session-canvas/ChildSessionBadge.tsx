@@ -21,7 +21,8 @@ export function ChildSessionBadge(props: {
   ].filter(Boolean).join('；')
   return <span className="child-session-badge-wrap">
     <button type="button" className={`child-session-badge status-${highest}`}
-      aria-label={`查看 ${total} 个子会话`} title={detail} onClick={(event) => {
+      aria-label={`查看 ${total} 个子会话`} title={detail}
+      onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => {
         event.stopPropagation()
         onOpen()
       }}>

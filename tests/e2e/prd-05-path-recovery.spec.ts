@@ -16,7 +16,7 @@ test('preserves the work scene while the directory is missing and resumes after 
     await expect(page.getByTestId('terminal-pane')).toHaveCount(1)
     await expect(page.getByRole('button', { name: '在 matou_workspace 中新增事项' })).toBeDisabled()
     await expect(page.getByRole('button', { name: '新建页签' })).toBeDisabled()
-    await expect(page.getByRole('button', { name: '水平分屏' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: '横向新增 Shell' })).toBeDisabled()
 
     await rename(moved, fixture.workspaceDirectory)
     await expect(page.getByText('路径失效')).toHaveCount(0, { timeout: 10_000 })
