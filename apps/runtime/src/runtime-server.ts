@@ -38,6 +38,7 @@ import {
 } from './hierarchy/workspace-path-service'
 import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
 import { SessionInteractionService } from './session-canvas/session-interaction-service'
+import { ProviderModeService } from './session-canvas/provider-mode-service'
 
 export interface PortMessageEvent {
   data: unknown
@@ -95,6 +96,7 @@ export class RuntimeServer {
   readonly #workspacePaths: WorkspacePathService
   readonly #hierarchy: HierarchyApplicationService
   readonly #sessionInteractions: SessionInteractionService
+  readonly #providerModes: ProviderModeService
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
@@ -139,6 +141,7 @@ export class RuntimeServer {
     const transactions = new DomainTransactionManager(database)
     this.#hierarchy = new HierarchyApplicationService(database, transactions)
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
+    this.#providerModes = new ProviderModeService(database, transactions)
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#control = control
@@ -178,6 +181,25 @@ export class RuntimeServer {
   }
 
   providerIdentityRecorded(sessionId: string, runId: string): void {
+    const restoring = this.#database.get<{ id: string }>(
+      `SELECT id FROM provider_bindings
+       WHERE session_id = ? AND provider = 'claude-code' AND restore_state = 'restoring'
+       ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      sessionId
+    )
+    if (restoring) {
+      const now = Date.now()
+      try {
+        this.#providerModes.markClaudeActive({
+          commandId: `provider-restore-succeeded-${sessionId}-${runId}`,
+          commandType: 'session.restore-succeeded',
+          requestHash: `${sessionId}:${restoring.id}:${runId}`
+        }, { sessionId, bindingId: restoring.id, now })
+        this.flushSemanticEvents()
+      } catch (error) {
+        console.error(`[session.restore-succeeded] ${errorMessage(error)}`)
+      }
+    }
     if (this.#providerLaunchRunIds.get(sessionId) !== runId) return
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
@@ -874,14 +896,23 @@ export class RuntimeServer {
           if (naturalAgentFallback) {
             const now = Date.now()
             try {
-              this.#sessionRepository.returnAgentToShell({
+              this.#providerModes.markUserExited({
                 commandId: `runtime-agent-return-shell-${message.sessionId}-${now}-${randomUUID()}`,
                 commandType: 'session.agent-return-shell',
                 requestHash: `agent-return-shell:${message.sessionId}:${now}`
-              }, message.sessionId, now)
+              }, { sessionId: message.sessionId, now })
               void this.#spawnSerialized({ ...message, profile: 'shell' })
             } catch (error) {
-              console.error(`[session.agent-return-shell] ${errorMessage(error)}`)
+              try {
+                this.#sessionRepository.returnAgentToShell({
+                  commandId: `runtime-agent-return-shell-legacy-${message.sessionId}-${now}-${randomUUID()}`,
+                  commandType: 'session.agent-return-shell',
+                  requestHash: `agent-return-shell-legacy:${message.sessionId}:${now}`
+                }, message.sessionId, now)
+                void this.#spawnSerialized({ ...message, profile: 'shell' })
+              } catch (fallbackError) {
+                console.error(`[session.agent-return-shell] ${errorMessage(fallbackError)}`)
+              }
             }
             return false
           }
@@ -1105,21 +1136,33 @@ export class RuntimeServer {
   #markResumeFailed(sessionId: string, bindingId: string, reason: string): boolean {
     const now = Date.now()
     try {
-      this.#sessionRepository.failResumeToShell(
+      this.#providerModes.markRestoreFailed(
         {
           commandId: `runtime-resume-failed-${sessionId}-${now}-${randomUUID()}`,
           commandType: 'session.resume-failed',
           requestHash: `resume-failed:${sessionId}:${bindingId}:${now}`
         },
-        sessionId,
-        bindingId,
-        reason,
-        now
+        { sessionId, bindingId, reason, now }
       )
       return true
-    } catch (error) {
-      console.error(`[session.resume-failed] ${errorMessage(error)}`)
-      return false
+    } catch (graphError) {
+      try {
+        this.#sessionRepository.failResumeToShell(
+          {
+            commandId: `runtime-resume-failed-legacy-${sessionId}-${now}-${randomUUID()}`,
+            commandType: 'session.resume-failed',
+            requestHash: `resume-failed-legacy:${sessionId}:${bindingId}:${now}`
+          },
+          sessionId,
+          bindingId,
+          reason,
+          now
+        )
+        return true
+      } catch (error) {
+        console.error(`[session.resume-failed] ${errorMessage(error)}`)
+        return false
+      }
     }
   }
 

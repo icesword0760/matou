@@ -218,6 +218,8 @@ export interface SessionGraphNode {
   currentMode: SessionCurrentMode
   workStatus: SessionWorkStatus
   providerRestoreState: ProviderRestoreState
+  providerRestoreError?: string
+  canFork: boolean
   title: string
   cwd: string
   worktree?: {

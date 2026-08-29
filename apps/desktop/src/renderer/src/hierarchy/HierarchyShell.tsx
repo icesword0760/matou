@@ -310,6 +310,8 @@ function HierarchyProduct({ projection, commands }: {
                       if (detachedWindow) {
                         return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
                       }
+                      const graphNode = projection.sessionGraphs?.[scene.id]?.nodes
+                        .find(({ sessionId }) => sessionId === session.id)
                       return <TerminalPane session={session}
                         active={projection.navigation.sessionByScene[scene.id] === session.id}
                         visible={scene.id === activeSceneId}
@@ -324,8 +326,16 @@ function HierarchyProduct({ projection, commands }: {
                         focusRequest={scene.id === activeSceneId && session.id === focusedSessionId
                           ? terminalFocusRequest : 0}
                         resumable={projection.sessionHuds?.find(({ sessionId }) => sessionId === session.id)?.resumable === true}
+                        {...(graphNode ? {
+                          forkReady: graphNode.canFork,
+                          providerRestoreState: graphNode.providerRestoreState,
+                          ...(graphNode.providerRestoreError
+                            ? { restoreError: graphNode.providerRestoreError }
+                            : {})
+                        } : {})}
                         {...(workspace ? { workspaceId: workspace.id } : {})}
                         onActivate={commands.activateSession} onDelete={commands.deleteSession}
+                        onRetryRestore={commands.retryProviderRestore}
                         onFork={() => commands.forkSession(scene.id, session.id)}
                         {...(window.matouDesktop?.createDetachedTerminalWindow
                           ? { onDetach: async () => {

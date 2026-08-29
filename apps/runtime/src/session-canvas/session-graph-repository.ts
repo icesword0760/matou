@@ -38,6 +38,8 @@ interface GraphRow extends MembershipRow {
   relation_kind: 'derived-from' | 'forked-from' | null
   relation_created_at: number | null
   restore_state: ProviderRestoreState | null
+  restore_error: string | null
+  provider_metadata_json: string | null
   worktree_path: string | null
   branch_name: string | null
   detached_window_id: string | null
@@ -174,6 +176,8 @@ export function projectSceneGraphFrom(
          structural.relation_kind,
          structural.created_at AS relation_created_at,
          provider.restore_state,
+         provider.restore_error,
+         provider.metadata_json AS provider_metadata_json,
          worktrees.worktree_path,
          worktrees.branch_name,
          detached.native_window_key AS detached_window_id
@@ -245,6 +249,10 @@ export function projectSceneGraphFrom(
         currentMode: row.kind,
         workStatus: mapWorkStatus(row.status),
         providerRestoreState: row.restore_state ?? 'none',
+        ...(row.restore_error === null ? {} : { providerRestoreError: row.restore_error }),
+        canFork: row.kind === 'claude-code' &&
+          row.restore_state !== 'failed' &&
+          providerCanFork(row.provider_metadata_json),
         title: row.title,
         cwd: row.cwd,
         ...(row.worktree_path === null || row.branch_name === null ? {} : {
@@ -331,6 +339,18 @@ function mapWorkStatus(status: SessionStatus): SessionWorkStatus {
     case 'exited':
     case 'archived':
       return 'exited'
+  }
+}
+
+function providerCanFork(metadataJson: string | null): boolean {
+  if (metadataJson === null) return false
+  try {
+    const metadata = JSON.parse(metadataJson) as unknown
+    return typeof metadata === 'object' && metadata !== null &&
+      !Array.isArray(metadata) &&
+      (metadata as Record<string, unknown>).canFork === true
+  } catch {
+    return false
   }
 }
 

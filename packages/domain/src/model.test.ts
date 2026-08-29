@@ -58,6 +58,7 @@ describe('session canvas graph models', () => {
       currentMode: 'shell',
       workStatus: 'idle',
       providerRestoreState: 'failed',
+      canFork: false,
       title: '方案 A',
       cwd: '/tmp/workspace',
       activeChildCount: 2,

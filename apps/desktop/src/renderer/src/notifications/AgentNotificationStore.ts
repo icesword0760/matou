@@ -12,6 +12,7 @@ export interface AgentNotificationInput {
   sessionId?: string | null
   sound?: boolean
   cooldownKey?: string
+  replacementKey?: string
   isFocusedSession?: boolean
   teamRole?: string
   teamStatus?: string
@@ -32,6 +33,7 @@ export interface AgentNotification {
   timestamp: number
   read: boolean
   sound: boolean
+  replacementKey: string
   teamRole: string
   teamStatus: string
   teamStatusTone: string
@@ -77,6 +79,38 @@ export class AgentNotificationStore {
 
   push(input: AgentNotificationInput): AgentNotification | null {
     const now = this.#now()
+    const replacementKey = input.replacementKey?.trim() ?? ''
+    const replacementIndex = replacementKey
+      ? this.#notifications.findIndex((notification) => notification.replacementKey === replacementKey)
+      : -1
+    if (replacementIndex >= 0) {
+      const current = this.#notifications[replacementIndex]!
+      const sessionId = input.sessionId ?? null
+      Object.assign(current, {
+        eventId: input.eventId,
+        eventType: input.eventType,
+        title: input.title,
+        subtitle: input.subtitle ?? '',
+        body: input.body ?? '',
+        workspaceId: input.workspaceId ?? null,
+        taskId: input.taskId ?? null,
+        sceneId: input.sceneId ?? null,
+        sessionId,
+        timestamp: now,
+        read: input.isFocusedSession === true,
+        sound: input.sound !== false,
+        replacementKey,
+        teamRole: input.teamRole ?? '',
+        teamStatus: input.teamStatus ?? '',
+        teamStatusTone: input.teamStatusTone ?? ''
+      })
+      this.#notifications.splice(replacementIndex, 1)
+      this.#notifications.unshift(current)
+      if (input.isFocusedSession && sessionId) this.#focusedReadIndicators.add(sessionId)
+      if (!input.isFocusedSession && current.sound && this.#soundEnabled) this.#playSound()
+      this.#emit()
+      return current
+    }
     const cooldownKey = this.#cooldownKey(input)
     const lastTime = this.#cooldowns.get(cooldownKey)
     if (lastTime !== undefined && now - lastTime < this.#cooldownMs) return null
@@ -103,6 +137,7 @@ export class AgentNotificationStore {
       timestamp: now,
       read: input.isFocusedSession === true,
       sound: input.sound !== false,
+      replacementKey,
       teamRole: input.teamRole ?? '',
       teamStatus: input.teamStatus ?? '',
       teamStatusTone: input.teamStatusTone ?? ''
@@ -180,6 +215,15 @@ export class AgentNotificationStore {
 
   remove(id: string): void {
     const index = this.#notifications.findIndex((notification) => notification.id === id)
+    if (index < 0) return
+    this.#notifications.splice(index, 1)
+    this.#emit()
+  }
+
+  removeByReplacementKey(replacementKey: string): void {
+    const normalized = replacementKey.trim()
+    if (!normalized) return
+    const index = this.#notifications.findIndex((notification) => notification.replacementKey === normalized)
     if (index < 0) return
     this.#notifications.splice(index, 1)
     this.#emit()

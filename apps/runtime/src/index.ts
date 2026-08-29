@@ -26,6 +26,7 @@ import { DomainTransactionManager } from './storage/domain-transaction'
 import { NotificationProjection } from './product/experience-foundation'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
+import { ProviderModeService } from './session-canvas/provider-mode-service'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -69,6 +70,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const notifications = new NotificationProjection()
   const transactions = new DomainTransactionManager(database)
   const sessionRepository = new SessionRepository(database, transactions)
+  const providerModes = new ProviderModeService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
   const rpcRouter = new RuntimeRpcRouter(database, notifications)
@@ -93,8 +95,18 @@ async function initializeRuntime(): Promise<RuntimeState> {
       sessionHuds.ingestProvider(sessionId, payload)
       for (const server of servers) void server.refreshSessionHud(sessionId)
     },
-    onIdentityRecorded: ({ sessionId, runId }) => {
+    onIdentityRecorded: ({ sessionId, runId, providerSessionId, eventName }) => {
       sessionHuds.markResumable(sessionId)
+      const now = Date.now()
+      try {
+        providerModes.observeHook({
+          commandId: `provider-mode-${runId}-${eventName}-${randomUUID()}`,
+          commandType: 'provider-hook.mode',
+          requestHash: `${sessionId}:${providerSessionId}:${eventName}:${now}`
+        }, { sessionId, providerSessionId, eventName, now })
+      } catch (error) {
+        console.error(`[provider-mode] ${errorMessage(error)}`)
+      }
       for (const server of servers) {
         server.providerIdentityRecorded(sessionId, runId)
         void server.refreshSessionHud(sessionId)
@@ -172,3 +184,7 @@ parentPort.on('message', async (event) => {
     return
   }
 })
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}

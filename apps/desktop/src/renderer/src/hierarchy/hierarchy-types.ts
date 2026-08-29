@@ -31,6 +31,8 @@ export interface SessionGraphNodeView {
   currentMode: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
   workStatus: 'starting' | 'idle' | 'running' | 'needs-input' | 'error' | 'interrupted' | 'exited'
   providerRestoreState: 'none' | 'restoring' | 'failed'
+  providerRestoreError?: string
+  canFork: boolean
   title: string
   cwd: string
   activeChildCount: number

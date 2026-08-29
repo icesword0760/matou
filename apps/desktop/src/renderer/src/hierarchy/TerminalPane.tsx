@@ -28,12 +28,17 @@ export function TerminalPane(props: {
   onActivate(sessionId: string): unknown
   onDelete(sessionId: string, confirmed?: boolean): unknown
   resumable?: boolean
+  forkReady?: boolean
+  providerRestoreState?: 'none' | 'restoring' | 'failed'
+  restoreError?: string
+  onRetryRestore?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
-    pathValid = true, workspaceId, sceneId, resumable = false,
+    pathValid = true, workspaceId, sceneId, resumable = false, forkReady,
+    providerRestoreState = 'none', restoreError, onRetryRestore,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onDetach
@@ -60,7 +65,7 @@ export function TerminalPane(props: {
     if (closeRequest > 0) requestRemove()
   }, [closeRequest, requestRemove])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
-  const canFork = session.kind === 'claude-code' && resumable && onFork !== undefined
+  const canFork = session.kind === 'claude-code' && (forkReady ?? resumable) && onFork !== undefined
   const hasPaneMenu = canFork || onDetach !== undefined
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
     if (!hasPaneMenu || (event.target as HTMLElement).closest('button')) return
@@ -89,6 +94,18 @@ export function TerminalPane(props: {
       </div>
     </header>
     {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
+    {providerRestoreState === 'failed' && visible && <div className="provider-restore-banner" role="status">
+      <div><strong>Claude Code 恢复失败</strong>
+        {restoreError && <span className="provider-restore-reason">{restoreError}</span>}
+      </div>
+      {onRetryRestore && <button type="button" onClick={(event) => {
+        event.stopPropagation()
+        void onRetryRestore(session.id)
+      }}>重试恢复</button>}
+    </div>}
+    {providerRestoreState === 'restoring' && visible && <div className="provider-restore-banner restoring" role="status">
+      <strong>正在恢复 Claude Code 会话…</strong>
+    </div>}
     <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} inputDisabled={!pathValid}

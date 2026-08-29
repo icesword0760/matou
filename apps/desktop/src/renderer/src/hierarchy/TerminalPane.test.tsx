@@ -86,6 +86,33 @@ describe('Terminal pane', () => {
     expect(screen.queryByText('⑂ Fork 会话')).toBeNull()
     expect(screen.getByText('↗ 独立窗口')).toBeTruthy()
   })
+
+  it('keeps a failed Claude restore usable as Shell with one retry action', async () => {
+    const user = userEvent.setup()
+    const onRetryRestore = vi.fn()
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'shell', title: 'Shell' }}
+      providerRestoreState="failed" restoreError="provider session not found"
+      onRetryRestore={onRetryRestore} />)
+
+    expect(screen.getByRole('status').textContent).toContain('Claude Code 恢复失败')
+    expect(screen.getByText('provider session not found')).toBeTruthy()
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '重试恢复' }))
+    expect(onRetryRestore).toHaveBeenCalledWith('session-1')
+  })
+
+  it('shows an ordinary Shell after a manual Claude exit', () => {
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'shell', title: 'Shell' }}
+      providerRestoreState="none" />)
+
+    expect(screen.queryByText('Claude Code 恢复失败')).toBeNull()
+    expect(screen.queryByText('Claude Code 已退出')).toBeNull()
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+  })
 })
 
 function fixture() {

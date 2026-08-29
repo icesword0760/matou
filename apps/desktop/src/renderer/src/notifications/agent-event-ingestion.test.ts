@@ -55,6 +55,46 @@ describe('ingestAgentNotification', () => {
     expect(ingestAgentNotification(event, projection(), undefined, store)).toBe(false)
     expect(store.snapshot().notifications).toHaveLength(0)
   })
+
+  it('updates and dismisses the one recovery notification for a Session', () => {
+    let now = 20
+    const store = new AgentNotificationStore({ now: () => now })
+    const failed = domainEvent()
+    failed.eventId = 'restore-failed'
+    failed.payload = {
+      targetSessionId: 'session-1', provider: 'claude-code', runId: 'restore:binding-1',
+      event: {
+        operation: 'upsert', replacementKey: 'provider-restore:session-1',
+        eventType: 'error', title: 'Claude Code 恢复失败', body: '会话不存在', sound: true
+      }
+    }
+    ingestAgentNotification(failed, projection(), undefined, store)
+
+    now = 21
+    const retrying = domainEvent()
+    retrying.eventId = 'restore-retrying'
+    retrying.payload = {
+      targetSessionId: 'session-1', provider: 'claude-code', runId: 'restore:binding-1',
+      event: {
+        operation: 'upsert', replacementKey: 'provider-restore:session-1',
+        eventType: 'attention', title: '正在恢复 Claude Code', sound: false
+      }
+    }
+    ingestAgentNotification(retrying, projection(), undefined, store)
+    expect(store.snapshot().notifications).toHaveLength(1)
+    expect(store.snapshot().notifications[0]).toMatchObject({
+      eventId: 'restore-retrying', title: '正在恢复 Claude Code'
+    })
+
+    const dismissed = domainEvent()
+    dismissed.eventId = 'restore-succeeded'
+    dismissed.payload = {
+      targetSessionId: 'session-1', provider: 'claude-code', runId: 'restore:binding-1',
+      event: { operation: 'dismiss', replacementKey: 'provider-restore:session-1' }
+    }
+    ingestAgentNotification(dismissed, projection(), undefined, store)
+    expect(store.snapshot().notifications).toHaveLength(0)
+  })
 })
 
 function domainEvent(): DomainEventWireEnvelope {

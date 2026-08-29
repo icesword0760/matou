@@ -54,6 +54,9 @@ interface BindingRow {
   updated_at: number
   validated_at: number | null
   invalidated_at: number | null
+  restore_state: 'none' | 'restoring' | 'failed'
+  restore_error: string | null
+  user_exited_at: number | null
 }
 
 export type ProviderPermissionMode =
@@ -779,6 +782,9 @@ function mapBinding(row: BindingRow): ProviderBinding {
     provider: row.provider,
     providerSessionId: row.provider_session_id,
     resumeState: row.resume_state,
+    restoreState: row.restore_state,
+    ...(row.restore_error === null ? {} : { restoreError: row.restore_error }),
+    ...(row.user_exited_at === null ? {} : { userExitedAt: row.user_exited_at }),
     metadata: parseMetadata(row.metadata_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,

@@ -24,6 +24,7 @@ import { SceneRepository } from '../scenes/scene-repository'
 import { SessionGraphRepository } from '../session-canvas/session-graph-repository'
 import { SessionCanvasService } from '../session-canvas/session-canvas-service'
 import { SessionInteractionService } from '../session-canvas/session-interaction-service'
+import { ProviderModeService } from '../session-canvas/provider-mode-service'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -64,6 +65,7 @@ export class RuntimeRpcRouter {
   readonly #sessionGraphs: SessionGraphRepository
   readonly #sessionCanvas: SessionCanvasService
   readonly #sessionInteractions: SessionInteractionService
+  readonly #providerModes: ProviderModeService
 
   constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
@@ -84,6 +86,7 @@ export class RuntimeRpcRouter {
     this.#sessionGraphs = new SessionGraphRepository(database, transactions)
     this.#sessionCanvas = new SessionCanvasService(database, transactions)
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
+    this.#providerModes = new ProviderModeService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -331,6 +334,11 @@ export class RuntimeRpcRouter {
             ['submit', 'control', 'provider-action'] as const,
             'interactionKind'
           ),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.retry-provider-restore':
+        return this.#providerModes.retryRestore(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })
       case 'hierarchy.fork-session':

@@ -13,6 +13,11 @@ export function ingestAgentNotification(
   const payload = object(envelope.payload)
   const providerEvent = object(payload?.event)
   if (!providerEvent) return false
+  const replacementKey = text(providerEvent.replacementKey)
+  if (text(providerEvent.operation) === 'dismiss') {
+    if (replacementKey) store.removeByReplacementKey(replacementKey)
+    return true
+  }
   const sessionId = text(envelope.sessionId) ?? text(payload?.targetSessionId) ?? text(envelope.aggregateId)
   const sceneId = projection.sceneSnapshots?.find(({ mounts }) =>
     mounts.some(({ sessionId: mounted }) => mounted === sessionId)
@@ -29,6 +34,7 @@ export function ingestAgentNotification(
     sessionId: sessionId ?? null,
     sound: providerEvent.sound !== false,
     ...(text(providerEvent.cooldownKey) ? { cooldownKey: text(providerEvent.cooldownKey)! } : {}),
+    ...(replacementKey ? { replacementKey } : {}),
     isFocusedSession: Boolean(sessionId && sessionId === focusedSessionId),
     teamRole: text(providerEvent.teamRole) ?? '',
     teamStatus: text(providerEvent.teamStatus) ?? '',

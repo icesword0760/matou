@@ -17,6 +17,31 @@ describe('AgentNotificationStore', () => {
     expect(store.snapshot().unreadCount).toBe(1)
   })
 
+  it('updates one recovery notification in place instead of stacking retry states', () => {
+    let now = 1_000
+    const store = new AgentNotificationStore({ now: () => now })
+
+    const failed = store.push(event({
+      eventId: 'restore-failed', eventType: 'error',
+      title: 'Claude Code 恢复失败', replacementKey: 'provider-restore:session'
+    }))!
+    now = 1_100
+    const retrying = store.push(event({
+      eventId: 'restore-retrying', eventType: 'attention',
+      title: '正在恢复 Claude Code', replacementKey: 'provider-restore:session', sound: false
+    }))!
+
+    expect(retrying.id).toBe(failed.id)
+    expect(store.snapshot().notifications).toHaveLength(1)
+    expect(store.snapshot().notifications[0]).toMatchObject({
+      eventId: 'restore-retrying', title: '正在恢复 Claude Code',
+      replacementKey: 'provider-restore:session'
+    })
+
+    store.removeByReplacementKey('provider-restore:session')
+    expect(store.snapshot().notifications).toHaveLength(0)
+  })
+
   it('drops a repeated event category for the same Session during the five-second cooldown', () => {
     let now = 1_000
     const store = new AgentNotificationStore({ now: () => now })

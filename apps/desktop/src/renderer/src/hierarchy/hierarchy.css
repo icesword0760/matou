@@ -127,6 +127,11 @@ button { -webkit-app-region: no-drag; }
 .pane-close { display: flex; align-items: center; justify-content: center; padding: 3px; border: 0; border-radius: 3px; color: rgba(255,255,255,.35); background: transparent; cursor: pointer; font-size: 12px; }
 .pane-close:hover { color: #fff; background: rgba(255,255,255,.1); }
 .terminal-pane > [role="status"] { padding: 7px 10px; color: #e4aa78; background: #2a1e17; font-size: 11px; }
+.terminal-pane > .provider-restore-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid rgba(238,168,88,.28); border-bottom: 1px solid rgba(238,168,88,.28); }
+.provider-restore-banner > div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.provider-restore-reason { overflow: hidden; color: #c99a73; text-overflow: ellipsis; white-space: nowrap; }
+.provider-restore-banner button { flex: none; padding: 3px 8px; border: 1px solid rgba(238,168,88,.55); border-radius: 5px; color: #f1c08f; background: rgba(238,168,88,.1); cursor: pointer; }
+.provider-restore-banner.restoring { justify-content: flex-start; color: #8fb8ed; background: #172333; border-color: rgba(103,159,226,.28); }
 .terminal-pane .terminal-surface { flex: 1; min-height: 0; padding: 4px 8px; background: var(--kooky-terminal); }
 .detach-context-overlay { position: fixed; z-index: 9998; inset: 0; }
 .detach-context-menu { position: fixed; z-index: 9999; min-width: 140px; padding: 4px 0; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; background: rgba(20,25,35,.95); box-shadow: 0 4px 12px rgba(0,0,0,.3); backdrop-filter: blur(12px); }
@@ -389,6 +394,10 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
 .hierarchy-shell[data-theme="light"] .pane-title { color: rgba(0,0,0,.6); }
 .hierarchy-shell[data-theme="light"] .terminal-pane.active-pane { outline-color: rgba(64,120,242,.35); }
+.hierarchy-shell[data-theme="light"] .terminal-pane > .provider-restore-banner { color: #8a4d10; background: #fff7eb; border-color: #efcfaa; }
+.hierarchy-shell[data-theme="light"] .provider-restore-reason { color: #966b43; }
+.hierarchy-shell[data-theme="light"] .provider-restore-banner button { color: #7c440d; border-color: #daa86d; background: #fff; }
+.hierarchy-shell[data-theme="light"] .provider-restore-banner.restoring { color: #315f9d; background: #edf5ff; border-color: #c5dcf8; }
 .hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn { color: rgba(0,0,0,.4); background: #eff0f4; }
 .hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn:hover,
 .hierarchy-shell[data-theme="light"] .is-clickable:hover { color: #2f3547; background: rgba(0,0,0,.08) !important; }
