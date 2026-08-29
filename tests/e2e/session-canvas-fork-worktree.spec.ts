@@ -16,13 +16,15 @@ test.describe('real Claude Fork and Git worktree', () => {
       const source = activeSurface(fixture.page)
       await terminalCommand(source, 'claude --dangerously-skip-permissions')
       await expect(fixture.page.locator('.pane-title').filter({ hasText: 'Claude' })).toBeVisible({ timeout: 60_000 })
-      if (await source.locator('.xterm-rows').getByText('Yes, I trust this folder').count()) {
-        await source.locator('.xterm-helper-textarea').press('Enter')
-      } else {
-        await expect(source.locator('.xterm-rows')).toContainText('Yes, I trust this folder', { timeout: 30_000 })
-        await source.locator('.xterm-helper-textarea').press('Enter')
-      }
-      await expect(source.locator('.xterm-rows')).toContainText('Welcome back', { timeout: 60_000 })
+      await expect(source.locator('.xterm-rows')).toContainText('Yes, I trust this folder', { timeout: 30_000 })
+      // Current Claude Code starts on the conservative "No, exit" choice.
+      // Select the visible trust choice explicitly rather than relying on a
+      // version-dependent default selection.
+      await source.locator('.xterm-helper-textarea').press('ArrowDown')
+      await expect.poll(async () => (await source.locator('.xterm-rows').textContent() ?? '')
+        .includes('❯ Yes, I trust this folder')).toBe(true)
+      await source.locator('.xterm-helper-textarea').press('Enter')
+      await expect(source.locator('.xterm-rows')).toContainText('Claude Code v', { timeout: 60_000 })
       const marker = `MATOU_${Date.now()}`
       await terminalCommand(source, `Reply only with ${marker}`)
       await expect.poll(async () => {

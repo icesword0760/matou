@@ -155,9 +155,10 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.focus).toHaveBeenCalledTimes(1))
   })
 
-  it('moves a session only for submitted or control input, before sending related bytes', async () => {
+  it('moves a session only after submitted or control input has reached the terminal', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
 
     state.onData?.('draft text')
     expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
@@ -168,21 +169,42 @@ describe('TerminalSurface focus continuity', () => {
     state.sendTerminalInput.mockImplementation(() => callOrder.push('input'))
     state.onData?.('\r')
     expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'submit')
-    expect(callOrder).toEqual(['interaction', 'input'])
+    expect(callOrder).toEqual(['input', 'interaction'])
 
     callOrder.length = 0
     state.onData?.('\u0003')
     expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'control')
-    expect(callOrder).toEqual(['interaction', 'input'])
+    expect(callOrder).toEqual(['input', 'interaction'])
 
     state.recordTerminalInteraction.mockClear()
     state.onData?.('\u001b[200~pasted\ntext\u001b[201~')
     expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
   })
 
+  it('buffers keystrokes during an agent-to-Shell respawn and flushes them after the new PTY is attached', async () => {
+    render(<TerminalSurface sessionId="session-1" profile="shell" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+
+    state.onData?.("printf '%s\\n' 808")
+    expect(state.sendTerminalInput).not.toHaveBeenCalled()
+    state.onMessage?.({ type: 'terminal.spawned', pid: 456 })
+
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', "printf '%s\\n' 808")
+  })
+
+  it('treats live terminal output as proof that a reattached input channel is ready', async () => {
+    render(<TerminalSurface sessionId="session-1" profile="claude-code" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([65]), sequence: 1 })
+
+    state.onData?.('\u001b[B')
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', '\u001b[B')
+  })
+
   it('forwards a short Option+Tab only to the active visible terminal', async () => {
     const view = render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
 
     window.dispatchEvent(new Event('matou:forward-terminal-tab'))
     expect(state.sendTerminalInput).toHaveBeenLastCalledWith('session-1', '\t')

@@ -15,6 +15,7 @@ export function SessionCard(props: {
   return <article className={`session-card${focused ? ' is-focused' : ''}${expanded ? ' is-expanded' : ''}`}
     data-session-card={node.sessionId} data-in-viewport={inViewport}
     aria-label={`会话：${node.title}`} aria-current={focused ? 'true' : undefined}
+    onMouseEnter={() => onHover(node.sessionId)}
     onPointerMove={(event) => {
       // Keep title-bar actions stationary. The card still expands when the
       // pointer is over its terminal content, while close/Fork remain reliable.

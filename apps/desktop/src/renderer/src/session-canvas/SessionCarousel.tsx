@@ -92,7 +92,7 @@ export function SessionCarousel(props: {
       cancelAnimationFrame(firstFrame)
       if (secondFrame) cancelAnimationFrame(secondFrame)
     }
-  }, [geometryKey, initialScrollLeft])
+  }, [geometryKey, initialScrollLeft, visibleCount])
 
   useLayoutEffect(() => {
     const next = new Map<string, DOMRect>()

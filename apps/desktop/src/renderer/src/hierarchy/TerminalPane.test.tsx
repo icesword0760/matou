@@ -8,7 +8,7 @@ import { TerminalPane } from './TerminalPane'
 vi.mock('../terminal/TerminalSurface', () => ({
   TerminalSurface: (props: { sessionId: string; visible: boolean; inputDisabled: boolean }) =>
     <div data-testid={`surface-${props.sessionId}`} data-visible={props.visible}
-      data-input-disabled={props.inputDisabled} />
+      data-input-disabled={props.inputDisabled}><textarea className="xterm-helper-textarea" aria-label="Terminal input" /></div>
 }))
 
 afterEach(cleanup)
@@ -20,6 +20,14 @@ describe('Terminal pane', () => {
     view.rerender(<TerminalPane {...props} active={false} visible={false} />)
 
     expect(screen.getByTestId('surface-session-1').dataset.visible).toBe('false')
+  })
+
+  it('reasserts the Session focus when its terminal input wins a projection race', () => {
+    const onActivate = vi.fn()
+    render(<TerminalPane {...fixture()} active={false} onActivate={onActivate} />)
+
+    screen.getByRole('textbox', { name: 'Terminal input' }).focus()
+    expect(onActivate).toHaveBeenCalledWith('session-1')
   })
 
   it('deletes a non-final Session without a dialog', async () => {

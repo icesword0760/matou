@@ -93,7 +93,10 @@ export function TerminalPane(props: {
     setContextMenu({ x: event.clientX, y: event.clientY })
   }
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible} onContextMenu={openPaneMenu} onPointerDown={(event) => {
+    data-active={active} hidden={!visible} onContextMenu={openPaneMenu}
+    onFocusCapture={(event) => {
+      if ((event.target as HTMLElement).classList.contains('xterm-helper-textarea')) onActivate(session.id)
+    }} onPointerDown={(event) => {
       if ((event.target as HTMLElement).closest('button,[role="menuitem"]')) return
       notificationStore.dismissSessionIndicator(session.id)
       if (!active) onActivate(session.id)

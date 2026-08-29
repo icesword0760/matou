@@ -129,6 +129,19 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let observed = ''
     let replayRequested = false
     let replaying = false
+    let spawned = false
+    let pendingInput = ''
+    const markSpawned = () => {
+      spawned = true
+      if (pendingInput) {
+        client.sendTerminalInput(sessionId, pendingInput)
+        pendingInput = ''
+      }
+    }
+    const sendOrBufferInput = (data: string) => {
+      if (spawned) client.sendTerminalInput(sessionId, data)
+      else pendingInput += data
+    }
     const replayProbe = shouldRunReplayProbe(
       sessionId,
       new URLSearchParams(window.location.search).get('e2e') === '1'
@@ -137,6 +150,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
     const onMessage = (message: RuntimeMessage) => {
       if (message.type === 'terminal.spawned') {
+        markSpawned()
         setPid(message.pid)
         onStatusChange('streaming')
         const replayFromSequence = replayFromSequenceForSpawn(message)
@@ -148,6 +162,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           client.sendTerminalInput(sessionId, `printf '${SMOKE_MARKER}\\n'\r`)
         }
       } else if (message.type === 'terminal.data') {
+        // A transferred/re-attached stream can deliver replay or live output
+        // before this renderer observes its spawned notification. Receiving
+        // bytes is itself proof that the input channel is attached.
+        markSpawned()
         const bytes = message.data instanceof Uint8Array
           ? message.data
           : new Uint8Array(message.data)
@@ -164,6 +182,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) terminal.focus()
         })
       } else if (message.type === 'terminal.exited') {
+        spawned = false
         onStatusChange('exited')
       } else if (message.type === 'protocol.error') {
         onStatusChange('error')
@@ -185,14 +204,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const input = terminal.onData((data) => {
       if (inputDisabledRef.current) return
       const interactionKind = classifyCompletedUserInteraction(data)
+      // Deliver bytes first. Reordering the surrounding Session carousel may
+      // cause a fit/resize; doing that before Enter can reset full-screen CLI
+      // choices before the confirmation reaches the PTY.
+      sendOrBufferInput(data)
       if (interactionKind !== undefined) {
         client.recordTerminalInteraction(sessionId, interactionKind)
       }
-      client.sendTerminalInput(sessionId, data)
     })
     const forwardTab = () => {
       if (!activeRef.current || !visibleRef.current || inputDisabledRef.current) return
-      client.sendTerminalInput(sessionId, '\t')
+      sendOrBufferInput('\t')
     }
     window.addEventListener('matou:forward-terminal-tab', forwardTab)
     const oscHandlers = [9, 99, 777].map((oscId) => terminal.parser.registerOscHandler(oscId, (content) => {
