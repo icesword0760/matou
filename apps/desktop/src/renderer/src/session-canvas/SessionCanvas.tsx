@@ -14,11 +14,13 @@ export function SessionCanvas(props: {
   onCreateShellSibling(sourceSessionId: string, parentSessionId?: string): void
   onCreateForkSibling(source: SessionGraphNodeView, parent: SessionGraphNodeView): void
   onReopenHistorical(sessionId: string): void
+  onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
 }) {
   const {
     graph, levelParentSessionId, disabled = false, renderSession, onActivate,
-    onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onEnsureSessionVisible
+    onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onReturnParent,
+    onEnsureSessionVisible
   } = props
   const [showHistory, setShowHistory] = useState(false)
   const activeNodes = graph.nodes.filter(({ archivedAt }) => archivedAt === undefined)
@@ -39,6 +41,7 @@ export function SessionCanvas(props: {
       canForkSibling={parent?.canFork === true} disabled={disabled}
       historicalCount={historicalCount} showHistory={historyVisible}
       onToggleHistory={() => setShowHistory((value) => !value)}
+      {...(parent && onReturnParent ? { onReturnParent: () => onReturnParent(parent.sessionId) } : {})}
       onAddShell={() => onCreateShellSibling(levelFocus.sessionId, parentId)}
       onAddForkSibling={() => parent && onCreateForkSibling(levelFocus, parent)} />
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
@@ -49,6 +52,10 @@ export function SessionCanvas(props: {
         const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
         if (node?.archivedAt === undefined) onActivate(sessionId)
       }}
+      {...(parent ? { parent } : {})}
+      {...(parent && onReturnParent
+        ? { onCommitParent: () => onReturnParent(parent.sessionId) }
+        : {})}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
 }

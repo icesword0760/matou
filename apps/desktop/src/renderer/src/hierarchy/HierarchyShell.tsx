@@ -401,6 +401,16 @@ function HierarchyProduct({ projection, commands }: {
                         })
                       }}
                       onReopenHistorical={(sessionId) => run(commands.reopenHistoricalSession(sessionId))}
+                      onReturnParent={(parentSessionId) => {
+                        const parentNode = graph.nodes.find(({ sessionId }) => sessionId === parentSessionId)
+                        setLevelParentByScene((current) => ({
+                          ...current,
+                          [scene.id]: parentNode?.parentSessionId
+                        }))
+                        run(Promise.resolve(commands.setFocusedSession(scene.id, parentSessionId)).then(() => {
+                          setTerminalFocusRequest((value) => value + 1)
+                        }))
+                      }}
                       onEnsureSessionVisible={(sessionId) => {
                         if (sessionId === activeSessionId) setTerminalFocusRequest((value) => value + 1)
                       }} />

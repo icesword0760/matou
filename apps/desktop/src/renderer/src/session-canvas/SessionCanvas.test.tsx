@@ -79,6 +79,18 @@ describe('SessionCanvas', () => {
 
     expect(onCreateShellSibling).toHaveBeenCalledWith('archived', 'parent')
   })
+
+  it('provides an explicit keyboard-accessible return to the parent', async () => {
+    const onReturnParent = vi.fn()
+    render(<SessionCanvas graph={graph()} onActivate={() => undefined}
+      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
+      onReopenHistorical={vi.fn()} onReturnParent={onReturnParent}
+      renderSession={(item) => <div>{item.title}</div>} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '返回父会话' }))
+
+    expect(onReturnParent).toHaveBeenCalledWith('parent')
+  })
 })
 
 function renderCanvas(data: SessionGraphView, handlers?: {

@@ -8,10 +8,11 @@ export function SessionHeader(props: {
   onAddShell(): void
   onAddForkSibling(): void
   onToggleHistory(): void
+  onReturnParent?(): void
 }) {
   const {
     parentTitle, sessionCount, canForkSibling, historicalCount = 0, showHistory = false,
-    disabled = false, onAddShell, onAddForkSibling, onToggleHistory
+    disabled = false, onAddShell, onAddForkSibling, onToggleHistory, onReturnParent
   } = props
   return <header className="session-level-header">
     <div className="session-level-context">
@@ -19,6 +20,8 @@ export function SessionHeader(props: {
       <span>{sessionCount} 个会话</span>
     </div>
     <div className="session-level-actions">
+      {parentTitle && onReturnParent && <button type="button" className="session-return-parent"
+        aria-label="返回父会话" onClick={onReturnParent}>← 返回父会话</button>}
       {historicalCount > 0 && <button type="button" aria-pressed={showHistory}
         aria-label={showHistory ? '隐藏历史会话' : `显示历史会话 (${historicalCount})`}
         onClick={onToggleHistory}>{showHistory ? '隐藏历史' : `历史 ${historicalCount}`}</button>}

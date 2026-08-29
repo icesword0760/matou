@@ -55,6 +55,30 @@ describe('SessionCarousel', () => {
     expect(card.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
   })
+
+  it('requires a completed edge gesture before a second right pull can return to the parent', () => {
+    vi.useFakeTimers()
+    const onCommitParent = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      parent={{ ...fixtures(1)[0]!, sessionId: 'parent', title: '父会话' }}
+      onCommitParent={onCommitParent} onActivate={() => undefined}
+      renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 800 })
+    viewport.scrollLeft = 320
+
+    fireEvent.wheel(viewport, { deltaX: -600, deltaY: 0 })
+    expect(viewport.scrollLeft).toBe(0)
+    expect(screen.queryByTestId('parent-projection')).toBeNull()
+    vi.advanceTimersByTime(110)
+    expect(onCommitParent).not.toHaveBeenCalled()
+
+    fireEvent.wheel(viewport, { deltaX: -500, deltaY: 0 })
+    expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
+    vi.advanceTimersByTime(110)
+    expect(onCommitParent).toHaveBeenCalledWith('parent')
+    vi.useRealTimers()
+  })
 })
 
 function fixtures(count: number): SessionGraphNodeView[] {
