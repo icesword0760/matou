@@ -20,8 +20,12 @@ export interface SceneCommands {
   createShellSibling?(sceneId: string, sessionId: string): unknown
 }
 
-export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid = true }: {
-  projection: HierarchyProjection; commands: SceneCommands; visibleLimit?: number; pathValid?: boolean
+export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid = true, onOpenDag }: {
+  projection: HierarchyProjection
+  commands: SceneCommands
+  visibleLimit?: number
+  pathValid?: boolean
+  onOpenDag?(): void
 }) {
   const workspaceId = projection.navigation.activeWorkspaceId
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
@@ -107,6 +111,8 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
         }}>+</button>
     </div>}
     <div className="tab-bar-right">
+    {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
+      title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}
     <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell" disabled={!pathValid || !activeSceneId || !activeSessionId}
       title={!pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
       onClick={() => {
@@ -151,3 +157,11 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
 
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}
+
+function DagIcon() {
+  return <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none"
+    stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+    <circle cx="3" cy="8" r="1.7"/><circle cx="12.5" cy="3" r="1.7"/><circle cx="12.5" cy="13" r="1.7"/>
+    <path d="M4.7 8h2.1c2.2 0 2.2-5 4-5M6.8 8c2.2 0 2.2 5 4 5"/>
+  </svg>
+}

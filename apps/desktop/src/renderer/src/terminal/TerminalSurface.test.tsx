@@ -179,4 +179,17 @@ describe('TerminalSurface focus continuity', () => {
     state.onData?.('\u001b[200~pasted\ntext\u001b[201~')
     expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
   })
+
+  it('forwards a short Option+Tab only to the active visible terminal', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+
+    window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+    expect(state.sendTerminalInput).toHaveBeenLastCalledWith('session-1', '\t')
+
+    state.sendTerminalInput.mockClear()
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible />)
+    window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+    expect(state.sendTerminalInput).not.toHaveBeenCalled()
+  })
 })

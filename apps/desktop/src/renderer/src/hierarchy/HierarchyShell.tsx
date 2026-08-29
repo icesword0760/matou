@@ -25,6 +25,7 @@ import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
 import { SessionCanvas } from '../session-canvas/SessionCanvas'
+import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import {
@@ -282,6 +283,33 @@ function HierarchyProduct({ projection, commands }: {
     }
   }), [activeRatios, activeSceneId, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, scenes, shortcutPanelOpen, task])
   const isMac = useTerminalShortcuts(shortcutHandlers)
+  const openDag = () => {
+    if (!activeSceneId || !focusedSessionId) return
+    void window.matouDesktop?.openDagWindow?.({
+      mainWindowId: projection.windowId,
+      sceneId: activeSceneId,
+      sessionId: focusedSessionId,
+      theme: themeKey
+    })
+  }
+  useDagShortcut({
+    enabled: Boolean(activeSceneId && focusedSessionId),
+    onShortPress: () => window.dispatchEvent(new Event('matou:forward-terminal-tab')),
+    onLongPress: openDag
+  })
+  useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
+    if (selection.mainWindowId !== projection.windowId) return
+    const graph = projection.sessionGraphs?.[selection.sceneId]
+    const target = graph?.nodes.find(({ sessionId }) => sessionId === selection.sessionId)
+    if (!target || target.archivedAt !== undefined) return
+    setLevelParentByScene((current) => ({
+      ...current,
+      [selection.sceneId]: target.parentSessionId
+    }))
+    run(Promise.resolve(commands.activateScene(selection.sceneId))
+      .then(() => commands.setFocusedSession(selection.sceneId, selection.sessionId))
+      .then(() => setTerminalFocusRequest((value) => value + 1)))
+  }), [commands, projection.sessionGraphs, projection.windowId])
   useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
     document.documentElement.dataset.theme = themeKey
@@ -305,7 +333,8 @@ function HierarchyProduct({ projection, commands }: {
                   }} />
                 <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
         {task && <>
-          <SceneTabBar projection={projection} commands={commands} pathValid={pathValid} />
+          <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
+            onOpenDag={openDag} />
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)

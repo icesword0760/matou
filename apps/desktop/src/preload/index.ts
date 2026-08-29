@@ -46,6 +46,19 @@ const desktopApi: MatouDesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
     ipcRenderer.on(DESKTOP_CHANNELS.detachedWindowClosed, handler)
     return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.detachedWindowClosed, handler)
+  },
+  openDagWindow: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.openDagWindow, input),
+  selectDagNode: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.selectDagNode, input),
+  closeDagWindow: (mainWindowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.closeDagWindow, mainWindowId),
+  onDagContext: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.dagContext, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.dagContext, handler)
+  },
+  onDagNodeSelected: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.dagNodeSelected, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.dagNodeSelected, handler)
   }
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)

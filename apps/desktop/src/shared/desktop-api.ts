@@ -6,6 +6,11 @@ export interface MatouDesktopApi {
   createDetachedTerminalWindow(input: DetachedTerminalWindowInput): Promise<void>
   closeDetachedTerminalWindow(windowId: string): Promise<void>
   onDetachedWindowClosed(listener: (event: DetachedWindowClosedEvent) => void): () => void
+  openDagWindow(input: DagWindowContext): Promise<void>
+  selectDagNode(input: DagNodeSelection): Promise<void>
+  closeDagWindow(mainWindowId: string): Promise<void>
+  onDagContext(listener: (context: DagWindowContext) => void): () => void
+  onDagNodeSelected(listener: (selection: DagNodeSelection) => void): () => void
 }
 
 export interface DetachedTerminalWindowInput {
@@ -27,6 +32,17 @@ export interface DetachedWindowClosedEvent {
   sessionId: string
 }
 
+export interface DagWindowContext {
+  mainWindowId: string
+  sceneId: string
+  sessionId: string
+  theme: 'light' | 'dark'
+}
+
+export interface DagNodeSelection extends DagWindowContext {
+  targetWindowId?: string
+}
+
 export const DESKTOP_CHANNELS = {
   selectWorkspaceDirectory: 'matou:select-workspace-directory',
   revealDirectory: 'matou:reveal-directory',
@@ -34,5 +50,10 @@ export const DESKTOP_CHANNELS = {
   showWindow: 'matou:show-window',
   createDetachedTerminalWindow: 'matou:create-detached-terminal-window',
   closeDetachedTerminalWindow: 'matou:close-detached-terminal-window',
-  detachedWindowClosed: 'matou:detached-window-closed'
+  detachedWindowClosed: 'matou:detached-window-closed',
+  openDagWindow: 'matou:open-dag-window',
+  selectDagNode: 'matou:select-dag-node',
+  closeDagWindow: 'matou:close-dag-window',
+  dagContext: 'matou:dag-context',
+  dagNodeSelected: 'matou:dag-node-selected'
 } as const

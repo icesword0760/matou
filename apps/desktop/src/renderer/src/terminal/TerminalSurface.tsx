@@ -190,6 +190,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       }
       client.sendTerminalInput(sessionId, data)
     })
+    const forwardTab = () => {
+      if (!activeRef.current || !visibleRef.current || inputDisabledRef.current) return
+      client.sendTerminalInput(sessionId, '\t')
+    }
+    window.addEventListener('matou:forward-terminal-tab', forwardTab)
     const oscHandlers = [9, 99, 777].map((oscId) => terminal.parser.registerOscHandler(oscId, (content) => {
       if (!replaying) onOscNotificationRef.current(oscId, content)
       return false
@@ -215,6 +220,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
       input.dispose()
+      window.removeEventListener('matou:forward-terminal-tab', forwardTab)
       searchResults.dispose()
       for (const handler of oscHandlers) handler.dispose()
       detach()

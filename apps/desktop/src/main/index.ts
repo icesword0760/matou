@@ -1,13 +1,16 @@
 import { mkdir } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
 
 import { RuntimeHost } from './runtime-host'
 import { claimSingleInstance } from './single-instance-policy'
 import { WindowManager } from './window-manager'
+import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
 import {
   DESKTOP_CHANNELS,
+  type DagNodeSelection,
+  type DagWindowContext,
   type DetachedTerminalWindowInput,
   type DetachedWindowClosedEvent
 } from '../shared/desktop-api'
@@ -15,9 +18,32 @@ import {
 let runtimeHost: RuntimeHost | undefined
 const windows = new WindowManager()
 const browserWindows = new Map<string, BrowserWindow>()
+const dagBrowserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
 let mainWindowSequence = 0
+
+const dagWindows = new DagWindowManager({
+  createWindow: ({ context, bounds }) => createDagBrowserWindow(context, bounds),
+  displayBounds: (mainWindowId) => {
+    const owner = browserWindows.get(mainWindowId)
+    return screen.getDisplayMatching(owner?.getBounds() ?? screen.getPrimaryDisplay().bounds).workArea
+  },
+  connectRuntime: (window) => {
+    const browserWindow = dagBrowserWindows.get(window.id)
+    if (browserWindow && !browserWindow.isDestroyed()) runtimeHost?.connect(browserWindow.webContents)
+  },
+  routeSelection: (mainWindowId, selection) => {
+    browserWindows.get(mainWindowId)?.webContents.send(DESKTOP_CHANNELS.dagNodeSelected, selection)
+  },
+  activateTargetWindow: (windowId) => {
+    const target = browserWindows.get(windowId)
+    if (!target || target.isDestroyed()) return false
+    target.show()
+    target.focus()
+    return true
+  }
+})
 
 const primaryInstance = claimSingleInstance({
   requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
@@ -134,6 +160,58 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   }
 }
 
+function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): DagWindowAdapter {
+  const id = `dag-window:${context.mainWindowId}`
+  const window = new BrowserWindow({
+    ...bounds,
+    minWidth: 680,
+    minHeight: 480,
+    show: false,
+    frame: true,
+    title: 'Matou 会话 DAG',
+    backgroundColor: context.theme === 'light' ? '#F7F8FA' : '#171717',
+    ...(process.platform === 'darwin' ? {
+      titleBarStyle: 'hidden' as const,
+      trafficLightPosition: { x: 14, y: 16 }
+    } : {}),
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true
+    }
+  })
+  dagBrowserWindows.set(id, window)
+  const readyListeners: Array<() => void> = []
+  const closedListeners: Array<() => void> = []
+  window.webContents.once('did-finish-load', () => readyListeners.splice(0).forEach((listener) => listener()))
+  window.on('closed', () => {
+    dagBrowserWindows.delete(id)
+    closedListeners.splice(0).forEach((listener) => listener())
+  })
+  const query = {
+    kind: 'dag', mainWindowId: context.mainWindowId,
+    sceneId: context.sceneId, sessionId: context.sessionId, theme: context.theme
+  }
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)
+    for (const [key, value] of Object.entries(query)) rendererUrl.searchParams.set(key, value)
+    void window.loadURL(rendererUrl.toString())
+  } else {
+    void window.loadFile(join(__dirname, '../renderer/index.html'), { query })
+  }
+  return {
+    id,
+    isDestroyed: () => window.isDestroyed(),
+    show: () => window.show(),
+    focus: () => window.focus(),
+    close: () => window.close(),
+    send: (channel, value) => window.webContents.send(channel, value),
+    onReady: (listener) => { readyListeners.push(listener) },
+    onClosed: (listener) => { closedListeners.push(listener) }
+  }
+}
+
 function resolveRuntimeEntry(): string {
   if (process.env.MATOU_RUNTIME_ENTRY) {
     return resolve(process.env.MATOU_RUNTIME_ENTRY)
@@ -189,6 +267,15 @@ ipcMain.handle(DESKTOP_CHANNELS.createDetachedTerminalWindow, (
 ) => createDetachedTerminalWindow(input))
 ipcMain.handle(DESKTOP_CHANNELS.closeDetachedTerminalWindow, (_event, windowId: string) => {
   browserWindows.get(windowId)?.close()
+})
+ipcMain.handle(DESKTOP_CHANNELS.openDagWindow, (_event, input: DagWindowContext) => {
+  dagWindows.open(input)
+})
+ipcMain.handle(DESKTOP_CHANNELS.selectDagNode, (_event, input: DagNodeSelection) => {
+  dagWindows.selectNode(input)
+})
+ipcMain.handle(DESKTOP_CHANNELS.closeDagWindow, (_event, mainWindowId: string) => {
+  dagWindows.close(mainWindowId)
 })
 
 app.on('before-quit', () => {
