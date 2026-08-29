@@ -258,6 +258,7 @@ function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown 
         matcher: 'Bash|Write|Edit|Read|Glob|Grep|TodoWrite|TaskCreate|TaskUpdate|Agent|Skill', hooks: [hook(10)]
       }],
       PostToolUse: [{ matcher: 'Bash|Write|Edit|Read|Glob|Grep|TodoWrite|TaskCreate|TaskUpdate|Agent|Skill', hooks: [hook(10)] }],
+      PostToolUseFailure: [{ hooks: [hook(5)] }],
       Stop: [{ hooks: [hook(5)] }],
       Notification: [{ hooks: [hook(5)] }]
     },

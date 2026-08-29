@@ -99,11 +99,23 @@ describe('SessionGraphRepository', () => {
       parentSessionId: 'parent',
       relationKind: 'forked-from',
       currentMode: 'claude-code',
-      workStatus: 'needs-input',
+      workStatus: 'idle',
       siblingCreatedSeq: 3,
       latestLines: ['line one', 'line two'],
       lastUserInteractionSeq: 12
     })
+  })
+
+  it('projects the durable work status independently from terminal process lifetime', () => {
+    database.run("UPDATE sessions SET work_status = 'running' WHERE id = 'shell-child'")
+    database.run("UPDATE sessions SET work_status = 'needs-input' WHERE id = 'claude-child'")
+
+    const graph = graphs.projectSceneGraph('scene')
+
+    expect(graph.nodes.find(({ sessionId }) => sessionId === 'shell-child'))
+      .toMatchObject({ currentMode: 'shell', workStatus: 'running' })
+    expect(graph.nodes.find(({ sessionId }) => sessionId === 'claude-child'))
+      .toMatchObject({ currentMode: 'claude-code', workStatus: 'needs-input' })
   })
 
   it('allocates persistent sequences and creates one membership with its Outbox event', () => {

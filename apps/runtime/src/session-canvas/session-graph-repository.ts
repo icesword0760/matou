@@ -28,6 +28,7 @@ interface GraphRow extends MembershipRow {
   execution_context_id: string
   kind: SessionKind
   status: SessionStatus
+  work_status: SessionWorkStatus
   title: string
   cwd: string
   session_created_at: number
@@ -170,6 +171,7 @@ export function projectSceneGraphFrom(
          sessions.execution_context_id,
          sessions.kind,
          sessions.status,
+         sessions.work_status,
          sessions.title,
          sessions.cwd,
          sessions.created_at AS session_created_at,
@@ -257,7 +259,11 @@ export function projectSceneGraphFrom(
         ...(row.parent_session_id === null ? {} : { parentSessionId: row.parent_session_id }),
         ...(row.relation_kind === null ? {} : { relationKind: row.relation_kind }),
         currentMode: row.kind,
-        workStatus: row.fork_state === 'failed' ? 'error' : mapWorkStatus(row.status),
+        workStatus: row.fork_state === 'failed' || row.restore_state === 'failed'
+          ? 'error'
+          : row.fork_state === 'pending' || row.fork_state === 'starting'
+            ? 'starting'
+            : row.work_status,
         providerRestoreState: row.restore_state ?? 'none',
         ...(row.restore_error === null ? {} : { providerRestoreError: row.restore_error }),
         ...(row.fork_state === null ? {} : { forkState: row.fork_state }),
@@ -337,23 +343,6 @@ function mapEdge(row: EdgeRow): SessionGraphEdge {
     childSessionId: row.child_session_id,
     relationKind: row.relation_kind,
     createdAt: row.created_at
-  }
-}
-
-function mapWorkStatus(status: SessionStatus): SessionWorkStatus {
-  switch (status) {
-    case 'created':
-    case 'starting':
-      return 'starting'
-    case 'running':
-      return 'running'
-    case 'waiting':
-      return 'needs-input'
-    case 'interrupted':
-      return 'interrupted'
-    case 'exited':
-    case 'archived':
-      return 'exited'
   }
 }
 

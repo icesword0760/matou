@@ -7,6 +7,7 @@ import * as pty from 'node-pty'
 import { CreditWindow } from '../flow-control/credit-window'
 import { SegmentJournal } from '../journal/segment-journal'
 import { resolvePtyCommand } from './provider-launch-plan'
+import { shellIntegrationEnvironment } from './shell-integration'
 
 interface PtySessionOptions {
   sessionId: string
@@ -90,12 +91,20 @@ export class PtySession {
         settingsPath: options.settingsPath
       })
     })
+    const integrationEnvironment = profile === 'shell'
+      ? await shellIntegrationEnvironment(options.dataRoot, command.file)
+      : {}
     const terminal = pty.spawn(command.file, command.args, {
       name: 'xterm-256color',
       cols: options.cols,
       rows: options.rows,
       cwd: options.cwd,
-      env: { ...process.env, ...options.env, TERM: 'xterm-256color' }
+      env: {
+        ...process.env,
+        ...integrationEnvironment,
+        ...options.env,
+        TERM: 'xterm-256color'
+      }
     })
     return new PtySession(options, journal, terminal)
   }

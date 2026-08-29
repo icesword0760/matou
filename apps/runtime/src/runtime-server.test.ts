@@ -345,6 +345,51 @@ describe('RuntimeServer domain RPC', () => {
     await waitUntil(() => terminalText(port).includes('__ORDERED_INPUT__'))
   })
 
+  it('tracks real Shell commands as running, idle, error, and interrupted work', async () => {
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/zsh'
+    try {
+      registerCanvasSession(database, 'work-status-session')
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned') !== undefined)
+
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', data: 'sleep 0.35\r'
+      })
+      await waitUntil(() => workStatus('work-status-session') === 'running')
+      await waitUntil(() => workStatus('work-status-session') === 'idle', 2_000)
+
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', data: 'false\r'
+      })
+      await waitUntil(() => workStatus('work-status-session') === 'error')
+
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', data: 'sleep 5\r'
+      })
+      await waitUntil(() => workStatus('work-status-session') === 'running')
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', data: '\u0003'
+      })
+      await waitUntil(() => workStatus('work-status-session') === 'interrupted', 2_000)
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('keeps a live PTY in the Runtime registry across Renderer disconnect and reattach', async () => {
     const priorRun = await SegmentJournal.open(root, 'reload-session')
     await priorRun.appendOutput(1, new TextEncoder().encode('output from an earlier app run'))
@@ -1692,6 +1737,12 @@ function terminalText(port: MockPort): string {
     )
     .map(({ data }) => decoder.decode(data))
     .join('')
+}
+
+function workStatus(sessionId: string): string | undefined {
+  return database.get<{ work_status: string }>(
+    'SELECT work_status FROM sessions WHERE id = ?', sessionId
+  )?.work_status
 }
 
 function seedReplayAuthority(database: RuntimeDatabase, root: string): void {

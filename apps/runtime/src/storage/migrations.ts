@@ -814,5 +814,26 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         updated_at INTEGER NOT NULL
       );
     `
+  },
+  {
+    version: 17,
+    name: 'session-work-status',
+    sql: `
+      ALTER TABLE sessions ADD COLUMN work_status TEXT NOT NULL DEFAULT 'idle'
+        CHECK (work_status IN (
+          'starting', 'idle', 'running', 'needs-input', 'error',
+          'interrupted', 'exited'
+        ));
+      UPDATE sessions
+      SET work_status = CASE status
+        WHEN 'created' THEN 'idle'
+        WHEN 'starting' THEN 'starting'
+        WHEN 'running' THEN 'idle'
+        WHEN 'waiting' THEN 'needs-input'
+        WHEN 'interrupted' THEN 'interrupted'
+        WHEN 'exited' THEN 'exited'
+        WHEN 'archived' THEN 'exited'
+      END;
+    `
   }
 ]

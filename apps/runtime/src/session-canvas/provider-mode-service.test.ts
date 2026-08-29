@@ -49,7 +49,7 @@ describe('ProviderModeService', () => {
     })
     expect(result.binding.restoreError).toBeUndefined()
     expect(result.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
-      .toMatchObject({ currentMode: 'shell', activeChildCount: 1, canFork: false })
+      .toMatchObject({ currentMode: 'shell', workStatus: 'idle', activeChildCount: 1, canFork: false })
     expect(result.graph.edges).toContainEqual(expect.objectContaining({
       parentSessionId: initial.parentSessionId,
       childSessionId: initial.childSessionId
@@ -73,7 +73,10 @@ describe('ProviderModeService', () => {
       restoreError: 'provider session not found'
     })
     expect(failed.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
-      .toMatchObject({ currentMode: 'shell', providerRestoreState: 'failed', activeChildCount: 1 })
+      .toMatchObject({
+        currentMode: 'shell', workStatus: 'error',
+        providerRestoreState: 'failed', activeChildCount: 1
+      })
     expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
       eventType: 'error',
       title: 'Claude Code 恢复失败',
@@ -116,7 +119,7 @@ describe('ProviderModeService', () => {
       now: 30
     })
     expect(prompted.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
-      .toMatchObject({ currentMode: 'claude-code', canFork: false })
+      .toMatchObject({ currentMode: 'claude-code', workStatus: 'running', canFork: false })
 
     const stopped = providerModes.observeHook(command('hook-stop'), {
       sessionId: initial.parentSessionId,
@@ -130,7 +133,7 @@ describe('ProviderModeService', () => {
       canFork: true
     })
     expect(stopped.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
-      .toMatchObject({ currentMode: 'claude-code', canFork: true })
+      .toMatchObject({ currentMode: 'claude-code', workStatus: 'idle', canFork: true })
   })
 
   it('replays a transition without incrementing versions or emitting a second event', () => {

@@ -27,6 +27,7 @@ import { NotificationProjection } from './product/experience-foundation'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
+import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -71,6 +72,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const transactions = new DomainTransactionManager(database)
   const sessionRepository = new SessionRepository(database, transactions)
   const providerModes = new ProviderModeService(database, transactions)
+  const workStatuses = new SessionWorkStatusService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
   const rpcRouter = new RuntimeRpcRouter(database, notifications)
@@ -89,6 +91,22 @@ async function initializeRuntime(): Promise<RuntimeState> {
         commandType: 'agent.notification.publish',
         requestHash: `${notification.runId}:${notification.sessionId}:${notification.event.eventType}:${now}`
       }, { ...notification, eventId, now })
+      try {
+        const workStatus = notification.event.eventType === 'error'
+          ? 'error'
+          : notification.event.eventType === 'completed'
+            ? 'idle'
+            : 'needs-input'
+        if (workStatuses.get(notification.sessionId) !== workStatus) {
+          workStatuses.set({
+            commandId: `provider-work-status-${notification.runId}-${eventId}`,
+            commandType: 'session.provider-work-status',
+            requestHash: `${notification.sessionId}:${workStatus}:${now}`
+          }, { sessionId: notification.sessionId, workStatus, now })
+        }
+      } catch (error) {
+        console.error(`[provider-work-status] ${errorMessage(error)}`)
+      }
       for (const server of servers) server.flushSemanticEvents()
     },
     onHudPayload: ({ sessionId, payload }) => {
@@ -109,6 +127,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
       }
       for (const server of servers) {
         server.providerIdentityRecorded(sessionId, runId)
+        server.flushSemanticEvents()
         void server.refreshSessionHud(sessionId)
       }
     }

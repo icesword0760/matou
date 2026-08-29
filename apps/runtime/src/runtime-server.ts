@@ -22,6 +22,7 @@ import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
+import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracker'
 import { ProviderResumeMonitor } from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
@@ -39,6 +40,7 @@ import {
 import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
 import { SessionInteractionService } from './session-canvas/session-interaction-service'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
+import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 
 export interface PortMessageEvent {
   data: unknown
@@ -97,6 +99,7 @@ export class RuntimeServer {
   readonly #hierarchy: HierarchyApplicationService
   readonly #sessionInteractions: SessionInteractionService
   readonly #providerModes: ProviderModeService
+  readonly #workStatuses: SessionWorkStatusService
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
@@ -144,6 +147,7 @@ export class RuntimeServer {
     this.#hierarchy = new HierarchyApplicationService(database, transactions)
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#providerModes = new ProviderModeService(database, transactions)
+    this.#workStatuses = new SessionWorkStatusService(database, transactions)
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#control = control
@@ -292,6 +296,9 @@ export class RuntimeServer {
           await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
           if (this.#closed) break
           const session = this.#session(message.sessionId)
+          if (session && /[\r\n]/.test(message.data)) {
+            this.#setWorkStatus(message.sessionId, 'running')
+          }
           const promoted = session?.profile === 'shell'
             ? await this.#maybePromoteShellAgent(session, message.data)
             : false
@@ -790,6 +797,9 @@ export class RuntimeServer {
     try {
       const runId = persistentAuthority ? randomUUID() : undefined
       const cwdTracker = new TerminalCwdTracker()
+      const workStatusTracker = message.profile === 'shell'
+        ? new TerminalWorkStatusTracker()
+        : undefined
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
@@ -857,6 +867,9 @@ export class RuntimeServer {
           this.#recordSessionSummary(message.sessionId, data)
           const reportedCwd = cwdTracker.ingest(data)
           if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
+          for (const status of workStatusTracker?.ingest(data) ?? []) {
+            this.#setWorkStatus(message.sessionId, status)
+          }
           const resumeFailure = resumeMonitor?.ingest(data)
           if (resumeFailure) {
             pendingResumeFailure = resumeFailure
@@ -924,6 +937,7 @@ export class RuntimeServer {
                 exited.runId,
                 { exitCode, ...(signal === undefined ? {} : { signal }), now: Date.now() }
               )
+              this.#setWorkStatus(message.sessionId, 'exited')
             } catch (error) {
               console.error(`[session.run-exit] ${errorMessage(error)}`)
             }
@@ -1441,6 +1455,24 @@ export class RuntimeServer {
       } catch {}
       await this.#spawn({ ...descriptor, profile: 'shell' })
       return true
+    }
+  }
+
+  #setWorkStatus(
+    sessionId: string,
+    workStatus: import('@matou/domain').SessionWorkStatus
+  ): void {
+    try {
+      if (this.#closed || this.#workStatuses.get(sessionId) === workStatus) return
+      const now = Date.now()
+      this.#workStatuses.set({
+        commandId: `runtime-work-status-${sessionId}-${workStatus}-${now}-${randomUUID()}`,
+        commandType: 'session.work-status',
+        requestHash: `${sessionId}:${workStatus}:${now}`
+      }, { sessionId, workStatus, now })
+      this.flushSemanticEvents()
+    } catch (error) {
+      if (!this.#closed) console.error(`[session.work-status] ${errorMessage(error)}`)
     }
   }
 }

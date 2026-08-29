@@ -4,7 +4,8 @@ import type {
   SceneSessionGraph,
   Session,
   SessionKind,
-  SessionStatus
+  SessionStatus,
+  SessionWorkStatus
 } from '@matou/domain'
 
 import type { RuntimeDatabase } from '../storage/database'
@@ -17,6 +18,7 @@ interface SessionRow {
   execution_context_id: string
   kind: SessionKind
   status: SessionStatus
+  work_status: SessionWorkStatus
   title: string
   cwd: string
   created_at: number
@@ -72,7 +74,7 @@ export class ProviderModeService {
         throw new Error('Provider binding does not match the active Claude conversation')
       }
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = 'Claude',
+        `UPDATE sessions SET kind = 'claude-code', title = 'Claude', work_status = 'idle',
            updated_at = ?, version = version + 1 WHERE id = ?`,
         input.now, session.id
       )
@@ -93,7 +95,7 @@ export class ProviderModeService {
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
       tx.run(
-        `UPDATE sessions SET kind = 'shell', title = 'Shell',
+        `UPDATE sessions SET kind = 'shell', title = 'Shell', work_status = 'idle',
            updated_at = ?, last_activity_at = ?, version = version + 1 WHERE id = ?`,
         input.now, input.now, session.id
       )
@@ -133,7 +135,7 @@ export class ProviderModeService {
         binding = requested
       }
       tx.run(
-        `UPDATE sessions SET kind = 'shell', title = 'Shell',
+        `UPDATE sessions SET kind = 'shell', title = 'Shell', work_status = 'error',
            updated_at = ?, last_activity_at = ?, version = version + 1 WHERE id = ?`,
         input.now, input.now, session.id
       )
@@ -157,6 +159,7 @@ export class ProviderModeService {
       }
       tx.run(
         `UPDATE sessions SET kind = 'claude-code', title = 'Claude', status = 'starting',
+           work_status = 'starting',
            updated_at = ?, version = version + 1 WHERE id = ?`,
         input.now, session.id
       )
@@ -201,10 +204,11 @@ export class ProviderModeService {
       if (input.eventName === 'Stop') metadata.observedNormalStop = true
       metadata.canFork = metadata.observedUserPrompt === true && metadata.observedNormalStop === true
       metadata.lastHookEvent = input.eventName
+      const workStatus = providerWorkStatus(input.eventName, session.work_status)
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = 'Claude',
+        `UPDATE sessions SET kind = 'claude-code', title = 'Claude', work_status = ?,
            updated_at = ?, version = version + 1 WHERE id = ?`,
-        input.now, session.id
+        workStatus, input.now, session.id
       )
       tx.run(
         `UPDATE provider_bindings
@@ -274,6 +278,13 @@ export class ProviderModeService {
       return result
     }).result
   }
+}
+
+function providerWorkStatus(eventName: string, current: SessionWorkStatus): SessionWorkStatus {
+  if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse') return 'running'
+  if (eventName === 'PostToolUseFailure') return 'error'
+  if (eventName === 'Stop') return 'idle'
+  return current
 }
 
 function emitRecoveryNotification(

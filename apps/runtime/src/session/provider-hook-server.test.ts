@@ -69,7 +69,7 @@ describe('ProviderHookServer', () => {
 
     expect((await stat(registration.settingsPath)).mode & 0o777).toBe(0o600)
     expect(Object.keys(settings.hooks).sort()).toEqual([
-      'Notification', 'PostToolUse', 'PreToolUse', 'SessionEnd',
+      'Notification', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionEnd',
       'SessionStart', 'Stop', 'UserPromptSubmit'
     ])
     expect(settings.hooks.PreToolUse?.[0]).toMatchObject({

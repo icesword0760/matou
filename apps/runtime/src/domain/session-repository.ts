@@ -168,8 +168,10 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET status = 'running', updated_at = ?, last_activity_at = ?, version = version + 1
+         SET status = 'running', work_status = ?, updated_at = ?, last_activity_at = ?,
+             version = version + 1
          WHERE id = ?`,
+        input.profile === 'shell' ? 'idle' : 'starting',
         input.now,
         input.now,
         input.sessionId
@@ -199,7 +201,8 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET status = 'exited', updated_at = ?, last_activity_at = ?, version = version + 1
+         SET status = 'exited', work_status = 'exited', updated_at = ?,
+             last_activity_at = ?, version = version + 1
          WHERE id = ?`,
         input.now,
         input.now,
@@ -227,7 +230,8 @@ export class SessionRepository {
         now, runId
       )
       tx.run(
-        `UPDATE sessions SET status = 'interrupted', updated_at = ?, last_activity_at = ?,
+        `UPDATE sessions SET status = 'interrupted', work_status = 'interrupted',
+         updated_at = ?, last_activity_at = ?,
          version = version + 1 WHERE id = ?`,
         now, now, before.session_id
       )
@@ -564,7 +568,8 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell', title = 'Shell', updated_at = ?, last_activity_at = ?,
+         SET kind = 'shell', title = 'Shell', work_status = 'error',
+             updated_at = ?, last_activity_at = ?,
              version = version + 1
          WHERE id = ?`,
         now,
@@ -601,7 +606,8 @@ export class SessionRepository {
       if (before.archived_at !== null) throw new Error('archived Session cannot return to Shell')
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell', title = 'Shell', updated_at = ?, last_activity_at = ?,
+         SET kind = 'shell', title = 'Shell', work_status = 'idle',
+             updated_at = ?, last_activity_at = ?,
              version = version + 1
          WHERE id = ?`,
         now,
@@ -636,7 +642,8 @@ export class SessionRepository {
       const title = kind === 'claude-code' ? 'Claude' : 'Codex'
       tx.run(
         `UPDATE sessions
-         SET kind = ?, title = ?, updated_at = ?, last_activity_at = ?, version = version + 1
+         SET kind = ?, title = ?, work_status = 'starting', updated_at = ?,
+             last_activity_at = ?, version = version + 1
          WHERE id = ?`,
         kind,
         title,
