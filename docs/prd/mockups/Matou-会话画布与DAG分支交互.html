@@ -1,0 +1,1934 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:," />
+  <title>Matou · 会话分支交互 Mockup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --surface: #ffffff;
+      --surface-2: #f2f4f7;
+      --surface-3: #e9edf3;
+      --line: #dfe3e8;
+      --line-strong: #ccd3dc;
+      --text: #24272d;
+      --muted: #737b87;
+      --quiet: #a0a7b1;
+      --blue: #1677ff;
+      --blue-soft: #eaf3ff;
+      --green: #23a66f;
+      --green-soft: #e9f7f1;
+      --amber: #d89021;
+      --amber-soft: #fff5de;
+      --shadow: 0 18px 52px rgba(24, 32, 44, .14);
+      --mono: "SFMono-Regular", "Cascadia Code", Menlo, Monaco, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: #dfe3e8;
+      -webkit-font-smoothing: antialiased;
+    }
+    .prototype-shell { transition: transform .34s cubic-bezier(.2,.8,.2,1), filter .34s ease; }
+    body.dag-active .prototype-shell { transform: scale(.965); filter: blur(9px) saturate(.72); }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .prototype-shell {
+      display: grid;
+      grid-template-rows: 58px minmax(0, 1fr);
+      width: 100vw;
+      height: 100vh;
+      background: var(--surface);
+      border: 1px solid #cdd2d8;
+      overflow: hidden;
+    }
+
+    .titlebar {
+      display: grid;
+      grid-template-columns: 410px 1fr;
+      align-items: stretch;
+      background: rgba(255, 255, 255, .96);
+      border-bottom: 1px solid var(--line);
+      user-select: none;
+    }
+
+    .titlebar-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 18px;
+      border-right: 1px solid var(--line);
+    }
+
+    .traffic { display: flex; gap: 9px; }
+    .traffic i { width: 13px; height: 13px; border-radius: 50%; display: block; }
+    .traffic i:nth-child(1) { background: #ff605c; }
+    .traffic i:nth-child(2) { background: #ffbd44; }
+    .traffic i:nth-child(3) { background: #00ca4e; }
+
+    .app-identity { display: flex; align-items: center; gap: 10px; font-weight: 670; letter-spacing: -.01em; }
+    .app-mark {
+      width: 27px; height: 27px; border: 1.5px solid #30343a; border-radius: 8px;
+      display: grid; place-items: center; font-size: 16px;
+    }
+
+    .titlebar-main {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-width: 0;
+      padding: 8px 14px;
+    }
+
+    .tabs { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .tab {
+      display: flex; align-items: center; gap: 8px; min-width: 210px; max-width: 330px;
+      padding: 10px 14px; border-radius: 10px; color: #3d424a; background: var(--surface-2);
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .tab.active { background: #e8edf5; box-shadow: inset 0 0 0 1px #d8e0eb; }
+    .tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tab .x { margin-left: auto; color: var(--quiet); font-size: 18px; line-height: 1; }
+    .new-tab { border: 0; background: var(--surface-2); width: 38px; height: 38px; border-radius: 10px; font-size: 22px; color: #5c6470; }
+    .new-tab:hover { background: #e8edf5; }
+
+    .window-tools { display: flex; align-items: center; gap: 8px; color: #707781; }
+    .window-tools span { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; }
+    .window-tools span:hover { background: var(--surface-2); color: var(--text); }
+
+    .app-body { display: grid; grid-template-columns: 410px minmax(0, 1fr); min-height: 0; }
+
+    .sidebar {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 10px 10px 18px;
+      background: #fbfbfc;
+      border-right: 1px solid var(--line);
+      overflow: hidden;
+    }
+
+    .workspace {
+      display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 12px;
+      border-radius: 12px; font-weight: 700; color: #303640;
+    }
+    .workspace.active { background: #f2f4f7; box-shadow: inset 3px 0 0 var(--blue); }
+    .workspace-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .workspace .home { color: #5696f9; }
+    .workspace .default { font-size: 11px; color: #707783; padding: 3px 7px; background: #e9ebef; border-radius: 999px; }
+    .workspace .actions { margin-left: auto; color: #858c96; display: flex; gap: 12px; font-weight: 500; }
+
+    .task-list { padding: 2px 0 10px 28px; }
+    .task {
+      display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 14px;
+      border-radius: 11px; color: #6e7580; font-weight: 620;
+    }
+    .task.active { color: #2e333a; background: #e9edf3; }
+    .task .dots { margin-left: auto; color: #969ca5; }
+
+    .prototype-note {
+      margin-top: auto;
+      padding: 14px;
+      border: 1px solid #dde6f1;
+      border-radius: 13px;
+      background: #f5f9ff;
+      color: #5f6876;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .prototype-note strong { display: block; margin-bottom: 5px; color: #2d5d9b; font-size: 13px; }
+
+    .main {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .single-view, .children-view {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-rows: 48px minmax(0, 1fr) 42px;
+      background: var(--bg);
+      transition: opacity .24s ease, transform .36s cubic-bezier(.2,.8,.2,1);
+    }
+    .empty-canvas {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 42px;
+      background: linear-gradient(180deg, #fbfcfe, #f5f7fa);
+      transition: opacity .24s ease, transform .36s cubic-bezier(.2,.8,.2,1);
+    }
+    .empty-card {
+      width: min(580px, 100%);
+      padding: 28px;
+      border: 1px solid #dce2ea;
+      border-radius: 18px;
+      background: rgba(255,255,255,.96);
+      box-shadow: 0 24px 70px rgba(42,58,80,.12);
+    }
+    .empty-card h2 { margin: 0 0 7px; font-size: 22px; }
+    .empty-card > p { margin: 0 0 22px; color: #78818d; font-size: 13px; line-height: 1.6; }
+    .empty-canvas.ready {
+      display: grid;
+      grid-template-rows: 44px minmax(0, 1fr) 34px;
+      place-items: stretch;
+      padding: 0;
+      background: #f7f8fa;
+    }
+    .choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 18px; }
+    .choice-card {
+      min-height: 78px; padding: 14px; border: 1px solid #d7dde5; border-radius: 12px;
+      background: #fff; color: #3e4651; text-align: left; cursor: pointer;
+    }
+    .choice-card strong { display: block; margin-bottom: 5px; font-size: 14px; }
+    .choice-card span { color: #858d98; font-size: 11px; line-height: 1.45; }
+    .choice-card.selected { border-color: #6ea9f5; background: #f2f7ff; box-shadow: 0 0 0 3px rgba(22,119,255,.10); }
+    .empty-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+    .view-hidden { opacity: 0; pointer-events: none; transform: scale(.985); }
+
+    .session-titlebar {
+      position: relative;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      padding: 0 16px;
+      background: rgba(255,255,255,.96);
+      border-bottom: 1px solid var(--line);
+      color: #59616d;
+      font-size: 13px;
+    }
+
+    .session-type { color: #333840; font-weight: 700; }
+    .session-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8a919c; }
+    .session-actions { display: flex; gap: 7px; margin-left: auto; align-items: center; }
+
+    .icon-btn {
+      position: relative;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      height: 30px; min-width: 30px; padding: 0 8px;
+      border: 0; border-radius: 8px; background: transparent; color: #6a727e; cursor: pointer;
+    }
+    .icon-btn:hover { background: var(--surface-2); color: var(--text); }
+    .icon-btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+    .branch-create { color: #4f6d94; }
+    .branch-create::after, .split-create::after {
+      content: attr(data-tip);
+      position: absolute;
+      top: 38px;
+      right: 0;
+      width: max-content;
+      max-width: 220px;
+      padding: 7px 9px;
+      border-radius: 7px;
+      background: #24282f;
+      color: white;
+      font-size: 11px;
+      font-weight: 500;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-3px);
+      transition: .15s ease;
+    }
+    .branch-create:hover::after, .split-create:hover::after { opacity: 1; transform: translateY(0); }
+
+    .branch-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 28px;
+      padding: 0 10px;
+      border: 1px solid #b9d6ff;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: #2666b1;
+      font-size: 12px;
+      font-weight: 680;
+      cursor: pointer;
+      transition: .18s ease;
+    }
+    .branch-badge:hover { border-color: #8cbbff; background: #dcecff; transform: translateY(-1px); }
+    .branch-badge.idle { border-color: #d7dbe1; background: #f3f4f6; color: #777f89; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(35,166,111,.12); }
+    .branch-badge.idle .status-dot { background: #a6adb6; box-shadow: none; }
+
+    .terminal-wrap {
+      position: relative;
+      min-height: 0;
+      padding: 18px 20px;
+      background: #f7f8fa;
+      overflow: hidden;
+    }
+
+    .terminal-content {
+      height: 100%;
+      padding: 9px 12px;
+      color: #26303a;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      overflow: hidden;
+    }
+    .prompt-green { color: #29a068; font-weight: 700; }
+    .prompt-blue { color: #1285a1; font-weight: 700; }
+    .term-muted { color: #7f8790; }
+    .term-success { color: #168655; }
+    .cursor { display: inline-block; width: 8px; height: 16px; vertical-align: -3px; background: #4a90ed; animation: blink 1.05s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .statusbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 0 16px;
+      border-top: 1px solid var(--line);
+      background: rgba(255,255,255,.96);
+      color: #78808b;
+      font-size: 12px;
+    }
+    .statusbar .spacer { flex: 1; }
+    .statusbar .mode { color: #2b72c8; font-weight: 650; }
+
+    .children-view { grid-template-rows: 48px minmax(0, 1fr) 42px; }
+    .children-topbar { overflow: hidden; }
+    .breadcrumb { display: flex; align-items: center; gap: 7px; min-width: 0; font-weight: 620; }
+    .breadcrumb .root { color: #808792; font-weight: 560; }
+    .breadcrumb .current { color: #343942; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .gesture-hint { margin-left: 6px; color: #949ba5; font-size: 11px; font-weight: 520; }
+
+    .carousel-shell {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      background: #e9edf2;
+      touch-action: pan-y;
+      cursor: grab;
+      user-select: none;
+    }
+    .carousel-shell.is-dragging { cursor: grabbing; }
+    .carousel-shell.is-dragging .child-pane { pointer-events: none; }
+
+    .parent-projection {
+      position: absolute;
+      z-index: 12;
+      top: 14px;
+      bottom: 14px;
+      left: 0;
+      width: min(46vw, 620px);
+      padding: 12px;
+      transform: translateX(calc(-100% + var(--pull, 0px)));
+      transition: transform .42s cubic-bezier(.2,.8,.2,1);
+      pointer-events: none;
+    }
+    .parent-projection.dragging { transition: none; }
+    .parent-card {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      border: 1px solid #9fc5f7;
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 18px 55px rgba(28, 69, 124, .20);
+    }
+    .parent-label {
+      position: absolute;
+      z-index: 3;
+      top: 12px;
+      left: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(22,119,255,.93);
+      color: white;
+      font-size: 11px;
+      font-weight: 700;
+      box-shadow: 0 4px 16px rgba(22,119,255,.22);
+    }
+    .parent-preview { padding: 58px 22px 22px; font-family: var(--mono); font-size: 12px; line-height: 1.75; color: #46505c; }
+    .pull-meter {
+      position: absolute;
+      z-index: 14;
+      left: 18px;
+      top: 50%;
+      transform: translateY(-50%) translateX(calc(-110px + min(var(--pull, 0px), 110px)));
+      width: 98px;
+      padding: 9px 10px;
+      border-radius: 10px;
+      background: rgba(35,39,46,.88);
+      color: white;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 650;
+      transition: transform .42s cubic-bezier(.2,.8,.2,1);
+    }
+    .pull-meter.dragging { transition: none; }
+
+    .children-strip {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      padding: 10px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+      scrollbar-width: none;
+    }
+    .children-strip::-webkit-scrollbar { display: none; }
+
+    .child-pane {
+      position: relative;
+      flex: 0 0 calc((100% - 24px) / 4);
+      min-width: 238px;
+      height: 100%;
+      display: grid;
+      grid-template-rows: 43px minmax(0, 1fr) 34px;
+      overflow: hidden;
+      border: 1px solid #d0d6de;
+      border-radius: 11px;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(31,39,51,.05);
+      transition: flex-basis .38s cubic-bezier(.2,.8,.2,1), border-color .18s, box-shadow .18s;
+    }
+    .child-pane:hover, .child-pane.focused {
+      flex-basis: min(48%, 620px);
+      border-color: #8bb9f6;
+      box-shadow: 0 10px 28px rgba(35,72,122,.16);
+      z-index: 4;
+    }
+    .child-pane.active-pane { box-shadow: inset 0 3px 0 var(--blue), 0 8px 24px rgba(25,74,140,.10); }
+
+    .child-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border-bottom: 1px solid #e4e7eb;
+      background: #fcfcfd;
+      font-size: 11px;
+      min-width: 0;
+    }
+    .child-title .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: #3b414a; }
+    .child-title .branch-tag { color: #8a919b; font-family: var(--mono); font-size: 10px; }
+    .child-title .tiny-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+    .child-title .icon-btn { height: 27px; min-width: 27px; padding: 0 5px; }
+    .child-title .icon-btn svg { width: 14px; height: 14px; }
+    .child-title .branch-badge { height: 24px; padding: 0 7px; font-size: 10px; gap: 5px; }
+    .child-title .branch-badge .status-dot { width: 6px; height: 6px; }
+
+    .child-terminal {
+      min-height: 0;
+      padding: 13px;
+      overflow: hidden;
+      background: #f8f9fa;
+      color: #303943;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.62;
+      white-space: pre-wrap;
+    }
+    .mock-input-row { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding-top: 9px; border-top: 1px solid #e2e6eb; }
+    .mock-input-row input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: #26303a; font: inherit; }
+    .mock-input-row input::placeholder { color: #a1a8b1; }
+    .child-bottom { display: flex; align-items: center; gap: 7px; padding: 0 10px; border-top: 1px solid #e5e8ec; color: #89909a; font-size: 10px; }
+    .run-dot { width: 7px; height: 7px; border-radius: 50%; background: #a6adb6; }
+    .run-dot.running { background: var(--green); box-shadow: 0 0 0 3px rgba(35,166,111,.11); animation: breathe 1.6s ease-in-out infinite; }
+    .run-dot.needs-input { background: #d29922; box-shadow: 0 0 0 3px rgba(210,153,34,.13); }
+    .run-dot.error { background: #e34f4f; box-shadow: 0 0 0 3px rgba(227,79,79,.12); }
+    .run-dot.restore-failed { background: #e34f4f; box-shadow: 0 0 0 3px rgba(227,79,79,.12); }
+    .run-dot.restoring { background: var(--blue); box-shadow: 0 0 0 3px rgba(22,119,255,.12); animation: breathe 1.2s ease-in-out infinite; }
+    .restore-alert { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 10px 0 2px; padding: 8px 9px; border: 1px solid #efc3c3; border-radius: 8px; background: #fff5f5; color: #b93636; font: 600 10px/1.4 var(--sans); }
+    .restore-alert button { flex: none; border: 1px solid #e5aaaa; border-radius: 6px; padding: 4px 7px; background: #fff; color: #a92f2f; font: 650 10px var(--sans); cursor: pointer; }
+    @keyframes breathe { 50% { transform: scale(.72); opacity: .7; } }
+
+    .carousel-status { padding-left: 14px; }
+    .scroll-indicator { display: flex; align-items: center; gap: 5px; }
+    .scroll-indicator i { width: 18px; height: 3px; border-radius: 4px; background: #d3d7dc; }
+    .scroll-indicator i.active { width: 32px; background: #6fa7ed; }
+
+    .modal-backdrop {
+      position: fixed;
+      z-index: 50;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(31, 36, 44, .28);
+      backdrop-filter: blur(5px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s ease;
+    }
+    .modal-backdrop.open { opacity: 1; pointer-events: auto; }
+    .modal {
+      width: min(440px, calc(100vw - 48px));
+      border: 1px solid rgba(213,218,225,.95);
+      border-radius: 16px;
+      background: rgba(255,255,255,.98);
+      box-shadow: var(--shadow);
+      transform: translateY(8px) scale(.98);
+      transition: transform .22s cubic-bezier(.2,.8,.2,1);
+      overflow: hidden;
+    }
+    .modal-backdrop.open .modal { transform: none; }
+    .modal-head { padding: 20px 22px 10px; }
+    .modal-head h2 { margin: 0 0 6px; font-size: 18px; letter-spacing: -.02em; }
+    .modal-head p { margin: 0; color: #7a828d; font-size: 12px; line-height: 1.5; }
+    .modal-body { padding: 12px 22px 20px; }
+    .field-label { display: block; margin-bottom: 7px; color: #4e5662; font-size: 12px; font-weight: 650; }
+    .branch-input {
+      width: 100%; height: 42px; padding: 0 12px;
+      border: 1px solid #cdd4dd; border-radius: 9px; outline: 0; background: #fff; color: var(--text);
+      box-shadow: inset 0 1px 1px rgba(33,39,48,.03);
+    }
+    .branch-input:focus { border-color: #6ca7f7; box-shadow: 0 0 0 3px rgba(22,119,255,.12); }
+    .parent-context {
+      display: flex; align-items: center; gap: 8px; margin-top: 10px; color: #89909a; font-size: 11px;
+    }
+    .worktree-options { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 16px; }
+    .worktree-option {
+      display: flex; gap: 9px; padding: 11px; border: 1px solid #d8dee6; border-radius: 10px;
+      background: #fff; color: #515a66; font-size: 11px; line-height: 1.45; cursor: pointer;
+    }
+    .worktree-option:has(input:checked) { border-color: #72aaf3; background: #f2f7ff; box-shadow: 0 0 0 2px rgba(22,119,255,.09); }
+    .worktree-option input { margin-top: 2px; accent-color: var(--blue); }
+    .worktree-option strong { display: block; margin-bottom: 2px; color: #343b44; font-size: 12px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 9px; padding: 13px 18px; background: #f7f8fa; border-top: 1px solid #e5e8ec; }
+    .btn { height: 36px; padding: 0 16px; border: 1px solid #d1d6dd; border-radius: 8px; background: #fff; font-weight: 650; font-size: 13px; cursor: pointer; }
+    .btn:hover { background: #f2f4f7; }
+    .btn.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .btn.primary:hover { background: #0969df; }
+
+    .toast {
+      position: fixed;
+      z-index: 70;
+      left: 50%;
+      bottom: 30px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 11px 14px;
+      border-radius: 11px;
+      background: rgba(32,37,44,.94);
+      color: #fff;
+      box-shadow: 0 10px 34px rgba(0,0,0,.24);
+      font-size: 12px;
+      transform: translate(-50%, 20px);
+      opacity: 0;
+      pointer-events: none;
+      transition: .25s ease;
+    }
+    .toast.show { transform: translate(-50%, 0); opacity: 1; }
+    .toast .ok { color: #78ddb5; }
+
+    .walkthrough {
+      position: absolute;
+      z-index: 25;
+      right: 18px;
+      bottom: 58px;
+      width: 265px;
+      padding: 14px;
+      border: 1px solid #dce2ea;
+      border-radius: 13px;
+      background: rgba(255,255,255,.94);
+      box-shadow: 0 12px 34px rgba(37,47,61,.12);
+      color: #59616c;
+      font-size: 11px;
+      line-height: 1.6;
+      backdrop-filter: blur(8px);
+    }
+    .walkthrough h3 { margin: 0 0 7px; color: #30353c; font-size: 12px; }
+    .walkthrough ol { margin: 0; padding-left: 18px; }
+    .walkthrough button { position: absolute; right: 8px; top: 8px; border: 0; background: transparent; color: #9aa1aa; cursor: pointer; }
+
+    .tab-hold-indicator {
+      position: fixed;
+      z-index: 85;
+      left: 50%;
+      top: 76px;
+      width: 260px;
+      padding: 10px 12px 9px;
+      border: 1px solid rgba(115, 134, 159, .28);
+      border-radius: 12px;
+      background: rgba(30, 36, 46, .92);
+      color: #fff;
+      box-shadow: 0 14px 38px rgba(20, 26, 35, .24);
+      text-align: center;
+      font-size: 11px;
+      font-weight: 650;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-50%, -8px) scale(.98);
+      transition: .18s ease;
+    }
+    .tab-hold-indicator.visible { opacity: 1; transform: translate(-50%, 0) scale(1); }
+    .tab-hold-track { height: 3px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.16); }
+    .tab-hold-progress { width: 0; height: 100%; border-radius: inherit; background: #75b7ff; }
+    .tab-hold-indicator.visible .tab-hold-progress { animation: tabHold 520ms linear forwards; }
+    @keyframes tabHold { to { width: 100%; } }
+
+    .dag-overlay {
+      position: fixed;
+      z-index: 100;
+      inset: 0;
+      display: grid;
+      grid-template-rows: 84px minmax(0, 1fr) 58px;
+      background: rgba(224, 230, 238, .74);
+      backdrop-filter: blur(30px) saturate(.94);
+      opacity: 0;
+      pointer-events: none;
+      transform: scale(1.025);
+      transition: opacity .24s ease, transform .3s cubic-bezier(.2,.8,.2,1);
+    }
+    .dag-overlay.open { opacity: 1; pointer-events: auto; transform: none; }
+
+    .dag-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      align-self: center;
+      width: calc(100% - 40px);
+      height: 58px;
+      margin: 12px auto 0;
+      padding: 0 18px;
+      border: 1px solid rgba(132, 145, 161, .26);
+      border-radius: 16px;
+      background: rgba(255,255,255,.70);
+      box-shadow: 0 14px 38px rgba(45,58,74,.11);
+    }
+    .dag-heading { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .dag-heading-mark {
+      width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px;
+      background: #e5f0ff; color: #226fc9; font-size: 18px;
+    }
+    .dag-heading h2 { margin: 0; font-size: 15px; letter-spacing: -.015em; }
+    .dag-heading p { margin: 2px 0 0; color: #848c97; font-size: 10px; }
+    .dag-legend { display: flex; align-items: center; gap: 13px; margin-left: auto; color: #6f7884; font-size: 10px; }
+    .dag-legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .dag-legend i { width: 7px; height: 7px; border-radius: 50%; background: #a7afb9; }
+    .dag-legend i.live { background: var(--green); box-shadow: 0 0 0 3px rgba(35,166,111,.12); }
+    .dag-close { width: 32px; height: 32px; border: 0; border-radius: 9px; background: rgba(255,255,255,.7); color: #69717d; cursor: pointer; font-size: 17px; }
+    .dag-close:hover { background: #fff; color: #242931; }
+
+    .dag-canvas {
+      position: relative;
+      min-height: 0;
+      overflow: hidden;
+      cursor: grab;
+      user-select: none;
+      touch-action: pan-y;
+      background:
+        radial-gradient(circle at 50% 43%, rgba(93, 151, 224, .11), transparent 31%),
+        linear-gradient(rgba(255,255,255,.16) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.16) 1px, transparent 1px);
+      background-size: auto, 28px 28px, 28px 28px;
+    }
+    .dag-canvas.dragging { cursor: grabbing; }
+    .dag-canvas::before, .dag-canvas::after {
+      content: '';
+      position: absolute;
+      z-index: 2;
+      top: 0; bottom: 0;
+      width: 108px;
+      pointer-events: none;
+    }
+    .dag-canvas::before { left: 0; background: linear-gradient(90deg, rgba(224,230,238,.96) 8%, rgba(224,230,238,0)); }
+    .dag-canvas::after { right: 0; background: linear-gradient(90deg, rgba(224,230,238,0), rgba(224,230,238,.96) 92%); }
+
+    .dag-lines { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+    .dag-line { fill: none; stroke: rgba(113, 133, 157, .46); stroke-width: 1.5; }
+    .dag-line.active { stroke: rgba(38, 116, 211, .68); stroke-width: 2; }
+
+    .dag-layer {
+      position: absolute;
+      z-index: 3;
+      top: 48px;
+      bottom: 48px;
+      width: 250px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      transition: left .42s cubic-bezier(.2,.8,.2,1), opacity .32s ease, filter .32s ease, transform .42s cubic-bezier(.2,.8,.2,1);
+    }
+    .dag-layer.ghost { z-index: 3; opacity: .23; filter: blur(4px); transform: scale(.88); pointer-events: none; }
+    .dag-layer-label {
+      position: absolute;
+      left: 50%;
+      top: -27px;
+      transform: translateX(-50%);
+      width: 160px;
+      color: #8a929e;
+      text-align: center;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .dag-node {
+      position: relative;
+      width: 248px;
+      min-width: 0;
+      height: 108px;
+      display: grid;
+      grid-template-rows: 32px minmax(0,1fr) 23px;
+      overflow: hidden;
+      border: 1px solid rgba(166, 178, 192, .64);
+      border-radius: 12px;
+      background: rgba(255,255,255,.92);
+      box-shadow: 0 8px 22px rgba(47, 61, 79, .10);
+      cursor: pointer;
+      transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+    }
+    .dag-node:hover { transform: translateY(-3px); border-color: #83b5f4; box-shadow: 0 14px 32px rgba(41,87,145,.17); }
+    .dag-node.selected { border-color: #4e99f4; box-shadow: 0 0 0 3px rgba(22,119,255,.12), 0 13px 32px rgba(41,87,145,.16); }
+    .dag-node-head { display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 10px; border-bottom: 1px solid #e7eaf0; }
+    .dag-node-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 750; color: #343a43; }
+    .dag-status { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; color: #78818d; font-size: 9px; }
+    .dag-status i { width: 6px; height: 6px; border-radius: 50%; background: #a8afb8; }
+    .dag-status.running { color: #18825a; }
+    .dag-status.running i { background: var(--green); box-shadow: 0 0 0 3px rgba(35,166,111,.10); }
+    .dag-live-lines { padding: 7px 10px; overflow: hidden; color: #68717d; background: #fafbfc; font-family: var(--mono); font-size: 8.5px; line-height: 1.48; white-space: pre-wrap; }
+    .dag-live-lines .newest { color: #25809a; }
+    .dag-node-foot { display: flex; align-items: center; gap: 7px; padding: 0 10px; border-top: 1px solid #e7eaf0; color: #8d949e; font-size: 8.5px; }
+    .dag-node-foot .live-tag { color: #22845f; }
+    .dag-node-foot .branch-name { margin-left: auto; max-width: 95px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+
+    .dag-more-indicator {
+      position: absolute;
+      z-index: 12;
+      top: 50%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px;
+      border: 1px solid rgba(139,153,170,.22);
+      border-radius: 999px;
+      background: rgba(255,255,255,.70);
+      color: #77818d;
+      font-size: 9px;
+      transform: translateY(-50%);
+      pointer-events: none;
+      writing-mode: vertical-rl;
+    }
+    .dag-more-indicator.left { left: 12px; }
+    .dag-more-indicator.right { right: 12px; }
+    .dag-more-indicator i { width: 4px; height: 4px; border-radius: 50%; background: #7b91ab; box-shadow: 8px 0 #9eabb9, -8px 0 #9eabb9; }
+
+    .dag-footer {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      align-self: start;
+      justify-self: center;
+      height: 36px;
+      padding: 0 18px;
+      border: 1px solid rgba(132,145,161,.22);
+      border-radius: 999px;
+      background: rgba(255,255,255,.68);
+      box-shadow: 0 8px 24px rgba(45,58,74,.08);
+      color: #737c88;
+      font-size: 10px;
+    }
+    .dag-footer kbd { padding: 3px 7px; border: 1px solid #c7ced7; border-bottom-width: 2px; border-radius: 6px; background: #fff; color: #4f5864; font-family: inherit; }
+
+    .dag-world {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 3200px;
+      height: 1500px;
+      transform-origin: 0 0;
+      will-change: transform;
+    }
+    .dag-world .dag-lines { width: 3200px; height: 1500px; }
+    .dag-world .dag-layer {
+      top: 0;
+      bottom: auto;
+      width: 250px;
+      height: auto;
+      min-height: 108px;
+      justify-content: flex-start;
+      gap: 14px;
+      transition: opacity .22s ease, filter .22s ease;
+      will-change: opacity, filter;
+    }
+    .dag-world .dag-layer.ghost { transform: none; pointer-events: auto; }
+    .dag-world .dag-layer-label { top: -25px; }
+    .dag-world .dag-node { flex: 0 0 108px; }
+
+    .dag-zoom-controls {
+      position: absolute;
+      z-index: 16;
+      right: 22px;
+      bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      padding: 5px;
+      border: 1px solid rgba(132,145,161,.24);
+      border-radius: 11px;
+      background: rgba(255,255,255,.82);
+      box-shadow: 0 10px 28px rgba(45,58,74,.11);
+      backdrop-filter: blur(10px);
+    }
+    .dag-zoom-controls button {
+      height: 28px;
+      min-width: 30px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: #59636f;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .dag-zoom-controls button:hover { background: #edf3fa; color: #216dc7; }
+    .dag-zoom-value { min-width: 45px; color: #737d89; text-align: center; font-size: 10px; font-variant-numeric: tabular-nums; }
+    .dag-canvas.dragging .dag-node { pointer-events: none; }
+
+    @media (max-width: 1100px) {
+      .titlebar { grid-template-columns: 300px 1fr; }
+      .app-body { grid-template-columns: 300px minmax(0,1fr); }
+      .child-pane { flex-basis: calc((100% - 16px) / 3); }
+      .child-pane:hover, .child-pane.focused { flex-basis: 55%; }
+      .prototype-note { display: none; }
+      .dag-node { width: 206px; }
+      .dag-layer { width: 208px; gap: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-shell">
+    <header class="titlebar">
+      <div class="titlebar-left">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="app-identity"><span class="app-mark">⌁</span><span>新增工作空间</span></div>
+      </div>
+      <div class="titlebar-main">
+        <div class="tabs">
+          <div class="tab active" id="primaryCanvasTab" onclick="showPrimaryCanvas()"><span class="label">分支交互设计</span><span class="x">×</span></div>
+          <button class="new-tab" onclick="createCanvas()" aria-label="新建画布">+</button>
+        </div>
+        <div class="window-tools"><span>◧</span><span>▰</span><span>│</span><span>▱</span></div>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <aside class="sidebar">
+        <div class="workspace active"><span>⌄</span><span class="home">⌂</span><span class="workspace-name">matou_workspace</span><span class="default">默认</span><span class="actions">⌖ ＋ •••</span></div>
+        <div class="task-list">
+          <div class="task active"><span>☰</span><span>分支交互设计</span><span class="dots">•••</span></div>
+          <div class="task"><span>☰</span><span>默认</span><span class="dots">•••</span></div>
+        </div>
+        <div class="workspace"><span>›</span><span>▱</span><span class="workspace-name">kookey</span><span class="actions">＋ •••</span></div>
+        <div class="workspace"><span>›</span><span>▱</span><span class="workspace-name">stock</span><span class="actions">＋ •••</span></div>
+
+        <div class="prototype-note">
+          <strong>可交互 Mockup</strong>
+          普通横向新建会在当前层追加 Shell 兄弟；Shell 与 Claude Code 可混合显示。会话提交真实输入后会移动到列表最前，长按 Option + Tab 打开 DAG。
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="single-view" id="singleView">
+          <div class="session-titlebar">
+            <span class="session-type">Claude Code</span>
+            <span class="session-path">主线会话 · ~/Documents/AIProjects/matou</span>
+            <div class="session-actions">
+              <button class="icon-btn branch-create" data-tip="Fork 当前 Claude Code 会话" onclick="openBranchModal('parent')" aria-label="创建子分支">
+                <svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v5a4 4 0 0 0 4 4h3a5 5 0 0 0 5-5V10"/><path d="M15 4v4M13 6h4"/></svg>
+              </button>
+              <button class="branch-badge" id="parentBadge" onclick="enterChildren()">
+                <span class="status-dot"></span><span id="parentBadgeText">5 分支 · 1 待输入</span><span>›</span>
+              </button>
+              <button class="icon-btn" aria-label="关闭">×</button>
+            </div>
+          </div>
+
+          <div class="terminal-wrap">
+            <div class="terminal-content"><span class="term-muted">Claude Code · 主线会话</span>
+
+<span class="term-success">✓</span> 已理解 Matou 会话画布与状态定义
+<span class="term-success">✓</span> 当前会话已形成可 Fork 的对话身份
+<span class="term-muted">  5 个子节点来自当前会话，其中 2 个运行中、1 个待输入、1 个恢复失败</span>
+
+<span class="prompt-green">➜</span> 请继续描述下一项产品决策 <span class="cursor"></span></div>
+          </div>
+
+          <div class="statusbar"><span>Claude Code</span><span class="spacer"></span><span>长按 ⌥ Option + Tab · 会话关系</span><span>空闲</span><span>~/matou_workspace</span></div>
+        </section>
+
+        <section class="children-view view-hidden" id="childrenView">
+          <div class="session-titlebar children-topbar">
+            <div class="breadcrumb"><span class="root">Claude Code /</span><span class="current">主线会话</span><span>›</span><span>兄弟分支</span></div>
+            <span class="gesture-hint">已进入 5 个子分支 · 滑到最左后继续右拉可返回父会话</span>
+            <div class="session-actions">
+              <button class="icon-btn split-create" data-tip="新建普通 Shell · 加入当前兄弟列表" onclick="createShellSibling()" aria-label="新建普通 Shell 兄弟">＋</button>
+              <button class="icon-btn branch-create" data-tip="由父会话继续创建子分支" onclick="openBranchModal('parent')">
+                <svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v5a4 4 0 0 0 4 4h3a5 5 0 0 0 5-5V10"/><path d="M15 4v4M13 6h4"/></svg>
+              </button>
+              <button class="icon-btn" onclick="returnToParent()" aria-label="返回父会话">⌃</button>
+            </div>
+          </div>
+
+          <div class="carousel-shell" id="carouselShell">
+            <div class="parent-projection" id="parentProjection">
+              <div class="parent-card">
+                <div class="parent-label">← 松手返回父会话</div>
+                <div class="parent-preview"><span class="term-muted">父会话投影 · Claude Code</span>
+
+(base) <span class="prompt-green">➜</span> <span class="prompt-blue">matou_workspace</span> git status
+On branch main
+
+<span class="term-success">✓</span> PRD 06 分支会话交互已完成基础验证
+
+(base) <span class="prompt-green">➜</span> <span class="prompt-blue">matou_workspace</span> _</div>
+              </div>
+            </div>
+            <div class="pull-meter" id="pullMeter">继续右拉<br/>返回父会话</div>
+
+            <div class="children-strip" id="childrenStrip"></div>
+          </div>
+
+          <div class="statusbar carousel-status">
+            <span id="visibleRange">正在查看 1–4 / 5</span>
+            <div class="scroll-indicator"><i class="active"></i><i></i><i></i></div>
+            <span class="spacer"></span>
+            <span>触摸板横滑 / 按住会话空白处拖拽</span>
+            <span>长按 ⌥ Option + Tab · DAG</span>
+            <span class="mode">3 个会话运行中</span>
+          </div>
+        </section>
+
+        <section class="empty-canvas view-hidden" id="emptyCanvas">
+          <div class="empty-card">
+            <h2>新画布</h2>
+            <p>普通新建沿用原有 Shell 逻辑：直接使用当前工作空间目录，自动聚焦并可立即输入。工作树选择只会在创建 Claude Code Fork 时出现。</p>
+            <div class="parent-context"><span>⌁</span><span><strong>默认会话：Shell</strong> · 当前工作空间目录 · 无额外选择</span></div>
+          </div>
+        </section>
+
+        <aside class="walkthrough" id="walkthrough">
+          <button onclick="this.parentElement.remove()">×</button>
+          <h3>建议按此顺序体验</h3>
+          <ol>
+            <li>点击标题行“分支”图标并创建</li>
+            <li>点击分支状态徽章进入子会话组</li>
+            <li>悬浮会话，观察自动变宽</li>
+            <li>在任一会话输入内容并回车，观察它移动到最前且保持聚焦</li>
+            <li>横向滑到最左，向右拖拽返回</li>
+            <li>点击“＋”追加 Shell 兄弟；Shell 与 Claude Code 会显示在同一列表</li>
+            <li>在“持久化恢复”节点点击“重试恢复”，观察节点在原位置恢复 Claude Code</li>
+            <li>用 Claude Code 分支图标创建子节点或 Fork 兄弟</li>
+            <li>按住 Option + Tab 约半秒，打开会话 DAG</li>
+          </ol>
+        </aside>
+      </main>
+    </div>
+  </div>
+
+  <div class="tab-hold-indicator" id="tabHoldIndicator">
+    继续按住 Option + Tab · 打开会话关系图
+    <div class="tab-hold-track"><div class="tab-hold-progress"></div></div>
+  </div>
+
+  <section class="dag-overlay" id="dagOverlay" aria-label="会话 DAG 关系视图">
+    <header class="dag-toolbar">
+      <div class="dag-heading">
+        <div class="dag-heading-mark">⌘</div>
+        <div><h2>会话关系</h2><p id="dagContextText">分支交互设计 · 当前聚焦：通知中心</p></div>
+      </div>
+      <div class="dag-legend">
+        <span><i class="live"></i>运行中 · 输出实时刷新</span>
+        <span><i></i>非运行中</span>
+        <span>默认显示父会话 / 当前层 / 子会话</span>
+      </div>
+      <button class="dag-close" onclick="closeDagView()" aria-label="关闭 DAG">×</button>
+    </header>
+    <div class="dag-canvas" id="dagCanvas">
+      <div class="dag-world" id="dagWorld">
+        <svg class="dag-lines" id="dagLines" aria-hidden="true"></svg>
+        <div id="dagLayers"></div>
+      </div>
+      <div class="dag-more-indicator left" id="dagMoreTop"><i></i><span>左侧还有会话层 · 向右滑动查看</span></div>
+      <div class="dag-more-indicator right" id="dagMoreBottom"><i></i><span>右侧还有会话层 · 向左滑动查看</span></div>
+      <div class="dag-zoom-controls">
+        <button onclick="zoomDag(-0.12)" aria-label="缩小 DAG">−</button>
+        <span class="dag-zoom-value" id="dagZoomValue">100%</span>
+        <button onclick="zoomDag(0.12)" aria-label="放大 DAG">＋</button>
+        <button onclick="fitDagToCurrent()">聚焦</button>
+      </div>
+    </div>
+    <footer class="dag-footer">
+      <span>平滑拖动画布：查看完整关系</span>
+      <span>双指捏合 / ⌘滚轮：缩放</span>
+      <span>点击卡片：跳转并聚焦会话</span>
+      <span><kbd>Esc</kbd> 关闭</span>
+      <span><kbd>⌥ Option + Tab</kbd> 长按呼出</span>
+    </footer>
+  </section>
+
+  <div class="modal-backdrop" id="branchModal" onclick="backdropClose(event)">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head">
+        <h2 id="modalTitle">创建子分支</h2>
+        <p id="modalSubtitle">从当前 Claude Code 会话 Fork 子分支，父会话保持原位。</p>
+      </div>
+      <div class="modal-body">
+        <label class="field-label" for="branchName">分支名称</label>
+        <input class="branch-input" id="branchName" placeholder="例如：通知中心交互" autocomplete="off" />
+        <div class="parent-context"><span>↳</span><span id="parentContext">父会话：Claude Code · 主线会话</span></div>
+        <div class="worktree-options">
+          <label class="worktree-option"><input type="radio" name="branch-worktree" value="current" checked><span><strong>在当前工作树中创建</strong>共享当前目录与未提交修改</span></label>
+          <label class="worktree-option"><input type="radio" name="branch-worktree" value="new"><span><strong>在新工作树中创建</strong>从最近提交创建独立目录和分支</span></label>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeBranchModal()">取消</button>
+        <button class="btn primary" onclick="createBranch()">创建并运行</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"><span class="ok">✓</span><span id="toastText">子分支已创建</span></div>
+
+  <script>
+    const branchIcon = `<svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v5a4 4 0 0 0 4 4h3a5 5 0 0 0 5-5V10"/><path d="M15 4v4M13 6h4"/></svg>`;
+    const splitIcon = `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/><path d="m16 9 2 2-2 2"/></svg>`;
+
+    const branches = [
+      { id: 'notification', name: '通知中心', mode: 'claude', edgeType: 'fork', git: 'feat/notification', status: 'running', running: true, nested: 2, nestedRunning: 1, lines: ['分析 Kooky 通知触发条件…', '✓ 已识别 4 类用户状态', '› 正在实现通知聚合视图'] },
+      { id: 'theme', name: '白色主题', mode: 'claude', edgeType: 'fork', git: 'fix/light-theme', status: 'needs-input', running: false, nested: 0, nestedRunning: 0, lines: ['✓ 完成列表层级对比', '✓ 校准终端背景与分割线', '等待你的验收选择'] },
+      { id: 'shortcut', name: '快捷键浮框', mode: 'claude', edgeType: 'fork', git: 'feat/shortcuts', status: 'running', running: true, nested: 1, nestedRunning: 1, lines: ['读取 Kooky 快捷键映射…', '✓ 完成全局唤起', '› 正在验证焦点恢复'] },
+      { id: 'persist', name: '持久化恢复', mode: 'shell', previousMode: 'claude', edgeType: 'fork', restoreState: 'failed', git: 'fix/persistence', status: 'restore-failed', running: false, nested: 0, nestedRunning: 0, lines: ['✓ 工作空间与节点关系已恢复', '原 Claude Code 对话恢复异常', '当前已回到 Shell，可继续使用'] },
+      { id: 'sidebar', name: '侧栏排序', mode: 'claude', edgeType: 'fork', git: 'feat/sidebar-order', status: 'idle', running: false, nested: 0, nestedRunning: 0, lines: ['✓ 置顶优先级已验证', '✓ 活跃时间排序已验证', '当前会话空闲'] }
+    ];
+
+    const dagNodes = {
+      product: { id: 'product', parent: null, depth: -2, mode: 'claude', edgeType: 'fork', name: 'Claude Code · 产品方案讨论', git: 'task/product-design', running: false, lines: ['✓ 明确工作区与事项层级', '✓ 确认会话分支产品方向', '当前会话空闲'] },
+      main: { id: 'main', parent: 'product', depth: -1, mode: 'claude', edgeType: 'fork', name: 'Claude Code · 主线会话', git: 'main', running: false, lines: ['✓ 创建 5 个并行子会话', '✓ 当前回答已完成', '主线会话空闲，可继续输入'] },
+      notification: { id: 'notification', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '通知中心', git: 'feat/notification', running: true, lines: ['✓ 识别 Kooky 通知触发条件', '› 正在实现通知聚合视图', '读取事件流 seq 1842…'] },
+      theme: { id: 'theme', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '白色主题', git: 'fix/light-theme', running: false, status: 'needs-input', lines: ['✓ 校准列表层级对比', '✓ 完成终端背景调整', '会话等待验收'] },
+      shortcut: { id: 'shortcut', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '快捷键浮框', git: 'feat/shortcuts', running: true, lines: ['✓ 完成全局唤起', '› 正在验证焦点恢复', '检查 CommandOrControl…'] },
+      persist: { id: 'persist', parent: 'main', depth: 0, mode: 'shell', previousMode: 'claude', edgeType: 'fork', restoreState: 'failed', status: 'restore-failed', name: '持久化恢复', git: 'fix/persistence', running: false, lines: ['✓ 工作空间与节点关系已恢复', '原 Claude Code 对话恢复异常', '当前已回到 Shell，可继续使用'] },
+      sidebar: { id: 'sidebar', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '侧栏排序', git: 'feat/sidebar-order', running: false, lines: ['✓ 置顶优先级已验证', '✓ 活跃时间排序已验证', '等待合并'] },
+      aggregate: { id: 'aggregate', parent: 'notification', depth: 1, name: '通知聚合', git: 'feat/notification-feed', running: true, lines: ['合并相同任务的连续事件…', '✓ 已聚合 12 条重复通知', '› 更新列表 projection'] },
+      badge: { id: 'badge', parent: 'notification', depth: 1, name: '状态徽章', git: 'feat/status-badge', running: false, lines: ['✓ 定义运行与等待状态', '✓ 完成红点降噪规则', '等待父会话确认'] },
+      quiet: { id: 'quiet', parent: 'notification', depth: 1, name: '免打扰规则', git: 'feat/quiet-hours', running: true, lines: ['读取工作区通知偏好…', '› 计算免打扰时间窗口', '已跳过 3 条低优先级事件'] },
+      feedState: { id: 'feedState', parent: 'aggregate', depth: 2, name: '聚合状态机', git: 'feat/feed-state', running: true, lines: ['处理 event seq 1843', '› 合并 running → needs-input', '写入 projection cache'] },
+      feedRestore: { id: 'feedRestore', parent: 'aggregate', depth: 2, name: '列表恢复', git: 'feat/feed-restore', running: false, lines: ['✓ 恢复滚动位置', '✓ 恢复未读分组', '等待集成测试'] },
+      quietRules: { id: 'quietRules', parent: 'quiet', depth: 2, name: '规则匹配器', git: 'feat/quiet-rules', running: true, lines: ['匹配 workspace 偏好…', '› 计算提醒优先级', '更新 next wake time'] },
+      delivery: { id: 'delivery', parent: 'feedState', depth: 3, name: '通知投递', git: 'feat/delivery', running: true, lines: ['消费 notification.ready', '› 投递 macOS 系统通知', '等待 delivery ack'] }
+    };
+
+    const liveLinePool = [
+      '读取最新 terminal event…', '更新会话运行状态…', '同步 journal checkpoint…',
+      '刷新最新输出摘要…', '处理 needs-input 事件…', '写入 session projection…'
+    ];
+
+    let currentGraphNodeId = 'main';
+    let dagWindowStart = -2;
+    let dagHoldTimer;
+    let dagHoldActive = false;
+    let dagDragStartX = 0;
+    let dagDragging = false;
+    let dagWheelAccumulator = 0;
+    let dagWheelTimer;
+    let liveTick = 0;
+    let activeGroupCount = branches.length;
+    let interactionSeq = 0;
+    let dagScale = 1;
+    let dagPanX = 0;
+    let dagPanY = 0;
+    let dagPointerStartX = 0;
+    let dagPointerStartY = 0;
+    let dagPointerStartPanX = 0;
+    let dagPointerStartPanY = 0;
+    let dagNodeLayout = {};
+
+    let modalParentId = 'parent';
+    let modalMode = 'child';
+    let pull = 0;
+    let dragging = false;
+    let startX = 0;
+    let startScrollLeft = 0;
+    let pointerStartedAtLeft = false;
+    let pointerReachedLeftFromInside = false;
+    let wheelGestureStartedAtLeft = false;
+    let wheelGestureReachedLeftFromInside = false;
+    let wheelGesturePulling = false;
+    let lastWheelAt = 0;
+    let wheelGestureTimer;
+    const LEFT_EDGE_TOLERANCE = 16;
+    const WHEEL_GESTURE_GAP = 220;
+
+    const singleView = document.getElementById('singleView');
+    const childrenView = document.getElementById('childrenView');
+    const childrenStrip = document.getElementById('childrenStrip');
+    const carouselShell = document.getElementById('carouselShell');
+    const projection = document.getElementById('parentProjection');
+    const meter = document.getElementById('pullMeter');
+
+    function branchStatusLabel(branch) {
+      return ({ running: '运行中', 'needs-input': '待输入', error: '错误', 'restore-failed': 'Claude Code 恢复失败', restoring: '正在恢复 Claude Code', interrupted: '已中断', idle: '空闲', exited: '已退出' })[branch.status || (branch.running ? 'running' : 'idle')] || '空闲';
+    }
+
+    function dominantBranchStatus() {
+      const order = ['error', 'restore-failed', 'needs-input', 'running', 'restoring', 'interrupted', 'idle', 'exited'];
+      for (const status of order) {
+        const count = branches.filter(branch => (branch.status || (branch.running ? 'running' : 'idle')) === status).length;
+        if (count) return { status, count, label: branchStatusLabel({ status }) };
+      }
+      return { status: 'idle', count: 0, label: '空闲' };
+    }
+
+    function paneTemplate(branch, index, total = branches.length) {
+      const isClaude = (branch.mode || 'claude') === 'claude';
+      const canFork = isClaude && branch.restoreState !== 'failed';
+      const nestedBadge = branch.nested > 0
+        ? `<button class="branch-badge ${branch.nestedRunning ? '' : 'idle'}" onclick="event.stopPropagation(); showNested('${branch.id}')"><span class="status-dot"></span><span>${branch.nested} 分支${branch.nestedRunning ? ` · ${branch.nestedRunning} 运行中` : ' · 空闲'}</span><span>›</span></button>`
+        : '';
+      const forkActions = canFork
+        ? `<button class="icon-btn branch-create" data-tip="从该 Claude Code 会话创建下一级" onclick="event.stopPropagation(); openBranchModal('${branch.id}')">${branchIcon}</button>
+            <button class="icon-btn split-create" data-tip="从共同父会话 Fork 兄弟分支" onclick="event.stopPropagation(); openSiblingModal('${branch.id}')">${splitIcon}</button>`
+        : '';
+      const restoreAlert = branch.restoreState === 'failed'
+        ? `<div class="restore-alert"><span>Claude Code 恢复失败</span><button onclick="event.stopPropagation(); retryClaudeRestore('${branch.id}')">重试恢复</button></div>`
+        : branch.restoreState === 'restoring'
+          ? `<div class="restore-alert"><span>正在恢复原 Claude Code 对话…</span></div>`
+          : '';
+      return `<article class="child-pane ${index === 0 ? 'active-pane' : ''}" data-id="${branch.id}" style="view-transition-name: pane-${branch.id}" onpointerdown="focusPane(this)" onmouseenter="setTimeout(() => ensurePaneVisible(this), 180)">
+        <div class="child-title">
+          <span class="name">${branch.name}</span>
+          <span class="branch-tag">${branch.git}</span>
+          <div class="tiny-actions">
+            ${nestedBadge}
+            ${forkActions}
+          </div>
+        </div>
+        <div class="child-terminal"><span class="term-muted">${isClaude ? 'Claude Code' : 'Shell'} · ${branch.name}</span>
+
+${branch.lines.map((line, i) => i === branch.lines.length - 1 && branch.running ? `<span class="prompt-blue">${line}</span>` : line).join('\n')}
+${restoreAlert}
+
+<span class="prompt-green">➜</span> <span class="prompt-blue">${branch.git}</span> ${branch.running ? '<span class="cursor"></span>' : ''}
+<div class="mock-input-row"><span class="prompt-green">›</span><input aria-label="向 ${branch.name} 发送内容" placeholder="输入内容并回车" onpointerdown="event.stopPropagation()" onfocus="focusPane(this.closest('.child-pane'))" onkeydown="recordSessionInteraction('${branch.id}', this, event)"></div></div>
+        <div class="child-bottom"><span class="run-dot ${branch.status || (branch.running ? 'running' : 'idle')}"></span><span>${branchStatusLabel(branch)}</span><span style="margin-left:auto">${index + 1}/${total}</span></div>
+      </article>`;
+    }
+
+    function renderBranches() {
+      activeGroupCount = branches.length;
+      childrenStrip.innerHTML = branches.map((branch, index) => paneTemplate(branch, index, branches.length)).join('');
+      const running = branches.filter(item => item.running).length;
+      const dominant = dominantBranchStatus();
+      const shellCount = branches.filter(item => item.mode === 'shell').length;
+      const claudeCount = branches.length - shellCount;
+      document.getElementById('parentBadgeText').textContent = `${branches.length} 会话 · ${claudeCount} Claude · ${shellCount} Shell · ${dominant.count} ${dominant.label}`;
+      document.querySelector('.carousel-status .mode').textContent = `${running} 运行中 · ${branches.filter(item => item.status === 'needs-input').length} 待输入`;
+      document.getElementById('visibleRange').textContent = `正在查看 1–${Math.min(4, branches.length)} / ${branches.length}`;
+      document.querySelector('.children-topbar .gesture-hint').textContent = `已进入 ${branches.length} 个子节点 · 滑到最左后继续右拉可返回父会话`;
+    }
+
+    function recordSessionInteraction(id, input, event) {
+      if (event.key !== 'Enter' || event.isComposing) return;
+      event.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;
+      const branch = branches.find(item => item.id === id);
+      if (!branch) return;
+      branch.lastUserInteraction = ++interactionSeq;
+      branch.lines = [...branch.lines.slice(-2), `你：${value}`];
+      const applyOrder = () => {
+        branches.sort((a, b) => (b.lastUserInteraction || 0) - (a.lastUserInteraction || 0));
+        renderBranches();
+      };
+      const transition = document.startViewTransition ? document.startViewTransition(applyOrder) : null;
+      if (!transition) applyOrder();
+      Promise.resolve(transition?.finished).then(() => {
+        const pane = childrenStrip.querySelector(`[data-id="${id}"]`);
+        if (!pane) return;
+        focusGraphPane(id);
+        const nextInput = pane.querySelector('.mock-input-row input');
+        if (nextInput) nextInput.focus({ preventScroll: true });
+        ensurePaneVisible(pane);
+      });
+      showToast(`“${branch.name}”已更新为最近交互会话并移动到最前`);
+    }
+
+    function enterChildren() {
+      currentGraphNodeId = currentGraphNodeId === 'main' ? 'notification' : currentGraphNodeId;
+      singleView.classList.add('view-hidden');
+      childrenView.classList.remove('view-hidden');
+      childrenStrip.scrollLeft = 0;
+      requestAnimationFrame(() => focusGraphPane(currentGraphNodeId));
+      showToast('已进入父会话的全部子分支');
+    }
+
+    function returnToParent() {
+      currentGraphNodeId = 'main';
+      resetPull();
+      childrenView.classList.add('view-hidden');
+      singleView.classList.remove('view-hidden');
+      showSingleDagNode(dagNodes.main);
+      showToast('已返回父会话');
+    }
+
+    function openBranchModal(parentId) {
+      modalMode = 'child';
+      modalParentId = parentId;
+      const parent = branches.find(item => item.id === parentId) || (dagNodes[parentId] ? nodeToBranch(dagNodes[parentId]) : undefined);
+      document.getElementById('modalTitle').textContent = parent ? '创建下一级子分支' : '创建子分支';
+      document.getElementById('modalSubtitle').textContent = parent
+        ? '新会话将继承该子会话的上下文，并作为它的下一级分支运行。'
+        : '从当前 Claude Code 会话 Fork 子分支，父会话保持原位。';
+      document.getElementById('parentContext').textContent = parent
+        ? `父会话：${parent.name} · ${parent.git}`
+        : '父会话：Claude Code · 主线会话';
+      document.getElementById('branchName').value = '';
+      document.querySelector('input[name="branch-worktree"][value="current"]').checked = true;
+      document.getElementById('branchModal').classList.add('open');
+      requestAnimationFrame(() => document.getElementById('branchName').focus());
+    }
+
+    function openSiblingModal(currentId) {
+      modalMode = 'sibling';
+      modalParentId = currentId;
+      const current = branches.find(item => item.id === currentId);
+      document.getElementById('modalTitle').textContent = '创建兄弟分支';
+      document.getElementById('modalSubtitle').textContent = '新会话将从共同父会话再次 Fork，与当前会话同级并追加到队列末尾。';
+      document.getElementById('parentContext').textContent = `当前兄弟：${current?.name || '当前会话'} · 共同父会话：Claude Code · 主线会话`;
+      document.getElementById('branchName').value = '';
+      document.querySelector('input[name="branch-worktree"][value="current"]').checked = true;
+      document.getElementById('branchModal').classList.add('open');
+      requestAnimationFrame(() => document.getElementById('branchName').focus());
+    }
+
+    function closeBranchModal() { document.getElementById('branchModal').classList.remove('open'); }
+    function backdropClose(event) { if (event.target.id === 'branchModal') closeBranchModal(); }
+
+    function createBranch() {
+      const input = document.getElementById('branchName');
+      const name = input.value.trim();
+      if (!name) {
+        input.focus();
+        input.style.borderColor = '#e05b5b';
+        setTimeout(() => input.style.borderColor = '', 700);
+        return;
+      }
+      const parent = branches.find(item => item.id === modalParentId);
+      const graphParent = dagNodes[modalParentId];
+      const worktreeMode = document.querySelector('input[name="branch-worktree"]:checked')?.value || 'current';
+      const gitLabel = worktreeMode === 'new'
+        ? `feat/${name.toLowerCase().replace(/\s+/g, '-')}`
+        : 'main · 共享工作树';
+      if (modalMode === 'sibling') {
+        const id = `branch-${Date.now()}`;
+        const branch = {
+          id,
+          name,
+          mode: 'claude',
+          edgeType: 'fork',
+          git: gitLabel,
+          status: 'running',
+          running: true,
+          nested: 0,
+          nestedRunning: 0,
+          lines: ['已从共同父会话 Fork', worktreeMode === 'new' ? '✓ 新工作树已准备' : '✓ 正在共享父会话工作树', '› 正在初始化独立兄弟会话']
+        };
+        branches.push(branch);
+        dagNodes[id] = {
+          id,
+          parent: 'main',
+          depth: 0,
+          mode: 'claude',
+          edgeType: 'fork',
+          name,
+          git: gitLabel,
+          running: true,
+          lines: branch.lines.slice()
+        };
+        renderBranches();
+        requestAnimationFrame(() => focusGraphPane(id));
+        showToast(`“${name}”已从共同父会话 Fork，并追加为兄弟分支`);
+      } else if (parent) {
+        parent.nested += 1;
+        parent.nestedRunning += 1;
+        parent.running = true;
+        parent.status = 'running';
+        const id = `branch-${Date.now()}`;
+        dagNodes[id] = {
+          id,
+          parent: parent.id,
+          depth: (dagNodes[parent.id]?.depth ?? 0) + 1,
+          mode: 'claude',
+          edgeType: 'fork',
+          name,
+          git: gitLabel,
+          running: true,
+          lines: ['已继承父会话上下文', worktreeMode === 'new' ? '✓ 新工作树已准备' : '✓ 共享当前工作树', '› 正在初始化子分支']
+        };
+        renderBranches();
+        showToast(`“${name}”已作为“${parent.name}”的下一级分支运行`);
+      } else if (graphParent) {
+        const id = `branch-${Date.now()}`;
+        dagNodes[id] = {
+          id,
+          parent: graphParent.id,
+          depth: graphParent.depth + 1,
+          mode: 'claude',
+          edgeType: 'fork',
+          name,
+          git: gitLabel,
+          running: true,
+          lines: ['已继承父会话上下文', worktreeMode === 'new' ? '✓ 新工作树已准备' : '✓ 共享当前工作树', '› 正在初始化独立工作会话']
+        };
+        showToast(`“${name}”已作为“${graphParent.name}”的下一级分支运行`);
+      } else {
+        const id = `branch-${Date.now()}`;
+        const branch = {
+          id,
+          name,
+          mode: 'claude',
+          edgeType: 'fork',
+          git: gitLabel,
+          status: 'running',
+          running: true,
+          nested: 0,
+          nestedRunning: 0,
+          lines: ['已继承父会话上下文', '› 正在初始化独立工作会话']
+        };
+        branches.push(branch);
+        dagNodes[id] = { id, parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name, git: gitLabel, running: true, lines: branch.lines.slice() };
+        renderBranches();
+        showToast(`子分支“${name}”已创建并开始运行`);
+      }
+      closeBranchModal();
+    }
+
+    function createCanvas() {
+      const tabs = document.querySelector('.tabs');
+      let tab = document.getElementById('newCanvasTab');
+      if (!tab) {
+        tab = document.createElement('div');
+        tab.className = 'tab';
+        tab.id = 'newCanvasTab';
+        tab.innerHTML = '<span class="label">新画布 2</span><span class="x">×</span>';
+        tab.onclick = showEmptyCanvas;
+        tabs.insertBefore(tab, document.querySelector('.new-tab'));
+      }
+      createRootSession();
+      showEmptyCanvas();
+    }
+
+    function showEmptyCanvas() {
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+      document.getElementById('newCanvasTab')?.classList.add('active');
+      singleView.classList.add('view-hidden');
+      childrenView.classList.add('view-hidden');
+      document.getElementById('emptyCanvas').classList.remove('view-hidden');
+    }
+
+    function showPrimaryCanvas() {
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+      document.getElementById('primaryCanvasTab').classList.add('active');
+      document.getElementById('emptyCanvas').classList.add('view-hidden');
+      childrenView.classList.add('view-hidden');
+      singleView.classList.remove('view-hidden');
+    }
+
+    function createRootSession() {
+      document.querySelector('#newCanvasTab .label').textContent = 'Shell · 新画布';
+      const canvas = document.getElementById('emptyCanvas');
+      canvas.classList.add('ready');
+      canvas.innerHTML = `<div class="session-titlebar"><span class="session-type">Shell</span><span class="session-path">~/Documents/AIProjects/matou</span><div class="session-actions"><button class="icon-btn split-create" data-tip="直接横向创建根级 Shell" onclick="showToast('演示：直接横向创建新的根级 Shell，不展示弹框')" aria-label="横向创建 Shell 兄弟">＋</button><button class="icon-btn" aria-label="关闭">×</button></div></div><div class="terminal-wrap"><div class="terminal-content"><span class="term-muted">Shell · 当前工作空间目录</span>\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">matou</span> <span class="cursor"></span></div></div><div class="statusbar"><span>Shell</span><span class="spacer"></span><span>空闲</span><span>~/Documents/AIProjects/matou</span></div>`;
+      showToast('Shell 已作为新画布的根级会话创建并自动聚焦');
+    }
+
+    function showNested(id) {
+      const branch = branches.find(item => item.id === id) || (dagNodes[id] ? nodeToBranch(dagNodes[id]) : undefined);
+      showToast(`演示：进入“${branch.name}”的 ${branch.nested} 个下一级分支`);
+    }
+
+    function createShellSibling() {
+      const id = `shell-${Date.now()}`;
+      const index = branches.filter(item => item.edgeType === 'normal').length + 1;
+      const branch = {
+        id,
+        name: `普通 Shell ${index}`,
+        mode: 'shell',
+        edgeType: 'normal',
+        git: '~/Documents/AIProjects/matou',
+        status: 'idle',
+        running: false,
+        nested: 0,
+        nestedRunning: 0,
+        lines: ['已使用当前工作空间目录创建', '与当前列表会话共享父节点', '未继承其他会话的对话内容']
+      };
+      branches.push(branch);
+      dagNodes[id] = {
+        id,
+        parent: 'main',
+        depth: 0,
+        mode: 'shell',
+        edgeType: 'normal',
+        name: branch.name,
+        git: branch.git,
+        status: 'idle',
+        running: false,
+        lines: branch.lines.slice()
+      };
+      renderBranches();
+      requestAnimationFrame(() => focusGraphPane(id));
+      showToast('普通 Shell 已追加到当前兄弟列表末尾并自动聚焦');
+    }
+
+    function retryClaudeRestore(id) {
+      const branch = branches.find(item => item.id === id);
+      if (!branch || branch.restoreState === 'restoring') return;
+      branch.restoreState = 'restoring';
+      branch.status = 'restoring';
+      branch.lines = [...branch.lines.slice(0, 2), '正在重新连接原 Claude Code 对话…'];
+      Object.assign(dagNodes[id], { restoreState: 'restoring', status: 'restoring', mode: 'shell', running: false, lines: branch.lines.slice() });
+      renderBranches();
+      requestAnimationFrame(() => focusGraphPane(id));
+      setTimeout(() => {
+        branch.mode = 'claude';
+        branch.restoreState = null;
+        branch.status = 'idle';
+        branch.running = false;
+        branch.lines = ['✓ 原 Claude Code 对话恢复成功', '✓ 节点关系与子节点保持原样', '当前会话空闲，可继续输入'];
+        Object.assign(dagNodes[id], { mode: 'claude', restoreState: null, status: 'idle', running: false, lines: branch.lines.slice() });
+        renderBranches();
+        requestAnimationFrame(() => focusGraphPane(id));
+        showToast('Claude Code 已恢复；节点身份、关系和列表位置保持原样');
+      }, 900);
+    }
+
+    function focusPane(element) {
+      document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane'));
+      element.classList.add('focused', 'active-pane');
+      if (dagNodes[element.dataset.id]) currentGraphNodeId = element.dataset.id;
+      setTimeout(() => ensurePaneVisible(element), 50);
+    }
+
+    function ensurePaneVisible(element, behavior = 'smooth') {
+      if (!element || !childrenStrip.contains(element)) return;
+      const maxLeft = Math.max(0, childrenStrip.scrollWidth - childrenStrip.clientWidth);
+      const centered = element.offsetLeft - (childrenStrip.clientWidth - element.offsetWidth) / 2;
+      childrenStrip.scrollTo({ left: Math.max(0, Math.min(maxLeft, centered)), behavior });
+      setTimeout(() => {
+        const viewport = childrenStrip.getBoundingClientRect();
+        const pane = element.getBoundingClientRect();
+        if (pane.left < viewport.left) childrenStrip.scrollBy({ left: pane.left - viewport.left - 12, behavior: 'smooth' });
+        if (pane.right > viewport.right) childrenStrip.scrollBy({ left: pane.right - viewport.right + 12, behavior: 'smooth' });
+      }, 260);
+    }
+
+    function focusGraphPane(nodeId) {
+      const element = childrenStrip.querySelector(`[data-id="${nodeId}"]`);
+      if (!element) return;
+      document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane'));
+      element.classList.add('focused', 'active-pane');
+      setTimeout(() => ensurePaneVisible(element), 80);
+    }
+
+    function setPull(value, isDragging = true) {
+      pull = Math.max(0, Math.min(320, value));
+      const visual = Math.min(300, Math.pow(pull, .88) * 1.65);
+      carouselShell.style.setProperty('--pull', `${visual}px`);
+      projection.classList.toggle('dragging', isDragging);
+      meter.classList.toggle('dragging', isDragging);
+      const label = pull >= 150 ? '松手即可\n返回父会话' : '继续右拉\n返回父会话';
+      meter.innerHTML = label.replace('\n', '<br/>');
+    }
+
+    function resetPull() {
+      pull = 0;
+      projection.classList.remove('dragging');
+      meter.classList.remove('dragging');
+      carouselShell.style.setProperty('--pull', '0px');
+    }
+
+    function releasePull() {
+      projection.classList.remove('dragging');
+      meter.classList.remove('dragging');
+      if (pull >= 150) {
+        carouselShell.style.setProperty('--pull', '620px');
+        setTimeout(returnToParent, 220);
+      } else {
+        resetPull();
+      }
+    }
+
+    carouselShell.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      dragging = true;
+      startX = event.clientX;
+      startScrollLeft = childrenStrip.scrollLeft;
+      pointerStartedAtLeft = startScrollLeft <= LEFT_EDGE_TOLERANCE;
+      pointerReachedLeftFromInside = false;
+      pull = 0;
+      carouselShell.classList.add('is-dragging');
+      carouselShell.setPointerCapture(event.pointerId);
+    });
+
+    carouselShell.addEventListener('pointermove', (event) => {
+      if (!dragging) return;
+      const delta = event.clientX - startX;
+      if (Math.abs(delta) < 3) return;
+
+      const desiredScrollLeft = startScrollLeft - delta;
+      if (desiredScrollLeft > LEFT_EDGE_TOLERANCE) {
+        childrenStrip.scrollLeft = desiredScrollLeft;
+        if (pull > 0) resetPull();
+        return;
+      }
+
+      childrenStrip.scrollLeft = 0;
+      const overshoot = LEFT_EDGE_TOLERANCE - desiredScrollLeft;
+      if (pointerStartedAtLeft && overshoot > 0) {
+        setPull(overshoot);
+      } else if (!pointerStartedAtLeft) {
+        pointerReachedLeftFromInside = true;
+      }
+    });
+
+    carouselShell.addEventListener('pointerup', () => {
+      if (!dragging) return;
+      dragging = false;
+      carouselShell.classList.remove('is-dragging');
+      if (pull > 0) {
+        releasePull();
+      } else if (pointerReachedLeftFromInside) {
+        showToast('已到第一个子会话，松手后再次右滑可返回父会话');
+      }
+    });
+
+    carouselShell.addEventListener('pointercancel', () => {
+      dragging = false;
+      carouselShell.classList.remove('is-dragging');
+      if (pull > 0) {
+        releasePull();
+      } else if (pointerReachedLeftFromInside) {
+        showToast('已到第一个子会话，松手后再次右滑可返回父会话');
+      }
+    });
+
+    carouselShell.addEventListener('wheel', (event) => {
+      const now = performance.now();
+      const startsNewGesture = now - lastWheelAt > WHEEL_GESTURE_GAP;
+      if (startsNewGesture) {
+        wheelGestureStartedAtLeft = childrenStrip.scrollLeft <= LEFT_EDGE_TOLERANCE;
+        wheelGestureReachedLeftFromInside = false;
+        wheelGesturePulling = false;
+        pull = 0;
+      }
+      lastWheelAt = now;
+
+      const isHorizontalGesture = Math.abs(event.deltaX) >= Math.abs(event.deltaY) && Math.abs(event.deltaX) > 0;
+      const movement = isHorizontalGesture ? event.deltaX : event.deltaY;
+      if (movement === 0) return;
+
+      event.preventDefault();
+      const desiredScrollLeft = childrenStrip.scrollLeft + movement;
+
+      if (isHorizontalGesture && movement < 0 && desiredScrollLeft < LEFT_EDGE_TOLERANCE) {
+        childrenStrip.scrollLeft = 0;
+        if (wheelGestureStartedAtLeft) {
+          const overshoot = LEFT_EDGE_TOLERANCE - desiredScrollLeft;
+          setPull(pull + overshoot * .85);
+          wheelGesturePulling = true;
+        } else {
+          wheelGestureReachedLeftFromInside = true;
+        }
+      } else {
+        if (pull > 0) resetPull();
+        childrenStrip.scrollLeft = Math.max(0, desiredScrollLeft);
+      }
+
+      clearTimeout(wheelGestureTimer);
+      wheelGestureTimer = setTimeout(() => {
+        if (wheelGesturePulling) {
+          releasePull();
+        } else if (wheelGestureReachedLeftFromInside) {
+          showToast('已到第一个子会话，再次右滑可返回父会话');
+        }
+        wheelGesturePulling = false;
+        wheelGestureReachedLeftFromInside = false;
+      }, WHEEL_GESTURE_GAP);
+    }, { passive: false });
+
+    childrenStrip.addEventListener('scroll', () => {
+      const max = Math.max(1, childrenStrip.scrollWidth - childrenStrip.clientWidth);
+      const progress = childrenStrip.scrollLeft / max;
+      const start = Math.min(Math.max(1, activeGroupCount - 3), Math.max(1, Math.round(progress * Math.max(1, activeGroupCount - 4)) + 1));
+      document.getElementById('visibleRange').textContent = `正在查看 ${start}–${Math.min(activeGroupCount, start + 3)} / ${activeGroupCount}`;
+      document.querySelectorAll('.scroll-indicator i').forEach((dot, i) => dot.classList.toggle('active', i === Math.min(2, Math.round(progress * 2))));
+    });
+
+    function graphChildren(nodeId) {
+      return Object.values(dagNodes).filter(node => node.parent === nodeId);
+    }
+
+    function graphSiblings(node) {
+      return Object.values(dagNodes).filter(item => item.parent === node.parent);
+    }
+
+    function nodeToBranch(node) {
+      const children = graphChildren(node.id);
+      return {
+        id: node.id,
+        name: node.name,
+        mode: node.mode || 'claude',
+        edgeType: node.edgeType || 'fork',
+        restoreState: node.restoreState,
+        status: node.status || (node.running ? 'running' : 'idle'),
+        git: node.git,
+        running: node.running,
+        nested: children.length,
+        nestedRunning: children.filter(item => item.running).length,
+        lines: [...node.lines]
+      };
+    }
+
+    function dagCardTemplate(node) {
+      const status = node.restoreState === 'failed' ? 'error' : node.restoreState === 'restoring' ? 'running' : node.running ? 'running' : '';
+      const selected = node.id === currentGraphNodeId ? 'selected' : '';
+      const mode = node.mode || 'claude';
+      const statusLabel = node.restoreState === 'failed' ? '恢复失败' : node.restoreState === 'restoring' ? '恢复中' : node.running ? '运行中' : '非运行中';
+      return `<article class="dag-node ${selected}" data-node-id="${node.id}" onclick="activateDagNode('${node.id}')">
+        <div class="dag-node-head">
+          <span class="dag-node-title">${node.name} · ${mode === 'shell' ? 'Shell' : 'Claude Code'}</span>
+          <span class="dag-status ${status}"><i></i>${statusLabel}</span>
+        </div>
+        <div class="dag-live-lines" data-live-node="${node.id}">${node.lines.slice(-3).map((line, index, arr) => index === arr.length - 1 && node.running ? `<span class="newest">${line}</span>` : line).join('\n')}</div>
+        <div class="dag-node-foot"><span>${node.edgeType === 'normal' ? '普通关系' : node.running ? '<span class="live-tag">● LIVE</span>' : 'Fork 关系'}</span><span class="branch-name">${node.git}</span></div>
+      </article>`;
+    }
+
+    function openDagView() {
+      if (document.getElementById('branchModal').classList.contains('open')) return;
+      const focusedPane = childrenStrip.querySelector('.active-pane');
+      if (!childrenView.classList.contains('view-hidden') && focusedPane && dagNodes[focusedPane.dataset.id]) {
+        currentGraphNodeId = focusedPane.dataset.id;
+      } else if (!dagNodes[currentGraphNodeId]) {
+        currentGraphNodeId = 'main';
+      }
+
+      const current = dagNodes[currentGraphNodeId];
+      const minDepth = Math.min(...Object.values(dagNodes).map(node => node.depth));
+      const maxDepth = Math.max(...Object.values(dagNodes).map(node => node.depth));
+      dagWindowStart = Math.max(minDepth, Math.min(maxDepth - 2, current.depth - 1));
+      document.getElementById('dagContextText').textContent = `独立系统浮层 · 分支交互设计 · 当前聚焦：${current.name}`;
+      document.body.classList.add('dag-active');
+      document.getElementById('dagOverlay').classList.add('open');
+      renderDagLayers();
+      requestAnimationFrame(fitDagToCurrent);
+    }
+
+    function closeDagView() {
+      document.getElementById('dagOverlay').classList.remove('open');
+      document.body.classList.remove('dag-active');
+      dagWheelAccumulator = 0;
+    }
+
+    function renderDagLayers() {
+      const layersRoot = document.getElementById('dagLayers');
+      const minDepth = Math.min(...Object.values(dagNodes).map(node => node.depth));
+      const maxDepth = Math.max(...Object.values(dagNodes).map(node => node.depth));
+      const currentDepth = dagNodes[currentGraphNodeId].depth;
+      const WORLD_CENTER_X = 1600;
+      const WORLD_CENTER_Y = 750;
+      const LAYER_GAP = 460;
+      const CARD_HEIGHT = 108;
+      const CARD_GAP = 14;
+      dagNodeLayout = {};
+
+      layersRoot.innerHTML = Array.from({ length: maxDepth - minDepth + 1 }, (_, index) => minDepth + index).map(depth => {
+        let nodes = Object.values(dagNodes).filter(node => node.depth === depth);
+        if (!nodes.length) return '';
+        const selectedIndex = nodes.findIndex(node => node.id === currentGraphNodeId);
+        if (selectedIndex >= 0 && nodes.length > 1) {
+          const selected = nodes[selectedIndex];
+          nodes = nodes.filter(node => node.id !== selected.id);
+          nodes.splice(Math.floor(nodes.length / 2), 0, selected);
+        }
+        const layerHeight = nodes.length * CARD_HEIGHT + (nodes.length - 1) * CARD_GAP;
+        const left = WORLD_CENTER_X + depth * LAYER_GAP;
+        const top = WORLD_CENTER_Y - layerHeight / 2;
+        nodes.forEach((node, nodeIndex) => {
+          dagNodeLayout[node.id] = { x: left, y: top + nodeIndex * (CARD_HEIGHT + CARD_GAP) };
+        });
+        const ghost = Math.abs(depth - currentDepth) > 1;
+        const label = depth === currentDepth ? '当前会话层' : depth < currentDepth ? '父级会话层' : '子级会话层';
+        return `<div class="dag-layer ${ghost ? 'ghost' : ''}" data-depth="${depth}" style="left:${left}px;top:${top}px">
+          <span class="dag-layer-label">${label}</span>
+          ${nodes.map(dagCardTemplate).join('')}
+        </div>`;
+      }).join('');
+
+      document.getElementById('dagMoreTop').style.display = minDepth < currentDepth - 1 ? 'flex' : 'none';
+      document.getElementById('dagMoreBottom').style.display = maxDepth > currentDepth + 1 ? 'flex' : 'none';
+      renderDagLines();
+    }
+
+    function renderDagLines() {
+      const svg = document.getElementById('dagLines');
+      const activePath = new Set([currentGraphNodeId]);
+      let cursor = dagNodes[currentGraphNodeId];
+      while (cursor?.parent) {
+        activePath.add(cursor.parent);
+        cursor = dagNodes[cursor.parent];
+      }
+
+      const paths = [];
+      Object.values(dagNodes).forEach(node => {
+        if (!node.parent) return;
+        const from = dagNodeLayout[node.parent];
+        const to = dagNodeLayout[node.id];
+        if (!from || !to) return;
+        const x1 = from.x + 248;
+        const y1 = from.y + 54;
+        const x2 = to.x;
+        const y2 = to.y + 54;
+        const middle = x1 + (x2 - x1) / 2;
+        const active = activePath.has(node.id) && activePath.has(node.parent);
+        paths.push(`<path class="dag-line ${active ? 'active' : ''}" d="M ${x1} ${y1} C ${middle} ${y1}, ${middle} ${y2}, ${x2} ${y2}"/>`);
+      });
+      svg.innerHTML = paths.join('');
+    }
+
+    function applyDagTransform() {
+      const world = document.getElementById('dagWorld');
+      world.style.transform = `translate3d(${dagPanX}px, ${dagPanY}px, 0) scale(${dagScale})`;
+      document.getElementById('dagZoomValue').textContent = `${Math.round(dagScale * 100)}%`;
+      updateDagLayerVisibility();
+    }
+
+    function updateDagLayerVisibility() {
+      const canvas = document.getElementById('dagCanvas');
+      const center = canvas.clientWidth / 2;
+      const fullDistance = canvas.clientWidth * .37;
+      const fadeDistance = canvas.clientWidth * .56;
+      canvas.querySelectorAll('.dag-layer').forEach(layer => {
+        const worldCenter = Number.parseFloat(layer.style.left) + 125;
+        const screenCenter = dagPanX + worldCenter * dagScale;
+        const distance = Math.abs(screenCenter - center);
+        const ratio = Math.max(0, Math.min(1, (distance - fullDistance) / Math.max(1, fadeDistance - fullDistance)));
+        const opacity = 1 - ratio * .84;
+        layer.style.opacity = String(opacity);
+        layer.style.filter = `blur(${ratio * 4}px)`;
+        layer.classList.toggle('ghost', ratio > .38);
+      });
+    }
+
+    function fitDagToCurrent() {
+      const canvas = document.getElementById('dagCanvas');
+      const current = dagNodeLayout[currentGraphNodeId];
+      if (!current) return;
+      const siblings = graphSiblings(dagNodes[currentGraphNodeId]);
+      const groupHeight = Math.max(108, siblings.length * 108 + Math.max(0, siblings.length - 1) * 14);
+      dagScale = Math.min(1, Math.max(.68, (canvas.clientHeight - 120) / groupHeight));
+      dagPanX = canvas.clientWidth / 2 - (current.x + 124) * dagScale;
+      dagPanY = canvas.clientHeight / 2 - (current.y + 54) * dagScale;
+      applyDagTransform();
+    }
+
+    function setDagScale(nextScale, anchorX, anchorY) {
+      const canvas = document.getElementById('dagCanvas');
+      const next = Math.max(.52, Math.min(1.65, nextScale));
+      const ax = anchorX ?? canvas.clientWidth / 2;
+      const ay = anchorY ?? canvas.clientHeight / 2;
+      const worldX = (ax - dagPanX) / dagScale;
+      const worldY = (ay - dagPanY) / dagScale;
+      dagPanX = ax - worldX * next;
+      dagPanY = ay - worldY * next;
+      dagScale = next;
+      applyDagTransform();
+    }
+
+    function zoomDag(delta) {
+      setDagScale(dagScale + delta);
+    }
+
+    function activateDagNode(nodeId) {
+      const node = dagNodes[nodeId];
+      if (!node) return;
+      currentGraphNodeId = nodeId;
+      closeDagView();
+
+      const siblings = graphSiblings(node);
+      if (node.parent && siblings.length > 1) {
+        const group = node.parent === 'shell'
+          ? branches
+          : siblings.map(nodeToBranch);
+        activeGroupCount = group.length;
+        childrenStrip.innerHTML = group.map((branch, index) => paneTemplate(branch, index, group.length)).join('');
+        const parentNode = dagNodes[node.parent];
+        document.querySelector('.children-topbar .breadcrumb').innerHTML = `<span class="root">${parentNode.name} /</span><span class="current">${node.name}</span><span>›</span><span>同级会话</span>`;
+        document.querySelector('.children-topbar .gesture-hint').textContent = `已聚焦“${node.name}” · 同时显示 ${group.length} 个兄弟会话`;
+        const running = group.filter(item => item.running).length;
+        document.querySelector('.carousel-status .mode').textContent = `${running} 个会话运行中`;
+        document.getElementById('visibleRange').textContent = `正在查看 1–${Math.min(4, group.length)} / ${group.length}`;
+        singleView.classList.add('view-hidden');
+        childrenView.classList.remove('view-hidden');
+        childrenStrip.scrollLeft = 0;
+        requestAnimationFrame(() => focusGraphPane(nodeId));
+      } else {
+        showSingleDagNode(node);
+      }
+      showToast(`已切换并聚焦“${node.name}”`);
+    }
+
+    function showSingleDagNode(node) {
+      currentGraphNodeId = node.id;
+      childrenView.classList.add('view-hidden');
+      singleView.classList.remove('view-hidden');
+      const children = graphChildren(node.id);
+      const type = singleView.querySelector('.session-type');
+      const path = singleView.querySelector('.session-path');
+      const isShell = (node.mode || 'claude') === 'shell';
+      type.textContent = isShell ? 'Shell' : 'Claude Code';
+      path.textContent = node.git;
+      const restoreControl = node.restoreState === 'failed'
+        ? `\n<div class="restore-alert"><span>Claude Code 恢复失败</span><button onclick="retryClaudeRestore('${node.id}')">重试恢复</button></div>`
+        : '';
+      singleView.querySelector('.terminal-content').innerHTML = `<span class="term-muted">会话投影 · ${node.name} · ${isShell ? 'Shell' : 'Claude Code'}</span>\n\n${node.lines.join('\n')}${restoreControl}\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">${node.git}</span> ${node.running ? '<span class="cursor"></span>' : ''}`;
+      singleView.querySelector('.branch-create').style.display = isShell || node.restoreState === 'failed' ? 'none' : 'inline-flex';
+      const statusItems = singleView.querySelectorAll('.statusbar span');
+      if (statusItems.length) {
+        statusItems[0].textContent = isShell ? 'Shell' : 'Claude Code';
+        statusItems[statusItems.length - 1].textContent = node.git;
+      }
+      const badge = document.getElementById('parentBadge');
+      badge.style.display = children.length ? 'inline-flex' : 'none';
+      if (children.length) {
+        const running = children.filter(item => item.running).length;
+        document.getElementById('parentBadgeText').textContent = `${children.length} 分支 · ${running} 运行中`;
+      }
+    }
+
+    const dagCanvas = document.getElementById('dagCanvas');
+    dagCanvas.addEventListener('wheel', event => {
+      event.preventDefault();
+      const rect = dagCanvas.getBoundingClientRect();
+      if (event.ctrlKey || event.metaKey) {
+        const intensity = Math.max(-.18, Math.min(.18, -event.deltaY * .004));
+        setDagScale(dagScale * (1 + intensity), event.clientX - rect.left, event.clientY - rect.top);
+        return;
+      }
+      const movement = Math.abs(event.deltaX) > 0 ? event.deltaX : event.deltaY;
+      dagPanX -= movement;
+      if (Math.abs(event.deltaX) > 0 && Math.abs(event.deltaY) > Math.abs(event.deltaX) * .75) dagPanY -= event.deltaY * .35;
+      applyDagTransform();
+    }, { passive: false });
+
+    dagCanvas.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.target.closest('.dag-node, .dag-zoom-controls, button')) return;
+      dagDragging = true;
+      dagPointerStartX = event.clientX;
+      dagPointerStartY = event.clientY;
+      dagPointerStartPanX = dagPanX;
+      dagPointerStartPanY = dagPanY;
+      dagCanvas.classList.add('dragging');
+      dagCanvas.setPointerCapture(event.pointerId);
+    });
+    dagCanvas.addEventListener('pointermove', event => {
+      if (!dagDragging) return;
+      dagPanX = dagPointerStartPanX + (event.clientX - dagPointerStartX);
+      dagPanY = dagPointerStartPanY + (event.clientY - dagPointerStartY);
+      applyDagTransform();
+    });
+    dagCanvas.addEventListener('pointerup', () => {
+      if (!dagDragging) return;
+      dagDragging = false;
+      dagCanvas.classList.remove('dragging');
+    });
+    dagCanvas.addEventListener('pointercancel', () => {
+      dagDragging = false;
+      dagCanvas.classList.remove('dragging');
+    });
+
+    window.addEventListener('resize', () => {
+      if (document.getElementById('dagOverlay').classList.contains('open')) fitDagToCurrent();
+    });
+
+    setInterval(() => {
+      if (!document.getElementById('dagOverlay').classList.contains('open')) return;
+      liveTick += 1;
+      Object.values(dagNodes).filter(node => node.running).forEach((node, index) => {
+        const nextLine = liveLinePool[(liveTick + index) % liveLinePool.length];
+        node.lines = [...node.lines.slice(-2), nextLine];
+        const target = document.querySelector(`[data-live-node="${node.id}"]`);
+        if (target) target.innerHTML = node.lines.map((line, lineIndex) => lineIndex === node.lines.length - 1 ? `<span class="newest">${line}</span>` : line).join('\n');
+      });
+    }, 1400);
+
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Tab' && event.altKey && !event.metaKey && !event.ctrlKey) {
+        if (document.getElementById('branchModal').classList.contains('open')) return;
+        event.preventDefault();
+        if (document.getElementById('dagOverlay').classList.contains('open') || dagHoldActive || event.repeat) return;
+        dagHoldActive = true;
+        document.getElementById('tabHoldIndicator').classList.add('visible');
+        clearTimeout(dagHoldTimer);
+        dagHoldTimer = setTimeout(() => {
+          document.getElementById('tabHoldIndicator').classList.remove('visible');
+          openDagView();
+        }, 520);
+        return;
+      }
+      if (event.key === 'Escape') {
+        if (document.getElementById('dagOverlay').classList.contains('open')) closeDagView();
+        else closeBranchModal();
+      }
+      if (event.key === 'Enter' && document.getElementById('branchModal').classList.contains('open')) createBranch();
+    });
+
+    document.addEventListener('keyup', event => {
+      if (event.key !== 'Tab') return;
+      dagHoldActive = false;
+      clearTimeout(dagHoldTimer);
+      document.getElementById('tabHoldIndicator').classList.remove('visible');
+    });
+
+    let toastTimer;
+    function showToast(text) {
+      document.getElementById('toastText').textContent = text;
+      const toast = document.getElementById('toast');
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 2300);
+    }
+
+    renderBranches();
+  </script>
+</body>
+</html>
