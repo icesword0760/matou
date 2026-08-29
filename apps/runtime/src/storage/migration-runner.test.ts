@@ -260,6 +260,25 @@ describe('MigrationRunner', () => {
       { name: 'session-sibling-created', value: 2 },
       { name: 'session-user-interaction', value: 0 }
     ])
+
+    database.run(
+      `INSERT INTO sessions (
+         id, task_id, execution_context_id, kind, status, title, cwd,
+         created_at, updated_at, last_activity_at
+       ) VALUES ('future', 'task', 'context', 'shell', 'created', 'Shell',
+                 '/tmp/workspace', 5, 5, 5)`
+    )
+    database.run(
+      `INSERT INTO session_mounts (id, scene_id, session_id, created_at)
+       VALUES ('mount-future', 'scene', 'future', 5)`
+    )
+    expect(database.get(
+      `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
+       FROM session_canvas_memberships WHERE session_id = 'future'`
+    )).toEqual({
+      session_id: 'future', scene_id: 'scene', sibling_created_seq: 3,
+      last_user_interaction_seq: 0
+    })
   })
 
   it('rolls back a failed migration without recording its version', async () => {

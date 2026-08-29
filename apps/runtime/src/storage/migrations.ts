@@ -748,6 +748,35 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       INSERT INTO runtime_sequences(name, value)
       VALUES ('session-user-interaction', 0);
 
+      CREATE TRIGGER session_mount_canvas_membership_after_insert
+      AFTER INSERT ON session_mounts
+      WHEN NOT EXISTS (
+        SELECT 1 FROM session_canvas_memberships
+        WHERE session_id = NEW.session_id
+      )
+      BEGIN
+        UPDATE runtime_sequences
+        SET value = value + 1
+        WHERE name = 'session-sibling-created';
+        INSERT INTO session_canvas_memberships (
+          session_id,
+          scene_id,
+          sibling_created_seq,
+          last_user_interaction_seq,
+          created_at,
+          updated_at
+        )
+        SELECT
+          NEW.session_id,
+          NEW.scene_id,
+          value,
+          0,
+          NEW.created_at,
+          NEW.created_at
+        FROM runtime_sequences
+        WHERE name = 'session-sibling-created';
+      END;
+
       ALTER TABLE provider_bindings ADD COLUMN restore_state TEXT NOT NULL DEFAULT 'none'
         CHECK (restore_state IN ('none', 'restoring', 'failed'));
       ALTER TABLE provider_bindings ADD COLUMN restore_error TEXT;

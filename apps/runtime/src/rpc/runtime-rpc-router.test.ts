@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,10 +12,11 @@ import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 
 let database: RuntimeDatabase
 let router: RuntimeRpcRouter
+let testRoot: string
 
 beforeEach(async () => {
-  const root = await mkdtemp(join(tmpdir(), 'matou-rpc-'))
-  database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
+  testRoot = await mkdtemp(join(tmpdir(), 'matou-rpc-'))
+  database = RuntimeDatabase.open(join(testRoot, 'matou.sqlite'))
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
   router = new RuntimeRpcRouter(database)
 })
@@ -172,12 +173,6 @@ describe('RuntimeRpcRouter', () => {
       id: 'relation-1', taskId: 'task-1', fromSessionId: 'child', toSessionId: 'parent',
       kind: 'forked-from', metadata: {}, now: 7
     }))
-    database.run(
-      `INSERT INTO session_canvas_memberships (
-         session_id, scene_id, sibling_created_seq, last_user_interaction_seq, created_at, updated_at
-       ) VALUES ('parent', 'scene-1', 1, 0, 6, 6),
-                ('child', 'scene-1', 2, 0, 6, 6)`
-    )
     await router.handle('geometry.put', {
       sceneId: 'scene-1', ownerKey: 'node:root', layoutRevision: 0,
       geometry: { ratio: 0.35 }, now: 7
@@ -206,6 +201,39 @@ describe('RuntimeRpcRouter', () => {
     expect(database.get('SELECT last_event_seq FROM consumer_cursors WHERE consumer_id = ?', 'renderer-1')).toEqual({
       last_event_seq: replay.events.length
     })
+  })
+
+  it('routes canvas creation, Shell sibling creation, and focus without changing graph relations', async () => {
+    const workspaceRoot = join(testRoot, 'canvas-workspace')
+    await mkdir(workspaceRoot)
+    const bootstrapped = await router.handle('hierarchy.bootstrap-window', payload('canvas-bootstrap', {
+      windowId: 'window-canvas', defaultRootDirectory: workspaceRoot,
+      defaultName: 'workspace', now: 2
+    })) as { task: { id: string }; scene: { id: string }; session: { id: string } }
+
+    const canvas = await router.handle('hierarchy.create-canvas', payload('canvas-create', {
+      windowId: 'window-canvas', taskId: bootstrapped.task.id, now: 3
+    })) as { scene: { id: string }; session: { id: string }; graph: { nodes: unknown[] } }
+    const sibling = await router.handle('hierarchy.create-shell-sibling', payload('canvas-sibling', {
+      windowId: 'window-canvas', sceneId: canvas.scene.id,
+      sourceSessionId: canvas.session.id, now: 4
+    })) as { session: { id: string }; graph: { nodes: unknown[]; edges: unknown[]; focusedSessionId?: string } }
+
+    expect(canvas.graph.nodes).toHaveLength(1)
+    expect(sibling.graph).toMatchObject({
+      nodes: expect.arrayContaining([
+        expect.objectContaining({ sessionId: canvas.session.id, currentMode: 'shell' }),
+        expect.objectContaining({ sessionId: sibling.session.id, currentMode: 'shell' })
+      ]),
+      edges: [],
+      focusedSessionId: sibling.session.id
+    })
+
+    const focused = await router.handle('hierarchy.set-focused-session', payload('canvas-focus', {
+      windowId: 'window-canvas', sceneId: canvas.scene.id,
+      sessionId: canvas.session.id, now: 5
+    })) as { focusedSessionId?: string }
+    expect(focused.focusedSessionId).toBe(canvas.session.id)
   })
 
   it('rejects malformed payloads before reaching repositories', async () => {

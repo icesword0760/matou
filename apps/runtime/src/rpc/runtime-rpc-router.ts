@@ -22,6 +22,7 @@ import { SessionRelationRepository } from '../relations/session-relation-reposit
 import { GeometryRepository } from '../scenes/geometry-repository'
 import { SceneRepository } from '../scenes/scene-repository'
 import { SessionGraphRepository } from '../session-canvas/session-graph-repository'
+import { SessionCanvasService } from '../session-canvas/session-canvas-service'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -60,6 +61,7 @@ export class RuntimeRpcRouter {
   readonly #taskWindowMigrations: TaskWindowMigrationService
   readonly #notifications: NotificationProjection
   readonly #sessionGraphs: SessionGraphRepository
+  readonly #sessionCanvas: SessionCanvasService
 
   constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
@@ -78,6 +80,7 @@ export class RuntimeRpcRouter {
     this.#taskWindowMigrations = new TaskWindowMigrationService(database, transactions)
     this.#notifications = notifications
     this.#sessionGraphs = new SessionGraphRepository(database, transactions)
+    this.#sessionCanvas = new SessionCanvasService(database, transactions)
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -252,6 +255,12 @@ export class RuntimeRpcRouter {
           taskId: text(input.taskId, 'taskId'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.create-canvas':
+        return this.#withActivePathState(this.#sessionCanvas.createCanvas(command, {
+          windowId: text(input.windowId, 'windowId'),
+          taskId: text(input.taskId, 'taskId'),
+          now: integer(input.now, 'now', 0)
+        }))
       case 'hierarchy.rename-scene':
         return this.#hierarchy.renameScene(command, {
           sceneId: text(input.sceneId, 'sceneId'),
@@ -290,15 +299,27 @@ export class RuntimeRpcRouter {
           now: integer(input.now, 'now', 0)
         })
       case 'hierarchy.split-session':
-        return this.#hierarchy.splitSession(command, {
+        return enumeration(input.direction, ['horizontal', 'vertical'] as const, 'direction') === 'horizontal'
+          ? this.#withActivePathState(this.#sessionCanvas.createShellSibling(command, {
+              windowId: text(input.windowId, 'windowId'),
+              sceneId: text(input.sceneId, 'sceneId'),
+              sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+              now: integer(input.now, 'now', 0)
+            }))
+          : this.#hierarchy.splitSession(command, {
+              windowId: text(input.windowId, 'windowId'),
+              sceneId: text(input.sceneId, 'sceneId'),
+              sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+              direction: 'vertical',
+              now: integer(input.now, 'now', 0)
+            })
+      case 'hierarchy.create-shell-sibling':
+        return this.#withActivePathState(this.#sessionCanvas.createShellSibling(command, {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
-          direction: enumeration(
-            input.direction, ['horizontal', 'vertical'] as const, 'direction'
-          ),
           now: integer(input.now, 'now', 0)
-        })
+        }))
       case 'hierarchy.fork-session':
         return this.#hierarchy.forkSession(command, {
           windowId: text(input.windowId, 'windowId'),
@@ -309,6 +330,13 @@ export class RuntimeRpcRouter {
       case 'hierarchy.activate-session':
         return this.#hierarchy.activateSession({
           windowId: text(input.windowId, 'windowId'),
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.set-focused-session':
+        return this.#sessionCanvas.setFocusedSession({
+          windowId: text(input.windowId, 'windowId'),
+          sceneId: text(input.sceneId, 'sceneId'),
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })

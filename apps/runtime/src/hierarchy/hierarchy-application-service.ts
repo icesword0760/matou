@@ -1905,7 +1905,7 @@ function emitTaskHierarchyCreated(
   })
 }
 
-function registerWindow(tx: DatabaseTransaction, windowId: string, now: number): void {
+export function registerWindow(tx: DatabaseTransaction, windowId: string, now: number): void {
   tx.run(
     `INSERT INTO app_windows (id, kind, state, created_at, updated_at)
      VALUES (?, 'main', 'visible', ?, ?)
@@ -2099,7 +2099,7 @@ function activateSceneInTransaction(
   )
 }
 
-function activateSessionInTransaction(
+export function activateSessionInTransaction(
   tx: DatabaseTransaction,
   windowId: string,
   sessionId: string,
@@ -2182,7 +2182,7 @@ function preferredSession(
   )
 }
 
-function readHierarchyResult(
+export function readHierarchyResult(
   tx: DatabaseTransaction,
   windowId: string
 ): WorkspaceHierarchyResult {
@@ -2450,7 +2450,7 @@ function workspacePathIsAvailable(tx: DatabaseTransaction, workspaceId: string):
   )?.status !== 'invalid'
 }
 
-function assertWorkspacePathAvailable(tx: DatabaseTransaction, workspaceId: string): void {
+export function assertWorkspacePathAvailable(tx: DatabaseTransaction, workspaceId: string): void {
   if (!workspacePathIsAvailable(tx, workspaceId)) {
     throw new Error(WORKSPACE_PATH_INVALID_MESSAGE)
   }

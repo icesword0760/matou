@@ -11,7 +11,7 @@ import type {
   SessionWorkStatus
 } from '@matou/domain'
 
-import type { RuntimeDatabase } from '../storage/database'
+import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 
 interface MembershipRow {
@@ -142,13 +142,22 @@ export class SessionGraphRepository {
   }
 
   projectSceneGraph(sceneId: string, windowId?: string): SceneSessionGraph {
-    const scene = this.#database.get<{ id: string }>(
+    return projectSceneGraphFrom(this.#database, sceneId, windowId)
+  }
+}
+
+export function projectSceneGraphFrom(
+  source: DatabaseTransaction,
+  sceneId: string,
+  windowId?: string
+): SceneSessionGraph {
+    const scene = source.get<{ id: string }>(
       'SELECT id FROM scenes WHERE id = ?',
       sceneId
     )
     if (!scene) throw new Error(`Scene ${sceneId} does not exist`)
 
-    const rows = this.#database.all<GraphRow>(
+    const rows = source.all<GraphRow>(
       `SELECT
          membership.*,
          sessions.task_id,
@@ -194,7 +203,7 @@ export class SessionGraphRepository {
     )
 
     const childCounts = new Map(
-      this.#database.all<ChildCountRow>(
+      source.all<ChildCountRow>(
         `SELECT
            relation.to_session_id AS parent_session_id,
            SUM(CASE WHEN child.archived_at IS NULL THEN 1 ELSE 0 END) AS active_count,
@@ -212,7 +221,7 @@ export class SessionGraphRepository {
     )
 
     const contextUseCounts = new Map(
-      this.#database.all<{ execution_context_id: string; count: number }>(
+      source.all<{ execution_context_id: string; count: number }>(
         `SELECT sessions.execution_context_id, COUNT(*) AS count
          FROM sessions
          JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
@@ -254,7 +263,7 @@ export class SessionGraphRepository {
       }
     })
 
-    const edges = this.#database.all<EdgeRow>(
+    const edges = source.all<EdgeRow>(
       `SELECT
          relation.to_session_id AS parent_session_id,
          relation.from_session_id AS child_session_id,
@@ -269,7 +278,7 @@ export class SessionGraphRepository {
       sceneId
     ).map(mapEdge)
 
-    const focusedSessionId = windowId === undefined ? undefined : this.#database.get<{ active_session_id: string | null }>(
+    const focusedSessionId = windowId === undefined ? undefined : source.get<{ active_session_id: string | null }>(
       `SELECT active_session_id FROM window_scene_focus
        WHERE window_id = ? AND scene_id = ?`,
       windowId,
@@ -282,7 +291,6 @@ export class SessionGraphRepository {
       edges,
       ...(focusedSessionId === undefined ? {} : { focusedSessionId })
     }
-  }
 }
 
 function mapMembership(row: MembershipRow): SessionCanvasMembership {
