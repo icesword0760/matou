@@ -938,7 +938,13 @@ export class RuntimeServer {
             this.#sessions.delete(message.sessionId, exited)
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
-            if (exited.runId) {
+            const workStatus = this.#database.get<{ work_status: string }>(
+              'SELECT work_status FROM sessions WHERE id = ?',
+              message.sessionId
+            )?.work_status
+            const preserveInterruptedRun = exited.profile === 'shell' &&
+              (workStatus === 'starting' || workStatus === 'running' || workStatus === 'needs-input')
+            if (exited.runId && !preserveInterruptedRun) {
               try {
                 this.#sessionRepository.finishRun(
                   {
