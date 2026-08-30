@@ -16,7 +16,7 @@ import { createHierarchyCommands } from './hierarchy-commands'
 import { DetachedPlaceholder } from './DetachedPlaceholder'
 import type {
   HierarchyCommands, HierarchyProjection, SceneNodeView, SceneSnapshotView,
-  SessionGraphNodeView
+  SessionGraphNodeView, SessionGraphView
 } from './hierarchy-types'
 import { SceneTabBar } from './SceneTabBar'
 import { SplitTree } from './SplitTree'
@@ -243,6 +243,7 @@ function HierarchyProduct({ projection, commands }: {
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
   const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
   const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
+  const dagFocusSessionId = dagFocusTarget(activeGraph, focusedSessionId)
   const activeGraphFocused = activeGraph?.nodes.find(({ sessionId }) => sessionId === focusedSessionId) ??
     activeGraph?.nodes.find(({ sessionId }) => sessionId === activeGraph.focusedSessionId)
   const paneSessionIds = activeGraph && activeGraphFocused
@@ -310,11 +311,11 @@ function HierarchyProduct({ projection, commands }: {
   }), [activeRatios, activeSceneId, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, scenes, shortcutPanelOpen, task])
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
-    if (!activeSceneId || !focusedSessionId) return
+    if (!activeSceneId || !dagFocusSessionId) return
     const request = window.matouDesktop?.openDagWindow?.({
       mainWindowId: projection.windowId,
       sceneId: activeSceneId,
-      sessionId: focusedSessionId,
+      sessionId: dagFocusSessionId,
       theme: themeKey
     })
     if (request === undefined) {
@@ -325,14 +326,14 @@ function HierarchyProduct({ projection, commands }: {
     void Promise.resolve(request).catch(() => setDagOpenError(true))
   }
   useDagShortcut({
-    enabled: Boolean(activeSceneId && focusedSessionId),
+    enabled: Boolean(activeSceneId && dagFocusSessionId),
     onShortPress: () => window.dispatchEvent(new Event('matou:forward-terminal-tab')),
     onLongPress: openDag
   })
   useEffect(() => window.matouDesktop?.onDagShortcut?.((kind) => {
     if (kind === 'long') openDag()
     else window.dispatchEvent(new Event('matou:forward-terminal-tab'))
-  }), [activeSceneId, focusedSessionId, projection.windowId, themeKey])
+  }), [activeSceneId, dagFocusSessionId, projection.windowId, themeKey])
   useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
     const currentProjection = projectionRef.current
     if (selection.mainWindowId !== currentProjection.windowId) return
@@ -913,4 +914,16 @@ function focusedSession(projection: HierarchyProjection): string | undefined {
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
   const sceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   return sceneId ? projection.navigation.sessionByScene[sceneId] : undefined
+}
+
+function dagFocusTarget(
+  graph: SessionGraphView | undefined,
+  liveFocusedSessionId: string | undefined
+): string | undefined {
+  if (!graph || graph.nodes.length === 0) return liveFocusedSessionId
+  const nodeIds = new Set(graph.nodes.map(({ sessionId }) => sessionId))
+  if (liveFocusedSessionId && nodeIds.has(liveFocusedSessionId)) return liveFocusedSessionId
+  if (graph.focusedSessionId && nodeIds.has(graph.focusedSessionId)) return graph.focusedSessionId
+  return graph.nodes.find(({ parentSessionId }) => parentSessionId === undefined)?.sessionId ??
+    graph.nodes[0]?.sessionId
 }

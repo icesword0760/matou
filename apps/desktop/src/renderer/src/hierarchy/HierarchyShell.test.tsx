@@ -81,6 +81,41 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('button', { name: '横向新增 Shell' })).toBeTruthy()
   })
 
+  it('opens DAG from a restored historical-only canvas without a live navigation focus', async () => {
+    const data = fixture()
+    delete data.navigation.sessionByScene['scene-a1']
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1',
+        edges: [{
+          parentSessionId: 'history-parent', childSessionId: 'history-child',
+          relationKind: 'derived-from', createdAt: 2
+        }],
+        nodes: [
+          { ...graphNode('history-parent', '历史父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 0 },
+          {
+            ...graphNode('history-child', '历史子会话'), parentSessionId: 'history-parent',
+            relationKind: 'derived-from', archivedAt: 11, workStatus: 'exited'
+          }
+        ]
+      }
+    }
+    const openDagWindow = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      openDagWindow,
+      onDagShortcut: vi.fn(() => vi.fn()),
+      onDagNodeSelected: vi.fn(() => vi.fn()),
+      onDetachedWindowClosed: vi.fn(() => vi.fn())
+    } })
+    render(<HierarchyShell fixture={data} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开会话 DAG' }))
+
+    expect(openDagWindow).toHaveBeenCalledWith({
+      mainWindowId: 'window-1', sceneId: 'scene-a1', sessionId: 'history-parent', theme: 'light'
+    })
+  })
+
   it('opens the Kooky shortcut floating panel with Cmd+/ and double Option', () => {
     render(<HierarchyShell fixture={fixture()} />)
 
