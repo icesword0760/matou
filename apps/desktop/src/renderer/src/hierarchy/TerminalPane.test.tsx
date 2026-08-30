@@ -171,6 +171,18 @@ describe('Terminal pane', () => {
     expect(onRemoveFailedFork).toHaveBeenCalledWith('session-1')
   })
 
+  it('explains an invalidated Fork parent in user terms with a concrete next step', () => {
+    render(<TerminalPane {...fixture()} forkState="failed"
+      forkError="provider session not found"
+      onRetryFork={vi.fn()} onRemoveFailedFork={vi.fn()} />)
+
+    const status = screen.getByRole('status')
+    expect(status.textContent).toContain('父会话已失效')
+    expect(status.textContent).toContain('返回父会话继续')
+    expect(status.textContent).toContain('移除此失败节点')
+    expect(status.textContent).not.toContain('provider session not found')
+  })
+
   it('keeps child navigation on a Shell-shaped parent after Claude exits', async () => {
     const user = userEvent.setup()
     const onOpenChildren = vi.fn()

@@ -102,6 +102,7 @@ export function TerminalPane(props: {
   const showFork = session.kind === 'claude-code' && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
   const hasPaneMenu = canFork || onDetach !== undefined
+  const forkFailure = forkFailurePresentation(forkError)
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
     if (!hasPaneMenu || (event.target as HTMLElement).closest('button')) return
     event.preventDefault()
@@ -154,8 +155,8 @@ export function TerminalPane(props: {
     </header>
     {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
     {forkState === 'failed' && visible && <div className="fork-failure-card" role="status">
-      <div><strong>分支创建失败</strong>
-        {forkError && <span className="fork-failure-reason">{forkError}</span>}
+      <div><strong>{forkFailure.title}</strong>
+        {forkFailure.reason && <span className="fork-failure-reason">{forkFailure.reason}</span>}
       </div>
       <div className="fork-failure-actions">
         {onRetryFork && <button type="button" aria-label="重试创建分支" onClick={(event) => {
@@ -243,3 +244,16 @@ export function TerminalPane(props: {
 }
 
 function NOOP(): void {}
+
+function forkFailurePresentation(error: string | undefined): {
+  title: string
+  reason: string | undefined
+} {
+  if (error && /provider session not found|no conversation found|conversation.*not found/i.test(error)) {
+    return {
+      title: '父会话已失效',
+      reason: '原 Claude Code 对话身份已失效，本次分支没有创建成功。请返回父会话继续，或移除此失败节点后新建空会话。'
+    }
+  }
+  return { title: '分支创建失败', reason: error }
+}
