@@ -103,6 +103,11 @@ test('persists Task order and each canvas horizontal position across restart', a
       savedScrollLeft = await carousel.evaluate((element) => element.scrollLeft)
       return savedScrollLeft
     }).toBeGreaterThan(0)
+    // Persist the ordinary browsing viewport, not a transient hover-expanded
+    // card. The independent QA flow also verifies geometry after hover motion
+    // has fully settled.
+    await page.mouse.move(5, 5)
+    await expect(page.locator('.session-card-slot.is-expanded')).toHaveCount(0)
     // Scroll snapping and card-width animation are real user-facing motion.
     // Capture the position only after that motion has settled, then verify the
     // same settled viewport is restored after restart.
@@ -120,6 +125,10 @@ test('persists Task order and each canvas horizontal position across restart', a
       Number(await activeCanvas.getAttribute('data-last-saved-scroll-left')) - savedScrollLeft
     )).toBeLessThan(5)
     await expect(activeCanvas).toHaveAttribute('aria-busy', 'false')
+    const focusedSessionId = await page.locator('.session-card-slot.is-focused')
+      .getAttribute('data-session-id')
+    expect(focusedSessionId).toBeTruthy()
+    const savedFocusedViewportOffset = await focusedCardViewportOffset(page, focusedSessionId!)
 
     fixture = await restartMatou(fixture)
     await expect.poll(() => taskTitles(fixture.page)).toEqual(['默认', '新事项 2', '新事项'])
@@ -127,6 +136,9 @@ test('persists Task order and each canvas horizontal position across restart', a
     await expect.poll(async () => Math.abs(
       await fixture.page.getByRole('region', { name: '同级会话列表' })
         .evaluate((element) => element.scrollLeft) - savedScrollLeft
+    )).toBeLessThan(5)
+    await expect.poll(async () => Math.abs(
+      await focusedCardViewportOffset(fixture.page, focusedSessionId!) - savedFocusedViewportOffset
     )).toBeLessThan(5)
   } finally { await fixture.close() }
 })
@@ -145,6 +157,17 @@ async function dragTaskBefore(page: MatouFixture['page'], sourceTitle: string, d
     has: page.locator('.workbench-item__name', { hasText: title })
   })
   await row(sourceTitle).dragTo(row(destinationTitle))
+}
+
+async function focusedCardViewportOffset(
+  page: MatouFixture['page'],
+  sessionId: string
+): Promise<number> {
+  return page.locator(`.session-card-slot[data-session-id="${sessionId}"]`).evaluate((card) => {
+    const viewport = card.closest('.session-carousel')
+    if (!viewport) throw new Error('session carousel not found')
+    return card.getBoundingClientRect().left - viewport.getBoundingClientRect().left
+  })
 }
 
 async function processCwd(pid: number): Promise<string> {

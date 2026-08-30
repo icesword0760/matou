@@ -42,5 +42,9 @@ function isExplicitBlockingPrompt(raw: string): boolean {
   return /(?:^|\s)(?:enter|input|type|provide)\s+[^:：?？\r\n]{1,64}[:：?？]$/i.test(line) ||
     /(?:^|\s)(?:password|passphrase|pin|token)\s*[:：?？]$/i.test(line) ||
     /(?:^|\s)(?:请输入|输入|密码|口令|请选择)[^:：?？\r\n]{0,64}[:：?？]$/.test(line) ||
+    // zsh's native `read "name?prompt"` form and many interactive CLIs use
+    // a labelled chevron prompt. A label is required so ordinary redirected
+    // output or the Agent UI's single `❯` glyph does not become waiting work.
+    /(?:^|\s)[\p{L}\p{N}_][\p{L}\p{N} _.:/@+-]{1,63}>$/u.test(line) ||
     /(?:\[[yYnN](?:\/[yYnN])?\]|\([yYnN](?:\/[yYnN])?\))$/.test(line)
 }

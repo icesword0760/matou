@@ -130,8 +130,8 @@ test.describe('native session DAG window', () => {
       const surface = visibleSurfaces(fixture.page).first()
       const sessionId = await surface.getAttribute('data-session-id')
       expect(sessionId).toBeTruthy()
-      await terminalCommand(surface, "printf 'enter value: '; read -r value; printf 'VALUE:%s\\n' \"$value\"")
-      await expect(surface.locator('.xterm-rows')).toContainText('enter value:')
+      await terminalCommand(surface, "read \"value?STA008_WAIT> \"; printf 'STA008_GOT:%s\\n' \"$value\"")
+      await expect(surface.locator('.xterm-rows')).toContainText('STA008_WAIT>')
       await expect.poll(() => {
         const database = new DatabaseSync(join(fixture.dataDirectory, 'matou.sqlite'), { readOnly: true })
         try {
@@ -151,7 +151,7 @@ test.describe('native session DAG window', () => {
       await textarea.focus()
       await textarea.pressSequentially('confirmed')
       await textarea.press('Enter')
-      await expect(surface.locator('.xterm-rows')).toContainText('VALUE:confirmed')
+      await expect(surface.locator('.xterm-rows')).toContainText('STA008_GOT:confirmed')
       await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
       dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!

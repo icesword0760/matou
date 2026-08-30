@@ -468,6 +468,20 @@ describe('RuntimeServer domain RPC', () => {
       })
       await waitUntil(() => terminalText(port).includes('VALUE:confirmed'), 5_000)
       await waitUntil(() => workStatus('work-status-session') === 'idle', 5_000)
+
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session',
+        data: 'read "value?STA008_WAIT> "; printf \'STA008_GOT:%s\\n\' "$value"\r'
+      })
+      await waitUntil(() => terminalText(port).includes('STA008_WAIT>'), 5_000)
+      await waitUntil(() => workStatus('work-status-session') === 'needs-input', 5_000)
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', data: 'zsh-confirmed\r'
+      })
+      await waitUntil(() => terminalText(port).includes('STA008_GOT:zsh-confirmed'), 5_000)
+      await waitUntil(() => workStatus('work-status-session') === 'idle', 5_000)
     } finally {
       port.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,

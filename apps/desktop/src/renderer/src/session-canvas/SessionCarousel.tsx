@@ -18,15 +18,22 @@ export function SessionCarousel(props: {
   onCommitParent?(parentSessionId: string): void
   geometryKey?: string
   initialScrollLeft?: number
+  initialAnchor?: { sessionId: string; viewportOffset: number }
   revealRequest?: { sessionId: string; sequence: number; historical?: boolean }
   onGeometryChange?(
-    geometry: { scrollLeft: number; focusedSessionId?: string },
+    geometry: {
+      scrollLeft: number
+      focusedSessionId?: string
+      anchorSessionId?: string
+      anchorViewportOffset?: number
+    },
     options?: { continuous?: boolean }
   ): void
 }) {
   const {
     nodes, focusedSessionId, renderSession, onActivate, onEnsureSessionVisible,
-    parent, onCommitParent, geometryKey, initialScrollLeft = 0, revealRequest, onGeometryChange
+    parent, onCommitParent, geometryKey, initialScrollLeft = 0, initialAnchor,
+    revealRequest, onGeometryChange
   } = props
   const viewportRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef(new Map<string, HTMLElement>())
@@ -48,7 +55,7 @@ export function SessionCarousel(props: {
   } | null>(null)
   const pullController = useRef(new ParentPullController())
   const restoringGeometry = useRef(false)
-  const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0)
+  const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0 || initialAnchor !== undefined)
   const [firstVisible, setFirstVisible] = useState(0)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [scrolling, setScrolling] = useState(false)
@@ -61,6 +68,18 @@ export function SessionCarousel(props: {
   const revealTargetPresent = Boolean(revealRequest && nodes.some(
     ({ sessionId }) => sessionId === revealRequest.sessionId
   ))
+  const currentGeometry = (sessionId = focusedSessionId) => {
+    const viewport = viewportRef.current
+    const card = sessionId ? cardsRef.current.get(sessionId) : undefined
+    return {
+      scrollLeft: viewport?.scrollLeft ?? 0,
+      ...(sessionId ? { focusedSessionId: sessionId } : {}),
+      ...(sessionId && viewport && card ? {
+        anchorSessionId: sessionId,
+        anchorViewportOffset: card.offsetLeft - viewport.scrollLeft
+      } : {})
+    }
+  }
 
   useEffect(() => {
     const stopScrollAuthority = () => { userScrollUntil.current = 0; focusScrollUntil.current = 0 }
@@ -98,38 +117,42 @@ export function SessionCarousel(props: {
     const viewport = viewportRef.current
     if (!viewport) return
     restoringGeometry.current = true
-    const target = Math.max(0, initialScrollLeft)
     let frame = 0
     let attempts = 0
     let reachedFrames = 0
     const restore = () => {
-      viewport.scrollLeft = target
+      const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+      const anchorCard = initialAnchor
+        ? cardsRef.current.get(initialAnchor.sessionId)
+        : undefined
+      const requested = anchorCard
+        ? anchoredCardScrollLeft(anchorCard.offsetLeft, initialAnchor!.viewportOffset, maxScrollLeft)
+        : Math.max(0, initialScrollLeft)
+      viewport.scrollLeft = requested
       updateVisibleWindow()
+      return { requested, expected: Math.min(requested, maxScrollLeft) }
     }
-    restore()
-    skipFocusScrollAfterRestore.current = initialScrollLeft > 0
-    if (target === 0) {
+    let target = restore()
+    skipFocusScrollAfterRestore.current = initialScrollLeft > 0 || initialAnchor !== undefined
+    if (target.requested === 0 && initialScrollLeft === 0 && initialAnchor === undefined) {
       restoringGeometry.current = false
       return
     }
     const continueRestore = () => {
       if (!restoringGeometry.current) return
-      restore()
+      target = restore()
       attempts += 1
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
-      const expected = Math.min(target, maxScrollLeft)
-      reachedFrames = Math.abs(viewport.scrollLeft - expected) < 1
+      target.expected = Math.min(target.requested, maxScrollLeft)
+      reachedFrames = Math.abs(viewport.scrollLeft - target.expected) < 1
         ? reachedFrames + 1 : 0
       // Terminal surfaces and responsive columns settle over multiple frames.
       // Keep applying a persisted non-zero viewport until its full scroll range
       // exists instead of permanently accepting the first clamped value.
-      if (target === 0 || (attempts >= 15 && reachedFrames >= 3 && maxScrollLeft > 0) || attempts >= 90) {
+      if (target.requested === 0 || (attempts >= 15 && reachedFrames >= 3 && maxScrollLeft > 0) || attempts >= 90) {
         restoringGeometry.current = false
-        if (target !== viewport.scrollLeft) {
-          onGeometryChange?.({
-            scrollLeft: viewport.scrollLeft,
-            ...(focusedSessionId ? { focusedSessionId } : {})
-          })
+        if (Math.abs(target.requested - viewport.scrollLeft) >= 1) {
+          onGeometryChange?.(currentGeometry())
         }
         return
       }
@@ -139,7 +162,7 @@ export function SessionCarousel(props: {
     return () => {
       cancelAnimationFrame(frame)
     }
-  }, [geometryKey, initialScrollLeft, visibleCount])
+  }, [geometryKey, initialAnchor?.sessionId, initialAnchor?.viewportOffset, initialScrollLeft, visibleCount])
 
   useLayoutEffect(() => {
     const next = new Map<string, number>()
@@ -223,10 +246,7 @@ export function SessionCarousel(props: {
       ensureVisibleRef.current?.(revealRequest.sessionId)
       window.setTimeout(() => {
         updateVisibleWindow()
-        onGeometryChange?.({
-          scrollLeft: viewportRef.current?.scrollLeft ?? 0,
-          focusedSessionId: revealRequest.sessionId
-        })
+        onGeometryChange?.(currentGeometry(revealRequest.sessionId))
       }, reducedMotion() ? 1 : 320)
     })
     return () => cancelAnimationFrame(frame)
@@ -278,10 +298,7 @@ export function SessionCarousel(props: {
     // the earlier, now-unreachable checkpoint. Only explicit restore writes
     // are excluded to avoid feeding persisted geometry back into itself.
     if (!pageClosing.current && !restoringGeometry.current && viewportRef.current) {
-      onGeometryChange?.({
-        scrollLeft: viewportRef.current.scrollLeft,
-        ...(focusedSessionId ? { focusedSessionId } : {})
-      }, { continuous: true })
+      onGeometryChange?.(currentGeometry(), { continuous: true })
     }
     if (continuousScroll) {
       if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
@@ -430,12 +447,20 @@ export function SessionCarousel(props: {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
-      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${!scrolling && hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}>
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${!scrolling && hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
+      onTransitionEnd={(event) => {
+        if (event.target !== event.currentTarget ||
+          (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return
+        updateVisibleWindow()
+        if (!pageClosing.current && !restoringGeometry.current) {
+          onGeometryChange?.(currentGeometry(), { continuous: true })
+        }
+      }}>
         <SessionCard node={node} focused={node.sessionId === focusedSessionId}
           inViewport={inViewport.has(node.sessionId)}
           expanded={!scrolling && hoveredSessionId === node.sessionId}
           onActivate={(sessionId) => {
-            onGeometryChange?.({ scrollLeft: viewportRef.current?.scrollLeft ?? 0, focusedSessionId: sessionId })
+            onGeometryChange?.(currentGeometry(sessionId))
             onActivate(sessionId)
           }} onHover={hover}>
           {renderSession(node, inViewport.has(node.sessionId))}
@@ -465,6 +490,14 @@ export function centeredCardScrollLeft(
     maxScrollLeft,
     cardOffsetLeft - Math.max(0, viewportWidth - cardWidth) / 2
   ))
+}
+
+export function anchoredCardScrollLeft(
+  cardOffsetLeft: number,
+  viewportOffset: number,
+  maxScrollLeft: number
+): number {
+  return Math.max(0, Math.min(maxScrollLeft, cardOffsetLeft - viewportOffset))
 }
 
 function centerCardInViewport(viewport: HTMLElement, card: HTMLElement): void {

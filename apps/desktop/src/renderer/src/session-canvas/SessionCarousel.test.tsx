@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import {
+  anchoredCardScrollLeft,
   centeredCardScrollLeft,
   SessionCarousel,
   visibleColumnsForWidth
@@ -20,6 +21,37 @@ describe('SessionCarousel', () => {
     expect(centeredCardScrollLeft(0, 280, 900, 900)).toBe(0)
     expect(centeredCardScrollLeft(900, 280, 900, 900)).toBe(590)
     expect(centeredCardScrollLeft(1_800, 280, 900, 900)).toBe(900)
+  })
+
+  it('restores a stable card viewport offset when responsive geometry changed', () => {
+    expect(anchoredCardScrollLeft(992, 60, 1_280)).toBe(932)
+    expect(anchoredCardScrollLeft(992, 60, 800)).toBe(800)
+    expect(anchoredCardScrollLeft(30, 60, 1_280)).toBe(0)
+  })
+
+  it('restores the focused card to its persisted viewport position after layout settles', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      initialScrollLeft={563} initialAnchor={{ sessionId: 'session-3', viewportOffset: 60 }}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const focusedSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    let position = 0
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 720 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: {
+        configurable: true,
+        get: () => position,
+        set: (value: number) => { position = Math.max(0, Math.min(1_280, value)) }
+      }
+    })
+    Object.defineProperty(focusedSlot, 'offsetLeft', { configurable: true, value: 992 })
+
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(viewport.scrollLeft).toBe(932)
+    vi.useRealTimers()
   })
 
   it('reduces visible columns before terminal cards become unreadable in a narrow window', () => {
@@ -151,6 +183,35 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('checkpoints the focused card anchor after a hover width transition settles', () => {
+    vi.useFakeTimers()
+    const onGeometryChange = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      onGeometryChange={onGeometryChange} onActivate={() => undefined}
+      renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const focusedSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    Object.defineProperties(viewport, {
+      scrollLeft: { configurable: true, value: 320, writable: true },
+      clientWidth: { configurable: true, value: 720 },
+      scrollWidth: { configurable: true, value: 2_000 }
+    })
+    Object.defineProperty(focusedSlot, 'offsetLeft', { configurable: true, value: 742 })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 320
+    onGeometryChange.mockClear()
+
+    fireEvent.transitionEnd(focusedSlot, { propertyName: 'flex-basis' })
+
+    expect(onGeometryChange).toHaveBeenCalledWith(expect.objectContaining({
+      scrollLeft: 320,
+      focusedSessionId: 'session-3',
+      anchorSessionId: 'session-3',
+      anchorViewportOffset: 422
+    }), { continuous: true })
+    vi.useRealTimers()
+  })
+
   it('keeps a focused terminal beside compact sibling summaries in a narrow window', () => {
     const nodes = fixtures(4)
     nodes[1] = {
@@ -194,10 +255,10 @@ describe('SessionCarousel', () => {
     act(() => vi.advanceTimersByTime(600))
 
     expect(viewport.scrollLeft).toBe(108)
-    expect(onGeometryChange).toHaveBeenCalledWith({
+    expect(onGeometryChange).toHaveBeenCalledWith(expect.objectContaining({
       scrollLeft: 108,
       focusedSessionId: 'session-3'
-    })
+    }))
     vi.useRealTimers()
   })
 
@@ -252,10 +313,10 @@ describe('SessionCarousel', () => {
     fireEvent.wheel(viewport, { deltaX: 200, deltaY: 0 })
 
     expect(viewport.scrollLeft).toBe(320)
-    expect(onGeometryChange).toHaveBeenCalledWith({
+    expect(onGeometryChange).toHaveBeenCalledWith(expect.objectContaining({
       scrollLeft: 320,
       focusedSessionId: 'session-1'
-    }, { continuous: true })
+    }), { continuous: true })
     vi.useRealTimers()
   })
 
@@ -276,10 +337,10 @@ describe('SessionCarousel', () => {
     viewport.scrollLeft = 240
     fireEvent.scroll(viewport)
 
-    expect(onGeometryChange).toHaveBeenCalledWith({
+    expect(onGeometryChange).toHaveBeenCalledWith(expect.objectContaining({
       scrollLeft: 240,
       focusedSessionId: 'session-5'
-    }, { continuous: true })
+    }), { continuous: true })
     vi.useRealTimers()
   })
 })

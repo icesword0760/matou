@@ -40,4 +40,11 @@ describe('TerminalWorkStatusTracker', () => {
     expect(tracker.ingest('continue? [y/N] ')).toEqual(['needs-input'])
     expect(tracker.ingest('Password: accepted\r\n')).toEqual([])
   })
+
+  it('recognizes a real zsh read prompt without depending on Bash read syntax', () => {
+    const tracker = new TerminalWorkStatusTracker()
+
+    expect(tracker.ingest('\u001b]133;C\u0007')).toEqual(['running'])
+    expect(tracker.ingest('STA008_WAIT> ')).toEqual(['needs-input'])
+  })
 })

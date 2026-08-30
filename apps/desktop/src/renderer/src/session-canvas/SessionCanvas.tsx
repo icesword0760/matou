@@ -53,6 +53,13 @@ export function SessionCanvas(props: {
   const ownerKey = `session-group:${graph.sceneId}:${parentId ?? 'root'}`
   const storedGeometry = geometry?.find((item) => item.ownerKey === ownerKey)?.geometry
   const initialScrollLeft = typeof storedGeometry?.scrollLeft === 'number' ? storedGeometry.scrollLeft : 0
+  const initialAnchor = typeof storedGeometry?.anchorSessionId === 'string' &&
+    typeof storedGeometry?.anchorViewportOffset === 'number'
+    ? {
+        sessionId: storedGeometry.anchorSessionId,
+        viewportOffset: storedGeometry.anchorViewportOffset
+      }
+    : undefined
   const levelFocus = focused && focused.parentSessionId === parentId ? focused : activeDirect[0] ?? direct[0]
   useEffect(() => { setShowHistory(false) }, [parentId])
   useEffect(() => {
@@ -99,7 +106,12 @@ export function SessionCanvas(props: {
     })
   }
   const putGeometry = (
-    next: { scrollLeft: number; focusedSessionId?: string },
+    next: {
+      scrollLeft: number
+      focusedSessionId?: string
+      anchorSessionId?: string
+      anchorViewportOffset?: number
+    },
     options?: { continuous?: boolean }
   ) => {
     geometryRetryCount.current = 0
@@ -158,6 +170,7 @@ export function SessionCanvas(props: {
         ? { onCommitParent: () => onReturnParent(parent.sessionId) }
         : {})}
       geometryKey={ownerKey} initialScrollLeft={initialScrollLeft}
+      {...(initialAnchor ? { initialAnchor } : {})}
       {...(revealRequest ? { revealRequest } : {})}
       onGeometryChange={putGeometry}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
