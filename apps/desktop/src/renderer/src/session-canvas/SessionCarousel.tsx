@@ -30,7 +30,7 @@ export function SessionCarousel(props: {
   } = props
   const viewportRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef(new Map<string, HTMLElement>())
-  const previousRectsRef = useRef(new Map<string, DOMRect>())
+  const previousOffsetsRef = useRef(new Map<string, number>())
   const ensureVisibleRef = useRef(onEnsureSessionVisible)
   const scrollTimer = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
@@ -142,22 +142,29 @@ export function SessionCarousel(props: {
   }, [geometryKey, initialScrollLeft, visibleCount])
 
   useLayoutEffect(() => {
-    const next = new Map<string, DOMRect>()
+    const next = new Map<string, number>()
     for (const node of nodes) {
       const element = cardsRef.current.get(node.sessionId)
       if (!element) continue
-      const rect = element.getBoundingClientRect()
-      next.set(node.sessionId, rect)
-      const previous = previousRectsRef.current.get(node.sessionId)
-      const deltaX = previous ? previous.left - rect.left : 0
-      if (previous && Math.abs(deltaX) > 0.5 && !reducedMotion()) {
+      // Screen rects include both the horizontal viewport scroll and any FLIP
+      // transform still in flight. Feeding either value into the next FLIP
+      // produces exponentially growing translations during frequent Runtime
+      // projections, leaving the card far away from the pointer. offsetLeft is
+      // the stable position inside the carousel content and changes only when
+      // the authoritative sibling order changes.
+      element.getAnimations?.().forEach((animation) => animation.cancel())
+      const offset = element.offsetLeft
+      next.set(node.sessionId, offset)
+      const previous = previousOffsetsRef.current.get(node.sessionId)
+      const deltaX = previous === undefined ? 0 : previous - offset
+      if (previous !== undefined && Math.abs(deltaX) > 0.5 && !reducedMotion()) {
         element.animate?.(
           [{ transform: `translateX(${deltaX}px)` }, { transform: 'translateX(0)' }],
           { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' }
         )
       }
     }
-    previousRectsRef.current = next
+    previousOffsetsRef.current = next
   }, [nodes])
 
   useEffect(() => {

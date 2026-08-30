@@ -54,6 +54,36 @@ describe('SessionCarousel', () => {
       .toEqual(['session-2', 'session-1', 'session-3'])
   })
 
+  it('animates reordering from stable content offsets instead of transient transformed screen rects', () => {
+    const positions = new Map([['session-1', 0], ['session-2', 300]])
+    const offsetLeft = vi.spyOn(HTMLElement.prototype, 'offsetLeft', 'get').mockImplementation(function (this: HTMLElement) {
+      return positions.get(this.getAttribute('data-session-id') ?? '') ?? 0
+    })
+    const animate = vi.fn()
+    const originalAnimate = HTMLElement.prototype.animate
+    HTMLElement.prototype.animate = animate
+    const nodes = fixtures(2)
+    const view = render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+
+    positions.set('session-1', 300)
+    positions.set('session-2', 0)
+    view.rerender(<SessionCarousel nodes={[nodes[1]!, nodes[0]!]} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: 'translateX(300px)' }, { transform: 'translateX(0)' }],
+      { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' }
+    )
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: 'translateX(-300px)' }, { transform: 'translateX(0)' }],
+      { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' }
+    )
+
+    offsetLeft.mockRestore()
+    HTMLElement.prototype.animate = originalAnimate
+  })
+
   it('centers the focused Session and expands hover only while ordinary scrolling is idle', () => {
     vi.useFakeTimers()
     const nodes = fixtures(5)
