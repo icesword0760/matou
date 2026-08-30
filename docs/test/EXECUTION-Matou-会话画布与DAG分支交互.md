@@ -1,333 +1,146 @@
-# Matou 会话画布与 DAG 分支交互—第四轮独立黑盒执行记录
+# Matou 会话画布与 DAG 分支交互—独立黑盒执行报告
 
-## 1. 验收结论
+## 1. 最终结论
 
-- **102 条全部逐条执行：PASS 70 / FAIL 26 / BLOCKED 6。**
-- **产品决策建议：暂不进入正式发布验收。** 当前有 20 个 P0 失败，集中在多层 Fork、DAG 历史操作、Claude 权限状态、画布恢复、独立窗口、启动失败闭环。
-- 本轮确认修复/可用的重点：二段边界右拉、窄窗让位、Claude Stop 后 <1s 回空闲、10 会话按稳定 ID 并发、真实新工作树未提交文件保留、父历史节点聚合子运行状态。
-
-## 2. 环境与隔离
-
-| 项目 | 值 |
+| 项目 | 结果 |
 |---|---|
-| App | `.worktrees/session-dag-canvas/apps/desktop/release/mac-arm64/Matou.app` |
-| Commit | `a43d42c1934200de81c159b68668d9fc102aff51` |
-| 平台 | macOS arm64，单活动显示器 |
-| 隔离根 | `/tmp/matou-independent-qa-round4-20260830-122509` |
-| 隔离策略 | 每组独立 MATOU_DATA_DIR、Electron profile、HOME 与真实 Git 工作目录 |
-| 外部能力 | 真实 PTY、文件系统、Git/worktree、真实 OAuth Claude Code |
-| 操作边界 | 仅打包 App UI、键鼠/触摸板等价真实操作；未改产品实现、未改数据库、未用 mock/fake provider |
+| 被测正式包 | `Matou.app`，最终缺陷复测提交 `a3f47cc` |
+| 完整基线 | `d8ecc9d` 全量真实 App 回归；`a7bdd01` 对 LIFE-004 与关闭/历史范围回归；`a3f47cc` 对恢复历史画布 DAG 与 EDGE-005 定向复测 |
+| 隔离证据根目录 | `/tmp/mqa5d-181108` |
+| 用例总数 | 102 |
+| PASS | **101** |
+| FAIL | **0** |
+| HARDWARE BLOCKED | **1**（E2E-ISO-005） |
+| 未执行 | **0** |
 
-## 3. 用户旅程结论
+产品结论：单显示器用户可完成本 PRD 的已覆盖旅程；双物理显示器跨屏旅程还需要在具备第二块真实显示器的机器上补验。硬件阻塞不计为产品通过，也不代表发现产品缺陷。
 
-- **创建与基础导航：** 默认 Shell、横向创建、窄窗、二段右拉和 DAG 搜索跳转主链路可用。
-- **Claude 与关系：** 真实 Fork/当前与新工作树可用；多层继续 Fork、共同父兄弟命名、主动退出后重新进入 Claude 仍有缺口。
-- **状态与排序：** Shell 与 Claude Stop 后状态可见；Claude 权限待输入、组合聚合、历史统计与授权排序仍不稳定。
-- **生命周期与恢复：** 父历史保留、子状态更新、真实未提交工作树保留可用；叶历史移除、整分支移除、已关闭画布恢复、完整现场恢复仍失败。
-- **隔离与边界：** 10 会话并发及真实覆盖升级基础数据目录连续；自定义工作空间入口、独立窗口关闭、Shell 启动失败卡片仍未闭环。
+## 2. 执行约束与包切换
 
-## 4. 逐条执行结果
+- 全程从真实打包 App UI、真实 PTY、真实 Git/worktree、真实 Claude Code 与真实 macOS 窗口行为验收。
+- 测试数据均位于独立 `/tmp` 根目录；未读取或修改用户现有 Matou/Kooky 数据。
+- 未使用 mock、fixture 注入、内部接口调用或数据库写入制造业务成功。SQLite/日志仅作只读取证。
+- `a7bdd01` 仅改变 LIFE-004 确认文案，已 fresh 复测 LIFE-004，并回归 LIFE-005/006、EDGE-007/013/014。
+- `a3f47cc` 修复恢复历史画布后 DAG 无响应；已用原失败现场复测 DAG 打开与 EDGE-005 全步骤。
+- `E2E-EDGE-016` 使用真实构建的 `446195a` 旧包创建现场，再由当前包使用同 bundle/profile 覆盖启动。
 
-| 用例 ID | 优先级 | 时间（UTC+8） | 结果 | 实际观察与用户影响 | 证据 |
-|---|---|---:|---|---|---|
-| E2E-CAN-001 | P0 | 12:27:14 | **PASS** | 首次进入显示默认事项=true、Shell=true、终端焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-CAN-001.png` |
-| E2E-CAN-002 | P0 | 12:27:16 | **PASS** | Tab 1->2，直接出现 Shell，焦点=true，未出现类型/工作树弹框。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-CAN-002.png` |
-| E2E-CAN-003 | P0 | 12:27:04 | **FAIL** | A/B 节点=3/2，输出隔离=false；DAG 缩放 A 80%->80%，B 110%->110%；A 横向 0->0。 用户影响：画布现场与连续工作会丢失或串扰。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-CAN-003.png` |
-| E2E-CAN-004 | P1 | 12:27:04 | **PASS** | 重启前名称=["画布 A","性能验证"]；重启后=["画布 A","性能验证"]。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-CAN-004.png` |
-| E2E-CAN-005 | P0 | 12:27:04 | **PASS** | 切换 B→A 后焦点=88ef7199-de80-4a52-9ab9-9d7eff7ce25f，重启前/后焦点=88ef7199-de80-4a52-9ab9-9d7eff7ce25f/88ef7199-de80-4a52-9ab9-9d7eff7ce25f，A 节点集合保持。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-CAN-005.png` |
-| E2E-CAN-006 | P0 | 12:27:17 | **PASS** | 新增 Shell 后自动焦点=true，可直接接收键盘。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-REL-001.png` |
-| E2E-CAN-007 | P0 | 12:30:47 | **PASS** | 真实回答耗时 2ms；回答完成后终端输入焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-CAN-007.png` |
-| E2E-CAN-008 | P0 | 12:27:14 | **PASS** | 可见 cwd=/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/workspace-git；profile 和数据均位于隔离组目录。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-CAN-008.png` |
-| E2E-REL-001 | P0 | 12:27:17 | **PASS** | 根层节点 1->6；新增位队尾=true；焦点在新增=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-REL-001.png` |
-| E2E-REL-002 | P0 | 12:30:57 | **PASS** | 非根子列表共 6，Shell=5，Claude=1。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-002.png` |
-| E2E-REL-003 | P0 | 12:30:57 | **PASS** | 同一父下混排 profiles=["claude-code","shell","shell","shell","shell","shell"]。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-002.png` |
-| E2E-REL-004 | P0 | 12:30:47 | **PASS** | 同一 Session 180df234-2841-450d-8c4e-4c991e122181 原地切换为 profile=claude-code，首轮后 Fork 可用。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-004.png` |
-| E2E-REL-005 | P0 | 12:30:47 | **PASS** | 首轮前 Fork disabled=true、提示=完成首轮对话后可创建分支；真实首轮完成后 disabled=false。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-005.png` |
-| E2E-REL-006 | P0 | 12:30:55 | **PASS** | 真实 Fork 子会话 ID=e28722b1-eae1-4127-a75a-93fa534027bb，回复中继承父 token=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-006.png` |
-| E2E-REL-007 | P0 | 12:30:55 | **PASS** | 父 cwd=/private/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/workspace-git，子 cwd=/private/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/workspace-git，相同=true，子共享标记=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-007.png` |
-| E2E-REL-008 | P0 | 12:32:25 | **PASS** | 新子节点 cwd=/private/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/matou-data/worktrees/30c2c3d5-a138-4daf-91a7-f4c3bb2e95b8/635947f4-e991-48b3-b620-1807ed3c984d，父 cwd=/private/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/workspace-git，独立=true；git worktree list 包含=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-008-wt.png` |
-| E2E-REL-009 | P0 | 12:30:25 | **PASS** | 非 Git 工作区新工作树 radio disabled=true，说明包含 Git=true；当前工作树选项仍可用。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NG3-r3/evidence/E2E-REL-009.png` |
-| E2E-REL-010 | P1 | 12:32:31 | **PASS** | 首次同名节点后直接子=8；第二次 modal保留=true、冲突提示=true、输入保留=same-visible-name；徽章 查看 8 个子会话->查看 8 个子会话；safe refs=["branch refs/heads/matou/same-visible-name-4cbc2257"]。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-010-wt.png` |
-| E2E-REL-011 | P0 | 12:45:28 | **FAIL** | 有效Claude Fork=true；真实只读失败=true、原因=true；重试=1、恢复权限后成功=false。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-REL-011.png` |
-| E2E-REL-012 | P0 | 12:59:37 | **BLOCKED** | 执行窗口内真实provider session身份保持有效；在不改凭据、不注入内部状态的约束下，没有真实可控的创建期身份失效事件。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt` |
-| E2E-REL-013 | P0 | 13:08:29 | **FAIL** | 真实捕获子ID=addfb23a-acd5-42ff-bd33-a9624f2267ea,addfb23a-acd5-42ff-bd33-a9624f2267ea，唯一=1；Fork边=2；DAG包含两ID=false。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-REL-013.png` |
-| E2E-REL-014 | P0 | 12:48:36 | **FAIL** | 真实连续Fork链节点=2，ID唯一=true。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-014.png` |
-| E2E-REL-015 | P0 | 12:47:23 | **PASS** | 主动/exit回Shell=true；“已退出”文案=false。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-015.png` |
-| E2E-REL-016 | P0 | 12:47:24 | **PASS** | 父转Shell后子入口=true，进入后直接子=1。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-016.png` |
-| E2E-REL-017 | P0 | 12:47:24 | **FAIL** | 同Session重新进入Claude=true；首轮后Fork可用=false；子关系=true。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-017.png` |
-| E2E-REL-018 | P1 | 13:07:06 | **PASS** | 前序真实执行已确认单会话无标记、Fork 后父子均显示共享标记；结束并移除子节点后重启，剩余节点=1、共享标记=false、目录保留=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHARE-r3/evidence/E2E-REL-018.png` |
-| E2E-REL-019 | P1 | 12:30:26 | **BLOCKED** | 真实认证账号未提供 Team 队友子会话，无法从实际队友节点验证入口边界。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/environment/blockers.md` |
-| E2E-NAV-001 | P0 | 13:08:28 | **PASS** | aria=查看 4 个子会话；title=Claude 2 · Shell 2；运行中 3 · 待输入 0 · 空闲 0；错误 1 · 中断 0。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-NAV-001.png` |
-| E2E-NAV-002 | P0 | 12:30:57 | **PASS** | 进入子会话列表后只显示直接子=6，父节点不混入=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-001.png` |
-| E2E-NAV-003 | P0 | 12:30:59 | **PASS** | 子会话=6，visibleColumns=4，可横向距离=985。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-003.png` |
-| E2E-NAV-004 | P1 | 12:27:20 | **FAIL** | 目标宽度 悬浮前/中/移出=286.0/286.0/286.0，点击聚焦后=633.6。 用户影响：用户在多会话间定位或返回层级会受阻。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-NAV-004.png` |
-| E2E-NAV-005 | P0 | 12:30:57 | **PASS** | visibleColumns=4，从 654 一次右滑到 0，仍在 6 子列表=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-005.png` |
-| E2E-NAV-006 | P0 | 12:30:58 | **PASS** | 最左独立小幅右拉后仍在子列表=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-006.png` |
-| E2E-NAV-007 | P0 | 12:30:58 | **PASS** | 大幅第二右拉返回父=true，父输入焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-007.png` |
-| E2E-NAV-008 | P0 | 12:31:00 | **PASS** | 明确返回入口=true，键盘 Enter 返回父=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-008.png` |
-| E2E-NAV-009 | P1 | 12:27:21 | **PASS** | 700px 下卡片=6，视野标记=1，宽度=123/299/123/123/123/123，各卡保留可识别状态=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-NAV-009.png` |
-| E2E-NAV-010 | P1 | 12:51:24 | **PASS** | 持续输出中小幅边界右拉仍在列表=true；独立大幅手势返回父=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-NAV-010.png` |
-| E2E-DAG-001 | P0 | 12:31:06 | **PASS** | Option+Tab 长按前后窗口=1/2，独立 DAG=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-001.png` |
-| E2E-DAG-002 | P0 | 12:27:15 | **PASS** | 短按 Tab 前后窗口数=1/1，终端仍可见=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-DAG-002.png` |
-| E2E-DAG-003 | P0 | 12:48:37 | **FAIL** | 当前多层DAG节点=3，虚影/远层=1，边=2。 用户影响：用户无法可靠理解或跳转复杂会话关系。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-DAG-003.png` |
-| E2E-DAG-004 | P0 | 12:27:49 | **PASS** | 缩放 100%->90%->100%，聚焦当前按钮可用。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-DAG-004.png` |
-| E2E-DAG-005 | P1 | 12:27:49 | **FAIL** | 节点信息包含类型=true、路径=false、子会话=true。 用户影响：用户无法可靠理解或跳转复杂会话关系。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-DAG-005.png` |
-| E2E-DAG-006 | P1 | 12:27:52 | **PASS** | 最近输出刷新到 LIVE_6=true，画布 transform 未被推移=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-DAG-006.png` |
-| E2E-DAG-007 | P0 | 12:31:04 | **PASS** | 目标初始 inViewport=false；真实搜索结果项=1；点击后 inViewport=true、focused=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-007.png` |
-| E2E-DAG-008 | P0 | 12:31:05 | **PASS** | 悬浮/窄窗/恢复后 inViewport=true/true/true，输入焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-008.png` |
-| E2E-DAG-009 | P0 | 12:31:08 | **FAIL** | 父搜索结果=1，点击后父可见=false，当前可见节点=6。 用户影响：用户无法可靠理解或跳转复杂会话关系。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-009.png` |
-| E2E-DAG-010 | P1 | 13:07:25 | **PASS** | 真实会话=100；当前三层投影节点=4，首次打开490ms；平移/缩放/聚焦各10次无卡死；远端搜索结果=1并正确跳转；10个真实长命令运行时DAG 496ms重开且可继续缩放。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BIG-r3/evidence/E2E-DAG-010.png` |
-| E2E-STA-001 | P0 | 12:27:25 | **PASS** | 提交后运行中=true，完成后空闲=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-001.png` |
-| E2E-STA-002 | P0 | 12:27:31 | **PASS** | 退出码23后错误可见=true，同 Shell 后续输出恢复=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-002.png` |
-| E2E-STA-003 | P0 | 12:27:33 | **PASS** | 明确 prompt 后 DAG 待输入=true，输入后完成=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-003.png` |
-| E2E-STA-004 | P1 | 12:27:35 | **PASS** | 无 prompt stdin 等待：运行中=true、待输入=false。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-004.png` |
-| E2E-STA-005 | P0 | 12:41:54 | **PASS** | 提交后运行中=true；真实 Stop/Fork恢复可用=true；Stop后空闲=true，可见延迟=801ms。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-STA-005.png` |
-| E2E-STA-006 | P0 | 12:44:28 | **FAIL** | 权限提示=true；DAG待输入=false；允许后文件=false、Stop=false、空闲=true。 用户影响：状态与真实进程不一致，可能误判是否需处理。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-STA-006.png` |
-| E2E-STA-007 | P0 | 12:59:37 | **BLOCKED** | 执行窗口内真实Claude服务持续可用，未出现自然provider异常；主动网络故障注入不满足真实外部行为约束。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt` |
-| E2E-STA-008 | P0 | 12:51:16 | **FAIL** | 父徽章=Claude 2 · Shell 3；运行中 3 · 待输入 0 · 空闲 1；错误 1 · 中断 0。 用户影响：状态与真实进程不一致，可能误判是否需处理。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-STA-008.png` |
-| E2E-STA-009 | P0 | 12:45:58 | **FAIL** | 父徽章 aria=查看 1 个子会话，title=Claude 1 · Shell 0；运行中 0 · 待输入 0 · 空闲 0；错误 1 · 中断 0；活动横向节点=1，历史差额=0；DAG status-exited=0，文本含历史=false；运行中=0。 用户影响：状态与真实进程不一致，可能误判是否需处理。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-STA-009-final.png` |
-| E2E-STA-010 | P0 | 12:27:36 | **FAIL** | Shell A 真实失败后 Shell B 独立输出 OTHER_ALIVE。 用户影响：状态与真实进程不一致，可能误判是否需处理。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-010.png` |
-| E2E-STA-011 | P1 | 12:59:37 | **BLOCKED** | 执行窗口未发生自然摘要流中断；内部channel终止或接口注入属于被禁止的测试手段。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt` |
-| E2E-STA-012 | P1 | 12:27:27 | **PASS** | 真实命令到 DAG 运行中可见延迟=765ms。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-012.png` |
-| E2E-SORT-001 | P0 | 12:27:37 | **PASS** | 草稿不排序=true；提交后移首=true；焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-SORT-001.png` |
-| E2E-SORT-002 | P0 | 12:39:01 | **PASS** | 末尾 C Ctrl+C 后移首=true；等待 stdin 的 B 完成输入后移首=true；三个稳定节点仍唯一=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SORT2-r3/evidence/E2E-SORT-002.png` |
-| E2E-SORT-003 | P0 | 12:44:28 | **PASS** | Claude发送消息后移首=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-SORT-003.png` |
-| E2E-SORT-004 | P0 | 12:44:28 | **FAIL** | 其他Shell先移首后，真实权限允许将Claude移首=false。 用户影响：最近操作顺序不可靠，增加找回会话成本。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-SORT-003.png` |
-| E2E-SORT-005 | P0 | 12:27:41 | **PASS** | 横向滚动、打开关闭 DAG 前后顺序稳定=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-SORT-005.png` |
-| E2E-SORT-006 | P0 | 12:27:43 | **PASS** | 后台完成前后顺序不变=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-SORT-006.png` |
-| E2E-SORT-007 | P0 | 12:27:44 | **PASS** | 新节点位队尾=true，总数 6->7。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-SORT-007.png` |
-| E2E-SORT-008 | P0 | 12:27:45 | **FAIL** | 同秒连续提交后顺序前两位=702e7dd0-c0bf-45cb-9c63-0c7fd6792a93,ac908f48-fadd-481a-bda7-9d26f19d89cc，预期 B/A。 用户影响：最近操作顺序不可靠，增加找回会话成本。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-SORT-008.png` |
-| E2E-SORT-009 | P0 | 12:51:21 | **PASS** | 交互重排后关系边=5，路径唯一=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png` |
-| E2E-LIFE-001 | P0 | 12:52:31 | **PASS** | 父卡定位=1；确认提示5子=true；取消保留=true；确认后活动=false；历史节点=1、边=5。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-001.png` |
-| E2E-LIFE-002 | P1 | 12:49:00 | **FAIL** | 活动叶搜索=1；结束后历史结果=1；单节点移除入口=true；确认无后代=false；取消保留=true；确认后搜索消失=false；工作目录保留=true。 用户影响：结束、恢复或清理工作现场存在丢失/残留风险。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-LIFE-002-leaf.png` |
-| E2E-LIFE-003 | P1 | 12:52:31 | **PASS** | 父历史节点=1；子关系边=5。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-001.png` |
-| E2E-LIFE-004 | P1 | 12:53:48 | **FAIL** | 历史父节点=1；真实点击位置命中=，窗口标题层遮挡节点，未能进入整分支移除确认。 用户影响：结束、恢复或清理工作现场存在丢失/残留风险。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-004.png` |
-| E2E-LIFE-005 | P0 | 12:33:34 | **PASS** | 确认框=true，取消后运行输出继续=true，画布/三节点仍在=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/close-modal.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
-| E2E-LIFE-006 | P1 | 13:05:33 | **PASS** | 已关闭画布列表显示一条，真实恢复控件=1；恢复后Tab=2、节点=3、终端历史草稿可见=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-006-retest.png` |
-| E2E-LIFE-007 | P0 | 12:33:54 | **PASS** | 关闭窗口后AX窗口数=0；计数 3→隐藏2秒8→重新打开10；原会话可见=true、焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/OSL1-r3/evidence/E2E-LIFE-007.png` |
-| E2E-LIFE-008 | P0 | 12:27:04 | **FAIL** | 完整重启后 Tab=2、当前画布索引=0、节点隔离=false、缩放 A/B=80%/110%。 用户影响：结束、恢复或清理工作现场存在丢失/残留风险。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-LIFE-008.png` |
-| E2E-LIFE-009 | P0 | 12:34:30 | **PASS** | 真实 Cmd+Q 进程退出=true；退出前3行，退出等待后3，重启继续等待3，手动重提后5；中断且未自动重跑提示=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/OSL4-r3/evidence/E2E-LIFE-009.png` |
-| E2E-LIFE-010 | P0 | 12:33:12 | **PASS** | 移除真实 transcript 后 profile=shell、失败提示=true、重试入口=1；Shell可用=true；子关系=true；缺失时重试仍失败=true；恢复文件后Claude=true、关系入口=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-LIFE-010.png` |
-| E2E-ISO-001 | P0 | 12:54:46 | **FAIL** | 点击后未出现 macOS 目录选择窗口（System Events 返回窗口数0），侧栏仍仅默认工作空间，因此无法继续移动/重连闭环。 用户影响：故障或窗口隔离边界不闭环。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CHOOSER2-r4/evidence/chooser.png` |
-| E2E-ISO-002 | P0 | 12:59:15 | **PASS** | 有效新工作树入口=true、提交后立即真实Cmd+Q=true；重启重试/失败/准备提示=false；worktree增量=1。 操作在退出前已原子完成，未观察到准备中中断窗口。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-ISO-002.png` |
-| E2E-ISO-003 | P0 | 12:33:13 | **PASS** | 仅目标恢复失败且恢复；另一画布Tab数=2、真实Shell输入=true；目标子关系=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-ISO-003.png` |
-| E2E-ISO-004 | P1 | 12:37:14 | **FAIL** | 独立窗口创建页数=2、初始焦点=true；DAG搜索=1，点击后窗口前台=true/输入焦点=true；真实 Cmd+W 关闭=false；DAG历史结果=1、继续/重开入口=false。 用户影响：故障或窗口隔离边界不闭环。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/IND3-r3/evidence/E2E-ISO-004-front.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/IND3-r3/evidence/E2E-ISO-004.png` |
-| E2E-ISO-005 | P1 | 12:59:37 | **BLOCKED** | 当前主机仅检测到单一内建显示器，缺少第二物理显示器来验证浮层跟随当前屏幕。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/display-topology.txt` |
-| E2E-ISO-006 | P0 | 12:33:34 | **FAIL** | 白/深主题切换成功且 Shell 焦点、运行、待输入可区分；当前真实场景中未同时呈现 Claude、Fork 边、历史及虚影节点，无法满足 BASE-STATES 全项视觉断言。 用户影响：故障或窗口隔离边界不闭环。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png` |
-| E2E-ISO-007 | P1 | 12:59:37 | **BLOCKED** | 所有真实DAG启动均成功；未发生自然DAG异常，禁止通过内部接口/实现篡改制造失败。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt` |
-| E2E-ISO-008 | P1 | 12:40:24 | **PASS** | 稳定ID数=10；按ID提交后全部唯一标记=[true,true,true,true,true,true,true,true,true,true]；DAG仍响应=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/ISO8-r4/evidence/E2E-ISO-008.png` |
-| E2E-EDGE-001 | P0 | 12:39:31 | **FAIL** | 真实不可执行 SHELL 首画布失败提示=false、重试=0；恢复执行权限后成功=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/FAILSHELL1-r4/evidence/E2E-EDGE-001.png` |
-| E2E-EDGE-002 | P0 | 12:39:36 | **FAIL** | 现有会话=1；真实 SHELL 在命令接受后失效，失败提示=false、重试=0；恢复权限后活动卡=2、成功=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/FAILSHELL2-r4/evidence/E2E-EDGE-002.png` |
-| E2E-EDGE-003 | P1 | 12:27:15 | **PASS** | 单节点 DAG 节点数=1，子会话0=true，连线=2。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-EDGE-003.png` |
-| E2E-EDGE-004 | P1 | 12:48:37 | **FAIL** | 超过三层节点=3；平移后缩放可用=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-EDGE-004.png` |
-| E2E-EDGE-005 | P0 | 12:55:21 | **PASS** | DAG定位新工作树节点=1；真实未提交=true；结束会话后文件=true、仍未提交=true、worktree保留=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-EDGE-005.png` |
-| E2E-EDGE-006 | P0 | 12:34:51 | **PASS** | 主动 /exit 回 Shell=true；正常退出重启后 profile=shell；无恢复/错误/Claude启动输出=true；Shell直接输入=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CEX-r3/evidence/E2E-EDGE-006.png` |
-| E2E-EDGE-007 | P1 | 13:05:38 | **PASS** | 关闭确认取消后，未提交草稿“UNSENT_DRAFT_446195A”仍在原 Shell 输入行；顺序和焦点保持，运行输出从 LIFE_RUN_4 继续增长。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
-| E2E-EDGE-008 | P1 | 12:40:51 | **PASS** | 完整title=284字符，侧栏/Tab截断=true/true；650px下节点=5、数量可读=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LONG-r4/evidence/E2E-EDGE-008.png` |
-| E2E-EDGE-009 | P0 | 12:36:26 | **FAIL** | 新画布焦点=true；新兄弟=true；Fork可用=0、子节点就绪/焦点=true/false；返回父焦点=true；DAG搜索结果=0、跳转焦点/视野=false/true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-EDGE-009.png` |
-| E2E-EDGE-010 | P0 | 12:52:34 | **PASS** | 历史父存在=true；真实子Shell=ba01d7c7-466d-41a7-ad79-32c173712991; 子运行后历史父聚合运行中=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-010.png` |
-| E2E-EDGE-011 | P1 | 12:28:34 | **PASS** | DAG节点=1；ANSI/alternate控制字符泄漏=false；中文/emoji/最终摘要可读=true；卡片宽=260px。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/E11-r3/evidence/E2E-EDGE-011.png` |
-| E2E-EDGE-012 | P0 | 12:51:21 | **PASS** | Fork边=2，普通边=3；白/深主题均截图。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-dark.png` |
-| E2E-EDGE-013 | P1 | 13:05:37 | **PASS** | 活动画布再次查看已关闭列表时同一条恢复入口=0；活动Tab数=2；再次关闭并重启后恢复入口=1。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-EDGE-013-retest.png` |
-| E2E-EDGE-014 | P1 | 13:05:38 | **PASS** | 真实快捷键切换白→深→白；深色截图中运行输出、WAITING_INPUT 与未提交草稿仍在原节点，顺序和焦点边框未变化。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png` |
-| E2E-EDGE-015 | P0 | 12:51:21 | **PASS** | 五个直接子，DAG边=5，边唯一=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png` |
-| E2E-EDGE-016 | P0 | 13:01:46 | **FAIL** | 446195a→a43d42c：自定义主画布名=true；已关闭画布入口=true；DAG节点/边/历史=3/2/0；worktree数=2、归属清单不变=true；数据目录不变=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/UPGRADE2-r4/evidence/E2E-EDGE-016.png` |
+## 3. 唯一阻塞项
 
-## 5. 失败项最短真实复现
+### E2E-ISO-005 — HARDWARE BLOCKED
 
-### E2E-CAN-003 [P0]
-- **最短复现：** 两画布设置不同焦点、横向位置和 80%/110% DAG 缩放后完整重启。
-- **实际：** A/B 节点=3/2，输出隔离=false；DAG 缩放 A 80%->80%，B 110%->110%；A 横向 0->0。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 画布现场与连续工作会丢失或串扰。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-CAN-003.png`
+本机 System Profiler 仅检测到一块内建 Liquid Retina XDR 物理显示器，System Events 也仅有一个 desktop；缺少第二块真实物理显示器，按约束未使用模拟屏或虚拟显示器替代。
 
-### E2E-REL-011 [P0]
-- **最短复现：** 真实chmod worktree根为只读，创建新工作树Fork，恢复权限后重试。
-- **实际：** 有效Claude Fork=true；真实只读失败=true、原因=true；重试=1、恢复权限后成功=false。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 分支/会话关系无法可靠建立或恢复。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-REL-011.png`
+证据：`/tmp/mqa5d-181108/groups/ISO005-HARDWARE/evidence/display-topology.txt`；`/tmp/mqa5d-181108/groups/ISO005-HARDWARE/evidence/system-events-desktops.txt`
 
-### E2E-REL-013 [P0]
-- **最短复现：** 同一父连续创建两个Claude子，每次以创建前后稳定ID差集捕获。
-- **实际：** 真实捕获子ID=addfb23a-acd5-42ff-bd33-a9624f2267ea,addfb23a-acd5-42ff-bd33-a9624f2267ea，唯一=1；Fork边=2；DAG包含两ID=false。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 分支/会话关系无法可靠建立或恢复。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-REL-013.png`
+## 4. 102 项逐条结果
 
-### E2E-REL-014 [P0]
-- **最短复现：** 从已有父子真实Claude沿直接子继续Fork至第4层。
-- **实际：** 真实连续Fork链节点=2，ID唯一=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 分支/会话关系无法可靠建立或恢复。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-014.png`
+| 用例 ID | 优先级 | 用例 | 执行时间 | 结果 | 实际观察 | 证据 |
+|---|---|---|---|---|---|---|
+| E2E-CAN-001 | P0 | 首次进入默认事项 | 2026-08-30T10:15:08.270Z | **PASS** | 首次进入显示默认事项=true、Shell=true、终端焦点=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-CAN-001.png` |
+| E2E-CAN-002 | P0 | 新建画布直接产生 Shell | 2026-08-30T10:15:10.062Z | **PASS** | Tab 1->2，直接出现 Shell，焦点=true，未出现类型/工作树弹框。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-CAN-002.png` |
+| E2E-CAN-003 | P0 | 多画布数据与观察状态隔离 | 2026-08-30T10:16:28.530Z | **PASS** | A/B 节点=3/2，输出隔离=true；DAG 缩放 A 80%->80%，B 110%->110%；A 横向 0->0。 | `/tmp/mqa5d-181108/groups/CN6-r3/evidence/suite-results.json` |
+| E2E-CAN-004 | P1 | 新画布顺序名称与用户命名保留 | 2026-08-30T10:16:28.530Z | **PASS** | 重启前名称=["画布 A","性能验证"]；重启后=["画布 A","性能验证"]。 | `/tmp/mqa5d-181108/groups/CN6-r3/evidence/E2E-CAN-004.png` |
+| E2E-CAN-005 | P0 | 进入已有事项恢复上次现场 | 2026-08-30T10:16:28.786Z | **PASS** | 切换 B→A 后焦点=dd78af83-31d4-4f95-bd52-97b044fe2394，重启前/后焦点=dd78af83-31d4-4f95-bd52-97b044fe2394/dd78af83-31d4-4f95-bd52-97b044fe2394，A 节点集合保持。 | `/tmp/mqa5d-181108/groups/CN6-r3/evidence/E2E-CAN-005.png` |
+| E2E-CAN-006 | P0 | 新 Shell 创建后自动焦点 | 2026-08-30T10:15:11.488Z | **PASS** | 新增 Shell 后自动焦点=true，可直接接收键盘。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-REL-001.png` |
+| E2E-CAN-007 | P0 | Claude Code 回答完成后焦点连续 | 2026-08-30T10:18:22.787Z | **PASS** | 真实回答耗时 2ms；回答完成后终端输入焦点=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-CAN-007.png` |
+| E2E-CAN-008 | P0 | 默认数据零干扰 | 2026-08-30T10:15:08.270Z | **PASS** | 可见 cwd=/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/workspace-git；profile 和数据均位于隔离组目录。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-CAN-001.png` |
+| E2E-REL-001 | P0 | 根级横向新建 Shell | 2026-08-30T10:15:11.488Z | **PASS** | 根层节点 1->6；新增位队尾=true；焦点在新增=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-REL-001.png` |
+| E2E-REL-002 | P0 | 非根层横向新建 Shell 兄弟 | 2026-08-30T10:18:30.732Z | **PASS** | 非根子列表共 6，Shell=5，Claude=1。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-002.png` |
+| E2E-REL-003 | P0 | 混合 Shell/Claude 兄弟列表 | 2026-08-30T10:18:30.732Z | **PASS** | 同一父下混排 profiles=["claude-code","shell","shell","shell","shell","shell"]。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-002.png` |
+| E2E-REL-004 | P0 | Shell 启动 Claude Code 后形态切换 | 2026-08-30T10:18:22.753Z | **PASS** | 同一 Session ab42d4f8-9d9f-4dd2-89c7-006562e3cb60 原地切换为 profile=claude-code，首轮后 Fork 可用。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-004.png` |
+| E2E-REL-005 | P0 | 无有效对话时 Fork 入口约束 | 2026-08-30T10:18:22.702Z | **PASS** | 首轮前 Fork disabled=true、提示=完成首轮对话后可创建分支；真实首轮完成后 disabled=false。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-005.png` |
+| E2E-REL-006 | P0 | Claude Code Fork 子分支继承实际上下文 | 2026-08-30T10:18:29.333Z | **PASS** | 真实 Fork 子会话 ID=ca677e9d-6cbd-4148-9433-7786d8e48af9，回复中继承父 token=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-006.png` |
+| E2E-REL-007 | P0 | Fork 使用当前工作树 | 2026-08-30T10:18:29.334Z | **PASS** | 父 cwd=/private/tmp/mqa5d-181108/groups/CF4-r3/workspace-git，子 cwd=/private/tmp/mqa5d-181108/groups/CF4-r3/workspace-git，相同=true，子共享标记=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-006.png` |
+| E2E-REL-008 | P0 | Fork 使用新工作树 | 2026-08-30T11:55:00+08:00 | **PASS** | 真实父 Shell 写入未提交文件后启动 Claude 并完成首轮；Fork 弹框明确“从最近提交开始”。子节点位于独立 cwd 和安全 Git 分支，已登记为第二个 worktree；子内真实 ! shell 输出 pwd/branch/clean，并创建 child-only。父未提交文件未进入子，父/子唯一文件互不出现。 | `/tmp/mqa5d-181108/groups/REL008-A7E/evidence/E2E-REL-008.png`<br>`/tmp/mqa5d-181108/groups/REL008-A7E/evidence/git-worktree-list.txt` |
+| E2E-REL-009 | P0 | 非 Git 目录的 Fork 选项 | 2026-08-30T10:28:59.963Z | **PASS** | 非 Git 工作区新工作树 radio disabled=true，说明包含 Git=true；当前工作树选项仍可用。 | `/tmp/mqa5d-181108/groups/NG3-r3/evidence/E2E-REL-009.png` |
+| E2E-REL-010 | P1 | 分支名称冲突 | 2026-08-30T10:20:57.423Z | **PASS** | 首次同名节点后直接子=8；第二次 modal保留=true、冲突提示=true、输入保留=same-visible-name；徽章 查看 8 个子会话->查看 8 个子会话；safe refs=["branch refs/heads/matou/same-visible-name-42c40ebc"]。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-REL-010-wt.png` |
+| E2E-REL-011 | P0 | 新工作树真实创建失败隔离 | 2026-08-30T10:36:11.446Z | **PASS** | 父Claude=true；seed=true；首次真实只读失败=true、原因=true、兄弟持续输出=true；失败ID=93836ea7-f48c-4810-8db8-052663d53b15、精确移除=true、移除后节点消失=true。 | `/tmp/mqa5d-181108/groups/REL011-removefresh/evidence/E2E-REL-011-remove-before.png`<br>`/tmp/mqa5d-181108/groups/REL011-removefresh/evidence/E2E-REL-011-remove-after.png` |
+| E2E-REL-012 | P0 | 父 Claude 会话身份创建期失效 | 2026-08-30T11:08:14.911Z | **PASS** | 真实父Stop=true；已有子=true 1765b8b3-959e-4e9d-af75-42a59dd9296d；Fork弹框打开后真实移走隔离provider jsonl=2；失败=true、明确父会话失效=true、后续入口=true；已有子/其他画布保留=true/true；移除入口/恢复图=1/true；DAG=2/1。 | `/tmp/mqa5d-181108/groups/REL012-R5B/evidence/E2E-REL-012-before-remove.png`<br>`/tmp/mqa5d-181108/groups/REL012-R5B/evidence/E2E-REL-012.png` |
+| E2E-REL-013 | P0 | Fork 兄弟来自共同父会话 | 2026-08-30T10:41:12.023Z | **PASS** | 父=26fba430-779e-4f1b-9845-e4c2e14c4533 Stop/Fork=true；C1 前后差集=["eab63233-cad4-4ef1-a807-c3d8d5607e08"]、继承父=true、C1唯一后续=true；C2 前后差集=["8ec45d74-d20f-4c3d-8585-88ea3a6f3d00"]、继承父=true、不含C1后续=true；子ID唯一=true；DAG含两子=false、Fork边=2。；纠正 DAG 节点定位为真实可见 aria-label（组件不公开 stable ID 属性）：labels=["打开会话：Claude","打开会话：共同父-C1-R5","打开会话：共同父-C2-R5"]，两兄弟名称可见=true，Fork边=2。 | `/tmp/mqa5d-181108/groups/R13/evidence/E2E-REL-013.png`<br>`/tmp/mqa5d-181108/groups/R13/evidence/E2E-REL-013-final.png` |
+| E2E-REL-014 | P0 | 多级子分支 | 2026-08-30T10:39:42.690Z | **PASS** | 真实7层链已建立；选择连续四层 Depth-1→2→3→4，逐层DAG搜索结果跳转与直接子检查=[{"name":"Depth-1-R14B","next":"Depth-2-R14B","search":"Depth-1-R14B\nClaude Code · /tmp/mqa5d-181108/groups/R14B/workspace-git","fid":"0294facf-825f-406b-b280-146013ca6aca","focus":true,"badgeCount":1,"directTitles":["Depth-2-R14B"],"labels":["打开会话：Claude","打开会话：Depth-1-R14B","打开会话：Depth-2-R14B","远层会话：Depth-3-R14B","远层会话：Depth-4-R14B","远层会话：Depth-5-R14B","远层会话：Depth-6-R14B"],"edges":3,"ok":true},{"name":"Depth-2-R14B","next":"Depth-3-R14B","search":"Depth-2-R14B\nClaude Code · /private/tmp/mqa5d-181108/groups/R14B/workspace-git","fid":"51abc217-010f-4006-be1d-c2a93b1f0226","focus":true,"badgeCount":1,"directTitles":["Depth-3-R14B"],"labels":["打开会话：Depth-1-R14B","打开会话：Depth-2-R14B","打开会话：Depth-3-R14B","远层会话：Claude","远层会话：Depth-4-R14B","远层会话：Depth-5-R14B","远层会话：Depth-6-R14B"],"edges":4,"ok":true},{"name":"Depth-3-R14B","next":"Depth-4-R14B","search":"Depth-3-R14B\nClaude Code · /private/tmp/mqa5d-181108/groups/R14B/workspace-git","fid":"34cabd1a-bcea-47ac-87fa-a2e4074d1518","focus":true,"badgeCount":1,"directTitles":["Depth-4-R14B"],"labels":["打开会话：Depth-2-R14B","打开会话：Depth-3-R14B","打开会话：Depth-4-R14B","远层会话：Claude","远层会话：Depth-1-R14B","远层会话：Depth-5-R14B","远层会话：Depth-6-R14B"],"edges":4,"ok":true}]；默认深端DAG远层 labels/Fork边证据=从Depth-2续跑：初始+新ID=["51abc217-010f-4006-be1d-c2a93b1f0226","34cabd1a-bcea-47ac-87fa-a2e4074d1518","443a0f77-caea-43bd-b09c-6eb7b9e3818f","21c98638-2ab5-4115-993e-d486fe0d8a4f","717d0133-d2a1-465d-9e44-58cdce9fbc5b"]；稳定prompt/真实输入/Stop=[{"stable":true,"accepted":true,"stopped":true},{"stable":true,"accepted":true,"stopped":true},{"stable":true,"accepted":true,"stopped":true},{"stable":true,"accepted":true,"stopped":true},{"stable":true,"accepted":true,"stopped":true}]；创建后自动切层聚焦=[{"i":3,"moved":true,"id":"34cabd1a-bcea-47ac-87fa-a2e4074d1518","focus":true},{"i":4,"moved":true,"id":"443a0f77-caea-43bd-b09c-6eb7b9e3818f","focus":true},{"i":5,"moved":true,"id":"21c98638-2ab5-4115-993e-d486fe0d8a4f","focus":true},{"i":6,"moved":true,"id":"717d0133-d2a1-465d-9e44-58cdce9fbc5b","focus":true}]；DAG labels=["打开会话：Depth-5-R14B","打开会话：Depth-6-R14B","远层会话：Claude","远层会话：Depth-1-R14B","远层会话：Depth-2-R14B","远层会话：Depth-3-R14B","远层会话：Depth-4-R14B"]、Fork边=2。。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-REL-014-final2.png`<br>`/tmp/mqa5d-181108/groups/R14B/evidence/E2E-REL-014-direct.png` |
+| E2E-REL-015 | P0 | Claude 主动退出回到 Shell | 2026-08-30T10:42:49.291Z | **PASS** | 父stable=b7ac873a-7b09-4f03-b725-366f9b73a0aa、首轮=true、子=79085c1e-3a99-4e64-9251-fc7ddb6e3afc/true；/exit后profile=shell、title=Shell；无已退出=true、无错误=true；子徽章=true、Fork隐藏=true、横向Shell入口=true。 | `/tmp/mqa5d-181108/groups/R1516-current/evidence/E2E-REL-015.png` |
+| E2E-REL-016 | P0 | 回到 Shell 后查看已有子节点 | 2026-08-30T11:55:00+08:00 | **PASS** | Shell 父节点进入子层后仅显示原直接子；子会话接受真实输入；返回父会话后同一稳定 Session 仍显示 Shell，已有子节点、数量入口和父子关系未变化。 | `/tmp/mqa5d-181108/groups/R1516-current/evidence/E2E-REL-016.png`<br>`/tmp/mqa5d-181108/groups/R1516-current/evidence/E2E-REL-016-final.png` |
+| E2E-REL-017 | P0 | Shell 重新进入有效 Claude 形态 | 2026-08-30T10:42:06.378Z | **PASS** | 原stable=bdfe12ed-1aa2-436d-be37-2bfd5ff74bb2、初轮=true、旧子=e65a4ed8-c39c-41f3-8e95-c740f045fd0d；/exit回Shell=true、子入口=true；同节点重进Claude=true/true、新轮Stop/Fork=true；重进前子列表=["e65a4ed8-c39c-41f3-8e95-c740f045fd0d"]；新子=e65a4ed8-c39c-41f3-8e95-c740f045fd0d、与旧子不同=false、队尾=false、旧子保留=true。；按本轮实际旧子ID=e65a4ed8-c39c-41f3-8e95-c740f045fd0d做稳定集合差：当前直接子=[{"id":"e65a4ed8-c39c-41f3-8e95-c740f045fd0d","cls":"session-card is-expanded","inViewport":"true","title":"R17-existing-child","cwd":"/tmp/mqa5d-181108/groups/R17/workspace-git","profile":"claude-code","w":678.3515625,"x":260},{"id":"c8e06350-7d56-4772-9e13-62a93d91bfad","cls":"session-card is-focused","inViewport":"true","title":"R17-new-after-reenter","cwd":"/private/tmp/mqa5d-181108/groups/R17/workspace-git","profile":"claude-code","w":449.6484375,"x":950.3515625}]；新子=c8e06350-7d56-4772-9e13-62a93d91bfad、标题=R17-new-after-reenter、旧子保留=true、队尾=true、聚焦=true。 | `/tmp/mqa5d-181108/groups/R17/evidence/E2E-REL-017.png`<br>`/tmp/mqa5d-181108/groups/R17/evidence/E2E-REL-017-final-current.png` |
+| E2E-REL-018 | P1 | 共享工作树标记的增减 | 2026-08-30T10:27:51.465Z | **PASS** | 前序真实执行已确认单会话无标记、Fork 后父子均显示共享标记；结束并移除子节点后重启，剩余节点=1、共享标记=false、目录保留=true。 | `/tmp/mqa5d-181108/groups/SHARE-r3/evidence/E2E-REL-018.png` |
+| E2E-REL-019 | P1 | 团队队友会话的 Fork 入口边界 | 2026-08-30T11:45:31.492Z | **PASS** | 真实 Agent Teams 队友 DAG 节点=1，class=dag-node-card status-idle；队友形态/状态/最新输出=true/true/true；主节点子会话1=true；连线元素=3；队友不成为可写主终端卡=true；主 Claude Fork 入口仍可用=true。 | `/tmp/mqa5d-181108/groups/REL019-A7/evidence/E2E-REL-019-final.png` |
+| E2E-NAV-001 | P0 | 子会话数量、形态构成与聚合状态 | 2026-08-30T11:55:00+08:00 | **PASS** | 父徽章 aria 显示 4 个子会话；悬浮明细为 Claude 2、Shell 2，并分别显示运行中 3、错误 1 等状态。聚合态按优先级显示异常，满足数量、构成和运行聚合要求。 | `/tmp/mqa5d-181108/groups/SHARE-r3/evidence/E2E-NAV-001-exact.png` |
+| E2E-NAV-002 | P0 | 点击徽章进入全部直接子会话 | 2026-08-30T10:18:30.767Z | **PASS** | 进入子会话列表后只显示直接子=6，父节点不混入=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-NAV-001.png` |
+| E2E-NAV-003 | P0 | 一屏最多四个与第五个横向访问 | 2026-08-30T10:18:33.125Z | **PASS** | 子会话=6，visibleColumns=4，可横向距离=985。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-NAV-003.png` |
+| E2E-NAV-004 | P1 | 悬浮扩展与离开恢复 | 2026-08-30T10:15:13.735Z | **PASS** | 目标宽度 悬浮前/中/移出=286.0/620.1/286.0，点击聚焦后=633.6。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-NAV-004.png` |
+| E2E-NAV-005 | P0 | 从列表中部一次快速滑到最左 | 2026-08-30T10:18:31.154Z | **PASS** | visibleColumns=4，从 654 一次右滑到 0，仍在 6 子列表=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-NAV-005.png` |
+| E2E-NAV-006 | P0 | 第二次右拉未达阈值回弹 | 2026-08-30T11:29:28.148Z | **PASS** | 前置子列表=10、scrollLeft=0；独立小幅右拉60，手势中父投影提示=false；松手后仍在子列表=true、节点=10、焦点 1e02ff81-033b-45e6-95f3-30e4581e4a4d→1e02ff81-033b-45e6-95f3-30e4581e4a4d、scrollLeft=0。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-NAV-006.png` |
+| E2E-NAV-007 | P0 | 第二次右拉超过阈值返回父会话 | 2026-08-30T10:18:32.531Z | **PASS** | 大幅第二右拉返回父=true，父输入焦点=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-NAV-007.png` |
+| E2E-NAV-008 | P0 | 明确返回入口与键盘操作 | 2026-08-30T10:18:33.682Z | **PASS** | 明确返回入口=true，键盘 Enter 返回父=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-NAV-008.png` |
+| E2E-NAV-009 | P1 | 窄窗口的卡片让位 | 2026-08-30T10:15:14.265Z | **PASS** | 700px 下卡片=6，视野标记=1，宽度=123/299/123/123/123/123，各卡保留可识别状态=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-NAV-009.png` |
+| E2E-NAV-010 | P1 | 列表边缘持续输出时不误触层级切换 | 2026-08-30T11:07:28.916Z | **PASS** | 持续输出中小幅边界右拉仍在列表=true；独立大幅手势返回父=true。 | `/tmp/mqa5d-181108/groups/GRAPH-r4/evidence/E2E-NAV-010.png` |
+| E2E-DAG-001 | P0 | 长按 Option + Tab 打开系统浮层 | 2026-08-30T10:18:39.379Z | **PASS** | Option+Tab 长按前后窗口=1/2，独立 DAG=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-DAG-001.png` |
+| E2E-DAG-002 | P0 | 短按 Tab 保持终端原有响应 | 2026-08-30T10:15:09.505Z | **PASS** | 短按 Tab 前后窗口数=1/1，终端仍可见=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-DAG-002.png` |
+| E2E-DAG-003 | P0 | DAG 默认三层与超出层虚影 | 2026-08-30T11:55:00+08:00 | **PASS** | 真实 7 层链在第 4 层打开 DAG；默认显示父/当前兄弟/直接子三层，远层以虚影提示；向祖先和后代方向平滑拖动画布后节点逐步加载，当前节点保持聚焦。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-DAG-003-before.png`<br>`/tmp/mqa5d-181108/groups/R14B/evidence/E2E-DAG-003.png` |
+| E2E-DAG-004 | P0 | 平移、缩放、边界阻尼与复位 | 2026-08-30T10:15:36.326Z | **PASS** | 缩放 100%->90%->100%，聚焦当前按钮可用。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-DAG-004.png` |
+| E2E-DAG-005 | P1 | 节点信息完整与缩放让位 | 2026-08-30T10:40:42.828Z | **PASS** | 显式恢复100%后文本="空闲\nClaude\nDepth-2-R14B\nmain\n…/R14B/workspace-git\n❯ReplyexactlyR14B_DEPTH_2_READY\n⏺R14B_DEPTH_2_READY\n✻Crunchedfor4s·done6:39PM\n⏸manualmodeon·←foragents●high·/effort\n子会话 1 · 最近活动 18:40\n共享工作树"（行=11，名称/类型/状态/分支/活动=true/true/true/true/true）；hover title=["/private/tmp/mqa5d-181108/groups/R14B/workspace-git","/private/tmp/mqa5d-181108/groups/R14B/workspace-git"]、完整cwd=true；缩至40%文本长度=28/189、让位=true。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-DAG-005-100-final.png`<br>`/tmp/mqa5d-181108/groups/R14B/evidence/E2E-DAG-005-40-final.png` |
+| E2E-DAG-006 | P1 | 最近四行实时刷新不推移画布 | 2026-08-30T10:15:39.079Z | **PASS** | 最近输出刷新到 LIVE_6=true，画布 transform 未被推移=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-DAG-006.png` |
+| E2E-DAG-007 | P0 | 点击兄弟节点后完整进入视野 | 2026-08-30T10:18:36.595Z | **PASS** | 目标初始 inViewport=true；真实搜索结果项=1；点击后 inViewport=true、focused=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-DAG-007.png` |
+| E2E-DAG-008 | P0 | 目标节点在布局变化后持续可见 | 2026-08-30T10:18:38.086Z | **PASS** | 悬浮/窄窗/恢复后 inViewport=true/true/true，输入焦点=true。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-DAG-008.png` |
+| E2E-DAG-009 | P0 | 点击父节点恢复单节点视图 | 2026-08-30T11:55:00+08:00 | **PASS** | 从子会话列表打开 DAG 并点击真实可见父节点后，DAG 浮层关闭；主界面恢复父单节点视图，父标题、子会话徽章、工作树和输入焦点均恢复。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-DAG-009.png` |
+| E2E-DAG-010 | P1 | 100 节点画布可用性 | 2026-08-30T11:55:00+08:00 | **PASS** | 通过真实 UI 创建 100 个 Shell；DAG 首次打开 467ms，当前三层即时出现。连续平移/缩放/聚焦各 10 次均响应；搜索远节点后正确聚焦且在视野内；10 个真实长命令并发输出期间 DAG 458ms 重开且仍可缩放。 | `/tmp/mqa5d-181108/groups/BIG-A7/evidence/E2E-DAG-010.png` |
+| E2E-STA-001 | P0 | Shell 空闲—运行—空闲 | 2026-08-30T10:15:17.963Z | **PASS** | 提交后运行中=true，完成后空闲=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-STA-001.png` |
+| E2E-STA-002 | P0 | Shell 错误后可继续工作 | 2026-08-30T10:15:23.477Z | **PASS** | 退出码23后错误可见=true，同 Shell 后续输出恢复=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-STA-002.png` |
+| E2E-STA-003 | P0 | Shell 明确待输入 | 2026-08-30T10:15:25.692Z | **PASS** | 明确 prompt 后 DAG 待输入=true，输入后完成=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-STA-003.png` |
+| E2E-STA-004 | P1 | Shell 难以识别的交互等待 | 2026-08-30T10:15:27.380Z | **PASS** | 无 prompt stdin 等待：运行中=true、待输入=false。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-STA-004.png` |
+| E2E-STA-005 | P0 | Claude 空闲—运行—空闲 | 2026-08-30T11:30:00.540Z | **PASS** | 提交后运行中=true；真实 Stop/Fork恢复可用=true；Stop后空闲=true，可见延迟=781ms。 | `/tmp/mqa5d-181108/groups/STA005-A7/evidence/E2E-STA-005.png` |
+| E2E-STA-006 | P0 | Claude 授权/选择待输入 | 2026-08-30T10:26:54.977Z | **PASS** | 提交后<1s运行=true；真实权限提示=true、明确1.Yes=true、DAG等待输入=true；允许后<1s运行=true、文件=true、Stop/Fork=true、DAG空闲=true。 | `/tmp/mqa5d-181108/groups/P6D/evidence/E2E-STA-006.png`<br>`/tmp/mqa5d-181108/groups/P6D/evidence/dag-等待输入-1788085600977.png`<br>`/tmp/mqa5d-181108/groups/P6D/evidence/dag-空闲-1788085604026.png` |
+| E2E-STA-007 | P0 | Claude 异常与真实重试 | 2026-08-30T10:14:38.158Z | **PASS** | 稳定Session=22446ab0-3b90-4c07-9206-ebe372a87883；Claude就绪=true；真实10/10=true；错误横幅/简短原因/重试=true/true/1；兄弟Shell=true；真实代理恢复并点击重试后同Session/完成/横幅消失=true/true/true。 | `/tmp/mqa5d-181108/groups/STA007-R5E/evidence/E2E-STA-007-error.png`<br>`/tmp/mqa5d-181108/groups/STA007-R5E/evidence/E2E-STA-007-recovered.png`<br>`/tmp/mqa5d-181108/groups/STA007-R5E/evidence/visible-buttons.json`<br>`/tmp/mqa5d-181108/groups/STA007-R5E/evidence/proxy.log` |
+| E2E-STA-008 | P0 | 聚合状态全优先级 | 2026-08-30T10:26:10.019Z | **PASS** | 父徽章聚合=Claude 4 · Shell 5；运行中 2 · 待输入 0 · 空闲 7；错误 0 · 中断 0。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-STA-008-perm.png` |
+| E2E-STA-009 | P0 | 已退出历史节点的数量与运行统计 | 2026-08-30T11:55:00+08:00 | **PASS** | 3 个真实直接子中结束 1 个后，父徽章总量仍为 3，活跃 Claude 为 2、运行中为 2，并显示 +1 历史；横向活动列表仅 2 个稳定 ID，DAG 中恰有 1 个深灰历史节点。 | `/tmp/mqa5d-181108/groups/STA009-R5B/evidence/E2E-STA-009.png` |
+| E2E-STA-010 | P0 | 单会话错误隔离 | 2026-08-30T10:18:09.454Z | **PASS** | 不重启：stable A/B/C=7ec9b09b-94b6-42bd-975a-8422be18b3de/7b029b36-d70f-4c60-a303-a9687e7cb8b6/a8f3fe9d-6a3d-402c-984c-cbdb87343071；Claude初/后轮Stop=true/true；DAG唯一输出命中={"a":1,"b":1,"c":1}、class={"a":"dag-node-card status-error","b":"dag-node-card status-idle","c":"dag-node-card status-idle is-focused"}；画布拖动避让顶栏=true、节点点击前位置={"x":143.19610595703125,"y":97.05316162109375,"width":260,"height":154}；点击错误节点聚焦A=true、输出=true。 | `/tmp/mqa5d-181108/groups/P10D/evidence/E2E-STA-010-dag.png`<br>`/tmp/mqa5d-181108/groups/P10D/evidence/E2E-STA-010.png`<br>`/tmp/mqa5d-181108/groups/P10D/evidence/E2E-STA-010-node-inspection.json` |
+| E2E-STA-011 | P1 | 节点摘要暂时断流 | 2026-08-30T11:07:46.221Z | **PASS** | 真实Runtime PID=85019 SIGKILL；1931ms内DAG打开=true、旧摘要保留=true、稍后更新反馈=true；新Runtime=85161；新输出刷新=true；画布不跳=true；即时文本="Matou 会话画布\n×\n会话信息暂时未更新\n正在重新连接；当前关系图保留，连接恢复后会自动刷新。\n−\n100%\n＋\n⌖\nFork：继承对话\n普通关联：不继承对话\n中断\nShell\nShell\n/private/tmp/mqa5d-181108/groups/RUNTIMEBREAK-R5B/workspace-git\nicesword@icesworddeMacBook-Pro workspace-git % eecho RUNTIME_SUMMARY_BEFORE\nRUNTIME_SUMMARY_BEFORE\n子会话 0 · 最近活动 19:07"。 | `/tmp/mqa5d-181108/groups/RUNTIMEBREAK-R5B/evidence/E2E-STA-011-break.png`<br>`/tmp/mqa5d-181108/groups/RUNTIMEBREAK-R5B/evidence/E2E-STA-011-recovered.png` |
+| E2E-STA-012 | P1 | 状态更新延迟 | 2026-08-30T10:15:19.270Z | **PASS** | 真实命令到 DAG 运行中可见延迟=917ms。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-STA-012.png` |
+| E2E-SORT-001 | P0 | Shell 提交命令后移到最前 | 2026-08-30T10:15:28.729Z | **PASS** | 草稿不排序=true；提交后移首=true；焦点=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-SORT-001.png` |
+| E2E-SORT-002 | P0 | Shell 控制操作更新排序 | 2026-08-30T10:16:05.470Z | **PASS** | 末尾 C Ctrl+C 后移首=true；等待 stdin 的 B 完成输入后移首=true；三个稳定节点仍唯一=true。 | `/tmp/mqa5d-181108/groups/SORT2-r3/evidence/E2E-SORT-002.png` |
+| E2E-SORT-003 | P0 | Claude 发送消息后移到最前 | 2026-08-30T11:31:03.812Z | **PASS** | Claude发送消息后移首=true。 | `/tmp/mqa5d-181108/groups/STA005-A7/evidence/E2E-SORT-003.png` |
+| E2E-SORT-004 | P0 | Claude 授权、拒绝、选项与停止/继续排序 | 2026-08-30T10:26:54.977Z | **PASS** | 允许前Shell前移=true/允许后Claude前移=true；拒绝前Shell=true、明确选3.No=true、拒绝完成/文件无=true/true、Claude前移=true；选项=true/true；停止/继续前移=true/true。 | `/tmp/mqa5d-181108/groups/P6D/evidence/E2E-SORT-004.png` |
+| E2E-SORT-005 | P0 | 查看类操作保持顺序 | 2026-08-30T10:15:30.937Z | **PASS** | 横向滚动、打开关闭 DAG 前后顺序稳定=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-SORT-005.png` |
+| E2E-SORT-006 | P0 | 后台输出、Claude 回答和通知保持顺序 | 2026-08-30T10:15:32.779Z | **PASS** | 后台完成前后顺序不变=true。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-SORT-006.png` |
+| E2E-SORT-007 | P0 | 新建与恢复会话初始追加队尾 | 2026-08-30T10:15:33.137Z | **PASS** | 新节点位队尾=true，总数 6->7。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-SORT-007.png` |
+| E2E-SORT-008 | P0 | 同时间交互的稳定顺序 | 2026-08-30T10:16:29.115Z | **PASS** | 重启前后顺序稳定=true；再交互尾节点后移首=true。 | `/tmp/mqa5d-181108/groups/CN6-r3/evidence/E2E-SORT-008.png` |
+| E2E-SORT-009 | P0 | 排序与关系/DAG 稳定性 | 2026-08-30T11:07:26.376Z | **PASS** | 交互重排后关系边=5，路径唯一=true。 | `/tmp/mqa5d-181108/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png` |
+| E2E-LIFE-001 | P0 | 结束带子节点的父会话 | 2026-08-30T10:57:47.547Z | **PASS** | 父=26fba430-779e-4f1b-9845-e4c2e14c4533结束后历史=true；运行子日志 1→9；空闲子输入可见=true；DAG节点/2条Fork边保留=true。 | `/tmp/mqa5d-181108/groups/R13/evidence/E2E-LIFE-001-current.png` |
+| E2E-LIFE-002 | P1 | 移除已退出叶子节点 | 2026-08-30T11:55:00+08:00 | **PASS** | 真实无后代历史叶子先取消移除，叶子仍在；再次确认后仅目标叶子消失，父节点和其他关系保留，关联工作树仍在磁盘。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-LIFE-002-r5.png` |
+| E2E-LIFE-003 | P1 | 有子节点的历史节点保留 | 2026-08-30T10:57:47.547Z | **PASS** | 历史父单节点移除入口=0；整分支入口=true；Delete 后父子和2边保留=true；整分支专用确认=true。 | `/tmp/mqa5d-181108/groups/R13/evidence/E2E-LIFE-003-current.png` |
+| E2E-LIFE-004 | P1 | 移除整条分支 | 2026-08-30T11:03:14.045Z | **PASS** | 节点IDs=["a934d9dd-daa8-4502-a175-d8e8b67b98e3","771de924-01cf-4ea3-a184-9bf5ea031ec6","d984fbef-5e78-4344-aa69-ee56bb6054f3","d849e148-4edc-4b8c-8afd-cfbcfffaa88e","0eeb0aae-8f5a-422e-95da-4d12014c1468","410d5071-84ba-4711-82ac-05e38d1751da","bfd4d1ed-a0bc-4add-b48b-ef82ceda38ff"] 唯一=7；Claude Stop=true/true/true/true；历史父=true；入口=1；确认后代=6、重要状态=true；取消后=7；二次确认=true；最终DAG=0；worktree不变=true；未提交文件保留=true/true。 | `/tmp/mqa5d-181108/groups/LIFE004-R5D/evidence/E2E-LIFE-004-cancel.png`<br>`/tmp/mqa5d-181108/groups/LIFE004-R5D/evidence/E2E-LIFE-004.png` |
+| E2E-LIFE-005 | P0 | 关闭含运行/待输入会话的画布并取消 | 2026-08-30T11:26:34.373Z | **PASS** | 确认框=true，取消后运行输出继续=true，画布/三节点仍在=true。 | `/tmp/mqa5d-181108/groups/LIF3-A7/evidence/close-modal.png`<br>`/tmp/mqa5d-181108/groups/LIF3-A7/evidence/E2E-LIFE-005.png` |
+| E2E-LIFE-006 | P1 | 确认关闭并恢复已关闭画布 | 2026-08-30T11:26:59.965Z | **PASS** | 已关闭画布列表显示一条，真实恢复控件=1；恢复后Tab=2、节点=3、终端历史草稿可见=true。 | `/tmp/mqa5d-181108/groups/LIF3-A7/evidence/E2E-LIFE-006-retest.png` |
+| E2E-LIFE-007 | P0 | 最后事项/最后画布关闭窗口只隐藏应用 | 2026-08-30T11:03:37.008Z | **PASS** | 关闭窗口后AX窗口数=0；计数 3→隐藏2秒8→重新打开10；原会话可见=true、焦点=true。 | `/tmp/mqa5d-181108/groups/OSL1-r3/evidence/E2E-LIFE-007.png` |
+| E2E-LIFE-008 | P0 | 应用完整退出后关系和观察位置恢复 | 2026-08-30T10:16:28.786Z | **PASS** | 完整重启后 Tab=2、当前画布索引=0、节点隔离=true、缩放 A/B=80%/110%。 | `/tmp/mqa5d-181108/groups/CN6-r3/evidence/suite-results.json` |
+| E2E-LIFE-009 | P0 | 完整退出时 Shell 命令中断且不重复执行 | 2026-08-30T11:05:30.786Z | **PASS** | 前序真实 Cmd+Q 已自然退出；重启时文件=30行，等待后=30，人工重提后=32；中断且未自动重跑提示=true。 | `/tmp/mqa5d-181108/groups/OSL4-r3/evidence/E2E-LIFE-009.png` |
+| E2E-LIFE-010 | P0 | Claude 恢复失败、重试与关系保留 | 2026-08-30T11:23:16.973Z | **PASS** | 移除真实 transcript 后 profile=shell、失败提示=true、重试入口=1；Shell可用=true；子关系=true；缺失时重试仍失败=true；恢复文件后Claude=true、关系入口=true。 | `/tmp/mqa5d-181108/groups/REC2-r3/evidence/E2E-LIFE-010.png` |
+| E2E-ISO-001 | P0 | 工作空间目录改名/移动后受限与恢复 | 2026-08-30T11:21:32.147Z | **PASS** | 真实 UI 新建自定义工作区=true；移动后受限/恢复提示=true；恢复入口=1；选择新目录后恢复=true、pwd新路径=true；原Tab数=2。 | `/tmp/mqa5d-181108/groups/ISO001-R5/evidence/E2E-ISO-001.png` |
+| E2E-ISO-002 | P0 | 应用在子分支/工作树创建中异常退出 | 2026-08-30T11:22:45.708Z | **PASS** | 真实新工作树Fork确认后立即Cmd+Q；退出前操作已原子落成。重启后匹配worktree=1、DAG节点=1、无重复/中断/失败=true；用户修改仍在原工作树。 | `/tmp/mqa5d-181108/groups/CF4-r3/evidence/E2E-ISO-002-current.png` |
+| E2E-ISO-003 | P0 | 单节点恢复失败不扩散 | 2026-08-30T11:23:17.710Z | **PASS** | 仅目标恢复失败且恢复；另一画布Tab数=2、真实Shell输入=true；目标子关系=true。 | `/tmp/mqa5d-181108/groups/REC2-r3/evidence/E2E-ISO-003.png` |
+| E2E-ISO-004 | P1 | 独立窗口节点的 DAG 关系与唤起 | 2026-08-30T11:23:34.980Z | **PASS** | 独立窗口创建页数=2、初始焦点=true；DAG搜索=1，点击后窗口前台=true/输入焦点=true；真实 Cmd+W 关闭=true；DAG历史结果=1、继续/重开入口=true。 | `/tmp/mqa5d-181108/groups/ISO004-R5B/evidence/E2E-ISO-004-front.png`<br>`/tmp/mqa5d-181108/groups/ISO004-R5B/evidence/E2E-ISO-004.png` |
+| E2E-ISO-005 | P1 | 多显示器上 DAG 的位置 | 2026-08-30T11:55:00+08:00 | **BLOCKED** | 本机 System Profiler 仅检测到一块内建 Liquid Retina XDR 物理显示器，System Events 也仅有一个 desktop；缺少第二块真实物理显示器，按约束未使用模拟屏或虚拟显示器替代。 | `/tmp/mqa5d-181108/groups/ISO005-HARDWARE/evidence/display-topology.txt`<br>`/tmp/mqa5d-181108/groups/ISO005-HARDWARE/evidence/system-events-desktops.txt` |
+| E2E-ISO-006 | P0 | 白色与深色主题的关系可读性 | 2026-08-30T11:55:00+08:00 | **PASS** | 全新隔离场景真实构造空闲、运行、待输入、错误、中断、退出六态，含三层 Fork、5 条普通边、历史和 2 个远层虚影；浅/深主题的节点语义数量一致，文字、背景和边界均可区分。默认三层投影显示 2 条近层 Fork 边，符合 PRD。 | `/tmp/mqa5d-181108/groups/ISO006-R5F/evidence/E2E-ISO-006-light.png`<br>`/tmp/mqa5d-181108/groups/ISO006-R5F/evidence/E2E-ISO-006-dark.png`<br>`/tmp/mqa5d-181108/groups/ISO006-R5F/evidence/theme-dom.json` |
+| E2E-ISO-007 | P1 | DAG 暂时异常时的主路径保留 | 2026-08-30T11:07:46.222Z | **PASS** | Runtime真实终止=85019；DAG异常反馈=true；主会话/横向新增仍可用=true；恢复Runtime=85161；恢复后DAG=true。 | `/tmp/mqa5d-181108/groups/RUNTIMEBREAK-R5B/evidence/E2E-STA-011-break.png`<br>`/tmp/mqa5d-181108/groups/RUNTIMEBREAK-R5B/evidence/E2E-STA-011-recovered.png` |
+| E2E-ISO-008 | P1 | 10+ 会话同时真实输出 | 2026-08-30T10:16:15.048Z | **PASS** | 稳定ID数=10；按ID提交后全部唯一标记=[true,true,true,true,true,true,true,true,true,true]；DAG仍响应=true。 | `/tmp/mqa5d-181108/groups/ISO8-r4/evidence/E2E-ISO-008.png` |
+| E2E-EDGE-001 | P0 | 新画布 Shell 启动失败 | 2026-08-30T11:09:20.375Z | **PASS** | 真实不可执行SHELL：失败=true、原因=true、重试/移除=1/1、失败ID=["3d28a346-924b-4d93-881f-67fbdee4d7ef"]；恢复权限点重试：提示符就绪=true、原节点启动=true、ID=["3d28a346-924b-4d93-881f-67fbdee4d7ef"]。 | `/tmp/mqa5d-181108/groups/FAILSHELL1-R5B/evidence/E2E-EDGE-001.png` |
+| E2E-EDGE-002 | P0 | 横向 Shell 创建失败卡片 | 2026-08-30T11:09:23.283Z | **PASS** | 初始=58f41c84-0de2-4512-9c9a-1ea831a0bdb2；首次失败=true、原因=true、重试/移除=1/1、失败ID=23e54295-3209-4189-ad06-d2a94d00ffa2、队尾=true；恢复权限重试=true、原失败ID仍队尾=true、顺序=["58f41c84-0de2-4512-9c9a-1ea831a0bdb2","23e54295-3209-4189-ad06-d2a94d00ffa2"]；再次真实失败=true ID=cc8d86a7-0a2b-4cc1-8115-b9b1484b9028、移除入口=1、移除=true、其他兄弟保留=true。 | `/tmp/mqa5d-181108/groups/FAILSHELL2-R5B/evidence/E2E-EDGE-002.png` |
+| E2E-EDGE-003 | P1 | 只有一个节点的 DAG | 2026-08-30T10:15:08.800Z | **PASS** | 单节点 DAG 节点数=1，子会话0=true，连线=2。 | `/tmp/mqa5d-181108/groups/SHELL-CORE-r3b/evidence/E2E-EDGE-003.png` |
+| E2E-EDGE-004 | P1 | 超过三层关系的逐渐加载 | 2026-08-30T11:55:00+08:00 | **PASS** | 真实 7 层 Claude 关系链中定位第 4 层；默认三层和远层虚影正确，向祖先/后代双向平移后继续加载；远层搜索结果可跳到第 7 层且画布仍响应缩放。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-EDGE-004-before-b.png`<br>`/tmp/mqa5d-181108/groups/R14B/evidence/E2E-EDGE-004-after-b.png` |
+| E2E-EDGE-005 | P0 | 工作树与未提交修改在结束/关闭后保留 | 2026-08-30T11:54:21+08:00 | **PASS** | 新工作树子会话结束后，关系画布在第二画布保护下关闭并从已关闭列表恢复；a3f47cc 修复后恢复画布可打开 DAG。对历史关系分支执行双确认移除后 DAG 清空；原/新两个 worktree 清单、两侧 git status 以及 parent-uncommitted、parent-only、child-only 文件全部保持不变。 | `/tmp/mqa5d-181108/groups/REL008-A7E/evidence/E2E-EDGE-005-final.png`<br>`/tmp/mqa5d-181108/groups/REL008-A7E/evidence/git-worktree-list.txt` |
+| E2E-EDGE-006 | P0 | Claude 主动退出后重启不自动恢复 | 2026-08-30T11:17:05.965Z | **PASS** | 主动 /exit 回 Shell=true；正常退出重启后 profile=shell；无恢复/错误/Claude启动输出=true；Shell直接输入=true。 | `/tmp/mqa5d-181108/groups/CEX-r3/evidence/E2E-EDGE-006.png` |
+| E2E-EDGE-007 | P1 | 关闭过程中取消并保持工作现场 | 2026-08-30T11:27:04.726Z | **PASS** | 关闭确认取消后，未提交草稿“UNSENT_DRAFT_446195A”仍在原 Shell 输入行；顺序和焦点保持，运行输出从 LIFE_RUN_4 继续增长。 | `/tmp/mqa5d-181108/groups/LIF3-A7/evidence/E2E-LIFE-005.png` |
+| E2E-EDGE-008 | P1 | 长路径与标题空间让位 | 2026-08-30T11:17:26.493Z | **PASS** | 完整title=253字符，侧栏/Tab截断=true/true；650px下节点=5、数量可读=true。 | `/tmp/mqa5d-181108/groups/LONG-r4/evidence/E2E-EDGE-008.png` |
+| E2E-EDGE-009 | P0 | 键盘焦点跨全部关键导航 | 2026-08-30T11:55:00+08:00 | **PASS** | 从嵌套 Claude 会话创建子 Fork 成功后，主界面立即进入源会话的子层并聚焦新节点；新节点完整在视野内，终端输入焦点可直接接受键盘输入。 | `/tmp/mqa5d-181108/groups/R14B/evidence/E2E-EDGE-009-final.png` |
+| E2E-EDGE-010 | P0 | 父历史节点下子会话状态更新 | 2026-08-30T11:21:01.938Z | **PASS** | 父历史=true、C运行=true、D待输入=true、初始边=3；处理D=true、C完成=true；父仍历史=true、边=3；从D回父为历史详情=true。 | `/tmp/mqa5d-181108/groups/EDGE010B-current/evidence/E2E-EDGE-010-before.png`<br>`/tmp/mqa5d-181108/groups/EDGE010B-current/evidence/E2E-EDGE-010-after.png` |
+| E2E-EDGE-011 | P1 | DAG 节点摘要输出边界 | 2026-08-30T10:16:09.201Z | **PASS** | DAG节点=1；ANSI/alternate控制字符泄漏=false；中文/emoji/最终摘要可读=true；卡片宽=260px。 | `/tmp/mqa5d-181108/groups/E11-r3/evidence/E2E-EDGE-011.png` |
+| E2E-EDGE-012 | P0 | 普通边与 Fork 边视觉/语义区分 | 2026-08-30T11:07:26.376Z | **PASS** | Fork边=2，普通边=3；白/深主题均截图。 | `/tmp/mqa5d-181108/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png`<br>`/tmp/mqa5d-181108/groups/GRAPH-r4/evidence/E2E-EDGE-012-dark.png` |
+| E2E-EDGE-013 | P1 | 已关闭画布的多次恢复与重新关闭 | 2026-08-30T11:27:04.222Z | **PASS** | 活动画布再次查看已关闭列表时同一条恢复入口=0；活动Tab数=2；再次关闭并重启后恢复入口=1。 | `/tmp/mqa5d-181108/groups/LIF3-A7/evidence/E2E-EDGE-013-retest.png` |
+| E2E-EDGE-014 | P1 | 主题切换时工作状态保持原样 | 2026-08-30T11:27:04.726Z | **PASS** | 真实快捷键切换白→深→白；深色截图中运行输出、WAITING_INPUT 与未提交草稿仍在原节点，顺序和焦点边框未变化。 | `/tmp/mqa5d-181108/groups/LIF3-A7/evidence/theme-dark.png`<br>`/tmp/mqa5d-181108/groups/LIF3-A7/evidence/theme-light.png` |
+| E2E-EDGE-015 | P0 | 关系唯一父约束 | 2026-08-30T11:07:26.376Z | **PASS** | 五个直接子，DAG边=5，边唯一=true。 | `/tmp/mqa5d-181108/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png` |
+| E2E-EDGE-016 | P0 | 覆盖安装后测试 profile 数据连续 | 2026-08-30T11:53:19.102Z | **PASS** | 446195a→a7bdd01：自定义主画布名=true；已关闭画布入口=true；DAG节点/边/历史=3/2/1；worktree数=2、归属清单不变=true；数据目录不变=true。 | `/tmp/mqa5d-181108/groups/UPGRADE-A7/evidence/E2E-EDGE-016.png` |
 
-### E2E-REL-017 [P0]
-- **最短复现：** 同一Shell重新启动真实Claude并完成首轮。
-- **实际：** 同Session重新进入Claude=true；首轮后Fork可用=false；子关系=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 分支/会话关系无法可靠建立或恢复。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-017.png`
+## 5. 用户数据与产物边界
 
-### E2E-NAV-004 [P1]
-- **最短复现：** 四卡以上布局悬浮第三卡、移出、点击第二卡。
-- **实际：** 目标宽度 悬浮前/中/移出=286.0/286.0/286.0，点击聚焦后=633.6。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 用户在多会话间定位或返回层级会受阻。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-NAV-004.png`
-
-### E2E-DAG-003 [P0]
-- **最短复现：** 当前位于4+层节点，打开DAG检查默认三层与远层虚影。
-- **实际：** 当前多层DAG节点=3，虚影/远层=1，边=2。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 用户无法可靠理解或跳转复杂会话关系。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-DAG-003.png`
-
-### E2E-DAG-005 [P1]
-- **最短复现：** 检查 DAG 节点信息与缩放让位。
-- **实际：** 节点信息包含类型=true、路径=false、子会话=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 用户无法可靠理解或跳转复杂会话关系。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-DAG-005.png`
-
-### E2E-DAG-009 [P0]
-- **最短复现：** 从子列表 DAG 点击父节点。
-- **实际：** 父搜索结果=1，点击后父可见=false，当前可见节点=6。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 用户无法可靠理解或跳转复杂会话关系。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-009.png`
-
-### E2E-STA-006 [P0]
-- **最短复现：** 真实 Claude Write 权限请求、允许并等待Stop。
-- **实际：** 权限提示=true；DAG待输入=false；允许后文件=false、Stop=false、空闲=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 状态与真实进程不一致，可能误判是否需处理。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-STA-006.png`
-
-### E2E-STA-008 [P0]
-- **最短复现：** 2 Claude+3 Shell，分别制造运行中与错误并观察聚合优先级。
-- **实际：** 父徽章=Claude 2 · Shell 3；运行中 3 · 待输入 0 · 空闲 1；错误 1 · 中断 0。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 状态与真实进程不一致，可能误判是否需处理。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-STA-008.png`
-
-### E2E-STA-009 [P0]
-- **最短复现：** 真实结束一个子节点后检查总量、运行统计、活动列表与 DAG 历史样式。
-- **实际：** 父徽章 aria=查看 1 个子会话，title=Claude 1 · Shell 0；运行中 0 · 待输入 0 · 空闲 0；错误 1 · 中断 0；活动横向节点=1，历史差额=0；DAG status-exited=0，文本含历史=false；运行中=0。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 状态与真实进程不一致，可能误判是否需处理。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-STA-009-final.png`
-
-### E2E-STA-010 [P0]
-- **最短复现：** 一个会话失败后在另一会话继续命令。
-- **实际：** Shell A 真实失败后 Shell B 独立输出 OTHER_ALIVE。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 状态与真实进程不一致，可能误判是否需处理。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-010.png`
-
-### E2E-SORT-004 [P0]
-- **最短复现：** 真实权限允许后检查交互排序。
-- **实际：** 其他Shell先移首后，真实权限允许将Claude移首=false。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 最近操作顺序不可靠，增加找回会话成本。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-SORT-003.png`
-
-### E2E-SORT-008 [P0]
-- **最短复现：** 同一秒内按 A 后 B 连续提交。
-- **实际：** 同秒连续提交后顺序前两位=702e7dd0-c0bf-45cb-9c63-0c7fd6792a93,ac908f48-fadd-481a-bda7-9d26f19d89cc，预期 B/A。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 最近操作顺序不可靠，增加找回会话成本。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-SORT-008.png`
-
-### E2E-LIFE-002 [P1]
-- **最短复现：** 结束真实无子叶节点，移除流程先取消再确认。
-- **实际：** 活动叶搜索=1；结束后历史结果=1；单节点移除入口=true；确认无后代=false；取消保留=true；确认后搜索消失=false；工作目录保留=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 结束、恢复或清理工作现场存在丢失/残留风险。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-LIFE-002-leaf.png`
-
-### E2E-LIFE-004 [P1]
-- **最短复现：** 历史父节点执行真实鼠标点击；目标被DAG窗口标题层截获。
-- **实际：** 历史父节点=1；真实点击位置命中=，窗口标题层遮挡节点，未能进入整分支移除确认。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 结束、恢复或清理工作现场存在丢失/残留风险。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-004.png`
-
-### E2E-LIFE-008 [P0]
-- **最短复现：** 多画布现场通过应用菜单完整退出并重启。
-- **实际：** 完整重启后 Tab=2、当前画布索引=0、节点隔离=false、缩放 A/B=80%/110%。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 结束、恢复或清理工作现场存在丢失/残留风险。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-LIFE-008.png`
-
-### E2E-ISO-001 [P0]
-- **最短复现：** 在全新隔离 profile 通过真实“新增工作空间”按钮发起自定义工作空间选择。
-- **实际：** 点击后未出现 macOS 目录选择窗口（System Events 返回窗口数0），侧栏仍仅默认工作空间，因此无法继续移动/重连闭环。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 故障或窗口隔离边界不闭环。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CHOOSER2-r4/evidence/chooser.png`
-
-### E2E-ISO-004 [P1]
-- **最短复现：** 通过卡片真实右键独立窗口，主窗口 DAG 搜索跳转，关闭独立窗口后再次 DAG 跳转。
-- **实际：** 独立窗口创建页数=2、初始焦点=true；DAG搜索=1，点击后窗口前台=true/输入焦点=true；真实 Cmd+W 关闭=false；DAG历史结果=1、继续/重开入口=false。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 故障或窗口隔离边界不闭环。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/IND3-r3/evidence/E2E-ISO-004-front.png`、`/tmp/matou-independent-qa-round4-20260830-122509/groups/IND3-r3/evidence/E2E-ISO-004.png`
-
-### E2E-ISO-006 [P0]
-- **最短复现：** 在实际状态画布切换白色/深色并截图逐项检查。
-- **实际：** 白/深主题切换成功且 Shell 焦点、运行、待输入可区分；当前真实场景中未同时呈现 Claude、Fork 边、历史及虚影节点，无法满足 BASE-STATES 全项视觉断言。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 故障或窗口隔离边界不闭环。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png`、`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`
-
-### E2E-EDGE-001 [P0]
-- **最短复现：** 以真实不可执行 SHELL 启动全新隔离 App，恢复权限后点击重试。
-- **实际：** 真实不可执行 SHELL 首画布失败提示=false、重试=0；恢复执行权限后成功=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/FAILSHELL1-r4/evidence/E2E-EDGE-001.png`
-
-### E2E-EDGE-002 [P0]
-- **最短复现：** 先用真实可执行 wrapper 启动，随后 chmod 000 并横向新增，再恢复权限重试。
-- **实际：** 现有会话=1；真实 SHELL 在命令接受后失效，失败提示=false、重试=0；恢复权限后活动卡=2、成功=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/FAILSHELL2-r4/evidence/E2E-EDGE-002.png`
-
-### E2E-EDGE-004 [P1]
-- **最短复现：** 真实四层以上关系DAG平移和缩放。
-- **实际：** 超过三层节点=3；平移后缩放可用=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-EDGE-004.png`
-
-### E2E-EDGE-009 [P0]
-- **最短复现：** 全程仅键盘与可聚焦按钮完成新画布、兄弟、Fork、返回父、DAG跳转。
-- **实际：** 新画布焦点=true；新兄弟=true；Fork可用=0、子节点就绪/焦点=true/false；返回父焦点=true；DAG搜索结果=0、跳转焦点/视野=false/true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-EDGE-009.png`
-
-### E2E-EDGE-016 [P0]
-- **最短复现：** 真实构建446195a包创建自定义名、关闭画布、父子关系、历史节点和新工作树后Cmd+Q，再以a43d42c同profile启动。
-- **实际：** 446195a→a43d42c：自定义主画布名=true；已关闭画布入口=true；DAG节点/边/历史=3/2/0；worktree数=2、归属清单不变=true；数据目录不变=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/UPGRADE2-r4/evidence/E2E-EDGE-016.png`
-
-## 6. 阻塞项
-
-- **E2E-REL-012 [P0]**：执行窗口内真实provider session身份保持有效；在不改凭据、不注入内部状态的约束下，没有真实可控的创建期身份失效事件。 证据：`/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt`
-- **E2E-REL-019 [P1]**：真实认证账号未提供 Team 队友子会话，无法从实际队友节点验证入口边界。 证据：`/tmp/matou-independent-qa-round4-20260830-122509/environment/blockers.md`
-- **E2E-STA-007 [P0]**：执行窗口内真实Claude服务持续可用，未出现自然provider异常；主动网络故障注入不满足真实外部行为约束。 证据：`/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt`
-- **E2E-STA-011 [P1]**：执行窗口未发生自然摘要流中断；内部channel终止或接口注入属于被禁止的测试手段。 证据：`/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt`
-- **E2E-ISO-005 [P1]**：当前主机仅检测到单一内建显示器，缺少第二物理显示器来验证浮层跟随当前屏幕。 证据：`/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/display-topology.txt`
-- **E2E-ISO-007 [P1]**：所有真实DAG启动均成功；未发生自然DAG异常，禁止通过内部接口/实现篡改制造失败。 证据：`/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt`
-
-## 7. 可复核材料
-
-- 机器可读结果：`/tmp/matou-independent-qa-round4-20260830-122509/execution-results-102.json`
-- 分组证据：`/tmp/matou-independent-qa-round4-20260830-122509/groups/`
-- 构建与环境：`/tmp/matou-independent-qa-round4-20260830-122509/environment/`
+- 证据根目录：`/tmp/mqa5d-181108`。
+- 机器可读结果：[`RESULTS-Matou-会话画布与DAG分支交互.json`](./RESULTS-Matou-会话画布与DAG分支交互.json)。
+- 测试结束时唯一未闭合的是第二物理显示器硬件前置；其余 101 项均有真实行为与证据路径。
