@@ -214,7 +214,9 @@ test('matches Kooky terminal shortcuts, real search, focus, zoom, and white skin
     await expect(terminal).toHaveAttribute('data-font-size', '11')
 
     await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .xterm-helper-textarea')).toBeFocused()
-    await page.keyboard.type("printf 'MATOU_SEARCH_TOKEN\\n'")
+    // Keep the literal search token out of the echoed command so the terminal
+    // contains exactly one real result: the command output under test.
+    await page.keyboard.type("printf 'MATOU_%s_TOKEN\\n' SEARCH")
     await page.keyboard.press('Enter')
     await expect(activeStage.locator('[data-testid="terminal-pane"][data-active="true"] .xterm-rows'))
       .toContainText('MATOU_SEARCH_TOKEN')
