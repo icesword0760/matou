@@ -154,6 +154,8 @@ test.describe('horizontal sibling navigation', () => {
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await expect(carousel).toBeVisible()
       const baseline = await carousel.evaluate((element) => element.scrollLeft)
+      const carouselBox = await carousel.boundingBox()
+      expect(carouselBox).not.toBeNull()
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const card = fixture.page.locator('.session-card').nth(2)
@@ -161,12 +163,60 @@ test.describe('horizontal sibling navigation', () => {
         expect(box).not.toBeNull()
         await fixture.page.mouse.move(box!.x + box!.width / 2, box!.y + 90)
         await expect(card).toHaveClass(/is-expanded/)
-        await fixture.page.mouse.move(440, 105)
+        await fixture.page.mouse.move(carouselBox!.x + 20, Math.max(1, carouselBox!.y - 20))
         await expect(card).not.toHaveClass(/is-expanded/)
         await expect.poll(async () => Math.abs(
           (await carousel.evaluate((element) => element.scrollLeft)) - baseline
         )).toBeLessThan(1)
       }
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test('slides an edge-hovered card fully into view while it expands', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 4; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await fixture.page.mouse.move(2, 2)
+      await fixture.page.waitForTimeout(450)
+      await carousel.evaluate((element) => {
+        const slot = element.querySelectorAll<HTMLElement>('[data-session-id]')[1]!
+        element.scrollLeft = slot.offsetLeft + 80
+      })
+      const viewportBox = await carousel.boundingBox()
+      expect(viewportBox).not.toBeNull()
+      const point = { x: viewportBox!.x + 28, y: viewportBox!.y + 120 }
+      const targetId = await fixture.page.evaluate(({ x, y }) =>
+        (document.elementFromPoint(x, y)?.closest('[data-session-card]') as HTMLElement | null)
+          ?.dataset.sessionCard, point)
+      expect(targetId).toBeTruthy()
+      const target = fixture.page.locator(`[data-session-card="${targetId}"]`)
+      const initialLeftGap = await target.evaluate((card) => {
+        const viewport = card.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        return card.getBoundingClientRect().left - viewport.getBoundingClientRect().left
+      })
+      expect(initialLeftGap).toBeLessThan(8)
+
+      await fixture.page.mouse.move(point.x, point.y)
+      await expect(target).toHaveClass(/is-expanded/)
+      await fixture.page.waitForTimeout(480)
+
+      const visibility = await target.evaluate((card) => {
+        const viewport = card.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        const viewportRect = viewport.getBoundingClientRect()
+        const cardRect = card.getBoundingClientRect()
+        return {
+          leftGap: cardRect.left - viewportRect.left,
+          rightGap: viewportRect.right - cardRect.right
+        }
+      })
+      expect(visibility.leftGap).toBeGreaterThanOrEqual(8)
+      expect(visibility.rightGap).toBeGreaterThanOrEqual(8)
     } finally {
       await fixture.close()
     }

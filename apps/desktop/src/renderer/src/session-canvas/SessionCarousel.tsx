@@ -41,6 +41,9 @@ export function SessionCarousel(props: {
   const previousOffsetsRef = useRef(new Map<string, number>())
   const ensureVisibleRef = useRef(onEnsureSessionVisible)
   const hoverRetargetFrame = useRef<number | undefined>(undefined)
+  const hoverVisibilityFrame = useRef<number | undefined>(undefined)
+  const hoverVisibilitySessionId = useRef<string | null>(null)
+  const hoverVisibilityThrough = useRef(0)
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
@@ -91,6 +94,7 @@ export function SessionCarousel(props: {
       window.removeEventListener('pagehide', closePage)
       window.removeEventListener('beforeunload', closePage)
       if (hoverRetargetFrame.current !== undefined) cancelAnimationFrame(hoverRetargetFrame.current)
+      if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
@@ -292,6 +296,41 @@ export function SessionCarousel(props: {
       resumeHoverAtPointer()
     })
   }
+  const keepHoveredCardFullyVisible = (sessionId: string) => {
+    hoverVisibilitySessionId.current = sessionId
+    hoverVisibilityThrough.current = performance.now() + 440
+    if (hoverVisibilityFrame.current !== undefined) {
+      cancelAnimationFrame(hoverVisibilityFrame.current)
+      hoverVisibilityFrame.current = undefined
+    }
+    const followPreview = () => {
+      hoverVisibilityFrame.current = undefined
+      if (hoverVisibilitySessionId.current !== sessionId) return
+      const viewport = viewportRef.current
+      const card = cardsRef.current.get(sessionId)
+      if (!viewport || !card) return
+      const target = fullyVisibleCardScrollLeft(
+        card.offsetLeft,
+        card.offsetWidth,
+        viewport.scrollLeft,
+        viewport.clientWidth,
+        Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+      )
+      const delta = target - viewport.scrollLeft
+      if (Math.abs(delta) > 0.5) {
+        // Follow the growing edge instead of jumping or launching overlapping
+        // native smooth-scroll animations. The 28px frame cap keeps large edge
+        // corrections physical while ordinary expansion advances by only a
+        // few pixels per frame.
+        viewport.scrollLeft += Math.sign(delta) * Math.min(Math.abs(delta), 28)
+        updateVisibleWindow()
+      }
+      if (performance.now() < hoverVisibilityThrough.current || Math.abs(delta) > 0.5) {
+        hoverVisibilityFrame.current = requestAnimationFrame(followPreview)
+      }
+    }
+    hoverVisibilityFrame.current = requestAnimationFrame(followPreview)
+  }
   const markScrolling = (userInitiated = false) => {
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
@@ -322,6 +361,11 @@ export function SessionCarousel(props: {
   const hover = (sessionId: string | null) => {
     hoverIntentSessionId.current = sessionId
     if (sessionId === null) {
+      hoverVisibilitySessionId.current = null
+      if (hoverVisibilityFrame.current !== undefined) {
+        cancelAnimationFrame(hoverVisibilityFrame.current)
+        hoverVisibilityFrame.current = undefined
+      }
       setHoveredSessionId(null)
       // A card boundary is not the end of the hover preview: the pointer can
       // spend any number of frames inside the carousel gap. Only leaving the
@@ -338,6 +382,7 @@ export function SessionCarousel(props: {
       hoverBaselineScrollLeft.current = viewportRef.current?.scrollLeft ?? 0
     }
     setHoveredSessionId(sessionId)
+    keepHoveredCardFullyVisible(sessionId)
   }
   hoverRef.current = hover
   const finishPullGesture = () => {
@@ -540,6 +585,26 @@ export function anchoredCardScrollLeft(
   maxScrollLeft: number
 ): number {
   return Math.max(0, Math.min(maxScrollLeft, cardOffsetLeft - viewportOffset))
+}
+
+export function fullyVisibleCardScrollLeft(
+  cardOffsetLeft: number,
+  cardWidth: number,
+  viewportScrollLeft: number,
+  viewportWidth: number,
+  maxScrollLeft: number,
+  edgeInset = 10
+): number {
+  const visibleLeft = viewportScrollLeft + edgeInset
+  const visibleRight = viewportScrollLeft + viewportWidth - edgeInset
+  if (cardOffsetLeft < visibleLeft) {
+    return Math.max(0, Math.min(maxScrollLeft, cardOffsetLeft - edgeInset))
+  }
+  const cardRight = cardOffsetLeft + cardWidth
+  if (cardRight > visibleRight) {
+    return Math.max(0, Math.min(maxScrollLeft, cardRight - viewportWidth + edgeInset))
+  }
+  return viewportScrollLeft
 }
 
 function centerCardInViewport(viewport: HTMLElement, card: HTMLElement): void {
