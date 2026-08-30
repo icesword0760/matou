@@ -42,6 +42,9 @@ export function SessionCarousel(props: {
   const scrollTimer = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverTimer = useRef<number | undefined>(undefined)
+  const hoverRestoreTimer = useRef<number | undefined>(undefined)
+  const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
+  const hoverIntentSessionId = useRef<string | null>(null)
   const wheelGesture = useRef(false)
   const userScrollUntil = useRef(0)
   const focusScrollUntil = useRef(0)
@@ -94,6 +97,7 @@ export function SessionCarousel(props: {
       if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
       if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
   }, [])
   useLayoutEffect(() => {
@@ -264,12 +268,29 @@ export function SessionCarousel(props: {
     const unit = viewport.clientWidth > 0 ? viewport.clientWidth / visibleCount : 1
     setFirstVisible(Math.max(0, Math.min(nodes.length - visibleCount, Math.round(viewport.scrollLeft / unit))))
   }
+  const restoreHoverBaseline = (settled: boolean) => {
+    const viewport = viewportRef.current
+    const baseline = hoverBaselineScrollLeft.current
+    if (!viewport || baseline === undefined) return false
+    viewport.scrollLeft = baseline
+    updateVisibleWindow()
+    if (settled) {
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      hoverRestoreTimer.current = undefined
+      hoverBaselineScrollLeft.current = undefined
+    }
+    return true
+  }
   const markScrolling = (userInitiated = false) => {
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
     // point onward and must not be mistaken for a programmatic restore event.
     if (userInitiated) {
       restoringGeometry.current = false
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      hoverRestoreTimer.current = undefined
+      hoverBaselineScrollLeft.current = undefined
+      hoverIntentSessionId.current = null
       // Browser kinetic scrolling can keep emitting native scroll events long
       // after the original wheel event. Keep treating that stream as user
       // intent so long gestures are checkpointed rather than only debounced.
@@ -297,7 +318,8 @@ export function SessionCarousel(props: {
     // native scroll is still the final user-visible viewport and must replace
     // the earlier, now-unreachable checkpoint. Only explicit restore writes
     // are excluded to avoid feeding persisted geometry back into itself.
-    if (!pageClosing.current && !restoringGeometry.current && viewportRef.current) {
+    if (!pageClosing.current && !restoringGeometry.current && viewportRef.current &&
+      hoverBaselineScrollLeft.current === undefined) {
       onGeometryChange?.(currentGeometry(), { continuous: true })
     }
     if (continuousScroll) {
@@ -308,9 +330,21 @@ export function SessionCarousel(props: {
   const hover = (sessionId: string | null) => {
     if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
     hoverTimer.current = undefined
+    hoverIntentSessionId.current = sessionId
     if (sessionId === null) {
       setHoveredSessionId(null)
+      // Hover expansion is only a preview. Reapply the position captured before
+      // expansion immediately, then once more after the flex transition has
+      // settled so Chromium cannot leave the strip at a clamped offset.
+      restoreHoverBaseline(false)
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      hoverRestoreTimer.current = window.setTimeout(() => restoreHoverBaseline(true), 220)
       return
+    }
+    if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+    hoverRestoreTimer.current = undefined
+    if (hoverBaselineScrollLeft.current === undefined) {
+      hoverBaselineScrollLeft.current = viewportRef.current?.scrollLeft ?? 0
     }
     // A deliberate hover after scrolling is a fresh interaction: stop treating
     // later layout notifications as part of the previous wheel gesture so the
@@ -448,7 +482,7 @@ export function SessionCarousel(props: {
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
-      {nodes.map((node, index) => <div key={node.sessionId} ref={(element) => {
+      {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
@@ -456,6 +490,11 @@ export function SessionCarousel(props: {
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return
+        if (hoverBaselineScrollLeft.current !== undefined) {
+          if (hoverIntentSessionId.current === null) restoreHoverBaseline(true)
+          else updateVisibleWindow()
+          return
+        }
         updateVisibleWindow()
         if (!pageClosing.current && !restoringGeometry.current) {
           onGeometryChange?.(currentGeometry(), { continuous: true })
@@ -465,20 +504,16 @@ export function SessionCarousel(props: {
           inViewport={inViewport.has(node.sessionId)}
           expanded={!scrolling && hoveredSessionId === node.sessionId}
           onActivate={(sessionId) => {
+            // Focusing or typing into the previewed card turns the current
+            // position into explicit user intent. Do not later restore the
+            // pre-hover viewport when the pointer leaves.
+            if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+            hoverRestoreTimer.current = undefined
+            hoverBaselineScrollLeft.current = undefined
             onGeometryChange?.(currentGeometry(sessionId))
             onActivate(sessionId)
           }} onHover={hover}>
           {renderSession(node, inViewport.has(node.sessionId))}
-          <footer className={`session-card-footer status-${node.workStatus}`}
-            data-session-card-footer aria-label={`会话状态：${cardStatus(node.workStatus)}`}>
-            <span className="session-card-footer__state">
-              <i data-session-status-dot aria-hidden="true" />
-              {cardStatus(node.workStatus)}
-            </span>
-            <span className="session-card-footer__position" aria-label={`第 ${index + 1} 个，共 ${nodes.length} 个会话`}>
-              {index + 1}/{nodes.length}
-            </span>
-          </footer>
           {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
             <strong>{node.title}</strong>
             <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
@@ -543,15 +578,5 @@ function compactStatus(status: SessionGraphNodeView['workStatus']): string {
   if (status === 'error') return '异常'
   if (status === 'interrupted') return '中断'
   if (status === 'exited') return '历史'
-  return '空闲'
-}
-
-function cardStatus(status: SessionGraphNodeView['workStatus']): string {
-  if (status === 'needs-input') return '待输入'
-  if (status === 'running') return '运行中'
-  if (status === 'starting') return '启动中'
-  if (status === 'error') return '异常'
-  if (status === 'interrupted') return '已中断'
-  if (status === 'exited') return '已结束'
   return '空闲'
 }

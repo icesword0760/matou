@@ -72,18 +72,11 @@ describe('SessionCarousel', () => {
     expect(screen.getByRole('region', { name: '同级会话列表' }).getAttribute('data-visible-columns')).toBe('4')
   })
 
-  it('presents every Session as a complete card with status and position context', () => {
-    const nodes = fixtures(3)
-    nodes[1] = { ...nodes[1]!, workStatus: 'needs-input' }
-    render(<SessionCarousel nodes={nodes} focusedSessionId="session-2"
+  it('does not reserve a bottom status bar inside Session cards', () => {
+    render(<SessionCarousel nodes={fixtures(3)} focusedSessionId="session-2"
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
 
-    const focusedCard = document.querySelector('[data-session-card="session-2"]')!
-    const footer = focusedCard.querySelector('[data-session-card-footer]')
-    expect(footer).not.toBeNull()
-    expect(footer?.textContent).toContain('待输入')
-    expect(footer?.textContent).toContain('2/3')
-    expect(footer?.querySelector('[data-session-status-dot]')).not.toBeNull()
+    expect(document.querySelector('[data-session-card-footer]')).toBeNull()
   })
 
   it('keeps card DOM identity while authoritative interaction order changes', () => {
@@ -215,7 +208,7 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
-  it('checkpoints the focused card anchor after a hover width transition settles', () => {
+  it('restores the pre-hover viewport without checkpointing transient card movement', () => {
     vi.useFakeTimers()
     const onGeometryChange = vi.fn()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
@@ -233,14 +226,52 @@ describe('SessionCarousel', () => {
     viewport.scrollLeft = 320
     onGeometryChange.mockClear()
 
+    const card = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    fireEvent.mouseEnter(card)
+    act(() => vi.advanceTimersByTime(160))
+    expect(card.classList.contains('is-expanded')).toBe(true)
+
+    // Chromium may clamp the viewport while flex-basis grows. This is a
+    // temporary hover preview, not a user navigation checkpoint.
+    viewport.scrollLeft = 410
+    fireEvent.scroll(viewport)
+    expect(onGeometryChange).not.toHaveBeenCalled()
+
+    fireEvent.pointerLeave(card)
     fireEvent.transitionEnd(focusedSlot, { propertyName: 'flex-basis' })
 
-    expect(onGeometryChange).toHaveBeenCalledWith(expect.objectContaining({
-      scrollLeft: 320,
-      focusedSessionId: 'session-3',
-      anchorSessionId: 'session-3',
-      anchorViewportOffset: 422
-    }), { continuous: true })
+    expect(viewport.scrollLeft).toBe(320)
+    expect(onGeometryChange).not.toHaveBeenCalled()
+    vi.useRealTimers()
+  })
+
+  it('keeps the new viewport when the user activates a card during its hover preview', () => {
+    vi.useFakeTimers()
+    const onActivate = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={onActivate}
+      renderSession={(node) => <input aria-label={`输入 ${node.sessionId}`} />} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const slot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const card = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    Object.defineProperties(viewport, {
+      scrollLeft: { configurable: true, value: 120, writable: true },
+      clientWidth: { configurable: true, value: 720 },
+      scrollWidth: { configurable: true, value: 2_000 }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 120
+
+    fireEvent.mouseEnter(card)
+    act(() => vi.advanceTimersByTime(160))
+    viewport.scrollLeft = 260
+    fireEvent.focus(screen.getByLabelText('输入 session-3'))
+    expect(onActivate).toHaveBeenCalledWith('session-3')
+
+    fireEvent.pointerLeave(card)
+    fireEvent.transitionEnd(slot, { propertyName: 'flex-basis' })
+
+    expect(viewport.scrollLeft).toBe(260)
     vi.useRealTimers()
   })
 

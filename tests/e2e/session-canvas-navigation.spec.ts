@@ -90,4 +90,32 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('keeps the same viewport after repeatedly previewing cards without clicking', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 4; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await expect(carousel).toBeVisible()
+      const baseline = await carousel.evaluate((element) => element.scrollLeft)
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const card = fixture.page.locator('.session-card').nth(2)
+        const box = await card.boundingBox()
+        expect(box).not.toBeNull()
+        await fixture.page.mouse.move(box!.x + box!.width / 2, box!.y + 90)
+        await expect(card).toHaveClass(/is-expanded/)
+        await fixture.page.mouse.move(440, 105)
+        await expect(card).not.toHaveClass(/is-expanded/)
+        await expect.poll(async () => Math.abs(
+          (await carousel.evaluate((element) => element.scrollLeft)) - baseline
+        )).toBeLessThan(1)
+      }
+    } finally {
+      await fixture.close()
+    }
+  })
 })

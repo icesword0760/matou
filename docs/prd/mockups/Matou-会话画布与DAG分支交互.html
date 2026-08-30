@@ -403,7 +403,7 @@
       min-width: 238px;
       height: 100%;
       display: grid;
-      grid-template-rows: 43px minmax(0, 1fr) 34px;
+      grid-template-rows: 43px minmax(0, 1fr);
       overflow: hidden;
       border: 1px solid #d0d6de;
       border-radius: 11px;
@@ -451,7 +451,6 @@
     .mock-input-row { display: flex; align-items: center; gap: 7px; margin-top: 12px; padding-top: 9px; border-top: 1px solid #e2e6eb; }
     .mock-input-row input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: #26303a; font: inherit; }
     .mock-input-row input::placeholder { color: #a1a8b1; }
-    .child-bottom { display: flex; align-items: center; gap: 7px; padding: 0 10px; border-top: 1px solid #e5e8ec; color: #89909a; font-size: 10px; }
     .run-dot { width: 7px; height: 7px; border-radius: 50%; background: #a6adb6; }
     .run-dot.running { background: var(--green); box-shadow: 0 0 0 3px rgba(35,166,111,.11); animation: breathe 1.6s ease-in-out infinite; }
     .run-dot.needs-input { background: #d29922; box-shadow: 0 0 0 3px rgba(210,153,34,.13); }
@@ -1085,6 +1084,8 @@ On branch main
     let wheelGesturePulling = false;
     let lastWheelAt = 0;
     let wheelGestureTimer;
+    let paneHoverBaseline = null;
+    let paneHoverRestoreTimer;
     const LEFT_EDGE_TOLERANCE = 16;
     const WHEEL_GESTURE_GAP = 220;
 
@@ -1108,7 +1109,7 @@ On branch main
       return { status: 'idle', count: 0, label: '空闲' };
     }
 
-    function paneTemplate(branch, index, total = branches.length) {
+    function paneTemplate(branch, index) {
       const isClaude = (branch.mode || 'claude') === 'claude';
       const canFork = isClaude && branch.restoreState !== 'failed';
       const nestedBadge = branch.nested > 0
@@ -1123,7 +1124,7 @@ On branch main
         : branch.restoreState === 'restoring'
           ? `<div class="restore-alert"><span>正在恢复原 Claude Code 对话…</span></div>`
           : '';
-      return `<article class="child-pane ${index === 0 ? 'active-pane' : ''}" data-id="${branch.id}" style="view-transition-name: pane-${branch.id}" onpointerdown="focusPane(this)" onmouseenter="setTimeout(() => ensurePaneVisible(this), 180)">
+      return `<article class="child-pane ${index === 0 ? 'active-pane' : ''}" data-id="${branch.id}" style="view-transition-name: pane-${branch.id}" onpointerdown="focusPane(this)" onmouseenter="beginPanePreview()" onmouseleave="endPanePreview()">
         <div class="child-title">
           <span class="name">${branch.name}</span>
           <span class="branch-tag">${branch.git}</span>
@@ -1139,13 +1140,12 @@ ${restoreAlert}
 
 <span class="prompt-green">➜</span> <span class="prompt-blue">${branch.git}</span> ${branch.running ? '<span class="cursor"></span>' : ''}
 <div class="mock-input-row"><span class="prompt-green">›</span><input aria-label="向 ${branch.name} 发送内容" placeholder="输入内容并回车" onpointerdown="event.stopPropagation()" onfocus="focusPane(this.closest('.child-pane'))" onkeydown="recordSessionInteraction('${branch.id}', this, event)"></div></div>
-        <div class="child-bottom"><span class="run-dot ${branch.status || (branch.running ? 'running' : 'idle')}"></span><span>${branchStatusLabel(branch)}</span><span style="margin-left:auto">${index + 1}/${total}</span></div>
       </article>`;
     }
 
     function renderBranches() {
       activeGroupCount = branches.length;
-      childrenStrip.innerHTML = branches.map((branch, index) => paneTemplate(branch, index, branches.length)).join('');
+      childrenStrip.innerHTML = branches.map((branch, index) => paneTemplate(branch, index)).join('');
       const running = branches.filter(item => item.running).length;
       const dominant = dominantBranchStatus();
       const shellCount = branches.filter(item => item.mode === 'shell').length;
@@ -1432,10 +1432,32 @@ ${restoreAlert}
     }
 
     function focusPane(element) {
+      cancelPanePreview();
       document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane'));
       element.classList.add('focused', 'active-pane');
       if (dagNodes[element.dataset.id]) currentGraphNodeId = element.dataset.id;
       setTimeout(() => ensurePaneVisible(element), 50);
+    }
+
+    function beginPanePreview() {
+      clearTimeout(paneHoverRestoreTimer);
+      if (paneHoverBaseline === null) paneHoverBaseline = childrenStrip.scrollLeft;
+    }
+
+    function cancelPanePreview() {
+      clearTimeout(paneHoverRestoreTimer);
+      paneHoverBaseline = null;
+    }
+
+    function endPanePreview() {
+      if (paneHoverBaseline === null) return;
+      const baseline = paneHoverBaseline;
+      childrenStrip.scrollLeft = baseline;
+      clearTimeout(paneHoverRestoreTimer);
+      paneHoverRestoreTimer = setTimeout(() => {
+        childrenStrip.scrollLeft = baseline;
+        paneHoverBaseline = null;
+      }, 420);
     }
 
     function ensurePaneVisible(element, behavior = 'smooth') {
@@ -1790,7 +1812,7 @@ ${restoreAlert}
           ? branches
           : siblings.map(nodeToBranch);
         activeGroupCount = group.length;
-        childrenStrip.innerHTML = group.map((branch, index) => paneTemplate(branch, index, group.length)).join('');
+        childrenStrip.innerHTML = group.map((branch, index) => paneTemplate(branch, index)).join('');
         const parentNode = dagNodes[node.parent];
         document.querySelector('.children-topbar .breadcrumb').innerHTML = `<span class="root">${parentNode.name} /</span><span class="current">${node.name}</span><span>›</span><span>同级会话</span>`;
         document.querySelector('.children-topbar .gesture-hint').textContent = `已聚焦“${node.name}” · 同时显示 ${group.length} 个兄弟会话`;
