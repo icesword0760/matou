@@ -13,14 +13,8 @@ describe('RuntimeSessionRegistry', () => {
     let complete = false
     const shutdown = registry.shutdownAll().then(() => { complete = true })
 
-    expect(first.dispose).toHaveBeenCalledWith({
-      notifyExit: false,
-      reason: 'runtime-shutdown'
-    })
-    expect(second.dispose).toHaveBeenCalledWith({
-      notifyExit: false,
-      reason: 'runtime-shutdown'
-    })
+    expect(first.shutdownForRuntime).toHaveBeenCalledOnce()
+    expect(second.shutdownForRuntime).toHaveBeenCalledOnce()
     expect(complete).toBe(false)
 
     first.resolve()
@@ -37,14 +31,14 @@ describe('RuntimeSessionRegistry', () => {
 function session(sessionId: string) {
   let resolve: () => void = () => {}
   const closed = new Promise<void>((done) => { resolve = done })
-  const dispose = vi.fn()
+  const shutdownForRuntime = vi.fn(() => closed)
   return {
     value: {
       sessionId,
-      dispose,
+      shutdownForRuntime,
       whenClosed: () => closed
     } as never,
-    dispose,
+    shutdownForRuntime,
     resolve
   }
 }

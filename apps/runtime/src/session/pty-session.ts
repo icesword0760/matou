@@ -59,6 +59,8 @@ export class PtySession {
   #disposed = false
   #notifyExit = true
   #exitReason: 'runtime-shutdown' | undefined
+  #forceFinalized = false
+  #closedResolved = false
   #pendingReplayFrom: number | undefined
   readonly #closed: Promise<void>
   #resolveClosed: () => void = () => {}
@@ -151,6 +153,32 @@ export class PtySession {
 
   whenClosed(): Promise<void> { return this.#closed }
 
+  async shutdownForRuntime(options: {
+    gracePeriodMs?: number
+    hardKillWaitMs?: number
+  } = {}): Promise<void> {
+    this.dispose({ notifyExit: false, reason: 'runtime-shutdown' })
+    if (await settlesWithin(this.#closed, options.gracePeriodMs ?? 1_500)) return
+    try {
+      if (process.platform === 'win32') this.#pty.kill()
+      else this.#pty.kill('SIGKILL')
+    } catch {
+      // The PTY may have exited between the grace timeout and escalation.
+    }
+    if (await settlesWithin(this.#closed, options.hardKillWaitMs ?? 1_000)) return
+
+    // A provider can leave its PTY exit callback unresolved even after the
+    // process was killed. Stop accepting new frames, drain all output already
+    // observed, and sync the journal so the desktop quit is never held open.
+    this.#forceFinalized = true
+    try {
+      await this.#writeChain
+    } finally {
+      await this.#journal.close()
+      this.#resolveClosedOnce()
+    }
+  }
+
   attach(send: (message: RuntimeMessage) => void): void {
     this.#send = send
     this.#pendingReplayFrom = undefined
@@ -179,6 +207,7 @@ export class PtySession {
   }
 
   #enqueueOutput(data: string): void {
+    if (this.#forceFinalized) return
     this.#onOutput?.(data)
     const bytes = this.#encoder.encode(data)
     const sequence = ++this.#sequence
@@ -194,6 +223,7 @@ export class PtySession {
   }
 
   #enqueueExit(exitCode: number, signal?: number): void {
+    if (this.#forceFinalized) return
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(async () => {
       await this.#journal.appendExit(sequence, exitCode, signal)
@@ -218,7 +248,13 @@ export class PtySession {
         exitCode,
         ...(signal === undefined ? {} : { signal })
       })
-    }).finally(() => this.#resolveClosed())
+    }).finally(() => this.#resolveClosedOnce())
+  }
+
+  #resolveClosedOnce(): void {
+    if (this.#closedResolved) return
+    this.#closedResolved = true
+    this.#resolveClosed()
   }
 
   #sendOutput(sequence: number, bytes: Uint8Array): void {
@@ -274,6 +310,23 @@ export class PtySession {
       }
     })
   }
+}
+
+function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(false)
+    }, Math.max(0, timeoutMs))
+    void promise.then(() => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(true)
+    })
+  })
 }
 
 function resolveShell(): string {

@@ -18,10 +18,7 @@ export class RuntimeSessionRegistry {
   }
   async shutdownAll(): Promise<void> {
     const sessions = [...this.#sessions.values()]
-    for (const session of sessions) {
-      session.dispose({ notifyExit: false, reason: 'runtime-shutdown' })
-    }
-    await Promise.all(sessions.map((session) => session.whenClosed()))
+    await Promise.all(sessions.map((session) => session.shutdownForRuntime()))
     for (const session of sessions) this.delete(session.sessionId, session)
   }
 }
