@@ -157,6 +157,24 @@ describe('ProviderModeService', () => {
       .toMatchObject({ workStatus: 'running' })
   })
 
+  it('settles a restored Claude session to idle when its statusline confirms the live conversation', () => {
+    const initial = bootstrapClaudeTree({ canFork: true })
+    database.run(
+      `UPDATE sessions SET status = 'running', work_status = 'starting' WHERE id = ?`,
+      initial.parentSessionId
+    )
+
+    const restored = providerModes.observeHook(command('hook-restored-statusline'), {
+      sessionId: initial.parentSessionId,
+      providerSessionId: 'provider-parent',
+      eventName: 'unknown',
+      now: 30
+    })
+
+    expect(restored.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
+      .toMatchObject({ currentMode: 'claude-code', workStatus: 'idle', canFork: true })
+  })
+
   it('preserves the user-visible node name across Claude recovery and mode transitions', () => {
     const initial = bootstrapClaudeTree({ canFork: false })
     database.run(`UPDATE sessions SET title = 'same-visible-name' WHERE id = ?`, initial.parentSessionId)

@@ -414,13 +414,18 @@ export class RuntimeServer {
       // The channel smoke fixture intentionally creates a transient PTY without
       // a durable Session. Only graph-owned Sessions own persisted summaries.
       if (!this.#sessionRepository.getSession(sessionId)) return
+      const latestLines = terminalSummaryLines(raw)
+      // A restored PTY initially emits only a fresh prompt (and Agent TUIs
+      // repaint only their chrome). That output is not newer user content and
+      // must not erase the last useful lines from the prior run.
+      if (latestLines.length === 0) return
       this.#database.run(
         `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
          VALUES (?, ?, ?)
          ON CONFLICT(session_id) DO UPDATE SET
            latest_lines_json = excluded.latest_lines_json,
            updated_at = excluded.updated_at`,
-        sessionId, JSON.stringify(terminalSummaryLines(raw)), Date.now()
+        sessionId, JSON.stringify(latestLines), Date.now()
       )
     } catch (error) {
       if (!this.#closed) console.error(`[session.graph-summary] ${errorMessage(error)}`)
@@ -1663,12 +1668,14 @@ async function gitEnvironment(cwd: string): Promise<{ gitBranch: string; gitDirt
 export function terminalSummaryLines(raw: string): string[] {
   const text = raw
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b[()][0-2A-Z]/g, '')
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\r/g, '\n')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
   return text.split('\n').map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0)
     .filter((line) => !looksLikeShellPrompt(line))
+    .filter((line) => !looksLikeProviderChrome(line))
     .slice(-4)
 }
 
@@ -1676,6 +1683,13 @@ function looksLikeShellPrompt(line: string): boolean {
   const value = line.trim()
   if (/^[%$#>]$/.test(value)) return true
   return /^[^\s@]+@[^\s]+\s+.+\s+[%$#>]$/.test(value)
+}
+
+function looksLikeProviderChrome(line: string): boolean {
+  const value = line.trim()
+  if (/^[❯›»]$/.test(value)) return true
+  if (/^[─━═╌╍┄┅┈┉\s]+$/.test(value)) return true
+  return /^[⏸⏵▶▷]\s*.*\b(?:manual mode on|for agents)\b/i.test(value)
 }
 
 function updateShellInputBuffer(previous: string, data: string): {

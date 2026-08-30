@@ -210,7 +210,12 @@ export class ProviderModeService {
       const metadata = asMetadata(binding.metadata_json)
       if (input.eventName === 'UserPromptSubmit') metadata.observedUserPrompt = true
       if (input.eventName === 'Stop') metadata.observedNormalStop = true
-      metadata.canFork = metadata.observedUserPrompt === true && metadata.observedNormalStop === true
+      // A statusline payload confirms that a resumed conversation is live, but
+      // it does not represent a new prompt/Stop cycle. Preserve the previously
+      // earned Fork capability until a real lifecycle hook supplies new facts.
+      if (input.eventName !== 'unknown') {
+        metadata.canFork = metadata.observedUserPrompt === true && metadata.observedNormalStop === true
+      }
       metadata.lastHookEvent = input.eventName
       const workStatus = providerWorkStatus(input.eventName, session.work_status)
       tx.run(
@@ -295,6 +300,10 @@ function providerWorkStatus(eventName: string, current: SessionWorkStatus): Sess
   if (eventName === 'PermissionRequest' || eventName === 'Notification') return 'needs-input'
   if (eventName === 'PostToolUseFailure') return 'error'
   if (eventName === 'Stop') return 'idle'
+  // Statusline identity is accepted only for resume/Fork launches. Its arrival
+  // means the provider has rendered an interactive conversation, so a restored
+  // node must no longer remain indefinitely in the starting state.
+  if (eventName === 'unknown' && current === 'starting') return 'idle'
   return current
 }
 

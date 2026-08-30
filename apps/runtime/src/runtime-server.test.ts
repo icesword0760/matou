@@ -76,6 +76,47 @@ describe('RuntimeServer domain RPC', () => {
       'icesword@MacBook workspace %'
     ].join('\n'))).toEqual(['中文_码头 😀', 'LONG', 'ALT_SCREEN', 'FINAL'])
   })
+  it('does not replace a restored DAG summary with provider chrome-only output', () => {
+    expect(terminalSummaryLines([
+      '\u001b(B❯',
+      '───────────────────────────────────────────────────────────',
+      '⏸ manual mode on · ← for agents ● high · /effort'
+    ].join('\r\n'))).toEqual([])
+  })
+  it('preserves the prior DAG summary when a restored Shell emits only its prompt', async () => {
+    const executable = join(root, 'prompt-only-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "%%\\r\\n"\nsleep 2\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    registerSession(database, 'restored-summary-session')
+    database.run(
+      `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
+       VALUES (?, ?, ?)`,
+      'restored-summary-session', JSON.stringify(['LAST_MEANINGFUL_OUTPUT']), 1
+    )
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'restored-summary-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => terminalText(port).includes('%'))
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      expect(database.get<{ latest_lines_json: string }>(
+        'SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?',
+        'restored-summary-session'
+      )?.latest_lines_json).toBe(JSON.stringify(['LAST_MEANINGFUL_OUTPUT']))
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'restored-summary-session'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
   it('publishes live per-Session HUD state in projection snapshots and terminal updates', async () => {
     registerSession(database, 'hud-session')
     port.receive({
