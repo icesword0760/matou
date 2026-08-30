@@ -44,6 +44,8 @@ export function SessionCarousel(props: {
   const hoverVisibilityFrame = useRef<number | undefined>(undefined)
   const hoverVisibilitySessionId = useRef<string | null>(null)
   const hoverVisibilityThrough = useRef(0)
+  const focusVisibilityFrame = useRef<number | undefined>(undefined)
+  const focusVisibilitySessionId = useRef<string | null>(null)
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
@@ -62,6 +64,7 @@ export function SessionCarousel(props: {
   const pullController = useRef(new ParentPullController())
   const restoringGeometry = useRef(false)
   const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0 || initialAnchor !== undefined)
+  const previousFocusedSessionId = useRef(focusedSessionId)
   const [firstVisible, setFirstVisible] = useState(0)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [pull, setPull] = useState({ distance: 0, progress: 0, springBack: false })
@@ -95,6 +98,7 @@ export function SessionCarousel(props: {
       window.removeEventListener('beforeunload', closePage)
       if (hoverRetargetFrame.current !== undefined) cancelAnimationFrame(hoverRetargetFrame.current)
       if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
+      if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
@@ -196,18 +200,69 @@ export function SessionCarousel(props: {
 
   useEffect(() => {
     if (!focusedSessionId) return
-    if (restoringGeometry.current) return
+    const focusChanged = previousFocusedSessionId.current !== focusedSessionId
+    previousFocusedSessionId.current = focusedSessionId
+    if (focusChanged) {
+      // Activation is a durable navigation choice; any pointer-only preview
+      // and its old viewport baseline must stop governing the carousel.
+      hoverIntentSessionId.current = null
+      setHoveredSessionId(null)
+      hoverVisibilitySessionId.current = null
+      if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
+      hoverVisibilityFrame.current = undefined
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      hoverRestoreTimer.current = undefined
+      hoverBaselineScrollLeft.current = undefined
+    }
     if (skipFocusScrollAfterRestore.current) {
       skipFocusScrollAfterRestore.current = false
-      return
+      if (!focusChanged) return
     }
-    const frame = requestAnimationFrame(() => {
+    if (restoringGeometry.current) {
+      if (!focusChanged) return
+      // A user-selected Session supersedes a stale viewport restore. The
+      // restoration loop observes this flag on its next frame and exits.
+      restoringGeometry.current = false
+    }
+    focusVisibilitySessionId.current = focusedSessionId
+    const followThrough = performance.now() + 440
+    const followActiveCard = () => {
+      focusVisibilityFrame.current = undefined
+      if (focusVisibilitySessionId.current !== focusedSessionId) return
+      if (hoverIntentSessionId.current !== null) {
+        focusVisibilitySessionId.current = null
+        return
+      }
       const viewport = viewportRef.current
       const card = cardsRef.current.get(focusedSessionId)
-      if (viewport && card) centerCardInViewport(viewport, card)
+      if (!viewport || !card) return
+      const target = centeredCardScrollLeft(
+        card.offsetLeft,
+        card.offsetWidth,
+        viewport.clientWidth,
+        Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+      )
+      const delta = target - viewport.scrollLeft
+      if (Math.abs(delta) > 0.5) {
+        viewport.scrollLeft += Math.sign(delta) * Math.min(Math.abs(delta), 28)
+        updateVisibleWindow()
+      }
       ensureVisibleRef.current?.(focusedSessionId)
-    })
-    return () => cancelAnimationFrame(frame)
+      if (performance.now() < followThrough || Math.abs(delta) > 0.5) {
+        focusVisibilityFrame.current = requestAnimationFrame(followActiveCard)
+        return
+      }
+      focusVisibilitySessionId.current = null
+      if (!pageClosing.current && !restoringGeometry.current) {
+        onGeometryChange?.(currentGeometry())
+      }
+    }
+    focusVisibilityFrame.current = requestAnimationFrame(followActiveCard)
+    return () => {
+      if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
+      focusVisibilityFrame.current = undefined
+      if (focusVisibilitySessionId.current === focusedSessionId) focusVisibilitySessionId.current = null
+    }
   }, [focusedSessionId])
 
   useEffect(() => {
@@ -337,6 +392,9 @@ export function SessionCarousel(props: {
     // point onward and must not be mistaken for a programmatic restore event.
     if (userInitiated) {
       restoringGeometry.current = false
+      focusVisibilitySessionId.current = null
+      if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
+      focusVisibilityFrame.current = undefined
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
       hoverRestoreTimer.current = undefined
       hoverBaselineScrollLeft.current = undefined
@@ -354,7 +412,7 @@ export function SessionCarousel(props: {
     // the earlier, now-unreachable checkpoint. Only explicit restore writes
     // are excluded to avoid feeding persisted geometry back into itself.
     if (!pageClosing.current && !restoringGeometry.current && viewportRef.current &&
-      hoverBaselineScrollLeft.current === undefined) {
+      hoverBaselineScrollLeft.current === undefined && focusVisibilitySessionId.current === null) {
       onGeometryChange?.(currentGeometry(), { continuous: true })
     }
   }
@@ -378,6 +436,9 @@ export function SessionCarousel(props: {
     }
     if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     hoverRestoreTimer.current = undefined
+    focusVisibilitySessionId.current = null
+    if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
+    focusVisibilityFrame.current = undefined
     if (hoverBaselineScrollLeft.current === undefined) {
       hoverBaselineScrollLeft.current = viewportRef.current?.scrollLeft ?? 0
     }
@@ -523,7 +584,7 @@ export function SessionCarousel(props: {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
-      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${node.sessionId === focusedSessionId || hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return
@@ -539,7 +600,7 @@ export function SessionCarousel(props: {
       }}>
         <SessionCard node={node} focused={node.sessionId === focusedSessionId}
           inViewport={inViewport.has(node.sessionId)}
-          expanded={hoveredSessionId === node.sessionId}
+          expanded={node.sessionId === focusedSessionId || hoveredSessionId === node.sessionId}
           onActivate={(sessionId) => {
             // Focusing or typing into the previewed card turns the current
             // position into explicit user intent. Do not later restore the

@@ -176,6 +176,32 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('does not let initial geometry restoration suppress the next explicit focus change', () => {
+    vi.useFakeTimers()
+    const nodes = fixtures(5)
+    const view = render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      initialScrollLeft={120} onActivate={() => undefined}
+      renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 1_800 },
+      scrollLeft: { configurable: true, value: 120, writable: true }
+    })
+    const targetSlot = document.querySelector<HTMLElement>('[data-session-id="session-5"]')!
+    Object.defineProperties(targetSlot, {
+      offsetLeft: { configurable: true, value: 900 },
+      offsetWidth: { configurable: true, value: 280 }
+    })
+    view.rerender(<SessionCarousel nodes={nodes} focusedSessionId="session-5"
+      initialScrollLeft={120} onActivate={() => undefined}
+      renderSession={(node) => <span>{node.title}</span>} />)
+    act(() => vi.runAllTimers())
+
+    expect(viewport.scrollLeft).toBe(590)
+    vi.useRealTimers()
+  })
+
   it('captures horizontal trackpad input before the terminal consumes its wheel event', () => {
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
       onActivate={() => undefined}
@@ -235,6 +261,50 @@ describe('SessionCarousel', () => {
     expect(card.classList.contains('is-expanded')).toBe(true)
     fireEvent.pointerMove(card, { clientX: 100, clientY: 50 })
     expect(card.classList.contains('is-expanded')).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('keeps the active card expanded while another card receives hover preview', () => {
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-2"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    const active = document.querySelector<HTMLElement>('[data-session-card="session-2"]')!
+    const other = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+
+    expect(active.classList.contains('is-expanded')).toBe(true)
+    fireEvent.mouseEnter(other)
+    expect(active.classList.contains('is-expanded')).toBe(true)
+    expect(other.classList.contains('is-expanded')).toBe(true)
+
+    fireEvent.pointerLeave(viewport)
+    expect(other.classList.contains('is-expanded')).toBe(false)
+    expect(active.classList.contains('is-expanded')).toBe(true)
+  })
+
+  it('keeps bringing the active card into view while its layout settles', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-5"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const activeSlot = document.querySelector<HTMLElement>('[data-session-id="session-5"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+    Object.defineProperties(activeSlot, {
+      offsetLeft: { configurable: true, value: 1_600 },
+      offsetWidth: { configurable: true, value: 600 }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    // The active card grows after the first positioning frame. A one-shot
+    // focus scroll would leave this later geometry outside the viewport.
+    viewport.scrollLeft = 0
+    Object.defineProperty(activeSlot, 'offsetLeft', { configurable: true, value: 1_700 })
+
+    act(() => vi.runAllTimers())
+
+    expect(viewport.scrollLeft).toBe(1_200)
     vi.useRealTimers()
   })
 

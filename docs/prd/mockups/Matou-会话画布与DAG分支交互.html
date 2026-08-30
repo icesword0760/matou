@@ -1124,7 +1124,7 @@ On branch main
         : branch.restoreState === 'restoring'
           ? `<div class="restore-alert"><span>正在恢复原 Claude Code 对话…</span></div>`
           : '';
-      return `<article class="child-pane ${index === 0 ? 'active-pane' : ''}" data-id="${branch.id}" style="view-transition-name: pane-${branch.id}" onpointerdown="focusPane(this)" onmouseenter="beginPanePreview(this)">
+      return `<article class="child-pane ${index === 0 ? 'active-pane previewed' : ''}" data-id="${branch.id}" style="view-transition-name: pane-${branch.id}" onpointerdown="focusPane(this)" onmouseenter="beginPanePreview(this)">
         <div class="child-title">
           <span class="name">${branch.name}</span>
           <span class="branch-tag">${branch.git}</span>
@@ -1434,8 +1434,8 @@ ${restoreAlert}
     function focusPane(element) {
       clearTimeout(paneHoverRestoreTimer);
       paneHoverBaseline = null;
-      document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane'));
-      element.classList.add('focused', 'active-pane');
+      document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane', 'previewed'));
+      element.classList.add('focused', 'active-pane', 'previewed');
       if (dagNodes[element.dataset.id]) currentGraphNodeId = element.dataset.id;
       setTimeout(() => ensurePaneVisible(element), 50);
     }
@@ -1444,13 +1444,14 @@ ${restoreAlert}
       clearTimeout(paneHoverRestoreTimer);
       if (paneHoverBaseline === null) paneHoverBaseline = childrenStrip.scrollLeft;
       document.querySelectorAll('.child-pane.previewed').forEach(item => {
-        if (item !== element) item.classList.remove('previewed');
+        if (item !== element && !item.classList.contains('active-pane')) item.classList.remove('previewed');
       });
       element.classList.add('previewed');
     }
 
     function endPanePreview() {
       document.querySelectorAll('.child-pane.previewed').forEach(item => item.classList.remove('previewed'));
+      document.querySelector('.child-pane.active-pane')?.classList.add('previewed');
       if (paneHoverBaseline === null) return;
       const baseline = paneHoverBaseline;
       clearTimeout(paneHoverRestoreTimer);
@@ -1477,8 +1478,8 @@ ${restoreAlert}
     function focusGraphPane(nodeId) {
       const element = childrenStrip.querySelector(`[data-id="${nodeId}"]`);
       if (!element) return;
-      document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane'));
-      element.classList.add('focused', 'active-pane');
+      document.querySelectorAll('.child-pane').forEach(item => item.classList.remove('focused', 'active-pane', 'previewed'));
+      element.classList.add('focused', 'active-pane', 'previewed');
       setTimeout(() => ensurePaneVisible(element), 80);
     }
 

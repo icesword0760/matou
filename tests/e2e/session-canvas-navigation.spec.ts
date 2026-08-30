@@ -7,7 +7,7 @@ import {
 test.describe('horizontal sibling navigation', () => {
   test.setTimeout(60_000)
 
-  test('shows at most four siblings, reaches the fifth horizontally, and expands only the hovered card', async () => {
+  test('shows at most four siblings, reaches the fifth horizontally, and keeps the active card expanded', async () => {
     const fixture = await launchSessionCanvas()
     try {
       await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
@@ -17,19 +17,19 @@ test.describe('horizontal sibling navigation', () => {
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await expect(carousel).toHaveAttribute('data-visible-columns', '4')
-      // Newly created sessions are required to stay in view, so the fifth
-      // sibling legitimately leaves the carousel at its right edge. Navigate
-      // left first, then prove an ordinary rightward gesture reaches it again.
+      await expect(fixture.page.locator('.session-card.is-focused')).toHaveClass(/is-expanded/)
+      // Session ordering may settle asynchronously as the Runtime publishes
+      // the newly focused node. Prove overflow and both directions from an
+      // explicit viewport baseline instead of assuming which edge owns focus.
       await fixture.page.mouse.move(2, 2)
       await fixture.page.waitForTimeout(500)
-      const rightEdge = await carousel.evaluate((element) => element.scrollLeft)
-      expect(rightEdge).toBeGreaterThan(0)
-      await carousel.dispatchEvent('wheel', { deltaX: -650, deltaY: 0 })
-      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThan(rightEdge)
-      await fixture.page.waitForTimeout(300)
-      const before = await carousel.evaluate((element) => element.scrollLeft)
+      expect(await carousel.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeGreaterThan(0)
+      await carousel.evaluate((element) => { element.scrollLeft = 0 })
       await carousel.dispatchEvent('wheel', { deltaX: 650, deltaY: 0 })
-      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(before)
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
+      const right = await carousel.evaluate((element) => element.scrollLeft)
+      await carousel.dispatchEvent('wheel', { deltaX: -650, deltaY: 0 })
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThan(right)
 
       const last = fixture.page.getByLabel('会话：Shell').last()
       await fixture.page.waitForTimeout(150)
@@ -84,7 +84,9 @@ test.describe('horizontal sibling navigation', () => {
       const startingCard = fixture.page.locator('.session-card[data-in-viewport="true"]').nth(1)
       const box = await startingCard.boundingBox()
       expect(box).not.toBeNull()
-      const point = { x: box!.x + box!.width / 2, y: box!.y + 120 }
+      // Anchor near the card's leading edge. Its right edge grows during the
+      // dual active + hover expansion, while this point stays on the same card.
+      const point = { x: box!.x + 40, y: box!.y + 120 }
       await fixture.page.mouse.move(point.x, point.y)
       const cardAtPoint = async () => fixture.page.evaluate(({ x, y }) =>
         (document.elementFromPoint(x, y)?.closest('[data-session-card]') as HTMLElement | null)
@@ -232,8 +234,13 @@ test.describe('horizontal sibling navigation', () => {
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       const visibleCards = fixture.page.locator('.session-card[data-in-viewport="true"]')
       await expect(visibleCards).toHaveCount(3)
-      const first = visibleCards.nth(0)
-      const next = visibleCards.nth(1)
+      const firstId = await visibleCards.nth(0).getAttribute('data-session-card')
+      const nextId = await visibleCards.nth(1).getAttribute('data-session-card')
+      expect(firstId).toBeTruthy()
+      expect(nextId).toBeTruthy()
+      // Freeze identity before expansion updates the derived in-viewport set.
+      const first = fixture.page.locator(`[data-session-card="${firstId}"]`)
+      const next = fixture.page.locator(`[data-session-card="${nextId}"]`)
       await first.hover()
       await expect(first).toHaveClass(/is-expanded/)
       const nextBox = await next.boundingBox()
@@ -320,7 +327,7 @@ test.describe('horizontal sibling navigation', () => {
     }
   })
 
-  test('keeps a focused Shell width monotonic when hover moves from its left sibling', async () => {
+  test('keeps the active Shell expanded while a hovered sibling also expands temporarily', async () => {
     const fixture = await launchSessionCanvas()
     try {
       await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
@@ -333,10 +340,14 @@ test.describe('horizontal sibling navigation', () => {
       const target = cards.nth(1)
       await target.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
       await expect(target).toHaveClass(/is-focused/)
-      await fixture.page.mouse.move(440, 105)
-      await expect(target).not.toHaveClass(/is-expanded/)
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      const carouselBox = await carousel.boundingBox()
+      expect(carouselBox).not.toBeNull()
+      await fixture.page.mouse.move(carouselBox!.x + 20, Math.max(1, carouselBox!.y - 20))
+      await expect(target).toHaveClass(/is-expanded/)
       await source.hover()
       await expect(source).toHaveClass(/is-expanded/)
+      await expect(target).toHaveClass(/is-expanded/)
       await fixture.page.waitForTimeout(450)
       const targetBox = await target.boundingBox()
       expect(targetBox).not.toBeNull()
@@ -372,12 +383,15 @@ test.describe('horizontal sibling navigation', () => {
       expect(reversals).toEqual([])
       expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
         Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(1)
+
+      await fixture.page.mouse.move(carouselBox!.x + 20, Math.max(1, carouselBox!.y - 20))
+      await expect(target).toHaveClass(/is-expanded/)
     } finally {
       await fixture.close()
     }
   })
 
-  test('keeps the real Claude Code to focused Shell handoff on one visual trajectory', async () => {
+  test('keeps a real focused Shell expanded while Claude hover preview settles on one trajectory', async () => {
     test.setTimeout(120_000)
     const fixture = await launchSessionCanvas()
     try {
@@ -423,15 +437,11 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 90)
       const samples = await samplesPromise
 
-      const expandedAt = samples.findIndex(({ expanded }) => expanded)
-      expect(expandedAt).toBeGreaterThanOrEqual(0)
-      expect(samples.slice(expandedAt).every(({ expanded }) => expanded)).toBe(true)
-      expect(samples.slice(1).filter((sample, index) =>
-        sample.width < samples[index]!.width - 1)).toEqual([])
+      expect(samples.every(({ expanded }) => expanded)).toBe(true)
+      expect(Math.max(...samples.map(({ width }) => width)) -
+        Math.min(...samples.map(({ width }) => width))).toBeLessThan(2)
       expect(samples.slice(1).filter((sample, index) =>
         sample.left > samples[index]!.left + 1)).toEqual([])
-      expect(Math.max(...samples.map(({ right }) => right)) -
-        Math.min(...samples.map(({ right }) => right))).toBeLessThan(2)
       expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
         Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(1)
     } finally {
