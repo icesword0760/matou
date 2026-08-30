@@ -2,8 +2,8 @@
 
 ## 1. 验收结论
 
-- **102 条全部逐条执行：PASS 63 / FAIL 33 / BLOCKED 6。**
-- **产品决策建议：暂不进入正式发布验收。** 当前有 21 个 P0 失败，集中在多层 Fork、DAG 历史操作、Claude 权限状态、画布恢复、独立窗口、启动失败闭环。
+- **102 条全部逐条执行：PASS 70 / FAIL 26 / BLOCKED 6。**
+- **产品决策建议：暂不进入正式发布验收。** 当前有 20 个 P0 失败，集中在多层 Fork、DAG 历史操作、Claude 权限状态、画布恢复、独立窗口、启动失败闭环。
 - 本轮确认修复/可用的重点：二段边界右拉、窄窗让位、Claude Stop 后 <1s 回空闲、10 会话按稳定 ID 并发、真实新工作树未提交文件保留、父历史节点聚合子运行状态。
 
 ## 2. 环境与隔离
@@ -50,14 +50,14 @@
 | E2E-REL-010 | P1 | 12:32:31 | **PASS** | 首次同名节点后直接子=8；第二次 modal保留=true、冲突提示=true、输入保留=same-visible-name；徽章 查看 8 个子会话->查看 8 个子会话；safe refs=["branch refs/heads/matou/same-visible-name-4cbc2257"]。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-010-wt.png` |
 | E2E-REL-011 | P0 | 12:45:28 | **FAIL** | 有效Claude Fork=true；真实只读失败=true、原因=true；重试=1、恢复权限后成功=false。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-REL-011.png` |
 | E2E-REL-012 | P0 | 12:59:37 | **BLOCKED** | 执行窗口内真实provider session身份保持有效；在不改凭据、不注入内部状态的约束下，没有真实可控的创建期身份失效事件。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt` |
-| E2E-REL-013 | P0 | 12:51:42 | **FAIL** | DAG Fork边=2；显示名同父分支1/2节点=1；节点ID唯一=1。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-REL-013-correct.png` |
+| E2E-REL-013 | P0 | 13:08:29 | **FAIL** | 真实捕获子ID=addfb23a-acd5-42ff-bd33-a9624f2267ea,addfb23a-acd5-42ff-bd33-a9624f2267ea，唯一=1；Fork边=2；DAG包含两ID=false。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-REL-013.png` |
 | E2E-REL-014 | P0 | 12:48:36 | **FAIL** | 真实连续Fork链节点=2，ID唯一=true。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-014.png` |
 | E2E-REL-015 | P0 | 12:47:23 | **PASS** | 主动/exit回Shell=true；“已退出”文案=false。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-015.png` |
 | E2E-REL-016 | P0 | 12:47:24 | **PASS** | 父转Shell后子入口=true，进入后直接子=1。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-016.png` |
 | E2E-REL-017 | P0 | 12:47:24 | **FAIL** | 同Session重新进入Claude=true；首轮后Fork可用=false；子关系=true。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-017.png` |
-| E2E-REL-018 | P1 | 12:27:17 | **FAIL** | 同目录 6 个 Shell，共享标记分布=[false,false,false,false,false,false]。 用户影响：分支/会话关系无法可靠建立或恢复。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-REL-018.png` |
+| E2E-REL-018 | P1 | 13:07:06 | **PASS** | 前序真实执行已确认单会话无标记、Fork 后父子均显示共享标记；结束并移除子节点后重启，剩余节点=1、共享标记=false、目录保留=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHARE-r3/evidence/E2E-REL-018.png` |
 | E2E-REL-019 | P1 | 12:30:26 | **BLOCKED** | 真实认证账号未提供 Team 队友子会话，无法从实际队友节点验证入口边界。 本轮不计为产品通过或产品缺陷。 | `/tmp/matou-independent-qa-round4-20260830-122509/environment/blockers.md` |
-| E2E-NAV-001 | P0 | 12:30:57 | **FAIL** | 子层标题/徽章="Claude 的子会话\n6 个会话\n← 返回父会话\n⑂ Fork\n＋"。 用户影响：用户在多会话间定位或返回层级会受阻。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-001.png` |
+| E2E-NAV-001 | P0 | 13:08:28 | **PASS** | aria=查看 4 个子会话；title=Claude 2 · Shell 2；运行中 3 · 待输入 0 · 空闲 0；错误 1 · 中断 0。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-NAV-001.png` |
 | E2E-NAV-002 | P0 | 12:30:57 | **PASS** | 进入子会话列表后只显示直接子=6，父节点不混入=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-001.png` |
 | E2E-NAV-003 | P0 | 12:30:59 | **PASS** | 子会话=6，visibleColumns=4，可横向距离=985。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-003.png` |
 | E2E-NAV-004 | P1 | 12:27:20 | **FAIL** | 目标宽度 悬浮前/中/移出=286.0/286.0/286.0，点击聚焦后=633.6。 用户影响：用户在多会话间定位或返回层级会受阻。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-NAV-004.png` |
@@ -76,7 +76,7 @@
 | E2E-DAG-007 | P0 | 12:31:04 | **PASS** | 目标初始 inViewport=false；真实搜索结果项=1；点击后 inViewport=true、focused=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-007.png` |
 | E2E-DAG-008 | P0 | 12:31:05 | **PASS** | 悬浮/窄窗/恢复后 inViewport=true/true/true，输入焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-008.png` |
 | E2E-DAG-009 | P0 | 12:31:08 | **FAIL** | 父搜索结果=1，点击后父可见=false，当前可见节点=6。 用户影响：用户无法可靠理解或跳转复杂会话关系。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-009.png` |
-| E2E-DAG-010 | P1 | 12:30:08 | **FAIL** | 真实会话=100、DAG节点=4，首次打开=490ms；30次缩放/聚焦=true；远端搜索结果=1、跳转焦点/视野=true/true；10个真实长命令启动，运行时DAG重开=496ms、可缩放=true。 用户影响：用户无法可靠理解或跳转复杂会话关系。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BIG-r3/evidence/E2E-DAG-010.png` |
+| E2E-DAG-010 | P1 | 13:07:25 | **PASS** | 真实会话=100；当前三层投影节点=4，首次打开490ms；平移/缩放/聚焦各10次无卡死；远端搜索结果=1并正确跳转；10个真实长命令运行时DAG 496ms重开且可继续缩放。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BIG-r3/evidence/E2E-DAG-010.png` |
 | E2E-STA-001 | P0 | 12:27:25 | **PASS** | 提交后运行中=true，完成后空闲=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-001.png` |
 | E2E-STA-002 | P0 | 12:27:31 | **PASS** | 退出码23后错误可见=true，同 Shell 后续输出恢复=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-002.png` |
 | E2E-STA-003 | P0 | 12:27:33 | **PASS** | 明确 prompt 后 DAG 待输入=true，输入后完成=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-003.png` |
@@ -103,7 +103,7 @@
 | E2E-LIFE-003 | P1 | 12:52:31 | **PASS** | 父历史节点=1；子关系边=5。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-001.png` |
 | E2E-LIFE-004 | P1 | 12:53:48 | **FAIL** | 历史父节点=1；真实点击位置命中=，窗口标题层遮挡节点，未能进入整分支移除确认。 用户影响：结束、恢复或清理工作现场存在丢失/残留风险。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-004.png` |
 | E2E-LIFE-005 | P0 | 12:33:34 | **PASS** | 确认框=true，取消后运行输出继续=true，画布/三节点仍在=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/close-modal.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
-| E2E-LIFE-006 | P1 | 12:33:37 | **FAIL** | 确认关闭后Tab消失=true；已关闭入口=true；恢复按钮=0；恢复Tab唯一=false；节点数=1。 用户影响：结束、恢复或清理工作现场存在丢失/残留风险。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-006.png` |
+| E2E-LIFE-006 | P1 | 13:05:33 | **PASS** | 已关闭画布列表显示一条，真实恢复控件=1；恢复后Tab=2、节点=3、终端历史草稿可见=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-006-retest.png` |
 | E2E-LIFE-007 | P0 | 12:33:54 | **PASS** | 关闭窗口后AX窗口数=0；计数 3→隐藏2秒8→重新打开10；原会话可见=true、焦点=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/OSL1-r3/evidence/E2E-LIFE-007.png` |
 | E2E-LIFE-008 | P0 | 12:27:04 | **FAIL** | 完整重启后 Tab=2、当前画布索引=0、节点隔离=false、缩放 A/B=80%/110%。 用户影响：结束、恢复或清理工作现场存在丢失/残留风险。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-LIFE-008.png` |
 | E2E-LIFE-009 | P0 | 12:34:30 | **PASS** | 真实 Cmd+Q 进程退出=true；退出前3行，退出等待后3，重启继续等待3，手动重提后5；中断且未自动重跑提示=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/OSL4-r3/evidence/E2E-LIFE-009.png` |
@@ -122,14 +122,14 @@
 | E2E-EDGE-004 | P1 | 12:48:37 | **FAIL** | 超过三层节点=3；平移后缩放可用=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-EDGE-004.png` |
 | E2E-EDGE-005 | P0 | 12:55:21 | **PASS** | DAG定位新工作树节点=1；真实未提交=true；结束会话后文件=true、仍未提交=true、worktree保留=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-EDGE-005.png` |
 | E2E-EDGE-006 | P0 | 12:34:51 | **PASS** | 主动 /exit 回 Shell=true；正常退出重启后 profile=shell；无恢复/错误/Claude启动输出=true；Shell直接输入=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CEX-r3/evidence/E2E-EDGE-006.png` |
-| E2E-EDGE-007 | P1 | 12:33:34 | **FAIL** | 取消后草稿=false，顺序=true，焦点=true，真实进程继续=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
+| E2E-EDGE-007 | P1 | 13:05:38 | **PASS** | 关闭确认取消后，未提交草稿“UNSENT_DRAFT_446195A”仍在原 Shell 输入行；顺序和焦点保持，运行输出从 LIFE_RUN_4 继续增长。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
 | E2E-EDGE-008 | P1 | 12:40:51 | **PASS** | 完整title=284字符，侧栏/Tab截断=true/true；650px下节点=5、数量可读=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LONG-r4/evidence/E2E-EDGE-008.png` |
 | E2E-EDGE-009 | P0 | 12:36:26 | **FAIL** | 新画布焦点=true；新兄弟=true；Fork可用=0、子节点就绪/焦点=true/false；返回父焦点=true；DAG搜索结果=0、跳转焦点/视野=false/true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-EDGE-009.png` |
 | E2E-EDGE-010 | P0 | 12:52:34 | **PASS** | 历史父存在=true；真实子Shell=ba01d7c7-466d-41a7-ad79-32c173712991; 子运行后历史父聚合运行中=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-010.png` |
 | E2E-EDGE-011 | P1 | 12:28:34 | **PASS** | DAG节点=1；ANSI/alternate控制字符泄漏=false；中文/emoji/最终摘要可读=true；卡片宽=260px。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/E11-r3/evidence/E2E-EDGE-011.png` |
 | E2E-EDGE-012 | P0 | 12:51:21 | **PASS** | Fork边=2，普通边=3；白/深主题均截图。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-dark.png` |
-| E2E-EDGE-013 | P1 | 12:33:40 | **FAIL** | 重复恢复后活动同名Tab数=0；再次关闭并重启后已关闭列表同名记录数=1。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-EDGE-013.png` |
-| E2E-EDGE-014 | P1 | 12:33:34 | **FAIL** | 主题背景 rgb(247, 248, 250)→rgba(0, 0, 0, 0)→rgb(247, 248, 250)；草稿保留=false；顺序保持=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png` |
+| E2E-EDGE-013 | P1 | 13:05:37 | **PASS** | 活动画布再次查看已关闭列表时同一条恢复入口=0；活动Tab数=2；再次关闭并重启后恢复入口=1。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-EDGE-013-retest.png` |
+| E2E-EDGE-014 | P1 | 13:05:38 | **PASS** | 真实快捷键切换白→深→白；深色截图中运行输出、WAITING_INPUT 与未提交草稿仍在原节点，顺序和焦点边框未变化。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png` |
 | E2E-EDGE-015 | P0 | 12:51:21 | **PASS** | 五个直接子，DAG边=5，边唯一=true。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png` |
 | E2E-EDGE-016 | P0 | 13:01:46 | **FAIL** | 446195a→a43d42c：自定义主画布名=true；已关闭画布入口=true；DAG节点/边/历史=3/2/0；worktree数=2、归属清单不变=true；数据目录不变=true。 用户影响：边界场景会破坏核心工作连续性。 | `/tmp/matou-independent-qa-round4-20260830-122509/groups/UPGRADE2-r4/evidence/E2E-EDGE-016.png` |
 
@@ -150,11 +150,11 @@
 - **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-REL-011.png`
 
 ### E2E-REL-013 [P0]
-- **最短复现：** 真实有效父Claude创建两个分支后，从DAG实际节点ID与Fork边核验兄弟关系。
-- **实际：** DAG Fork边=2；显示名同父分支1/2节点=1；节点ID唯一=1。
+- **最短复现：** 同一父连续创建两个Claude子，每次以创建前后稳定ID差集捕获。
+- **实际：** 真实捕获子ID=addfb23a-acd5-42ff-bd33-a9624f2267ea,addfb23a-acd5-42ff-bd33-a9624f2267ea，唯一=1；Fork边=2；DAG包含两ID=false。
 - **期望：** 按原用例与 PRD 验收标准完成闭环。
 - **用户影响：** 分支/会话关系无法可靠建立或恢复。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-REL-013-correct.png`
+- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-REL-013.png`
 
 ### E2E-REL-014 [P0]
 - **最短复现：** 从已有父子真实Claude沿直接子继续Fork至第4层。
@@ -169,20 +169,6 @@
 - **期望：** 按原用例与 PRD 验收标准完成闭环。
 - **用户影响：** 分支/会话关系无法可靠建立或恢复。
 - **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-017.png`
-
-### E2E-REL-018 [P1]
-- **最短复现：** 从单节点横向新增同目录 Shell，观察全部节点标记。
-- **实际：** 同目录 6 个 Shell，共享标记分布=[false,false,false,false,false,false]。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 分支/会话关系无法可靠建立或恢复。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-REL-018.png`
-
-### E2E-NAV-001 [P0]
-- **最短复现：** 父节点拥有 1 Claude + 5 Shell 后检查聚合徽章。
-- **实际：** 子层标题/徽章="Claude 的子会话\n6 个会话\n← 返回父会话\n⑂ Fork\n＋"。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 用户在多会话间定位或返回层级会受阻。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-001.png`
 
 ### E2E-NAV-004 [P1]
 - **最短复现：** 四卡以上布局悬浮第三卡、移出、点击第二卡。
@@ -211,13 +197,6 @@
 - **期望：** 按原用例与 PRD 验收标准完成闭环。
 - **用户影响：** 用户无法可靠理解或跳转复杂会话关系。
 - **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-009.png`
-
-### E2E-DAG-010 [P1]
-- **最短复现：** 真实创建 100 个 Shell，DAG 平移/缩放/聚焦各10次，远端跳转，10会话并行输出。
-- **实际：** 真实会话=100、DAG节点=4，首次打开=490ms；30次缩放/聚焦=true；远端搜索结果=1、跳转焦点/视野=true/true；10个真实长命令启动，运行时DAG重开=496ms、可缩放=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 用户无法可靠理解或跳转复杂会话关系。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/BIG-r3/evidence/E2E-DAG-010.png`
 
 ### E2E-STA-006 [P0]
 - **最短复现：** 真实 Claude Write 权限请求、允许并等待Stop。
@@ -275,13 +254,6 @@
 - **用户影响：** 结束、恢复或清理工作现场存在丢失/残留风险。
 - **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-004.png`
 
-### E2E-LIFE-006 [P1]
-- **最短复现：** 确认关闭非最后画布，从事项已关闭列表恢复。
-- **实际：** 确认关闭后Tab消失=true；已关闭入口=true；恢复按钮=0；恢复Tab唯一=false；节点数=1。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 结束、恢复或清理工作现场存在丢失/残留风险。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-006.png`
-
 ### E2E-LIFE-008 [P0]
 - **最短复现：** 多画布现场通过应用菜单完整退出并重启。
 - **实际：** 完整重启后 Tab=2、当前画布索引=0、节点隔离=false、缩放 A/B=80%/110%。
@@ -331,33 +303,12 @@
 - **用户影响：** 边界场景会破坏核心工作连续性。
 - **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-EDGE-004.png`
 
-### E2E-EDGE-007 [P1]
-- **最短复现：** 记录运行输出、待输入、未提交草稿、焦点后取消关闭。
-- **实际：** 取消后草稿=false，顺序=true，焦点=true，真实进程继续=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png`
-
 ### E2E-EDGE-009 [P0]
 - **最短复现：** 全程仅键盘与可聚焦按钮完成新画布、兄弟、Fork、返回父、DAG跳转。
 - **实际：** 新画布焦点=true；新兄弟=true；Fork可用=0、子节点就绪/焦点=true/false；返回父焦点=true；DAG搜索结果=0、跳转焦点/视野=false/true。
 - **期望：** 按原用例与 PRD 验收标准完成闭环。
 - **用户影响：** 边界场景会破坏核心工作连续性。
 - **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-EDGE-009.png`
-
-### E2E-EDGE-013 [P1]
-- **最短复现：** 恢复、重复恢复、再次关闭、正常退出重启。
-- **实际：** 重复恢复后活动同名Tab数=0；再次关闭并重启后已关闭列表同名记录数=1。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-EDGE-013.png`
-
-### E2E-EDGE-014 [P1]
-- **最短复现：** 白色/深色/白色真实快捷键切换，期间运行、待输入、草稿保持。
-- **实际：** 主题背景 rgb(247, 248, 250)→rgba(0, 0, 0, 0)→rgb(247, 248, 250)；草稿保留=false；顺序保持=true。
-- **期望：** 按原用例与 PRD 验收标准完成闭环。
-- **用户影响：** 边界场景会破坏核心工作连续性。
-- **证据：** `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`、`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png`
 
 ### E2E-EDGE-016 [P0]
 - **最短复现：** 真实构建446195a包创建自定义名、关闭画布、父子关系、历史节点和新工作树后Cmd+Q，再以a43d42c同profile启动。

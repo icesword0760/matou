@@ -574,7 +574,7 @@ App 启动时必须将 Runtime 数据指向 `$MATOU_DATA_DIR`，将 Electron pro
 
 ## 11. 第四轮独立黑盒执行结果索引
 
-> 完整记录见 [`EXECUTION-Matou-会话画布与DAG分支交互.md`](./EXECUTION-Matou-会话画布与DAG分支交互.md)。第四轮合计：PASS 63 / FAIL 33 / BLOCKED 6。
+> 完整记录见 [`EXECUTION-Matou-会话画布与DAG分支交互.md`](./EXECUTION-Matou-会话画布与DAG分支交互.md)。第四轮合计：PASS 70 / FAIL 26 / BLOCKED 6。
 
 | 用例 ID | 结果 | 执行记录 | 证据 |
 |---|---|---|---|
@@ -598,14 +598,14 @@ App 启动时必须将 Runtime 数据指向 `$MATOU_DATA_DIR`，将 Electron pro
 | E2E-REL-010 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-REL-010-wt.png` |
 | E2E-REL-011 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CSTAT-r4/evidence/E2E-REL-011.png` |
 | E2E-REL-012 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BLOCKERS-r4/evidence/external-preconditions.txt` |
-| E2E-REL-013 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-REL-013-correct.png` |
+| E2E-REL-013 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-REL-013.png` |
 | E2E-REL-014 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-014.png` |
 | E2E-REL-015 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-015.png` |
 | E2E-REL-016 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-016.png` |
 | E2E-REL-017 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-REL-017.png` |
-| E2E-REL-018 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-REL-018.png` |
+| E2E-REL-018 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHARE-r3/evidence/E2E-REL-018.png` |
 | E2E-REL-019 | **BLOCKED** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/environment/blockers.md` |
-| E2E-NAV-001 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-001.png` |
+| E2E-NAV-001 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/NAVREL-r4/evidence/E2E-NAV-001.png` |
 | E2E-NAV-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-001.png` |
 | E2E-NAV-003 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-NAV-003.png` |
 | E2E-NAV-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-NAV-004.png` |
@@ -624,7 +624,7 @@ App 启动时必须将 Runtime 数据指向 `$MATOU_DATA_DIR`，将 Electron pro
 | E2E-DAG-007 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-007.png` |
 | E2E-DAG-008 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-008.png` |
 | E2E-DAG-009 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-DAG-009.png` |
-| E2E-DAG-010 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BIG-r3/evidence/E2E-DAG-010.png` |
+| E2E-DAG-010 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/BIG-r3/evidence/E2E-DAG-010.png` |
 | E2E-STA-001 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-001.png` |
 | E2E-STA-002 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-002.png` |
 | E2E-STA-003 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/SHELL-CORE-r3b/evidence/E2E-STA-003.png` |
@@ -651,7 +651,7 @@ App 启动时必须将 Runtime 数据指向 `$MATOU_DATA_DIR`，将 Electron pro
 | E2E-LIFE-003 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-001.png` |
 | E2E-LIFE-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-LIFE-004.png` |
 | E2E-LIFE-005 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/close-modal.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
-| E2E-LIFE-006 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-006.png` |
+| E2E-LIFE-006 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-006-retest.png` |
 | E2E-LIFE-007 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/OSL1-r3/evidence/E2E-LIFE-007.png` |
 | E2E-LIFE-008 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CN6-r3/evidence/E2E-LIFE-008.png` |
 | E2E-LIFE-009 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/OSL4-r3/evidence/E2E-LIFE-009.png` |
@@ -670,13 +670,13 @@ App 启动时必须将 Runtime 数据指向 `$MATOU_DATA_DIR`，将 Electron pro
 | E2E-EDGE-004 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CMODE-r4/evidence/E2E-EDGE-004.png` |
 | E2E-EDGE-005 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CF4-r3/evidence/E2E-EDGE-005.png` |
 | E2E-EDGE-006 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/CEX-r3/evidence/E2E-EDGE-006.png` |
-| E2E-EDGE-007 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
+| E2E-EDGE-007 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-LIFE-005.png` |
 | E2E-EDGE-008 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LONG-r4/evidence/E2E-EDGE-008.png` |
 | E2E-EDGE-009 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/REC2-r3/evidence/E2E-EDGE-009.png` |
 | E2E-EDGE-010 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-010.png` |
 | E2E-EDGE-011 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/E11-r3/evidence/E2E-EDGE-011.png` |
 | E2E-EDGE-012 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-dark.png` |
-| E2E-EDGE-013 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-EDGE-013.png` |
-| E2E-EDGE-014 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png` |
+| E2E-EDGE-013 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/E2E-EDGE-013-retest.png` |
+| E2E-EDGE-014 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-dark.png`<br>`/tmp/matou-independent-qa-round4-20260830-122509/groups/LIF3-r3/evidence/theme-light.png` |
 | E2E-EDGE-015 | **PASS** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/GRAPH-r4/evidence/E2E-EDGE-012-light.png` |
 | E2E-EDGE-016 | **FAIL** | [查看](./EXECUTION-Matou-会话画布与DAG分支交互.md) | `/tmp/matou-independent-qa-round4-20260830-122509/groups/UPGRADE2-r4/evidence/E2E-EDGE-016.png` |
