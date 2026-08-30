@@ -652,7 +652,17 @@ export class RuntimeServer {
           type: 'terminal.replay-reset', protocolVersion: PROTOCOL_VERSION,
           sessionId, sequence: frame.sequence, screenEpoch: frame.screenEpoch
         })
-      } else if (frame.kind === 'exit') {
+      } else if (
+        frame.kind === 'exit' &&
+        (
+          replay.activeSession === undefined ||
+          frame.sequence >= replay.activeSession.replayFromSequence
+        )
+      ) {
+        // A restarted Session appends a new live run to the same Journal. Exit
+        // frames before replayFromSequence belong to older runs and must remain
+        // terminal history; reporting one as the current process exit would
+        // turn a successfully spawned terminal back into an inert card.
         this.#port.postMessage({
           type: 'terminal.exited', protocolVersion: PROTOCOL_VERSION,
           sessionId, sequence: frame.sequence, exitCode: frame.exitCode,

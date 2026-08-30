@@ -10,6 +10,10 @@ import { _electron as electron, expect, test } from '@playwright/test'
 import { FOUNDATION_MIGRATIONS } from '../../apps/runtime/src/storage/migrations'
 
 test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema compatibility', async () => {
+  // Four independent packaged launches exercise durable replay, torn-tail
+  // recovery and forward-schema compatibility in one lifecycle. Keep the
+  // timeout scoped to that real packaged journey rather than the suite default.
+  test.setTimeout(60_000)
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-packaged-e2e-'))
   const executablePath = await packagedExecutable()
   try {
@@ -67,15 +71,24 @@ async function runPackagedSmoke(
   // into. The product no longer recreates a previously moved/missing Workspace,
   // so the packaged fixture must provide the same valid starting directory as
   // the regular Electron fixture and a real user's home directory.
-  await mkdir(join(dataDirectory, 'matou_workspace'), { recursive: true })
+  const workspaceDirectory = join(dataDirectory, 'matou_workspace')
+  const homeDirectory = join(dataDirectory, 'home')
+  const electronUserDataDirectory = join(dataDirectory, 'electron-user-data')
+  await Promise.all([
+    mkdir(workspaceDirectory, { recursive: true }),
+    mkdir(homeDirectory, { recursive: true }),
+    mkdir(electronUserDataDirectory, { recursive: true })
+  ])
   const launchEnvironment = {
     ...process.env, MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
-    MATOU_DEFAULT_WORKSPACE: join(dataDirectory, 'matou_workspace'),
+    MATOU_DEFAULT_WORKSPACE: workspaceDirectory,
+    HOME: homeDirectory,
+    ELECTRON_USER_DATA_DIR: electronUserDataDirectory,
     MATOU_E2E_WINDOW_CLOSE: 'hide'
   }
   const app = await electron.launch({
     executablePath,
-    args: [],
+    args: [`--user-data-dir=${electronUserDataDirectory}`],
     env: launchEnvironment
   })
   try {

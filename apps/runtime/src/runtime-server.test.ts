@@ -168,6 +168,46 @@ describe('RuntimeServer domain RPC', () => {
     expect(port.last('terminal.replay-complete')).toMatchObject({ throughSequence: 4 })
   })
 
+  it('does not report a historical exit while replaying into a new live Shell run', async () => {
+    const journal = await SegmentJournal.open(root, 'live-after-exit')
+    await journal.appendOutput(1, new TextEncoder().encode('previous run'))
+    await journal.appendExit(2, 1)
+    await journal.close()
+    registerSession(database, 'live-after-exit')
+    const executable = join(root, 'live-after-exit.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "LIVE_RUN_READY\\n"\nsleep 5\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'live-after-exit', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => terminalText(port).includes('LIVE_RUN_READY'))
+      const beforeReplay = port.sent.length
+
+      port.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'live-after-exit', fromSequence: 0
+      })
+      await waitUntil(() => port.sent.slice(beforeReplay).some(({ type }) =>
+        type === 'terminal.replay-complete'
+      ))
+
+      expect(port.sent.slice(beforeReplay).filter(({ type }) => type === 'terminal.exited'))
+        .toHaveLength(0)
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'live-after-exit'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('reports a retention gap before replaying the available suffix', async () => {
     const journal = await SegmentJournal.open(root, 'retained-session')
     registerSession(database, 'retained-session')
