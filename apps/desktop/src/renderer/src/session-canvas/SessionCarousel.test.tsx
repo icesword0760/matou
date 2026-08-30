@@ -114,10 +114,40 @@ describe('SessionCarousel', () => {
     fireEvent(window, new Event('resize'))
 
     expect(viewport.classList.contains('is-narrow')).toBe(true)
+    expect(document.querySelectorAll('.session-card')).toHaveLength(4)
     const sibling = document.querySelector('[data-session-id="session-2"] .session-compact-summary')!
+    expect(sibling.closest('.session-card')).toBeTruthy()
     expect(sibling.getAttribute('aria-hidden')).toBe('false')
     expect(sibling.textContent).toContain('恢复失败')
     expect(sibling.textContent).toContain('子会话 3')
+  })
+
+  it('finishes restoring at the browser-clamped reachable position', () => {
+    vi.useFakeTimers()
+    const onGeometryChange = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      initialScrollLeft={320} onGeometryChange={onGeometryChange}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    let position = 0
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 908 },
+      scrollLeft: {
+        configurable: true,
+        get: () => position,
+        set: (value: number) => { position = Math.max(0, Math.min(108, value)) }
+      }
+    })
+
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(viewport.scrollLeft).toBe(108)
+    expect(onGeometryChange).toHaveBeenCalledWith({
+      scrollLeft: 108,
+      focusedSessionId: 'session-3'
+    })
+    vi.useRealTimers()
   })
 
   it('does not turn header actions or portal menu items into carousel drag gestures', () => {

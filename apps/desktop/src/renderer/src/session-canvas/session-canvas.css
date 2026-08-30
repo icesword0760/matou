@@ -19,8 +19,8 @@
 .session-compact-summary { display: none; }
 .session-carousel.is-narrow .session-card-slot:not(.is-focused) { flex: 0 0 clamp(112px,28%,176px); }
 .session-carousel.is-narrow .session-card-slot.is-focused { flex: 0 0 clamp(260px,68%,560px); }
-.session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-card { display: none; }
-.session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-compact-summary { display: grid; height: 100%; box-sizing: border-box; align-content: start; gap: 9px; padding: 14px 12px; overflow: hidden; border: 1px solid var(--kooky-border); color: rgba(255,255,255,.56); background: var(--kooky-chrome); }
+.session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-card > :not(.session-compact-summary) { display: none; }
+.session-carousel.is-narrow .session-card-slot:not(.is-focused) .session-compact-summary { display: grid; height: 100%; box-sizing: border-box; align-content: start; gap: 9px; padding: 14px 12px; overflow: hidden; border: 1px solid var(--kooky-border); color: rgba(255,255,255,.56); background: var(--kooky-chrome); }
 .session-compact-summary strong { overflow: hidden; color: rgba(255,255,255,.82); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .session-compact-summary span { justify-self: start; padding: 2px 6px; border-radius: 8px; background: rgba(255,255,255,.06); font-size: 9px; }
 .session-compact-summary__priority { display: flex; min-width: 0; flex-wrap: wrap; gap: 5px; color: #e8ae48; font-size: 9px; }
@@ -50,7 +50,7 @@
 .hierarchy-shell[data-theme="light"] .parent-projection__card { border-color: rgba(68,132,207,.38); color: #687180; background: #fff; box-shadow: 0 18px 42px rgba(42,55,72,.18); }
 .hierarchy-shell[data-theme="light"] .parent-projection__card strong { color: #2f3744; }
 .hierarchy-shell[data-theme="light"] .parent-projection__card pre { color: #505a68; }
-.hierarchy-shell[data-theme="light"] .session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-compact-summary { color: #6b7482; background: #f2f4f7; }
+.hierarchy-shell[data-theme="light"] .session-carousel.is-narrow .session-card-slot:not(.is-focused) .session-compact-summary { color: #6b7482; background: #f2f4f7; }
 .hierarchy-shell[data-theme="light"] .session-compact-summary strong { color: #364050; }
 @media (prefers-reduced-motion: reduce) {
   .session-carousel { scroll-behavior: auto; }

@@ -92,6 +92,9 @@ button { -webkit-app-region: no-drag; }
 .toolbar-btn img { display: block; width: 16px; height: 16px; object-fit: contain; }
 .toolbar-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
 .toolbar-btn:disabled, .tab-add-btn:disabled, .workbench-sidebar__add-btn:disabled { cursor: not-allowed; opacity: .5; }
+@media (max-width: 700px) {
+  .tab-bar-right .split-horizontal-icon { display: none; }
+}
 .tab-bar-separator { flex: 0 0 auto; width: 1px; height: 16px; margin: 0 4px; background: #333; }
 .scene-tab-menu, .scene-overflow-menu { position: absolute; z-index: 9999; top: 35px; right: 76px; display: grid; min-width: 160px; padding: 6px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(35,35,40,.98); box-shadow: 0 12px 40px rgba(0,0,0,.6); }
 .scene-tab-menu button, .scene-overflow-menu button { padding: 8px 12px; border: 0; border-radius: 6px; color: #dfdfdf; background: transparent; text-align: left; }

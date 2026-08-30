@@ -212,7 +212,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }, onMessage)
     const input = terminal.onData((data) => {
       if (inputDisabledRef.current) return
-      const interactionKind = classifyCompletedUserInteraction(data)
+      const interactionKind = classifyCompletedUserInteraction(data, profile !== 'shell')
       // Deliver bytes first. Reordering the surrounding Session carousel may
       // cause a fit/resize; doing that before Enter can reset full-screen CLI
       // choices before the confirmation reaches the PTY.
@@ -304,9 +304,14 @@ function isMacPlatform(): boolean {
 }
 
 export function classifyCompletedUserInteraction(
-  data: string
-): 'submit' | 'control' | undefined {
+  data: string,
+  providerMode = false
+): 'submit' | 'control' | 'provider-action' | undefined {
   if (data === '\u0003' || data === '\u0004') return 'control'
   if (data === '\r' || data === '\n') return 'submit'
+  // In agent CLIs Escape commits a visible user decision (cancel/reject/leave
+  // the current picker). In a normal shell it is merely the prefix for many
+  // navigation sequences and must not reorder the Session carousel.
+  if (providerMode && data === '\u001b') return 'provider-action'
   return undefined
 }

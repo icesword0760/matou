@@ -1667,7 +1667,15 @@ export function terminalSummaryLines(raw: string): string[] {
     .replace(/\r/g, '\n')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
   return text.split('\n').map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0).slice(-4)
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !looksLikeShellPrompt(line))
+    .slice(-4)
+}
+
+function looksLikeShellPrompt(line: string): boolean {
+  const value = line.trim()
+  if (/^[%$#>]$/.test(value)) return true
+  return /^[^\s@]+@[^\s]+\s+.+\s+[%$#>]$/.test(value)
 }
 
 function updateShellInputBuffer(previous: string, data: string): {

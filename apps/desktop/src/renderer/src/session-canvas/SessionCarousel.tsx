@@ -108,19 +108,29 @@ export function SessionCarousel(props: {
     }
     restore()
     skipFocusScrollAfterRestore.current = initialScrollLeft > 0
+    if (target === 0) {
+      restoringGeometry.current = false
+      return
+    }
     const continueRestore = () => {
       if (!restoringGeometry.current) return
       restore()
       attempts += 1
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
       const expected = Math.min(target, maxScrollLeft)
-      reachedFrames = Math.abs(viewport.scrollLeft - expected) < 1 && target <= maxScrollLeft + 1
+      reachedFrames = Math.abs(viewport.scrollLeft - expected) < 1
         ? reachedFrames + 1 : 0
       // Terminal surfaces and responsive columns settle over multiple frames.
       // Keep applying a persisted non-zero viewport until its full scroll range
       // exists instead of permanently accepting the first clamped value.
-      if (target === 0 || (attempts >= 15 && reachedFrames >= 3) || attempts >= 90) {
+      if (target === 0 || (attempts >= 15 && reachedFrames >= 3 && maxScrollLeft > 0) || attempts >= 90) {
         restoringGeometry.current = false
+        if (target !== viewport.scrollLeft) {
+          onGeometryChange?.({
+            scrollLeft: viewport.scrollLeft,
+            ...(focusedSessionId ? { focusedSessionId } : {})
+          })
+        }
         return
       }
       frame = requestAnimationFrame(continueRestore)
@@ -152,6 +162,7 @@ export function SessionCarousel(props: {
 
   useEffect(() => {
     if (!focusedSessionId) return
+    if (restoringGeometry.current) return
     if (skipFocusScrollAfterRestore.current) {
       skipFocusScrollAfterRestore.current = false
       return
@@ -414,17 +425,17 @@ export function SessionCarousel(props: {
             onActivate(sessionId)
           }} onHover={hover}>
           {renderSession(node, inViewport.has(node.sessionId))}
+          {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
+            <strong>{node.title}</strong>
+            <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
+            {(node.providerRestoreState === 'failed' || node.activeChildCount > 0) &&
+              <div className="session-compact-summary__priority">
+                {node.providerRestoreState === 'failed' && <b>Claude 恢复失败</b>}
+                {node.activeChildCount > 0 && <small>子会话 {node.activeChildCount}</small>}
+              </div>}
+            <pre title={node.cwd}>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>
+          </div>}
         </SessionCard>
-        {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
-          <strong>{node.title}</strong>
-          <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
-          {(node.providerRestoreState === 'failed' || node.activeChildCount > 0) &&
-            <div className="session-compact-summary__priority">
-              {node.providerRestoreState === 'failed' && <b>Claude 恢复失败</b>}
-              {node.activeChildCount > 0 && <small>子会话 {node.activeChildCount}</small>}
-            </div>}
-          <pre title={node.cwd}>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>
-        </div>}
       </div>)}
     </div>
   </div>

@@ -39,6 +39,10 @@ test.describe('session canvas lifecycle', () => {
     let fixture = await launchSessionCanvas()
     try {
       await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      // Session creation is an authoritative Runtime command. Under full-suite
+      // load the projection can arrive after the button click has resolved;
+      // wait for the requested sibling before resolving the active Session.
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
       await terminalCommand(activeSurface(fixture.page), 'printf "RESTART_JOURNAL_OK\\n"')
       await expect(activeSurface(fixture.page).locator('.xterm-rows')).toContainText('RESTART_JOURNAL_OK')
       fixture = await restartMatou(fixture)

@@ -200,6 +200,26 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
   })
 
+  it('treats Escape as a completed Claude action but not as Shell navigation', async () => {
+    const view = render(
+      <TerminalSurface sessionId="session-1" profile="claude-code" active visible />
+    )
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+
+    state.onData?.('\u001b')
+    expect(state.sendTerminalInput).toHaveBeenLastCalledWith('session-1', '\u001b')
+    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith(
+      'session-1', 'provider-action'
+    )
+
+    state.recordTerminalInteraction.mockClear()
+    view.rerender(<TerminalSurface sessionId="session-1" profile="shell" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onData?.('\u001b')
+    expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
+  })
+
   it('buffers keystrokes during an agent-to-Shell respawn and flushes them after the new PTY is attached', async () => {
     render(<TerminalSurface sessionId="session-1" profile="shell" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))

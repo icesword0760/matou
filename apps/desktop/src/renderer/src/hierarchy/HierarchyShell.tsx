@@ -15,7 +15,8 @@ import { TerminalHud } from '../hud/TerminalHud'
 import { createHierarchyCommands } from './hierarchy-commands'
 import { DetachedPlaceholder } from './DetachedPlaceholder'
 import type {
-  HierarchyCommands, HierarchyProjection, SceneNodeView, SceneSnapshotView
+  HierarchyCommands, HierarchyProjection, SceneNodeView, SceneSnapshotView,
+  SessionGraphNodeView
 } from './hierarchy-types'
 import { SceneTabBar } from './SceneTabBar'
 import { SplitTree } from './SplitTree'
@@ -454,8 +455,8 @@ function HierarchyProduct({ projection, commands }: {
                   historicalChildCount={graphNode?.historicalChildCount ?? 0}
                   onOpenChildren={() => {
                     setLevelParentByScene((current) => ({ ...current, [scene.id]: session.id }))
-                    const firstActiveChild = childNodes.find(({ archivedAt }) => archivedAt === undefined)
-                    if (firstActiveChild) run(commands.setFocusedSession(scene.id, firstActiveChild.sessionId))
+                    const preferredChild = preferredActiveChild(childNodes)
+                    if (preferredChild) run(commands.setFocusedSession(scene.id, preferredChild.sessionId))
                   }}
                   onFork={() => setBranchDialog({
                     sceneId: scene.id, sourceSessionId: session.id, sourceTitle: session.title,
@@ -597,6 +598,33 @@ function HierarchyProduct({ projection, commands }: {
                   setTerminalFocusRequest((value) => value + 1)
                 }} />}
   </main>
+}
+
+const CHILD_STATUS_PRIORITY: Record<SessionGraphNodeView['workStatus'], number> = {
+  error: 0,
+  'needs-input': 1,
+  running: 2,
+  starting: 2,
+  interrupted: 3,
+  idle: 4,
+  exited: 5
+}
+
+/**
+ * The aggregate badge represents the most urgent child state. Opening it must
+ * land on the child responsible for that state instead of an unrelated first
+ * child. Array order remains the tie-breaker so sibling ordering stays stable.
+ */
+export function preferredActiveChild(
+  children: SessionGraphNodeView[]
+): SessionGraphNodeView | undefined {
+  return children.reduce<SessionGraphNodeView | undefined>((preferred, child) => {
+    if (child.archivedAt !== undefined) return preferred
+    if (!preferred) return child
+    return CHILD_STATUS_PRIORITY[child.workStatus] < CHILD_STATUS_PRIORITY[preferred.workStatus]
+      ? child
+      : preferred
+  }, undefined)
 }
 
 function layoutRatios(snapshot: SceneSnapshotView, live: Record<string, number>): Record<string, number> {

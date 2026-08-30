@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -213,6 +213,22 @@ describe('Terminal pane', () => {
     await user.click(screen.getByRole('button', { name: '触发启动失败' }))
     await user.click(screen.getByRole('button', { name: '移除失败会话' }))
     expect(onDelete).toHaveBeenCalledWith('session-1', true)
+  })
+
+  it('automatically restarts a failed Session after its Workspace is relinked', async () => {
+    const props = fixture()
+    const user = userEvent.setup()
+    const view = render(<TerminalPane {...props} pathValid={false} />)
+
+    await user.click(screen.getByRole('button', { name: '触发启动失败' }))
+    expect(screen.getByText('会话启动失败')).toBeTruthy()
+
+    view.rerender(<TerminalPane {...props} pathValid />)
+
+    await waitFor(() => {
+      expect(screen.queryByText('会话启动失败')).toBeNull()
+      expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('1')
+    })
   })
 })
 

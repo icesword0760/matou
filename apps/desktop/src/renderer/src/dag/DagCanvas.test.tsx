@@ -48,7 +48,7 @@ describe('DagCanvas', () => {
     expect(onTransformChange).toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 })
   })
 
-  it('renders exactly the parent, focused, and child depths while farther layers stay as ghosts', () => {
+  it('renders parent, focused, and child depths fully while farther nodes stay as directional ghosts', () => {
     const nodes = [
       node('depth-0', 'Depth 0'),
       { ...node('depth-1', 'Depth 1'), parentSessionId: 'depth-0' },
@@ -64,12 +64,23 @@ describe('DagCanvas', () => {
       }))
     }} focusedSessionId="depth-2" onSelect={vi.fn()} />)
 
-    expect(screen.queryByRole('button', { name: '打开会话：Depth 0' })).toBeNull()
+    expect(screen.getByRole('button', { name: '远层会话：Depth 0' }).getAttribute('data-ghost')).toBe('true')
     expect(screen.getByRole('button', { name: '打开会话：Depth 1' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '打开会话：Depth 2' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '打开会话：Depth 3' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '打开会话：Depth 4' })).toBeNull()
-    expect(screen.getAllByText(/平移到此处查看第/)).toHaveLength(2)
+    expect(screen.getByRole('button', { name: '远层会话：Depth 4' }).getAttribute('data-ghost')).toBe('true')
+    expect(document.querySelectorAll('.dag-node-card')).toHaveLength(5)
+    expect(document.querySelectorAll('.dag-node-card.is-ghost')).toHaveLength(2)
+  })
+
+  it('shows full path context and labels Fork versus ordinary relation semantics', () => {
+    render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '打开会话：Child' }).textContent).toContain('/tmp')
+    expect(document.querySelector('.dag-edge.relation-forked-from')?.getAttribute('data-relation-label'))
+      .toContain('继承父会话对话上下文')
+    expect(screen.getByText('Fork：继承对话')).toBeTruthy()
+    expect(screen.getByText('普通关联：不继承对话')).toBeTruthy()
   })
 })
 

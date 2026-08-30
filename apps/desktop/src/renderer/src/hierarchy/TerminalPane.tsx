@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 import { TerminalSurface, type RuntimeStatus, type TerminalSearchRequest } from '../terminal/TerminalSurface'
@@ -65,6 +65,7 @@ export function TerminalPane(props: {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('waiting-for-port')
   const [runtimeError, setRuntimeError] = useState('')
   const [startupRetry, setStartupRetry] = useState(0)
+  const previousPathValid = useRef(pathValid)
   const handleRuntimeStatus = useCallback((status: RuntimeStatus) => {
     setRuntimeStatus(status)
     if (status === 'streaming') setRuntimeError('')
@@ -89,6 +90,14 @@ export function TerminalPane(props: {
   useEffect(() => {
     if (closeRequest > 0) requestRemove()
   }, [closeRequest, requestRemove])
+  useEffect(() => {
+    const restored = !previousPathValid.current && pathValid
+    previousPathValid.current = pathValid
+    if (!restored) return
+    setRuntimeError('')
+    setRuntimeStatus('starting-session')
+    setStartupRetry((value) => value + 1)
+  }, [pathValid])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
   const showFork = session.kind === 'claude-code' && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)

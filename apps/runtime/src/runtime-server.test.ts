@@ -70,6 +70,12 @@ describe('RuntimeServer domain RPC', () => {
       'two', 'three', 'four', 'five'
     ])
   })
+  it('drops shell prompts before choosing the latest four meaningful DAG lines', () => {
+    expect(terminalSummaryLines([
+      'RED', '中文_码头 😀', 'LONG', 'ALT_SCREEN', 'FINAL', '%',
+      'icesword@MacBook workspace %'
+    ].join('\n'))).toEqual(['中文_码头 😀', 'LONG', 'ALT_SCREEN', 'FINAL'])
+  })
   it('publishes live per-Session HUD state in projection snapshots and terminal updates', async () => {
     registerSession(database, 'hud-session')
     port.receive({

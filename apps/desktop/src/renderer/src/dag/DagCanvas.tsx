@@ -41,7 +41,8 @@ export function DagCanvas(props: {
       (x + width >= worldBounds.left && x <= worldBounds.right &&
         y + height >= worldBounds.top && y <= worldBounds.bottom)
     ))
-  const renderedNodeIds = new Set(renderedNodes.map(({ sessionId }) => sessionId))
+  const ghostNodes = layout.nodes.filter(({ depth }) => !fullDepths.has(depth))
+  const renderedNodeIds = new Set([...renderedNodes, ...ghostNodes].map(({ sessionId }) => sessionId))
   const update = (next: DagTransform) => {
     setTransform(next)
     onTransformChange?.(next)
@@ -127,6 +128,10 @@ export function DagCanvas(props: {
         <button aria-label="放大" onClick={() => update(zoomAt(transform, transform.scale + .1, center(viewportRef.current)))}>＋</button>
         <button aria-label="聚焦当前节点" onClick={() => focusNode(previewSessionId)}>⌖</button>
       </div>
+      <div className="dag-relation-legend" aria-label="关系说明">
+        <span className="fork">Fork：继承对话</span>
+        <span className="derived">普通关联：不继承对话</span>
+      </div>
     </header>
     <div className="dag-world" style={{
       width: layout.width, height: layout.height,
@@ -149,6 +154,9 @@ export function DagCanvas(props: {
           const mid = (edge.from.x + edge.to.x) / 2
           return <path key={`${edge.fromSessionId}:${edge.toSessionId}`}
             className={`dag-edge relation-${edge.relationKind}`}
+            data-relation-label={edge.relationKind === 'forked-from'
+              ? 'Fork 分支：继承父会话对话上下文'
+              : '普通父子关联：共享层级，不继承对话上下文'}
             d={`M ${edge.from.x} ${edge.from.y} C ${mid} ${edge.from.y}, ${mid} ${edge.to.y}, ${edge.to.x} ${edge.to.y}`} />
         })}
       </svg>
@@ -160,13 +168,10 @@ export function DagCanvas(props: {
             setPreviewSessionId(positioned.sessionId)
             onSelect(positioned.sessionId)
           }} />)}
-      {Array.from({ length: layout.depthCount }, (_, depth) => depth)
-        .filter((depth) => !fullDepths.has(depth)).map((depth) => {
-        const count = layout.nodes.filter((node) => node.depth === depth).length
-        return <div key={depth} className="dag-ghost-layer" style={{ left: 50 + depth * 370, top: 70 }}>
-          <strong>{count} 个会话</strong><span>平移到此处查看第 {depth + 1} 层</span>
-        </div>
-      })}
+      {ghostNodes.map((positioned) => <DagNodeCard key={`ghost:${positioned.sessionId}`}
+        node={positioned.node} focused={false} ghost
+        style={{ left: positioned.x, top: positioned.y, width: positioned.width, height: positioned.height }}
+        onClick={() => focusNode(positioned.sessionId)} />)}
     </div>
   </div>
 }
@@ -174,19 +179,21 @@ export function DagCanvas(props: {
 function DagNodeCard(props: {
   node: SessionGraphNodeView
   focused: boolean
+  ghost?: boolean
   style: CSSProperties
   onClick(): void
 }) {
-  const { node, focused, style, onClick } = props
+  const { node, focused, ghost = false, style, onClick } = props
   const branch = node.worktree?.branch ?? node.git?.branch
   const shared = node.sharedWorkingDirectory === true || node.worktree?.shared === true
-  return <button type="button" className={`dag-node-card status-${node.workStatus}${focused ? ' is-focused' : ''}`}
-    style={style} aria-label={`打开会话：${node.title}`} onClick={onClick}>
+  return <button type="button" className={`dag-node-card status-${node.workStatus}${focused ? ' is-focused' : ''}${ghost ? ' is-ghost' : ''}`}
+    style={style} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
     <span className="dag-node-card__top"><i />{statusLabel(node.workStatus)}<em>{node.currentMode === 'claude-code' ? 'Claude' : 'Shell'}</em></span>
     <strong>{node.title}</strong>
     <span className="dag-node-card__path" title={node.cwd}>
       {branch ? `${branch}${node.git?.dirty ? '*' : ''}` : node.cwd}
     </span>
+    {branch && <span className="dag-node-card__cwd" title={node.cwd}>{compactPath(node.cwd)}</span>}
     <pre>{node.latestLines.slice(-4).join('\n') || '等待会话输出…'}</pre>
     <span className="dag-node-card__meta">子会话 {node.activeChildCount}{node.archivedAt ? ' · 历史节点' : ''} · {activityLabel(node)}</span>
     {shared && <span className="dag-node-card__shared">{branch ? '共享工作树' : '共享目录'}</span>}
@@ -232,6 +239,12 @@ function reducedMotion() {
 }
 
 function round(value: number) { return Math.round(value * 100) / 100 }
+
+function compactPath(value: string): string {
+  if (value.length <= 42) return value
+  const parts = value.split('/').filter(Boolean)
+  return parts.length > 1 ? `…/${parts.slice(-2).join('/')}` : value
+}
 
 function depthsAround(centerDepth: number, depthCount: number): number[] {
   return [centerDepth - 1, centerDepth, centerDepth + 1]

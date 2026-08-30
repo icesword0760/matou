@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { HierarchyShell } from './HierarchyShell'
+import { HierarchyShell, preferredActiveChild } from './HierarchyShell'
 import type { HierarchyProjection } from './hierarchy-types'
 
 vi.mock('../terminal/TerminalSurface', () => ({
@@ -29,6 +29,16 @@ afterEach(() => {
 })
 
 describe('PRD 05 hierarchy shell', () => {
+  it('opens the highest-priority active child represented by the aggregate badge', () => {
+    const idle = { ...graphNode('idle-child', '空闲子会话'), workStatus: 'idle' as const }
+    const running = { ...graphNode('running-child', '运行子会话'), workStatus: 'running' as const }
+    const error = { ...graphNode('error-child', '错误子会话'), workStatus: 'error' as const }
+    const archivedError = { ...graphNode('archived-error', '历史错误'), workStatus: 'error' as const, archivedAt: 1 }
+
+    expect(preferredActiveChild([idle, running, archivedError, error])?.sessionId)
+      .toBe('error-child')
+  })
+
   it('starts with the requested white skin and cycles the whole CLI with Kooky Cmd+I', () => {
     render(<HierarchyShell fixture={fixture()} />)
 
