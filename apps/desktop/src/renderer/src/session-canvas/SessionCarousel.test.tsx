@@ -100,6 +100,27 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('keeps hover expansion through the native scroll emitted by its width change', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const card = document.querySelector('[data-session-card="session-3"]')!
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+
+    act(() => vi.advanceTimersByTime(20))
+    fireEvent.mouseEnter(card)
+    act(() => vi.advanceTimersByTime(160))
+    expect(card.classList.contains('is-expanded')).toBe(true)
+
+    // Chromium reports a native scroll when flex-basis expansion changes the
+    // available horizontal range. That layout notification is not a new user
+    // gesture and must not collapse the card under the pointer.
+    fireEvent.scroll(viewport)
+    expect(card.classList.contains('is-expanded')).toBe(true)
+
+    vi.useRealTimers()
+  })
+
   it('keeps a focused terminal beside compact sibling summaries in a narrow window', () => {
     const nodes = fixtures(4)
     nodes[1] = {

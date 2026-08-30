@@ -258,7 +258,12 @@ export function SessionCarousel(props: {
       // and shifting the saved viewport underneath the user.
       setHoveredSessionId(null)
     }
-    setScrolling(true)
+    // A flex-basis or terminal-fit layout change can make Chromium emit a
+    // native scroll without any user gesture. Persist its reachable geometry,
+    // but do not treat it as active navigation: doing so collapses the hovered
+    // card whose expansion caused the layout update and creates a feedback
+    // loop that never visibly expands.
+    if (continuousScroll) setScrolling(true)
     updateVisibleWindow()
     // Browser layout changes can clamp scrollLeft after the original wheel or
     // drag stream has ended (for example while terminal columns settle). That
@@ -271,8 +276,10 @@ export function SessionCarousel(props: {
         ...(focusedSessionId ? { focusedSessionId } : {})
       }, { continuous: true })
     }
-    if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
-    scrollTimer.current = window.setTimeout(() => setScrolling(false), 120)
+    if (continuousScroll) {
+      if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
+      scrollTimer.current = window.setTimeout(() => setScrolling(false), 120)
+    }
   }
   const hover = (sessionId: string | null) => {
     if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
