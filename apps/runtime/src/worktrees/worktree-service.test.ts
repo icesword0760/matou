@@ -113,6 +113,22 @@ describe('WorktreeService', () => {
       state: 'failed'
     })
   })
+
+  it('reuses its existing branch when a prior add failed before linking the worktree directory', async () => {
+    const path = join(root, 'worktrees', 'retry-partial')
+    await exec('git', ['-C', repositoryRoot, 'branch', 'retry-partial', 'HEAD'])
+
+    const retried = await service.create(command('retry-partial'), {
+      id: 'worktree-retry-partial', executionContextId: 'context-retry-partial',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch: 'retry-partial', baseRef: 'HEAD', setupPolicy: [], now: 20
+    })
+
+    expect(retried).toMatchObject({ state: 'ready', branch: 'retry-partial', path })
+    await expect(exec('git', ['-C', path, 'branch', '--show-current'])).resolves.toMatchObject({
+      stdout: 'retry-partial\n'
+    })
+  })
 })
 
 function command(commandId: string) {

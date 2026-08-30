@@ -108,9 +108,16 @@ export class WorktreeService {
       const repository = (await exec('git', ['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).stdout.trim()
       const baseRevision = (await exec('git', ['-C', repository, 'rev-parse', input.baseRef])).stdout.trim()
       if (!(await pathIsGitWorktree(input.path))) {
-        await exec('git', [
-          '-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef
-        ])
+        // `git worktree add -b` creates the branch before it creates the target
+        // directory. A permission or disk failure can therefore leave the ref
+        // behind while no usable worktree exists. Retrying with `-b` can never
+        // recover that valid partial result; reuse the same operation-owned
+        // branch and let Git still reject it if another worktree has it checked
+        // out.
+        const args = await localBranchExists(repository, input.branch)
+          ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
+          : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
+        await exec('git', args)
       }
       const setupResult: Array<{ command: string; ok: boolean; output: string }> = []
       for (const step of input.setupPolicy) {
@@ -265,6 +272,20 @@ async function pathIsGitWorktree(path: string): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+async function localBranchExists(repository: string, branch: string): Promise<boolean> {
+  try {
+    await exec('git', [
+      '-C', repository, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`
+    ])
+    return true
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 1) {
+      return false
+    }
+    throw error
   }
 }
 
