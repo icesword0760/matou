@@ -15,8 +15,15 @@ test.describe('horizontal sibling navigation', () => {
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await expect(carousel).toHaveAttribute('data-visible-columns', '4')
-      const before = await carousel.evaluate((element) => element.scrollLeft)
+      // Newly created sessions are required to stay in view, so the fifth
+      // sibling legitimately leaves the carousel at its right edge. Navigate
+      // left first, then prove an ordinary rightward gesture reaches it again.
       await carousel.hover()
+      const rightEdge = await carousel.evaluate((element) => element.scrollLeft)
+      await carousel.dispatchEvent('wheel', { deltaX: -650, deltaY: 0 })
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThan(rightEdge)
+      await fixture.page.waitForTimeout(300)
+      const before = await carousel.evaluate((element) => element.scrollLeft)
       await carousel.dispatchEvent('wheel', { deltaX: 650, deltaY: 0 })
       await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(before)
 
