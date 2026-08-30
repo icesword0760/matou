@@ -23,6 +23,10 @@ export class TerminalWorkStatusTracker {
     OSC_133.lastIndex = 0
     for (const match of combined.matchAll(OSC_133)) {
       consumedThrough = (match.index ?? 0) + match[0].length
+      // Claude owns its work lifecycle through provider hooks and explicit
+      // final-error output. Shell integration markers can appear inside its
+      // terminal repaint and must not clear a latched provider failure.
+      if (this.#provider) continue
       if (match[1] === 'C') {
         statuses.push('running')
         continue
@@ -54,7 +58,8 @@ export class TerminalWorkStatusTracker {
 function isTerminalClaudeFailure(raw: string): boolean {
   const visible = visibleTerminalText(raw)
   return /(?:Connection refused|ConnectionRefused|ECONNREFUSED)[\s\S]{0,240}attempt\s*10\s*\/\s*10/i.test(visible) ||
-    /(?:API Error|authentication failed|invalid api key|OAuth token (?:is )?(?:invalid|expired)|account (?:is )?(?:disabled|unavailable))[^\r\n]{0,240}$/i.test(visible) ||
+    /API Error:[^\r\n]{1,240}/i.test(visible) ||
+    /(?:authentication failed|invalid api key|OAuth token (?:is )?(?:invalid|expired)|account (?:is )?(?:disabled|unavailable))[^\r\n]{0,240}$/i.test(visible) ||
     /(?:rate limit|overloaded|service unavailable)[^\r\n]{0,180}(?:final attempt|attempt\s*10\s*\/\s*10)$/i.test(visible)
 }
 

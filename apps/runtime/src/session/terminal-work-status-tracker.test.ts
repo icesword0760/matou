@@ -68,4 +68,15 @@ describe('TerminalWorkStatusTracker', () => {
       '─'.repeat(1_500)
     )).toEqual(['error'])
   })
+
+  it('recognizes Claude final API Error repaint even when the retry counter was drawn as deltas', () => {
+    const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
+
+    expect(tracker.ingest(
+      '\u001b[2D\u001b[3B\r\u001b[6A⏺\u001b[3GAPI Error:\u001b[14GConnection refused —' +
+      '\u001b[35Ga firewall or proxy may be blocking it (ConnectionRefused)\u001b[K\r' +
+      '\u001b[2B✻ Baked for 2m 50s · done 6:02 PM\u001b[K\r\u001b[2B❯ '
+    )).toEqual(['error'])
+    expect(tracker.ingest('\u001b]133;D;0\u0007')).toEqual([])
+  })
 })
