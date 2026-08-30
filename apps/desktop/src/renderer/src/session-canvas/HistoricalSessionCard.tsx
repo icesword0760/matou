@@ -45,11 +45,11 @@ export function HistoricalSessionCard(props: {
     }} />}
     {removeMode === 'branch' && <ConfirmationSequence steps={[{
       title: '移除整条分支',
-      body: `“${node.title}”下的 ${descendantCount} 个后代节点将一起从当前画布移除。${impactText(descendantImpact)}相关会话将结束。`,
+      body: `“${node.title}”下的 ${descendantCount} 个后代节点将一起从当前画布移除。${impactText(descendantImpact)}相关会话将结束。本地工作树和未提交修改会继续保留在磁盘中，需要后续自行管理。`,
       confirmLabel: '继续', cancelLabel: '取消'
     }, {
       title: '再次确认',
-      body: `确认移除“${node.title}”及其全部 ${descendantCount} 个后代节点？本地文件和工作树保持原样。`,
+      body: `确认移除“${node.title}”及其全部 ${descendantCount} 个后代节点？本地工作树、文件和未提交修改不会删除。`,
       confirmLabel: '移除整条分支', cancelLabel: '取消'
     }]} onCancel={() => setRemoveMode(null)} onComplete={() => {
       setRemoveMode(null); onRemove(node.sessionId, true)

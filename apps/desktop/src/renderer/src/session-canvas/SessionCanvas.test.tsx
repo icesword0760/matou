@@ -136,6 +136,8 @@ describe('SessionCanvas', () => {
       .toContain('2 个后代节点')
     expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
       .toContain('1 个运行中、1 个待输入')
+    expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
+      .toContain('本地工作树和未提交修改会继续保留')
     await user.click(screen.getByRole('button', { name: '继续' }))
     expect(screen.getByRole('alertdialog', { name: '再次确认' })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '移除整条分支' }))
