@@ -23,4 +23,21 @@ describe('PRD 02 HUD commands', () => {
       })]
     ])
   })
+
+  it('keeps the owning canvas when retrying or removing a failed Fork card', async () => {
+    const request = vi.fn().mockResolvedValue({})
+    const commands = createHierarchyCommands({ request } as never, 'window-1')
+
+    await commands.retryFork('scene-1', 'failed-session')
+    await commands.removeFailedFork('scene-1', 'failed-session')
+
+    expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
+      ['hierarchy.retry-fork', expect.objectContaining({
+        sceneId: 'scene-1', sessionId: 'failed-session'
+      })],
+      ['hierarchy.remove-failed-fork', expect.objectContaining({
+        sceneId: 'scene-1', sessionId: 'failed-session'
+      })]
+    ])
+  })
 })

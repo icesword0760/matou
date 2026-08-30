@@ -169,8 +169,8 @@ export interface HierarchyCommands {
   createShellSibling(sceneId: string, sessionId: string, parentSessionId?: string): unknown
   createForkChild(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
   createForkSibling(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
-  retryFork(sessionId: string): unknown
-  removeFailedFork(sessionId: string): unknown
+  retryFork(sceneId: string, sessionId: string): unknown
+  removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
   reopenHistoricalSession(sessionId: string): unknown
   removeHistoricalSession?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown

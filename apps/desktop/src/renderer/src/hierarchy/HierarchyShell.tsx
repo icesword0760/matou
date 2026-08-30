@@ -449,8 +449,8 @@ function HierarchyProduct({ projection, commands }: {
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
                   onDelete={commands.deleteSession}
                   onRetryRestore={commands.retryProviderRestore}
-                  onRetryFork={() => commands.retryFork(session.id)}
-                  onRemoveFailedFork={() => commands.removeFailedFork(session.id)}
+                  onRetryFork={() => commands.retryFork(scene.id, session.id)}
+                  onRemoveFailedFork={() => commands.removeFailedFork(scene.id, session.id)}
                   childNodes={childNodes}
                   historicalChildCount={graphNode?.historicalChildCount ?? 0}
                   onOpenChildren={() => {

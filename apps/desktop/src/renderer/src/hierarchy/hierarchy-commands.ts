@@ -69,8 +69,10 @@ export function createHierarchyCommands(
     createForkSibling: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-sibling', {
       sceneId, sourceSessionId, name, worktreeMode
     }),
-    retryFork: (sessionId) => command('hierarchy.retry-fork', { sessionId }),
-    removeFailedFork: (sessionId) => command('hierarchy.remove-failed-fork', { sessionId }),
+    retryFork: (sceneId, sessionId) => command('hierarchy.retry-fork', { sceneId, sessionId }),
+    removeFailedFork: (sceneId, sessionId) => command('hierarchy.remove-failed-fork', {
+      sceneId, sessionId
+    }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
     reopenHistoricalSession: (sessionId) => command('hierarchy.reopen-historical-session', { sessionId }),
     removeHistoricalSession: (sceneId, sessionId, includeDescendants) => command(
