@@ -649,6 +649,23 @@ describe('HierarchyApplicationService Session workflows', () => {
     })).toThrow('Session deletion intent is stale')
   })
 
+  it('cancels a newly starting leaf Session without treating it as submitted work', () => {
+    const initial = bootstrap('session-starting-close-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const starting = service.splitSession(command('session-starting-sibling'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, direction: 'horizontal', now: 20
+    })
+    database.run("UPDATE sessions SET work_status = 'starting' WHERE id = ?", starting.session!.id)
+
+    const deleted = service.deleteSession(command('session-starting-close'), {
+      windowId: 'window-1', sessionId: starting.session!.id, now: 21
+    })
+
+    expect(deleted.outcome).toBe('scene-remains')
+    expect(deleted.disposedSessionIds).toEqual([starting.session!.id])
+  })
+
   it('deletes a final Session and creates a fresh default Task hierarchy', () => {
     const initial = bootstrap('session-final-bootstrap')
     markPathValid(initial.workspace!.id)

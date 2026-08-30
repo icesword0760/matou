@@ -119,6 +119,24 @@ describe('SessionGraphRepository', () => {
       .toMatchObject({ currentMode: 'claude-code', workStatus: 'needs-input' })
   })
 
+  it('marks every live node that actually shares the same working directory', () => {
+    for (const id of ['parent', 'shell-child', 'claude-child'] as const) {
+      database.run(
+        `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+         VALUES (?, 'workspace', 'plain-directory', '/tmp/workspace', 10)`,
+        `context-${id}`
+      )
+      database.run('UPDATE sessions SET execution_context_id = ? WHERE id = ?', `context-${id}`, id)
+    }
+
+    const graph = graphs.projectSceneGraph('scene')
+
+    for (const id of ['parent', 'shell-child', 'claude-child']) {
+      expect(graph.nodes.find(({ sessionId }) => sessionId === id))
+        .toMatchObject({ sharedWorkingDirectory: true })
+    }
+  })
+
   it('allocates persistent sequences and creates one membership with its Outbox event', () => {
     const first = graphs.nextSequence('session-sibling-created')
     const second = graphs.nextSequence('session-sibling-created')

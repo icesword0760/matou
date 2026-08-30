@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, waitFor } from '@testing-library/react'
+import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TerminalSurface } from './TerminalSurface'
@@ -107,6 +108,24 @@ describe('TerminalSurface focus continuity', () => {
     button.focus()
     state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([66]), sequence: 2 })
     expect(state.focus).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not let late output from a terminal that became inactive steal focus during the same commit', async () => {
+    function OutputDuringCommit({ active }: { active: boolean }) {
+      useLayoutEffect(() => {
+        if (active) return
+        state.focus.mockClear()
+        state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([65]), sequence: 1 })
+      }, [active])
+      return <TerminalSurface sessionId="session-1" active={active} visible />
+    }
+
+    const view = render(<OutputDuringCommit active />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    view.rerender(<OutputDuringCommit active={false} />)
+
+    expect(state.focus).not.toHaveBeenCalled()
   })
 
   it('searches the real terminal buffer in both directions and reports result counts', async () => {

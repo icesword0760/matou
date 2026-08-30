@@ -16,7 +16,6 @@ export function SessionCard(props: {
     data-session-card={node.sessionId} data-in-viewport={inViewport}
     aria-label={`会话：${node.title}`} aria-current={focused ? 'true' : undefined}
     onMouseEnter={() => onHover(node.sessionId)}
-    onPointerMove={() => onHover(node.sessionId)}
     onPointerLeave={() => onHover(null)}
     onFocusCapture={(event: FocusEvent<HTMLElement>) => {
       // Header actions must complete on their original DOM node. Activating the

@@ -72,8 +72,9 @@ describe('SessionCanvas', () => {
       onReopenHistorical={vi.fn()} renderSession={(item) => <div>{item.title}</div>} />)
 
     expect(await screen.findByText('历史 Shell')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '重新打开 Shell' })).toBeTruthy()
-    await vi.waitFor(() => expect(Element.prototype.scrollIntoView).toHaveBeenCalled())
+    const reopen = screen.getByRole('button', { name: '重新打开 Shell' })
+    expect(reopen).toBeTruthy()
+    await vi.waitFor(() => expect(document.activeElement).toBe(reopen))
   })
 
   it('keeps the current parent when adding a Shell after all children became history', async () => {
@@ -113,7 +114,7 @@ describe('SessionCanvas', () => {
     data.nodes = [
       { ...node('archived-parent', '历史父会话'), archivedAt: 20, workStatus: 'exited' },
       { ...node('descendant', '仍在工作的子会话', 'archived-parent'), workStatus: 'running' },
-      { ...node('grandchild', '孙会话', 'descendant'), workStatus: 'idle' }
+      { ...node('grandchild', '孙会话', 'descendant'), workStatus: 'needs-input' }
     ]
     data.edges = [
       { parentSessionId: 'archived-parent', childSessionId: 'descendant', relationKind: 'derived-from', createdAt: 1 },
@@ -133,6 +134,8 @@ describe('SessionCanvas', () => {
     await user.click(screen.getByRole('button', { name: '移除整条分支：历史父会话' }))
     expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
       .toContain('2 个后代节点')
+    expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
+      .toContain('1 个运行中、1 个待输入')
     await user.click(screen.getByRole('button', { name: '继续' }))
     expect(screen.getByRole('alertdialog', { name: '再次确认' })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '移除整条分支' }))

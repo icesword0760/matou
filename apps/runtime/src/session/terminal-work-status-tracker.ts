@@ -24,6 +24,23 @@ export class TerminalWorkStatusTracker {
           : 'error')
     }
     this.#buffer = combined.slice(consumedThrough).slice(-512)
+    const completed = statuses.some((status) =>
+      status === 'idle' || status === 'error' || status === 'interrupted'
+    )
+    if (!completed && isExplicitBlockingPrompt(this.#buffer)) statuses.push('needs-input')
     return statuses
   }
+}
+
+function isExplicitBlockingPrompt(raw: string): boolean {
+  const visible = raw
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+  const line = visible.split(/\r\n|\r|\n/).at(-1)?.trimEnd() ?? ''
+  if (!line) return false
+  return /(?:^|\s)(?:enter|input|type|provide)\s+[^:：?？\r\n]{1,64}[:：?？]$/i.test(line) ||
+    /(?:^|\s)(?:password|passphrase|pin|token)\s*[:：?？]$/i.test(line) ||
+    /(?:^|\s)(?:请输入|输入|密码|口令|请选择)[^:：?？\r\n]{0,64}[:：?？]$/.test(line) ||
+    /(?:\[[yYnN](?:\/[yYnN])?\]|\([yYnN](?:\/[yYnN])?\))$/.test(line)
 }

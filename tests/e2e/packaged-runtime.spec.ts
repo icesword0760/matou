@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, readFile, rename, rm, truncate } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, truncate } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -63,6 +63,11 @@ async function runPackagedSmoke(
   exerciseProduct: boolean
 ): Promise<void> {
   await chmod(executablePath, 0o755)
+  // MATOU_DEFAULT_WORKSPACE models the directory a normal macOS Terminal opens
+  // into. The product no longer recreates a previously moved/missing Workspace,
+  // so the packaged fixture must provide the same valid starting directory as
+  // the regular Electron fixture and a real user's home directory.
+  await mkdir(join(dataDirectory, 'matou_workspace'), { recursive: true })
   const launchEnvironment = {
     ...process.env, MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
     MATOU_DEFAULT_WORKSPACE: join(dataDirectory, 'matou_workspace'),

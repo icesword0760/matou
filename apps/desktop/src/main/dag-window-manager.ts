@@ -63,13 +63,16 @@ export class DagWindowManager {
   }
 
   selectNode(selection: DagNodeSelection): void {
+    // Close the always-on-top DAG before focusing the destination. Focusing the
+    // main/detached window first and closing the DAG afterwards lets macOS move
+    // focus a second time, leaving the selected terminal visible but inactive.
+    this.close(selection.mainWindowId)
     const targetActivated = selection.targetWindowId
       ? this.#dependencies.activateTargetWindow(selection.targetWindowId)
       : false
     if (!targetActivated) {
       this.#dependencies.routeSelection(selection.mainWindowId, selection)
     }
-    this.close(selection.mainWindowId)
   }
 
   close(mainWindowId: string): void {

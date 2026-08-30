@@ -74,7 +74,9 @@ export class ProviderModeService {
         throw new Error('Provider binding does not match the active Claude conversation')
       }
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = 'Claude', work_status = 'idle',
+        `UPDATE sessions SET kind = 'claude-code',
+           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+           work_status = 'idle',
            updated_at = ?, version = version + 1 WHERE id = ?`,
         input.now, session.id
       )
@@ -95,7 +97,9 @@ export class ProviderModeService {
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
       tx.run(
-        `UPDATE sessions SET kind = 'shell', title = 'Shell', work_status = 'idle',
+        `UPDATE sessions SET kind = 'shell',
+           title = CASE WHEN title = 'Claude' OR title = id THEN 'Shell' ELSE title END,
+           work_status = 'idle',
            updated_at = ?, last_activity_at = ?, version = version + 1 WHERE id = ?`,
         input.now, input.now, session.id
       )
@@ -135,7 +139,9 @@ export class ProviderModeService {
         binding = requested
       }
       tx.run(
-        `UPDATE sessions SET kind = 'shell', title = 'Shell', work_status = 'error',
+        `UPDATE sessions SET kind = 'shell',
+           title = CASE WHEN title = 'Claude' OR title = id THEN 'Shell' ELSE title END,
+           work_status = 'error',
            updated_at = ?, last_activity_at = ?, version = version + 1 WHERE id = ?`,
         input.now, input.now, session.id
       )
@@ -158,7 +164,9 @@ export class ProviderModeService {
         throw new Error('只有恢复失败的 Claude Code 会话需要重试')
       }
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = 'Claude', status = 'starting',
+        `UPDATE sessions SET kind = 'claude-code',
+           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+           status = 'starting',
            work_status = 'starting',
            updated_at = ?, version = version + 1 WHERE id = ?`,
         input.now, session.id
@@ -206,7 +214,9 @@ export class ProviderModeService {
       metadata.lastHookEvent = input.eventName
       const workStatus = providerWorkStatus(input.eventName, session.work_status)
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = 'Claude', work_status = ?,
+        `UPDATE sessions SET kind = 'claude-code',
+           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+           work_status = ?,
            updated_at = ?, version = version + 1 WHERE id = ?`,
         workStatus, input.now, session.id
       )

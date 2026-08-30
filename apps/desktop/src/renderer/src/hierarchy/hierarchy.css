@@ -515,3 +515,7 @@ html[data-theme="light"], body.light-theme { color: #2f3547; background: #f7f8fa
 .detached-terminal-app[data-theme="light"] .terminal-search-bar { color: #2f3547; background: #fff; border-color: #e8e8e8; }
 .detached-terminal-app[data-theme="light"] > header span { color: #606572; }
 .detached-terminal-app[data-theme="light"] .terminal-surface { background: #f7f8fa; }
+.dag-open-error { display: flex; min-height: 34px; box-sizing: border-box; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #efcaca; color: #9b342f; background: #fff2f1; font-size: 11px; }
+.dag-open-error span { min-width: 0; flex: 1; }
+.dag-open-error button { flex: none; padding: 3px 7px; border: 1px solid currentColor; border-radius: 5px; color: inherit; background: transparent; cursor: pointer; }
+.hierarchy-shell[data-theme="dark"] .dag-open-error { border-color: #6e3735; color: #ff9b94; background: #331f1f; }

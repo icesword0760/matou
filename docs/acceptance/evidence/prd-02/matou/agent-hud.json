@@ -50,7 +50,7 @@
     "gap": "8px"
   },
   "hud": {
-    "maxWidth": "695.52px",
+    "maxWidth": "760px",
     "fontSize": "10px",
     "gap": "8px",
     "whiteSpace": "nowrap",

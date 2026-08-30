@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -24,6 +24,7 @@ afterEach(() => {
   cleanup()
   Reflect.deleteProperty(window, 'matouDesktop')
   Reflect.deleteProperty(window, 'matouE2e')
+  Reflect.deleteProperty(document, 'visibilityState')
   window.history.replaceState({}, '', '/')
 })
 
@@ -37,6 +38,37 @@ describe('PRD 05 hierarchy shell', () => {
     fireEvent.keyDown(document, { key: 'i', metaKey: true })
     expect(screen.getByRole('main').getAttribute('data-theme')).toBe('dark')
     expect(screen.getByTestId('xterm-session-a1').dataset.theme).toBe('dark')
+  })
+
+  it('returns keyboard focus to the active terminal when a hidden main window becomes visible', () => {
+    let visibility: DocumentVisibilityState = 'hidden'
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true, get: () => visibility
+    })
+    render(<HierarchyShell fixture={fixture()} />)
+    const before = Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest ?? 0)
+
+    visibility = 'visible'
+    fireEvent(document, new Event('visibilitychange'))
+
+    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThan(before)
+  })
+
+  it('keeps ordinary navigation available when the native DAG window does not open', async () => {
+    const openDagWindow = vi.fn().mockRejectedValue(new Error('native window unavailable'))
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      openDagWindow,
+      onDagShortcut: vi.fn(() => vi.fn()),
+      onDagNodeSelected: vi.fn(() => vi.fn()),
+      onDetachedWindowClosed: vi.fn(() => vi.fn())
+    } })
+    render(<HierarchyShell fixture={fixture()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开会话 DAG' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('会话关系视图打开失败')
+    expect(screen.getByRole('button', { name: '重试打开 DAG' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '横向新增 Shell' })).toBeTruthy()
   })
 
   it('opens the Kooky shortcut floating panel with Cmd+/ and double Option', () => {
@@ -301,6 +333,81 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
       .toBe('session-a1')
     expect(screen.getByTestId('xterm-session-child')).toBeTruthy()
+  })
+
+  it('opens a root historical notification as node detail instead of inferring its active children', async () => {
+    window.history.replaceState({}, '', '/?e2e=1')
+    const data = fixture()
+    data.sessions.push({
+      id: 'history-parent', taskId: 'task-a1', title: '历史父会话', executionContextId: 'context-a'
+    })
+    data.sceneSnapshots![0]!.nodes.push({
+      id: 'node-history-parent', sceneId: 'scene-a1', kind: 'mount', ordinal: 1
+    })
+    data.sceneSnapshots![0]!.mounts.push({
+      id: 'mount-history-parent', sceneId: 'scene-a1', sceneNodeId: 'node-history-parent', sessionId: 'history-parent'
+    })
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1',
+        edges: [{
+          parentSessionId: 'history-parent', childSessionId: 'session-a1',
+          relationKind: 'derived-from', createdAt: 2
+        }],
+        nodes: [
+          { ...graphNode('history-parent', '历史父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 1 },
+          { ...graphNode('session-a1', '活动子会话'), parentSessionId: 'history-parent', relationKind: 'derived-from' }
+        ]
+      }
+    }
+    render(<HierarchyShell fixture={data} />)
+    window.matouE2e!.pushNotification({
+      eventId: 'history-parent-completed', eventType: 'completed', title: 'Claude Code', body: '历史父会话已完成',
+      workspaceId: 'workspace-a', taskId: 'task-a1', sceneId: 'scene-a1', sessionId: 'history-parent'
+    })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '通知中心' }))
+    await user.click(screen.getByRole('button', { name: '打开通知：历史父会话已完成' }))
+
+    expect(await screen.findByText('历史父会话')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重新打开 Shell' })).toBeTruthy()
+    expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
+  })
+
+  it('opens a root historical node detail from the DAG instead of falling back to its active children', async () => {
+    const data = fixture()
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1',
+        edges: [{
+          parentSessionId: 'history-parent', childSessionId: 'session-a1',
+          relationKind: 'derived-from', createdAt: 2
+        }],
+        nodes: [
+          { ...graphNode('history-parent', '历史父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 1 },
+          { ...graphNode('session-a1', '活动子会话'), parentSessionId: 'history-parent', relationKind: 'derived-from' }
+        ]
+      }
+    }
+    let selectDagNode: ((selection: {
+      mainWindowId: string; sceneId: string; sessionId: string
+    }) => void) | undefined
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      onDagNodeSelected: vi.fn((listener) => { selectDagNode = listener; return vi.fn() }),
+      onDetachedWindowClosed: vi.fn(() => vi.fn())
+    } })
+    render(<HierarchyShell fixture={data} />)
+    expect(screen.getByTestId('xterm-session-a1')).toBeTruthy()
+
+    await act(async () => selectDagNode?.({
+      mainWindowId: 'window-1', sceneId: 'scene-a1', sessionId: 'history-parent'
+    }))
+
+    expect(await screen.findByText('历史父会话')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重新打开 Shell' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '移除整条分支：历史父会话' })).toBeTruthy()
+    expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
   it('keeps startup and partial layout hydration silent for PRD 04', () => {

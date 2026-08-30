@@ -240,15 +240,15 @@ export function projectSceneGraphFrom(
       ).map((row) => [row.parent_session_id, row] as const)
     )
 
-    const contextUseCounts = new Map(
-      source.all<{ execution_context_id: string; count: number }>(
-        `SELECT sessions.execution_context_id, COUNT(*) AS count
+    const cwdUseCounts = new Map(
+      source.all<{ cwd: string; count: number }>(
+        `SELECT sessions.cwd, COUNT(*) AS count
          FROM sessions
          JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
          WHERE membership.scene_id = ? AND sessions.archived_at IS NULL
-         GROUP BY sessions.execution_context_id`,
+         GROUP BY sessions.cwd`,
         sceneId
-      ).map((row) => [row.execution_context_id, row.count] as const)
+      ).map((row) => [row.cwd, row.count] as const)
     )
 
     const nodes: SessionGraphNode[] = rows.map((row) => {
@@ -274,12 +274,12 @@ export function projectSceneGraphFrom(
           providerCanFork(row.provider_metadata_json),
         title: row.title,
         cwd: row.cwd,
-        sharedWorkingDirectory: (contextUseCounts.get(row.execution_context_id) ?? 0) > 1,
+        sharedWorkingDirectory: (cwdUseCounts.get(row.cwd) ?? 0) > 1,
         ...(row.worktree_path === null || row.branch_name === null ? {} : {
           worktree: {
             branch: row.branch_name,
             path: row.worktree_path,
-            shared: (contextUseCounts.get(row.execution_context_id) ?? 0) > 1
+            shared: (cwdUseCounts.get(row.cwd) ?? 0) > 1
           }
         }),
         activeChildCount: counts?.active_count ?? 0,

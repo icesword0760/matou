@@ -158,7 +158,9 @@ export function SessionCarousel(props: {
     }
     const frame = requestAnimationFrame(() => {
       focusScrollUntil.current = performance.now() + 600
-      cardsRef.current.get(focusedSessionId)?.scrollIntoView?.({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+      const viewport = viewportRef.current
+      const card = cardsRef.current.get(focusedSessionId)
+      if (viewport && card) centerCardInViewport(viewport, card)
       ensureVisibleRef.current?.(focusedSessionId)
     })
     return () => cancelAnimationFrame(frame)
@@ -187,9 +189,15 @@ export function SessionCarousel(props: {
     skipFocusScrollAfterRestore.current = false
     const frame = requestAnimationFrame(() => {
       const card = cardsRef.current.get(revealRequest.sessionId)
-      if (!card) return
+      const viewport = viewportRef.current
+      if (!card || !viewport) return
       focusScrollUntil.current = performance.now() + 900
-      card.scrollIntoView?.({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+      // DAG and notification navigation may select the already-focused Session.
+      // In that case React has no focus-ID change to observe, so force the
+      // carousel position from this explicit navigation request. Directly
+      // setting the owning viewport also avoids Chromium scrolling the page
+      // instead of the horizontal strip while the native DAG window closes.
+      centerCardInViewport(viewport, card)
       const focusTarget = revealRequest.historical
         ? card.querySelector<HTMLElement>('button,[tabindex="0"]')
         : undefined
@@ -241,7 +249,12 @@ export function SessionCarousel(props: {
     }
     setScrolling(true)
     updateVisibleWindow()
-    if (!pageClosing.current && continuousScroll && !restoringGeometry.current && viewportRef.current) {
+    // Browser layout changes can clamp scrollLeft after the original wheel or
+    // drag stream has ended (for example while terminal columns settle). That
+    // native scroll is still the final user-visible viewport and must replace
+    // the earlier, now-unreachable checkpoint. Only explicit restore writes
+    // are excluded to avoid feeding persisted geometry back into itself.
+    if (!pageClosing.current && !restoringGeometry.current && viewportRef.current) {
       onGeometryChange?.({
         scrollLeft: viewportRef.current.scrollLeft,
         ...(focusedSessionId ? { focusedSessionId } : {})
@@ -405,11 +418,41 @@ export function SessionCarousel(props: {
         {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
           <strong>{node.title}</strong>
           <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
-          <pre>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>
+          {(node.providerRestoreState === 'failed' || node.activeChildCount > 0) &&
+            <div className="session-compact-summary__priority">
+              {node.providerRestoreState === 'failed' && <b>Claude 恢复失败</b>}
+              {node.activeChildCount > 0 && <small>子会话 {node.activeChildCount}</small>}
+            </div>}
+          <pre title={node.cwd}>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>
         </div>}
       </div>)}
     </div>
   </div>
+}
+
+export function centeredCardScrollLeft(
+  cardOffsetLeft: number,
+  cardWidth: number,
+  viewportWidth: number,
+  maxScrollLeft: number
+): number {
+  return Math.max(0, Math.min(
+    maxScrollLeft,
+    cardOffsetLeft - Math.max(0, viewportWidth - cardWidth) / 2
+  ))
+}
+
+function centerCardInViewport(viewport: HTMLElement, card: HTMLElement): void {
+  const target = centeredCardScrollLeft(
+    card.offsetLeft,
+    card.offsetWidth,
+    viewport.clientWidth,
+    Math.max(0, viewport.scrollWidth - viewport.clientWidth)
+  )
+  viewport.scrollLeft = target
+  // Reapply after responsive card widths and terminal fits settle in the same
+  // navigation turn. The second write is idempotent for already-stable layouts.
+  requestAnimationFrame(() => { viewport.scrollLeft = target })
 }
 
 function reducedMotion(): boolean {

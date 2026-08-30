@@ -4,7 +4,11 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
-import { SessionCarousel, visibleColumnsForWidth } from './SessionCarousel'
+import {
+  centeredCardScrollLeft,
+  SessionCarousel,
+  visibleColumnsForWidth
+} from './SessionCarousel'
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn()
@@ -12,6 +16,12 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('SessionCarousel', () => {
+  it('centers an explicit navigation target inside the horizontal viewport bounds', () => {
+    expect(centeredCardScrollLeft(0, 280, 900, 900)).toBe(0)
+    expect(centeredCardScrollLeft(900, 280, 900, 900)).toBe(590)
+    expect(centeredCardScrollLeft(1_800, 280, 900, 900)).toBe(900)
+  })
+
   it('reduces visible columns before terminal cards become unreadable in a narrow window', () => {
     expect(visibleColumnsForWidth(7, 1440)).toBe(4)
     expect(visibleColumnsForWidth(7, 900)).toBe(3)
@@ -49,21 +59,65 @@ describe('SessionCarousel', () => {
     const nodes = fixtures(5)
     render(<SessionCarousel nodes={nodes} focusedSessionId="session-5"
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
-    const card = document.querySelector('[data-session-card="session-5"]')!
+    const card = document.querySelector('[data-session-card="session-5"]') as HTMLElement
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLElement
+    Object.defineProperties(card.parentElement!, {
+      offsetLeft: { configurable: true, value: 900 },
+      offsetWidth: { configurable: true, value: 280 }
+    })
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 1_800 }
+    })
     vi.runAllTimers()
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
+    expect(viewport.scrollLeft).toBe(590)
 
-    fireEvent.pointerMove(card)
+    fireEvent.mouseEnter(card)
     act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
     fireEvent.wheel(screen.getByRole('region', { name: '同级会话列表' }), { deltaX: 20, deltaY: 0 })
     expect(card.classList.contains('is-expanded')).toBe(false)
     act(() => vi.advanceTimersByTime(120))
     expect(card.classList.contains('is-expanded')).toBe(false)
-    fireEvent.pointerMove(card)
+    fireEvent.mouseEnter(card)
     act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
+  })
+
+  it('expands from a stable pointer entry even when the pointer moves inside the same card', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const card = document.querySelector('[data-session-card="session-3"]')!
+
+    fireEvent.mouseEnter(card)
+    act(() => vi.advanceTimersByTime(80))
+    fireEvent.pointerMove(card, { clientX: 100, clientY: 50 })
+    act(() => vi.advanceTimersByTime(80))
+
+    expect(card.classList.contains('is-expanded')).toBe(true)
+    vi.useRealTimers()
+  })
+
+  it('keeps a focused terminal beside compact sibling summaries in a narrow window', () => {
+    const nodes = fixtures(4)
+    nodes[1] = {
+      ...nodes[1]!, providerRestoreState: 'failed', providerRestoreError: 'missing provider',
+      workStatus: 'error', activeChildCount: 3
+    }
+    render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 600 })
+
+    fireEvent(window, new Event('resize'))
+
+    expect(viewport.classList.contains('is-narrow')).toBe(true)
+    const sibling = document.querySelector('[data-session-id="session-2"] .session-compact-summary')!
+    expect(sibling.getAttribute('aria-hidden')).toBe('false')
+    expect(sibling.textContent).toContain('恢复失败')
+    expect(sibling.textContent).toContain('子会话 3')
   })
 
   it('does not turn header actions or portal menu items into carousel drag gestures', () => {
@@ -120,6 +174,30 @@ describe('SessionCarousel', () => {
     expect(onGeometryChange).toHaveBeenCalledWith({
       scrollLeft: 320,
       focusedSessionId: 'session-1'
+    }, { continuous: true })
+    vi.useRealTimers()
+  })
+
+  it('checkpoints the final browser-clamped position after card widths settle', () => {
+    vi.useFakeTimers()
+    const onGeometryChange = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-5"
+      onGeometryChange={onGeometryChange}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 800 })
+    act(() => vi.advanceTimersByTime(1_000))
+    onGeometryChange.mockClear()
+
+    // Chromium emits a native scroll after a shrinking card layout clamps a
+    // previously valid larger scrollLeft. This final visible position is the
+    // one the user expects to return to after restart.
+    viewport.scrollLeft = 240
+    fireEvent.scroll(viewport)
+
+    expect(onGeometryChange).toHaveBeenCalledWith({
+      scrollLeft: 240,
+      focusedSessionId: 'session-5'
     }, { continuous: true })
     vi.useRealTimers()
   })

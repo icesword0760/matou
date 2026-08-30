@@ -7,9 +7,9 @@
     "minWidth": "140px",
     "padding": "4px 0px",
     "borderRadius": "6px",
-    "backgroundColor": "rgba(20, 25, 35, 0.95)",
-    "border": "1px solid rgba(255, 255, 255, 0.1)",
-    "boxShadow": "rgba(0, 0, 0, 0.3) 0px 4px 12px 0px",
+    "backgroundColor": "rgb(255, 255, 255)",
+    "border": "1px solid rgba(0, 0, 0, 0)",
+    "boxShadow": "rgba(0, 0, 0, 0.1) 0px 4px 20px 0px",
     "backdropFilter": "blur(12px)",
     "zIndex": "9999"
   },

@@ -61,7 +61,7 @@ export function sessionDeleteFlow(input: {
 }): CloseFlow {
   if (input.isWorkspaceFinal) return { action: 'hide-window', steps: [] }
   const childCount = input.childCount ?? 0
-  const active = input.workStatus === 'running' || input.workStatus === 'starting' || input.workStatus === 'needs-input'
+  const active = input.workStatus === 'running' || input.workStatus === 'needs-input'
   if (!active && childCount === 0) return { action: 'silent', steps: [] }
   const activity = active ? '正在运行' : '当前空闲'
   const descendants = childCount > 0 ? `，并有 ${childCount} 个子会话` : ''

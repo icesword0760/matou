@@ -70,13 +70,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
 
+  // Runtime bytes can arrive during React's commit phase, before passive
+  // effects run. Keep focus authority synchronized with the latest render so
+  // late output from the previously active Session cannot reclaim focus.
+  visibleRef.current = visible
+  activeRef.current = active
+
   useEffect(() => { pendingInputRef.current = '' }, [sessionId])
 
   useEffect(() => {
-    visibleRef.current = visible
     if (visible) requestAnimationFrame(() => fitRef.current?.fit())
   }, [visible])
-  useEffect(() => { activeRef.current = active }, [active])
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
   useEffect(() => { onOscNotificationRef.current = onOscNotification }, [onOscNotification])

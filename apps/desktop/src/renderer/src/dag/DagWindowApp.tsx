@@ -12,8 +12,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   const [graph, setGraph] = useState<SessionGraphView | null>(fixtureGraph ?? null)
   const [initialTransform, setInitialTransform] = useState<DagTransform | undefined>(undefined)
   const [geometryReady, setGeometryReady] = useState(Boolean(fixtureGraph))
-  const geometryTimer = useRef<number | undefined>(undefined)
-  const pendingTransform = useRef<DagTransform | undefined>(undefined)
+  const latestTransform = useRef<DagTransform | undefined>(undefined)
   const layoutRevision = useRef(0)
   const graphSignature = useRef('')
   const [error, setError] = useState('')
@@ -55,7 +54,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     }).then((items) => {
       const stored = items.find(({ ownerKey }) => ownerKey === `dag-viewport:${context.sceneId}`)
       const value = stored?.geometry
-      if (stored) layoutRevision.current = stored.layoutRevision
+      if (stored) layoutRevision.current = Math.max(layoutRevision.current, stored.layoutRevision)
       if (typeof value?.panX === 'number' && typeof value.panY === 'number' && typeof value.zoom === 'number') {
         setInitialTransform({ x: value.panX, y: value.panY, scale: value.zoom })
       }
@@ -82,31 +81,31 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     window.addEventListener('keydown', keyDown)
     return () => window.removeEventListener('keydown', keyDown)
   }, [context.mainWindowId])
-  const flushGeometry = useCallback(() => {
-    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
-    geometryTimer.current = undefined
-    const value = pendingTransform.current
-    pendingTransform.current = undefined
-    if (!client || !value || fixtureGraph) return
-    void client.request('geometry.put', {
+  const flushGeometry = useCallback((value = latestTransform.current) => {
+    if (!client || !value || fixtureGraph) return Promise.resolve()
+    return client.request('geometry.put', {
       sceneId: context.sceneId,
       ownerKey: `dag-viewport:${context.sceneId}`,
       layoutRevision: layoutRevision.current,
       geometry: { panX: value.x, panY: value.y, zoom: value.scale },
       now: Date.now()
-    }).catch(() => {})
+    }).then(() => undefined).catch(() => undefined)
   }, [client, context.sceneId, fixtureGraph])
   useEffect(() => {
-    window.addEventListener('beforeunload', flushGeometry)
+    const flushBeforeUnload = () => { void flushGeometry() }
+    window.addEventListener('beforeunload', flushBeforeUnload)
     return () => {
-      window.removeEventListener('beforeunload', flushGeometry)
-      flushGeometry()
+      window.removeEventListener('beforeunload', flushBeforeUnload)
+      void flushGeometry()
     }
   }, [flushGeometry])
   const persistTransform = (value: DagTransform) => {
-    pendingTransform.current = value
-    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
-    geometryTimer.current = window.setTimeout(flushGeometry, 180)
+    latestTransform.current = value
+    // The DAG is a short-lived native window and users often close it directly
+    // after one zoom or pan gesture. Send every final transform to Runtime as the
+    // gesture happens so a native close cannot drop the last observation point.
+    // Geometry is deliberately outside the domain outbox, so this stays UI-only.
+    void flushGeometry(value)
   }
 
   if (!graph || !geometryReady) return <main className="dag-window dag-window-state" aria-label="会话 DAG">

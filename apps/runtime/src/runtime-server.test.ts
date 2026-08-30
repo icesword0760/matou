@@ -404,6 +404,20 @@ describe('RuntimeServer domain RPC', () => {
         sessionId: 'work-status-session', data: '\u0003'
       })
       await waitUntil(() => workStatus('work-status-session') === 'interrupted', 5_000)
+
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session',
+        data: "printf 'enter value: '; read -r value; printf 'VALUE:%s\\n' \"$value\"\r"
+      })
+      await waitUntil(() => terminalText(port).includes('enter value:'), 5_000)
+      await waitUntil(() => workStatus('work-status-session') === 'needs-input', 5_000)
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'work-status-session', data: 'confirmed\r'
+      })
+      await waitUntil(() => terminalText(port).includes('VALUE:confirmed'), 5_000)
+      await waitUntil(() => workStatus('work-status-session') === 'idle', 5_000)
     } finally {
       port.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,

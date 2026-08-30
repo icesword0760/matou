@@ -1496,7 +1496,7 @@ export class HierarchyApplicationService {
         'SELECT work_status FROM sessions WHERE id = ?', input.sessionId
       )?.work_status
       const requiresConfirmation = workspaceSessionCount === 1 || structuralChildCount > 0 ||
-        hasActiveWork === 'starting' || hasActiveWork === 'running' || hasActiveWork === 'needs-input'
+        hasActiveWork === 'running' || hasActiveWork === 'needs-input'
       if (
         requiresConfirmation &&
         input.confirmedIntent !== `delete-session:${input.sessionId}`

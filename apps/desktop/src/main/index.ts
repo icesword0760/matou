@@ -1,10 +1,10 @@
 import { mkdirSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
-import { basename, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
 
 import { RuntimeHost } from './runtime-host'
+import { resolveDefaultWorkspacePath } from './default-workspace-policy'
 import { claimSingleInstance } from './single-instance-policy'
 import { WindowManager } from './window-manager'
 import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
@@ -63,9 +63,8 @@ const primaryInstance = claimSingleInstance({
 
 async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
-  const defaultRootDirectory = process.env.MATOU_DEFAULT_WORKSPACE ?? app.getPath('home')
-  const defaultName = basename(defaultRootDirectory)
-  await mkdir(defaultRootDirectory, { recursive: true })
+  const { rootDirectory: defaultRootDirectory, name: defaultName } =
+    resolveDefaultWorkspacePath(process.env.MATOU_DEFAULT_WORKSPACE, app.getPath('home'))
   const window = new BrowserWindow({
     width: 1200,
     height: 780,

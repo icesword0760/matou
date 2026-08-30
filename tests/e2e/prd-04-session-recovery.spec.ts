@@ -69,6 +69,7 @@ test('hides and shows the main window without restarting its live terminal', asy
     )).toBe(true)
     await expect(surface).toHaveAttribute('data-pid', String(originalPid))
     await expect(surface.locator('.xterm-rows')).toContainText('975')
+    await expect(surface.locator('.xterm-helper-textarea')).toBeFocused()
     await typeTerminalCommand(surface, "printf '%s\\n' \"$((111 + 222))\"")
     await expect(surface.locator('.xterm-rows')).toContainText('333')
   } finally {

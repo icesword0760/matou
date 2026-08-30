@@ -143,6 +143,7 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
         checking = false
       }
     }
+    void checkPath().catch(() => {})
     const timer = window.setInterval(() => { void checkPath().catch(() => {}) }, 400)
     return () => window.clearInterval(timer)
   }, [client, fixture, projection?.navigation.activeWorkspaceId, refresh, windowId])
@@ -172,11 +173,19 @@ function HierarchyProduct({ projection, commands }: {
   })
   const [searchResults, setSearchResults] = useState({ resultIndex: 0, resultCount: 0 })
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
+  const [dagOpenError, setDagOpenError] = useState(false)
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
   useEffect(() => {
     const restoreTerminalFocus = () => setTerminalFocusRequest((value) => value + 1)
+    const restoreVisibleTerminalFocus = () => {
+      if (document.visibilityState === 'visible') restoreTerminalFocus()
+    }
     window.addEventListener('focus', restoreTerminalFocus)
-    return () => window.removeEventListener('focus', restoreTerminalFocus)
+    document.addEventListener('visibilitychange', restoreVisibleTerminalFocus)
+    return () => {
+      window.removeEventListener('focus', restoreTerminalFocus)
+      document.removeEventListener('visibilitychange', restoreVisibleTerminalFocus)
+    }
   }, [])
   const [branchDialog, setBranchDialog] = useState<{
     sceneId: string
@@ -300,12 +309,18 @@ function HierarchyProduct({ projection, commands }: {
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
     if (!activeSceneId || !focusedSessionId) return
-    void window.matouDesktop?.openDagWindow?.({
+    const request = window.matouDesktop?.openDagWindow?.({
       mainWindowId: projection.windowId,
       sceneId: activeSceneId,
       sessionId: focusedSessionId,
       theme: themeKey
     })
+    if (request === undefined) {
+      setDagOpenError(true)
+      return
+    }
+    setDagOpenError(false)
+    void Promise.resolve(request).catch(() => setDagOpenError(true))
   }
   useDagShortcut({
     enabled: Boolean(activeSceneId && focusedSessionId),
@@ -324,7 +339,9 @@ function HierarchyProduct({ projection, commands }: {
     if (!target) return
     setLevelParentByScene((current) => ({
       ...current,
-      [selection.sceneId]: target.parentSessionId
+      // An undefined value means "infer the level from the focused live node".
+      // A root historical selection instead needs an explicit root projection.
+      [selection.sceneId]: target.parentSessionId ?? null
     }))
     setRevealSessionByScene((current) => ({
       ...current,
@@ -357,7 +374,7 @@ function HierarchyProduct({ projection, commands }: {
                       candidate.sessionId === sessionId)
                     setLevelParentByScene((current) => ({
                       ...current,
-                      [sceneId]: node?.parentSessionId
+                      [sceneId]: node ? node.parentSessionId ?? null : undefined
                     }))
                     setTerminalFocusRequest((value) => value + 1)
                     setRevealSessionByScene((current) => ({
@@ -370,6 +387,11 @@ function HierarchyProduct({ projection, commands }: {
                     }))
                   }} />
                 <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
+        {dagOpenError && <div className="dag-open-error" role="alert">
+          <span>会话关系视图打开失败，当前会话列表和返回入口仍可继续使用。</span>
+          <button type="button" onClick={openDag}>重试打开 DAG</button>
+          <button type="button" aria-label="关闭 DAG 异常提示" onClick={() => setDagOpenError(false)}>×</button>
+        </div>}
         {task && <>
           <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
             onOpenDag={openDag} />
@@ -473,7 +495,7 @@ function HierarchyProduct({ projection, commands }: {
                         ? { geometry: snapshot.geometry as Array<{ ownerKey: string; geometry: Record<string, unknown> }> }
                         : {})}
                       onPutGeometry={(ownerKey, geometry) => commands.putGeometry(
-                        scene.id, ownerKey, scene.layoutRevision ?? 0, geometry
+                        scene.id, ownerKey, graph.layoutRevision ?? scene.layoutRevision ?? 0, geometry
                       )}
                       onActivate={(sessionId) => run(commands.setFocusedSession(scene.id, sessionId))}
                       onCreateShellSibling={(sessionId, parentSessionId) =>

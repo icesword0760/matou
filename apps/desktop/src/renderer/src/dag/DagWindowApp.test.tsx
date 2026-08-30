@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagWindowApp } from './DagWindowApp'
 
+const runtime = vi.hoisted(() => ({ current: null as null | { request: ReturnType<typeof vi.fn> } }))
+vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
+
 beforeEach(() => {
+  runtime.current = null
   window.history.replaceState({}, '', '/?kind=dag&mainWindowId=main-1&sceneId=scene-1&sessionId=child&theme=light')
   Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
     selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn(() => () => {})
@@ -42,6 +46,27 @@ describe('DagWindowApp', () => {
 
     expect(screen.getByText('feature/dag*')).toBeTruthy()
     expect(screen.getByText('共享工作树')).toBeTruthy()
+  })
+
+  it('persists every changed viewport before the short-lived native DAG can close', async () => {
+    const data = graph()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = { request }
+
+    render(<DagWindowApp />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+    request.mockClear()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '放大' }))
+
+    expect(request).toHaveBeenCalledWith('geometry.put', expect.objectContaining({
+      sceneId: 'scene-1', ownerKey: 'dag-viewport:scene-1',
+      geometry: expect.objectContaining({ zoom: 1.1 })
+    }))
   })
 })
 

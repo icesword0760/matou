@@ -133,14 +133,22 @@ export function SessionCanvas(props: {
       onAddShell={() => onCreateShellSibling(levelFocus.sessionId, parentId)}
       onAddForkSibling={() => parent && onCreateForkSibling(levelFocus, parent)} />
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
-      renderSession={(node, inViewport) => node.archivedAt === undefined
-        ? renderSession(node, inViewport)
-        : <HistoricalSessionCard node={node}
-            directChildCount={directChildren(graph, node.sessionId).length}
-            descendantCount={descendants(graph, node.sessionId).length}
-            onReopen={onReopenHistorical}
-            {...(onNavigateToChildren ? { onNavigateToChildren } : {})}
-            onRemove={onRemoveHistorical ?? NOOP_REMOVE} />}
+      renderSession={(node, inViewport) => {
+        if (node.archivedAt === undefined) return renderSession(node, inViewport)
+        const affected = descendants(graph, node.sessionId)
+          .map((sessionId) => graph.nodes.find((candidate) => candidate.sessionId === sessionId))
+          .filter((candidate): candidate is SessionGraphNodeView => candidate !== undefined)
+        return <HistoricalSessionCard node={node}
+          directChildCount={directChildren(graph, node.sessionId).length}
+          descendantCount={affected.length}
+          descendantImpact={{
+            running: affected.filter(({ workStatus }) => workStatus === 'running' || workStatus === 'starting').length,
+            needsInput: affected.filter(({ workStatus }) => workStatus === 'needs-input').length
+          }}
+          onReopen={onReopenHistorical}
+          {...(onNavigateToChildren ? { onNavigateToChildren } : {})}
+          onRemove={onRemoveHistorical ?? NOOP_REMOVE} />
+      }}
       onActivate={(sessionId) => {
         const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
         if (node?.archivedAt === undefined) onActivate(sessionId)

@@ -57,6 +57,21 @@ describe('SessionRepository', () => {
     })
   })
 
+  it('keeps a named branch title while its panel changes between Shell and Claude', () => {
+    sessions.createSession(command('named-shell-session'), {
+      id: 'named-shell-1', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'shell', title: '修复登录', now: 2
+    })
+
+    sessions.promoteShellToAgent(command('promote-named-agent'), 'named-shell-1', 'claude-code', 3)
+    expect(sessions.getSession('named-shell-1')).toMatchObject({
+      kind: 'claude-code', title: '修复登录'
+    })
+
+    sessions.returnAgentToShell(command('return-named-shell'), 'named-shell-1', 4)
+    expect(sessions.getSession('named-shell-1')).toMatchObject({ kind: 'shell', title: '修复登录' })
+  })
+
   it('keeps logical Session identity across multiple process runs', () => {
     sessions.createSession(command('session'), {
       id: 'session-1', taskId: 'task-1', executionContextId: 'context-1',
@@ -322,6 +337,21 @@ describe('SessionRepository', () => {
         metadata: expect.objectContaining({ invalidationReason: 'provider session not found' })
       })
     ])
+  })
+
+  it('keeps a named branch title when its provider resume fails', () => {
+    seedSession()
+    database.run(`UPDATE sessions SET title = '修复登录' WHERE id = 'session-1'`)
+    sessions.bindProvider(command('named-binding'), {
+      id: 'named-binding-1', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'named-provider-1', metadata: {}, now: 3
+    })
+
+    sessions.failResumeToShell(
+      command('named-resume-failed'), 'session-1', 'named-binding-1', 'missing', 4
+    )
+
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: '修复登录' })
   })
 
   it('persists the last confirmed working directory independently per Session', () => {

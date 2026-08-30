@@ -33,6 +33,13 @@ describe('destructive hierarchy copy', () => {
     })
   })
 
+  it('lets a newly starting leaf Session be cancelled without a running-work confirmation', () => {
+    expect(sessionDeleteFlow({
+      isWorkspaceFinal: false, taskName: '事项', sessionTitle: '新 Shell',
+      workStatus: 'starting', childCount: 0
+    })).toEqual({ action: 'silent', steps: [] })
+  })
+
   it('shows the affected work count before closing a busy non-final Scene', () => {
     expect(sceneCloseFlow({
       isLastScene: false, isLastTask: true, taskName: '事项',

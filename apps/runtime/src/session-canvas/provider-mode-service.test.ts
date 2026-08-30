@@ -157,6 +157,28 @@ describe('ProviderModeService', () => {
       .toMatchObject({ workStatus: 'running' })
   })
 
+  it('preserves the user-visible node name across Claude recovery and mode transitions', () => {
+    const initial = bootstrapClaudeTree({ canFork: false })
+    database.run(`UPDATE sessions SET title = 'same-visible-name' WHERE id = ?`, initial.parentSessionId)
+
+    expect(providerModes.markRestoreFailed(command('named-failed'), {
+      sessionId: initial.parentSessionId, bindingId: 'binding-parent', reason: 'missing', now: 30
+    }).session.title).toBe('same-visible-name')
+    expect(providerModes.retryRestore(command('named-retry'), {
+      sessionId: initial.parentSessionId, now: 31
+    }).session.title).toBe('same-visible-name')
+    expect(providerModes.markClaudeActive(command('named-active'), {
+      sessionId: initial.parentSessionId, bindingId: 'binding-parent', now: 32
+    }).session.title).toBe('same-visible-name')
+    expect(providerModes.observeHook(command('named-hook'), {
+      sessionId: initial.parentSessionId, providerSessionId: 'provider-parent',
+      eventName: 'UserPromptSubmit', now: 33
+    }).session.title).toBe('same-visible-name')
+    expect(providerModes.markUserExited(command('named-exit'), {
+      sessionId: initial.parentSessionId, now: 34
+    }).session.title).toBe('same-visible-name')
+  })
+
   it('replays a transition without incrementing versions or emitting a second event', () => {
     const initial = bootstrapClaudeTree()
     const input = { sessionId: initial.parentSessionId, now: 30 }

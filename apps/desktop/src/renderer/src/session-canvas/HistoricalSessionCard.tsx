@@ -7,11 +7,15 @@ export function HistoricalSessionCard(props: {
   node: SessionGraphNodeView
   directChildCount: number
   descendantCount: number
+  descendantImpact: { running: number; needsInput: number }
   onReopen(sessionId: string): void
   onNavigateToChildren?(sessionId: string): void
   onRemove(sessionId: string, includeDescendants: boolean): void
 }) {
-  const { node, directChildCount, descendantCount, onReopen, onNavigateToChildren, onRemove } = props
+  const {
+    node, directChildCount, descendantCount, descendantImpact,
+    onReopen, onNavigateToChildren, onRemove
+  } = props
   const [removeMode, setRemoveMode] = useState<'leaf' | 'branch' | null>(null)
   const isClaude = node.currentMode === 'claude-code'
   return <div className="historical-session-card">
@@ -41,7 +45,7 @@ export function HistoricalSessionCard(props: {
     }} />}
     {removeMode === 'branch' && <ConfirmationSequence steps={[{
       title: '移除整条分支',
-      body: `“${node.title}”下的 ${descendantCount} 个后代节点将一起从当前画布移除，运行中的会话也会结束。`,
+      body: `“${node.title}”下的 ${descendantCount} 个后代节点将一起从当前画布移除。${impactText(descendantImpact)}相关会话将结束。`,
       confirmLabel: '继续', cancelLabel: '取消'
     }, {
       title: '再次确认',
@@ -51,4 +55,12 @@ export function HistoricalSessionCard(props: {
       setRemoveMode(null); onRemove(node.sessionId, true)
     }} />}
   </div>
+}
+
+function impactText(impact: { running: number; needsInput: number }): string {
+  const items = [
+    impact.running > 0 ? `${impact.running} 个运行中` : '',
+    impact.needsInput > 0 ? `${impact.needsInput} 个待输入` : ''
+  ].filter(Boolean)
+  return items.length > 0 ? `其中 ${items.join('、')}，` : ''
 }

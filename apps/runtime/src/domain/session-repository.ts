@@ -568,7 +568,9 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell', title = 'Shell', work_status = 'error',
+         SET kind = 'shell',
+             title = CASE WHEN title IN ('Claude', 'Codex') OR title = id THEN 'Shell' ELSE title END,
+             work_status = 'error',
              updated_at = ?, last_activity_at = ?,
              version = version + 1
          WHERE id = ?`,
@@ -579,7 +581,7 @@ export class SessionRepository {
       const session = mapSession({
         ...before,
         kind: 'shell',
-        title: 'Shell',
+        title: genericShellTitle(before.title, before.id),
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1
@@ -606,7 +608,9 @@ export class SessionRepository {
       if (before.archived_at !== null) throw new Error('archived Session cannot return to Shell')
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell', title = 'Shell', work_status = 'idle',
+         SET kind = 'shell',
+             title = CASE WHEN title IN ('Claude', 'Codex') OR title = id THEN 'Shell' ELSE title END,
+             work_status = 'idle',
              updated_at = ?, last_activity_at = ?,
              version = version + 1
          WHERE id = ?`,
@@ -617,7 +621,7 @@ export class SessionRepository {
       const session = mapSession({
         ...before,
         kind: 'shell',
-        title: 'Shell',
+        title: genericShellTitle(before.title, before.id),
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1
@@ -639,10 +643,13 @@ export class SessionRepository {
         'Session'
       )
       if (before.archived_at !== null) throw new Error('archived Session cannot start an Agent')
-      const title = kind === 'claude-code' ? 'Claude' : 'Codex'
+      const title = before.title === 'Shell' || before.title === before.id
+        ? (kind === 'claude-code' ? 'Claude' : 'Codex')
+        : before.title
       tx.run(
         `UPDATE sessions
-         SET kind = ?, title = ?, work_status = 'starting', updated_at = ?,
+         SET kind = ?, title = CASE WHEN title = 'Shell' OR title = id THEN ? ELSE title END,
+             work_status = 'starting', updated_at = ?,
              last_activity_at = ?, version = version + 1
          WHERE id = ?`,
         kind,
@@ -773,6 +780,10 @@ function mapSession(row: SessionRow): Session {
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     version: row.version
   }
+}
+
+function genericShellTitle(title: string, sessionId: string): string {
+  return title === 'Claude' || title === 'Codex' || title === sessionId ? 'Shell' : title
 }
 
 function mapRun(row: RunRow): SessionRun {

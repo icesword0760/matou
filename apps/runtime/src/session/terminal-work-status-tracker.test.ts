@@ -19,4 +19,25 @@ describe('TerminalWorkStatusTracker', () => {
     expect(tracker.ingest('0\u001b\\prompt')).toEqual(['idle'])
     expect(tracker.ingest('more prompt')).toEqual([])
   })
+
+  it('recognizes an explicit blocking Shell prompt without guessing from generic input calls', () => {
+    const tracker = new TerminalWorkStatusTracker()
+
+    expect(tracker.ingest('\u001b]133;C\u0007')).toEqual(['running'])
+    expect(tracker.ingest("printf 'enter value: '; read -r value\r\n")).toEqual([])
+    expect(tracker.ingest('enter ')).toEqual([])
+    expect(tracker.ingest('value: ')).toEqual(['needs-input'])
+
+    const generic = new TerminalWorkStatusTracker()
+    expect(generic.ingest('\u001b]133;C\u0007')).toEqual(['running'])
+    expect(generic.ingest("python3 -c 'input()'\r\n")).toEqual([])
+  })
+
+  it('recognizes common confirmation and secret prompts only at the live line boundary', () => {
+    const tracker = new TerminalWorkStatusTracker()
+
+    expect(tracker.ingest('Password: ')).toEqual(['needs-input'])
+    expect(tracker.ingest('continue? [y/N] ')).toEqual(['needs-input'])
+    expect(tracker.ingest('Password: accepted\r\n')).toEqual([])
+  })
 })
