@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -9,12 +9,18 @@ import { DagWindowApp } from './DagWindowApp'
 
 const runtime = vi.hoisted(() => ({ current: null as null | { request: ReturnType<typeof vi.fn> } }))
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
+let runtimeConnectionListener: ((state: 'reconnecting' | 'ready') => void) | undefined
 
 beforeEach(() => {
   runtime.current = null
+  runtimeConnectionListener = undefined
   window.history.replaceState({}, '', '/?kind=dag&mainWindowId=main-1&sceneId=scene-1&sessionId=child&theme=light')
   Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
-    selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn(() => () => {})
+    selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn(() => () => {}),
+    onRuntimeConnectionState: vi.fn((listener) => {
+      runtimeConnectionListener = listener
+      return () => { runtimeConnectionListener = undefined }
+    })
   } })
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
   vi.stubGlobal('cancelAnimationFrame', vi.fn())
@@ -46,6 +52,16 @@ describe('DagWindowApp', () => {
 
     expect(screen.getByText('feature/dag*')).toBeTruthy()
     expect(screen.getByText('共享工作树')).toBeTruthy()
+  })
+
+  it('keeps the last DAG visible while clearly saying that Runtime information is temporarily stale', () => {
+    render(<DagWindowApp fixtureGraph={graph()} />)
+
+    act(() => runtimeConnectionListener?.('reconnecting'))
+
+    expect(screen.getByRole('application', { name: '会话 DAG 画布' })).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toContain('会话信息暂时未更新')
+    expect(screen.getByRole('status').textContent).toContain('正在重新连接')
   })
 
   it('persists every changed viewport before the short-lived native DAG can close', async () => {

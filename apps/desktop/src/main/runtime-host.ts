@@ -1,14 +1,17 @@
 import { MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron'
 
 import { PROTOCOL_VERSION, type RuntimeConnectRequest } from '@matou/contracts'
+import { DESKTOP_CHANNELS, type RuntimeConnectionState } from '../shared/desktop-api'
 
 export class RuntimeHost {
   readonly #runtimeEntry: string
   readonly #renderers = new Set<WebContents>()
   #child: UtilityProcess | undefined
   #restartTimer: ReturnType<typeof setTimeout> | undefined
+  #recoveryReadyTimer: ReturnType<typeof setTimeout> | undefined
   #stopping = false
   #stopPromise: Promise<void> | undefined
+  #connectionState: RuntimeConnectionState = 'ready'
 
   constructor(runtimeEntry: string) {
     this.#runtimeEntry = runtimeEntry
@@ -46,13 +49,18 @@ export class RuntimeHost {
         if (code !== 0) {
           console.error(`Matou Runtime exited with code ${code}`)
         }
-        if (!this.#stopping) this.#scheduleRestart()
+        if (!this.#stopping) {
+          this.#markReconnecting()
+          this.#scheduleRestart()
+        }
       })
     })
   }
 
   connect(webContents: WebContents): void {
     this.#renderers.add(webContents)
+    this.#sendConnectionState(webContents)
+    if (!this.#child) return
     this.#connectRenderer(webContents)
   }
 
@@ -75,7 +83,9 @@ export class RuntimeHost {
     if (this.#stopPromise) return this.#stopPromise
     this.#stopping = true
     if (this.#restartTimer) clearTimeout(this.#restartTimer)
+    if (this.#recoveryReadyTimer) clearTimeout(this.#recoveryReadyTimer)
     this.#restartTimer = undefined
+    this.#recoveryReadyTimer = undefined
     const child = this.#child
     if (!child) return Promise.resolve()
     this.#stopPromise = new Promise<void>((resolve) => {
@@ -105,9 +115,29 @@ export class RuntimeHost {
         }
         this.#connectRenderer(renderer)
       }
+      this.#recoveryReadyTimer = setTimeout(() => {
+        this.#recoveryReadyTimer = undefined
+        this.#setConnectionState('ready')
+      }, 1_000)
     } catch (error) {
       console.error('Matou Runtime restart failed', error)
       this.#scheduleRestart()
     }
+  }
+
+  #markReconnecting(): void {
+    if (this.#recoveryReadyTimer) clearTimeout(this.#recoveryReadyTimer)
+    this.#recoveryReadyTimer = undefined
+    this.#setConnectionState('reconnecting')
+  }
+
+  #setConnectionState(state: RuntimeConnectionState): void {
+    this.#connectionState = state
+    for (const renderer of this.#renderers) this.#sendConnectionState(renderer)
+  }
+
+  #sendConnectionState(webContents: WebContents): void {
+    if (webContents.isDestroyed()) return
+    webContents.send(DESKTOP_CHANNELS.runtimeConnectionState, this.#connectionState)
   }
 }

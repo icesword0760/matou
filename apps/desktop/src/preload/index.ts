@@ -1,12 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-import type { MatouDesktopApi } from '../shared/desktop-api'
+import type { MatouDesktopApi, RuntimeConnectionState } from '../shared/desktop-api'
 import { DESKTOP_CHANNELS } from '../shared/desktop-api'
 
 const PORT_CHANNEL = 'matou:terminal-port'
 const RENDERER_READY = 'matou:renderer-ready'
 let pendingPort: MessagePort | undefined
 let rendererReady = false
+let runtimeConnectionState: RuntimeConnectionState = 'ready'
+const runtimeConnectionListeners = new Set<(state: RuntimeConnectionState) => void>()
 
 function deliverPort(): void {
   if (!rendererReady || !pendingPort) {
@@ -25,6 +27,10 @@ ipcRenderer.on(PORT_CHANNEL, (event) => {
   pendingPort?.close()
   pendingPort = port
   deliverPort()
+})
+ipcRenderer.on(DESKTOP_CHANNELS.runtimeConnectionState, (_event, state: RuntimeConnectionState) => {
+  runtimeConnectionState = state
+  for (const listener of runtimeConnectionListeners) listener(state)
 })
 
 window.addEventListener('message', (event) => {
@@ -64,6 +70,11 @@ const desktopApi: MatouDesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
     ipcRenderer.on(DESKTOP_CHANNELS.dagShortcut, handler)
     return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.dagShortcut, handler)
+  },
+  onRuntimeConnectionState: (listener) => {
+    runtimeConnectionListeners.add(listener)
+    listener(runtimeConnectionState)
+    return () => runtimeConnectionListeners.delete(listener)
   }
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)

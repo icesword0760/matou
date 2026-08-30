@@ -41,6 +41,7 @@ describe('RuntimeHost', () => {
     expect(renderer.messages).toHaveLength(1)
 
     ;(electron.children[0] as MockUtilityProcess).emit('exit', 9)
+    expect(renderer.signals).toContainEqual(['matou:runtime-connection-state', 'reconnecting'])
     await vi.advanceTimersByTimeAsync(100)
     expect(electron.children).toHaveLength(2)
     ;(electron.children[1] as MockUtilityProcess).emit('spawn')
@@ -48,10 +49,30 @@ describe('RuntimeHost', () => {
 
     expect(renderer.messages).toHaveLength(2)
     expect(renderer.messages[1]!.ports[0]).not.toBe(renderer.messages[0]!.ports[0])
+    expect(renderer.signals).toContainEqual(['matou:runtime-connection-state', 'ready'])
     host.stop()
     ;(electron.children[1] as MockUtilityProcess).emit('exit', 0)
     await vi.runAllTimersAsync()
     expect(electron.children).toHaveLength(2)
+  })
+
+  it('keeps a Renderer opened during recovery registered and tells it that information is stale', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    ;(electron.children[0] as MockUtilityProcess).emit('spawn')
+    await starting
+    ;(electron.children[0] as MockUtilityProcess).emit('exit', 9)
+
+    const renderer = new MockWebContents()
+    expect(() => host.connect(renderer as never)).not.toThrow()
+    expect(renderer.messages).toHaveLength(0)
+    expect(renderer.signals).toContainEqual(['matou:runtime-connection-state', 'reconnecting'])
+
+    await vi.advanceTimersByTimeAsync(100)
+    ;(electron.children[1] as MockUtilityProcess).emit('spawn')
+    await vi.runAllTimersAsync()
+    expect(renderer.messages).toHaveLength(1)
+    expect(renderer.signals).toContainEqual(['matou:runtime-connection-state', 'ready'])
   })
 
   it('does not report shutdown complete until the Runtime has flushed and exited', async () => {
@@ -82,8 +103,10 @@ class MockUtilityProcess extends EventEmitter {
 
 class MockWebContents {
   readonly messages: Array<{ channel: string; ports: unknown[] }> = []
+  readonly signals: Array<[string, unknown]> = []
   postMessage(channel: string, _message: unknown, ports: unknown[]): void {
     this.messages.push({ channel, ports })
   }
+  send(channel: string, value: unknown): void { this.signals.push([channel, value]) }
   isDestroyed(): boolean { return false }
 }
