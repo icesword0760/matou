@@ -116,6 +116,30 @@ body {
   background-color: rgb(104 114 128 / 24%);
 }
 
+/* xterm 6 renders its visible history scrollbar as DOM rather than the native
+   viewport scrollbar. Keep the interactive strip usable while reducing the
+   painted thumb so it cannot read as a card-height shadow. */
+.terminal-surface .xterm-scrollable-element > .scrollbar.vertical {
+  right: 0 !important;
+  width: 5px !important;
+  background: transparent !important;
+}
+
+.terminal-surface .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  left: 1px !important;
+  width: 3px !important;
+  border-radius: 999px;
+  background-color: transparent !important;
+}
+
+.terminal-surface:hover .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  background-color: rgb(255 255 255 / 22%) !important;
+}
+
+.terminal-surface[data-theme="light"]:hover .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  background-color: rgb(104 114 128 / 24%) !important;
+}
+
 .smoke-marker {
   min-height: 14px;
 }

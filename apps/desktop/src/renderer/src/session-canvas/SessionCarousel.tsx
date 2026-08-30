@@ -45,6 +45,8 @@ export function SessionCarousel(props: {
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
   const hoverIntentSessionId = useRef<string | null>(null)
+  const hoverRef = useRef<(sessionId: string | null) => void>(() => undefined)
+  const pointerPosition = useRef<{ x: number; y: number } | null>(null)
   const wheelGesture = useRef(false)
   const userScrollUntil = useRef(0)
   const focusScrollUntil = useRef(0)
@@ -281,6 +283,16 @@ export function SessionCarousel(props: {
     }
     return true
   }
+  const resumeHoverAtPointer = () => {
+    const viewport = viewportRef.current
+    const pointer = pointerPosition.current
+    if (!viewport || !pointer || typeof document.elementFromPoint !== 'function') return
+    const hit = document.elementFromPoint(pointer.x, pointer.y) as HTMLElement | null
+    const card = hit?.closest<HTMLElement>('[data-session-card]')
+    if (!card || !viewport.contains(card)) return
+    const sessionId = card.dataset.sessionCard
+    if (sessionId) hoverRef.current(sessionId)
+  }
   const markScrolling = (userInitiated = false) => {
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
@@ -322,7 +334,13 @@ export function SessionCarousel(props: {
     }
     if (continuousScroll) {
       if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
-      scrollTimer.current = window.setTimeout(() => setScrolling(false), 120)
+      scrollTimer.current = window.setTimeout(() => {
+        setScrolling(false)
+        // Horizontal movement changes which card sits below a stationary
+        // pointer. Browsers do not emit mouseenter for that layout-only hit
+        // target change, so resolve it explicitly when kinetic scrolling ends.
+        resumeHoverAtPointer()
+      }, 120)
     }
   }
   const hover = (sessionId: string | null) => {
@@ -350,6 +368,7 @@ export function SessionCarousel(props: {
     focusScrollUntil.current = 0
     setHoveredSessionId(sessionId)
   }
+  hoverRef.current = hover
   const finishPullGesture = () => {
     const viewport = viewportRef.current
     if (!viewport) return
@@ -436,6 +455,7 @@ export function SessionCarousel(props: {
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    pointerPosition.current = { x: event.clientX, y: event.clientY }
     const gesture = pointerGesture.current
     const viewport = viewportRef.current
     if (!gesture || !viewport || gesture.id !== event.pointerId) return
@@ -475,7 +495,13 @@ export function SessionCarousel(props: {
       data-visible-columns={visibleCount} onScroll={() => markScrolling()}
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
-      onPointerLeave={() => hover(null)}
+      onPointerEnter={(event) => {
+        pointerPosition.current = { x: event.clientX, y: event.clientY }
+      }}
+      onPointerLeave={() => {
+        pointerPosition.current = null
+        hover(null)
+      }}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
       {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)

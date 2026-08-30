@@ -64,13 +64,15 @@ test.describe('session canvas basics with real PTYs', () => {
       await expect(surface.locator('.xterm-rows')).toContainText('SCROLLBAR_120')
       await surface.hover()
 
-      const scrollbar = await surface.locator('.xterm-viewport').evaluate((element) => ({
-        width: getComputedStyle(element, '::-webkit-scrollbar').width,
-        track: getComputedStyle(element, '::-webkit-scrollbar-track').backgroundColor,
-        thumb: getComputedStyle(element, '::-webkit-scrollbar-thumb').backgroundColor
+      const scrollbar = await surface.locator('.xterm-scrollable-element > .scrollbar.vertical').evaluate((element) => ({
+        width: getComputedStyle(element).width,
+        track: getComputedStyle(element).backgroundColor,
+        thumbWidth: getComputedStyle(element.querySelector<HTMLElement>('.slider')!).width,
+        thumb: getComputedStyle(element.querySelector<HTMLElement>('.slider')!).backgroundColor
       }))
 
       expect(parseFloat(scrollbar.width)).toBeLessThanOrEqual(6)
+      expect(parseFloat(scrollbar.thumbWidth)).toBeLessThanOrEqual(4)
       expect(scrollbar.track).toBe('rgba(0, 0, 0, 0)')
       expect(scrollbar.thumb).not.toBe('rgb(221, 221, 221)')
     } finally {

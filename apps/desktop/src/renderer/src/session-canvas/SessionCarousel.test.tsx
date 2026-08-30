@@ -198,6 +198,37 @@ describe('SessionCarousel', () => {
     expect(viewport.scrollLeft).toBe(240)
   })
 
+  it('expands the card that settles under a stationary pointer after scrolling stops', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const target = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 1_800 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+    const originalElementFromPoint = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => target)
+    })
+
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 500, clientY: 240 })
+    fireEvent.wheel(viewport, { deltaX: 240, deltaY: 0 })
+    expect(target.classList.contains('is-expanded')).toBe(false)
+
+    act(() => vi.advanceTimersByTime(120))
+    expect(target.classList.contains('is-expanded')).toBe(true)
+
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint
+    })
+    vi.useRealTimers()
+  })
+
   it('starts a single expansion immediately on pointer entry', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"

@@ -72,6 +72,37 @@ test.describe('horizontal sibling navigation', () => {
     }
   })
 
+  test('expands the new card under a stationary pointer when horizontal scrolling stops', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 5; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await carousel.evaluate((element) => { element.scrollLeft = 0 })
+      const box = await carousel.boundingBox()
+      expect(box).not.toBeNull()
+      const point = { x: box!.x + box!.width * 0.7, y: box!.y + 120 }
+      await fixture.page.mouse.move(point.x, point.y)
+      const cardAtPoint = async () => fixture.page.evaluate(({ x, y }) =>
+        (document.elementFromPoint(x, y)?.closest('[data-session-card]') as HTMLElement | null)
+          ?.dataset.sessionCard, point)
+      const before = await cardAtPoint()
+      expect(before).toBeTruthy()
+
+      await fixture.page.mouse.wheel(700, 0)
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
+      const after = await expect.poll(cardAtPoint).not.toBe(before)
+      void after
+      const settled = await cardAtPoint()
+      expect(settled).toBeTruthy()
+      await expect(fixture.page.locator(`[data-session-card="${settled}"]`)).toHaveClass(/is-expanded/)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('moves both directions when the native horizontal gesture starts over a real terminal', async () => {
     const fixture = await launchSessionCanvas()
     try {
