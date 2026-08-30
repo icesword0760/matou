@@ -32,6 +32,17 @@ export async function restartMatou(
   return startMatou(fixture.rootDirectory, options)
 }
 
+export async function restartMatouGracefully(
+  fixture: MatouFixture,
+  options: LaunchMatouOptions = {}
+): Promise<MatouFixture> {
+  await Promise.all([
+    fixture.app.waitForEvent('close'),
+    fixture.app.evaluate(({ app }) => { app.quit() })
+  ])
+  return startMatou(fixture.rootDirectory, options)
+}
+
 async function startMatou(root: string, options: LaunchMatouOptions = {}): Promise<MatouFixture> {
   const dataDirectory = join(root, 'data')
   const workspaceDirectory = join(root, 'matou_workspace')

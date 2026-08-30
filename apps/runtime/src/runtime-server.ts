@@ -917,11 +917,32 @@ export class RuntimeServer {
             }
           }
         },
-        onExit: (exited, exitCode, signal) => {
+        onExit: (exited, exitCode, signal, exitReason) => {
           this.#flushSessionSummary(message.sessionId)
           this.#clearProviderResumeTimer(message.sessionId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
           hookRegistration?.retire()
+          if (exitReason === 'runtime-shutdown') {
+            this.#sessions.delete(message.sessionId, exited)
+            this.#control?.backend.unregister(message.sessionId, exited)
+            this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
+            if (exited.runId) {
+              try {
+                this.#sessionRepository.finishRun(
+                  {
+                    commandId: `runtime-shutdown-${exited.runId}`,
+                    commandType: 'session.run-exit',
+                    requestHash: `shutdown:${exited.runId}:${exited.pid}`
+                  },
+                  exited.runId,
+                  { exitCode, ...(signal === undefined ? {} : { signal }), now: Date.now() }
+                )
+              } catch (error) {
+                console.error(`[session.run-shutdown] ${errorMessage(error)}`)
+              }
+            }
+            return false
+          }
           const resumeExitFallback = Boolean(
             resumeBinding &&
             resumeMonitor?.isMonitoring &&

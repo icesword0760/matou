@@ -23,7 +23,12 @@ interface PtySessionOptions {
   settingsPath?: string
   env?: Record<string, string>
   send: (message: RuntimeMessage) => void
-  onExit?: (session: PtySession, exitCode: number, signal?: number) => boolean | void
+  onExit?: (
+    session: PtySession,
+    exitCode: number,
+    signal?: number,
+    reason?: 'runtime-shutdown'
+  ) => boolean | void
   onOutput?: (data: string) => void
   runId?: string
 }
@@ -40,7 +45,12 @@ export class PtySession {
   readonly #journal: SegmentJournal
   #send: ((message: RuntimeMessage) => void) | undefined
   #creditWindow: CreditWindow
-  readonly #onExit: ((session: PtySession, exitCode: number, signal?: number) => boolean | void) | undefined
+  readonly #onExit: ((
+    session: PtySession,
+    exitCode: number,
+    signal?: number,
+    reason?: 'runtime-shutdown'
+  ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
 
@@ -48,6 +58,7 @@ export class PtySession {
   #writeChain = Promise.resolve()
   #disposed = false
   #notifyExit = true
+  #exitReason: 'runtime-shutdown' | undefined
   #pendingReplayFrom: number | undefined
   readonly #closed: Promise<void>
   #resolveClosed: () => void = () => {}
@@ -154,11 +165,15 @@ export class PtySession {
     }
   }
 
-  dispose(options: { notifyExit?: boolean } = {}): void {
+  dispose(options: {
+    notifyExit?: boolean
+    reason?: 'runtime-shutdown'
+  } = {}): void {
     if (this.#disposed) {
       return
     }
     this.#notifyExit = options.notifyExit ?? true
+    this.#exitReason = options.reason
     this.#disposed = true
     this.#pty.kill()
   }
@@ -183,8 +198,9 @@ export class PtySession {
     this.#writeChain = this.#writeChain.then(async () => {
       await this.#journal.appendExit(sequence, exitCode, signal)
       await this.#journal.close()
-      const allowNotification = this.#onExit?.(this, exitCode, signal) !== false
-      this.#resolveClosed()
+      const allowNotification = this.#onExit?.(
+        this, exitCode, signal, this.#exitReason
+      ) !== false
       if (!this.#notifyExit || !allowNotification) return
       if (!this.#send) {
         return
@@ -202,7 +218,7 @@ export class PtySession {
         exitCode,
         ...(signal === undefined ? {} : { signal })
       })
-    })
+    }).finally(() => this.#resolveClosed())
   }
 
   #sendOutput(sequence: number, bytes: Uint8Array): void {

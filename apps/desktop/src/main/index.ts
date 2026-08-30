@@ -22,6 +22,8 @@ const browserWindows = new Map<string, BrowserWindow>()
 const dagBrowserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
+let runtimeShutdownComplete = false
+let runtimeShutdownPromise: Promise<void> | undefined
 let mainWindowSequence = 0
 
 if (process.env.ELECTRON_USER_DATA_DIR) {
@@ -323,8 +325,13 @@ app.on('before-quit', () => {
   tray?.destroy()
 })
 
-app.on('will-quit', () => {
-  runtimeHost?.stop()
+app.on('will-quit', (event) => {
+  if (runtimeShutdownComplete || !runtimeHost) return
+  event.preventDefault()
+  runtimeShutdownPromise ??= runtimeHost.stop().then(() => {
+    runtimeShutdownComplete = true
+    app.quit()
+  })
 })
 
 app.on('window-all-closed', () => {

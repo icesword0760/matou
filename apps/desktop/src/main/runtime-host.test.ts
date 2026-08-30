@@ -53,6 +53,24 @@ describe('RuntimeHost', () => {
     await vi.runAllTimersAsync()
     expect(electron.children).toHaveLength(2)
   })
+
+  it('does not report shutdown complete until the Runtime has flushed and exited', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn')
+    await starting
+
+    let stopped = false
+    const stopping = host.stop().then(() => { stopped = true })
+    expect(child.kill).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    expect(stopped).toBe(false)
+
+    child.emit('exit', 0)
+    await stopping
+    expect(stopped).toBe(true)
+  })
 })
 
 class MockUtilityProcess extends EventEmitter {

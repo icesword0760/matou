@@ -155,21 +155,29 @@ async function initializeRuntime(): Promise<RuntimeState> {
 }
 
 let shutdownStarted = false
-function shutdown(): void {
-  if (shutdownStarted) return
+let shutdownPromise: Promise<void> | undefined
+function shutdown(): Promise<void> {
+  if (shutdownPromise) return shutdownPromise
   shutdownStarted = true
-  for (const server of servers) server.close()
-  servers.clear()
-  sessions.disposeAll()
-  runtimeState?.providerHooks.stop()
-  runtimeState?.hostControl.stop()
-  runtimeState?.database.close()
+  shutdownPromise = (async () => {
+    for (const server of servers) server.close()
+    servers.clear()
+    await sessions.shutdownAll()
+    await runtimeState?.providerHooks.stop()
+    await runtimeState?.hostControl.stop()
+    runtimeState?.database.close()
+  })()
+  return shutdownPromise
 }
 process.once('SIGTERM', () => {
-  shutdown()
-  process.exit(0)
+  void shutdown().then(
+    () => process.exit(0),
+    (error) => {
+      console.error('[runtime.shutdown]', error)
+      process.exit(1)
+    }
+  )
 })
-process.once('exit', shutdown)
 
 parentPort.on('message', async (event) => {
   const request = event.data as Partial<RuntimeConnectRequest>

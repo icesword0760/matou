@@ -8,6 +8,7 @@ export class RuntimeHost {
   #child: UtilityProcess | undefined
   #restartTimer: ReturnType<typeof setTimeout> | undefined
   #stopping = false
+  #stopPromise: Promise<void> | undefined
 
   constructor(runtimeEntry: string) {
     this.#runtimeEntry = runtimeEntry
@@ -70,12 +71,20 @@ export class RuntimeHost {
     webContents.postMessage('matou:terminal-port', { protocolVersion: PROTOCOL_VERSION }, [port2])
   }
 
-  stop(): void {
+  stop(): Promise<void> {
+    if (this.#stopPromise) return this.#stopPromise
     this.#stopping = true
     if (this.#restartTimer) clearTimeout(this.#restartTimer)
     this.#restartTimer = undefined
-    this.#child?.kill()
-    this.#child = undefined
+    const child = this.#child
+    if (!child) return Promise.resolve()
+    this.#stopPromise = new Promise<void>((resolve) => {
+      child.once('exit', () => resolve())
+      child.kill()
+    }).finally(() => {
+      if (this.#child === child) this.#child = undefined
+    })
+    return this.#stopPromise
   }
 
   #scheduleRestart(): void {

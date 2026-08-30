@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import { restartMatou } from './matou-fixture'
+import { restartMatou, restartMatouGracefully } from './matou-fixture'
 import {
   activeSurface, launchSessionCanvas, terminalCommand, visibleSurfaces
 } from './fixtures/session-canvas-fixture'
@@ -57,4 +57,37 @@ test.describe('session canvas lifecycle', () => {
       await fixture.close()
     }
   })
+
+  test('keeps completed Shell output and idle state after a graceful app quit', async () => {
+    let fixture = await launchSessionCanvas()
+    try {
+      const first = activeSurface(fixture.page)
+      const firstId = await first.getAttribute('data-session-id')
+      await terminalCommand(first, "printf 'GRACEFUL_FIRST\\n'")
+      await expect.poll(() => occurrences(first, 'GRACEFUL_FIRST')).toBeGreaterThanOrEqual(2)
+
+      await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+      const second = activeSurface(fixture.page)
+      const secondId = await second.getAttribute('data-session-id')
+      await terminalCommand(second, "printf 'GRACEFUL_SECOND\\n'")
+      await expect.poll(() => occurrences(second, 'GRACEFUL_SECOND')).toBeGreaterThanOrEqual(2)
+
+      fixture = { ...await restartMatouGracefully(fixture), nonGitDirectory: fixture.nonGitDirectory }
+      const restored = visibleSurfaces(fixture.page)
+      await expect(restored).toHaveCount(2)
+      const restoredFirst = fixture.page.locator(`.terminal-surface[data-session-id="${firstId}"]`)
+      const restoredSecond = fixture.page.locator(`.terminal-surface[data-session-id="${secondId}"]`)
+      await expect(restoredFirst.locator('.xterm-rows')).toContainText('GRACEFUL_FIRST')
+      await expect(restoredSecond.locator('.xterm-rows')).toContainText('GRACEFUL_SECOND')
+      await expect(restoredFirst.locator('.xterm-rows')).not.toContainText('上次命令已中断')
+      await expect(restoredSecond.locator('.xterm-rows')).not.toContainText('上次命令已中断')
+    } finally {
+      await fixture.close()
+    }
+  })
 })
+
+async function occurrences(surface: ReturnType<typeof activeSurface>, marker: string): Promise<number> {
+  return ((await surface.locator('.xterm-rows').textContent()) ?? '').split(marker).length - 1
+}
