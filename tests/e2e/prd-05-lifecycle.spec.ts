@@ -131,6 +131,12 @@ test('persists Task order and each canvas horizontal position across restart', a
     const savedFocusedViewportOffset = await focusedCardViewportOffset(page, focusedSessionId!)
 
     fixture = await restartMatou(fixture)
+    // The new native window may open underneath the physical pointer even
+    // though no hover was part of this journey. Move it back to window chrome
+    // so the intentional hover-to-expand behavior is not confused with
+    // persisted canvas geometry.
+    await fixture.page.mouse.move(5, 5)
+    await expect(fixture.page.locator('.session-card-slot.is-expanded')).toHaveCount(0)
     await expect.poll(() => taskTitles(fixture.page)).toEqual(['默认', '新事项 2', '新事项'])
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项 2')
     await expect.poll(async () => Math.abs(
