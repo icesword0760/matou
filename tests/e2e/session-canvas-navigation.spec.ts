@@ -146,6 +146,47 @@ test.describe('horizontal sibling navigation', () => {
     }
   })
 
+  test('reaches the far left while the pointer remains over an expanded right card', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 3; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await carousel.evaluate((element) => {
+        element.scrollLeft = element.scrollWidth - element.clientWidth
+      })
+      await fixture.page.waitForTimeout(150)
+      const viewportBox = await carousel.boundingBox()
+      expect(viewportBox).not.toBeNull()
+      const point = {
+        x: viewportBox!.x + viewportBox!.width - 80,
+        y: viewportBox!.y + 100
+      }
+      const rightCardId = await fixture.page.evaluate(({ x, y }) =>
+        (document.elementFromPoint(x, y)?.closest('[data-session-card]') as HTMLElement | null)
+          ?.dataset.sessionCard, point)
+      expect(rightCardId).toBeTruthy()
+      const rightCardSlot = fixture.page.locator(`.session-card-slot[data-session-id="${rightCardId}"]`)
+      await fixture.page.mouse.move(point.x, point.y)
+      await expect(rightCardSlot).toHaveClass(/is-expanded/)
+      await expect(fixture.page.locator('.session-card-slot.is-focused')).toHaveClass(/is-expanded/)
+      const rightEdge = await carousel.evaluate((element) => element.scrollLeft)
+      expect(rightEdge).toBeGreaterThan(0)
+
+      for (let index = 0; index < 6; index += 1) {
+        await fixture.page.mouse.wheel(-360, 0)
+        await fixture.page.waitForTimeout(40)
+      }
+      await fixture.page.waitForTimeout(500)
+
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThanOrEqual(1)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('keeps the same viewport after repeatedly previewing cards without clicking', async () => {
     const fixture = await launchSessionCanvas()
     try {

@@ -395,6 +395,13 @@ export function SessionCarousel(props: {
       focusVisibilitySessionId.current = null
       if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
       focusVisibilityFrame.current = undefined
+      // Direct trackpad/mouse movement owns the viewport. A hover preview may
+      // still hand its expanded width to the card now under the stationary
+      // pointer, but its edge-follow animation must not pull the strip back
+      // toward the card the user is deliberately scrolling away from.
+      hoverVisibilitySessionId.current = null
+      if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
+      hoverVisibilityFrame.current = undefined
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
       hoverRestoreTimer.current = undefined
       hoverBaselineScrollLeft.current = undefined
@@ -443,7 +450,10 @@ export function SessionCarousel(props: {
       hoverBaselineScrollLeft.current = viewportRef.current?.scrollLeft ?? 0
     }
     setHoveredSessionId(sessionId)
-    keepHoveredCardFullyVisible(sessionId)
+    // During a live horizontal gesture, retargeting is visual only. Starting
+    // an automatic visibility correction here would compete with the next
+    // wheel delta and can leave the user stuck before the far edge.
+    if (!wheelGesture.current) keepHoveredCardFullyVisible(sessionId)
   }
   hoverRef.current = hover
   const finishPullGesture = () => {
