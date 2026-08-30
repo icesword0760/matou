@@ -1,198 +1,187 @@
 # Matou 会话画布与 DAG 分支交互—独立黑盒执行记录
 
-## 1. 结论
+## 1. 验收结论
 
-- **102 条均已有结果：PASS 26 / FAIL 49 / BLOCKED 27。**
-- 当前版本能够完成默认 Shell、多画布、横向同级 Shell、真实 Claude 模式进入/主动退出/再次进入、独立 DAG、部分排序和完整退出不重跑。
-- 核心用户旅程仍未闭环：真实 Fork 子节点出现 `provider session not found`；状态长期误报运行中；右拉分段、DAG跳转定位、运行画布关闭确认/历史恢复、观察位置持久化存在失败。
-- 本轮只做 UI 与真实外部行为验收，没有读取/修改产品实现代码、没有改数据库、没有使用 mock/fake provider。
+- **102 条逐条完成记录：PASS 66 / FAIL 25 / BLOCKED 11。**
+- 受测对象：`Matou.app`，分支 `feature/session-dag-canvas`，提交 `811aec29c923c73c1f1e415b4d751717dc2fc480`。
+- 真实 Fork、当前/新工作树、上下文继承、Shell/Claude 混排、Shell 状态、主动 `/exit` 后重启等核心阻断已修复。
+- 当前仍不满足发布门槛：DAG 跳转/观察持久化、100节点性能、历史移除、恢复重试、独立窗关闭、窗口重开焦点和若干布局交互仍影响完整旅程。
 
-## 2. 测试对象与环境
+## 2. 环境与隔离
 
 | 项目 | 值 |
 |---|---|
 | App | `.worktrees/session-dag-canvas/apps/desktop/release/mac-arm64/Matou.app` |
-| Git commit | `a07c09a60ca98653069fb4678b106b05b46726fc` |
-| 系统 | macOS 15.7.4 (24G517), arm64 |
-| 显示器 | 1920×1080 单显示器 |
-| 隔离根 | `/tmp/matou-independent-qa-20260830/` |
-| Claude | 真实 Claude Code v2.1.251；OAuth 凭据只读注入，HOME/会话/配置在 /tmp |
-| 输入驱动 | Playwright Electron 真实 UI、真实键盘/鼠标、真实 PTY/Git/文件系统 |
-
-### 2.1 隔离事件披露
-
-- 初次使用系统级桌面自动化时，因三个 Matou bundle 共用 Bundle ID，系统误启动旧 worktree/default profile。发现后立即停止并废弃相关结果；记录：`/tmp/matou-independent-qa-20260830/evidence/INCIDENT-001.txt`。
-- 此后所有有效结果均由 Playwright `_electron.launch` 指定上述包体绝对路径，并设置独立 `--user-data-dir`、`HOME`、`MATOU_DATA_DIR`。
-- 因默认 profile 基线曾被事件污染，`E2E-CAN-008` 记为 BLOCKED，不把隔离工具问题算作产品通过。
+| Commit | `811aec29c923c73c1f1e415b4d751717dc2fc480` |
+| macOS | 15.7.4 (24G517), arm64 |
+| 显示 | 1920×1080 单显示器 |
+| 隔离根 | `/tmp/matou-independent-qa-final-20260830-071752` |
+| Claude | 真实 Claude Code v2.1.251；OAuth 只读注入，项目/会话配置均写入隔离 HOME |
+| 操作 | Playwright Electron 真实 UI 键鼠、真实 PTY/Git/worktree/Claude；未读取实现代码、未改数据库、未使用 mock |
 
 ## 3. 逐条执行结果
 
-| 用例 ID | 时间（UTC+8） | 结果 | 实际观察 | 证据 |
-|---|---|---|---|---|
-| E2E-CAN-001 | 05:10:00 | **FAIL** | 首次页面与真实 PTY 可直接输入，但默认工作目录实际为 /Users/icesword，而不是用例夹具 WS-GIT。 | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results.json` |
-| E2E-CAN-002 | 05:10:01 | **PASS** | 点击顶部 + 后直接创建并选中新画布；无类型/工作树弹框，新 Shell 可直接接收真实 pwd。 | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results.json` |
-| E2E-CAN-003 | 05:10:02 | **FAIL** | A/B 节点集合和焦点隔离；A 横向位置 1904→476，DAG 80%→100%；B DAG 110%→100%，观察状态串为默认值。 | `/tmp/matou-independent-qa-20260830/groups/CAN003-r2/evidence/results.json` |
-| E2E-CAN-004 | 05:10:03 | **FAIL** | 连续新建名称存在，但双击/可见操作均没有进入画布重命名，重启保名步骤没有入口。 | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results-cont.json` |
-| E2E-CAN-005 | 05:10:04 | **PASS** | 新增事项后切回原事项，原画布与会话现场恢复，真实输入仍进入原焦点会话。 | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results-cont.json` |
-| E2E-CAN-006 | 05:10:05 | **PASS** | 普通横向 Shell 追加队尾、自动焦点，未二次点击即输出唯一真实标记，旧会话未收到输入。 | `/tmp/matou-independent-qa-20260830/groups/CAN-blackbox-r1/evidence/results.json` |
-| E2E-CAN-007 | 05:10:06 | **PASS** | 隔离 HOME 下真实 OAuth Claude 连续完成 CAN7_ONE/CAN7_TWO 两轮，回答完成后 textarea 均保持焦点。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
-| E2E-CAN-008 | 05:10:07 | **BLOCKED** | 精确包体后续运行均使用 /tmp profile；但前期系统自动化按同 Bundle ID 误启动默认 profile，隔离基线已被污染，本用例证据作废。 | `/tmp/matou-independent-qa-20260830/evidence/INCIDENT-001.txt` |
-| E2E-REL-001 | 05:10:08 | **PASS** | 根层横向新增不弹框、追加队尾、自动焦点；DAG 中两个根节点之间无会话父子语义。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-REL-002 | 05:10:09 | **PASS** | 在 Claude 父节点的子列表用普通 + 创建真实 Shell，2→3、队尾自动焦点并输出 NONROOT_SHELL_REAL；DAG 保持共同父节点。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NONROOT-results.json` |
-| E2E-REL-003 | 05:10:10 | **FAIL** | 真实 Claude Fork 子节点均进入 provider session not found 并退化为 Shell，列表无法形成可工作的 Claude/Shell 混合兄弟。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-REL-004 | 05:10:11 | **FAIL** | Shell 进入真实 Claude 后标题会变 Claude；但首轮前 Fork 入口完全隐藏，未按期望可见且置灰；首轮后才出现。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
-| E2E-REL-005 | 05:10:12 | **FAIL** | 有效首轮前不存在可悬浮的禁用 Fork 图标与启用条件提示；完成首轮后入口直接出现。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
-| E2E-REL-006 | 05:10:13 | **FAIL** | 真实父会话创建当前工作树 Fork 后出现子卡片，但子 Claude 启动/恢复报 provider session not found，无法验证上下文继承。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/FORK-results.json` |
-| E2E-REL-007 | 05:10:14 | **FAIL** | 当前工作树 Fork 能建立关系卡片，但子会话未就绪并转恢复失败，无法在子会话执行 pwd/cat 与双向文件验证。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png` |
-| E2E-REL-008 | 05:10:15 | **BLOCKED** | 当前允许的默认工作空间为非 Git；原生工作空间选择器的隔离路径选择未成功建立，无法进入真实新 worktree Fork。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-REL-009 | 05:10:16 | **FAIL** | 非 Git 工作空间中“新工作树”正确置灰并提示需要 Git；选择当前工作树后子会话 provider session not found，Fork 未完成。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-dialog.png` |
-| E2E-REL-010 | 05:10:17 | **BLOCKED** | 未建立受 App 管理的隔离 Git 工作空间，无法通过 UI 构造同名分支冲突。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-REL-011 | 05:10:18 | **BLOCKED** | 未建立受 App 管理且可安全切只读的隔离 Git 工作空间，真实 worktree 失败前置缺失。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-REL-012 | 05:10:19 | **BLOCKED** | Fork 子节点在 provider session not found 前没有足够的可观察准备窗口，父身份创建期失效步骤未能执行。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/FORK-results.json` |
-| E2E-REL-013 | 05:10:20 | **FAIL** | “创建同级 Claude 分支”存在并建立兄弟卡片，但新兄弟同样 provider session not found，无法完成共同父上下文隔离。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-REL-014 | 05:10:21 | **BLOCKED** | 首层真实 Fork 子节点即 provider session not found，后续 G1/H1 无法由 UI 创建。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-REL-015 | 05:10:22 | **PASS** | 有 6 个子节点的 Claude 执行真实 /exit 后同一节点变 Shell，子数保留、Fork 隐藏、普通新增可用。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
-| E2E-REL-016 | 05:10:23 | **PASS** | Shell 父节点仍可用徽章进入 6 个原子节点并返回；返回后父节点保持 Shell。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
-| E2E-REL-017 | 05:10:24 | **PASS** | 同一 Shell 重新启动真实 Claude，首轮 REENTER_OK 完成后 Fork 再出现，6 个已有子节点保持。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
-| E2E-REL-018 | 05:10:25 | **FAIL** | 创建共享当前工作树 Fork 后父/子标题与卡片未显示共享工作树标记，且子会话恢复失败。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png` |
-| E2E-REL-019 | 05:10:26 | **BLOCKED** | 本次专用真实 Claude 身份未提供可用团队/队友会话，前置外部能力缺失。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
-| E2E-NAV-001 | 05:10:27 | **FAIL** | 父徽章数量为 6，但失败/空闲子节点全部被统计为 Shell 运行中，形态与聚合状态错误。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-NAV-002 | 05:10:28 | **PASS** | 点击“查看 3 个子会话”后父单卡被 3 个直接子节点列表替换；列表不混入根节点。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-NAV-003 | 05:10:29 | **PASS** | 6 个真实 Shell 布局 data-visible-columns=4，横向滚轮使 scrollLeft 45→476，可访问第五/第六节点。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-NAV-004 | 05:10:30 | **FAIL** | 悬浮前/后卡片宽度均为 226px，无平滑扩展或相邻收缩。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-NAV-005 | 05:10:31 | **FAIL** | 从中部一次大幅向右滚动时出现直接回父的情况，未稳定停留在最左子列表。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
-| E2E-NAV-006 | 05:10:32 | **FAIL** | 左边界手势阈值/手势分段不稳定，第一次到边界可直接返回父视图，未观察到未达阈值的弹性回弹。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
-| E2E-NAV-007 | 05:10:33 | **FAIL** | 重新进入列表后大幅第二次右拉仍停留子列表，未稳定触发超过阈值返回。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
-| E2E-NAV-008 | 05:10:34 | **BLOCKED** | 显式“返回父会话”鼠标路径已通过；在真实终端占用焦点下未完成 Tab/方向键到达返回入口的完整证据。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/MODE-results.json` |
-| E2E-NAV-009 | 05:10:35 | **FAIL** | 700px 窗宽时四卡全部等宽压到 101px，当前会话没有优先保留，终端提示符被逐字换行；恢复宽度后回 226px。 | `/tmp/matou-independent-qa-20260830/groups/NAV9-r1/evidence/results.json` |
-| E2E-NAV-010 | 05:10:36 | **FAIL** | 边缘手势分段本身不稳定；输出期间无法满足“只有清晰第二手势超过阈值才返回”。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json` |
-| E2E-DAG-001 | 05:10:37 | **PASS** | 真实长按 Option+Tab 约 650ms 打开独立 DAG BrowserWindow，松键后保留。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-DAG-002 | 05:10:38 | **PASS** | Shell 短 Tab 完成真实文件名且窗口数保持 1；真实 Claude 内连续短 Tab 未打开 DAG。 | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
-| E2E-DAG-003 | 05:10:39 | **BLOCKED** | 首层 Fork 子节点恢复失败，无法形成上下各2+层的真实关系链。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-DAG-004 | 05:10:40 | **PASS** | 独立 DAG 提供缩小/100%/放大/聚焦控件，真实拖拽与按钮缩放持续响应并可复位。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-DAG-005 | 05:10:41 | **FAIL** | 100% 节点显示名称、类型、路径、状态、最近四行和活动时间，但真实 Git 工作目录未显示分支信息。 | `/tmp/matou-independent-qa-20260830/groups/DAG-INFO-r1/evidence/results.json` |
-| E2E-DAG-006 | 05:10:42 | **PASS** | 输出 LIVE_DAG_1..7 时摘要实时滚动保持最近四行，节点边界始终 260×154、坐标 350,262。 | `/tmp/matou-independent-qa-20260830/groups/DAG-LIVE-r2/evidence/results.json` |
-| E2E-DAG-007 | 05:10:43 | **FAIL** | 点击视野外兄弟节点后目标卡 aria-current 为空且 data-in-viewport=false，未滚入视野/选中。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-DAG-008 | 05:10:44 | **FAIL** | DAG 跳转目标未保持在视野；悬浮/布局变化后仍存在不可见或未选中的目标。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-DAG-009 | 05:10:45 | **PASS** | 子列表打开 DAG 点击 Claude 父节点后回根单卡，父徽章恢复且 textarea 获得焦点。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/DAG-parent-results.json` |
-| E2E-DAG-010 | 05:10:46 | **FAIL** | 100 个真实 UI 节点均出现，但 DAG 首屏节点可操作耗时约 5130ms；不符合可感知即时反馈。 | `/tmp/matou-independent-qa-20260830/groups/DAG100-r2/evidence/results.json` |
-| E2E-STA-001 | 05:10:47 | **FAIL** | 命令真实运行并完成，但 DAG 在提示符前、运行期、完成后始终显示“运行中”。 | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
-| E2E-STA-002 | 05:10:48 | **FAIL** | 真实 stderr 与 exit 23 可见且可继续 echo recovered，但红色错误状态未出现，DAG仍显示运行中。 | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
-| E2E-STA-003 | 05:10:49 | **BLOCKED** | 严格执行 CMD-WAIT 后 zsh 返回“read: -p: no coprocess”，程序没有进入等待输入，验收前提由夹具命令破坏。 | `/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json` |
-| E2E-STA-004 | 05:10:50 | **PASS** | 无标准提示的真实 stdin 等待程序保持运行中而未猜测为待输入，输入后可继续。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-STA-005 | 05:10:51 | **FAIL** | 真实 Claude 可完成回答，但 DAG/聚合状态没有可靠空闲回落，节点常驻运行中。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/DAG-parent-results.json` |
-| E2E-STA-006 | 05:10:52 | **BLOCKED** | 真实 Claude身份可用，但未形成可控且可重复的权限请求；同时现有状态回落缺陷影响前置。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
-| E2E-STA-007 | 05:10:53 | **BLOCKED** | 未在不影响测试机其他流量的条件下提供可恢复网络/账户失败开关，外部失败前置缺失。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
-| E2E-STA-008 | 05:10:54 | **FAIL** | 恢复失败、空闲和已完成子节点在徽章中被统一计为“运行中”，状态优先级不成立。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-STA-009 | 05:10:55 | **FAIL** | 恢复失败节点仍占活动横向列表并计入运行中，没有作为历史节点从日常列表收起。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-STA-010 | 05:10:56 | **FAIL** | 单 Shell 错误没有串流，其他 Shell/真实 Claude仍可用；但父/画布聚合未显示异常且不能定位错误节点。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-STA-011 | 05:10:57 | **BLOCKED** | 没有可从 App UI/真实外部边界单独中断并恢复摘要链路而不杀死整个测试 App 的夹具。 | `/tmp/matou-independent-qa-20260830/groups/DAG-LIVE-r2/evidence/results.json` |
-| E2E-STA-012 | 05:10:58 | **FAIL** | 提交后约 91ms 出现运行中，但命令完成后超过 1s 仍未回空闲，DAG/徽章一致性失败。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-SORT-001 | 05:10:59 | **PASS** | 草稿不换序；Shell 回车提交后目标移首且焦点保持。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-SORT-002 | 05:11:00 | **PASS** | Ctrl+C 与完成 stdin 输入均将真实操作会话移首，关系未变。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-SORT-003 | 05:11:01 | **PASS** | 真实 Claude 草稿不换序；发送后目标从末位移首，回答完成顺序不再变化，焦点保持。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-REAL-r2/evidence/SORT003-results.json` |
-| E2E-SORT-004 | 05:11:02 | **BLOCKED** | 真实 Claude授权/拒绝/选项场景未形成可重复测试前置，未取得四种控制操作完整序列。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/results.json` |
-| E2E-SORT-005 | 05:11:03 | **PASS** | 点击/聚焦/选择/滚动及 DAG 查看不更新排序。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-SORT-006 | 05:11:04 | **FAIL** | 后台 Shell 输出本身不换序，但 Claude 语义状态/通知缺失，无法满足内容与徽章同步要求。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-SORT-007 | 05:11:05 | **FAIL** | 新 Shell 追加队尾；Fork 节点建立后立即恢复失败，历史恢复队尾流程不可完成。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png` |
-| E2E-SORT-008 | 05:11:06 | **PASS** | B/C 同一时钟粒度真实提交后顺序稳定；重启保持，后续交互目标明确移首。 | `/tmp/matou-independent-qa-20260830/groups/SORT8-r1/evidence/results.json` |
-| E2E-SORT-009 | 05:11:07 | **BLOCKED** | 首层 Fork恢复失败，BASE-TREE关系链不完整，无法执行完整关系坐标与排序回归。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-LIFE-001 | 05:11:08 | **FAIL** | 运行中的带 6 子节点父会话点击删除无确认（dialog=0），父节点直接消失且子徽章不再可见。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json` |
-| E2E-LIFE-002 | 05:11:09 | **FAIL** | 活动叶子点击 × 后直接从活动区消失；DAG没有历史节点确认/移除流程。 | `/tmp/matou-independent-qa-20260830/groups/LIFE-CORE-r1/evidence/E2E-LIFE-002.png` |
-| E2E-LIFE-003 | 05:11:10 | **FAIL** | 删除父节点后未保留可操作历史父节点，关系入口随父消失。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.png` |
-| E2E-LIFE-004 | 05:11:11 | **FAIL** | 父节点删除没有“移除整条分支”专用确认与后代数量，直接删除主节点。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json` |
-| E2E-LIFE-005 | 05:11:12 | **FAIL** | 运行中非最后画布点击关闭后 dialog=0，Tab直接减少，用户没有取消机会。 | `/tmp/matou-independent-qa-20260830/groups/CLOSE-r3/evidence/after-close-click.png` |
-| E2E-LIFE-006 | 05:11:13 | **FAIL** | 空闲画布关闭后事项菜单仅置顶/重命名/删除，不存在“已关闭画布”与恢复入口。 | `/tmp/matou-independent-qa-20260830/groups/HISTORY-r1/evidence/results.json` |
-| E2E-LIFE-007 | 05:11:14 | **FAIL** | 窗口关闭后真实命令继续（counter 2→4），重新唤起成功但终端焦点未恢复。 | `/tmp/matou-independent-qa-20260830/groups/HIDE-r2/evidence/results.json` |
-| E2E-LIFE-008 | 05:11:15 | **FAIL** | 同 profile 重启可恢复基本 Tab/历史，但每画布横向位置与 DAG 缩放均复位到默认。 | `/tmp/matou-independent-qa-20260830/groups/CAN003-r2/evidence/results.json` |
-| E2E-LIFE-009 | 05:11:16 | **PASS** | 完整退出时 counter 保持 2→2；重启后仍为2且出现历史/中断提示，未自动重复执行。 | `/tmp/matou-independent-qa-20260830/groups/QUIT-r1/evidence/results.json` |
-| E2E-LIFE-010 | 05:11:17 | **FAIL** | 真实 Fork 子会话重启后呈 Shell+“Claude Code 恢复失败/provider session not found”并保留重试；点击重试仍未恢复真实子会话。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-ISO-001 | 05:11:18 | **BLOCKED** | 通过真实“新增工作空间”与 macOS选择器尝试选择隔离目录，自动化操作返回成功但工作空间未添加；目录改名旅程前置未建立。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-ISO-002 | 05:11:19 | **BLOCKED** | 新 worktree Fork入口因默认非 Git 且隔离 Git工作空间未建立，无法观察创建中异常退出。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-ISO-003 | 05:11:20 | **BLOCKED** | 已观察多个 Fork子节点均恢复失败，不满足“仅一个目标节点恢复条件失效”的隔离前置。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-ISO-004 | 05:11:21 | **FAIL** | 独立窗口可真实脱出，DAG点击会唤起并聚焦；关闭独立窗口后 DAG仍把节点显示为运行中，没有历史/继续入口。 | `/tmp/matou-independent-qa-20260830/groups/INDEPENDENT-r2/evidence/results.json` |
-| E2E-ISO-005 | 05:11:22 | **BLOCKED** | 测试机仅检测到 1 台 1920×1080 主显示器，双显示器前置不存在。 | `/tmp/matou-independent-qa-20260830/environment/display.txt` |
-| E2E-ISO-006 | 05:11:23 | **FAIL** | 主题真实切换可用，但状态节点持续误报运行中、普通/Fork边语义不完整，无法完成关系可读性验收。 | `/tmp/matou-independent-qa-20260830/groups/THEME-r3/evidence/results.json` |
-| E2E-ISO-007 | 05:11:24 | **BLOCKED** | 未发现可从真实系统外部稳定制造“仅 DAG BrowserWindow创建失败”且主窗口保持的环境条件。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-ISO-008 | 05:11:25 | **FAIL** | 10个真实终端并发输出未串流且UI响应；命令结束后节点仍显示运行中，未满足全量回空闲。 | `/tmp/matou-independent-qa-20260830/groups/SHELL-CORE-r2/evidence/results.json` |
-| E2E-EDGE-001 | 05:11:26 | **BLOCKED** | 当前工作空间为有效 /Users/icesword，隔离失效 cwd 未能通过真实工作空间选择器建立。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-EDGE-002 | 05:11:27 | **BLOCKED** | 同上，未取得只影响新 PTY创建而不影响现有 PTY的真实资源/目录失效夹具。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-EDGE-003 | 05:11:28 | **PASS** | 单节点 DAG居中且缩放/平移/聚焦控件可用；点击当前节点返回终端。 | `/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json` |
-| E2E-EDGE-004 | 05:11:29 | **BLOCKED** | 首层 Fork恢复失败，无法通过真实 UI建立7层节点链。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json` |
-| E2E-EDGE-005 | 05:11:30 | **BLOCKED** | 新 Git worktree创建前置未建立，无法生成原/新工作树两组未提交修改。 | `/tmp/matou-independent-qa-20260830/groups/WORKSPACE-r1/evidence/results.json` |
-| E2E-EDGE-006 | 05:11:31 | **FAIL** | Claude主动 /exit 立即转 Shell，但完整重启后同节点错误尝试恢复并显示“Claude Code恢复失败/provider resume exited with code 0”。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/EDGE006-final.json` |
-| E2E-EDGE-007 | 05:11:32 | **FAIL** | 关闭运行画布没有确认框，因此无“取消关闭并保持草稿/焦点/进程”的路径。 | `/tmp/matou-independent-qa-20260830/groups/CLOSE-r3/evidence/after-close-click.png` |
-| E2E-EDGE-008 | 05:11:33 | **FAIL** | 进入200+字符真实目录后 Tab仍显示 /Users/icesword；窄窗仅终端逐字换行，无完整路径悬浮/信息优先让位。 | `/tmp/matou-independent-qa-20260830/groups/LONGPATH-r2/evidence/results.json` |
-| E2E-EDGE-009 | 05:11:34 | **BLOCKED** | 新画布/兄弟/显式返回焦点已分别验证；Fork子节点 provider session not found、DAG视野外跳转失败阻断完整五段旅程。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/FORK-results.json` |
-| E2E-EDGE-010 | 05:11:35 | **FAIL** | 运行中父节点删除后未以历史节点保留，子状态更新与回历史父详情路径消失。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json` |
-| E2E-EDGE-011 | 05:11:36 | **PASS** | 6个真实会话分别输出空行、ANSI、超长行、中文、emoji、alternate-screen；DAG无实际ESC泄漏、Unicode正确、卡宽固定260px、节点数未增。 | `/tmp/matou-independent-qa-20260830/groups/EDGE11-r2/evidence/results.json` |
-| E2E-EDGE-012 | 05:11:37 | **FAIL** | 普通 Shell 子边存在；Claude Fork 子节点恢复失败后显示为 Shell，DAG无法持续区分 Fork继承边与普通边。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NONROOT-results.json` |
-| E2E-EDGE-013 | 05:11:38 | **FAIL** | 事项菜单没有已关闭画布入口，首次恢复即不存在，多次恢复/重新关闭无法进行。 | `/tmp/matou-independent-qa-20260830/groups/HISTORY-r1/evidence/results.json` |
-| E2E-EDGE-014 | 05:11:39 | **PASS** | 真实运行命令与未提交草稿跨 Cmd+I 白→深→白切换均保留，焦点和会话顺序不变。 | `/tmp/matou-independent-qa-20260830/groups/THEME-STATE-r2/evidence/results.json` |
-| E2E-EDGE-015 | 05:11:40 | **BLOCKED** | 已验证一个父下多子关系；未形成多个有效可作为父的Claude节点，无法执行P1/P2唯一父全序列。 | `/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NONROOT-results.json` |
-| E2E-EDGE-016 | 05:11:41 | **BLOCKED** | 只提供当前单一打包版本，没有“后续覆盖安装测试版”工件。 | `/tmp/matou-independent-qa-20260830/environment/build.txt` |
+| 用例 ID | 时间（UTC+8） | 结果 | 实际观察与用户影响 | 证据 |
+|---|---:|---|---|---|
+| E2E-CAN-001 | 07:18:35 | **PASS** | 隔离 profile 首次启动即显示默认画布和可直接输入的 Shell；真实 pwd 指向隔离 WS-GIT。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SMOKE-r1/evidence/body.txt` |
+| E2E-CAN-002 | 07:22:40 | **PASS** | 顶部 + 直接产生并选中新画布，无类型/工作树弹框；新 Shell 自动聚焦。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CANVAS-RENAME-r1/evidence/results.json` |
+| E2E-CAN-003 | 07:19:06 | **FAIL** | A/B 节点与焦点隔离、横向位置可恢复；但两张画布 DAG 80%/110% 均重启为 100%，观察位置未按画布保存。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CAN003-r2/evidence/results.json` |
+| E2E-CAN-004 | 07:22:40 | **PASS** | 连续名称为“新画布/新画布 2”；双击重命名为“性能验证”后完整重启仍保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CANVAS-RENAME-r1/evidence/results.json` |
+| E2E-CAN-005 | 07:19:06 | **PASS** | 事项/画布切换后会话集合、上次焦点与可输入现场保持；数据未串到其他画布。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CAN003-r2/evidence/results.json` |
+| E2E-CAN-006 | 07:32:33 | **PASS** | 横向 Shell 追加队尾并自动焦点，未二次点击即可输入；旧终端未收到内容。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-CAN-007 | 07:28:57 | **PASS** | 真实 Claude 两轮回复后输入 textarea 持续聚焦，第二条无需鼠标即可提交。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-CAN-008 | 07:54:34 | **PASS** | 所有 App、Electron、Claude、Git、worktree 与证据路径均位于唯一 /tmp 根；未使用默认 profile 启动。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/isolation.md` |
+| E2E-REL-001 | 07:32:33 | **PASS** | 根层新增 Shell 无弹框、追加队尾、自动焦点，DAG 中无会话父子边。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-REL-002 | 07:28:57 | **PASS** | Claude 父的子列表中新增普通 Shell 后与 Claude 子共享同一父，追加并聚焦。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-REL-003 | 07:28:57 | **PASS** | 同一横向子列表真实混排 Claude 与 Shell；两类节点独立工作，DAG 保留共同父。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-REL-004 | 07:28:12 | **PASS** | Shell 启动真实 Claude 后节点原地切型；首轮前 Fork 图标可见且禁用，完成后启用。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/results.json` |
+| E2E-REL-005 | 07:28:12 | **PASS** | 首轮前 Fork 悬浮文案为“完成首轮对话后可创建分支”且按钮禁用；首轮完成后可打开弹框。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/results.json` |
+| E2E-REL-006 | 07:28:57 | **PASS** | 真实 Fork 子 Claude 正常就绪，并准确回答父会话唯一 token；父子后续输入隔离。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-REL-007 | 08:00:05 | **PASS** | 当前工作树 Fork 的父子路径一致、双方显示共享工作树，子 Shell 可读父目录 uncommitted.txt。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/current-inspect.txt` |
+| E2E-REL-008 | 07:30:03 | **PASS** | 新 worktree Fork 产生独立路径和生成分支；子目录无父未提交文件，原 main/uncommitted 保留且子写入不回原目录。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-WT-r1/evidence/results.json` |
+| E2E-REL-009 | 07:42:29 | **PASS** | 非 Git 目录新工作树项真实禁用并提示需要 Git；键盘 Space 不改变选择，当前目录 Fork 成功，普通 Shell 仍可直接新增。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/results.json` |
+| E2E-REL-010 | 07:54:34 | **BLOCKED** | 规格冲突：用例以已有原始 Git ref 作为冲突，但最终规则按用户显示名去重、Runtime 生成安全 Git ref；实际生成 matou/e2e-duplicate-<id>。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/spec-conflicts.md` |
+| E2E-REL-011 | 07:54:34 | **BLOCKED** | 隔离小仓库的真实 worktree 准备过快，未形成可重复的只读失败阶段；未改实现或伪造失败。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-REL-012 | 07:54:34 | **BLOCKED** | 真实 Fork 准备窗口不足以在创建期失效父 provider 身份；未通过内部接口延长或伪造阶段。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-REL-013 | 07:44:28 | **PASS** | 从同级入口创建第二 Claude；新兄弟继承共同父 NONGIT_READY，未继承 C1_SECRET，DAG 显示共同父。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/sibling-list.png` |
+| E2E-REL-014 | 07:46:51 | **PASS** | 真实建立多级 P→C→G→H 链，直接子列表逐层只显示下一层，DAG 连线保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/multilevel2-results.json` |
+| E2E-REL-015 | 07:28:12 | **PASS** | 真实 /exit 后同一节点转为 Shell，不显示“已退出”，子数量/导航/关系保留，Fork 隐藏。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/results.json` |
+| E2E-REL-016 | 07:28:12 | **PASS** | 主动退出后的 Shell 仍可进入原子列表；完整重启后父继续是 Shell，没有自动恢复。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/results.json` |
+| E2E-REL-017 | 07:46:51 | **PASS** | 同一稳定节点可再次进入 Claude；完成新一轮后 Fork 能力恢复，既有关系未重写。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/multilevel2-results.json` |
+| E2E-REL-018 | 07:52:23 | **PASS** | 单会话无共享标记；第二会话加入后双方出现共享工作树；移除后剩余节点标记消退，目录保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/TESTNEW-r1/evidence/shared-marker.json` |
+| E2E-REL-019 | 07:54:34 | **BLOCKED** | 真实账号没有可用 Team teammate session，无法建立队友会话前置。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-NAV-001 | 07:28:57 | **PASS** | 父徽章显示直接子总数、Claude/Shell 构成和运行/空闲/中断计数；错误优先级由状态引擎实时更新。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-NAV-002 | 07:28:57 | **PASS** | 点击徽章以横向直接子列表替换父卡；孙节点不混入，焦点落在选中子节点。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-NAV-003 | 07:32:48 | **PASS** | 同级 6 节点每屏不超过四卡；横向 wheel 可在 scrollLeft 952 与 0 间访问首尾。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/NAV-pull-results.json` |
+| E2E-NAV-004 | 07:32:33 | **FAIL** | 悬浮第三卡前/中/后宽度均 305.3px，相邻卡没有收缩，点击后也无保持扩展。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-NAV-005 | 07:33:12 | **PASS** | 中部一次大幅右滑只到 scrollLeft=0，仍停在子列表且未出现父视图。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/NAV-boundary-results.json` |
+| E2E-NAV-006 | 07:33:12 | **PASS** | 已在最左后的小幅独立右滑仍留在子列表并保持原焦点，未越级。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/NAV-boundary-results.json` |
+| E2E-NAV-007 | 07:33:12 | **PASS** | 边界第二次大幅右滑返回父视图，父 textarea 自动恢复焦点。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/NAV-boundary-results.json` |
+| E2E-NAV-008 | 07:53:50 | **FAIL** | 鼠标明确返回可用；但终端聚焦后连续 120 次 Tab 均由终端消费，键盘到达不了“返回父会话”。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/shortcut-keyboard.json` |
+| E2E-NAV-009 | 07:19:20 | **FAIL** | 700px 窄窗仍把所有卡保持 440px 完整终端并横向溢出；没有“当前完整、其他摘要”的优先让位。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/NAV9-r1/evidence/results.json` |
+| E2E-NAV-010 | 07:33:12 | **PASS** | 最左边界在静态/持续输出场景不自动切层；小手势不返回，清晰第二大手势才返回父会话。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/NAV-boundary-results.json` |
+| E2E-DAG-001 | 07:53:50 | **PASS** | 真实按住 Option+Tab 650ms 打开第二个独立 DAG BrowserWindow，松键后仍保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/shortcut-keyboard.json` |
+| E2E-DAG-002 | 07:32:33 | **PASS** | Shell 短 Tab 完成 baseline.txt 且窗口数不变；未出现 DAG 闪现。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-DAG-003 | 07:46:51 | **FAIL** | 四层真实关系打开 DAG 时直接铺开跨层节点，未见只保留父/当前/子三层及超出层虚影。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/multilevel2-dag.png` |
+| E2E-DAG-004 | 07:32:33 | **PASS** | 独立画布缩放、100%复位、聚焦与平移均响应；节点布局保持。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-DAG-005 | 07:19:18 | **PASS** | 100% 节点含名称/类型/分支/状态/最近四行/活动时间；缩放时保持核心信息和固定卡宽。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG-LIVE-r2/evidence/results.json` |
+| E2E-DAG-006 | 07:19:18 | **PASS** | LIVE_DAG_1..7 实时轮换为最近四行，节点位置与260×154边界不移动。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG-LIVE-r2/evidence/results.json` |
+| E2E-DAG-007 | 07:21:51 | **FAIL** | DAG 点击视野外末节点后主列表目标未获得焦点，data-in-viewport 仍为 false。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG100-r2/evidence/results.json` |
+| E2E-DAG-008 | 07:21:51 | **FAIL** | 目标点击后未滚入视野，后续布局/悬浮无法保持其可见；100节点同样复现。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG100-r2/evidence/results.json` |
+| E2E-DAG-009 | 07:34:08 | **PASS** | 从子列表点击活动父节点可回到父层级，子徽章和终端焦点恢复。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/PARENT-LIFE-results.json` |
+| E2E-DAG-010 | 07:21:51 | **FAIL** | 100 个真实 UI 节点均创建，但 DAG 首个节点可操作耗时 5128ms；点远端节点后仍不在视野且无焦点。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG100-r2/evidence/results.json` |
+| E2E-STA-001 | 07:32:33 | **PASS** | Shell 从空闲→运行中→空闲真实切换，结束后提示符与 DAG 一致。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-STA-002 | 07:32:33 | **PASS** | exit 23 在 DAG 显示异常；同一 Shell 随后可输出 recovered。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-STA-003 | 07:54:34 | **BLOCKED** | 用例硬编码 Bash read -p，在默认 zsh 返回 no coprocess，未进入等待；与 PRD 的抽象待输入要求冲突。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/spec-conflicts.md` |
+| E2E-STA-004 | 07:32:33 | **PASS** | 无标准提示的 python input 只显示运行中而不误判待输入，提交后继续。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-STA-005 | 07:47:54 | **PASS** | 真实 Claude 提交后 339ms 显示运行中，回复完成后回空闲，输入焦点保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/claude-status.json` |
+| E2E-STA-006 | 07:48:55 | **FAIL** | 真实 Write 权限确认已出现，但 DAG 将明确的 Yes/No 等待显示为“运行中”，未显示“待输入”。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/permission2-results.json` |
+| E2E-STA-007 | 07:54:34 | **BLOCKED** | 无仅影响隔离 Claude 会话且可逆的真实网络/账户故障边界；未替换 provider。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-STA-008 | 07:36:51 | **PASS** | 错误/中断/运行/空闲均能进入徽章和 DAG，错误优先；历史节点不覆盖活动子状态。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-WT-r1/evidence/restore-results.json` |
+| E2E-STA-009 | 07:34:08 | **PASS** | 结束父节点从活动列表收起，在 DAG 标为历史；活跃子数量/状态继续独立统计。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/PARENT-LIFE-results.json` |
+| E2E-STA-010 | 07:32:33 | **PASS** | 一个 Shell 异常未串流，其他 Shell/Claude继续可输入，DAG可定位异常节点。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-STA-011 | 07:54:34 | **BLOCKED** | 缺少只中断语义摘要链、同时保留真实 PTY/App 的外部条件。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-STA-012 | 07:47:54 | **PASS** | Shell/Claude 运行状态均在1秒内可见；Claude实测339ms，结束后回空闲。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/claude-status.json` |
+| E2E-SORT-001 | 07:32:33 | **PASS** | Shell 草稿不换序，回车提交后目标移首且焦点保持。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-002 | 07:32:33 | **PASS** | Ctrl+C 与真实 stdin 控制操作更新交互序并将目标移首。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-003 | 07:49:59 | **PASS** | Claude 草稿不换序；发送后目标移首，回答完成不再次换序且焦点保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/sort-results.json` |
+| E2E-SORT-004 | 07:48:55 | **FAIL** | 真实授权选项可操作，但其状态先被误报为运行中；拒绝/多选/停止继续全序列无法满足用例状态与排序闭环。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/permission2-results.json` |
+| E2E-SORT-005 | 07:32:33 | **PASS** | 点击、悬浮、滚动和打开 DAG 不更新顺序。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-SORT-006 | 07:49:59 | **PASS** | Claude 后台回答结束未把自己移首；用户随后操作的 Shell 始终保持首位。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/sort-results.json` |
+| E2E-SORT-007 | 07:28:57 | **PASS** | 新 Shell 与新 Fork 都追加到当前层队尾并获得初始焦点；恢复不擅自按输出换序。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-results.json` |
+| E2E-SORT-008 | 07:19:30 | **PASS** | B/C 快速提交得到稳定 C/B/A；重启保留，后续 B 交互变 B/C/A。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SORT8-r1/evidence/results.json` |
+| E2E-SORT-009 | 07:44:28 | **PASS** | 交互排序只改变横向投影，DAG 的父子/Fork 边和节点ID在排序与重启后保持。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/sibling-dag.png` |
+| E2E-LIFE-001 | 07:34:08 | **PASS** | 结束有6个子会话的父节点出现影响确认；确认后父在DAG为历史，6子继续留在活动列表且连线保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/PARENT-LIFE-results.json` |
+| E2E-LIFE-002 | 07:34:31 | **FAIL** | 叶子结束后可形成历史节点，但 DAG/主界面没有可发现的“移除历史叶子”确认入口。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/HISTORY-parent-inspect.json` |
+| E2E-LIFE-003 | 07:34:31 | **FAIL** | 历史父保留关系，但选择历史父后没有历史操作菜单或“移除整条分支”入口。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/HISTORY-parent-inspect.json` |
+| E2E-LIFE-004 | 07:34:31 | **FAIL** | 未发现“移除整条分支”专用确认页，无法列出后代数量或执行整支移除。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/HISTORY-parent-inspect.json` |
+| E2E-LIFE-005 | 07:22:42 | **PASS** | 运行画布关闭弹框明确1个运行会话；取消后Tab数不变、原textarea焦点保留且进程继续。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLOSE-FINAL-r1/evidence/results.json` |
+| E2E-LIFE-006 | 07:23:43 | **PASS** | 确认关闭后Tab消失并进入“已关闭画布 1”；重新打开恢复Tab、历史输出和工作区。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLOSE-FINAL-r1/evidence/restore-results.json` |
+| E2E-LIFE-007 | 07:19:42 | **FAIL** | 窗口关闭后真实计数器继续、Dock reopen回原现场；但原终端输入焦点未恢复。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/HIDE-r2/evidence/results.json` |
+| E2E-LIFE-008 | 07:19:06 | **FAIL** | 关系/Tab/历史恢复，但每画布 DAG 缩放均重置100%，观察位置不完整持久化。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CAN003-r2/evidence/results.json` |
+| E2E-LIFE-009 | 07:19:49 | **PASS** | 完整退出后 counter 2→2，重启仍2；历史与中断提示存在，命令未重复运行。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/QUIT-r1/evidence/results.json` |
+| E2E-LIFE-010 | 07:36:51 | **FAIL** | 恢复条件失效后显示真实原因/重试，Shell和子列表可用；但点击重试后长期卡在“正在恢复”，失败条件恢复后也无再次重试入口。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-WT-r1/evidence/restore-results.json` |
+| E2E-ISO-001 | 07:50:43 | **FAIL** | 目录移动后画布/历史可见且输入/创建禁用并提示路径失效；但未提供在产品内选择移动后目录并重绑的闭环。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/WORKSPACE-MOVE-r1/evidence/new-canvas-fail.png` |
+| E2E-ISO-002 | 07:54:34 | **BLOCKED** | 真实小仓库的 worktree 创建过快，未获得可重复的“准备中”异常退出窗口。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-ISO-003 | 07:36:51 | **PASS** | 只让一个 provider session 文件失效后，仅目标父节点报恢复失败；子节点真实可用，关系/徽章保留。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-WT-r1/evidence/restore-results.json` |
+| E2E-ISO-004 | 07:20:05 | **FAIL** | 独立窗口可脱出，DAG点击能唤起并聚焦；关闭独立窗后节点仍显示空闲，无历史/继续/重新打开入口。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/INDEPENDENT-r2/evidence/results.json` |
+| E2E-ISO-005 | 07:18:18 | **BLOCKED** | 测试机只有一台1920×1080显示器。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/display.txt` |
+| E2E-ISO-006 | 07:28:55 | **PASS** | 白/深主题切换下状态、历史和普通/Fork连线语义保持；蓝色Fork边与普通边不只靠节点颜色区分。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-mixed-dag.png` |
+| E2E-ISO-007 | 07:54:34 | **BLOCKED** | 没有只让 DAG BrowserWindow 创建失败、同时维持主窗口健康的真实系统条件。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
+| E2E-ISO-008 | 07:32:33 | **PASS** | 10个真实PTY并发输出未串流，UI仍可操作；状态结束后回空闲。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json` |
+| E2E-EDGE-001 | 07:50:43 | **FAIL** | cwd真实消失后新画布Tab保留并显示路径失效原因，但没有“重新创建”操作，恢复只能依赖外部把路径搬回。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/WORKSPACE-MOVE-r1/evidence/new-canvas-fail.png` |
+| E2E-EDGE-002 | 07:50:43 | **FAIL** | 工作区路径失效时横向新增被整体禁用，没有在队尾生成带原因/重试/移除的失败卡片。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/WORKSPACE-MOVE-r1/evidence/new-canvas-fail.png` |
+| E2E-EDGE-003 | 07:21:51 | **PASS** | 单节点DAG居中，缩放/平移/聚焦可用；点节点回终端。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG100-r2/evidence/dag100.png` |
+| E2E-EDGE-004 | 07:46:51 | **FAIL** | 真实四层关系已直接全量铺开且没有超层虚影/渐进变实；未体现设计要求的三层窗口。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/multilevel2-dag.png` |
+| E2E-EDGE-005 | 07:30:03 | **PASS** | 父 main 未提交文件与新 worktree 独立写入在会话退出/App关闭后都保留，原目录未被回写。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-WT-r1/evidence/results.json` |
+| E2E-EDGE-006 | 07:28:12 | **PASS** | Claude真实/exit后完整重启仍为Shell，无恢复中/恢复失败；历史与子徽章保留并可直接输入。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/results.json` |
+| E2E-EDGE-007 | 07:22:42 | **FAIL** | 取消关闭可保留单运行Shell和焦点，但未在同一画布完整保留“运行Claude+待输入Shell+草稿+滚动”组合现场。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLOSE-FINAL-r1/evidence/results.json` |
+| E2E-EDGE-008 | 07:20:02 | **FAIL** | 进入200+字符路径后标题仍固定显示workspace根；无完整当前路径悬浮，窄窗优先级让位不符合。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/LONGPATH-r2/evidence/results.json` |
+| E2E-EDGE-009 | 07:21:51 | **FAIL** | 新画布/兄弟/Fork/返回均可恢复焦点；但DAG跳视野外节点不滚入也不聚焦，整段键盘旅程中断。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/DAG100-r2/evidence/results.json` |
+| E2E-EDGE-010 | 07:34:31 | **FAIL** | 历史父在DAG保留且子状态更新；点击历史父却回到子列表，没有历史详情页面。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/HISTORY-parent-inspect.json` |
+| E2E-EDGE-011 | 07:19:59 | **PASS** | 空行/ANSI/超长行/中文/emoji/alternate-screen真实输出无控制字符泄漏、乱码或重复节点，卡宽固定。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/EDGE11-r2/evidence/results.json` |
+| E2E-EDGE-012 | 07:28:55 | **PASS** | 同父普通Shell边与Claude Fork边同时存在；Fork边蓝色、普通边深色，节点类型和继承语义可区分。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/child-mixed-dag.png` |
+| E2E-EDGE-013 | 07:23:43 | **PASS** | 已关闭画布恢复只生成一个Tab；历史入口随恢复消失，重新关闭后列表仍是一条同名记录。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLOSE-FINAL-r1/evidence/restore-results.json` |
+| E2E-EDGE-014 | 07:35:16 | **PASS** | 白→深→白过程中运行命令、stdin等待、未提交草稿、顺序和焦点均保持。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/THEME-FINAL-r1/evidence/results.json` |
+| E2E-EDGE-015 | 07:46:51 | **PASS** | 多父、多级、混合Shell/Claude真实关系中每个节点始终只有一个父；切型、排序和重启未复制边。 | `/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/multilevel2-dag.png` |
+| E2E-EDGE-016 | 07:54:34 | **BLOCKED** | 只提供同一提交811aec29的一个包体，没有后续覆盖安装包可执行升级连续性。 | `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md` |
 
-## 4. 失败清单（按用户影响聚合）
+## 4. 失败项与最短复现
 
-### D-01 Fork 子会话不可用（P0）
-- **影响用例**：REL-003/006/007/009/013/018、SORT-007、LIFE-010、EDGE-012。
-- **最短复现**：进入真实 Claude → 完成一轮 → 点击 Fork → 使用当前工作树创建。
-- **期望**：子 Claude 就绪、继承父上下文并可继续工作。
-- **实际**：关系卡片出现后子节点转为 Shell，并显示 `Claude Code 恢复失败 / provider session not found`；重试仍失败。
-- **证据**：`/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/fork-created.png`、`BADGE-results.json`。
+### D-01 DAG 跳转与观察现场不可靠（P0）
+- 用例：CAN-003、DAG-007/008/010、LIFE-008、EDGE-009。
+- 复现：创建 5+ 节点，将目标滑出视野 → 打开 DAG 点击远端节点；或将 DAG 缩放 80% 后切换画布/重启。
+- 期望：目标完整进入视野并聚焦；每画布观察位置恢复。
+- 实际：目标仍不在视野且无焦点；缩放回 100%；100节点首可操作约 5128ms。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/DAG100-r2/evidence/results.json`、`/tmp/matou-independent-qa-final-20260830-071752/groups/CAN003-r2/evidence/results.json`。
 
-### D-02 状态与聚合长期误报运行中（P0）
-- **影响用例**：NAV-001、STA-001/002/005/008/009/010/012、ISO-006/008。
-- **最短复现**：Shell 执行 `sleep 2; echo done` → 等待提示符 → 打开 DAG。
-- **期望**：运行中后回空闲；exit 23 显示错误；恢复失败不计运行中。
-- **实际**：提示符已恢复仍显示运行中；exit 23 无红色错误；恢复失败节点计为 Shell 运行中。
-- **证据**：`/tmp/matou-independent-qa-20260830/groups/STATUS-FOCUS-r2/evidence/results.json`、`/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/BADGE-results.json`。
+### D-02 恢复失败的重试旅程卡住（P0）
+- 用例：LIFE-010。
+- 复现：让隔离 HOME 中真实 provider session 暂时失效 → 重启 → 点击“重试恢复”。
+- 期望：失败条件下回到可重试错误；条件恢复后再次重试进入 Claude。
+- 实际：第一次错误/原因/Shell/子关系正确；点击后长期停在“正在恢复 Claude Code 会话…”，重试入口消失。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-WT-r1/evidence/restore-results.json`。
 
-### D-03 子列表二次右拉手势不稳定（P0）
-- **影响用例**：NAV-005/006/007/010。
-- **最短复现**：6 个子会话 → 中部一次向右大滑 → 在最左再次右拉。
-- **期望**：第一手势只到最左；第二手势未过阈值回弹、过阈值返回。
-- **实际**：出现第一手势直接回父；重新进入后大幅第二手势又不返回，阈值与手势边界不稳定。
-- **证据**：`/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/NAV-pull-results.json`。
+### D-03 历史节点缺少清理与详情闭环（P1/P0）
+- 用例：LIFE-002/003/004、EDGE-010。
+- 复现：结束有子节点父会话 → DAG 选择历史父。
+- 期望：历史详情、叶子移除、整支移除专用确认。
+- 实际：历史样式和边保留，但点击回到子列表；没有历史菜单或整支移除入口。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-FORK-r1/evidence/HISTORY-parent-inspect.json`。
 
-### D-04 DAG 跳转与观察状态不可靠（P0）
-- **影响用例**：CAN-003、DAG-007/008/010、LIFE-008。
-- **最短复现**：6 个同级会话，将目标移出视野 → DAG点击目标；或设置DAG 80%后切换画布。
-- **期望**：目标完整进入视野并聚焦；每画布缩放/平移独立恢复。
-- **实际**：目标 `aria-current` 为空且不在视野；缩放回到100%；100节点首屏约5.13秒。
-- **证据**：`/tmp/matou-independent-qa-20260830/groups/DAG-CORE-r1/evidence/results.json`、`/tmp/matou-independent-qa-20260830/groups/CAN003-r2/evidence/results.json`、`/tmp/matou-independent-qa-20260830/groups/DAG100-r2/evidence/results.json`。
+### D-04 布局/导航细节不符合产品交互（P1/P0）
+- 用例：NAV-004/008/009、DAG-003、EDGE-004/008。
+- 复现：四卡悬浮、窄窗、终端焦点连续 Tab、四层关系打开 DAG、进入超长路径。
+- 实际：卡片不扩宽；窄窗未摘要让位；Tab 被终端持续消费；DAG没有三层虚影；标题不反映超长当前路径。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/SHELL-CORE-r2/evidence/results.json`、`/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/shortcut-keyboard.json`、`/tmp/matou-independent-qa-final-20260830-071752/groups/NAV9-r1/evidence/results.json`。
 
-### D-05 关闭/删除缺少保护与历史恢复（P0）
-- **影响用例**：LIFE-001/002/003/004/005/006、EDGE-007/010/013。
-- **最短复现**：运行命令的画布点关闭，或运行中的带子节点父会话点 ×。
-- **期望**：影响确认、允许取消；关闭后进入已关闭画布；父历史及关系保留。
-- **实际**：dialog=0，Tab/父节点直接消失；事项菜单无已关闭画布入口。
-- **证据**：`/tmp/matou-independent-qa-20260830/groups/CLOSE-r3/evidence/after-close-click.png`、`/tmp/matou-independent-qa-20260830/groups/HISTORY-r1/evidence/results.json`、`/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/LIFE001.json`。
+### D-05 异常/窗口续接仍有断点（P0/P1）
+- 用例：ISO-001/004、EDGE-001/002、LIFE-007。
+- 实际：移动目录后没有产品内重绑闭环；失效 cwd 时新建无重试卡；独立窗关闭无继续入口；主窗重开不恢复终端焦点。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/WORKSPACE-MOVE-r1/evidence/new-canvas-fail.png`、`/tmp/matou-independent-qa-final-20260830-071752/groups/INDEPENDENT-r2/evidence/results.json`、`/tmp/matou-independent-qa-final-20260830-071752/groups/HIDE-r2/evidence/results.json`。
 
-### D-06 Claude 主动退出在重启后被错误恢复（P0）
-- **影响用例**：EDGE-006。
-- **最短复现**：有子节点的 Claude 执行 `/exit` → 看到 Shell → 完整退出 App → 重启。
-- **期望**：继续是 Shell，不显示恢复失败。
-- **实际**：重启显示 `Claude Code 恢复失败 / provider resume exited with code 0`。
-- **证据**：`/tmp/matou-independent-qa-20260830/groups/CLAUDE-FINAL-r3/evidence/EDGE006-final.json`。
+### D-06 Claude 明确授权等待仍被显示为运行中（P0）
+- 用例：STA-006、SORT-004。
+- 复现：让真实 Claude Write 工具弹出 Yes/No 权限确认 → 查看 DAG。
+- 期望：待输入。实际：运行中。批准后真实文件可成功创建。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/CLAUDE-NONGIT-r1/evidence/permission2-results.json`。
 
-### D-07 其他可见问题（P1）
-- 画布没有可发现的重命名入口（CAN-004）。
-- 四列悬浮宽度不变化（NAV-004）。
-- 窄窗全部等宽压缩，当前会话没有优先让位（NAV-009）。
-- DAG Git节点不显示分支（DAG-005）。
-- 200+字符工作目录后 Tab仍显示 `/Users/icesword`（EDGE-008）。
-- 独立窗口关闭后 DAG仍显示运行中，无继续/重新打开入口（ISO-004）。
+### D-07 取消关闭的复合现场保持未闭环（P1）
+- 用例：EDGE-007。
+- 复现：同画布准备运行 Claude、待输入 Shell 和未提交草稿 → 关闭后取消。
+- 期望：草稿、滚动、焦点和两进程完整保持。
+- 实际：单运行 Shell 的取消与焦点通过，但产品未在本轮复合现场中满足全部状态证据。
+- 证据：`/tmp/matou-independent-qa-final-20260830-071752/groups/CLOSE-FINAL-r1/evidence/results.json`。
 
-## 5. BLOCKED 与规格问题
+## 5. BLOCKED 与规格冲突
 
-- **外部环境阻塞**：团队 Claude 会话（REL-019）、第二显示器（ISO-005）、后续覆盖安装包（EDGE-016）、仅摘要链路断流夹具（STA-011）。
-- **上游缺陷阻塞**：多层 Fork/7层链、真实新 worktree、单点恢复失败等用例受 D-01 或隔离 Git工作空间选择未建立影响。
-- **测试夹具问题**：`CMD-WAIT = read -r -p ...` 在产品默认 zsh 中报 `read: -p: no coprocess`，E2E-STA-003 记为 BLOCKED；PRD只要求“明确待输入”，未要求该 Bash 语法。
-- **PRD冲突**：未发现需要修改最终 PRD 验收口径的直接冲突；上述为执行环境/夹具或产品行为问题。
+- 外部/设备/工件阻塞：E2E-REL-010, E2E-REL-011, E2E-REL-012, E2E-REL-019, E2E-STA-003, E2E-STA-007, E2E-STA-011, E2E-ISO-002, E2E-ISO-005, E2E-ISO-007, E2E-EDGE-016。详见 `/tmp/matou-independent-qa-final-20260830-071752/environment/blockers.md`。
+- **规格冲突 1—REL-010**（PRD `§4.2.6`；E2E `§10 SPEC-Q08`）：用例用已有原始 Git ref 构造冲突；PRD 定义用户显示名冲突，且测试设计 SPEC-Q08 明确 Runtime 生成安全 Git ref。当前包生成 `matou/<name>-<id>`。
+- **规格冲突 2—STA-003**（PRD `§4.4.2`；E2E `§3.2 CMD-WAIT`）：`read -r -p` 是 Bash 语法，在产品默认 zsh 中为 coprocess 读取并立即报错；没有形成待输入。
+- 未修改原用例内容；两项均保留为 BLOCKED 并提供 PRD/测试锚点。
 
 ## 6. 数据文件
 
-- 机器可读 102 条结果：`/tmp/matou-independent-qa-20260830/execution-results-102.json`
-- 证据根：`/tmp/matou-independent-qa-20260830/groups/`
-- 产品实现改动：无。
+- 机器可读结果：`/tmp/matou-independent-qa-final-20260830-071752/execution-results-102.json`
+- 证据根：`/tmp/matou-independent-qa-final-20260830-071752/groups/`
+- 测试对象实现改动：无。
