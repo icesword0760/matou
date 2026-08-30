@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -75,5 +75,31 @@ describe('PRD 02 detached HUD', () => {
     expect(openDagWindow).toHaveBeenCalledWith({
       mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'agent-1', theme: 'light'
     })
+  })
+
+  it('keeps an Agent Teams teammate read-only when it opens in an independent window', async () => {
+    runtime.request.mockImplementationOnce(async () => ({
+      hierarchy: {
+        sessionGraphs: {
+          'scene-1': {
+            sceneId: 'scene-1', nodes: [{
+              sessionId: 'teammate-1', sceneId: 'scene-1', currentMode: 'agent-team-member',
+              workStatus: 'idle', providerRestoreState: 'none', canFork: false,
+              title: 'MATOU_QA_TEAMMATE', cwd: '/tmp', activeChildCount: 0,
+              historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+              latestLines: ['TEAMMATE_REAL_READY'], lastUserInteractionSeq: 0
+            }], edges: []
+          }
+        }
+      }
+    }))
+    window.history.replaceState({}, '',
+      '/?kind=detached-terminal&windowId=detached-1&mainWindowId=main-1&sceneId=scene-1&sessionId=teammate-1&profile=agent-team-member&title=MATOU_QA_TEAMMATE')
+    render(<DetachedTerminalApp />)
+
+    await waitFor(() => expect(screen.getByRole('status', { name: '队友会话摘要' }).textContent)
+      .toContain('TEAMMATE_REAL_READY'))
+    expect(screen.queryByTestId('terminal-teammate-1')).toBeNull()
+    expect(screen.queryByLabelText('快捷指令栏')).toBeNull()
   })
 })

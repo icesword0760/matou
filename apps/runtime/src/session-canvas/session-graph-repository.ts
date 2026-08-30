@@ -229,7 +229,9 @@ export function projectSceneGraphFrom(
            SUM(CASE WHEN child.archived_at IS NULL THEN 1 ELSE 0 END) AS active_count,
            SUM(CASE WHEN child.archived_at IS NOT NULL THEN 1 ELSE 0 END) AS historical_count,
            SUM(CASE WHEN child.archived_at IS NULL AND child.kind = 'shell' THEN 1 ELSE 0 END) AS shell_count,
-           SUM(CASE WHEN child.archived_at IS NULL AND child.kind = 'claude-code' THEN 1 ELSE 0 END) AS claude_count
+           SUM(CASE WHEN child.archived_at IS NULL
+                     AND child.kind IN ('claude-code', 'agent-team-member')
+                    THEN 1 ELSE 0 END) AS claude_count
          FROM session_relations_current AS relation
          JOIN sessions AS child ON child.id = relation.from_session_id
          JOIN session_canvas_memberships AS membership ON membership.session_id = child.id

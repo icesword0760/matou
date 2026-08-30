@@ -24,7 +24,7 @@ export interface DetachedTerminalWindowInput {
   mountId: string
   sessionId: string
   executionContextId: string
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
   title: string
 }
 

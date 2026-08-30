@@ -151,6 +151,16 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .session-start-failure-card { color: #9b2f2a; border-color: #edc2bf; background: #fff3f2; }
 .hierarchy-shell[data-theme="light"] .session-start-failure-reason { color: #a95853; }
 .terminal-pane .terminal-surface { flex: 1; min-height: 0; padding: 4px 8px; background: var(--kooky-terminal); }
+.agent-team-member-summary { display: flex; flex: 1; flex-direction: column; gap: 16px; min-height: 0; padding: 28px; color: #d9dce2; background: var(--kooky-terminal); }
+.agent-team-member-summary__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.agent-team-member-summary__heading strong { font-size: 15px; }
+.agent-team-member-summary__heading span { padding: 3px 8px; border-radius: 999px; color: #a9c8f1; background: rgba(79,137,205,.18); font-size: 11px; }
+.agent-team-member-summary__heading span[data-work-status="running"],
+.agent-team-member-summary__heading span[data-work-status="starting"] { color: #9ed6b0; background: rgba(69,151,95,.18); }
+.agent-team-member-summary__heading span[data-work-status="error"],
+.agent-team-member-summary__heading span[data-work-status="interrupted"] { color: #efaaa1; background: rgba(188,72,61,.18); }
+.agent-team-member-summary__lines { display: grid; gap: 8px; overflow: auto; padding: 14px; border: 1px solid rgba(139,160,191,.2); border-radius: 8px; background: rgba(255,255,255,.025); font: 12px/1.55 'SF Mono','Monaco','Menlo',monospace; white-space: pre-wrap; }
+.agent-team-member-summary small { margin-top: auto; color: #7f8793; }
 .detach-context-overlay { position: fixed; z-index: 9998; inset: 0; }
 .detach-context-menu { position: fixed; z-index: 9999; min-width: 140px; padding: 4px 0; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; background: rgba(20,25,35,.95); box-shadow: 0 4px 12px rgba(0,0,0,.3); backdrop-filter: blur(12px); }
 .detach-menu-item { display: block; box-sizing: border-box; width: 100%; padding: 6px 14px; border: 0; color: rgba(255,255,255,.85); background: transparent; cursor: pointer; font: 13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-align: left; white-space: nowrap; }
@@ -368,6 +378,9 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .scene-stage,
 .hierarchy-shell[data-theme="light"] .terminal-pane,
 .hierarchy-shell[data-theme="light"] .terminal-pane .terminal-surface { color: #2f3547; background: #f7f8fa; }
+.hierarchy-shell[data-theme="light"] .agent-team-member-summary { color: #303746; background: #f7f8fa; }
+.hierarchy-shell[data-theme="light"] .agent-team-member-summary__lines { border-color: #d9dee8; background: #fff; }
+.hierarchy-shell[data-theme="light"] .agent-team-member-summary small { color: #78808c; }
 .hierarchy-shell[data-theme="light"] .workbench-sidebar,
 .hierarchy-shell[data-theme="light"] .flat-sidebar,
 .hierarchy-shell[data-theme="light"] .flat-sidebar__topbar,

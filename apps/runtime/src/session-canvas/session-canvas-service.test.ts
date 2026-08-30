@@ -291,6 +291,70 @@ describe('SessionCanvasService', () => {
       restore_state: 'none'
     })
   })
+
+  it('projects a real Claude Agent Teams teammate as a read-only child without stealing focus', () => {
+    const initial = bootstrap()
+    database.run(
+      "UPDATE sessions SET kind = 'claude-code', title = 'Claude' WHERE id = ?",
+      initial.session!.id
+    )
+    const observe = (service as unknown as {
+      upsertAgentTeamMember?: (
+        mutation: { commandId: string; commandType: string; requestHash: string },
+        input: {
+          leadSessionId: string
+          teammateId: string
+          teamId: string
+          name: string
+          workStatus: 'running' | 'idle'
+          latestLines: string[]
+          now: number
+        }
+      ) => { graph: { focusedSessionId?: string; nodes: Array<Record<string, unknown>> } }
+    }).upsertAgentTeamMember
+
+    expect(observe).toBeTypeOf('function')
+    const created = observe!.call(service, command('observe-real-teammate'), {
+      leadSessionId: initial.session!.id,
+      teammateId: 'MATOU_QA_TEAMMATE@session-real',
+      teamId: 'session-real',
+      name: 'MATOU_QA_TEAMMATE',
+      workStatus: 'running',
+      latestLines: ['TEAMMATE_REAL_READY'],
+      now: 20
+    })
+
+    const teammate = created.graph.nodes.find(({ currentMode }) =>
+      currentMode === 'agent-team-member'
+    )
+    expect(teammate).toMatchObject({
+      parentSessionId: initial.session!.id,
+      relationKind: 'derived-from',
+      currentMode: 'agent-team-member',
+      title: 'MATOU_QA_TEAMMATE',
+      workStatus: 'running',
+      latestLines: ['TEAMMATE_REAL_READY']
+    })
+    expect(created.graph.focusedSessionId).toBe(initial.session!.id)
+    expect(created.graph.nodes.find(({ sessionId }) => sessionId === initial.session!.id))
+      .toMatchObject({ activeChildCount: 1, childModeCounts: { shell: 0, claudeCode: 1 } })
+
+    const updated = observe!.call(service, command('update-real-teammate'), {
+      leadSessionId: initial.session!.id,
+      teammateId: 'MATOU_QA_TEAMMATE@session-real',
+      teamId: 'session-real',
+      name: 'MATOU_QA_TEAMMATE',
+      workStatus: 'idle',
+      latestLines: ['TEAMMATE_REAL_READY', 'Teammate finished'],
+      now: 21
+    })
+    expect(updated.graph.nodes.filter(({ currentMode }) =>
+      currentMode === 'agent-team-member'
+    )).toHaveLength(1)
+    expect(updated.graph.nodes.find(({ currentMode }) =>
+      currentMode === 'agent-team-member'
+    )).toMatchObject({ workStatus: 'idle', latestLines: ['TEAMMATE_REAL_READY', 'Teammate finished'] })
+  })
 })
 
 function bootstrap() {

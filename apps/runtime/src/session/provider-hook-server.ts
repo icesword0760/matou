@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import { chmod, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -29,6 +29,16 @@ export interface ProviderHookNotification {
   event: ProviderNotificationEvent
 }
 
+export interface AgentTeamObservation {
+  runId: string
+  leadSessionId: string
+  teammateId: string
+  teamId: string
+  name: string
+  workStatus: 'running' | 'idle' | 'needs-input' | 'error'
+  latestLines: string[]
+}
+
 export interface ProviderHookServerOptions {
   onNotification?: (notification: ProviderHookNotification) => void
   onHudPayload?: (event: {
@@ -44,6 +54,7 @@ export interface ProviderHookServerOptions {
     providerSessionId: string
     eventName: string
   }) => void
+  onTeamObservations?: (observations: AgentTeamObservation[]) => void | Promise<void>
 }
 
 export interface ProviderHookRegistration {
@@ -62,6 +73,7 @@ export class ProviderHookServer {
   readonly #onNotification: (notification: ProviderHookNotification) => void
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
+  readonly #onTeamObservations: NonNullable<ProviderHookServerOptions['onTeamObservations']>
   #server: Server | undefined
   #port: number | undefined
 
@@ -71,6 +83,7 @@ export class ProviderHookServer {
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
+    this.#onTeamObservations = options.onTeamObservations ?? (() => {})
   }
 
   async start(): Promise<void> {
@@ -183,6 +196,14 @@ export class ProviderHookServer {
         provider: 'claude-code',
         payload
       })
+      const transcriptPath = providerTranscriptPath(payload)
+      if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
+        const observations = await readAgentTeamObservations(transcriptPath, {
+          runId: registration.runId,
+          leadSessionId: registration.sessionId
+        })
+        if (observations.length > 0) await this.#onTeamObservations(observations)
+      }
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
       const confirmsConversation = eventName !== 'SessionEnd' && (
@@ -302,6 +323,142 @@ export function providerSessionIdentity(payload: Record<string, unknown>): strin
   return transcriptPath?.match(
     /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl/i
   )?.[1]
+}
+
+export function providerTranscriptPath(payload: Record<string, unknown>): string | undefined {
+  return nonEmptyText(payload.transcript_path) ??
+    nonEmptyText(payload.transcriptPath) ??
+    nonEmptyText(payload.agent_transcript_path)
+}
+
+const MAX_TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
+
+async function readAgentTeamObservations(
+  transcriptPath: string,
+  owner: { runId: string; leadSessionId: string }
+): Promise<AgentTeamObservation[]> {
+  const transcript = await readTranscriptTail(transcriptPath).catch(() => '')
+  if (!transcript) return []
+  const members = new Map<string, {
+    teammateId: string
+    teamId: string
+    name: string
+    workStatus: AgentTeamObservation['workStatus']
+    latestLines: string[]
+  }>()
+  const addLine = (member: { latestLines: string[] }, value: unknown) => {
+    const text = nonEmptyText(value)
+    if (!text || member.latestLines.at(-1) === text) return
+    member.latestLines.push(text)
+    member.latestLines = member.latestLines.slice(-4)
+  }
+  for (const line of transcript.split('\n')) {
+    if (!line.trim()) continue
+    let row: Record<string, unknown>
+    try {
+      const parsed = JSON.parse(line) as unknown
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue
+      row = parsed as Record<string, unknown>
+    } catch {
+      continue
+    }
+    const toolUseResult = record(row.toolUseResult)
+    if (nonEmptyText(toolUseResult?.status) === 'teammate_spawned') {
+      const teammateId = nonEmptyText(toolUseResult?.teammate_id) ??
+        nonEmptyText(toolUseResult?.agent_id)
+      const name = nonEmptyText(toolUseResult?.name) ?? teammateId?.split('@')[0]
+      if (teammateId && name) {
+        const member = members.get(name) ?? {
+          teammateId,
+          teamId: nonEmptyText(toolUseResult?.team_name) ?? teammateId.split('@')[1] ?? '',
+          name,
+          workStatus: 'running' as const,
+          latestLines: []
+        }
+        member.teammateId = teammateId
+        member.teamId = nonEmptyText(toolUseResult?.team_name) ?? member.teamId
+        member.workStatus = 'running'
+        addLine(member, toolUseResult?.prompt)
+        members.set(name, member)
+      }
+    }
+    const listing = nonEmptyText(toolUseResult?.listing)
+    if (listing) {
+      for (const listingLine of listing.split('\n')) {
+        const match = /^\s*(.+?)\s+\[[^\]]+\]\s+·\s+(running|idle)\b/i.exec(listingLine)
+        if (!match) continue
+        const name = match[1]!.trim()
+        const member = members.get(name)
+        if (member) member.workStatus = match[2]!.toLowerCase() === 'idle' ? 'idle' : 'running'
+      }
+    }
+    const messageCandidates = [nonEmptyText(row.content), messageText(row.message)]
+      .filter((value): value is string => Boolean(value))
+    for (const content of messageCandidates) {
+      for (const match of content.matchAll(
+        /<(?:agent-message\s+from|teammate-message\s+teammate_id)="([^"]+)"[^>]*>([\s\S]*?)<\/(?:agent-message|teammate-message)>/g
+      )) {
+        const name = match[1]!.split('@')[0]!
+        const member = members.get(name)
+        if (!member) continue
+        const body = match[2]!.trim()
+        const idle = parseIdleNotification(body)
+        if (idle) {
+          member.workStatus = 'idle'
+          addLine(member, idle)
+        } else {
+          addLine(member, body)
+        }
+      }
+    }
+  }
+  return [...members.values()].map((member) => ({
+    ...owner,
+    ...member
+  }))
+}
+
+async function readTranscriptTail(path: string): Promise<string> {
+  const info = await stat(path)
+  const start = Math.max(0, info.size - MAX_TRANSCRIPT_TAIL_BYTES)
+  const length = info.size - start
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.alloc(length)
+    await handle.read(buffer, 0, length, start)
+    const value = buffer.toString('utf8')
+    return start === 0 ? value : value.slice(Math.max(0, value.indexOf('\n') + 1))
+  } finally {
+    await handle.close()
+  }
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function messageText(value: unknown): string | undefined {
+  const message = record(value)
+  const content = message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  return content.flatMap((part) => {
+    const entry = record(part)
+    return nonEmptyText(entry?.text) ?? nonEmptyText(entry?.content) ?? []
+  }).join('\n') || undefined
+}
+
+function parseIdleNotification(value: string): string | undefined {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    const event = record(parsed)
+    if (event?.type !== 'idle_notification') return undefined
+    return nonEmptyText(event.result) ?? '队友已完成当前任务'
+  } catch {
+    return undefined
+  }
 }
 
 function nonEmptyText(value: unknown): string | undefined {

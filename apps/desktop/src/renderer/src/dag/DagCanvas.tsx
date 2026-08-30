@@ -190,7 +190,7 @@ function DagNodeCard(props: {
   const visualStatus = historical ? 'exited' : node.workStatus
   return <button type="button" className={`dag-node-card status-${visualStatus}${historical ? ' is-historical' : ''}${focused ? ' is-focused' : ''}${ghost ? ' is-ghost' : ''}`}
     style={style} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
-    <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{node.currentMode === 'claude-code' ? 'Claude' : 'Shell'}</em></span>
+    <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{modeLabel(node.currentMode)}</em></span>
     <strong>{node.title}</strong>
     <span className="dag-node-card__path" title={node.cwd}>
       {branch ? `${branch}${node.git?.dirty ? '*' : ''}` : node.cwd}
@@ -200,6 +200,13 @@ function DagNodeCard(props: {
     <span className="dag-node-card__meta">子会话 {node.activeChildCount}{historical ? ' · 历史节点' : ''} · {activityLabel(node)}</span>
     {shared && <span className="dag-node-card__shared">{branch ? '共享工作树' : '共享目录'}</span>}
   </button>
+}
+
+function modeLabel(mode: SessionGraphNodeView['currentMode']): string {
+  if (mode === 'claude-code') return 'Claude'
+  if (mode === 'agent-team-member') return '队友'
+  if (mode === 'codex') return 'Codex'
+  return 'Shell'
 }
 
 export function clampDagScale(scale: number): number {

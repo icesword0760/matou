@@ -430,6 +430,7 @@ function HierarchyProduct({ projection, commands }: {
                   {...(graphNode ? {
                     forkReady: graphNode.canFork,
                     workStatus: graphNode.workStatus,
+                    latestLines: graphNode.latestLines,
                     providerRestoreState: graphNode.providerRestoreState,
                     forkState: graphNode.forkState,
                     spawnRevision: graphNode.forkAttempt ?? 0,
@@ -471,7 +472,7 @@ function HierarchyProduct({ projection, commands }: {
                             windowId: sceneWindowId, mainWindowId: projection.windowId,
                             sceneId: scene.id, mountId: mount.id, sessionId: session.id,
                             executionContextId: session.executionContextId ?? 'local-default',
-                            profile: session.kind === 'claude-code' || session.kind === 'codex'
+                            profile: session.kind === 'claude-code' || session.kind === 'codex' || session.kind === 'agent-team-member'
                               ? session.kind : 'shell', title: session.title
                           })
                         } catch (error) {

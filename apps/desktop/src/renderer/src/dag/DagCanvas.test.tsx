@@ -99,6 +99,21 @@ describe('DagCanvas', () => {
     expect(card.querySelector('.dag-node-card__top')?.textContent).toContain('历史')
     expect(card.querySelector('.dag-node-card__top')?.textContent).not.toContain('运行中')
   })
+
+  it('identifies Agent Teams nodes as teammates and shows their latest real output', () => {
+    const teammate = {
+      ...node('teammate', 'MATOU_QA_TEAMMATE'),
+      currentMode: 'agent-team-member' as const,
+      workStatus: 'idle' as const,
+      latestLines: ['TEAMMATE_REAL_READY']
+    }
+    render(<DagCanvas graph={{ sceneId: 'scene', nodes: [teammate], edges: [] }}
+      focusedSessionId="teammate" onSelect={vi.fn()} />)
+
+    const card = screen.getByRole('button', { name: '打开会话：MATOU_QA_TEAMMATE' })
+    expect(card.querySelector('.dag-node-card__top')?.textContent).toContain('队友')
+    expect(card.textContent).toContain('TEAMMATE_REAL_READY')
+  })
 })
 
 function graph(): SessionGraphView {

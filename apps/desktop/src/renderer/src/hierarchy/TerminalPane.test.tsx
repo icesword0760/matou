@@ -106,6 +106,20 @@ describe('Terminal pane', () => {
     expect(screen.getByText('↗ 独立窗口')).toBeTruthy()
   })
 
+  it('shows an Agent Teams teammate as a read-only live summary instead of a Shell', () => {
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'agent-team-member', title: 'MATOU_QA_TEAMMATE' }}
+      workStatus="idle" latestLines={['TEAMMATE_REAL_READY', '队友已完成当前任务']} />)
+
+    expect(screen.getByRole('status', { name: '队友会话摘要' }).textContent)
+      .toContain('TEAMMATE_REAL_READY')
+    expect(screen.getByText('空闲')).toBeTruthy()
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    expect(screen.queryByRole('textbox', { name: 'Terminal input' })).toBeNull()
+    expect(screen.queryByText('② Fork 会话')).toBeNull()
+  })
+
   it('keeps Fork visible but disabled until the Claude conversation is ready', () => {
     const props = fixture()
     render(<TerminalPane {...props} forkReady={false} onFork={vi.fn()} />)

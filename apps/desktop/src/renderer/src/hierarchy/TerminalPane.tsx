@@ -10,6 +10,7 @@ import { toOscNotification } from '../notifications/osc-notification'
 import type { TerminalThemeKey } from '../terminal/terminal-themes'
 import { ChildSessionBadge } from '../session-canvas/ChildSessionBadge'
 import type { SessionGraphNodeView } from './hierarchy-types'
+import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -45,6 +46,7 @@ export function TerminalPane(props: {
   childNodes?: SessionGraphNodeView[]
   historicalChildCount?: number
   workStatus?: SessionGraphNodeView['workStatus']
+  latestLines?: string[]
   onOpenChildren?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
@@ -55,7 +57,7 @@ export function TerminalPane(props: {
     providerRestoreState = 'none', restoreError, forkState, forkError, cwd, git,
     sharedWorkingDirectory = false,
     spawnRevision = 0, onRetryRestore, onRetryFork, onRemoveFailedFork,
-    childNodes = [], historicalChildCount = 0, workStatus = 'idle', onOpenChildren,
+    childNodes = [], historicalChildCount = 0, workStatus = 'idle', latestLines = [], onOpenChildren,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onDetach
@@ -99,9 +101,11 @@ export function TerminalPane(props: {
     setStartupRetry((value) => value + 1)
   }, [pathValid])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
+  const isTeamMember = session.kind === 'agent-team-member'
   const showFork = session.kind === 'claude-code' && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
-  const hasPaneMenu = canFork || onDetach !== undefined
+  const canDetach = onDetach !== undefined
+  const hasPaneMenu = canFork || canDetach
   const forkFailure = forkFailurePresentation(forkError)
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
     if (!hasPaneMenu || (event.target as HTMLElement).closest('button')) return
@@ -118,12 +122,12 @@ export function TerminalPane(props: {
       notificationStore.dismissSessionIndicator(session.id)
       if (!active) onActivate(session.id)
     }}>
-    <header className="terminal-pane-header split-pane-header" draggable={onDetach !== undefined}
+    <header className="terminal-pane-header split-pane-header" draggable={canDetach}
       onDragEnd={(event) => {
         const outside = event.screenX <= window.screenX || event.screenY <= window.screenY ||
           event.screenX >= window.screenX + window.outerWidth ||
           event.screenY >= window.screenY + window.outerHeight
-        if (outside) void onDetach?.(session.id)
+        if (outside && canDetach) void onDetach?.(session.id)
       }}>
       <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
         {onOpenChildren && <ChildSessionBadge children={childNodes}
@@ -199,7 +203,9 @@ export function TerminalPane(props: {
           }}>移除失败会话</button>
         </div>
       </div>}
-    {forkState !== 'failed' && <TerminalSurface sessionId={session.id}
+    {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
+      workStatus={workStatus} latestLines={latestLines} />}
+    {!isTeamMember && forkState !== 'failed' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} inputDisabled={!pathValid}
       themeKey={themeKey} fontSize={fontSize}
@@ -234,7 +240,7 @@ export function TerminalPane(props: {
           setContextMenu(null)
           void onFork?.(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
-        {onDetach && <button className="detach-menu-item" role="menuitem" onClick={() => {
+        {canDetach && <button className="detach-menu-item" role="menuitem" onClick={() => {
           setContextMenu(null)
           void onDetach(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>↗ 独立窗口</button>}

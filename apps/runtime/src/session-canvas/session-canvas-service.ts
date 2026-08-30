@@ -103,6 +103,22 @@ export interface RemoveHistoricalSessionResult {
   disposedSessionIds: string[]
 }
 
+export interface UpsertAgentTeamMemberInput {
+  leadSessionId: string
+  teammateId: string
+  teamId: string
+  name: string
+  workStatus: 'running' | 'idle' | 'needs-input' | 'error'
+  latestLines: string[]
+  now: number
+}
+
+export interface UpsertAgentTeamMemberResult {
+  sessionId: string
+  created: boolean
+  graph: SceneSessionGraph
+}
+
 export interface SessionCanvasMutationResult extends WorkspaceHierarchyResult {
   graph: SceneSessionGraph
 }
@@ -566,6 +582,135 @@ export class SessionCanvasService {
     }).result
   }
 
+  upsertAgentTeamMember(
+    command: DomainCommandMetadata,
+    input: UpsertAgentTeamMemberInput
+  ): UpsertAgentTeamMemberResult {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const lead = requireRow(tx.get<{
+        id: string
+        task_id: string
+        execution_context_id: string
+        cwd: string
+        workspace_id: string
+        scene_id: string
+        scene_node_id: string
+      }>(
+        `SELECT sessions.id, sessions.task_id, sessions.execution_context_id, sessions.cwd,
+                tasks.workspace_id, membership.scene_id, mounts.scene_node_id
+         FROM sessions
+         JOIN tasks ON tasks.id = sessions.task_id
+         JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+         JOIN session_mounts AS mounts
+           ON mounts.session_id = sessions.id AND mounts.scene_id = membership.scene_id
+         WHERE sessions.id = ? AND sessions.archived_at IS NULL
+           AND mounts.scene_node_id IS NOT NULL AND mounts.scene_window_id IS NULL
+         ORDER BY mounts.created_at, mounts.id LIMIT 1`,
+        input.leadSessionId
+      ), 'Agent team lead Session')
+      const existing = tx.all<{
+        session_id: string
+        metadata_json: string
+      }>(
+        `SELECT relation.from_session_id AS session_id, relation.metadata_json
+         FROM session_relations_current AS relation
+         JOIN sessions ON sessions.id = relation.from_session_id
+         WHERE relation.to_session_id = ? AND relation.relation_kind = 'derived-from'
+           AND sessions.kind = 'agent-team-member' AND sessions.archived_at IS NULL`,
+        lead.id
+      ).find(({ metadata_json }) => relationMetadata(metadata_json).teammateId === input.teammateId)
+      const latestLines = input.latestLines.map((line) => line.trim()).filter(Boolean).slice(-4)
+      let sessionId = existing?.session_id
+      let created = false
+      if (sessionId) {
+        tx.run(
+          `UPDATE sessions SET title = ?, status = 'running', work_status = ?,
+             updated_at = ?, last_activity_at = ?, version = version + 1
+           WHERE id = ?`,
+          input.name, input.workStatus, input.now, input.now, sessionId
+        )
+      } else {
+        created = true
+        const ids = createHierarchyIds()
+        const relationId = randomUUID()
+        sessionId = ids.sessionId
+        const sourceNode = requireRow(tx.get<SceneNodeRow>(
+          'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?',
+          lead.scene_node_id
+        ), 'Agent team lead SceneNode')
+        insertHorizontalNode(tx, lead.scene_id, sourceNode, ids, input.now)
+        tx.run(
+          `INSERT INTO sessions (
+             id, task_id, execution_context_id, kind, status, work_status, title, cwd,
+             created_at, updated_at, last_activity_at, version
+           ) VALUES (?, ?, ?, 'agent-team-member', 'running', ?, ?, ?, ?, ?, ?, 1)`,
+          sessionId, lead.task_id, lead.execution_context_id, input.workStatus,
+          input.name, lead.cwd, input.now, input.now, input.now
+        )
+        tx.run(
+          `INSERT INTO session_mounts (
+             id, scene_id, scene_node_id, session_id, created_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+          ids.mountId, lead.scene_id, ids.rootNodeId, sessionId, input.now
+        )
+        tx.run(
+          `UPDATE scenes
+           SET root_node_id = CASE WHEN root_node_id = ? THEN ? ELSE root_node_id END,
+               layout_revision = layout_revision + 1, updated_at = ?
+           WHERE id = ?`,
+          sourceNode.id, ids.secondaryNodeId, input.now, lead.scene_id
+        )
+        const metadataJson = JSON.stringify({
+          teamId: input.teamId,
+          teammateId: input.teammateId,
+          role: 'teammate'
+        })
+        const relationInsertion = tx.run(
+          `INSERT INTO session_relation_events (
+             event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+             relation_kind, metadata_json, command_id, occurred_at
+           ) VALUES (?, ?, 'created', ?, ?, ?, 'derived-from', ?, ?, ?)`,
+          `${command.commandId}:team-relation-created`, relationId, lead.task_id,
+          sessionId, lead.id, metadataJson, command.commandId, input.now
+        )
+        tx.run(
+          `INSERT INTO session_relations_current (
+             relation_id, task_id, from_session_id, to_session_id, relation_kind,
+             metadata_json, created_at, updated_at, source_event_sequence
+           ) VALUES (?, ?, ?, ?, 'derived-from', ?, ?, ?, ?)`,
+          relationId, lead.task_id, sessionId, lead.id, metadataJson,
+          input.now, input.now, Number(relationInsertion.lastInsertRowid)
+        )
+      }
+      tx.run(
+        `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           latest_lines_json = excluded.latest_lines_json,
+           updated_at = excluded.updated_at`,
+        sessionId, JSON.stringify(latestLines), input.now
+      )
+      const windowId = tx.get<{ window_id: string }>(
+        `SELECT window_id FROM window_scene_focus
+         WHERE scene_id = ? ORDER BY updated_at DESC, window_id LIMIT 1`,
+        lead.scene_id
+      )?.window_id
+      const graph = projectSceneGraphFrom(tx, lead.scene_id, windowId)
+      emit({
+        eventId: `${command.commandId}:team-member-observed`,
+        eventType: 'session.team-member-observed',
+        aggregateType: 'session', aggregateId: sessionId,
+        workspaceId: lead.workspace_id, taskId: lead.task_id, sessionId,
+        payload: {
+          graph, leadSessionId: lead.id, teamId: input.teamId,
+          teammateId: input.teammateId, created
+        },
+        occurredAt: input.now
+      })
+      return { sessionId, created, graph }
+    }).result
+  }
+
   projectSceneGraph(sceneId: string, windowId?: string): SceneSessionGraph {
     return projectSceneGraphFrom(this.#database, sceneId, windowId)
   }
@@ -667,6 +812,17 @@ function insertHorizontalNode(
      ) VALUES (?, ?, ?, 'mount', 1, ?)`,
     ids.rootNodeId, sceneId, ids.secondaryNodeId, now
   )
+}
+
+function relationMetadata(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
 }
 
 function requireRow<T>(row: T | undefined, label: string): T {

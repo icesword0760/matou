@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -99,6 +99,53 @@ describe('ProviderHookServer', () => {
         hook_event_name: 'PreToolUse', tool_name: 'Read'
       }) })
     ])
+  })
+
+  it('projects real Agent Teams transcript activity into teammate observations', async () => {
+    await hooks.stop()
+    const observations: unknown[] = []
+    hooks = new ProviderHookServer(root, sessions, {
+      onTeamObservations: (events: unknown[]) => observations.push(...events)
+    } as unknown as ConstructorParameters<typeof ProviderHookServer>[2])
+    await hooks.start()
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-team', sessionId: 'session-1'
+    })
+    const transcriptPath = join(root, 'provider-team-real.jsonl')
+    await writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'user',
+        toolUseResult: {
+          status: 'teammate_spawned',
+          teammate_id: 'MATOU_QA_TEAMMATE@session-real',
+          agent_id: 'MATOU_QA_TEAMMATE@session-real',
+          name: 'MATOU_QA_TEAMMATE',
+          team_name: 'session-real',
+          prompt: 'Reply exactly TEAMMATE_REAL_READY'
+        }
+      }),
+      JSON.stringify({
+        type: 'queue-operation', operation: 'enqueue',
+        content: '<agent-message from="MATOU_QA_TEAMMATE">\nTEAMMATE_REAL_READY\n</agent-message>'
+      }),
+      JSON.stringify({
+        type: 'user',
+        toolUseResult: {
+          listing: 'Teammates (1):\n  MATOU_QA_TEAMMATE [96bcfc]  ·  idle  ·  started 8s ago'
+        }
+      })
+    ].join('\n'))
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-team', transcript_path: transcriptPath
+    })
+
+    expect(observations).toContainEqual({
+      runId: 'run-team', leadSessionId: 'session-1',
+      teammateId: 'MATOU_QA_TEAMMATE@session-real', teamId: 'session-real',
+      name: 'MATOU_QA_TEAMMATE', workStatus: 'idle',
+      latestLines: ['Reply exactly TEAMMATE_REAL_READY', 'TEAMMATE_REAL_READY']
+    })
   })
 
   it('keeps Fork unavailable when statusline reports an identity before the first conversation event', async () => {

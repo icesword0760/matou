@@ -5,12 +5,13 @@ import type { RuntimeMessage } from '@matou/contracts'
 import { TerminalSurface } from '../terminal/TerminalSurface'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { TerminalHud } from '../hud/TerminalHud'
-import type { HudModelStrategy, HudPermissionMode, SessionHudView } from './hierarchy-types'
+import type { HudModelStrategy, HudPermissionMode, SessionGraphNodeView, SessionHudView } from './hierarchy-types'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeKey } from '../terminal/terminal-themes'
 import { useDagShortcut } from '../dag/useDagShortcut'
+import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 
 export function DetachedTerminalApp() {
   const client = useRuntimeClient()
@@ -20,6 +21,7 @@ export function DetachedTerminalApp() {
   const sceneId = query.get('sceneId') ?? ''
   const executionContextId = query.get('executionContextId') ?? 'local-default'
   const requestedProfile = query.get('profile')
+  const isTeamMember = requestedProfile === 'agent-team-member'
   const profile = requestedProfile === 'claude-code' || requestedProfile === 'codex'
     ? requestedProfile : 'shell'
   const title = query.get('title') ?? '独立终端'
@@ -42,23 +44,37 @@ export function DetachedTerminalApp() {
     query: '', options: { caseSensitive: false, regex: false, wholeWord: false } as TerminalSearchOptions,
     direction: 'next' as 'next' | 'previous', sequence: 0
   })
+  const [teamMemberNode, setTeamMemberNode] = useState<SessionGraphNodeView>()
   const sequence = useRef(0)
   useEffect(() => {
     if (!client) return
+    const loadSnapshot = async () => {
+      const snapshot = await client.request<{
+        hierarchy?: {
+          sessionHuds?: SessionHudView[]
+          sessionGraphs?: Record<string, { nodes: SessionGraphNodeView[] }>
+        }
+      }>('projection.snapshot', {
+        windowId: query.get('windowId') ?? 'detached-window'
+      })
+      const current = snapshot.hierarchy?.sessionHuds?.find((item) => item.sessionId === sessionId)
+      if (current) setHud(current)
+      if (isTeamMember) {
+        const node = snapshot.hierarchy?.sessionGraphs?.[sceneId]?.nodes
+          .find((item) => item.sessionId === sessionId)
+        if (node) setTeamMemberNode(node)
+      }
+    }
     const apply = (message: RuntimeMessage) => {
       if (message.type === 'terminal.hud' && message.sessionId === sessionId && message.hud) {
         setHud(message.hud)
       }
+      if (isTeamMember && message.type === 'events.batch') void loadSnapshot().catch(() => {})
     }
     const unsubscribe = client.subscribeProjection(apply)
-    void client.request<{ hierarchy?: { sessionHuds?: SessionHudView[] } }>('projection.snapshot', {
-      windowId: query.get('windowId') ?? 'detached-window'
-    }).then((snapshot) => {
-      const current = snapshot.hierarchy?.sessionHuds?.find((item) => item.sessionId === sessionId)
-      if (current) setHud(current)
-    }).catch(() => {})
+    void loadSnapshot().catch(() => {})
     return unsubscribe
-  }, [client, sessionId])
+  }, [client, isTeamMember, sceneId, sessionId])
   const command = (method: 'session.set-permission-mode' | 'session.set-model', input: Record<string, unknown>) => {
     if (!client) return
     const commandId = `${method}-${Date.now()}-${++sequence.current}`
@@ -115,8 +131,8 @@ export function DetachedTerminalApp() {
     }
   }, [themeKey])
   return <main className="detached-terminal-app" data-theme={themeKey}>
-    <header><strong>{title}</strong><span>独立窗口 · 会话保持运行</span></header>
-    <TerminalSearchBar open={searchOpen} themeKey={themeKey}
+    <header><strong>{title}</strong><span>{isTeamMember ? '独立窗口 · 队友摘要' : '独立窗口 · 会话保持运行'}</span></header>
+    {!isTeamMember && <TerminalSearchBar open={searchOpen} themeKey={themeKey}
       resultIndex={searchResults.resultIndex} resultCount={searchResults.resultCount}
       onSearch={(query, options) => search(query, options)}
       onNext={() => search(searchRequest.query, searchRequest.options, 'next')}
@@ -125,12 +141,14 @@ export function DetachedTerminalApp() {
         search('', searchRequest.options)
         setSearchOpen(false)
         setFocusRequest((value) => value + 1)
-      }} />
-    <TerminalSurface sessionId={sessionId} executionContextId={executionContextId}
+      }} />}
+    {isTeamMember ? <AgentTeamMemberSummary
+      workStatus={teamMemberNode?.workStatus ?? 'starting'}
+      latestLines={teamMemberNode?.latestLines ?? []} /> : <TerminalSurface sessionId={sessionId} executionContextId={executionContextId}
       profile={profile} visible themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
       {...(searchOpen ? { searchRequest } : {})} onSearchResults={setSearchResults}
-      focusRequest={focusRequest} />
-    <div className="shortcut-bar" aria-label="快捷指令栏">
+      focusRequest={focusRequest} />}
+    {!isTeamMember && <div className="shortcut-bar" aria-label="快捷指令栏">
       <button className="add-btn" aria-label="添加快捷指令">+</button><div className="btn-list" />
       <TerminalHud hud={hud} onPermissionMode={(_sessionId: string, permissionMode: HudPermissionMode, respawn: boolean) =>
         command('session.set-permission-mode', {
@@ -138,11 +156,11 @@ export function DetachedTerminalApp() {
         })}
         onModel={(_sessionId: string, modelStrategy: HudModelStrategy) =>
           command('session.set-model', { sessionId, modelStrategy })} />
-    </div>
-    <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}
+    </div>}
+    {!isTeamMember && <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}
       onClose={() => {
         setShortcutPanelOpen(false)
         setFocusRequest((value) => value + 1)
-      }} />
+      }} />}
   </main>
 }

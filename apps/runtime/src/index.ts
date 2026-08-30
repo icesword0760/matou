@@ -28,6 +28,7 @@ import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
+import { SessionCanvasService } from './session-canvas/session-canvas-service'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -73,6 +74,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionRepository = new SessionRepository(database, transactions)
   const providerModes = new ProviderModeService(database, transactions)
   const workStatuses = new SessionWorkStatusService(database, transactions)
+  const sessionCanvas = new SessionCanvasService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
   const rpcRouter = new RuntimeRpcRouter(database, notifications)
@@ -112,6 +114,31 @@ async function initializeRuntime(): Promise<RuntimeState> {
     onHudPayload: ({ sessionId, payload }) => {
       sessionHuds.ingestProvider(sessionId, payload)
       for (const server of servers) void server.refreshSessionHud(sessionId)
+    },
+    onTeamObservations: async (observations) => {
+      let changed = false
+      for (const observation of observations) {
+        const now = Date.now()
+        try {
+          sessionCanvas.upsertAgentTeamMember({
+            commandId: `provider-team-${observation.runId}-${randomUUID()}`,
+            commandType: 'provider-hook.team-member',
+            requestHash: `${observation.leadSessionId}:${observation.teammateId}:${observation.workStatus}:${JSON.stringify(observation.latestLines)}`
+          }, {
+            leadSessionId: observation.leadSessionId,
+            teammateId: observation.teammateId,
+            teamId: observation.teamId,
+            name: observation.name,
+            workStatus: observation.workStatus,
+            latestLines: observation.latestLines,
+            now
+          })
+          changed = true
+        } catch (error) {
+          console.error(`[provider-team-member] ${errorMessage(error)}`)
+        }
+      }
+      if (changed) for (const server of servers) server.flushSemanticEvents()
     },
     onIdentityRecorded: ({ sessionId, runId, providerSessionId, eventName }) => {
       sessionHuds.markResumable(sessionId)
