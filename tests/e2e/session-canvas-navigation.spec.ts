@@ -165,4 +165,52 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('matches the Mockup fixed-card width transition without resizing siblings', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      for (let index = 0; index < 3; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      const cards = fixture.page.locator('.session-card[data-in-viewport="true"]')
+      await expect(cards).toHaveCount(4)
+      const target = cards.nth(1)
+      const sibling = cards.nth(2)
+      const targetBox = await target.boundingBox()
+      expect(targetBox).not.toBeNull()
+      const siblingWidth = (await sibling.boundingBox())!.width
+      const expectedExpandedWidth = await carousel.evaluate((element) => {
+        const style = getComputedStyle(element)
+        const innerWidth = element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+        return Math.min(innerWidth * 0.48, 620)
+      })
+
+      const samplesPromise = target.evaluate(async (element) => {
+        const sibling = element.closest('[aria-label="同级会话列表"]')!
+          .querySelectorAll<HTMLElement>('.session-card')[2]!
+        const samples: Array<{ target: number; sibling: number }> = []
+        const started = performance.now()
+        while (performance.now() - started < 520) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          samples.push({
+            target: element.getBoundingClientRect().width,
+            sibling: sibling.getBoundingClientRect().width
+          })
+        }
+        return samples
+      })
+      await fixture.page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 90)
+      const samples = await samplesPromise
+
+      expect(samples.slice(0, 5).some(({ target: width }) => width > targetBox!.width + 1)).toBe(true)
+      expect(Math.max(...samples.map(({ sibling: width }) => width)) -
+        Math.min(...samples.map(({ sibling: width }) => width))).toBeLessThan(2)
+      expect(samples.at(-1)!.sibling).toBeCloseTo(siblingWidth, 0)
+      expect(samples.at(-1)!.target).toBeCloseTo(expectedExpandedWidth, 0)
+    } finally {
+      await fixture.close()
+    }
+  })
 })

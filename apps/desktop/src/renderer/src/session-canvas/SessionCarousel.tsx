@@ -41,7 +41,6 @@ export function SessionCarousel(props: {
   const ensureVisibleRef = useRef(onEnsureSessionVisible)
   const scrollTimer = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
-  const hoverTimer = useRef<number | undefined>(undefined)
   const hoverLeaveTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
@@ -97,7 +96,6 @@ export function SessionCarousel(props: {
       window.removeEventListener('beforeunload', closePage)
       if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
-      if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
       if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
@@ -303,8 +301,6 @@ export function SessionCarousel(props: {
     const continuousScroll = userInitiated || performance.now() < userScrollUntil.current ||
       performance.now() < focusScrollUntil.current
     if (continuousScroll) {
-      if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
-      hoverTimer.current = undefined
       // The card under the pointer changes while the strip moves. Requiring a
       // fresh hover after scrolling prevents a stale card from expanding again
       // and shifting the saved viewport underneath the user.
@@ -332,8 +328,6 @@ export function SessionCarousel(props: {
     }
   }
   const hover = (sessionId: string | null) => {
-    if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
-    hoverTimer.current = undefined
     hoverIntentSessionId.current = sessionId
     if (sessionId === null) {
       if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
@@ -366,10 +360,7 @@ export function SessionCarousel(props: {
     // chosen card can expand immediately.
     userScrollUntil.current = 0
     focusScrollUntil.current = 0
-    hoverTimer.current = window.setTimeout(() => {
-      hoverTimer.current = undefined
-      setHoveredSessionId(sessionId)
-    }, 160)
+    setHoveredSessionId(sessionId)
   }
   const finishPullGesture = () => {
     const viewport = viewportRef.current

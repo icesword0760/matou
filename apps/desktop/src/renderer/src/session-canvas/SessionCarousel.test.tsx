@@ -123,7 +123,7 @@ describe('SessionCarousel', () => {
     HTMLElement.prototype.animate = originalAnimate
   })
 
-  it('centers the focused Session and expands hover only while ordinary scrolling is idle', () => {
+  it('centers the focused Session and expands hover immediately while ordinary scrolling is idle', () => {
     vi.useFakeTimers()
     const nodes = fixtures(5)
     render(<SessionCarousel nodes={nodes} focusedSessionId="session-5"
@@ -142,14 +142,12 @@ describe('SessionCarousel', () => {
     expect(viewport.scrollLeft).toBe(590)
 
     fireEvent.mouseEnter(card)
-    act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
     fireEvent.wheel(screen.getByRole('region', { name: '同级会话列表' }), { deltaX: 20, deltaY: 0 })
     expect(card.classList.contains('is-expanded')).toBe(false)
     act(() => vi.advanceTimersByTime(120))
     expect(card.classList.contains('is-expanded')).toBe(false)
     fireEvent.mouseEnter(card)
-    act(() => vi.advanceTimersByTime(160))
     expect(card.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
   })
@@ -172,22 +170,20 @@ describe('SessionCarousel', () => {
     expect(viewport.scrollLeft).toBe(240)
   })
 
-  it('expands from a stable pointer entry even when the pointer moves inside the same card', () => {
+  it('starts a single expansion immediately on pointer entry', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
     const card = document.querySelector('[data-session-card="session-3"]')!
 
     fireEvent.mouseEnter(card)
-    act(() => vi.advanceTimersByTime(80))
+    expect(card.classList.contains('is-expanded')).toBe(true)
     fireEvent.pointerMove(card, { clientX: 100, clientY: 50 })
-    act(() => vi.advanceTimersByTime(80))
-
     expect(card.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
   })
 
-  it('hands hover directly to the next card without an intermediate layout reset', () => {
+  it('hands hover immediately to the next card without an intermediate layout reset', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
@@ -195,20 +191,13 @@ describe('SessionCarousel', () => {
     const next = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
 
     fireEvent.mouseEnter(first)
-    act(() => vi.advanceTimersByTime(160))
     expect(first.classList.contains('is-expanded')).toBe(true)
 
     fireEvent.pointerLeave(first)
     fireEvent.mouseEnter(next)
 
-    // Moving directly between cards keeps the previous preview in place until
-    // the new card takes ownership. The list never resets to equal widths in
-    // between, so the target card performs only one width transition.
-    expect(first.classList.contains('is-expanded')).toBe(true)
-    expect(next.classList.contains('is-expanded')).toBe(false)
-    act(() => vi.advanceTimersByTime(159))
-    expect(first.classList.contains('is-expanded')).toBe(true)
-    act(() => vi.advanceTimersByTime(1))
+    // Leave and enter are handled in the same event turn. The new card takes
+    // ownership immediately, matching the CSS :hover behavior in the Mockup.
     expect(first.classList.contains('is-expanded')).toBe(false)
     expect(next.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
