@@ -354,9 +354,14 @@ export function SessionCarousel(props: {
     const viewport = viewportRef.current
     if (!viewport) return
     const overTerminal = (event.target as HTMLElement).closest('.terminal-surface') !== null
-    const horizontal = Math.abs(event.deltaX) >= Math.abs(event.deltaY)
+    // macOS trackpads dispatch the wheel event from inside xterm. Capture it
+    // before xterm consumes horizontal movement for its own viewport. A mouse
+    // user can express the same intent with Shift + wheel.
+    const horizontal = event.shiftKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY)
     if (!horizontal && overTerminal) return
-    const delta = horizontal ? event.deltaX : event.deltaY
+    const delta = horizontal
+      ? (Math.abs(event.deltaX) > 0 ? event.deltaX : event.deltaY)
+      : event.deltaY
     if (delta === 0) return
     if (!wheelGesture.current) {
       wheelGesture.current = true
@@ -384,8 +389,8 @@ export function SessionCarousel(props: {
     // React registers wheel handlers passively in Chromium. This interaction
     // must cancel the browser's native scroll because Matou applies the same
     // delta itself and reserves edge movement for the parent-pull gesture.
-    viewport.addEventListener('wheel', wheel, { passive: false })
-    return () => viewport.removeEventListener('wheel', wheel)
+    viewport.addEventListener('wheel', wheel, { passive: false, capture: true })
+    return () => viewport.removeEventListener('wheel', wheel, { capture: true })
   })
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {

@@ -67,4 +67,27 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('moves both directions when the native horizontal gesture starts over a real terminal', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 3; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await carousel.evaluate((element) => { element.scrollLeft = 0 })
+      const terminal = fixture.page.locator('.session-card .terminal-surface').first()
+      await terminal.hover()
+
+      await fixture.page.mouse.wheel(700, 0)
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
+      const right = await carousel.evaluate((element) => element.scrollLeft)
+
+      await fixture.page.mouse.wheel(-700, 0)
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThan(right)
+    } finally {
+      await fixture.close()
+    }
+  })
 })

@@ -161,6 +161,24 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('captures horizontal trackpad input before the terminal consumes its wheel event', () => {
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined}
+      renderSession={(node) => <div className="terminal-surface" data-testid={`surface-${node.sessionId}`} />} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 1_800 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+    const surface = screen.getByTestId('surface-session-1')
+    surface.addEventListener('wheel', (event) => event.stopPropagation())
+
+    fireEvent.wheel(surface, { deltaX: 240, deltaY: 0 })
+
+    expect(viewport.scrollLeft).toBe(240)
+  })
+
   it('expands from a stable pointer entry even when the pointer moves inside the same card', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
