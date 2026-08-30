@@ -48,6 +48,11 @@ test.describe('session canvas lifecycle', () => {
       fixture = await restartMatou(fixture)
       await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
       await expect(visibleSurfaces(fixture.page).filter({ hasText: 'RESTART_JOURNAL_OK' })).toHaveCount(1)
+
+      await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+      const dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
+      await expect(dag.locator('.dag-node-card').filter({ hasText: 'RESTART_JOURNAL_OK' })).toHaveCount(1)
     } finally {
       await fixture.close()
     }
