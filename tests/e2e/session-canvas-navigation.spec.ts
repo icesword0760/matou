@@ -118,4 +118,51 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('hands preview between adjacent cards without resetting their widths in between', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 4; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      const visibleCards = fixture.page.locator('.session-card[data-in-viewport="true"]')
+      await expect(visibleCards).toHaveCount(3)
+      const first = visibleCards.nth(0)
+      const next = visibleCards.nth(1)
+      await first.hover()
+      await expect(first).toHaveClass(/is-expanded/)
+      const nextBox = await next.boundingBox()
+      expect(nextBox).not.toBeNull()
+
+      const samplesPromise = next.evaluate(async (target) => {
+        const cards = [...target.closest('[aria-label="同级会话列表"]')!
+          .querySelectorAll<HTMLElement>('.session-card')]
+        const samples: Array<{ expandedCount: number; targetExpanded: boolean; targetWidth: number }> = []
+        const started = performance.now()
+        while (performance.now() - started < 520) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          samples.push({
+            expandedCount: cards.filter((card) => card.classList.contains('is-expanded')).length,
+            targetExpanded: target.classList.contains('is-expanded'),
+            targetWidth: target.getBoundingClientRect().width
+          })
+        }
+        return samples
+      })
+      await fixture.page.mouse.move(nextBox!.x + nextBox!.width / 2, nextBox!.y + 90)
+      const samples = await samplesPromise
+
+      expect(samples.every(({ expandedCount }) => expandedCount >= 1)).toBe(true)
+      const handoff = samples.findIndex(({ targetExpanded }) => targetExpanded)
+      expect(handoff).toBeGreaterThanOrEqual(0)
+      expect(samples.slice(handoff).every(({ targetExpanded }) => targetExpanded)).toBe(true)
+      for (let index = handoff + 1; index < samples.length; index += 1) {
+        expect(samples[index]!.targetWidth).toBeGreaterThanOrEqual(samples[index - 1]!.targetWidth - 1)
+      }
+    } finally {
+      await fixture.close()
+    }
+  })
 })

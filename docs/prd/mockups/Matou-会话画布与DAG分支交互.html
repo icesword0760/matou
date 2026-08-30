@@ -1452,12 +1452,14 @@ ${restoreAlert}
     function endPanePreview() {
       if (paneHoverBaseline === null) return;
       const baseline = paneHoverBaseline;
-      childrenStrip.scrollLeft = baseline;
       clearTimeout(paneHoverRestoreTimer);
       paneHoverRestoreTimer = setTimeout(() => {
         childrenStrip.scrollLeft = baseline;
-        paneHoverBaseline = null;
-      }, 420);
+        paneHoverRestoreTimer = setTimeout(() => {
+          childrenStrip.scrollLeft = baseline;
+          paneHoverBaseline = null;
+        }, 420);
+      }, 0);
     }
 
     function ensurePaneVisible(element, behavior = 'smooth') {

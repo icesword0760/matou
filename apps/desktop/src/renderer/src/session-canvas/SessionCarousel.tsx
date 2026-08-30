@@ -42,6 +42,7 @@ export function SessionCarousel(props: {
   const scrollTimer = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverTimer = useRef<number | undefined>(undefined)
+  const hoverLeaveTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
   const hoverIntentSessionId = useRef<string | null>(null)
@@ -97,6 +98,7 @@ export function SessionCarousel(props: {
       if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
       if (hoverTimer.current !== undefined) window.clearTimeout(hoverTimer.current)
+      if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
   }, [])
@@ -287,6 +289,8 @@ export function SessionCarousel(props: {
     // point onward and must not be mistaken for a programmatic restore event.
     if (userInitiated) {
       restoringGeometry.current = false
+      if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
+      hoverLeaveTimer.current = undefined
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
       hoverRestoreTimer.current = undefined
       hoverBaselineScrollLeft.current = undefined
@@ -332,15 +336,26 @@ export function SessionCarousel(props: {
     hoverTimer.current = undefined
     hoverIntentSessionId.current = sessionId
     if (sessionId === null) {
-      setHoveredSessionId(null)
-      // Hover expansion is only a preview. Reapply the position captured before
-      // expansion immediately, then once more after the flex transition has
-      // settled so Chromium cannot leave the strip at a clamped offset.
-      restoreHoverBaseline(false)
-      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
-      hoverRestoreTimer.current = window.setTimeout(() => restoreHoverBaseline(true), 220)
+      if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
+      // Pointer leave and enter fire back-to-back when moving between sibling
+      // cards. Defer collapse by one task so the next card can take over the
+      // existing preview directly instead of resetting every card to its base
+      // width before starting a second transition.
+      hoverLeaveTimer.current = window.setTimeout(() => {
+        hoverLeaveTimer.current = undefined
+        if (hoverIntentSessionId.current !== null) return
+        setHoveredSessionId(null)
+        // Hover expansion is only a preview. Reapply the position captured before
+        // expansion immediately, then once more after the flex transition has
+        // settled so Chromium cannot leave the strip at a clamped offset.
+        restoreHoverBaseline(false)
+        if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+        hoverRestoreTimer.current = window.setTimeout(() => restoreHoverBaseline(true), 220)
+      }, 0)
       return
     }
+    if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
+    hoverLeaveTimer.current = undefined
     if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     hoverRestoreTimer.current = undefined
     if (hoverBaselineScrollLeft.current === undefined) {

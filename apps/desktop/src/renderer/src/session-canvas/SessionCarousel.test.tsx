@@ -187,6 +187,33 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('hands hover directly to the next card without an intermediate layout reset', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const first = document.querySelector<HTMLElement>('[data-session-card="session-2"]')!
+    const next = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+
+    fireEvent.mouseEnter(first)
+    act(() => vi.advanceTimersByTime(160))
+    expect(first.classList.contains('is-expanded')).toBe(true)
+
+    fireEvent.pointerLeave(first)
+    fireEvent.mouseEnter(next)
+
+    // Moving directly between cards keeps the previous preview in place until
+    // the new card takes ownership. The list never resets to equal widths in
+    // between, so the target card performs only one width transition.
+    expect(first.classList.contains('is-expanded')).toBe(true)
+    expect(next.classList.contains('is-expanded')).toBe(false)
+    act(() => vi.advanceTimersByTime(159))
+    expect(first.classList.contains('is-expanded')).toBe(true)
+    act(() => vi.advanceTimersByTime(1))
+    expect(first.classList.contains('is-expanded')).toBe(false)
+    expect(next.classList.contains('is-expanded')).toBe(true)
+    vi.useRealTimers()
+  })
+
   it('keeps hover expansion through the native scroll emitted by its width change', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
