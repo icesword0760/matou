@@ -27,6 +27,7 @@ import { NotificationProjection } from './product/experience-foundation'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
+import { nextProviderWorkStatus } from './session/provider-work-status'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
 
@@ -94,12 +95,11 @@ async function initializeRuntime(): Promise<RuntimeState> {
         requestHash: `${notification.runId}:${notification.sessionId}:${notification.event.eventType}:${now}`
       }, { ...notification, eventId, now })
       try {
-        const workStatus = notification.event.eventType === 'error'
-          ? 'error'
-          : notification.event.eventType === 'completed'
-            ? 'idle'
-            : 'needs-input'
-        if (workStatuses.get(notification.sessionId) !== workStatus) {
+        const currentWorkStatus = workStatuses.get(notification.sessionId)
+        const workStatus = nextProviderWorkStatus(
+          currentWorkStatus, notification.event.eventType
+        )
+        if (currentWorkStatus !== workStatus) {
           workStatuses.set({
             commandId: `provider-work-status-${notification.runId}-${eventId}`,
             commandType: 'session.provider-work-status',
