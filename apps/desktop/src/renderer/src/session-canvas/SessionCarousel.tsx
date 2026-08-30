@@ -443,7 +443,7 @@ export function SessionCarousel(props: {
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
-      {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
+      {nodes.map((node, index) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
@@ -464,6 +464,16 @@ export function SessionCarousel(props: {
             onActivate(sessionId)
           }} onHover={hover}>
           {renderSession(node, inViewport.has(node.sessionId))}
+          <footer className={`session-card-footer status-${node.workStatus}`}
+            data-session-card-footer aria-label={`会话状态：${cardStatus(node.workStatus)}`}>
+            <span className="session-card-footer__state">
+              <i data-session-status-dot aria-hidden="true" />
+              {cardStatus(node.workStatus)}
+            </span>
+            <span className="session-card-footer__position" aria-label={`第 ${index + 1} 个，共 ${nodes.length} 个会话`}>
+              {index + 1}/{nodes.length}
+            </span>
+          </footer>
           {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
             <strong>{node.title}</strong>
             <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
@@ -528,5 +538,15 @@ function compactStatus(status: SessionGraphNodeView['workStatus']): string {
   if (status === 'error') return '异常'
   if (status === 'interrupted') return '中断'
   if (status === 'exited') return '历史'
+  return '空闲'
+}
+
+function cardStatus(status: SessionGraphNodeView['workStatus']): string {
+  if (status === 'needs-input') return '待输入'
+  if (status === 'running') return '运行中'
+  if (status === 'starting') return '启动中'
+  if (status === 'error') return '异常'
+  if (status === 'interrupted') return '已中断'
+  if (status === 'exited') return '已结束'
   return '空闲'
 }

@@ -72,6 +72,20 @@ describe('SessionCarousel', () => {
     expect(screen.getByRole('region', { name: '同级会话列表' }).getAttribute('data-visible-columns')).toBe('4')
   })
 
+  it('presents every Session as a complete card with status and position context', () => {
+    const nodes = fixtures(3)
+    nodes[1] = { ...nodes[1]!, workStatus: 'needs-input' }
+    render(<SessionCarousel nodes={nodes} focusedSessionId="session-2"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+
+    const focusedCard = document.querySelector('[data-session-card="session-2"]')!
+    const footer = focusedCard.querySelector('[data-session-card-footer]')
+    expect(footer).not.toBeNull()
+    expect(footer?.textContent).toContain('待输入')
+    expect(footer?.textContent).toContain('2/3')
+    expect(footer?.querySelector('[data-session-status-dot]')).not.toBeNull()
+  })
+
   it('keeps card DOM identity while authoritative interaction order changes', () => {
     const nodes = fixtures(3)
     const view = render(<SessionCarousel nodes={nodes} focusedSessionId="session-2"
