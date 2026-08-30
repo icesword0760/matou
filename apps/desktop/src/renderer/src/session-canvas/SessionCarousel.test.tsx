@@ -123,6 +123,34 @@ describe('SessionCarousel', () => {
     HTMLElement.prototype.animate = originalAnimate
   })
 
+  it('does not animate card positions when terminal content refreshes without an order change', () => {
+    const positions = new Map([['session-1', 0], ['session-2', 300]])
+    const offsetLeft = vi.spyOn(HTMLElement.prototype, 'offsetLeft', 'get').mockImplementation(function (this: HTMLElement) {
+      return positions.get(this.getAttribute('data-session-id') ?? '') ?? 0
+    })
+    const animate = vi.fn()
+    const originalAnimate = HTMLElement.prototype.animate
+    HTMLElement.prototype.animate = animate
+    const nodes = fixtures(2)
+    const view = render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.latestLines.join('\n')}</span>} />)
+    animate.mockClear()
+
+    // A hover transition changes physical offsets while Claude Code keeps
+    // publishing latestLines. That projection refresh is not a sibling reorder
+    // and must not launch a second FLIP movement on top of the width animation.
+    positions.set('session-1', 180)
+    positions.set('session-2', 480)
+    view.rerender(<SessionCarousel
+      nodes={nodes.map((node) => ({ ...node, latestLines: ['runtime refresh'] }))}
+      focusedSessionId="session-1" onActivate={() => undefined}
+      renderSession={(node) => <span>{node.latestLines.join('\n')}</span>} />)
+
+    expect(animate).not.toHaveBeenCalled()
+    offsetLeft.mockRestore()
+    HTMLElement.prototype.animate = originalAnimate
+  })
+
   it('centers the focused Session and expands hover immediately while ordinary scrolling is idle', () => {
     vi.useFakeTimers()
     const nodes = fixtures(5)
@@ -189,11 +217,17 @@ describe('SessionCarousel', () => {
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
     const first = document.querySelector<HTMLElement>('[data-session-card="session-2"]')!
     const next = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
 
     fireEvent.mouseEnter(first)
     expect(first.classList.contains('is-expanded')).toBe(true)
 
-    fireEvent.pointerLeave(first)
+    fireEvent.pointerOut(first, { relatedTarget: viewport })
+    act(() => vi.advanceTimersByTime(200))
+    // Leaving a card is not the same as leaving the carousel. The pointer may
+    // cross an inter-card gap for an arbitrary amount of time, so the source
+    // preview must remain stable until another card takes ownership.
+    expect(first.classList.contains('is-expanded')).toBe(true)
     fireEvent.mouseEnter(next)
 
     // Leave and enter are handled in the same event turn. The new card takes
@@ -253,7 +287,7 @@ describe('SessionCarousel', () => {
     fireEvent.scroll(viewport)
     expect(onGeometryChange).not.toHaveBeenCalled()
 
-    fireEvent.pointerLeave(card)
+    fireEvent.pointerLeave(viewport)
     fireEvent.transitionEnd(focusedSlot, { propertyName: 'flex-basis' })
 
     expect(viewport.scrollLeft).toBe(320)
@@ -284,7 +318,7 @@ describe('SessionCarousel', () => {
     fireEvent.focus(screen.getByLabelText('输入 session-3'))
     expect(onActivate).toHaveBeenCalledWith('session-3')
 
-    fireEvent.pointerLeave(card)
+    fireEvent.pointerLeave(viewport)
     fireEvent.transitionEnd(slot, { propertyName: 'flex-basis' })
 
     expect(viewport.scrollLeft).toBe(260)

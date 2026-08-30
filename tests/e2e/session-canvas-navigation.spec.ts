@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test'
 
-import { launchSessionCanvas, visibleSurfaces } from './fixtures/session-canvas-fixture'
+import {
+  activeSurface, launchSessionCanvas, terminalCommand, visibleSurfaces
+} from './fixtures/session-canvas-fixture'
 
 test.describe('horizontal sibling navigation', () => {
   test.setTimeout(60_000)
@@ -18,8 +20,10 @@ test.describe('horizontal sibling navigation', () => {
       // Newly created sessions are required to stay in view, so the fifth
       // sibling legitimately leaves the carousel at its right edge. Navigate
       // left first, then prove an ordinary rightward gesture reaches it again.
-      await carousel.hover()
+      await fixture.page.mouse.move(2, 2)
+      await fixture.page.waitForTimeout(500)
       const rightEdge = await carousel.evaluate((element) => element.scrollLeft)
+      expect(rightEdge).toBeGreaterThan(0)
       await carousel.dispatchEvent('wheel', { deltaX: -650, deltaY: 0 })
       await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeLessThan(rightEdge)
       await fixture.page.waitForTimeout(300)
@@ -178,6 +182,9 @@ test.describe('horizontal sibling navigation', () => {
       await expect(cards).toHaveCount(4)
       const target = cards.nth(1)
       const sibling = cards.nth(2)
+      await fixture.page.mouse.move(2, 2)
+      await expect(target).not.toHaveClass(/is-expanded/)
+      await fixture.page.waitForTimeout(450)
       const targetBox = await target.boundingBox()
       expect(targetBox).not.toBeNull()
       const siblingWidth = (await sibling.boundingBox())!.width
@@ -204,11 +211,130 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 90)
       const samples = await samplesPromise
 
-      expect(samples.slice(0, 5).some(({ target: width }) => width > targetBox!.width + 1)).toBe(true)
+      expect(samples.some(({ target: width }) => width > targetBox!.width + 1)).toBe(true)
       expect(Math.max(...samples.map(({ sibling: width }) => width)) -
         Math.min(...samples.map(({ sibling: width }) => width))).toBeLessThan(2)
       expect(samples.at(-1)!.sibling).toBeCloseTo(siblingWidth, 0)
       expect(samples.at(-1)!.target).toBeCloseTo(expectedExpandedWidth, 0)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test('keeps a focused Shell width monotonic when hover moves from its left sibling', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      for (let index = 0; index < 3; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const cards = fixture.page.locator('.session-card[data-in-viewport="true"]')
+      await expect(cards).toHaveCount(4)
+      const source = cards.nth(0)
+      const target = cards.nth(1)
+      await target.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
+      await expect(target).toHaveClass(/is-focused/)
+      await fixture.page.mouse.move(440, 105)
+      await expect(target).not.toHaveClass(/is-expanded/)
+      await source.hover()
+      await expect(source).toHaveClass(/is-expanded/)
+      await fixture.page.waitForTimeout(450)
+      const targetBox = await target.boundingBox()
+      expect(targetBox).not.toBeNull()
+
+      const samplesPromise = target.evaluate(async (element) => {
+        const viewport = element.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        const samples: Array<{
+          width: number; left: number; right: number; scrollLeft: number; expanded: boolean; focused: boolean
+        }> = []
+        const started = performance.now()
+        while (performance.now() - started < 560) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          samples.push({
+            width: element.getBoundingClientRect().width,
+            left: element.getBoundingClientRect().left,
+            right: element.getBoundingClientRect().right,
+            scrollLeft: viewport.scrollLeft,
+            expanded: element.classList.contains('is-expanded'),
+            focused: element.classList.contains('is-focused')
+          })
+        }
+        return samples
+      })
+      await fixture.page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 90)
+      const samples = await samplesPromise
+
+      expect(samples.every(({ focused }) => focused)).toBe(true)
+      const expandedAt = samples.findIndex(({ expanded }) => expanded)
+      expect(expandedAt).toBeGreaterThanOrEqual(0)
+      expect(samples.slice(expandedAt).every(({ expanded }) => expanded)).toBe(true)
+      const reversals = samples.slice(1).filter((sample, index) =>
+        sample.width < samples[index]!.width - 1)
+      expect(reversals).toEqual([])
+      expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
+        Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(1)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test('keeps the real Claude Code to focused Shell handoff on one visual trajectory', async () => {
+    test.setTimeout(120_000)
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      await terminalCommand(activeSurface(fixture.page), 'claude --dangerously-skip-permissions')
+      await expect(fixture.page.locator('.pane-title').filter({ hasText: 'Claude' }))
+        .toBeVisible({ timeout: 60_000 })
+      for (let index = 0; index < 3; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const cards = fixture.page.locator('.session-card[data-in-viewport="true"]')
+      await expect(cards).toHaveCount(4)
+      const source = cards.nth(0)
+      const target = cards.nth(1)
+      await expect(source.locator('.pane-title')).toHaveText('Claude')
+      await target.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
+      await expect(target).toHaveClass(/is-focused/)
+      await fixture.page.mouse.move(440, 105)
+      await source.hover()
+      await expect(source).toHaveClass(/is-expanded/)
+      await fixture.page.waitForTimeout(450)
+      const targetBox = await target.boundingBox()
+      expect(targetBox).not.toBeNull()
+
+      const samplesPromise = target.evaluate(async (element) => {
+        const viewport = element.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        const samples: Array<{
+          width: number; left: number; right: number; scrollLeft: number; expanded: boolean
+        }> = []
+        const started = performance.now()
+        while (performance.now() - started < 560) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          samples.push({
+            width: element.getBoundingClientRect().width,
+            left: element.getBoundingClientRect().left,
+            right: element.getBoundingClientRect().right,
+            scrollLeft: viewport.scrollLeft,
+            expanded: element.classList.contains('is-expanded')
+          })
+        }
+        return samples
+      })
+      await fixture.page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 90)
+      const samples = await samplesPromise
+
+      const expandedAt = samples.findIndex(({ expanded }) => expanded)
+      expect(expandedAt).toBeGreaterThanOrEqual(0)
+      expect(samples.slice(expandedAt).every(({ expanded }) => expanded)).toBe(true)
+      expect(samples.slice(1).filter((sample, index) =>
+        sample.width < samples[index]!.width - 1)).toEqual([])
+      expect(samples.slice(1).filter((sample, index) =>
+        sample.left > samples[index]!.left + 1)).toEqual([])
+      expect(Math.max(...samples.map(({ right }) => right)) -
+        Math.min(...samples.map(({ right }) => right))).toBeLessThan(2)
+      expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
+        Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(1)
     } finally {
       await fixture.close()
     }

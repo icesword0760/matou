@@ -9,14 +9,13 @@ export function SessionCard(props: {
   expanded: boolean
   children: ReactNode
   onActivate(sessionId: string): void
-  onHover(sessionId: string | null): void
+  onHover(sessionId: string): void
 }) {
   const { node, focused, inViewport, expanded, children, onActivate, onHover } = props
   return <article className={`session-card${focused ? ' is-focused' : ''}${expanded ? ' is-expanded' : ''}`}
     data-session-card={node.sessionId} data-in-viewport={inViewport}
     aria-label={`会话：${node.title}`} aria-current={focused ? 'true' : undefined}
     onMouseEnter={() => onHover(node.sessionId)}
-    onPointerLeave={() => onHover(null)}
     onFocusCapture={(event: FocusEvent<HTMLElement>) => {
       // Header actions must complete on their original DOM node. Activating the
       // card on button focus refreshes the projection between pointer-down and

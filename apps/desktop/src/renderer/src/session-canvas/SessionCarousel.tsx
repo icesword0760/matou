@@ -35,13 +35,13 @@ export function SessionCarousel(props: {
     parent, onCommitParent, geometryKey, initialScrollLeft = 0, initialAnchor,
     revealRequest, onGeometryChange
   } = props
+  const sessionOrderKey = JSON.stringify(nodes.map((node) => node.sessionId))
   const viewportRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef(new Map<string, HTMLElement>())
   const previousOffsetsRef = useRef(new Map<string, number>())
   const ensureVisibleRef = useRef(onEnsureSessionVisible)
   const scrollTimer = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
-  const hoverLeaveTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
   const hoverIntentSessionId = useRef<string | null>(null)
@@ -96,7 +96,6 @@ export function SessionCarousel(props: {
       window.removeEventListener('beforeunload', closePage)
       if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
-      if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
   }, [])
@@ -170,8 +169,9 @@ export function SessionCarousel(props: {
 
   useLayoutEffect(() => {
     const next = new Map<string, number>()
-    for (const node of nodes) {
-      const element = cardsRef.current.get(node.sessionId)
+    const sessionIds = JSON.parse(sessionOrderKey) as string[]
+    for (const sessionId of sessionIds) {
+      const element = cardsRef.current.get(sessionId)
       if (!element) continue
       // Screen rects include both the horizontal viewport scroll and any FLIP
       // transform still in flight. Feeding either value into the next FLIP
@@ -181,8 +181,8 @@ export function SessionCarousel(props: {
       // the authoritative sibling order changes.
       element.getAnimations?.().forEach((animation) => animation.cancel())
       const offset = element.offsetLeft
-      next.set(node.sessionId, offset)
-      const previous = previousOffsetsRef.current.get(node.sessionId)
+      next.set(sessionId, offset)
+      const previous = previousOffsetsRef.current.get(sessionId)
       const deltaX = previous === undefined ? 0 : previous - offset
       if (previous !== undefined && Math.abs(deltaX) > 0.5 && !reducedMotion()) {
         element.animate?.(
@@ -192,7 +192,7 @@ export function SessionCarousel(props: {
       }
     }
     previousOffsetsRef.current = next
-  }, [nodes])
+  }, [sessionOrderKey])
 
   useEffect(() => {
     if (!focusedSessionId) return
@@ -287,8 +287,6 @@ export function SessionCarousel(props: {
     // point onward and must not be mistaken for a programmatic restore event.
     if (userInitiated) {
       restoringGeometry.current = false
-      if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
-      hoverLeaveTimer.current = undefined
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
       hoverRestoreTimer.current = undefined
       hoverBaselineScrollLeft.current = undefined
@@ -330,26 +328,16 @@ export function SessionCarousel(props: {
   const hover = (sessionId: string | null) => {
     hoverIntentSessionId.current = sessionId
     if (sessionId === null) {
-      if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
-      // Pointer leave and enter fire back-to-back when moving between sibling
-      // cards. Defer collapse by one task so the next card can take over the
-      // existing preview directly instead of resetting every card to its base
-      // width before starting a second transition.
-      hoverLeaveTimer.current = window.setTimeout(() => {
-        hoverLeaveTimer.current = undefined
-        if (hoverIntentSessionId.current !== null) return
-        setHoveredSessionId(null)
-        // Hover expansion is only a preview. Reapply the position captured before
-        // expansion immediately, then once more after the flex transition has
-        // settled so Chromium cannot leave the strip at a clamped offset.
-        restoreHoverBaseline(false)
-        if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
-        hoverRestoreTimer.current = window.setTimeout(() => restoreHoverBaseline(true), 220)
-      }, 0)
+      setHoveredSessionId(null)
+      // A card boundary is not the end of the hover preview: the pointer can
+      // spend any number of frames inside the carousel gap. Only leaving the
+      // entire carousel reaches this branch, so there is no timing window in
+      // which Chromium can collapse and re-expand the strip while handing off.
+      restoreHoverBaseline(false)
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      hoverRestoreTimer.current = window.setTimeout(() => restoreHoverBaseline(true), 220)
       return
     }
-    if (hoverLeaveTimer.current !== undefined) window.clearTimeout(hoverLeaveTimer.current)
-    hoverLeaveTimer.current = undefined
     if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     hoverRestoreTimer.current = undefined
     if (hoverBaselineScrollLeft.current === undefined) {
@@ -487,6 +475,7 @@ export function SessionCarousel(props: {
       data-visible-columns={visibleCount} onScroll={() => markScrolling()}
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
+      onPointerLeave={() => hover(null)}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
       {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
@@ -497,7 +486,7 @@ export function SessionCarousel(props: {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return
         if (hoverBaselineScrollLeft.current !== undefined) {
-          if (hoverIntentSessionId.current === null) restoreHoverBaseline(true)
+          if (hoverIntentSessionId.current === null && hoveredSessionId === null) restoreHoverBaseline(true)
           else updateVisibleWindow()
           return
         }
