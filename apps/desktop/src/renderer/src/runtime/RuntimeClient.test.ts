@@ -91,6 +91,33 @@ describe('RuntimeClient', () => {
       expect.objectContaining({ type: 'terminal.input', sessionId: 'session-1', data: '\r' })
     ])
   })
+
+  it('routes a Session-scoped startup error only to that terminal card', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    const first: any[] = []
+    const second: any[] = []
+    client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1', profile: 'shell', cols: 80, rows: 24
+    }, (message) => first.push(message))
+    client.attachTerminal({
+      sessionId: 'session-2', executionContextId: 'context-1', profile: 'shell', cols: 80, rows: 24
+    }, (message) => second.push(message))
+
+    port.deliver({
+      type: 'protocol.error', protocolVersion: PROTOCOL_VERSION,
+      code: 'WORKSPACE_PATH_INVALID', message: '工作空间目录不存在', sessionId: 'session-2'
+    })
+
+    expect(first).toEqual([])
+    expect(second).toEqual([expect.objectContaining({
+      type: 'protocol.error', code: 'WORKSPACE_PATH_INVALID', sessionId: 'session-2'
+    })])
+  })
 })
 
 class FakePort implements RuntimeClientPort {

@@ -158,8 +158,8 @@ export function projectSceneGraphFrom(
   sceneId: string,
   windowId?: string
 ): SceneSessionGraph {
-    const scene = source.get<{ id: string }>(
-      'SELECT id FROM scenes WHERE id = ?',
+    const scene = source.get<{ id: string; layout_revision: number }>(
+      'SELECT id, layout_revision FROM scenes WHERE id = ?',
       sceneId
     )
     if (!scene) throw new Error(`Scene ${sceneId} does not exist`)
@@ -321,6 +321,7 @@ export function projectSceneGraphFrom(
 
     return {
       sceneId,
+      layoutRevision: scene.layout_revision,
       nodes,
       edges,
       ...(focusedSessionId === undefined ? {} : { focusedSessionId })

@@ -8,7 +8,10 @@ import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
 
 describe('Workspace and Task navigation', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    Reflect.deleteProperty(window, 'matouDesktop')
+  })
   it('renders all Workspaces as flat groups and creates a Task in the selected group', async () => {
     const user = userEvent.setup()
     const data = fixture()
@@ -140,6 +143,22 @@ describe('Workspace and Task navigation', () => {
     await user.click(screen.getByRole('menuitem', { name: '删除' }))
     await user.click(screen.getByRole('button', { name: '确定' }))
     expect(target.removeWorkspace).toHaveBeenCalledWith('workspace-1')
+  })
+
+  it('lets a user relink an invalid custom Workspace from the flat list', async () => {
+    const user = userEvent.setup()
+    const target = commands()
+    const selectWorkspaceDirectory = vi.fn().mockResolvedValue('/Users/demo/projects/frontend-renamed')
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: { selectWorkspaceDirectory } })
+    render(<TaskSidebar projection={fixture()} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '重新关联工作空间目录：Frontend' }))
+
+    expect(selectWorkspaceDirectory).toHaveBeenCalledTimes(1)
+    expect(target.relinkWorkspace).toHaveBeenCalledWith(
+      'workspace-1', '/Users/demo/projects/frontend-renamed'
+    )
+    expect(await screen.findByText('已恢复 Frontend 的工作目录')).toBeTruthy()
   })
 
   it('disables duplicate Task rename while displaying the product error', async () => {

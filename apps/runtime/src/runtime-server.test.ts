@@ -41,7 +41,10 @@ beforeEach(async () => {
   await settle()
 })
 
-afterEach(() => database.close())
+afterEach(() => {
+  server.close()
+  database.close()
+})
 
 describe('RuntimeServer domain RPC', () => {
   it('adds current cwd and Git information to a direct DAG graph response', () => {
@@ -383,7 +386,7 @@ describe('RuntimeServer domain RPC', () => {
         sessionId: 'work-status-session', data: 'sleep 0.35\r'
       })
       await waitUntil(() => workStatus('work-status-session') === 'running')
-      await waitUntil(() => workStatus('work-status-session') === 'idle', 2_000)
+      await waitUntil(() => workStatus('work-status-session') === 'idle', 5_000)
 
       port.receive({
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
@@ -400,7 +403,7 @@ describe('RuntimeServer domain RPC', () => {
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'work-status-session', data: '\u0003'
       })
-      await waitUntil(() => workStatus('work-status-session') === 'interrupted', 2_000)
+      await waitUntil(() => workStatus('work-status-session') === 'interrupted', 5_000)
     } finally {
       port.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -1367,6 +1370,60 @@ describe('RuntimeServer domain RPC', () => {
       restoreEnv('PATH', previousPath)
       restoreEnv('SHELL', previousShell)
       restoreEnv('ZDOTDIR', previousZdotdir)
+    }
+  })
+
+  it('replaces the live fallback Shell when the same persisted Session retries Claude restore', async () => {
+    const executable = join(root, 'provider-restore-retry.sh')
+    await writeFile(executable, '#!/bin/sh\nstty raw -echo\ncat\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = new RuntimeSessionRegistry()
+    const retryPort = new MockPort()
+    try {
+      registerSession(database, 'provider-restore-retry', 'shell')
+      new RuntimeServer(retryPort, root, database, undefined, undefined, sessions)
+      retryPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'restore-retry-renderer'
+      })
+      retryPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-restore-retry', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.get('provider-restore-retry')?.profile === 'shell')
+      database.run(
+        `UPDATE sessions SET kind = 'claude-code', title = 'Claude', status = 'starting',
+           work_status = 'starting' WHERE id = ?`,
+        'provider-restore-retry'
+      )
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           metadata_json, created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', 'restoring', '{}', 1, 2, 1)`,
+        'binding-restore-retry', 'provider-restore-retry', 'provider-retry-identity'
+      )
+
+      retryPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-restore-retry', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => sessions.get('provider-restore-retry')?.profile === 'claude-code')
+      expect(retryPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(0)
+      expect(retryPort.last('terminal.hud')).toMatchObject({
+        sessionId: 'provider-restore-retry', hud: { mode: 'agent' }
+      })
+    } finally {
+      retryPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-restore-retry'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
 

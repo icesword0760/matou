@@ -10,8 +10,23 @@
 .session-carousel-shell { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: var(--kooky-terminal); }
 .session-carousel { position: relative; z-index: 2; display: flex; flex: 1; min-width: 0; min-height: 0; align-items: stretch; gap: 12px; overflow-x: auto; overflow-y: hidden; padding: 0; background: var(--kooky-terminal); scroll-behavior: auto; overscroll-behavior-x: contain; scrollbar-width: thin; transform: translateX(var(--parent-pull-distance,0)); will-change: transform; }
 .session-carousel-shell.is-springing .session-carousel { transition: transform 260ms cubic-bezier(.2,.9,.2,1.12); }
-.session-card-slot { box-sizing: border-box; flex: 0 0 calc((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns)); min-width: 0; min-height: 0; transition: flex-basis 180ms cubic-bezier(.2,.8,.2,1); }
-.session-card-slot.is-expanded { flex-basis: clamp(420px,44vw,760px); }
+.session-card-slot { position: relative; box-sizing: border-box; flex: 0 0 calc((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns)); min-width: 0; min-height: 0; transition: flex-basis 180ms cubic-bezier(.2,.8,.2,1),flex-grow 180ms cubic-bezier(.2,.8,.2,1); }
+.session-carousel:not(.has-overflow) .session-card-slot { flex: 1 1 0; }
+.session-carousel:not(.has-overflow) .session-card-slot.is-focused { flex-grow: 1.16; }
+.session-carousel:not(.has-overflow) .session-card-slot.is-expanded { flex-grow: 1.75; }
+.session-carousel.has-overflow .session-card-slot.is-focused { flex-basis: calc((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns) + 28px); }
+.session-carousel.has-overflow .session-card-slot.is-expanded { flex-basis: clamp(420px,44vw,760px); }
+.session-compact-summary { display: none; }
+.session-carousel.is-narrow .session-card-slot:not(.is-focused) { flex: 0 0 176px; }
+.session-carousel.is-narrow .session-card-slot.is-focused { flex: 0 0 min(100%,640px); }
+.session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-card { display: none; }
+.session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-compact-summary { display: grid; height: 100%; box-sizing: border-box; align-content: start; gap: 9px; padding: 14px 12px; overflow: hidden; border: 1px solid var(--kooky-border); color: rgba(255,255,255,.56); background: var(--kooky-chrome); }
+.session-compact-summary strong { overflow: hidden; color: rgba(255,255,255,.82); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.session-compact-summary span { justify-self: start; padding: 2px 6px; border-radius: 8px; background: rgba(255,255,255,.06); font-size: 9px; }
+.session-compact-summary .status-needs-input { color: #e8ae48; }
+.session-compact-summary .status-running,.session-compact-summary .status-starting { color: #62c787; }
+.session-compact-summary .status-error { color: #ec746d; }
+.session-compact-summary pre { overflow: hidden; margin: 0; color: inherit; font: 9px/1.5 'SF Mono',monospace; white-space: pre-wrap; }
 .session-card { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid transparent; background: var(--kooky-terminal); transition: border-color 140ms ease, box-shadow 140ms ease; }
 .session-card.is-focused { z-index: 1; border-color: rgba(91,157,233,.72); box-shadow: inset 0 0 0 1px rgba(91,157,233,.18); }
 .session-card > .terminal-pane { flex: 1; min-width: 0; min-height: 0; }
@@ -33,6 +48,8 @@
 .hierarchy-shell[data-theme="light"] .parent-projection__card { border-color: rgba(68,132,207,.38); color: #687180; background: #fff; box-shadow: 0 18px 42px rgba(42,55,72,.18); }
 .hierarchy-shell[data-theme="light"] .parent-projection__card strong { color: #2f3744; }
 .hierarchy-shell[data-theme="light"] .parent-projection__card pre { color: #505a68; }
+.hierarchy-shell[data-theme="light"] .session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-compact-summary { color: #6b7482; background: #f2f4f7; }
+.hierarchy-shell[data-theme="light"] .session-compact-summary strong { color: #364050; }
 @media (prefers-reduced-motion: reduce) {
   .session-carousel { scroll-behavior: auto; }
   .session-carousel-shell.is-springing .session-carousel { transition-duration: 1ms; }

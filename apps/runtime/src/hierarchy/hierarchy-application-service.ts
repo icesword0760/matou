@@ -255,6 +255,7 @@ export interface DeleteSessionWorkflowInput {
   windowId: string
   sessionId: string
   confirmedIntent?: string
+  preserveSceneOnLastSession?: boolean
   now: number
 }
 
@@ -265,7 +266,7 @@ export interface ActivateSessionInput {
 }
 
 export interface DeleteSessionResult extends HierarchyMutationResult {
-  outcome: 'scene-remains' | 'scene-archives' | 'default-task-created'
+  outcome: 'scene-remains' | 'session-history-remains' | 'scene-archives' | 'default-task-created'
 }
 
 export class HierarchyApplicationService {
@@ -1526,11 +1527,30 @@ export class HierarchyApplicationService {
         payload: { archivedAt: input.now }, occurredAt: input.now
       })
 
+      if (mount.scene_window_id) {
+        tx.run(
+          'UPDATE session_mounts SET scene_window_id = NULL WHERE id = ?',
+          mount.id
+        )
+        tx.run(
+          "UPDATE scene_windows SET state = 'closed', updated_at = ? WHERE id = ?",
+          input.now, mount.scene_window_id
+        )
+        tx.run(
+          "UPDATE app_windows SET state = 'closed', updated_at = ? WHERE id = ?",
+          input.now, mount.scene_window_id
+        )
+      }
+
       let outcome: DeleteSessionResult['outcome'] = 'scene-remains'
       if (sceneSessionCount > 1) {
         tx.run('DELETE FROM session_mounts WHERE id = ?', mount.id)
         const sibling = preferredSession(tx, input.windowId, scene.id)
         if (sibling) activateSessionInTransaction(tx, input.windowId, sibling.id, input.now)
+      } else if (input.preserveSceneOnLastSession) {
+        // Closing the native window ends that Session, but the owning canvas
+        // remains as the user's historical graph and continuation surface.
+        outcome = 'session-history-remains'
       } else {
         outcome = 'scene-archives'
         tx.run('UPDATE scenes SET archived_at = ?, updated_at = ? WHERE id = ?', input.now, input.now, scene.id)

@@ -663,6 +663,28 @@ describe('HierarchyApplicationService Session workflows', () => {
     expect(deleted.task?.id).not.toBe(initial.task!.id)
     expect(deleted.disposedSessionIds).toEqual([initial.session!.id])
   })
+
+  it('keeps the owning canvas as history when its last detached Session window closes', () => {
+    const initial = bootstrap('detached-final-bootstrap')
+    markPathValid(initial.workspace!.id)
+
+    const deleted = service.deleteSession(command('detached-final-close'), {
+      windowId: 'window-1', sessionId: initial.session!.id,
+      confirmedIntent: `delete-session:${initial.session!.id}`,
+      preserveSceneOnLastSession: true, now: 31
+    })
+
+    expect(deleted.outcome).toBe('session-history-remains')
+    expect(database.get<{ archived_at: number | null }>(
+      'SELECT archived_at FROM sessions WHERE id = ?', initial.session!.id
+    )?.archived_at).toBe(31)
+    expect(database.get<{ archived_at: number | null }>(
+      'SELECT archived_at FROM scenes WHERE id = ?', initial.scene!.id
+    )?.archived_at).toBeNull()
+    expect(database.get<{ archived_at: number | null }>(
+      'SELECT archived_at FROM tasks WHERE id = ?', initial.task!.id
+    )?.archived_at).toBeNull()
+  })
 })
 
 function command(commandId: string) {

@@ -158,6 +158,8 @@ export class SessionHudRegistry {
 
     if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse') {
       current.taskStatus = 'running'
+    } else if (eventName === 'PermissionRequest') {
+      current.taskStatus = 'needs-input'
     } else if (eventName === 'Notification') {
       current.taskStatus = notificationStatus(payload)
     } else if (eventName === 'Stop') {

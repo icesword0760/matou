@@ -6,9 +6,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TerminalPane } from './TerminalPane'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: (props: { sessionId: string; visible: boolean; inputDisabled: boolean }) =>
+  TerminalSurface: (props: {
+    sessionId: string; visible: boolean; inputDisabled: boolean; spawnRevision?: number
+    onStatusChange?(status: string): void; onRuntimeError?(message: string): void
+  }) =>
     <div data-testid={`surface-${props.sessionId}`} data-visible={props.visible}
-      data-input-disabled={props.inputDisabled}><textarea className="xterm-helper-textarea" aria-label="Terminal input" /></div>
+      data-input-disabled={props.inputDisabled} data-spawn-revision={props.spawnRevision}>
+      <textarea className="xterm-helper-textarea" aria-label="Terminal input" />
+      <button type="button" aria-label="触发启动失败" onClick={() => {
+        props.onRuntimeError?.('spawn ENOENT: /missing/SHELL')
+        props.onStatusChange?.('error')
+      }} />
+    </div>
 }))
 
 afterEach(cleanup)
@@ -187,6 +196,23 @@ describe('Terminal pane', () => {
     expect(screen.getByTitle(longPath).textContent).toBe(longPath)
     expect(screen.getByText('feature/dag*')).toBeTruthy()
     expect(screen.getByText('共享工作树')).toBeTruthy()
+  })
+
+  it('keeps a real startup failure actionable without removing sibling Sessions', async () => {
+    const user = userEvent.setup()
+    const onDelete = vi.fn()
+    render(<TerminalPane {...fixture()} onDelete={onDelete} />)
+
+    await user.click(screen.getByRole('button', { name: '触发启动失败' }))
+    expect(screen.getByRole('status').textContent).toContain('会话启动失败')
+    expect(screen.getByText('spawn ENOENT: /missing/SHELL')).toBeTruthy()
+    expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('0')
+
+    await user.click(screen.getByRole('button', { name: '重试启动' }))
+    expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('1')
+    await user.click(screen.getByRole('button', { name: '触发启动失败' }))
+    await user.click(screen.getByRole('button', { name: '移除失败会话' }))
+    expect(onDelete).toHaveBeenCalledWith('session-1', true)
   })
 })
 

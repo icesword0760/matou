@@ -54,6 +54,7 @@ export interface SessionGraphNodeView {
 }
 export interface SessionGraphView {
   sceneId: string
+  layoutRevision?: number
   focusedSessionId?: string
   nodes: SessionGraphNodeView[]
   edges: Array<{
@@ -178,7 +179,7 @@ export interface HierarchyCommands {
   setFocusedSession(sceneId: string, sessionId: string): unknown
   putGeometry(sceneId: string, ownerKey: string, layoutRevision: number, geometry: unknown): unknown
   activateSession(sessionId: string): unknown
-  deleteSession(sessionId: string, confirmed?: boolean): unknown
+  deleteSession(sessionId: string, confirmed?: boolean, preserveSceneOnLastSession?: boolean): unknown
   detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
   returnSession(sceneWindowId: string): unknown
   setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown

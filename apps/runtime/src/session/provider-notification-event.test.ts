@@ -22,6 +22,15 @@ describe('toProviderNotificationEvent', () => {
     })
   })
 
+  it('maps the provider PermissionRequest hook even when no Notification hook is emitted', () => {
+    expect(toProviderNotificationEvent({
+      hook_event_name: 'PermissionRequest', tool_name: 'Write',
+      tool_input: { file_path: '/tmp/project/file.ts' }
+    })).toMatchObject({
+      eventType: 'permission', subtitle: 'Permission', body: 'Write: /tmp/project/file.ts'
+    })
+  })
+
   it('classifies errors, completion, waiting, and generic attention in Kooky order', () => {
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Tool failed' })?.eventType).toBe('error')
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Task done' })?.eventType).toBe('completed')

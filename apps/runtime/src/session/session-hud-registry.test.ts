@@ -93,6 +93,20 @@ describe('PRD 02 authoritative Session HUD state', () => {
     expect(registry.snapshot('agent-1')?.runningTools).toEqual([])
   })
 
+  it('shows an explicit provider permission prompt as waiting for user input', () => {
+    const registry = new SessionHudRegistry()
+    registry.spawn({ sessionId: 'agent-1', profile: 'claude-code', cwd: '/tmp', startedAt: 1 })
+    registry.ingestProvider('agent-1', {
+      hook_event_name: 'PermissionRequest', tool_name: 'Write',
+      tool_input: { file_path: '/tmp/file.ts' }
+    })
+    expect(registry.snapshot('agent-1')).toMatchObject({ taskStatus: 'needs-input' })
+    registry.ingestProvider('agent-1', {
+      hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 'write-1'
+    })
+    expect(registry.snapshot('agent-1')).toMatchObject({ taskStatus: 'running' })
+  })
+
   it('refreshes Git branch and dirty state and removes Git when cwd is outside a repository', () => {
     const registry = new SessionHudRegistry()
     registry.spawn({ sessionId: 'shell-1', profile: 'shell', cwd: '/tmp', startedAt: 1 })

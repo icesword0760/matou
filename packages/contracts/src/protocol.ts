@@ -213,6 +213,7 @@ export type RuntimeMessage =
         | 'WORKSPACE_PATH_INVALID'
         | 'INTERNAL_ERROR'
       message: string
+      sessionId?: string
     }
   | {
       type: 'terminal.hud'

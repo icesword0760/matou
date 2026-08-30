@@ -336,7 +336,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     expect(screen.getByText('工作区目录不可用，请先在本地恢复原路径，或移出该工作区')).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
-    expect(screen.getByTestId('xterm-session-a2')).toBeTruthy()
+    expect(screen.getAllByTestId('xterm-session-a2').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: '在 Workspace A 中新增事项' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '横向新增 Shell' })).toHaveProperty('disabled', true)
@@ -375,6 +375,33 @@ describe('PRD 05 hierarchy shell', () => {
 
     expect(screen.getByTestId('detached-placeholder').textContent).toContain('已脱出')
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
+  })
+
+  it('ends a detached Session when its independent window closes instead of silently remounting it', async () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.scene.rootNodeId = 'split-detached'
+    first.nodes = [
+      { id: 'split-detached', sceneId: first.scene.id, kind: 'split', direction: 'horizontal', ordinal: 0 },
+      { id: 'node-a1', sceneId: first.scene.id, parentNodeId: 'split-detached', kind: 'mount', ordinal: 0 },
+      { id: 'node-a2', sceneId: first.scene.id, parentNodeId: 'split-detached', kind: 'mount', ordinal: 1 }
+    ]
+    first.mounts[0]!.sceneWindowId = 'detached-1'
+    first.mounts.push({ id: 'mount-a2', sceneId: first.scene.id, sceneNodeId: 'node-a2', sessionId: 'session-a2' })
+    first.windows.push({ id: 'detached-1', sceneId: first.scene.id, state: 'detached' })
+    let closeListener: ((event: { mainWindowId: string; sessionId: string }) => void) | undefined
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      selectWorkspaceDirectory: vi.fn(), hideWindow: vi.fn(), showWindow: vi.fn(),
+      createDetachedTerminalWindow: vi.fn(), closeDetachedTerminalWindow: vi.fn(),
+      onDetachedWindowClosed: vi.fn((listener) => { closeListener = listener; return vi.fn() })
+    } })
+    render(<HierarchyShell fixture={data} />)
+
+    expect(screen.getByTestId('detached-placeholder')).toBeTruthy()
+    closeListener?.({ mainWindowId: 'window-1', sessionId: 'session-a1' })
+
+    await vi.waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull())
+    expect(screen.getAllByTestId('xterm-session-a2').length).toBeGreaterThan(0)
   })
 })
 

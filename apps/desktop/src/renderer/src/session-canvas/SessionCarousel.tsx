@@ -18,6 +18,7 @@ export function SessionCarousel(props: {
   onCommitParent?(parentSessionId: string): void
   geometryKey?: string
   initialScrollLeft?: number
+  revealRequest?: { sessionId: string; sequence: number; historical?: boolean }
   onGeometryChange?(
     geometry: { scrollLeft: number; focusedSessionId?: string },
     options?: { continuous?: boolean }
@@ -25,7 +26,7 @@ export function SessionCarousel(props: {
 }) {
   const {
     nodes, focusedSessionId, renderSession, onActivate, onEnsureSessionVisible,
-    parent, onCommitParent, geometryKey, initialScrollLeft = 0, onGeometryChange
+    parent, onCommitParent, geometryKey, initialScrollLeft = 0, revealRequest, onGeometryChange
   } = props
   const viewportRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef(new Map<string, HTMLElement>())
@@ -53,9 +54,13 @@ export function SessionCarousel(props: {
   const [scrolling, setScrolling] = useState(false)
   const [pull, setPull] = useState({ distance: 0, progress: 0, springBack: false })
   const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
+  const [narrow, setNarrow] = useState(false)
   const inViewport = useMemo(() => new Set(
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
+  const revealTargetPresent = Boolean(revealRequest && nodes.some(
+    ({ sessionId }) => sessionId === revealRequest.sessionId
+  ))
 
   useEffect(() => {
     const stopScrollAuthority = () => { userScrollUntil.current = 0; focusScrollUntil.current = 0 }
@@ -75,7 +80,10 @@ export function SessionCarousel(props: {
   useLayoutEffect(() => {
     const viewport = viewportRef.current
     if (!viewport) return
-    const measure = () => setVisibleCount(visibleColumnsForWidth(nodes.length, viewport.clientWidth))
+    const measure = () => {
+      setVisibleCount(visibleColumnsForWidth(nodes.length, viewport.clientWidth))
+      setNarrow(viewport.clientWidth > 0 && viewport.clientWidth < 720)
+    }
     measure()
     if (typeof ResizeObserver === 'undefined') {
       window.addEventListener('resize', measure)
@@ -155,6 +163,51 @@ export function SessionCarousel(props: {
     })
     return () => cancelAnimationFrame(frame)
   }, [focusedSessionId])
+
+  useEffect(() => {
+    if (!parent) return
+    const captureTerminalTab = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      const target = event.target as HTMLElement | null
+      if (!target?.closest('.terminal-surface')) return
+      const returnButton = viewportRef.current?.closest('.session-canvas')
+        ?.querySelector<HTMLButtonElement>('.session-return-parent')
+      if (!returnButton) return
+      event.preventDefault()
+      event.stopPropagation()
+      returnButton.focus()
+    }
+    window.addEventListener('keydown', captureTerminalTab, true)
+    return () => window.removeEventListener('keydown', captureTerminalTab, true)
+  }, [parent])
+
+  useLayoutEffect(() => {
+    if (!revealRequest) return
+    restoringGeometry.current = false
+    skipFocusScrollAfterRestore.current = false
+    const frame = requestAnimationFrame(() => {
+      const card = cardsRef.current.get(revealRequest.sessionId)
+      if (!card) return
+      focusScrollUntil.current = performance.now() + 900
+      card.scrollIntoView?.({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+      const focusTarget = revealRequest.historical
+        ? card.querySelector<HTMLElement>('button,[tabindex="0"]')
+        : undefined
+      focusTarget?.focus({ preventScroll: true })
+      ensureVisibleRef.current?.(revealRequest.sessionId)
+      window.setTimeout(() => {
+        updateVisibleWindow()
+        onGeometryChange?.({
+          scrollLeft: viewportRef.current?.scrollLeft ?? 0,
+          focusedSessionId: revealRequest.sessionId
+        })
+      }, reducedMotion() ? 1 : 320)
+    })
+    return () => cancelAnimationFrame(frame)
+    // The sequence is an explicit product navigation request. It must override
+    // persisted geometry even when the target Session ID did not change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest?.sequence, revealTargetPresent])
 
   const updateVisibleWindow = () => {
     const viewport = viewportRef.current
@@ -329,7 +382,8 @@ export function SessionCarousel(props: {
     style={{ '--parent-pull-distance': `${pull.distance}px` } as React.CSSProperties}>
     {parent && pull.distance > 0 && <ParentProjection parent={parent}
       pullDistance={pull.distance} progress={pull.progress} />}
-    <div className="session-carousel" ref={viewportRef} role="region" aria-label="同级会话列表"
+    <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
+      ref={viewportRef} role="region" aria-label="同级会话列表"
       data-visible-columns={visibleCount} onScroll={() => markScrolling()}
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
@@ -337,7 +391,8 @@ export function SessionCarousel(props: {
       {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
-      }} className={`session-card-slot${!scrolling && hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}>
+      }} data-session-id={node.sessionId}
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${!scrolling && hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}>
         <SessionCard node={node} focused={node.sessionId === focusedSessionId}
           inViewport={inViewport.has(node.sessionId)}
           expanded={!scrolling && hoveredSessionId === node.sessionId}
@@ -347,6 +402,11 @@ export function SessionCarousel(props: {
           }} onHover={hover}>
           {renderSession(node, inViewport.has(node.sessionId))}
         </SessionCard>
+        {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
+          <strong>{node.title}</strong>
+          <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
+          <pre>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>
+        </div>}
       </div>)}
     </div>
   </div>
@@ -359,4 +419,13 @@ function reducedMotion(): boolean {
 export function visibleColumnsForWidth(nodeCount: number, width: number): number {
   const available = width > 0 ? Math.floor((width + 12) / (280 + 12)) : 4
   return Math.min(4, Math.max(1, nodeCount, 1), Math.max(1, available))
+}
+
+function compactStatus(status: SessionGraphNodeView['workStatus']): string {
+  if (status === 'needs-input') return '等待输入'
+  if (status === 'running' || status === 'starting') return '运行中'
+  if (status === 'error') return '异常'
+  if (status === 'interrupted') return '中断'
+  if (status === 'exited') return '历史'
+  return '空闲'
 }

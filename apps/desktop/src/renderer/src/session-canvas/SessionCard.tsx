@@ -16,13 +16,7 @@ export function SessionCard(props: {
     data-session-card={node.sessionId} data-in-viewport={inViewport}
     aria-label={`会话：${node.title}`} aria-current={focused ? 'true' : undefined}
     onMouseEnter={() => onHover(node.sessionId)}
-    onPointerMove={(event) => {
-      // Keep title-bar actions stationary. The card still expands when the
-      // pointer is over its terminal content, while close/Fork remain reliable.
-      onHover((event.target as HTMLElement).closest('.terminal-pane-header')
-        ? null
-        : node.sessionId)
-    }}
+    onPointerMove={() => onHover(node.sessionId)}
     onPointerLeave={() => onHover(null)}
     onFocusCapture={(event: FocusEvent<HTMLElement>) => {
       // Header actions must complete on their original DOM node. Activating the

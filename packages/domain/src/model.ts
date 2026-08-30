@@ -259,6 +259,7 @@ export interface SessionGraphEdge {
 
 export interface SceneSessionGraph {
   sceneId: SceneId
+  layoutRevision?: number
   nodes: SessionGraphNode[]
   edges: SessionGraphEdge[]
   focusedSessionId?: SessionId

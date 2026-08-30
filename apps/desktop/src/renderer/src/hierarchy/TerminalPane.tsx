@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
-import { TerminalSurface, type TerminalSearchRequest } from '../terminal/TerminalSurface'
+import { TerminalSurface, type RuntimeStatus, type TerminalSearchRequest } from '../terminal/TerminalSurface'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import type { SessionView } from './hierarchy-types'
 import { sessionDeleteFlow } from './terminal-close-flow'
@@ -62,6 +62,13 @@ export function TerminalPane(props: {
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('waiting-for-port')
+  const [runtimeError, setRuntimeError] = useState('')
+  const [startupRetry, setStartupRetry] = useState(0)
+  const handleRuntimeStatus = useCallback((status: RuntimeStatus) => {
+    setRuntimeStatus(status)
+    if (status === 'streaming') setRuntimeError('')
+  }, [])
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
   const flow = sessionDeleteFlow({
@@ -108,7 +115,10 @@ export function TerminalPane(props: {
           event.screenY >= window.screenY + window.outerHeight
         if (outside) void onDetach?.(session.id)
       }}>
-      <div className="pane-header-content"><strong className="pane-title">{session.title}</strong>
+      <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
+        {onOpenChildren && <ChildSessionBadge children={childNodes}
+          historicalCount={historicalChildCount}
+          onOpen={() => void onOpenChildren(session.id)} />}
         {cwd && <span className="pane-cwd" title={cwd}>{cwd}</span>}
         {git && <span className="pane-environment-badge" title={`Git 分支 ${git.branch}${git.dirty ? '，有未提交修改' : ''}`}>
           {git.branch}{git.dirty ? '*' : ''}
@@ -116,9 +126,6 @@ export function TerminalPane(props: {
         {sharedWorkingDirectory && <span className="pane-environment-badge is-shared">
           {git ? '共享工作树' : '共享目录'}
         </span>}
-        {onOpenChildren && <ChildSessionBadge children={childNodes}
-          historicalCount={historicalChildCount}
-          onOpen={() => void onOpenChildren(session.id)} />}
       </div>
       <div className="terminal-pane-actions">
         {showFork && <button className="pane-fork" type="button" draggable={false}
@@ -164,6 +171,24 @@ export function TerminalPane(props: {
     {providerRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
       <strong>正在恢复 Claude Code 会话…</strong>
     </div>}
+    {runtimeStatus === 'error' && forkState !== 'failed' && providerRestoreState !== 'failed' && visible &&
+      <div className="session-start-failure-card" role="status">
+        <div><strong>会话启动失败</strong>
+          <span className="session-start-failure-reason">{runtimeError || '终端进程未能启动'}</span>
+        </div>
+        <div className="session-start-failure-actions">
+          <button type="button" onClick={(event) => {
+            event.stopPropagation()
+            setRuntimeError('')
+            setRuntimeStatus('starting-session')
+            setStartupRetry((value) => value + 1)
+          }}>重试启动</button>
+          <button type="button" onClick={(event) => {
+            event.stopPropagation()
+            void Promise.resolve(onDelete(session.id, true)).catch(NOOP)
+          }}>移除失败会话</button>
+        </div>
+      </div>}
     {forkState !== 'failed' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} inputDisabled={!pathValid}
@@ -172,7 +197,9 @@ export function TerminalPane(props: {
       {...(searchRequest ? { searchRequest } : {})}
       {...(onSearchResults ? { onSearchResults } : {})}
       focusRequest={focusRequest}
-      spawnRevision={spawnRevision}
+      spawnRevision={spawnRevision + startupRetry}
+      onStatusChange={handleRuntimeStatus}
+      onRuntimeError={setRuntimeError}
       onOscNotification={(oscId, content) => {
         const notification = toOscNotification(oscId, content)
         if (!notification) return

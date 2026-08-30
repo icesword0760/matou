@@ -40,7 +40,11 @@ const dagWindows = new DagWindowManager({
     if (browserWindow && !browserWindow.isDestroyed()) runtimeHost?.connect(browserWindow.webContents)
   },
   routeSelection: (mainWindowId, selection) => {
-    browserWindows.get(mainWindowId)?.webContents.send(DESKTOP_CHANNELS.dagNodeSelected, selection)
+    const mainWindow = browserWindows.get(mainWindowId)
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.webContents.send(DESKTOP_CHANNELS.dagNodeSelected, selection)
   },
   activateTargetWindow: (windowId) => {
     const target = browserWindows.get(windowId)
@@ -278,9 +282,9 @@ if (primaryInstance) app.whenReady().then(async () => {
   ]))
 
   app.on('activate', async () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      await createWindow()
-    }
+    const windowId = windows.firstLiveWindowId()
+    if (windowId) windows.showWindow(windowId)
+    else await createWindow()
   })
 })
 

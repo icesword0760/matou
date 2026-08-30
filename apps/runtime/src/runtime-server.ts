@@ -308,7 +308,7 @@ export class RuntimeServer {
           }
         } catch (error) {
           if (error instanceof WorkspacePathInvalidError) {
-            this.#sendError(error.code, error.message)
+            this.#sendError(error.code, error.message, message.sessionId)
             break
           }
           throw error
@@ -348,9 +348,15 @@ export class RuntimeServer {
     const pending = this.#cwdTimers.get(session.sessionId)
     if (pending) clearTimeout(pending)
     this.#cwdTimers.set(session.sessionId, setTimeout(() => {
-      this.#cwdTimers.delete(session.sessionId)
       void this.#captureCwd(session)
-    }, 1_200))
+      // Capture once more after the prompt has fully settled. Fast commands
+      // update the title almost immediately; shell plugins and long wrapped
+      // input still converge without requiring another user action.
+      this.#cwdTimers.set(session.sessionId, setTimeout(() => {
+        this.#cwdTimers.delete(session.sessionId)
+        void this.#captureCwd(session)
+      }, 1_050))
+    }, 180))
   }
 
   async #captureCwd(session: PtySession): Promise<void> {
@@ -384,6 +390,7 @@ export class RuntimeServer {
         commandType: 'session.cwd-update',
         requestHash: `cwd:${sessionId}:${cwd}:${now}`
       }, sessionId, cwd, now)
+      this.flushSemanticEvents()
     } catch (error) {
       if (!this.#closed) console.error(`[session.cwd-update] ${errorMessage(error)}`)
     }
@@ -702,15 +709,40 @@ export class RuntimeServer {
   }
 
   async #spawn(message: Extract<RendererMessage, { type: 'terminal.spawn' }>): Promise<void> {
+    const persistentAuthority = this.#database.get<{
+      execution_context_id: string
+      cwd: string
+      kind: 'shell' | 'claude-code' | 'codex'
+    }>(
+      `SELECT execution_context_id, cwd, kind FROM sessions
+       WHERE id = ? AND archived_at IS NULL`,
+      message.sessionId
+    )
     if (this.#sessions.has(message.sessionId)) {
       const existing = this.#sessions.get(message.sessionId)!
-      if (
-        existing.executionContextId !== message.executionContextId ||
-        existing.profile !== message.profile
-      ) {
-        this.#sendError('SESSION_FORBIDDEN', 'live Session identity does not match the attach request')
+      if (existing.executionContextId !== message.executionContextId) {
+        this.#sendError('SESSION_FORBIDDEN', 'live Session identity does not match the attach request', message.sessionId)
         return
       }
+      if (existing.profile !== message.profile) {
+        // A restore retry deliberately changes the same stable Session from its
+        // fallback Shell process back to the authoritative provider profile.
+        // Replace only when persisted domain state already authorizes the exact
+        // requested profile; arbitrary Renderer profile changes stay rejected.
+        if (persistentAuthority?.kind !== message.profile) {
+          this.#sendError('SESSION_FORBIDDEN', 'live Session identity does not match the attach request', message.sessionId)
+          return
+        }
+        this.#clearProviderResumeTimer(message.sessionId)
+        this.#sessions.delete(message.sessionId, existing)
+        this.#control?.backend.unregister(message.sessionId, existing)
+        this.#control?.tokens.revokeRun(existing.runId ?? message.sessionId)
+        this.#hud.delete(message.sessionId)
+        this.publishSessionHud(message.sessionId)
+        this.#shellInputBuffers.delete(message.sessionId)
+        existing.dispose({ notifyExit: false })
+        await existing.whenClosed()
+      } else {
       existing.attach(this.#sendToPort)
       this.#endedSessionIds.delete(message.sessionId)
       this.#completedReplayThrough.delete(message.sessionId)
@@ -730,22 +762,16 @@ export class RuntimeServer {
       this.publishSessionHud(message.sessionId)
       void this.refreshSessionHud(message.sessionId)
       return
+      }
     }
-    const persistentAuthority = this.#database.get<{
-      execution_context_id: string
-      cwd: string
-    }>(
-      `SELECT execution_context_id, cwd FROM sessions
-       WHERE id = ? AND archived_at IS NULL`,
-      message.sessionId
-    )
     if (
       persistentAuthority !== undefined &&
       persistentAuthority.execution_context_id !== message.executionContextId
     ) {
       this.#sendError(
         'SESSION_FORBIDDEN',
-        'persisted Session execution context does not match the attach request'
+        'persisted Session execution context does not match the attach request',
+        message.sessionId
       )
       return
     }
@@ -762,7 +788,7 @@ export class RuntimeServer {
       os.homedir()
     ])
     if (!cwd) {
-      this.#sendError('SESSION_FORBIDDEN', 'execution context is not registered')
+      this.#sendError('SESSION_FORBIDDEN', 'execution context is not registered', message.sessionId)
       return
     }
     if (persistentAuthority && persistentAuthority.cwd !== cwd) {
@@ -776,7 +802,7 @@ export class RuntimeServer {
         )
       } catch (error) {
         if (error instanceof WorkspacePathInvalidError) {
-          this.#sendError(error.code, error.message)
+          this.#sendError(error.code, error.message, message.sessionId)
           return
         }
         throw error
@@ -1053,7 +1079,7 @@ export class RuntimeServer {
           return
         }
       }
-      this.#sendError('INTERNAL_ERROR', errorMessage(error))
+      this.#sendError('INTERNAL_ERROR', errorMessage(error), message.sessionId)
     }
   }
 
@@ -1304,13 +1330,18 @@ export class RuntimeServer {
     this.#replays.clear()
   }
 
-  #sendError(code: Extract<RuntimeMessage, { type: 'protocol.error' }>['code'], message: string): void {
+  #sendError(
+    code: Extract<RuntimeMessage, { type: 'protocol.error' }>['code'],
+    message: string,
+    sessionId?: string
+  ): void {
     console.error(`[protocol.error] ${code}: ${message}`)
     this.#port.postMessage({
       type: 'protocol.error',
       protocolVersion: PROTOCOL_VERSION,
       code,
-      message
+      message,
+      ...(sessionId === undefined ? {} : { sessionId })
     })
   }
 

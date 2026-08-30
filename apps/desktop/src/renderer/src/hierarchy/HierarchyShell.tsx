@@ -186,6 +186,11 @@ function HierarchyProduct({ projection, commands }: {
     gitAvailable: boolean
   } | null>(null)
   const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | null | undefined>>({})
+  const [revealSessionByScene, setRevealSessionByScene] = useState<Record<string, {
+    sessionId: string
+    sequence: number
+    historical?: boolean
+  }>>({})
   const ratioTimers = useRef(new Map<string, number>())
   useEffect(() => () => {
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
@@ -194,7 +199,10 @@ function HierarchyProduct({ projection, commands }: {
   useEffect(() => {
     const unsubscribe = window.matouDesktop?.onDetachedWindowClosed((event) => {
       if (event.mainWindowId === projection.windowId) {
-        void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
+        // Closing the independent window is an explicit end of that terminal.
+        // Keep the stable graph node as history so DAG selection exposes the
+        // continue/reopen path instead of silently remounting a live process.
+        void Promise.resolve(commands.deleteSession(event.sessionId, true, true)).catch(() => {})
       }
     })
     return () => { if (typeof unsubscribe === 'function') unsubscribe() }
@@ -313,14 +321,24 @@ function HierarchyProduct({ projection, commands }: {
     if (selection.mainWindowId !== currentProjection.windowId) return
     const graph = currentProjection.sessionGraphs?.[selection.sceneId]
     const target = graph?.nodes.find(({ sessionId }) => sessionId === selection.sessionId)
-    if (!target || target.archivedAt !== undefined) return
+    if (!target) return
     setLevelParentByScene((current) => ({
       ...current,
       [selection.sceneId]: target.parentSessionId
     }))
-    run(Promise.resolve(commands.activateScene(selection.sceneId))
-      .then(() => commands.setFocusedSession(selection.sceneId, selection.sessionId))
-      .then(() => setTerminalFocusRequest((value) => value + 1)))
+    setRevealSessionByScene((current) => ({
+      ...current,
+      [selection.sceneId]: {
+        sessionId: selection.sessionId,
+        sequence: (current[selection.sceneId]?.sequence ?? 0) + 1,
+        ...(target.archivedAt === undefined ? {} : { historical: true })
+      }
+    }))
+    const activate = Promise.resolve(commands.activateScene(selection.sceneId))
+    run(target.archivedAt === undefined
+      ? activate.then(() => commands.setFocusedSession(selection.sceneId, selection.sessionId))
+        .then(() => setTerminalFocusRequest((value) => value + 1))
+      : activate)
   }), [commands])
   useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
@@ -342,6 +360,14 @@ function HierarchyProduct({ projection, commands }: {
                       [sceneId]: node?.parentSessionId
                     }))
                     setTerminalFocusRequest((value) => value + 1)
+                    setRevealSessionByScene((current) => ({
+                      ...current,
+                      [sceneId]: {
+                        sessionId,
+                        sequence: (current[sceneId]?.sequence ?? 0) + 1,
+                        ...(node?.archivedAt === undefined ? {} : { historical: true })
+                      }
+                    }))
                   }} />
                 <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
         {task && <>
@@ -438,6 +464,9 @@ function HierarchyProduct({ projection, commands }: {
                   ? <SessionCanvas graph={graph} disabled={!pathValid}
                       {...(levelParentByScene[scene.id] !== undefined
                         ? { levelParentSessionId: levelParentByScene[scene.id]! }
+                        : {})}
+                      {...(revealSessionByScene[scene.id]
+                        ? { revealRequest: revealSessionByScene[scene.id] }
                         : {})}
                       renderSession={(node, cardVisible) => renderSession(node.sessionId, cardVisible)}
                       {...(snapshot.geometry

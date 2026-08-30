@@ -72,6 +72,16 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
     const path = await window.matouDesktop?.selectWorkspaceDirectory()
     if (path) await commands.createWorkspace(path)
   }
+  const relinkDirectory = async (workspace: WorkspaceView) => {
+    const path = await window.matouDesktop?.selectWorkspaceDirectory()
+    if (!path) return
+    try {
+      await Promise.resolve(commands.relinkWorkspace(workspace.id, path))
+      setToast(`已恢复 ${workspace.name} 的工作目录`)
+    } catch {
+      setToast('工作目录恢复失败，请重新选择')
+    }
+  }
   const openTaskMenu = (task: TaskView, event: MouseEvent<HTMLElement>) => {
     event.stopPropagation()
     const rect = event.currentTarget.getBoundingClientRect()
@@ -164,6 +174,9 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
             </button>
             <button className="workspace-group__add" aria-label={`在 ${workspace.name} 中新增事项`} title={invalid ? WORKSPACE_PATH_MESSAGE : '新增事项'}
               disabled={invalid} onClick={() => void commands.createTask(workspace.id)}><PlusIcon /></button>
+            {invalid && !workspace.isDefault && <button className="workspace-group__relink"
+              aria-label={`重新关联工作空间目录：${workspace.name}`} title="选择工作空间的新位置"
+              onClick={(event) => { event.stopPropagation(); void relinkDirectory(workspace) }}>恢复目录</button>}
             <button className="workspace-group__more" aria-label={`工作空间菜单：${workspace.name}`}
               onClick={(event) => openWorkspaceMenu(workspace, event)}>•••</button>
           </div>
@@ -205,6 +218,12 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
       })}
     </nav>
     {menuWorkspace && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
+      {projection.pathStates.find(({ workspaceId }) => workspaceId === menuWorkspace.id)?.status === 'invalid' &&
+        !menuWorkspace.isDefault && <button role="menuitem" onClick={() => {
+          const target = menuWorkspace
+          setMenuWorkspace(null)
+          void relinkDirectory(target)
+        }}>重新关联工作空间目录</button>}
       <button role="menuitem" onClick={() => {
         const pinned = !menuWorkspace.isPinned
         const workspaceId = menuWorkspace.id

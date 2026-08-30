@@ -282,6 +282,7 @@ export class ProviderModeService {
 
 function providerWorkStatus(eventName: string, current: SessionWorkStatus): SessionWorkStatus {
   if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse') return 'running'
+  if (eventName === 'PermissionRequest' || eventName === 'Notification') return 'needs-input'
   if (eventName === 'PostToolUseFailure') return 'error'
   if (eventName === 'Stop') return 'idle'
   return current

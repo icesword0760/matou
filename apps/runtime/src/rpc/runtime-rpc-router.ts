@@ -438,6 +438,9 @@ export class RuntimeRpcRouter {
           ...(optionalText(input.confirmedIntent, 'confirmedIntent') === undefined
             ? {}
             : { confirmedIntent: optionalText(input.confirmedIntent, 'confirmedIntent')! }),
+          ...(input.preserveSceneOnLastSession === true
+            ? { preserveSceneOnLastSession: true }
+            : {}),
           now: integer(input.now, 'now', 0)
         })
       case 'hierarchy.detach-session':

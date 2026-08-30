@@ -8,7 +8,7 @@ import {
 test.describe('session canvas lifecycle', () => {
   test.setTimeout(60_000)
 
-  test('returns the same detached session to its original graph after the native window closes', async () => {
+  test('keeps a detached Session as history and reopens a continuation after the native window closes', async () => {
     const fixture = await launchSessionCanvas()
     try {
       const original = activeSurface(fixture.page)
@@ -23,8 +23,13 @@ test.describe('session canvas lifecycle', () => {
       await expect(detached.locator(`.terminal-surface[data-session-id="${sessionId}"]`)).toBeVisible()
       await detached.close()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
-      await expect(fixture.page.locator(`.terminal-surface[data-session-id="${sessionId}"]`)).toBeVisible()
       await expect(fixture.page.getByTestId('detached-placeholder')).toHaveCount(0)
+      await expect(fixture.page.locator(`.terminal-surface[data-session-id="${sessionId}"]`)).toHaveCount(0)
+      await expect(fixture.page.locator('.historical-session-card')).toContainText('Shell 已结束')
+
+      await fixture.page.getByRole('button', { name: '重新打开 Shell' }).click()
+      await expect(activeSurface(fixture.page)).toHaveAttribute('data-session-id', /.+/)
+      await expect(activeSurface(fixture.page)).not.toHaveAttribute('data-session-id', sessionId!)
     } finally {
       await fixture.close()
     }

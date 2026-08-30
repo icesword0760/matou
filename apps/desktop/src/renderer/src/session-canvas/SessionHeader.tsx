@@ -21,7 +21,12 @@ export function SessionHeader(props: {
     </div>
     <div className="session-level-actions">
       {parentTitle && onReturnParent && <button type="button" className="session-return-parent"
-        aria-label="返回父会话" onClick={onReturnParent}>← 返回父会话</button>}
+        aria-label="返回父会话" onClick={onReturnParent}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowUp') return
+          event.preventDefault()
+          onReturnParent()
+        }}>← 返回父会话</button>}
       {historicalCount > 0 && <button type="button" aria-pressed={showHistory}
         aria-label={showHistory ? '隐藏历史会话' : `显示历史会话 (${historicalCount})`}
         onClick={onToggleHistory}>{showHistory ? '隐藏历史' : `历史 ${historicalCount}`}</button>}

@@ -69,7 +69,7 @@ describe('ProviderHookServer', () => {
 
     expect((await stat(registration.settingsPath)).mode & 0o777).toBe(0o600)
     expect(Object.keys(settings.hooks).sort()).toEqual([
-      'Notification', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionEnd',
+      'Notification', 'PermissionRequest', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'SessionEnd',
       'SessionStart', 'Stop', 'UserPromptSubmit'
     ])
     expect(settings.hooks.PreToolUse?.[0]).toMatchObject({
@@ -221,6 +221,19 @@ describe('ProviderHookServer', () => {
       event: {
         eventType: 'completed', title: 'Claude Code', subtitle: 'Completed in matou', body: '任务完成'
       }
+    })
+  })
+
+  it('publishes an explicit permission request as a needs-attention provider event', async () => {
+    const registration = await hooks.registerClaudeSession({ runId: 'run-permission', sessionId: 'session-1' })
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'PermissionRequest', session_id: 'claude-session',
+      tool_name: 'Write', tool_input: { file_path: '/tmp/matou/README.md' }
+    })
+
+    expect(notificationEvents.at(-1)).toMatchObject({
+      runId: 'run-permission', sessionId: 'session-1',
+      event: { eventType: 'permission', subtitle: 'Permission', body: 'Write: /tmp/matou/README.md' }
     })
   })
 

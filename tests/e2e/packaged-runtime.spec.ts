@@ -90,6 +90,7 @@ async function runPackagedSmoke(
       const embedded = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
       await expect(embedded).toHaveAttribute('data-pid', /\d+/)
       const pid = await embedded.getAttribute('data-pid')
+      const detachedSessionId = await embedded.getAttribute('data-session-id')
       await page.locator('.terminal-pane-header').first()
         .dispatchEvent('dragend', { screenX: -1, screenY: -1 })
       await expect(page.getByTestId('detached-placeholder')).toContainText('已脱出')
@@ -98,6 +99,16 @@ async function runPackagedSmoke(
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid', pid!)
       await detached.close()
       await expect(page.getByTestId('detached-placeholder')).toHaveCount(0)
+      await expect(page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)).toHaveCount(0)
+      await page.getByRole('button', { name: '显示历史会话 (1)' }).click()
+      await expect(page.locator('.historical-session-card')).toContainText('Shell 已结束')
+      await expect(page.getByRole('button', { name: '重新打开 Shell' })).toBeVisible()
+
+      await page.getByRole('button', { name: '重新打开 Shell' }).click()
+      const continued = page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
+      await expect(continued).toHaveAttribute('data-session-id', /.+/)
+      await expect(continued).not.toHaveAttribute('data-session-id', detachedSessionId!)
+      await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
 
       const workspace = join(dataDirectory, 'matou_workspace')
       const moved = `${workspace}-moved`

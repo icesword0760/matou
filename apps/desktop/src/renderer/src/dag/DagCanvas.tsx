@@ -22,8 +22,26 @@ export function DagCanvas(props: {
   const baseVisibility = visibleLayers(layout, previewSessionId)
   const centerWorldX = ((viewportRef.current?.clientWidth ?? 1000) / 2 - transform.x) / transform.scale
   const centerDepth = Math.max(0, Math.min(layout.depthCount - 1, Math.round((centerWorldX - 50) / 370)))
-  const fullDepths = new Set([...baseVisibility.fullDepths, centerDepth - 1, centerDepth, centerDepth + 1]
-    .filter((depth) => depth >= 0 && depth < layout.depthCount))
+  const previewDepth = layout.nodes.find(({ sessionId }) => sessionId === previewSessionId)?.depth ?? 0
+  const viewportVisibility = Math.abs(centerDepth - previewDepth) > 1
+    ? depthsAround(centerDepth, layout.depthCount)
+    : baseVisibility.fullDepths
+  const fullDepths = new Set(viewportVisibility)
+  const viewportWidth = viewportRef.current?.clientWidth || 1000
+  const viewportHeight = viewportRef.current?.clientHeight || 700
+  const worldBounds = {
+    left: -transform.x / transform.scale - 360,
+    right: (viewportWidth - transform.x) / transform.scale + 360,
+    top: -transform.y / transform.scale - 260,
+    bottom: (viewportHeight - transform.y) / transform.scale + 260
+  }
+  const renderedNodes = layout.nodes.filter(({ depth, x, y, width, height, sessionId }) =>
+    fullDepths.has(depth) && (
+      sessionId === previewSessionId ||
+      (x + width >= worldBounds.left && x <= worldBounds.right &&
+        y + height >= worldBounds.top && y <= worldBounds.bottom)
+    ))
+  const renderedNodeIds = new Set(renderedNodes.map(({ sessionId }) => sessionId))
   const update = (next: DagTransform) => {
     setTransform(next)
     onTransformChange?.(next)
@@ -98,6 +116,7 @@ export function DagCanvas(props: {
 
   return <div className="dag-canvas" ref={viewportRef} role="application" aria-label="会话 DAG 画布"
     data-scale={round(transform.scale)} data-pan={`${round(transform.x)},${round(transform.y)}`}
+    data-rendered-node-count={renderedNodes.length}
     onWheel={wheel} onPointerDown={pointerDown} onPointerMove={pointerMove}
     onPointerUp={pointerEnd} onPointerCancel={pointerEnd}>
     <header className="dag-toolbar">
@@ -124,7 +143,8 @@ export function DagCanvas(props: {
           const fromDepth = layout.nodes.find(({ sessionId }) => sessionId === edge.fromSessionId)?.depth
           const toDepth = layout.nodes.find(({ sessionId }) => sessionId === edge.toSessionId)?.depth
           return fromDepth !== undefined && toDepth !== undefined &&
-            (fullDepths.has(fromDepth) || fullDepths.has(toDepth))
+            (fullDepths.has(fromDepth) || fullDepths.has(toDepth)) &&
+            (renderedNodeIds.has(edge.fromSessionId) || renderedNodeIds.has(edge.toSessionId))
         }).map((edge) => {
           const mid = (edge.from.x + edge.to.x) / 2
           return <path key={`${edge.fromSessionId}:${edge.toSessionId}`}
@@ -132,12 +152,16 @@ export function DagCanvas(props: {
             d={`M ${edge.from.x} ${edge.from.y} C ${mid} ${edge.from.y}, ${mid} ${edge.to.y}, ${edge.to.x} ${edge.to.y}`} />
         })}
       </svg>
-      {layout.nodes.filter(({ depth }) => fullDepths.has(depth)).map((positioned) =>
+      {renderedNodes.map((positioned) =>
         <DagNodeCard key={positioned.sessionId} node={positioned.node}
           focused={positioned.sessionId === previewSessionId}
           style={{ left: positioned.x, top: positioned.y, width: positioned.width, height: positioned.height }}
-          onClick={() => onSelect(positioned.sessionId)} />)}
-      {baseVisibility.ghostDepths.filter((depth) => !fullDepths.has(depth)).map((depth) => {
+          onClick={() => {
+            setPreviewSessionId(positioned.sessionId)
+            onSelect(positioned.sessionId)
+          }} />)}
+      {Array.from({ length: layout.depthCount }, (_, depth) => depth)
+        .filter((depth) => !fullDepths.has(depth)).map((depth) => {
         const count = layout.nodes.filter((node) => node.depth === depth).length
         return <div key={depth} className="dag-ghost-layer" style={{ left: 50 + depth * 370, top: 70 }}>
           <strong>{count} 个会话</strong><span>平移到此处查看第 {depth + 1} 层</span>
@@ -208,3 +232,8 @@ function reducedMotion() {
 }
 
 function round(value: number) { return Math.round(value * 100) / 100 }
+
+function depthsAround(centerDepth: number, depthCount: number): number[] {
+  return [centerDepth - 1, centerDepth, centerDepth + 1]
+    .filter((depth) => depth >= 0 && depth < depthCount)
+}

@@ -47,6 +47,30 @@ describe('DagCanvas', () => {
     fireEvent.wheel(canvas, { deltaX: 20, deltaY: 10 })
     expect(onTransformChange).toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 })
   })
+
+  it('renders exactly the parent, focused, and child depths while farther layers stay as ghosts', () => {
+    const nodes = [
+      node('depth-0', 'Depth 0'),
+      { ...node('depth-1', 'Depth 1'), parentSessionId: 'depth-0' },
+      { ...node('depth-2', 'Depth 2'), parentSessionId: 'depth-1' },
+      { ...node('depth-3', 'Depth 3'), parentSessionId: 'depth-2' },
+      { ...node('depth-4', 'Depth 4'), parentSessionId: 'depth-3' }
+    ]
+    render(<DagCanvas graph={{
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: `depth-${index}`, childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const, createdAt: index + 1
+      }))
+    }} focusedSessionId="depth-2" onSelect={vi.fn()} />)
+
+    expect(screen.queryByRole('button', { name: '打开会话：Depth 0' })).toBeNull()
+    expect(screen.getByRole('button', { name: '打开会话：Depth 1' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '打开会话：Depth 2' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '打开会话：Depth 3' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '打开会话：Depth 4' })).toBeNull()
+    expect(screen.getAllByText(/平移到此处查看第/)).toHaveLength(2)
+  })
 })
 
 function graph(): SessionGraphView {

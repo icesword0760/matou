@@ -63,6 +63,19 @@ describe('SessionCanvas', () => {
     expect(onReopenHistorical).toHaveBeenCalledWith('archived')
   })
 
+  it('unfolds and reveals a historical Session selected from the DAG', async () => {
+    const data = graph()
+    data.nodes.push({ ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
+    render(<SessionCanvas graph={data} levelParentSessionId="parent" onActivate={() => undefined}
+      revealRequest={{ sessionId: 'archived', sequence: 1, historical: true }}
+      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
+      onReopenHistorical={vi.fn()} renderSession={(item) => <div>{item.title}</div>} />)
+
+    expect(await screen.findByText('历史 Shell')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重新打开 Shell' })).toBeTruthy()
+    await vi.waitFor(() => expect(Element.prototype.scrollIntoView).toHaveBeenCalled())
+  })
+
   it('keeps the current parent when adding a Shell after all children became history', async () => {
     const data = graph()
     data.nodes = [

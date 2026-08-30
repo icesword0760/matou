@@ -136,6 +136,27 @@ describe('ProviderModeService', () => {
       .toMatchObject({ currentMode: 'claude-code', workStatus: 'idle', canFork: true })
   })
 
+  it('projects an explicit provider permission request as needs-input until work resumes', () => {
+    const initial = bootstrapClaudeTree({ canFork: false })
+    const waiting = providerModes.observeHook(command('hook-permission'), {
+      sessionId: initial.parentSessionId,
+      providerSessionId: 'provider-parent',
+      eventName: 'PermissionRequest',
+      now: 30
+    })
+    expect(waiting.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
+      .toMatchObject({ workStatus: 'needs-input' })
+
+    const resumed = providerModes.observeHook(command('hook-pre-tool'), {
+      sessionId: initial.parentSessionId,
+      providerSessionId: 'provider-parent',
+      eventName: 'PreToolUse',
+      now: 31
+    })
+    expect(resumed.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
+      .toMatchObject({ workStatus: 'running' })
+  })
+
   it('replays a transition without incrementing versions or emitting a second event', () => {
     const initial = bootstrapClaudeTree()
     const input = { sessionId: initial.parentSessionId, now: 30 }

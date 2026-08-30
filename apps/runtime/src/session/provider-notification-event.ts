@@ -14,8 +14,29 @@ export function toProviderNotificationEvent(
 ): ProviderNotificationEvent | null {
   const hookEvent = text(payload.hook_event_name) ?? text(payload.hookEventName)
   if (hookEvent === 'Stop') return stopNotification(payload)
+  if (hookEvent === 'PermissionRequest') return permissionRequestNotification(payload)
   if (hookEvent === 'Notification') return hookNotification(payload)
   return null
+}
+
+function permissionRequestNotification(payload: Record<string, unknown>): ProviderNotificationEvent {
+  const tool = text(payload.tool_name) ?? text(payload.toolName) ?? 'operation'
+  const detail = firstText([
+    payload.message,
+    payload.description,
+    nested(payload.tool_input, 'command'),
+    nested(payload.tool_input, 'file_path'),
+    nested(payload.toolInput, 'command'),
+    nested(payload.toolInput, 'filePath')
+  ])
+  return {
+    eventType: 'permission',
+    title: TITLE,
+    subtitle: 'Permission',
+    body: compact(detail ? `${tool}: ${detail}` : `${tool} requires approval`, 180),
+    sound: true,
+    cooldownKey: 'Notification'
+  }
 }
 
 function stopNotification(payload: Record<string, unknown>): ProviderNotificationEvent {

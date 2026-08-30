@@ -14,6 +14,8 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   const [geometryReady, setGeometryReady] = useState(Boolean(fixtureGraph))
   const geometryTimer = useRef<number | undefined>(undefined)
   const pendingTransform = useRef<DagTransform | undefined>(undefined)
+  const layoutRevision = useRef(0)
+  const graphSignature = useRef('')
   const [error, setError] = useState('')
   const refresh = useCallback(async () => {
     if (fixtureGraph || !client) return
@@ -22,7 +24,12 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
         sceneId: context.sceneId,
         windowId: context.mainWindowId
       })
-      setGraph(next)
+      const signature = sessionGraphSignature(next)
+      if (signature !== graphSignature.current) {
+        graphSignature.current = signature
+        setGraph(next)
+      }
+      layoutRevision.current = next.layoutRevision ?? layoutRevision.current
       setError('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -32,16 +39,23 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   useEffect(() => window.matouDesktop?.onDagContext?.((next) => {
     setContext(next)
     setGraph(null)
+    graphSignature.current = ''
     setInitialTransform(undefined)
     setGeometryReady(false)
   }), [])
   useEffect(() => {
     if (fixtureGraph || !client) return
     setGeometryReady(false)
-    void client.request<Array<{ ownerKey: string; geometry: Record<string, unknown> }>>('geometry.list', {
+    void client.request<Array<{
+      ownerKey: string
+      layoutRevision: number
+      geometry: Record<string, unknown>
+    }>>('geometry.list', {
       sceneId: context.sceneId
     }).then((items) => {
-      const value = items.find(({ ownerKey }) => ownerKey === `dag-viewport:${context.sceneId}`)?.geometry
+      const stored = items.find(({ ownerKey }) => ownerKey === `dag-viewport:${context.sceneId}`)
+      const value = stored?.geometry
+      if (stored) layoutRevision.current = stored.layoutRevision
       if (typeof value?.panX === 'number' && typeof value.panY === 'number' && typeof value.zoom === 'number') {
         setInitialTransform({ x: value.panX, y: value.panY, scale: value.zoom })
       }
@@ -50,7 +64,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   useEffect(() => {
     void refresh()
     if (fixtureGraph) return
-    const timer = window.setInterval(() => { void refresh() }, 250)
+    const timer = window.setInterval(() => { void refresh() }, 500)
     return () => window.clearInterval(timer)
   }, [fixtureGraph, refresh])
   useEffect(() => {
@@ -77,7 +91,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     void client.request('geometry.put', {
       sceneId: context.sceneId,
       ownerKey: `dag-viewport:${context.sceneId}`,
-      layoutRevision: 0,
+      layoutRevision: layoutRevision.current,
       geometry: { panX: value.x, panY: value.y, zoom: value.scale },
       now: Date.now()
     }).catch(() => {})
@@ -128,4 +142,18 @@ function readContext(): DagWindowContext {
     sessionId: query.get('sessionId') ?? '',
     theme: query.get('theme') === 'dark' ? 'dark' : 'light'
   }
+}
+
+function sessionGraphSignature(graph: SessionGraphView): string {
+  return JSON.stringify([
+    graph.layoutRevision,
+    graph.focusedSessionId,
+    graph.nodes.map((node) => [
+      node.sessionId, node.parentSessionId, node.currentMode, node.workStatus,
+      node.providerRestoreState, node.title, node.cwd, node.archivedAt,
+      node.detachedWindowId, node.latestLines, node.lastActivityAt,
+      node.activeChildCount, node.historicalChildCount
+    ]),
+    graph.edges
+  ])
 }

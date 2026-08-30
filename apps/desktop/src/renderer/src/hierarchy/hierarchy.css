@@ -120,13 +120,16 @@ button { -webkit-app-region: no-drag; }
   0%, 100% { box-shadow: 0 0 0 0 rgba(80,144,224,.2); opacity: .4; }
   50% { box-shadow: 0 0 12px 2px rgba(80,144,224,.5); opacity: 1; }
 }
-.terminal-pane-header.split-pane-header { display: flex; flex: 0 0 32px; align-items: center; justify-content: space-between; box-sizing: border-box; height: 32px; min-height: 32px; padding: 2px 8px; border: 0; background: var(--kooky-chrome); cursor: grab; }
+.terminal-pane-header.split-pane-header { container-type: inline-size; display: flex; flex: 0 0 32px; align-items: center; justify-content: space-between; box-sizing: border-box; height: 32px; min-height: 32px; padding: 2px 8px; border: 0; background: var(--kooky-chrome); cursor: grab; }
 .pane-header-content { display: flex; flex: 1; align-items: center; min-width: 0; gap: 8px; }
-.pane-title { flex: 0 1 auto; max-width: 34%; overflow: hidden; color: rgba(255,255,255,.5); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.pane-title { flex: 0 1 auto; max-width: 42%; overflow: hidden; color: rgba(255,255,255,.5); font-size: 11px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .pane-cwd { min-width: 0; flex: 1 1 120px; overflow: hidden; color: rgba(255,255,255,.32); font: 9px/1.2 "SF Mono",monospace; text-overflow: ellipsis; white-space: nowrap; }
 .pane-environment-badge { flex: 0 0 auto; max-width: 120px; overflow: hidden; padding: 2px 5px; border-radius: 8px; color: rgba(210,222,239,.72); background: rgba(255,255,255,.055); font: 8px/1.2 "SF Mono",monospace; text-overflow: ellipsis; white-space: nowrap; }
 .pane-environment-badge.is-shared { color: #e0ad55; background: rgba(224,173,85,.11); }
 .terminal-pane-actions { display: flex; align-items: center; gap: 2px; }
+@container (max-width: 620px) { .pane-cwd { display: none; } }
+@container (max-width: 500px) { .pane-environment-badge:not(.is-shared) { display: none; } }
+@container (max-width: 420px) { .pane-environment-badge.is-shared,.terminal-pane-actions .pane-fork { display: none; } .pane-title { max-width: 54%; } }
 .pane-fork { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; color: rgba(255,255,255,.55); background: transparent; cursor: pointer; }
 .pane-fork:hover { color: rgba(255,255,255,.9); background: rgba(255,255,255,.08); }
 .pane-close { display: flex; align-items: center; justify-content: center; padding: 3px; border: 0; border-radius: 3px; color: rgba(255,255,255,.35); background: transparent; cursor: pointer; font-size: 12px; }
@@ -137,6 +140,13 @@ button { -webkit-app-region: no-drag; }
 .provider-restore-reason { overflow: hidden; color: #c99a73; text-overflow: ellipsis; white-space: nowrap; }
 .provider-restore-banner button { flex: none; padding: 3px 8px; border: 1px solid rgba(238,168,88,.55); border-radius: 5px; color: #f1c08f; background: rgba(238,168,88,.1); cursor: pointer; }
 .provider-restore-banner.restoring { justify-content: flex-start; color: #8fb8ed; background: #172333; border-color: rgba(103,159,226,.28); }
+.session-start-failure-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-top: 1px solid rgba(228,93,85,.3); border-bottom: 1px solid rgba(228,93,85,.3); color: #f0b1ad; background: #2b1919; font-size: 11px; }
+.session-start-failure-card > div { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.session-start-failure-reason { overflow: hidden; color: #d98e89; text-overflow: ellipsis; white-space: nowrap; }
+.session-start-failure-actions { flex: none; }
+.session-start-failure-actions button { padding: 3px 8px; border: 1px solid rgba(228,93,85,.45); border-radius: 5px; color: #f2b7b3; background: rgba(228,93,85,.08); cursor: pointer; }
+.hierarchy-shell[data-theme="light"] .session-start-failure-card { color: #9b2f2a; border-color: #edc2bf; background: #fff3f2; }
+.hierarchy-shell[data-theme="light"] .session-start-failure-reason { color: #a95853; }
 .terminal-pane .terminal-surface { flex: 1; min-height: 0; padding: 4px 8px; background: var(--kooky-terminal); }
 .detach-context-overlay { position: fixed; z-index: 9998; inset: 0; }
 .detach-context-menu { position: fixed; z-index: 9999; min-width: 140px; padding: 4px 0; border: 1px solid rgba(255,255,255,.1); border-radius: 6px; background: rgba(20,25,35,.95); box-shadow: 0 4px 12px rgba(0,0,0,.3); backdrop-filter: blur(12px); }
@@ -300,6 +310,8 @@ button { -webkit-app-region: no-drag; }
 .workspace-group__status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; min-width: 0; }
 .workspace-group__badge { flex: 0 0 auto; padding: 1px 5px; border-radius: 5px; color: #858585; background: rgba(255,255,255,.06); font-size: 9px; font-weight: 600; }
 .workspace-group__add, .workspace-group__more { display: grid; flex: 0 0 auto; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; color: #777; background: transparent; cursor: pointer; opacity: 0; }
+.workspace-group__relink { flex: 0 0 auto; height: 24px; padding: 0 7px; border: 1px solid rgba(217,157,60,.3); border-radius: 6px; color: #d99d3c; background: rgba(217,157,60,.08); cursor: pointer; font-size: 9px; }
+.workspace-group__relink:hover { color: #efbd66; background: rgba(217,157,60,.15); }
 .workspace-group:hover .workspace-group__add, .workspace-group:hover .workspace-group__more, .workspace-group.is-active .workspace-group__add, .workspace-group.is-active .workspace-group__more { opacity: 1; }
 .workspace-group__add:hover, .workspace-group__more:hover { color: #eee; background: rgba(255,255,255,.08); }
 .workspace-group__add:disabled { opacity: .28; cursor: not-allowed; }
@@ -377,6 +389,7 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .workspace-group__add,
 .hierarchy-shell[data-theme="light"] .workspace-group__more,
 .hierarchy-shell[data-theme="light"] .flat-sidebar .pin-icon { color: #81848d; }
+.hierarchy-shell[data-theme="light"] .workspace-group__relink { color: #9a6818; border-color: rgba(154,104,24,.25); background: #fff8e8; }
 .hierarchy-shell[data-theme="light"] .workbench-item__more-btn:hover,
 .hierarchy-shell[data-theme="light"] .workbench-item__more-btn.is-open { color: #1f2328; background: rgba(0,0,0,.06); }
 .hierarchy-shell[data-theme="light"] .workspace-group__add:hover,

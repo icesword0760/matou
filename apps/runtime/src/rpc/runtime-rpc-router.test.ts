@@ -76,6 +76,23 @@ describe('RuntimeRpcRouter', () => {
     expect(taskActivated.task.id).toBe(createdTask.task.id)
   })
 
+  it('keeps the final canvas as history when a detached native window closes', async () => {
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('detached-bootstrap', {
+      windowId: 'window-1', defaultRootDirectory: '/tmp/detached-workspace',
+      defaultName: 'detached-workspace', now: 1
+    })) as { session: { id: string }; scene: { id: string } }
+
+    const result = await router.handle('hierarchy.delete-session', payload('detached-close', {
+      windowId: 'window-1', sessionId: initial.session.id,
+      confirmedIntent: `delete-session:${initial.session.id}`,
+      preserveSceneOnLastSession: true, now: 2
+    })) as { outcome: string }
+
+    expect(result.outcome).toBe('session-history-remains')
+    expect(database.get('SELECT archived_at FROM scenes WHERE id = ?', initial.scene.id))
+      .toEqual({ archived_at: null })
+  })
+
   it('creates, modifies, archives, and projects the authoritative hierarchy', async () => {
     await router.handle('workspace.create', payload('workspace', {
       id: 'workspace-1', name: 'Workspace', rootDirectory: '/tmp/workspace', now: 1

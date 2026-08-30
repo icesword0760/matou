@@ -18,6 +18,7 @@ export function SessionCanvas(props: {
   onRemoveHistorical?(sessionId: string, includeDescendants: boolean): void
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
+  revealRequest?: { sessionId: string; sequence: number; historical?: boolean }
   geometry?: Array<{ ownerKey: string; geometry: Record<string, unknown> }>
   onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): unknown
 }) {
@@ -25,7 +26,7 @@ export function SessionCanvas(props: {
     graph, levelParentSessionId, disabled = false, renderSession, onActivate,
     onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onNavigateToChildren,
     onRemoveHistorical, onReturnParent,
-    onEnsureSessionVisible, geometry, onPutGeometry
+    onEnsureSessionVisible, revealRequest, geometry, onPutGeometry
   } = props
   const geometryTimer = useRef<number | undefined>(undefined)
   const pendingGeometry = useRef<{ ownerKey: string; geometry: Record<string, unknown> } | undefined>(undefined)
@@ -54,6 +55,10 @@ export function SessionCanvas(props: {
   const initialScrollLeft = typeof storedGeometry?.scrollLeft === 'number' ? storedGeometry.scrollLeft : 0
   const levelFocus = focused && focused.parentSessionId === parentId ? focused : activeDirect[0] ?? direct[0]
   useEffect(() => { setShowHistory(false) }, [parentId])
+  useEffect(() => {
+    if (!revealRequest?.historical) return
+    if (direct.some(({ sessionId }) => sessionId === revealRequest.sessionId)) setShowHistory(true)
+  }, [direct, revealRequest?.historical, revealRequest?.sequence, revealRequest?.sessionId])
   useEffect(() => { onPutGeometryRef.current = onPutGeometry }, [onPutGeometry])
   useEffect(() => () => {
     if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
@@ -145,6 +150,7 @@ export function SessionCanvas(props: {
         ? { onCommitParent: () => onReturnParent(parent.sessionId) }
         : {})}
       geometryKey={ownerKey} initialScrollLeft={initialScrollLeft}
+      {...(revealRequest ? { revealRequest } : {})}
       onGeometryChange={putGeometry}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
