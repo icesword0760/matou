@@ -292,6 +292,63 @@ describe('PRD 05 hierarchy shell', () => {
     expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThanOrEqual(1)
   })
 
+  it('enters the newly forked child level when forking from a nested Claude session', async () => {
+    const data = fixture()
+    data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code', title: 'Depth-1' }
+    data.sessions.push({
+      id: 'session-depth2', taskId: 'task-a1', kind: 'claude-code',
+      title: 'Depth-2', executionContextId: 'context-a'
+    })
+    data.sceneSnapshots![0]!.nodes.push({
+      id: 'node-depth2', sceneId: 'scene-a1', kind: 'mount', ordinal: 1
+    })
+    data.sceneSnapshots![0]!.mounts.push({
+      id: 'mount-depth2', sceneId: 'scene-a1', sceneNodeId: 'node-depth2', sessionId: 'session-depth2'
+    })
+    data.sessionHuds = [
+      {
+        sessionId: 'session-a1', mode: 'agent', cwd: '/tmp/a', gitBranch: 'main',
+        startedAt: 1, resumable: true
+      },
+      {
+        sessionId: 'session-depth2', mode: 'agent', cwd: '/tmp/a', gitBranch: 'main',
+        startedAt: 2, resumable: true
+      }
+    ]
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1',
+        edges: [{
+          parentSessionId: 'session-a1', childSessionId: 'session-depth2',
+          relationKind: 'forked-from', createdAt: 2
+        }],
+        nodes: [
+          {
+            ...graphNode('session-a1', 'Depth-1'), currentMode: 'claude-code', canFork: true,
+            childModeCounts: { shell: 0, claudeCode: 1 }
+          },
+          {
+            ...graphNode('session-depth2', 'Depth-2'), currentMode: 'claude-code', canFork: true,
+            parentSessionId: 'session-a1', relationKind: 'forked-from'
+          }
+        ]
+      }
+    }
+    render(<HierarchyShell fixture={data} />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '查看 1 个子会话' }))
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+      .toBe('session-a1')
+    await user.click(screen.getByRole('button', { name: '从“Depth-2”创建子分支' }))
+    await user.type(screen.getByRole('textbox', { name: '分支名称' }), 'Depth-3')
+    await user.click(screen.getByRole('button', { name: '创建分支' }))
+
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+      .toBe('session-depth2')
+    expect(screen.getByTestId('xterm-fixture-fork-session-scene-a1-3')).toBeTruthy()
+  })
+
   it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
     window.history.replaceState({}, '', '/?e2e=1')
     render(<HierarchyShell fixture={fixture()} />)

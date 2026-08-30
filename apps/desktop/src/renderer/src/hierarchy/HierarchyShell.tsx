@@ -589,6 +589,13 @@ function HierarchyProduct({ projection, commands }: {
                     await Promise.resolve(commands.createForkChild(
                       sceneId, sourceSessionId, input.name, input.worktreeMode
                     ))
+                    // A child Fork creates the next level in the same canvas. Keep
+                    // the newly focused child visible instead of leaving the user
+                    // on the source session's sibling level.
+                    setLevelParentByScene((current) => ({
+                      ...current,
+                      [sceneId]: sourceSessionId
+                    }))
                   } else {
                     await Promise.resolve(commands.createForkSibling(
                       sceneId, sourceSessionId, input.name, input.worktreeMode
@@ -791,6 +798,45 @@ function createFixtureCommands(
     value.sessions.push({ ...source, id: sessionId, title: 'Shell' })
     value.navigation.sessionByScene[sceneId] = sessionId
   })
+  const createFixtureForkChild = (
+    sceneId: string,
+    sourceSessionId: string,
+    name: string
+  ) => updateNavigation((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
+    const graph = value.sessionGraphs?.[sceneId]
+    const sourceSession = value.sessions.find(({ id }) => id === sourceSessionId)
+    const source = graph?.nodes.find(({ sessionId }) => sessionId === sourceSessionId)
+    if (!snapshot || !graph || !sourceSession || !source) return
+    const suffix = snapshot.mounts.length + 1
+    const sessionId = `fixture-fork-session-${sceneId}-${suffix}`
+    const nodeId = `fixture-fork-node-${sceneId}-${suffix}`
+    const mountId = `fixture-fork-mount-${sceneId}-${suffix}`
+    value.sessions.push({
+      ...sourceSession, id: sessionId, kind: 'claude-code', title: name
+    })
+    snapshot.nodes.push({ id: nodeId, sceneId, kind: 'mount', ordinal: suffix })
+    snapshot.mounts.push({ id: mountId, sceneId, sceneNodeId: nodeId, sessionId })
+    source.activeChildCount += 1
+    source.childModeCounts = {
+      ...source.childModeCounts,
+      claudeCode: source.childModeCounts.claudeCode + 1
+    }
+    graph.nodes.push({
+      sessionId, sceneId, currentMode: 'claude-code', workStatus: 'starting',
+      providerRestoreState: 'none', canFork: false, title: name, cwd: source.cwd,
+      parentSessionId: sourceSessionId, relationKind: 'forked-from',
+      activeChildCount: 0, historicalChildCount: 0,
+      childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [],
+      lastUserInteractionSeq: 0
+    })
+    graph.edges.push({
+      parentSessionId: sourceSessionId, childSessionId: sessionId,
+      relationKind: 'forked-from', createdAt: Date.now()
+    })
+    graph.focusedSessionId = sessionId
+    value.navigation.sessionByScene[sceneId] = sessionId
+  })
   return {
     activateWorkspace: (workspaceId) => updateNavigation((value) => { value.navigation.activeWorkspaceId = workspaceId }),
     activateTask: (taskId) => updateNavigation((value) => {
@@ -811,7 +857,7 @@ function createFixtureCommands(
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
     createCanvas: createFixtureCanvas,
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
-    createForkChild: NOOP, createForkSibling: NOOP,
+    createForkChild: createFixtureForkChild, createForkSibling: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
     retryProviderRestore: NOOP, reopenHistoricalSession: NOOP, getSceneSessionGraph: NOOP,
     recordSessionInteraction: NOOP,
