@@ -13,6 +13,7 @@ const state = vi.hoisted(() => ({
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
+  terminalResize: vi.fn(),
   sendTerminalInput: vi.fn(),
   recordTerminalInteraction: vi.fn()
 }))
@@ -26,6 +27,7 @@ vi.mock('@xterm/xterm', () => ({
     open = vi.fn()
     focus = state.focus
     write = vi.fn((_data: unknown, done?: () => void) => done?.())
+    resize = state.terminalResize
     onData = vi.fn((listener: (data: string) => void) => {
       state.onData = listener
       return { dispose: vi.fn() }
@@ -73,6 +75,7 @@ describe('TerminalSurface focus continuity', () => {
     state.onData = undefined
     state.sendTerminalInput.mockClear()
     state.recordTerminalInteraction.mockClear()
+    state.terminalResize.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -92,6 +95,18 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
 
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
+  })
+
+  it('replays historical terminal resize frames before continuing output', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.replay-resize', sessionId: 'session-1', sequence: 2,
+      cols: 100, rows: 40
+    })
+
+    expect(state.terminalResize).toHaveBeenCalledWith(100, 40)
   })
 
   it('restores the active terminal after agent output while leaving dialogs and controls alone', async () => {

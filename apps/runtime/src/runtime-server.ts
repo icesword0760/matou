@@ -642,6 +642,16 @@ export class RuntimeServer {
         })
         replay.pendingBytes.set(frame.sequence, frame.data.byteLength)
         replay.unackedBytes += frame.data.byteLength
+      } else if (frame.kind === 'resize') {
+        this.#port.postMessage({
+          type: 'terminal.replay-resize', protocolVersion: PROTOCOL_VERSION,
+          sessionId, sequence: frame.sequence, cols: frame.cols, rows: frame.rows
+        })
+      } else if (frame.kind === 'reset') {
+        this.#port.postMessage({
+          type: 'terminal.replay-reset', protocolVersion: PROTOCOL_VERSION,
+          sessionId, sequence: frame.sequence, screenEpoch: frame.screenEpoch
+        })
       } else if (frame.kind === 'exit') {
         this.#port.postMessage({
           type: 'terminal.exited', protocolVersion: PROTOCOL_VERSION,
@@ -851,6 +861,7 @@ export class RuntimeServer {
       const resumeMonitor = providerSessionId === undefined ? undefined : new ProviderResumeMonitor()
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
+      let emittedTerminalOutput = false
       let controlEnvironment: Record<string, string> | undefined
       if (message.profile !== 'shell' && this.#control) {
         const token = this.#control.tokens.issue(
@@ -899,6 +910,7 @@ export class RuntimeServer {
         ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
         send: this.#sendToPort,
         onOutput: (data) => {
+          emittedTerminalOutput = true
           this.#recordSessionSummary(message.sessionId, data)
           const reportedCwd = cwdTracker.ingest(data)
           if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
@@ -966,6 +978,8 @@ export class RuntimeServer {
           }
           const naturalAgentFallback = wasCurrent && exited.profile !== 'shell' &&
             !resumeExitFallback && (!forkLaunch || forkState === 'succeeded')
+          const shellStartupFailure = wasCurrent && exited.profile === 'shell' &&
+            !emittedTerminalOutput && exitReason !== 'runtime-shutdown'
           if (wasCurrent) {
             if (!resumeExitFallback && !naturalAgentFallback) {
               this.#attachedSessionIds.delete(message.sessionId)
@@ -993,10 +1007,22 @@ export class RuntimeServer {
                 exited.runId,
                 { exitCode, ...(signal === undefined ? {} : { signal }), now: Date.now() }
               )
-              this.#setWorkStatus(message.sessionId, 'exited')
+              this.#setWorkStatus(message.sessionId, shellStartupFailure ? 'error' : 'exited')
             } catch (error) {
               console.error(`[session.run-exit] ${errorMessage(error)}`)
             }
+          }
+          if (shellStartupFailure) {
+            const executable = process.env.SHELL ?? '系统默认 Shell'
+            const termination = signal === undefined
+              ? `退出代码 ${exitCode}`
+              : `信号 ${signal}`
+            this.#sendError(
+              'INTERNAL_ERROR',
+              `Shell 进程启动失败：${executable} 未产生可用输出并退出（${termination}）`,
+              message.sessionId
+            )
+            return false
           }
           if (resumeExitFallback) {
             void this.#spawnShellFallback(message)

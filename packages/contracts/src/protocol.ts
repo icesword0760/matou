@@ -259,6 +259,21 @@ export type RuntimeMessage =
       liveSequence: number
     }
   | {
+      type: 'terminal.replay-resize'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
+      cols: number
+      rows: number
+    }
+  | {
+      type: 'terminal.replay-reset'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
+      screenEpoch: number
+    }
+  | {
       type: 'terminal.replay-complete'
       protocolVersion: typeof PROTOCOL_VERSION
       sessionId: string

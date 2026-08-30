@@ -39,6 +39,10 @@ html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%
 .dag-node-card.status-running .dag-node-card__top i,.dag-node-card.status-starting .dag-node-card__top i { background: #4cbd78; }
 .dag-node-card.status-needs-input .dag-node-card__top i { background: #e9ae43; }
 .dag-node-card.status-error .dag-node-card__top i { background: #e66b64; }
+.dag-node-card.is-historical { border-color: #343941; color: #858d98; background: #1c1f23; box-shadow: 0 8px 22px rgba(0,0,0,.16); }
+.dag-node-card.is-historical .dag-node-card__top i { box-sizing: border-box; border: 1px solid #757e89; background: transparent; }
+.dag-node-card.is-historical strong { color: #aab0b8; }
+.dag-node-card.is-historical pre { color: #7b838e; background: rgba(0,0,0,.1); }
 .dag-node-card__top em { margin-left: auto; font-style: normal; }
 .dag-node-card strong { overflow: hidden; color: #f0f2f5; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .dag-node-card__path { overflow: hidden; color: #858e9b; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
@@ -55,6 +59,9 @@ html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%
 .light-theme .dag-window-title { border-color: #dfe2e7; background: rgba(250,251,252,.95); }
 .light-theme .dag-canvas { background-color: #f7f8fa; background-image: radial-gradient(circle at 1px 1px,rgba(44,56,72,.11) 1px,transparent 0); }
 .light-theme .dag-node-card { border-color: #d5dae2; color: #505966; background: #fff; box-shadow: 0 10px 28px rgba(46,57,73,.1); }
+.light-theme .dag-node-card.is-historical { border-color: #d7dbe1; color: #7e8793; background: #eef0f3; box-shadow: 0 7px 19px rgba(46,57,73,.07); }
+.light-theme .dag-node-card.is-historical strong { color: #6b7480; }
+.light-theme .dag-node-card.is-historical pre { color: #7c8590; background: #e7e9ed; }
 .light-theme .dag-node-card strong { color: #2d3541; }.light-theme .dag-node-card pre { color: #586271; background: #f6f7f9; }
 .light-theme .dag-node-card__shared { color: #91620e; background: #fff3d5; }
 .light-theme .dag-search input,.light-theme .dag-search__results,.light-theme .dag-toolbar__zoom { border-color: #d5dae2; color: #303744; background: rgba(255,255,255,.96); box-shadow: 0 9px 28px rgba(46,57,73,.12); }

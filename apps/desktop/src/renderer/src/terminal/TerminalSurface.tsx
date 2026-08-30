@@ -198,9 +198,20 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-start') {
         replaying = true
         terminal.reset()
+      } else if (message.type === 'terminal.replay-resize') {
+        // Resize is part of VT history: zsh and full-screen tools emit cursor
+        // movements relative to the active grid. Apply it at its original
+        // sequence instead of replaying every byte at today's card width.
+        terminal.write('', () => terminal.resize(message.cols, message.rows))
+      } else if (message.type === 'terminal.replay-reset') {
+        terminal.write('', () => terminal.reset())
       } else if (message.type === 'terminal.replay-complete') {
         replaying = false
-        onReplayComplete(`replayed-through:${message.throughSequence}`)
+        terminal.write('', () => {
+          fit.fit()
+          client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+          onReplayComplete(`replayed-through:${message.throughSequence}`)
+        })
       }
     }
     const detach = client.attachTerminal({

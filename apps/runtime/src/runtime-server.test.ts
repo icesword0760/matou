@@ -161,6 +161,9 @@ describe('RuntimeServer domain RPC', () => {
     expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
       expect.objectContaining({ sessionId: 'persisted-session', sequence: 3 })
     ])
+    expect(port.last('terminal.replay-resize')).toMatchObject({
+      sessionId: 'persisted-session', sequence: 2, cols: 100, rows: 40
+    })
     expect(port.last('terminal.exited')).toMatchObject({ sequence: 4, exitCode: 0 })
     expect(port.last('terminal.replay-complete')).toMatchObject({ throughSequence: 4 })
   })

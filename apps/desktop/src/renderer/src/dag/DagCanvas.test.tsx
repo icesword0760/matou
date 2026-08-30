@@ -82,6 +82,23 @@ describe('DagCanvas', () => {
     expect(screen.getByText('Fork：继承对话')).toBeTruthy()
     expect(screen.getByText('普通关联：不继承对话')).toBeTruthy()
   })
+
+  it('renders an archived node as historical even when its last live status was starting', () => {
+    const archived = {
+      ...node('archived', 'Archived child'),
+      workStatus: 'starting' as const,
+      archivedAt: 1_730_000_000_000
+    }
+    render(<DagCanvas graph={{ sceneId: 'scene', nodes: [archived], edges: [] }}
+      focusedSessionId="archived" onSelect={vi.fn()} />)
+
+    const card = screen.getByRole('button', { name: '打开会话：Archived child' })
+    expect(card.classList.contains('is-historical')).toBe(true)
+    expect(card.classList.contains('status-exited')).toBe(true)
+    expect(card.classList.contains('status-starting')).toBe(false)
+    expect(card.querySelector('.dag-node-card__top')?.textContent).toContain('历史')
+    expect(card.querySelector('.dag-node-card__top')?.textContent).not.toContain('运行中')
+  })
 })
 
 function graph(): SessionGraphView {
