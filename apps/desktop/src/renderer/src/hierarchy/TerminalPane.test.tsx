@@ -44,7 +44,8 @@ describe('Terminal pane', () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} workspaceSessionCount={2} onDelete={onDelete} />)
 
-    await user.click(screen.getByRole('button', { name: '删除终端：Claude 主会话' }))
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
+    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(onDelete).toHaveBeenCalledWith('session-1', false)
   })
@@ -54,7 +55,8 @@ describe('Terminal pane', () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} workspaceSessionCount={1} onDelete={onDelete} />)
 
-    await user.click(screen.getByRole('button', { name: '删除终端：Claude 主会话' }))
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
+    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
     expect(screen.getByRole('alertdialog', { name: '提示' })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '我知道了' }))
     expect(onDelete).not.toHaveBeenCalled()
@@ -78,6 +80,31 @@ describe('Terminal pane', () => {
     await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
     await user.click(screen.getByText('↗ 独立窗口'))
     expect(onDetach).toHaveBeenCalledWith('session-1')
+  })
+
+  it('matches the approved card header hierarchy and keeps branch actions on the right', async () => {
+    const onFork = vi.fn()
+    const onForkSibling = vi.fn()
+    const children = [
+      { ...childNode('child-1'), workStatus: 'running' as const },
+      childNode('child-2')
+    ]
+    render(<TerminalPane {...fixture()} resumable git={{ branch: 'feat/notification', dirty: false }}
+      childNodes={children} onOpenChildren={vi.fn()} onFork={onFork} onForkSibling={onForkSibling} />)
+
+    const header = screen.getByRole('banner')
+    expect(header.textContent).toContain('Claude 主会话')
+    expect(header.textContent).toContain('feat/notification')
+    expect(header.textContent).toContain('2 分支 · 1 运行中')
+    expect(header.querySelector('.pane-header-content .child-session-badge')).toBeNull()
+    expect(header.querySelector('.terminal-pane-actions .child-session-badge')).not.toBeNull()
+    expect(screen.queryByRole('button', { name: '删除终端：Claude 主会话' })).toBeNull()
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' }))
+    await user.click(screen.getByRole('button', { name: '从共同父会话创建“Claude 主会话”的兄弟分支' }))
+    expect(onFork).toHaveBeenCalledWith('session-1')
+    expect(onForkSibling).toHaveBeenCalledWith('session-1')
   })
 
   it('opens the pane actions when the user right-clicks the terminal content area', async () => {
@@ -135,7 +162,8 @@ describe('Terminal pane', () => {
     render(<TerminalPane {...fixture()} workspaceSessionCount={4} workStatus="running"
       childNodes={[childNode('child-1'), childNode('child-2')]} onDelete={onDelete} />)
 
-    await user.click(screen.getByRole('button', { name: '删除终端：Claude 主会话' }))
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
+    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
     expect(screen.getByRole('alertdialog', { name: '结束会话' }).textContent)
       .toContain('正在运行，并有 2 个子会话')
     await user.click(screen.getByRole('button', { name: '结束会话' }))

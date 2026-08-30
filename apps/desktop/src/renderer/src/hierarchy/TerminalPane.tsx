@@ -50,6 +50,7 @@ export function TerminalPane(props: {
   latestLines?: string[]
   onOpenChildren?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
+  onForkSibling?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
 }) {
   const {
@@ -61,7 +62,7 @@ export function TerminalPane(props: {
     childNodes = [], historicalChildCount = 0, workStatus = 'idle', latestLines = [], onOpenChildren,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
-    onActivate, onDelete, onFork, onDetach
+    onActivate, onDelete, onFork, onForkSibling, onDetach
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
@@ -105,14 +106,14 @@ export function TerminalPane(props: {
   const isTeamMember = session.kind === 'agent-team-member'
   const showFork = session.kind === 'claude-code' && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
+  const canForkSibling = session.kind === 'claude-code' && onForkSibling !== undefined && (forkReady ?? resumable)
   const canDetach = onDetach !== undefined
-  const hasPaneMenu = canFork || canDetach
   const forkFailure = forkFailurePresentation(forkError)
   const providerWorkFailure = session.kind === 'claude-code' && workStatus === 'error'
     ? claudeWorkFailureReason(latestLines)
     : undefined
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
-    if (!hasPaneMenu || (event.target as HTMLElement).closest('button')) return
+    if ((event.target as HTMLElement).closest('button')) return
     event.preventDefault()
     event.stopPropagation()
     setContextMenu({ x: event.clientX, y: event.clientY })
@@ -134,18 +135,18 @@ export function TerminalPane(props: {
         if (outside && canDetach) void onDetach?.(session.id)
       }}>
       <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
-        {onOpenChildren && <ChildSessionBadge children={childNodes}
-          historicalCount={historicalChildCount}
-          onOpen={() => void onOpenChildren(session.id)} />}
-        {cwd && <span className="pane-cwd" title={cwd}>{cwd}</span>}
         {git && <span className="pane-environment-badge" title={`Git 分支 ${git.branch}${git.dirty ? '，有未提交修改' : ''}`}>
           {git.branch}{git.dirty ? '*' : ''}
         </span>}
         {sharedWorkingDirectory && <span className="pane-environment-badge is-shared">
           {git ? '共享工作树' : '共享目录'}
         </span>}
+        {cwd && <span className="pane-cwd" title={cwd}>{cwd}</span>}
       </div>
       <div className="terminal-pane-actions">
+        {onOpenChildren && <ChildSessionBadge children={childNodes}
+          historicalCount={historicalChildCount}
+          onOpen={() => void onOpenChildren(session.id)} />}
         {showFork && <button className="pane-fork" type="button" draggable={false}
           aria-label={`从“${session.title}”创建子分支`} disabled={!canFork}
           title={canFork ? '创建子分支' : '完成首轮对话后可创建分支'}
@@ -153,12 +154,14 @@ export function TerminalPane(props: {
           onClick={(event) => {
             event.stopPropagation()
             void onFork?.(session.id)
-          }}>⑂</button>}
-        <button className="pane-close" draggable={false} aria-label={`删除终端：${session.title}`}
-          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => {
-          event.stopPropagation()
-          requestRemove()
-        }}>×</button>
+          }}><BranchChildIcon /></button>}
+        {canForkSibling && <button className="pane-fork pane-fork-sibling" type="button" draggable={false}
+          aria-label={`从共同父会话创建“${session.title}”的兄弟分支`} title="从共同父会话 Fork 兄弟分支"
+          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
+          onClick={(event) => {
+            event.stopPropagation()
+            void onForkSibling?.(session.id)
+          }}><BranchSiblingIcon /></button>}
       </div>
     </header>
     {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
@@ -254,16 +257,38 @@ export function TerminalPane(props: {
           setContextMenu(null)
           void onFork?.(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
+        {canForkSibling && <button className="detach-menu-item" role="menuitem" onClick={() => {
+          setContextMenu(null)
+          void onForkSibling?.(session.id)
+        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 兄弟分支</button>}
         {canDetach && <button className="detach-menu-item" role="menuitem" onClick={() => {
           setContextMenu(null)
           void onDetach(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>↗ 独立窗口</button>}
+        <button className="detach-menu-item" role="menuitem" onClick={() => {
+          setContextMenu(null)
+          requestRemove()
+        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>删除会话</button>
       </div>
     </>, document.body)}
   </section>
 }
 
 function NOOP(): void {}
+
+function BranchChildIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24">
+    <circle cx="6" cy="5" r="2" /><circle cx="18" cy="7" r="2" /><circle cx="6" cy="19" r="2" />
+    <path d="M6 7v10M8 9c4 0 5-2 8-2" />
+  </svg>
+}
+
+function BranchSiblingIcon() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24">
+    <path d="M5 4v16M5 8h7M12 8v8M12 16h7" />
+    <circle cx="5" cy="4" r="1.8" /><circle cx="19" cy="16" r="1.8" />
+  </svg>
+}
 
 function claudeWorkFailureReason(latestLines: string[]): string {
   const source = [...latestLines].reverse().find((line) =>

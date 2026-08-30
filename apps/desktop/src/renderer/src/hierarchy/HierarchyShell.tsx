@@ -416,6 +416,9 @@ function HierarchyProduct({ projection, commands }: {
                   return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
                 }
                 const graphNode = graph?.nodes.find(({ sessionId: candidate }) => candidate === session.id)
+                const parentGraphNode = graphNode?.parentSessionId
+                  ? graph?.nodes.find(({ sessionId: candidate }) => candidate === graphNode.parentSessionId)
+                  : undefined
                 const childNodes = graph?.nodes.filter(({ parentSessionId }) => parentSessionId === session.id) ?? []
                 const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
                 const isFocused = activeSessionId === session.id
@@ -468,6 +471,15 @@ function HierarchyProduct({ projection, commands }: {
                     sceneId: scene.id, sourceSessionId: session.id, sourceTitle: session.title,
                     relationMode: 'child', gitAvailable: Boolean(sessionHud?.gitBranch)
                   })}
+                  {...(parentGraphNode?.canFork === true ? { onForkSibling: () => {
+                    const parentHud = projection.sessionHuds?.find(
+                      ({ sessionId: candidate }) => candidate === parentGraphNode.sessionId
+                    )
+                    setBranchDialog({
+                      sceneId: scene.id, sourceSessionId: session.id, sourceTitle: parentGraphNode.title,
+                      relationMode: 'sibling', gitAvailable: Boolean(parentHud?.gitBranch)
+                    })
+                  } } : {})}
                   {...(window.matouDesktop?.createDetachedTerminalWindow
                     ? { onDetach: async () => {
                         const sceneWindowId = crypto.randomUUID()

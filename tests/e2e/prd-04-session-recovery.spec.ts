@@ -239,7 +239,8 @@ test('does not resurrect an explicitly removed Task, Scene, or terminal panel', 
     const removedPanel = page.locator('[data-testid="terminal-pane"]:visible').filter({
       has: page.locator(`.terminal-surface[data-session-id="${removedSessionId}"]`)
     })
-    await removedPanel.getByRole('button', { name: /^删除终端：/ }).click()
+    await removedPanel.locator('.pane-title').click({ button: 'right' })
+    await page.getByRole('menuitem', { name: '删除会话' }).click()
     await expect(visiblePanels).toHaveCount(1)
     await page.getByRole('button', { name: /^关闭页签：/ }).last().click()
     await expect(page.getByRole('tab')).toHaveCount(1)

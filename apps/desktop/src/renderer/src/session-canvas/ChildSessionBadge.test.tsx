@@ -17,6 +17,7 @@ describe('ChildSessionBadge', () => {
     ]} historicalCount={2} onOpen={() => undefined} />)
 
     const badge = screen.getByRole('button', { name: '查看 4 个子会话' })
+    expect(badge.textContent).toContain('4 分支 · 1 运行中')
     expect(badge.className).toContain('status-needs-input')
     expect(badge.getAttribute('title')).toContain('Claude 1 · Shell 1')
     expect(badge.getAttribute('title')).toContain('运行中 1 · 待输入 1')

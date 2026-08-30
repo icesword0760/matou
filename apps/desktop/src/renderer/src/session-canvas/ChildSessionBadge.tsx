@@ -19,6 +19,9 @@ export function ChildSessionBadge(props: {
     `错误 ${counts.error} · 中断 ${counts.interrupted}`,
     historicalCount > 0 ? `+${historicalCount} 历史` : ''
   ].filter(Boolean).join('；')
+  const summary = counts.running > 0
+    ? `${total} 分支 · ${counts.running} 运行中`
+    : `${total} 分支 · 空闲`
   return <span className="child-session-badge-wrap">
     <button type="button" className={`child-session-badge status-${highest}`}
       aria-label={`查看 ${total} 个子会话`} title={detail}
@@ -27,8 +30,8 @@ export function ChildSessionBadge(props: {
         onOpen()
       }}>
       <span className="child-session-badge__dot" aria-hidden="true" />
-      <span>{total}</span>
-      {historicalCount > 0 && <small>+{historicalCount}</small>}
+      <span>{summary}</span>
+      <span className="child-session-badge__chevron" aria-hidden="true">›</span>
     </button>
     <span className="child-session-badge__tooltip" role="tooltip">{detail}</span>
   </span>
