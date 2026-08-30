@@ -151,7 +151,7 @@ describe('SessionCarousel', () => {
     HTMLElement.prototype.animate = originalAnimate
   })
 
-  it('centers the focused Session and expands hover immediately while ordinary scrolling is idle', () => {
+  it('centers the focused Session without collapsing its preview during ordinary scrolling', () => {
     vi.useFakeTimers()
     const nodes = fixtures(5)
     render(<SessionCarousel nodes={nodes} focusedSessionId="session-5"
@@ -172,10 +172,6 @@ describe('SessionCarousel', () => {
     fireEvent.mouseEnter(card)
     expect(card.classList.contains('is-expanded')).toBe(true)
     fireEvent.wheel(screen.getByRole('region', { name: '同级会话列表' }), { deltaX: 20, deltaY: 0 })
-    expect(card.classList.contains('is-expanded')).toBe(false)
-    act(() => vi.advanceTimersByTime(120))
-    expect(card.classList.contains('is-expanded')).toBe(false)
-    fireEvent.mouseEnter(card)
     expect(card.classList.contains('is-expanded')).toBe(true)
     vi.useRealTimers()
   })
@@ -198,7 +194,7 @@ describe('SessionCarousel', () => {
     expect(viewport.scrollLeft).toBe(240)
   })
 
-  it('expands the card that settles under a stationary pointer after scrolling stops', () => {
+  it('expands the card under a stationary pointer on the next frame while scrolling', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
@@ -219,7 +215,7 @@ describe('SessionCarousel', () => {
     fireEvent.wheel(viewport, { deltaX: 240, deltaY: 0 })
     expect(target.classList.contains('is-expanded')).toBe(false)
 
-    act(() => vi.advanceTimersByTime(120))
+    act(() => vi.advanceTimersByTime(17))
     expect(target.classList.contains('is-expanded')).toBe(true)
 
     Object.defineProperty(document, 'elementFromPoint', {

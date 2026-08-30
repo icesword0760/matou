@@ -72,7 +72,7 @@ test.describe('horizontal sibling navigation', () => {
     }
   })
 
-  test('expands the new card under a stationary pointer when horizontal scrolling stops', async () => {
+  test('retargets a stationary pointer within one responsive frame during horizontal scrolling', async () => {
     const fixture = await launchSessionCanvas()
     try {
       await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
@@ -81,9 +81,10 @@ test.describe('horizontal sibling navigation', () => {
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await carousel.evaluate((element) => { element.scrollLeft = 0 })
-      const box = await carousel.boundingBox()
+      const startingCard = fixture.page.locator('.session-card[data-in-viewport="true"]').nth(1)
+      const box = await startingCard.boundingBox()
       expect(box).not.toBeNull()
-      const point = { x: box!.x + box!.width * 0.7, y: box!.y + 120 }
+      const point = { x: box!.x + box!.width / 2, y: box!.y + 120 }
       await fixture.page.mouse.move(point.x, point.y)
       const cardAtPoint = async () => fixture.page.evaluate(({ x, y }) =>
         (document.elementFromPoint(x, y)?.closest('[data-session-card]') as HTMLElement | null)
@@ -91,10 +92,27 @@ test.describe('horizontal sibling navigation', () => {
       const before = await cardAtPoint()
       expect(before).toBeTruthy()
 
+      const responsePromise = fixture.page.evaluate(({ point, before }) => new Promise<number>((resolve, reject) => {
+        const started = performance.now()
+        const probe = () => {
+          const card = document.elementFromPoint(point.x, point.y)
+            ?.closest<HTMLElement>('[data-session-card]')
+          if (card?.dataset.sessionCard !== before && card?.classList.contains('is-expanded')) {
+            resolve(performance.now() - started)
+            return
+          }
+          if (performance.now() - started > 500) {
+            reject(new Error('stationary pointer did not retarget within 500ms'))
+            return
+          }
+          requestAnimationFrame(probe)
+        }
+        requestAnimationFrame(probe)
+      }), { point, before })
       await fixture.page.mouse.wheel(700, 0)
       await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
-      const after = await expect.poll(cardAtPoint).not.toBe(before)
-      void after
+      const responseMs = await responsePromise
+      expect(responseMs).toBeLessThan(100)
       const settled = await cardAtPoint()
       expect(settled).toBeTruthy()
       await expect(fixture.page.locator(`[data-session-card="${settled}"]`)).toHaveClass(/is-expanded/)

@@ -40,7 +40,7 @@ export function SessionCarousel(props: {
   const cardsRef = useRef(new Map<string, HTMLElement>())
   const previousOffsetsRef = useRef(new Map<string, number>())
   const ensureVisibleRef = useRef(onEnsureSessionVisible)
-  const scrollTimer = useRef<number | undefined>(undefined)
+  const hoverRetargetFrame = useRef<number | undefined>(undefined)
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
@@ -48,8 +48,6 @@ export function SessionCarousel(props: {
   const hoverRef = useRef<(sessionId: string | null) => void>(() => undefined)
   const pointerPosition = useRef<{ x: number; y: number } | null>(null)
   const wheelGesture = useRef(false)
-  const userScrollUntil = useRef(0)
-  const focusScrollUntil = useRef(0)
   const pageClosing = useRef(false)
   const pointerGesture = useRef<{
     id: number
@@ -63,7 +61,6 @@ export function SessionCarousel(props: {
   const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0 || initialAnchor !== undefined)
   const [firstVisible, setFirstVisible] = useState(0)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
-  const [scrolling, setScrolling] = useState(false)
   const [pull, setPull] = useState({ distance: 0, progress: 0, springBack: false })
   const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
   const [narrow, setNarrow] = useState(false)
@@ -87,16 +84,13 @@ export function SessionCarousel(props: {
   }
 
   useEffect(() => {
-    const stopScrollAuthority = () => { userScrollUntil.current = 0; focusScrollUntil.current = 0 }
-    const closePage = () => { pageClosing.current = true; stopScrollAuthority() }
-    window.addEventListener('blur', stopScrollAuthority)
+    const closePage = () => { pageClosing.current = true }
     window.addEventListener('pagehide', closePage)
     window.addEventListener('beforeunload', closePage)
     return () => {
-      window.removeEventListener('blur', stopScrollAuthority)
       window.removeEventListener('pagehide', closePage)
       window.removeEventListener('beforeunload', closePage)
-      if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
+      if (hoverRetargetFrame.current !== undefined) cancelAnimationFrame(hoverRetargetFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     }
@@ -204,7 +198,6 @@ export function SessionCarousel(props: {
       return
     }
     const frame = requestAnimationFrame(() => {
-      focusScrollUntil.current = performance.now() + 600
       const viewport = viewportRef.current
       const card = cardsRef.current.get(focusedSessionId)
       if (viewport && card) centerCardInViewport(viewport, card)
@@ -238,7 +231,6 @@ export function SessionCarousel(props: {
       const card = cardsRef.current.get(revealRequest.sessionId)
       const viewport = viewportRef.current
       if (!card || !viewport) return
-      focusScrollUntil.current = performance.now() + 900
       // DAG and notification navigation may select the already-focused Session.
       // In that case React has no focus-ID change to observe, so force the
       // carousel position from this explicit navigation request. Directly
@@ -293,6 +285,13 @@ export function SessionCarousel(props: {
     const sessionId = card.dataset.sessionCard
     if (sessionId) hoverRef.current(sessionId)
   }
+  const retargetHoverOnNextFrame = () => {
+    if (hoverRetargetFrame.current !== undefined) cancelAnimationFrame(hoverRetargetFrame.current)
+    hoverRetargetFrame.current = requestAnimationFrame(() => {
+      hoverRetargetFrame.current = undefined
+      resumeHoverAtPointer()
+    })
+  }
   const markScrolling = (userInitiated = false) => {
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
@@ -303,25 +302,12 @@ export function SessionCarousel(props: {
       hoverRestoreTimer.current = undefined
       hoverBaselineScrollLeft.current = undefined
       hoverIntentSessionId.current = null
-      // Browser kinetic scrolling can keep emitting native scroll events long
-      // after the original wheel event. Keep treating that stream as user
-      // intent so long gestures are checkpointed rather than only debounced.
-      userScrollUntil.current = performance.now() + 1_000
+      // Horizontal movement changes the hit target below a stationary pointer.
+      // Resolve it on the next painted frame instead of waiting for macOS
+      // momentum events to end; repeated wheel events coalesce into one hit
+      // test per frame and hand expansion directly from one card to the next.
+      retargetHoverOnNextFrame()
     }
-    const continuousScroll = userInitiated || performance.now() < userScrollUntil.current ||
-      performance.now() < focusScrollUntil.current
-    if (continuousScroll) {
-      // The card under the pointer changes while the strip moves. Requiring a
-      // fresh hover after scrolling prevents a stale card from expanding again
-      // and shifting the saved viewport underneath the user.
-      setHoveredSessionId(null)
-    }
-    // A flex-basis or terminal-fit layout change can make Chromium emit a
-    // native scroll without any user gesture. Persist its reachable geometry,
-    // but do not treat it as active navigation: doing so collapses the hovered
-    // card whose expansion caused the layout update and creates a feedback
-    // loop that never visibly expands.
-    if (continuousScroll) setScrolling(true)
     updateVisibleWindow()
     // Browser layout changes can clamp scrollLeft after the original wheel or
     // drag stream has ended (for example while terminal columns settle). That
@@ -331,16 +317,6 @@ export function SessionCarousel(props: {
     if (!pageClosing.current && !restoringGeometry.current && viewportRef.current &&
       hoverBaselineScrollLeft.current === undefined) {
       onGeometryChange?.(currentGeometry(), { continuous: true })
-    }
-    if (continuousScroll) {
-      if (scrollTimer.current !== undefined) window.clearTimeout(scrollTimer.current)
-      scrollTimer.current = window.setTimeout(() => {
-        setScrolling(false)
-        // Horizontal movement changes which card sits below a stationary
-        // pointer. Browsers do not emit mouseenter for that layout-only hit
-        // target change, so resolve it explicitly when kinetic scrolling ends.
-        resumeHoverAtPointer()
-      }, 120)
     }
   }
   const hover = (sessionId: string | null) => {
@@ -361,11 +337,6 @@ export function SessionCarousel(props: {
     if (hoverBaselineScrollLeft.current === undefined) {
       hoverBaselineScrollLeft.current = viewportRef.current?.scrollLeft ?? 0
     }
-    // A deliberate hover after scrolling is a fresh interaction: stop treating
-    // later layout notifications as part of the previous wheel gesture so the
-    // chosen card can expand immediately.
-    userScrollUntil.current = 0
-    focusScrollUntil.current = 0
     setHoveredSessionId(sessionId)
   }
   hoverRef.current = hover
@@ -507,7 +478,7 @@ export function SessionCarousel(props: {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
-      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${!scrolling && hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return
@@ -523,7 +494,7 @@ export function SessionCarousel(props: {
       }}>
         <SessionCard node={node} focused={node.sessionId === focusedSessionId}
           inViewport={inViewport.has(node.sessionId)}
-          expanded={!scrolling && hoveredSessionId === node.sessionId}
+          expanded={hoveredSessionId === node.sessionId}
           onActivate={(sessionId) => {
             // Focusing or typing into the previewed card turns the current
             // position into explicit user intent. Do not later restore the
