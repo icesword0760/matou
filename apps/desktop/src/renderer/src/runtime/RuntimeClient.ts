@@ -122,6 +122,12 @@ export class RuntimeClient {
     this.#post({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data })
   }
 
+  retryLastTerminalInput(sessionId: string): void {
+    this.#post({
+      type: 'terminal.retry-last-input', protocolVersion: PROTOCOL_VERSION, sessionId
+    })
+  }
+
   recordTerminalInteraction(
     sessionId: string,
     interactionKind: 'submit' | 'control' | 'provider-action'

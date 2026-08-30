@@ -110,6 +110,9 @@ export class RuntimeServer {
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #permissionOverrides = new Map<string, HudPermissionMode>()
   readonly #shellInputBuffers = new Map<string, string>()
+  readonly #providerInputBuffers = new Map<string, string>()
+  readonly #lastProviderInputs = new Map<string, string>()
+  readonly #workStatusTrackers = new Map<string, TerminalWorkStatusTracker>()
   readonly #summaryBuffers = new Map<string, string>()
   readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
@@ -227,6 +230,9 @@ export class RuntimeServer {
     this.#providerResumeTimers.clear()
     this.#providerLaunchRunIds.clear()
     this.#confirmedProviderRunIds.clear()
+    this.#providerInputBuffers.clear()
+    this.#lastProviderInputs.clear()
+    this.#workStatusTrackers.clear()
     this.#detachAll()
     this.#port.close()
   }
@@ -297,7 +303,11 @@ export class RuntimeServer {
           if (this.#closed) break
           const session = this.#session(message.sessionId)
           if (session && /[\r\n]/.test(message.data)) {
+            this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
             this.#setWorkStatus(message.sessionId, 'running')
+          }
+          if (session && session.profile !== 'shell') {
+            this.#observeProviderInput(message.sessionId, message.data)
           }
           const promoted = session?.profile === 'shell'
             ? await this.#maybePromoteShellAgent(session, message.data)
@@ -314,6 +324,31 @@ export class RuntimeServer {
           throw error
         }
         break
+      case 'terminal.retry-last-input': {
+        const session = this.#session(message.sessionId)
+        const lastInput = this.#lastProviderInputs.get(message.sessionId)
+        if (!session || session.profile === 'shell' || !lastInput) {
+          this.#sendError(
+            'INVALID_MESSAGE', '当前会话没有可重试的上一轮输入', message.sessionId
+          )
+          break
+        }
+        const now = Date.now()
+        this.#sessionInteractions.record({
+          commandId: `terminal-retry-${message.sessionId}-${randomUUID()}`,
+          commandType: 'session.user-interaction',
+          requestHash: `${message.sessionId}:provider-retry:${now}`
+        }, {
+          sessionId: message.sessionId,
+          interactionKind: 'provider-action',
+          now
+        })
+        this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
+        this.#setWorkStatus(message.sessionId, 'running')
+        session.write(`${lastInput}\r`)
+        this.flushSemanticEvents()
+        break
+      }
       case 'terminal.resize':
         if (this.#attachedSessionIds.has(message.sessionId)) {
           this.#sessions.get(message.sessionId)?.resize(message.cols, message.rows)
@@ -765,6 +800,8 @@ export class RuntimeServer {
         this.#hud.delete(message.sessionId)
         this.publishSessionHud(message.sessionId)
         this.#shellInputBuffers.delete(message.sessionId)
+        this.#providerInputBuffers.delete(message.sessionId)
+        this.#workStatusTrackers.delete(message.sessionId)
         existing.dispose({ notifyExit: false })
         await existing.whenClosed()
       } else {
@@ -852,9 +889,12 @@ export class RuntimeServer {
     try {
       const runId = persistentAuthority ? randomUUID() : undefined
       const cwdTracker = new TerminalCwdTracker()
-      const workStatusTracker = message.profile === 'shell'
-        ? new TerminalWorkStatusTracker()
+      const workStatusTracker = message.profile === 'shell' || message.profile === 'claude-code'
+        ? new TerminalWorkStatusTracker(
+            message.profile === 'claude-code' ? { provider: 'claude-code' } : {}
+          )
         : undefined
+      if (workStatusTracker) this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
@@ -925,6 +965,7 @@ export class RuntimeServer {
           const reportedCwd = cwdTracker.ingest(data)
           if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
           for (const status of workStatusTracker?.ingest(data) ?? []) {
+            if (status === 'error') this.#flushSessionSummary(message.sessionId)
             this.#setWorkStatus(message.sessionId, status)
           }
           const resumeFailure = resumeMonitor?.ingest(data)
@@ -1011,6 +1052,8 @@ export class RuntimeServer {
               this.#spawnDescriptors.delete(message.sessionId)
             }
             this.#shellInputBuffers.delete(message.sessionId)
+            this.#providerInputBuffers.delete(message.sessionId)
+            this.#workStatusTrackers.delete(message.sessionId)
           }
           if (exited.runId) {
             try {
@@ -1379,6 +1422,9 @@ export class RuntimeServer {
     this.#spawnDescriptors.delete(sessionId)
     this.#permissionOverrides.delete(sessionId)
     this.#shellInputBuffers.delete(sessionId)
+    this.#providerInputBuffers.delete(sessionId)
+    this.#lastProviderInputs.delete(sessionId)
+    this.#workStatusTrackers.delete(sessionId)
     this.#skipResumeSessionIds.delete(sessionId)
     this.#hud.delete(sessionId)
     this.publishSessionHud(sessionId)
@@ -1559,6 +1605,28 @@ export class RuntimeServer {
       await this.#spawn({ ...descriptor, profile: 'shell' })
       return true
     }
+  }
+
+  #observeProviderInput(sessionId: string, data: string): void {
+    const normalized = data
+      .replace(/\u001b\[200~/g, '')
+      .replace(/\u001b\[201~/g, '')
+      .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
+    let buffer = this.#providerInputBuffers.get(sessionId) ?? ''
+    for (const character of normalized) {
+      if (character === '\r' || character === '\n') {
+        const submitted = buffer.trim()
+        if (submitted) this.#lastProviderInputs.set(sessionId, submitted)
+        buffer = ''
+      } else if (character === '\u007f' || character === '\b') {
+        buffer = buffer.slice(0, -1)
+      } else if (character === '\u0015') {
+        buffer = ''
+      } else if (character >= ' ' || character === '\t') {
+        buffer += character
+      }
+    }
+    this.#providerInputBuffers.set(sessionId, buffer.slice(-128 * 1024))
   }
 
   #setWorkStatus(

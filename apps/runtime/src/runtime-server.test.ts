@@ -532,6 +532,64 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('keeps a failed Claude round on the same Session and retries its last submitted prompt', async () => {
+    const executable = join(root, 'provider-retry-round.sh')
+    const inputFile = join(root, 'provider-retry-inputs.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'while IFS= read -r line; do',
+      '  printf "%s\\n" "$line" >> "$MATOU_PROVIDER_INPUT_FILE"',
+      '  count=$(wc -l < "$MATOU_PROVIDER_INPUT_FILE" | tr -d " ")',
+      '  if [ "$count" = "1" ]; then',
+      '    printf "✻ Connection refused — a firewall or proxy may be blocking it (ConnectionRefused) · Retrying in 34s · attempt 10/10\\r\\n"',
+      '  else',
+      '    printf "STA007_RECOVERED\\r\\n"',
+      '  fi',
+      'done'
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousInputFile = process.env.MATOU_PROVIDER_INPUT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_PROVIDER_INPUT_FILE = inputFile
+    try {
+      registerCanvasSession(database, 'provider-round-retry', 'claude-code')
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-round-retry', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned') !== undefined)
+
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-round-retry', data: 'Reply exactly STA007_RECOVERED\r'
+      })
+      await waitUntil(() => workStatus('provider-round-retry') === 'error', 5_000)
+
+      port.receive({
+        type: 'terminal.retry-last-input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-round-retry'
+      })
+      await waitUntilAsync(async () => (
+        await readFile(inputFile, 'utf8').catch(() => '')
+      ).trim().split('\n').length === 2, 5_000)
+      expect((await readFile(inputFile, 'utf8')).trim().split('\n')).toEqual([
+        'Reply exactly STA007_RECOVERED', 'Reply exactly STA007_RECOVERED'
+      ])
+      expect(workStatus('provider-round-retry')).toBe('running')
+      expect(terminalText(port)).toContain('STA007_RECOVERED')
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-round-retry'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_PROVIDER_INPUT_FILE', previousInputFile)
+    }
+  })
+
   it('keeps a live PTY in the Runtime registry across Renderer disconnect and reattach', async () => {
     const priorRun = await SegmentJournal.open(root, 'reload-session')
     await priorRun.appendOutput(1, new TextEncoder().encode('output from an earlier app run'))
@@ -1972,8 +2030,12 @@ function registerSession(
   )
 }
 
-function registerCanvasSession(database: RuntimeDatabase, sessionId: string): void {
-  registerSession(database, sessionId)
+function registerCanvasSession(
+  database: RuntimeDatabase,
+  sessionId: string,
+  kind: 'shell' | 'claude-code' | 'codex' = 'shell'
+): void {
+  registerSession(database, sessionId, kind)
   database.run(
     `INSERT INTO scenes (
        id, task_id, name, mode, root_node_id, title_pinned, sort_key,

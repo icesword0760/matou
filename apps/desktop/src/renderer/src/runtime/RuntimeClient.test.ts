@@ -92,6 +92,21 @@ describe('RuntimeClient', () => {
     ])
   })
 
+  it('asks Runtime to retry the last submitted input in the same Session', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+
+    client.retryLastTerminalInput('session-1')
+
+    expect(port.sent.at(-1)).toMatchObject({
+      type: 'terminal.retry-last-input', sessionId: 'session-1'
+    })
+  })
+
   it('routes a Session-scoped startup error only to that terminal card', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })

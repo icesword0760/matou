@@ -107,6 +107,14 @@ describe('parseRendererMessage', () => {
     }
   )
 
+  it('accepts a retry request scoped to the last submitted terminal input', () => {
+    expect(parseRendererMessage({
+      type: 'terminal.retry-last-input',
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1'
+    })).toMatchObject({ type: 'terminal.retry-last-input', sessionId: 'session-1' })
+  })
+
   it('rejects unknown message types', () => {
     expect(() =>
       parseRendererMessage({

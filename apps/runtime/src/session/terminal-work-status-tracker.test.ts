@@ -47,4 +47,25 @@ describe('TerminalWorkStatusTracker', () => {
     expect(tracker.ingest('\u001b]133;C\u0007')).toEqual(['running'])
     expect(tracker.ingest('STA008_WAIT> ')).toEqual(['needs-input'])
   })
+
+  it('marks only a terminal Claude provider failure as an error', () => {
+    const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
+
+    expect(tracker.ingest('Retrying in 2s · attempt 9/10')).toEqual([])
+    expect(tracker.ingest('\r\n✻ Connection refused — a firewall or proxy may be blocking it ')).toEqual([])
+    expect(tracker.ingest('(ConnectionRefused) · Retrying in 34s · attempt 10/10')).toEqual(['error'])
+    expect(tracker.ingest('\r\n────────────────────\r\n❯ ')).toEqual([])
+
+    const shell = new TerminalWorkStatusTracker()
+    expect(shell.ingest('echo "Connection refused · attempt 10/10"')).toEqual([])
+  })
+
+  it('keeps the provider failure visible through a full-screen repaint tail', () => {
+    const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
+
+    expect(tracker.ingest(
+      '✻ Connection refused (ConnectionRefused) · Retrying in 34s · attempt 10/10\r\n' +
+      '─'.repeat(1_500)
+    )).toEqual(['error'])
+  })
 })

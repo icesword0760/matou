@@ -158,6 +158,23 @@ describe('Terminal pane', () => {
     expect(onRetryRestore).toHaveBeenCalledWith('session-1')
   })
 
+  it('shows a real Claude round failure with its reason and retries in the same pane', async () => {
+    const user = userEvent.setup()
+    const onRetryWork = vi.fn()
+    render(<TerminalPane {...fixture()} workStatus="error"
+      latestLines={[
+        'Reply exactly STA007_RECOVERED',
+        'Connection refused — a firewall or proxy may be blocking it (ConnectionRefused) · attempt 10/10'
+      ]}
+      onRetryWork={onRetryWork} />)
+
+    const status = screen.getByRole('status', { name: 'Claude Code 任务失败' })
+    expect(status.textContent).toContain('连接被拒绝')
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '重试本轮任务' }))
+    expect(onRetryWork).toHaveBeenCalledWith('session-1')
+  })
+
   it('shows an ordinary Shell after a manual Claude exit', () => {
     const props = fixture()
     render(<TerminalPane {...props}

@@ -161,6 +161,7 @@ function HierarchyProduct({ projection, commands }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
 }) {
+  const client = useRuntimeClient()
   const projectionRef = useRef(projection)
   useEffect(() => { projectionRef.current = projection }, [projection])
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
@@ -450,6 +451,9 @@ function HierarchyProduct({ projection, commands }: {
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
                   onDelete={commands.deleteSession}
                   onRetryRestore={commands.retryProviderRestore}
+                  {...(client ? { onRetryWork: (sessionId: string) => {
+                    client.retryLastTerminalInput(sessionId)
+                  } } : {})}
                   onRetryFork={() => commands.retryFork(scene.id, session.id)}
                   onRemoveFailedFork={() => commands.removeFailedFork(scene.id, session.id)}
                   childNodes={childNodes}

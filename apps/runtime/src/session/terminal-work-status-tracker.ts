@@ -4,6 +4,17 @@ const OSC_133 = /\u001b\]133;([CD])(?:;(-?\d+))?(?:\u0007|\u001b\\)/g
 
 export class TerminalWorkStatusTracker {
   #buffer = ''
+  readonly #provider: 'claude-code' | undefined
+  #providerFailureEmitted = false
+
+  constructor(options: { provider?: 'claude-code' } = {}) {
+    this.#provider = options.provider
+  }
+
+  beginAttempt(): void {
+    this.#providerFailureEmitted = false
+    if (this.#provider) this.#buffer = ''
+  }
 
   ingest(chunk: string): SessionWorkStatus[] {
     const combined = this.#buffer + chunk
@@ -23,20 +34,39 @@ export class TerminalWorkStatusTracker {
           ? 'interrupted'
           : 'error')
     }
-    this.#buffer = combined.slice(consumedThrough).slice(-512)
+    this.#buffer = combined.slice(consumedThrough).slice(this.#provider ? -8_192 : -512)
     const completed = statuses.some((status) =>
       status === 'idle' || status === 'error' || status === 'interrupted'
     )
     if (!completed && isExplicitBlockingPrompt(this.#buffer)) statuses.push('needs-input')
+    if (
+      this.#provider === 'claude-code' &&
+      !this.#providerFailureEmitted &&
+      isTerminalClaudeFailure(this.#buffer)
+    ) {
+      this.#providerFailureEmitted = true
+      statuses.push('error')
+    }
     return statuses
   }
 }
 
-function isExplicitBlockingPrompt(raw: string): boolean {
-  const visible = raw
+function isTerminalClaudeFailure(raw: string): boolean {
+  const visible = visibleTerminalText(raw)
+  return /(?:Connection refused|ConnectionRefused|ECONNREFUSED)[\s\S]{0,240}attempt\s*10\s*\/\s*10/i.test(visible) ||
+    /(?:API Error|authentication failed|invalid api key|OAuth token (?:is )?(?:invalid|expired)|account (?:is )?(?:disabled|unavailable))[^\r\n]{0,240}$/i.test(visible) ||
+    /(?:rate limit|overloaded|service unavailable)[^\r\n]{0,180}(?:final attempt|attempt\s*10\s*\/\s*10)$/i.test(visible)
+}
+
+function visibleTerminalText(raw: string): string {
+  return raw
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
     .replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, '')
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+}
+
+function isExplicitBlockingPrompt(raw: string): boolean {
+  const visible = visibleTerminalText(raw)
   const line = visible.split(/\r\n|\r|\n/).at(-1)?.trimEnd() ?? ''
   if (!line) return false
   return /(?:^|\s)(?:enter|input|type|provide)\s+[^:：?？\r\n]{1,64}[:：?？]$/i.test(line) ||

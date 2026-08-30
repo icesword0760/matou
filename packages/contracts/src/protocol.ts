@@ -33,6 +33,12 @@ const inputSchema = z.object({
   data: z.string().max(1024 * 1024)
 })
 
+const retryLastInputSchema = z.object({
+  type: z.literal('terminal.retry-last-input'),
+  protocolVersion,
+  sessionId
+})
+
 const userInteractionSchema = z.object({
   type: z.literal('terminal.user-interaction'),
   protocolVersion,
@@ -172,6 +178,7 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   helloSchema,
   spawnSchema,
   inputSchema,
+  retryLastInputSchema,
   userInteractionSchema,
   resizeSchema,
   disposeSchema,

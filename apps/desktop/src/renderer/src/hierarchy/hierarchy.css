@@ -143,6 +143,10 @@ button { -webkit-app-region: no-drag; }
 .provider-restore-reason { overflow: hidden; color: #c99a73; text-overflow: ellipsis; white-space: nowrap; }
 .provider-restore-banner button { flex: none; padding: 3px 8px; border: 1px solid rgba(238,168,88,.55); border-radius: 5px; color: #f1c08f; background: rgba(238,168,88,.1); cursor: pointer; }
 .provider-restore-banner.restoring { justify-content: flex-start; color: #8fb8ed; background: #172333; border-color: rgba(103,159,226,.28); }
+.provider-work-failure-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-top: 1px solid rgba(228,93,85,.3); border-bottom: 1px solid rgba(228,93,85,.3); color: #f0b1ad; background: #2b1919; font-size: 11px; }
+.provider-work-failure-banner > div { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.provider-work-failure-reason { overflow: hidden; color: #d98e89; text-overflow: ellipsis; white-space: nowrap; }
+.provider-work-failure-banner button { flex: none; padding: 3px 8px; border: 1px solid rgba(228,93,85,.45); border-radius: 5px; color: #f2b7b3; background: rgba(228,93,85,.08); cursor: pointer; }
 .session-start-failure-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-top: 1px solid rgba(228,93,85,.3); border-bottom: 1px solid rgba(228,93,85,.3); color: #f0b1ad; background: #2b1919; font-size: 11px; }
 .session-start-failure-card > div { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .session-start-failure-reason { overflow: hidden; color: #d98e89; text-overflow: ellipsis; white-space: nowrap; }
@@ -444,6 +448,9 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .provider-restore-reason { color: #966b43; }
 .hierarchy-shell[data-theme="light"] .provider-restore-banner button { color: #7c440d; border-color: #daa86d; background: #fff; }
 .hierarchy-shell[data-theme="light"] .provider-restore-banner.restoring { color: #315f9d; background: #edf5ff; border-color: #c5dcf8; }
+.hierarchy-shell[data-theme="light"] .provider-work-failure-banner { color: #9b2f2a; border-color: #edc2bf; background: #fff3f2; }
+.hierarchy-shell[data-theme="light"] .provider-work-failure-reason { color: #a95853; }
+.hierarchy-shell[data-theme="light"] .provider-work-failure-banner button { color: #8e2d28; border-color: #d69b97; background: #fff; }
 
 .branch-dialog-overlay { position: fixed; z-index: 500; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.44); backdrop-filter: blur(5px); }
 .branch-dialog { box-sizing: border-box; width: min(520px, calc(100vw - 48px)); padding: 20px; border: 1px solid #343942; border-radius: 16px; color: #e8eaed; background: #1d1f23; box-shadow: 0 24px 80px rgba(0,0,0,.46); }
