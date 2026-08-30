@@ -89,6 +89,31 @@ body {
 .terminal-surface .xterm-viewport {
   overflow-y: auto !important;
   background: transparent !important;
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar {
+  width: 5px;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background-color: transparent;
+  background-clip: padding-box;
+}
+
+.terminal-surface:hover .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: rgb(255 255 255 / 22%);
+}
+
+.terminal-surface[data-theme="light"]:hover .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: rgb(104 114 128 / 24%);
 }
 
 .smoke-marker {

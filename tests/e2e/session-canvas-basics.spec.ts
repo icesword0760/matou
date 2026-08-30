@@ -54,4 +54,27 @@ test.describe('session canvas basics with real PTYs', () => {
       await fixture.close()
     }
   })
+
+  test('keeps terminal history scrollbars narrow and visually separate from card shadows', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      const surface = activeSurface(fixture.page)
+      await waitForShell(surface)
+      await terminalCommand(surface, 'for i in {1..120}; do echo "SCROLLBAR_$i"; done')
+      await expect(surface.locator('.xterm-rows')).toContainText('SCROLLBAR_120')
+      await surface.hover()
+
+      const scrollbar = await surface.locator('.xterm-viewport').evaluate((element) => ({
+        width: getComputedStyle(element, '::-webkit-scrollbar').width,
+        track: getComputedStyle(element, '::-webkit-scrollbar-track').backgroundColor,
+        thumb: getComputedStyle(element, '::-webkit-scrollbar-thumb').backgroundColor
+      }))
+
+      expect(parseFloat(scrollbar.width)).toBeLessThanOrEqual(6)
+      expect(scrollbar.track).toBe('rgba(0, 0, 0, 0)')
+      expect(scrollbar.thumb).not.toBe('rgb(221, 221, 221)')
+    } finally {
+      await fixture.close()
+    }
+  })
 })
