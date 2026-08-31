@@ -853,5 +853,46 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX shell_history_blocks_session_completed_idx
       ON shell_history_blocks(session_id, completed_at DESC, id DESC);
     `
+  },
+  {
+    version: 19,
+    name: 'fork-inherited-conversation-readiness',
+    sql: `
+      UPDATE provider_bindings
+      SET resume_state = 'available',
+          metadata_json = json_set(
+            json_remove(metadata_json, '$.provisional'),
+            '$.inheritedConversation', json('true'),
+            '$.canFork', json('true')
+          ),
+          validated_at = COALESCE(validated_at, updated_at),
+          invalidated_at = NULL
+      WHERE provider = 'claude-code'
+        AND json_valid(metadata_json) = 1
+        AND json_extract(metadata_json, '$.provisional') = 1
+        AND EXISTS (
+          SELECT 1
+          FROM session_fork_intents AS fork
+          WHERE fork.session_id = provider_bindings.session_id
+            AND fork.state IN ('pending', 'starting')
+            AND fork.source_provider_session_id <> provider_bindings.provider_session_id
+        );
+
+      UPDATE session_fork_intents
+      SET state = 'succeeded',
+          error_message = NULL,
+          completed_at = COALESCE(completed_at, updated_at, created_at)
+      WHERE state IN ('pending', 'starting')
+        AND EXISTS (
+          SELECT 1
+          FROM provider_bindings AS binding
+          WHERE binding.session_id = session_fork_intents.session_id
+            AND binding.provider = 'claude-code'
+            AND binding.resume_state = 'available'
+            AND json_valid(binding.metadata_json) = 1
+            AND json_extract(binding.metadata_json, '$.inheritedConversation') = 1
+            AND json_extract(binding.metadata_json, '$.canFork') = 1
+        );
+    `
   }
 ]

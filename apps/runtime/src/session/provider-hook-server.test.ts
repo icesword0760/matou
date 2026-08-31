@@ -188,7 +188,7 @@ describe('ProviderHookServer', () => {
     }])
   })
 
-  it('keeps a Fork statusline identity provisional until a real conversation event arrives', async () => {
+  it('accepts a Fork statusline identity as an immediately forkable inherited conversation', async () => {
     sessions.createSession(command('fork-source'), {
       id: 'session-source', taskId: 'task-1', executionContextId: 'context-1',
       kind: 'claude-code', title: 'Source', now: 2
@@ -202,7 +202,7 @@ describe('ProviderHookServer', () => {
     )
     const registration = await hooks.registerClaudeSession({
       runId: 'run-fork', sessionId: 'session-1',
-      acceptStatuslineIdentity: true, provisionalStatuslineIdentity: true
+      acceptStatuslineIdentity: true, inheritedConversation: true
     })
 
     await postHook(registration.hookUrl, {
@@ -210,21 +210,9 @@ describe('ProviderHookServer', () => {
       model: { display_name: 'Claude Opus 4.6' }
     })
 
-    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
-    expect(sessions.listProviderBindings('session-1')).toContainEqual(expect.objectContaining({
-      providerSessionId: 'provider-derived', resumeState: 'unknown',
-      metadata: expect.objectContaining({ provisional: true })
-    }))
-    expect(database.get<{ state: string }>(
-      'SELECT state FROM session_fork_intents WHERE session_id = ?', 'session-1'
-    )).toEqual({ state: 'starting' })
-
-    await postHook(registration.hookUrl, {
-      hook_event_name: 'UserPromptSubmit', session_id: 'provider-derived', cwd: root
-    })
-
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
-      providerSessionId: 'provider-derived', resumeState: 'available'
+      providerSessionId: 'provider-derived', resumeState: 'available',
+      metadata: expect.objectContaining({ inheritedConversation: true, canFork: true })
     })
     expect(sessions.getResumeBinding('session-1', 'claude-code')?.metadata)
       .not.toHaveProperty('provisional')

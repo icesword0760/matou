@@ -1228,7 +1228,7 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
-  it('keeps a quiet real-style Fork running while its statusline identity remains provisional', async () => {
+  it('marks a quiet real-style Fork ready from its inherited statusline identity', async () => {
     const executable = join(root, 'provider-quiet-fork-fixture.sh')
     const argumentFile = join(root, 'provider-quiet-fork-arguments.txt')
     await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
@@ -1291,19 +1291,11 @@ describe('RuntimeServer domain RPC', () => {
       expect(sessions.has('fork-quiet-derived')).toBe(true)
       expect(database.get<{ state: string }>(
         'SELECT state FROM session_fork_intents WHERE session_id = ?', 'fork-quiet-derived'
-      )).toEqual({ state: 'starting' })
-      expect(repository.getResumeBinding('fork-quiet-derived', 'claude-code')).toBeUndefined()
-
-      expect((await fetch(hookUrl, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          hook_event_name: 'UserPromptSubmit',
-          session_id: 'provider-derived-quiet', cwd: root
-        })
-      })).status).toBe(200)
-      expect(database.get<{ state: string }>(
-        'SELECT state FROM session_fork_intents WHERE session_id = ?', 'fork-quiet-derived'
       )).toEqual({ state: 'succeeded' })
+      expect(repository.getResumeBinding('fork-quiet-derived', 'claude-code')).toMatchObject({
+        providerSessionId: 'provider-derived-quiet', resumeState: 'available',
+        metadata: expect.objectContaining({ inheritedConversation: true, canFork: true })
+      })
 
       forkPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'fork-quiet-derived'

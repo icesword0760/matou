@@ -14,7 +14,7 @@ interface HookRegistrationRecord {
   sessionId: string
   permissionMode?: string
   acceptStatuslineIdentity: boolean
-  provisionalStatuslineIdentity: boolean
+  inheritedConversation: boolean
   acceptIdentity: boolean
   settingsPath: string
   statusScriptPath: string
@@ -122,7 +122,7 @@ export class ProviderHookServer {
     sessionId: string
     permissionMode?: string
     acceptStatuslineIdentity?: boolean
-    provisionalStatuslineIdentity?: boolean
+    inheritedConversation?: boolean
   }): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
     const token = randomBytes(32).toString('base64url')
@@ -145,7 +145,7 @@ export class ProviderHookServer {
       sessionId: input.sessionId,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
-      provisionalStatuslineIdentity: input.provisionalStatuslineIdentity === true,
+      inheritedConversation: input.inheritedConversation === true,
       acceptIdentity: true,
       settingsPath,
       statusScriptPath
@@ -236,9 +236,11 @@ export class ProviderHookServer {
           metadata: {
             ...(permissionMode === undefined ? {} : { permissionMode }),
             ...(cwd === undefined ? {} : { cwd }),
-            lastHookEvent: eventName
+            lastHookEvent: eventName,
+            ...(registration.inheritedConversation
+              ? { inheritedConversation: true, canFork: true }
+              : {})
           },
-          provisional: eventName === 'unknown' && registration.provisionalStatuslineIdentity,
           now
         })
         this.#onIdentityRecorded({

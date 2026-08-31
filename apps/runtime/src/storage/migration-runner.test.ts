@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
-    expect(result.currentVersion).toBe(18)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])
+    expect(result.currentVersion).toBe(19)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -104,7 +104,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 18,
+      currentVersion: 19,
       backupPath: undefined
     })
   })
@@ -130,7 +130,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[14]!,
       FOUNDATION_MIGRATIONS[15]!,
       FOUNDATION_MIGRATIONS[16]!,
-      FOUNDATION_MIGRATIONS[17]!
+      FOUNDATION_MIGRATIONS[17]!,
+      FOUNDATION_MIGRATIONS[18]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -151,7 +152,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 18')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 19')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -186,7 +187,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18])
+    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
@@ -250,7 +251,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18])
+    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19])
     expect(database.all(
       `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
        FROM session_canvas_memberships ORDER BY sibling_created_seq`
@@ -285,6 +286,65 @@ describe('MigrationRunner', () => {
       session_id: 'future', scene_id: 'scene', sibling_created_seq: 3,
       last_user_interaction_seq: 0
     })
+  })
+
+  it('promotes inherited Fork identities that older builds left provisional', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 18)).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('context', 'workspace', 'plain-directory', '/tmp/workspace', 1)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at
+       ) VALUES ('task', 'workspace', 'context', 'Task', 'active', 1, 1)`
+    )
+    for (const id of ['parent', 'child']) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', 'context', 'claude-code', 'running', ?, '/tmp/workspace', 1, 1, 1)`,
+        id, id
+      )
+    }
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at
+       ) VALUES ('child', 'parent', 'claude-code', 'provider-parent',
+                 'starting', 1, 2, 2)`
+    )
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state,
+         metadata_json, created_at, updated_at
+       ) VALUES ('binding-child', 'child', 'claude-code', 'provider-child', 'unknown',
+                 '{"provisional":true,"lastHookEvent":"unknown"}', 2, 2)`
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.appliedVersions).toEqual([19])
+    expect(database.get<{ state: string }>(
+      `SELECT state FROM session_fork_intents WHERE session_id = 'child'`
+    )).toEqual({ state: 'succeeded' })
+    const binding = database.get<{ resume_state: string; validated_at: number; metadata_json: string }>(
+      `SELECT resume_state, validated_at, metadata_json
+       FROM provider_bindings WHERE id = 'binding-child'`
+    )!
+    expect(binding.resume_state).toBe('available')
+    expect(binding.validated_at).toBe(2)
+    expect(JSON.parse(binding.metadata_json)).toMatchObject({
+      inheritedConversation: true,
+      canFork: true
+    })
+    expect(JSON.parse(binding.metadata_json)).not.toHaveProperty('provisional')
   })
 
   it('rolls back a failed migration without recording its version', async () => {
