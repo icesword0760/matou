@@ -1714,8 +1714,7 @@ describe('RuntimeServer domain RPC', () => {
           mode: 'agent', permissionMode: 'bypassPermissions', modelStrategy: 'opusplan'
         }
       })
-      await waitUntil(() => terminalText(promotedPort).includes('\u001b[2J\u001b[3J\u001b[H'))
-      expect(terminalText(promotedPort)).toContain('\u001b[2J\u001b[3J\u001b[H')
+      expect(terminalText(promotedPort)).not.toContain('\u001b[2J\u001b[3J\u001b[H')
     } finally {
       promotedPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -1727,6 +1726,76 @@ describe('RuntimeServer domain RPC', () => {
       restoreEnv('PATH', previousPath)
       restoreEnv('SHELL', previousShell)
       restoreEnv('ZDOTDIR', previousZdotdir)
+    }
+  })
+
+  it('keeps a Shell to Claude replacement atomic across Renderer connections', async () => {
+    const slowShell = join(root, 'slow-closing-shell.sh')
+    const provider = join(root, 'atomic-provider.sh')
+    await writeFile(slowShell, [
+      '#!/bin/sh',
+      "trap 'sleep 0.35; exit 0' HUP TERM",
+      "printf 'ready\\n'",
+      'while :; do sleep 1; done',
+      ''
+    ].join('\n'))
+    await writeFile(provider, '#!/bin/sh\nstty raw -echo\ncat\n')
+    await chmod(slowShell, 0o755)
+    await chmod(provider, 0o755)
+    const previousShell = process.env.SHELL
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.SHELL = slowShell
+    process.env.MATOU_CLAUDE_COMMAND = provider
+    const sessions = new RuntimeSessionRegistry()
+    const firstPort = new MockPort()
+    const secondPort = new MockPort()
+    const firstServer = new RuntimeServer(firstPort, root, database, undefined, undefined, sessions)
+    const secondServer = new RuntimeServer(secondPort, root, database, undefined, undefined, sessions)
+    try {
+      registerSession(database, 'atomic-shell-promotion', 'shell')
+      firstPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'atomic-first'
+      })
+      secondPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'atomic-second'
+      })
+      const spawn = {
+        type: 'terminal.spawn' as const, protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion', executionContextId: 'replay-context',
+        profile: 'shell' as const, cols: 80, rows: 24
+      }
+      firstPort.receive(spawn)
+      await waitUntil(() => sessions.get('atomic-shell-promotion')?.profile === 'shell')
+      secondPort.receive(spawn)
+      await waitUntil(() => secondPort.last('terminal.spawned')?.reattached === true)
+
+      firstPort.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion', data: 'claude\r'
+      })
+      await waitUntil(() => !sessions.has('atomic-shell-promotion'))
+      secondPort.receive(spawn)
+
+      await waitUntil(() => sessions.get('atomic-shell-promotion')?.profile === 'claude-code', 4_000)
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      const runs = database.all<{ profile: string }>(
+        'SELECT profile FROM session_runs WHERE session_id = ? ORDER BY ordinal',
+        'atomic-shell-promotion'
+      )
+      expect(runs.map(({ profile }) => profile)).toEqual(['shell', 'claude-code'])
+      const frames = await readSessionFrames(root, 'atomic-shell-promotion')
+      expect(frames.every((frame, index) => index === 0 || frame.sequence > frames[index - 1]!.sequence))
+        .toBe(true)
+    } finally {
+      firstPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion'
+      })
+      await waitUntil(() => !sessions.has('atomic-shell-promotion')).catch(() => undefined)
+      firstServer.close()
+      secondServer.close()
+      restoreEnv('SHELL', previousShell)
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
 

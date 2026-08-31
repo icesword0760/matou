@@ -135,7 +135,6 @@ export class RuntimeServer {
   readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
   readonly #pendingShellFallbacks = new Map<string, PendingShellFallback>()
-  readonly #spawnQueues = new Map<string, Promise<void>>()
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerResumeTimeoutMs: number
   readonly #hud: SessionHudRegistry
@@ -1456,16 +1455,7 @@ export class RuntimeServer {
   async #spawnSerialized(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>
   ): Promise<void> {
-    const previous = this.#spawnQueues.get(message.sessionId) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.#spawn(message))
-    this.#spawnQueues.set(message.sessionId, current)
-    try {
-      await current
-    } finally {
-      if (this.#spawnQueues.get(message.sessionId) === current) {
-        this.#spawnQueues.delete(message.sessionId)
-      }
-    }
+    await this.#sessions.runExclusive(message.sessionId, () => this.#spawn(message))
   }
 
   #session(sessionId: string): PtySession | undefined {
@@ -1626,54 +1616,54 @@ export class RuntimeServer {
     this.#shellInputBuffers.delete(session.sessionId)
     const launch = await resolveInteractiveClaudeLaunch(next.command)
     if (!launch) return false
-
-    const descriptor = this.#spawnDescriptors.get(session.sessionId)
-    if (!descriptor || this.#sessions.get(session.sessionId) !== session) return false
-    session.write('\u0015')
-    this.#sessions.delete(session.sessionId, session)
-    this.#control?.backend.unregister(session.sessionId, session)
-    this.#control?.tokens.revokeRun(session.runId ?? session.sessionId)
-    session.dispose({ notifyExit: false })
-    await session.whenClosed()
-    const now = Date.now()
-    try {
-      this.#sessionRepository.promoteShellToAgent({
-        commandId: `runtime-shell-promote-agent-${session.sessionId}-${now}-${randomUUID()}`,
-        commandType: 'session.shell-promote-agent',
-        requestHash: `shell-promote-agent:${session.sessionId}:${now}`
-      }, session.sessionId, 'claude-code', now)
-      const before = this.#hud.snapshot(session.sessionId)
-      this.#permissionOverrides.set(session.sessionId, launch.permissionMode)
-      this.#hud.spawn({
-        sessionId: session.sessionId,
-        profile: 'claude-code',
-        ...(before?.cwd ? { cwd: before.cwd } : {}),
-        startedAt: before?.startedAt ?? now,
-        permissionMode: launch.permissionMode,
-        modelStrategy: 'opusplan'
-      })
-      this.publishSessionHud(session.sessionId)
-      this.#skipResumeSessionIds.add(session.sessionId)
-      await this.#spawn({ ...descriptor, profile: 'claude-code' })
-      const replacement = this.#sessions.get(session.sessionId)
-      if (!replacement || replacement.profile !== 'claude-code') {
-        throw new Error('Claude process did not start')
-      }
-      replacement.display('\u001b[2J\u001b[3J\u001b[H')
-      return true
-    } catch (error) {
-      console.error(`[session.shell-promote-agent] ${errorMessage(error)}`)
-      this.#permissionOverrides.delete(session.sessionId)
+    return this.#sessions.runExclusive(session.sessionId, async () => {
+      const descriptor = this.#spawnDescriptors.get(session.sessionId)
+      if (!descriptor || this.#sessions.get(session.sessionId) !== session) return false
+      session.write('\u0015')
+      this.#sessions.delete(session.sessionId, session)
+      this.#control?.backend.unregister(session.sessionId, session)
+      this.#control?.tokens.revokeRun(session.runId ?? session.sessionId)
+      session.dispose({ notifyExit: false })
+      await session.whenClosed()
+      const now = Date.now()
       try {
-        this.#sessionRepository.returnAgentToShell({
-          commandId: `runtime-shell-promote-rollback-${session.sessionId}-${now}-${randomUUID()}`,
-          commandType: 'session.shell-promote-rollback',
-          requestHash: `shell-promote-rollback:${session.sessionId}:${now}`
-        }, session.sessionId, Date.now())
-      } catch {}
-      await this.#spawn({ ...descriptor, profile: 'shell' })
-      return true
-    }
+        this.#sessionRepository.promoteShellToAgent({
+          commandId: `runtime-shell-promote-agent-${session.sessionId}-${now}-${randomUUID()}`,
+          commandType: 'session.shell-promote-agent',
+          requestHash: `shell-promote-agent:${session.sessionId}:${now}`
+        }, session.sessionId, 'claude-code', now)
+        const before = this.#hud.snapshot(session.sessionId)
+        this.#permissionOverrides.set(session.sessionId, launch.permissionMode)
+        this.#hud.spawn({
+          sessionId: session.sessionId,
+          profile: 'claude-code',
+          ...(before?.cwd ? { cwd: before.cwd } : {}),
+          startedAt: before?.startedAt ?? now,
+          permissionMode: launch.permissionMode,
+          modelStrategy: 'opusplan'
+        })
+        this.publishSessionHud(session.sessionId)
+        this.#skipResumeSessionIds.add(session.sessionId)
+        await this.#spawn({ ...descriptor, profile: 'claude-code' })
+        const replacement = this.#sessions.get(session.sessionId)
+        if (!replacement || replacement.profile !== 'claude-code') {
+          throw new Error('Claude process did not start')
+        }
+        return true
+      } catch (error) {
+        console.error(`[session.shell-promote-agent] ${errorMessage(error)}`)
+        this.#permissionOverrides.delete(session.sessionId)
+        try {
+          this.#sessionRepository.returnAgentToShell({
+            commandId: `runtime-shell-promote-rollback-${session.sessionId}-${now}-${randomUUID()}`,
+            commandType: 'session.shell-promote-rollback',
+            requestHash: `shell-promote-rollback:${session.sessionId}:${now}`
+          }, session.sessionId, Date.now())
+        } catch {}
+        await this.#spawn({ ...descriptor, profile: 'shell' })
+        return true
+      }
+    })
   }
 
   #observeProviderInput(sessionId: string, data: string): void {

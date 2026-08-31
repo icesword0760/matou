@@ -3,6 +3,49 @@ import { describe, expect, it, vi } from 'vitest'
 import { RuntimeSessionRegistry } from './runtime-session-registry'
 
 describe('RuntimeSessionRegistry', () => {
+  it('serializes lifecycle operations for the same Session across Runtime connections', async () => {
+    const registry = new RuntimeSessionRegistry()
+    const events: string[] = []
+    let releaseFirst: () => void = () => {}
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let markFirstStarted: () => void = () => {}
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve })
+
+    const first = registry.runExclusive('shared-session', async () => {
+      events.push('first:start')
+      markFirstStarted()
+      await firstGate
+      events.push('first:end')
+    })
+    const second = registry.runExclusive('shared-session', async () => {
+      events.push('second:start')
+      events.push('second:end')
+    })
+
+    await firstStarted
+    expect(events).toEqual(['first:start'])
+    releaseFirst()
+    await Promise.all([first, second])
+    expect(events).toEqual(['first:start', 'first:end', 'second:start', 'second:end'])
+  })
+
+  it('does not serialize lifecycle operations for different Sessions', async () => {
+    const registry = new RuntimeSessionRegistry()
+    let releaseFirst: () => void = () => {}
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let secondStarted = false
+
+    const first = registry.runExclusive('first-session', () => firstGate)
+    const second = registry.runExclusive('second-session', async () => {
+      secondStarted = true
+    })
+
+    await second
+    expect(secondStarted).toBe(true)
+    releaseFirst()
+    await first
+  })
+
   it('waits for every PTY journal to close during a graceful Runtime shutdown', async () => {
     const registry = new RuntimeSessionRegistry()
     const first = session('first')
