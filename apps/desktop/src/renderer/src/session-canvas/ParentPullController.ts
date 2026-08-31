@@ -40,7 +40,10 @@ export class ParentPullController {
     this.#rawDistance = Math.max(0, this.#rawDistance + input.deltaTowardParent)
     const threshold = parentPullThreshold(input.viewportWidth)
     this.#pullDistance = resistance(this.#rawDistance, threshold)
-    this.#progress = Math.min(1, this.#pullDistance / threshold)
+    // Resistance is visual feedback only. Comparing the resisted pixels with
+    // the intent threshold turns a 150px trackpad pull into roughly 270px of
+    // required finger travel, so the parent appears and then springs back.
+    this.#progress = Math.min(1, this.#rawDistance / threshold)
     return { consume: true, pullDistance: this.#pullDistance, progress: this.#progress }
   }
 
@@ -50,7 +53,7 @@ export class ParentPullController {
     springBack: boolean
   } {
     const wasPulling = this.#phase === 'pulling'
-    const commit = wasPulling && this.#pullDistance >= parentPullThreshold(input.viewportWidth)
+    const commit = wasPulling && this.#rawDistance >= parentPullThreshold(input.viewportWidth)
     this.#edgeArmed = this.#hasParent && input.scrollLeft <= 1 && !commit
     this.#phase = 'idle'
     this.#rawDistance = 0
@@ -77,7 +80,7 @@ export class ParentPullController {
 }
 
 export function parentPullThreshold(viewportWidth: number): number {
-  return Math.max(96, Math.min(180, viewportWidth * 0.22))
+  return Math.max(96, Math.min(150, viewportWidth * 0.22))
 }
 
 function resistance(rawDistance: number, threshold: number): number {

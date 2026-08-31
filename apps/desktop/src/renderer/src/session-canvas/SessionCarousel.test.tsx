@@ -896,6 +896,27 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('returns to the parent after one deliberate trackpad pull made of small wheel deltas', () => {
+    vi.useFakeTimers()
+    const onCommitParent = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      parent={{ ...fixtures(1)[0]!, sessionId: 'parent', title: '父会话' }}
+      onCommitParent={onCommitParent} onActivate={() => undefined}
+      renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 800 })
+    viewport.scrollLeft = 0
+
+    for (const deltaX of [-36, -42, -38, -36]) {
+      fireEvent.wheel(viewport, { deltaX, deltaY: 0 })
+    }
+
+    expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
+    vi.advanceTimersByTime(240)
+    expect(onCommitParent).toHaveBeenCalledWith('parent')
+    vi.useRealTimers()
+  })
+
   it('persists an immediate user scroll even while initial geometry frames are settling', () => {
     vi.useFakeTimers()
     const onGeometryChange = vi.fn()

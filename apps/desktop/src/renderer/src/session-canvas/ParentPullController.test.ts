@@ -32,6 +32,18 @@ describe('ParentPullController', () => {
     expect(controller.end({ scrollLeft: 0, viewportWidth: 800 })).toMatchObject({ commit: true })
   })
 
+  it('commits a deliberate trackpad pull using raw gesture travel rather than resisted pixels', () => {
+    const controller = new ParentPullController()
+    controller.begin({ scrollLeft: 0, hasParent: true })
+
+    for (const deltaTowardParent of [36, 42, 38, 36]) {
+      controller.move({ deltaTowardParent, viewportWidth: 800 })
+    }
+
+    expect(controller.snapshot().progress).toBe(1)
+    expect(controller.end({ scrollLeft: 0, viewportWidth: 800 })).toMatchObject({ commit: true })
+  })
+
   it('applies resistance without a parent and ignores vertical motion', () => {
     const controller = new ParentPullController()
     expect(controller.begin({ scrollLeft: 0, hasParent: false })).toBe('scrolling')
@@ -40,9 +52,9 @@ describe('ParentPullController', () => {
     expect(controller.end({ scrollLeft: 0, viewportWidth: 800 }).commit).toBe(false)
   })
 
-  it('uses a 22 percent threshold clamped between 96 and 180 pixels', () => {
+  it('uses a 22 percent threshold clamped between 96 and 150 pixels', () => {
     expect(parentPullThreshold(300)).toBe(96)
     expect(parentPullThreshold(600)).toBe(132)
-    expect(parentPullThreshold(1200)).toBe(180)
+    expect(parentPullThreshold(1200)).toBe(150)
   })
 })
