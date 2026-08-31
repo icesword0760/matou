@@ -153,7 +153,7 @@ Claude 判断：语义事件或 hook 表示生成/工具执行为 `running`，�
 
 ### 4.8 动态排序
 
-每个兄弟列表按 Runtime 生成的 `lastUserInteractionSeq` 倒序显示。
+每个兄弟列表按 Runtime 已提交的 `lastUserInteractionSeq` 倒序显示。激活会话的新交互先写入 `pendingUserInteractionSeq`，激活期间不改变列表位置；当用户激活其他卡片时，再把上一张卡片的 pending 序号一次性提交到排序序号。
 
 更新顺序的事件：
 
@@ -166,7 +166,7 @@ Claude 判断：语义事件或 hook 表示生成/工具执行为 `running`，�
 
 新会话追加到队列末尾。应用整体恢复保留原顺序；重新启动已停止节点不改变节点身份和既有关系。
 
-`lastUserInteractionSeq` 由 Runtime 在 SQLite 事务中单调递增。值相同时按同层创建顺序，再按 Session ID 稳定排序。
+Runtime 在 SQLite 事务中生成单调递增的交互序号。激活卡片仅更新 pending 序号，失去激活后再提交为 `lastUserInteractionSeq`；应用重启后依然保留这一待提交状态。值相同时按同层创建顺序，再按 Session ID 稳定排序。
 
 ## 5. 用户旅程
 
@@ -431,9 +431,9 @@ interface TerminalUserInteractionMessage {
 }
 ```
 
-Runtime 校验 Session 与端口归属，在 SQLite 事务中递增 `session-user-interaction`，更新 membership 并发出 `session.user-interacted`。普通字符、鼠标事件和输出流不发送该消息。
+Runtime 校验 Session 与端口归属，在 SQLite 事务中递增 `session-user-interaction`。如果该 Session 仍是激活卡片，序号写入 membership 的 pending 字段并保持当前顺序；失去激活时再一次性提交排序，并发出对应投影。普通字符、鼠标事件和输出流不发送该消息。
 
-顺序变化后 Renderer 使用 FLIP 动画移动卡片，同时保持 xterm 实例、选择、焦点和 PTY 不变。
+用户切换卡片后，Renderer 对上一张卡片的排序变化使用 FLIP 动画，同时保持新激活卡片的 xterm 实例、选择、焦点和 PTY 不变。
 
 ### 8.4 恢复状态
 

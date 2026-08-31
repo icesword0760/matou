@@ -2164,12 +2164,35 @@ export function activateSessionInTransaction(
     sessionId
   )
   if (!owner) throw new Error(`Session ${sessionId} does not exist in an active Scene`)
+  const previousSessionId = tx.get<{ active_session_id: string | null }>(
+    `SELECT active_session_id FROM window_scene_focus
+     WHERE window_id = ? AND scene_id = ?`,
+    windowId, owner.scene_id
+  )?.active_session_id ?? undefined
   activateSceneInTransaction(tx, windowId, owner.scene_id, now)
   tx.run(
     `UPDATE window_scene_focus SET active_session_id = ?, updated_at = ?
      WHERE window_id = ? AND scene_id = ?`,
     sessionId, now, windowId, owner.scene_id
   )
+  if (previousSessionId && previousSessionId !== sessionId) {
+    const remainsActive = tx.get<{ active: number }>(
+      `SELECT 1 AS active FROM window_scene_focus
+       WHERE active_session_id = ? LIMIT 1`,
+      previousSessionId
+    ) !== undefined
+    if (!remainsActive) {
+      tx.run(
+        `UPDATE session_canvas_memberships
+         SET last_user_interaction_seq = pending_user_interaction_seq,
+             pending_user_interaction_seq = 0,
+             updated_at = ?
+         WHERE session_id = ?
+           AND pending_user_interaction_seq > 0`,
+        now, previousSessionId
+      )
+    }
+  }
 }
 
 function clearWindowNavigation(tx: DatabaseTransaction, windowId: string, now: number): void {

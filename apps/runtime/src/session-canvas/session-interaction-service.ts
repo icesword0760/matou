@@ -72,12 +72,28 @@ export class SessionInteractionService {
       )?.value
       if (sequence === undefined) throw new Error('session-user-interaction sequence does not exist')
 
-      tx.run(
-        `UPDATE session_canvas_memberships
-         SET last_user_interaction_seq = ?, updated_at = ?
-         WHERE session_id = ?`,
-        sequence, input.now, input.sessionId
-      )
+      const active = tx.get<{ active: number }>(
+        `SELECT 1 AS active FROM window_scene_focus
+         WHERE active_session_id = ? LIMIT 1`,
+        input.sessionId
+      ) !== undefined
+      if (active) {
+        tx.run(
+          `UPDATE session_canvas_memberships
+           SET pending_user_interaction_seq = ?, updated_at = ?
+           WHERE session_id = ?`,
+          sequence, input.now, input.sessionId
+        )
+      } else {
+        tx.run(
+          `UPDATE session_canvas_memberships
+           SET last_user_interaction_seq = ?,
+               pending_user_interaction_seq = 0,
+               updated_at = ?
+           WHERE session_id = ?`,
+          sequence, input.now, input.sessionId
+        )
+      }
       tx.run(
         `UPDATE sessions
          SET last_activity_at = ?, updated_at = ?, version = version + 1
@@ -90,7 +106,14 @@ export class SessionInteractionService {
         input.now, owner.workspace_id
       )
 
-      const graph = projectSceneGraphFrom(tx, owner.scene_id)
+      const focusWindowId = tx.get<{ window_id: string }>(
+        `SELECT window_id FROM window_scene_focus
+         WHERE scene_id = ?
+         ORDER BY (active_session_id = ?) DESC, updated_at DESC
+         LIMIT 1`,
+        owner.scene_id, input.sessionId
+      )?.window_id
+      const graph = projectSceneGraphFrom(tx, owner.scene_id, focusWindowId)
       const result: RecordedSessionInteraction = {
         sessionId: input.sessionId,
         sceneId: owner.scene_id,

@@ -894,5 +894,13 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
             AND json_extract(binding.metadata_json, '$.canFork') = 1
         );
     `
+  },
+  {
+    version: 20,
+    name: 'deferred-active-session-order',
+    sql: `
+      ALTER TABLE session_canvas_memberships
+      ADD COLUMN pending_user_interaction_seq INTEGER NOT NULL DEFAULT 0;
+    `
   }
 ]

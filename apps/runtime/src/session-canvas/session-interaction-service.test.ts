@@ -32,6 +32,44 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('SessionInteractionService', () => {
+  it('defers an active card reorder until focus leaves that card', () => {
+    const initial = bootstrap()
+    const second = canvas.createShellSibling(command('second'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+    const third = canvas.createShellSibling(command('third'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 21
+    })
+
+    const interaction = interactions.record(command('interact-active-third'), {
+      sessionId: third.session!.id, interactionKind: 'submit', now: 30
+    })
+    expect(interaction.graph.focusedSessionId).toBe(third.session!.id)
+
+    expect(rootOrder(initial.scene!.id)).toEqual([
+      initial.session!.id,
+      second.session!.id,
+      third.session!.id
+    ])
+
+    database.close()
+    database = RuntimeDatabase.open(databasePath)
+    wireServices()
+
+    canvas.setFocusedSession({
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sessionId: second.session!.id, now: 31
+    })
+
+    expect(rootOrder(initial.scene!.id)).toEqual([
+      third.session!.id,
+      initial.session!.id,
+      second.session!.id
+    ])
+  })
+
   it('moves only true user interactions to the front with a persistent monotonic order', async () => {
     const initial = bootstrap()
     const second = canvas.createShellSibling(command('second'), {
@@ -41,6 +79,10 @@ describe('SessionInteractionService', () => {
     const third = canvas.createShellSibling(command('third'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
       sourceSessionId: initial.session!.id, now: 21
+    })
+    canvas.setFocusedSession({
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sessionId: initial.session!.id, now: 22
     })
 
     const secondInteraction = interactions.record(command('interact-second'), {
