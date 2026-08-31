@@ -7,7 +7,6 @@ import { SceneTabBar, type SceneCommands } from './SceneTabBar'
 import { SceneOverflowMenu } from './SceneOverflowMenu'
 import { SplitDivider } from './SplitDivider'
 import type { HierarchyProjection } from './hierarchy-types'
-import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
 
 afterEach(cleanup)
 
@@ -34,13 +33,12 @@ describe('Scene tabs and split actions', () => {
     expect(container.querySelector('.tab-bar-overflow-actions')).toBeNull()
   })
 
-  it('keeps the horizontal-add and file toolbar artwork', () => {
+  it('keeps horizontal Shell creation and removes the unused file toolbar action', () => {
     render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
 
     expect(screen.getByRole('button', { name: '横向新增 Shell' }).querySelector('img')?.getAttribute('src') ?? '')
       .toContain('vertical.png')
-    expect(screen.getByRole('button', { name: '文件' }).querySelector('img')?.getAttribute('src'))
-      .toBe(folderIcon)
+    expect(screen.queryByRole('button', { name: '文件' })).toBeNull()
   })
 
   it('opens overflow and centers the selected Scene', async () => {

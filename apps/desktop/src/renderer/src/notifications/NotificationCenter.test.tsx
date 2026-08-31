@@ -12,9 +12,10 @@ describe('Kooky notification center', () => {
   afterEach(cleanup)
 
   it('shows the exact empty state and omits the clear action', () => {
-    renderCenter(new AgentNotificationStore())
+    const { container } = renderCenter(new AgentNotificationStore())
     expect(screen.getByRole('heading', { name: '通知 (0)' })).toBeTruthy()
     expect(screen.getByText('暂无通知')).toBeTruthy()
+    expect(container.querySelector('.notification-center__empty-img')).toBeNull()
     expect(screen.queryByRole('button', { name: '清空通知' })).toBeNull()
   })
 

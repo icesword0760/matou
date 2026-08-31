@@ -7,7 +7,6 @@ import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import splitRightIcon from '../assets/kooky/terminal/vertical.png'
-import folderIcon from '../assets/kooky/terminal/folder_normal.svg'
 
 export interface SceneCommands {
   activateScene(sceneId: string): unknown
@@ -130,10 +129,6 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
         else commands.splitSession(activeSceneId, activeSessionId, 'horizontal')
       }}>
       <img src={splitRightIcon} alt="" aria-hidden="true" />
-    </button>
-    <span className="tab-bar-separator" />
-    <button className="toolbar-btn file-panel-icon" aria-label="文件" title="文件">
-      <img src={folderIcon} alt="" aria-hidden="true" />
     </button>
     </div>
     {menuSceneId && <div role="menu" className="scene-tab-menu">

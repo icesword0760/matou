@@ -256,8 +256,7 @@ button { -webkit-app-region: no-drag; }
 .notification-center__list { flex: 1; min-height: 0; overflow-y: auto; }
 .notification-center__list::-webkit-scrollbar { width: 4px; }
 .notification-center__list::-webkit-scrollbar-thumb { border-radius: 10px; background: #30363d; }
-.notification-center__empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 0; margin-top: 266px; }
-.notification-center__empty-img { display: block; width: 100%; max-width: 100px; height: auto; object-fit: contain; user-select: none; pointer-events: none; }
+.notification-center__empty { display: flex; height: 100%; align-items: center; justify-content: center; min-height: 0; }
 .notification-center__empty-text { margin: 0; color: #8b949e; font-size: 13px; text-align: center; }
 .notification-center__group { padding: 8px 16px 16px; }
 .notification-center__items { display: flex; flex-direction: column; gap: 8px; }

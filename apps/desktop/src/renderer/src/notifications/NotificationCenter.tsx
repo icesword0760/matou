@@ -1,7 +1,6 @@
 import type { HierarchyProjection } from '../hierarchy/hierarchy-types'
 import type { AgentNotification } from './AgentNotificationStore'
 import { useNotificationSnapshot, useNotificationStore } from './NotificationProvider'
-import emptyStateImage from '../assets/kooky/terminal/no-xiaoxi.png'
 
 export function NotificationCenter({ projection, onClose, onNavigate }: {
   projection: HierarchyProjection
@@ -23,7 +22,6 @@ export function NotificationCenter({ projection, onClose, onNavigate }: {
     <div className="notification-center__list">
       {notifications.length === 0
         ? <div className="notification-center__empty">
-            <img src={emptyStateImage} alt="" className="notification-center__empty-img" />
             <p className="notification-center__empty-text">暂无通知</p>
           </div>
         : <div className="notification-center__group"><div className="notification-center__items">
