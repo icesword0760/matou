@@ -89,6 +89,22 @@ describe('Terminal pane', () => {
     expect(onForkSibling).toHaveBeenCalledWith('session-1')
   })
 
+  it('offers session loading directly in every Shell and Claude card header', async () => {
+    const onLoadSession = vi.fn()
+    const user = userEvent.setup()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} onLoadSession={onLoadSession} />)
+
+    await user.click(screen.getByRole('button', { name: '载入 Claude Code 会话到“Claude 主会话”' }))
+    expect(onLoadSession).toHaveBeenCalledWith('session-1')
+
+    view.rerender(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'shell', title: 'Shell' }}
+      onLoadSession={onLoadSession} />)
+    await user.click(screen.getByRole('button', { name: '载入 Claude Code 会话到“Shell”' }))
+    expect(onLoadSession).toHaveBeenLastCalledWith('session-1')
+  })
+
   it('offers a sibling Fork on a Shell child when its common Claude parent is fork-ready', async () => {
     const onForkSibling = vi.fn()
     const props = fixture()

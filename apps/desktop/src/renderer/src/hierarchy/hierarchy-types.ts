@@ -36,6 +36,7 @@ export interface SessionGraphNodeView {
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
   forkAttempt?: number
+  providerSpawnRevision?: number
   canFork: boolean
   title: string
   cwd: string
@@ -172,6 +173,9 @@ export interface HierarchyCommands {
   retryFork(sceneId: string, sessionId: string): unknown
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
+  listClaudeSessions(sessionId: string, query: string, providerSessionId?: string): Promise<ClaudeSessionListResult>
+  getClaudeSessionDetail(sessionId: string, providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
+  loadClaudeSession(sessionId: string, providerSessionId: string): Promise<ClaudeSessionLoadResult>
   restartStoppedSession?(sessionId: string): unknown
   removeSessionBranch?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown
   getSceneSessionGraph(sceneId: string): unknown
@@ -185,3 +189,6 @@ export interface HierarchyCommands {
   setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown
   setModel(sessionId: string, modelStrategy: HudModelStrategy): unknown
 }
+import type {
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
+} from '@matou/contracts'

@@ -848,6 +848,35 @@ describe('RuntimeServer domain RPC', () => {
     await settle()
   })
 
+  it('replaces a live PTY when the same stable Session requests a newer spawn revision', async () => {
+    registerSession(database, 'revised-spawn-session')
+    const message = {
+      type: 'terminal.spawn' as const,
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'revised-spawn-session',
+      executionContextId: 'replay-context',
+      profile: 'shell' as const,
+      cols: 80,
+      rows: 24,
+      spawnRevision: 1
+    }
+
+    port.receive(message)
+    await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.spawned').length === 1)
+    const firstPid = port.last('terminal.spawned')?.pid
+
+    port.receive({ ...message, spawnRevision: 2 })
+    await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.spawned').length === 2)
+    const secondPid = port.last('terminal.spawned')?.pid
+
+    expect(secondPid).not.toBe(firstPid)
+    port.receive({
+      type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'revised-spawn-session'
+    })
+    await settle()
+  })
+
   it('rejects input for an invalid Workspace while keeping the PTY alive', async () => {
     const sessions = new RuntimeSessionRegistry()
     const guardedPort = new MockPort()

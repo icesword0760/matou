@@ -1,4 +1,6 @@
-import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
+import { dirname, resolve } from 'node:path'
 
 import type { RpcMethod } from '@matou/contracts'
 import type {
@@ -32,6 +34,7 @@ import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
+import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -72,8 +75,13 @@ export class RuntimeRpcRouter {
   readonly #providerModes: ProviderModeService
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
+  readonly #claudeSessions: ClaudeSessionCatalog
 
-  constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
+  constructor(
+    database: RuntimeDatabase,
+    notifications = new NotificationProjection(),
+    options: { projectsRoot?: string } = {}
+  ) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
     this.#workspaces = new WorkspaceTaskRepository(database, transactions)
@@ -97,6 +105,10 @@ export class RuntimeRpcRouter {
       dirname(database.path), database, transactions, { stopRuns: async () => undefined }
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
+    this.#claudeSessions = new ClaudeSessionCatalog(
+      options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
+        resolve(homedir(), '.claude', 'projects')
+    )
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -154,11 +166,63 @@ export class RuntimeRpcRouter {
       const input = record(payload)
       return this.#geometry.list(text(input.sceneId, 'sceneId'))
     }
+    if (method === 'claude-sessions.list') {
+      const input = record(payload)
+      const sessionId = text(input.sessionId, 'sessionId')
+      const result = await this.#claudeSessions.list({
+        cwd: this.#sessionCwd(sessionId),
+        query: optionalString(input.query),
+        limit: optionalInteger(input.limit, 100)
+      })
+      const scopeProviderSessionId = optionalText(input.providerSessionId, 'providerSessionId')
+      const sessions = result.sessions.filter(({ providerSessionId }) =>
+        this.#providerConversationAvailable(providerSessionId, sessionId) &&
+        (scopeProviderSessionId === undefined || providerSessionId === scopeProviderSessionId)
+      )
+      return { sessions, total: sessions.length }
+    }
+    if (method === 'claude-sessions.detail') {
+      const input = record(payload)
+      const sessionId = text(input.sessionId, 'sessionId')
+      const providerSessionId = text(input.providerSessionId, 'providerSessionId')
+      if (!this.#providerConversationAvailable(providerSessionId, sessionId)) {
+        throw new RpcFault('CONFLICT', '该 Claude Code 会话正在另一张卡片中使用')
+      }
+      return this.#claudeSessions.detail({
+        cwd: this.#sessionCwd(sessionId), providerSessionId,
+        query: optionalString(input.query)
+      })
+    }
 
     const envelope = record(payload)
     const command = commandMetadata(envelope.command)
     const input = record(envelope.input)
     switch (method) {
+      case 'claude-sessions.load': {
+        const sessionId = text(input.sessionId, 'sessionId')
+        const providerSessionId = text(input.providerSessionId, 'providerSessionId')
+        if (!this.#providerConversationAvailable(providerSessionId, sessionId)) {
+          throw new RpcFault('CONFLICT', '该 Claude Code 会话正在另一张卡片中使用')
+        }
+        const detail = await this.#claudeSessions.detail({
+          cwd: this.#sessionCwd(sessionId), providerSessionId, query: ''
+        })
+        const result = this.#providerModes.loadClaudeSession(command, {
+          sessionId,
+          bindingId: randomUUID(),
+          providerSessionId,
+          title: detail.title,
+          permissionMode: detail.permissionMode,
+          ...(detail.model ? { model: detail.model } : {}),
+          now: integer(input.now, 'now', 0)
+        })
+        return {
+          ...result,
+          load: {
+            sessionId, providerSessionId, permissionMode: detail.permissionMode
+          }
+        }
+      }
       case 'git.status':
         return this.#git.status(text(input.cwd, 'cwd'))
       case 'git.checkout':
@@ -701,6 +765,38 @@ export class RuntimeRpcRouter {
     }
   }
 
+  #sessionCwd(sessionId: string): string {
+    const row = this.#database.get<{ cwd: string }>(
+      `SELECT COALESCE(context.cwd, sessions.cwd) AS cwd
+       FROM sessions
+       LEFT JOIN execution_contexts AS context ON context.id = sessions.execution_context_id
+       WHERE sessions.id = ? AND sessions.archived_at IS NULL`, sessionId
+    )
+    if (!row) throw new RpcFault('NOT_FOUND', 'Session does not exist')
+    return row.cwd
+  }
+
+  #providerConversationAvailable(providerSessionId: string, targetSessionId: string): boolean {
+    const binding = this.#database.get<{
+      session_id: string
+      kind: SessionKind
+      archived_at: number | null
+      resume_state: string
+      invalidated_at: number | null
+    }>(
+      `SELECT binding.session_id, owner.kind, owner.archived_at,
+              binding.resume_state, binding.invalidated_at
+       FROM provider_bindings AS binding
+       JOIN sessions AS owner ON owner.id = binding.session_id
+       WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?`,
+      providerSessionId
+    )
+    if (!binding || binding.session_id === targetSessionId) return true
+    return binding.archived_at !== null || binding.kind !== 'claude-code' ||
+      binding.invalidated_at !== null ||
+      !['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state)
+  }
+
   #snapshot(payload: unknown): unknown {
     const workspaces = this.#database.all<{ id: string }>('SELECT id FROM workspaces ORDER BY created_at').map(({ id }) => this.#workspaces.getWorkspace(id)!)
     const tasks = this.#database.all<{ id: string }>('SELECT id FROM tasks ORDER BY created_at').map(({ id }) => this.#workspaces.getTask(id)!)
@@ -828,6 +924,14 @@ function text(value: unknown, label: string): string {
 }
 function optionalText(value: unknown, label: string): string | undefined {
   return value === undefined ? undefined : text(value, label)
+}
+function optionalString(value: unknown): string {
+  if (value === undefined) return ''
+  if (typeof value !== 'string') throw new RpcFault('INVALID_REQUEST', 'query must be a string')
+  return value
+}
+function optionalInteger(value: unknown, fallback: number): number {
+  return value === undefined ? fallback : integer(value, 'limit', 1)
 }
 function optionalNullableText(input: Record<string, unknown>, key: string): { present: boolean; value: string | null } {
   if (!Object.prototype.hasOwnProperty.call(input, key)) return { present: false, value: null }

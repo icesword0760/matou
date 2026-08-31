@@ -48,6 +48,7 @@ export function TerminalPane(props: {
   workStatus?: SessionGraphNodeView['workStatus']
   latestLines?: string[]
   onOpenChildren?(sessionId: string): unknown
+  onLoadSession?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
   onForkSibling?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
@@ -61,7 +62,7 @@ export function TerminalPane(props: {
     providerRestoreState = 'none', restoreError, forkState, forkError, cwd, git,
     sharedWorkingDirectory = false,
     spawnRevision = 0, onRetryRestore, onRetryWork, onRetryFork, onRemoveFailedFork,
-    childNodes = [], workStatus = 'idle', latestLines = [], onOpenChildren,
+    childNodes = [], workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onForkSibling, onDetach,
@@ -181,6 +182,13 @@ export function TerminalPane(props: {
         {cwd && <span className="pane-cwd" title={cwd}>{cwd}</span>}
       </div>
       <div className="terminal-pane-actions">
+        {onLoadSession && <button className="pane-fork pane-load-session" type="button" draggable={false}
+          aria-label={`载入 Claude Code 会话到“${session.title}”`} title="载入 Claude Code 会话"
+          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
+          onClick={(event) => {
+            event.stopPropagation()
+            void onLoadSession(session.id)
+          }}><LoadSessionIcon /></button>}
         {onOpenChildren && <ChildSessionBadge children={childNodes}
           onOpen={() => void onOpenChildren(session.id)} />}
         {showFork && <button className="pane-fork" type="button" draggable={false}
@@ -334,6 +342,13 @@ export function TerminalPane(props: {
       </div>
     </>, document.body)}
   </section>
+}
+
+function LoadSessionIcon() {
+  return <svg viewBox="0 0 20 20" aria-hidden="true" fill="none">
+    <path d="M3.5 5.5h5l1.4 1.8h6.6v8.2h-13z" />
+    <path d="M10 9v4m-2-2 2 2 2-2" />
+  </svg>
 }
 
 function NOOP(): void {}

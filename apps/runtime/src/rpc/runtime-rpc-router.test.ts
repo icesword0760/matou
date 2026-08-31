@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +10,7 @@ import { NotificationProjection } from '../product/experience-foundation'
 import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { encodeClaudeProjectPath } from '../session/claude-session-catalog'
 
 let database: RuntimeDatabase
 let router: RuntimeRpcRouter
@@ -25,6 +26,55 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('lists workspace Claude history and loads the selected permission into the same Session', async () => {
+    const workspaceRoot = join(testRoot, 'load-workspace')
+    const projectsRoot = join(testRoot, 'claude-projects')
+    await mkdir(workspaceRoot)
+    const projectDirectory = join(projectsRoot, encodeClaudeProjectPath(workspaceRoot))
+    await mkdir(projectDirectory, { recursive: true })
+    await writeFile(join(projectDirectory, 'provider-load.jsonl'), [
+      JSON.stringify({
+        type: 'user', sessionId: 'provider-load', cwd: workspaceRoot,
+        timestamp: '2026-08-31T10:00:00.000Z', permissionMode: 'default',
+        message: { role: 'user', content: '载入通知中心会话' }
+      }),
+      JSON.stringify({
+        type: 'permission-mode', sessionId: 'provider-load', cwd: workspaceRoot,
+        timestamp: '2026-08-31T10:01:00.000Z', permissionMode: 'bypassPermissions'
+      })
+    ].join('\n'))
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), { projectsRoot })
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('load-bootstrap', {
+      windowId: 'window-load', defaultRootDirectory: workspaceRoot,
+      defaultName: 'load-workspace', now: 1
+    })) as { session: { id: string }; scene: { id: string } }
+
+    const list = await router.handle('claude-sessions.list', {
+      sessionId: initial.session.id, query: '通知中心'
+    }) as { sessions: Array<{ providerSessionId: string; permissionMode: string }> }
+    expect(list.sessions).toEqual([expect.objectContaining({
+      providerSessionId: 'provider-load', permissionMode: 'bypassPermissions'
+    })])
+
+    await router.handle('claude-sessions.load', payload('load-existing', {
+      sessionId: initial.session.id,
+      providerSessionId: 'provider-load',
+      permissionMode: 'default',
+      now: 2
+    }))
+
+    expect(database.get(
+      `SELECT sessions.id, sessions.kind, binding.provider_session_id, binding.metadata_json
+       FROM sessions JOIN provider_bindings AS binding ON binding.session_id = sessions.id
+       WHERE sessions.id = ?`, initial.session.id
+    )).toMatchObject({
+      id: initial.session.id,
+      kind: 'claude-code',
+      provider_session_id: 'provider-load',
+      metadata_json: expect.stringContaining('bypassPermissions')
+    })
+  })
+
   it('routes Git status and branch mutations for the active repository', async () => {
     const repositoryRoot = join(testRoot, 'repository')
     await mkdir(repositoryRoot)

@@ -47,6 +47,18 @@ describe('PRD 05 hierarchy shell', () => {
     expect(document.querySelector('.session-level-header')).toBeNull()
   })
 
+  it('opens session management from the card header centered inside the workspace stage', async () => {
+    render(<HierarchyShell fixture={fixture()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', {
+      name: '载入 Claude Code 会话到“终端 A1”'
+    }))
+
+    const dialog = screen.getByRole('dialog', { name: '载入 Claude Code 会话' })
+    expect(dialog).toBeTruthy()
+    expect(dialog.parentElement?.parentElement?.classList.contains('workspace-stage')).toBe(true)
+  })
+
   it('returns to the parent from the bottom breadcrumb', async () => {
     const data = fixture()
     data.sessions.push({

@@ -1,4 +1,7 @@
 import type {
+  ClaudeSessionPermissionMode,
+} from '@matou/contracts'
+import type {
   DomainCommandMetadata,
   ProviderBinding,
   SceneSessionGraph,
@@ -63,6 +66,93 @@ export class ProviderModeService {
   constructor(database: RuntimeDatabase, transactions: DomainTransactionManager) {
     this.#database = database
     this.#transactions = transactions
+  }
+
+  loadClaudeSession(
+    command: DomainCommandMetadata,
+    input: {
+      sessionId: string
+      bindingId: string
+      providerSessionId: string
+      title: string
+      permissionMode: ClaudeSessionPermissionMode
+      model?: string
+      now: number
+    }
+  ): ProviderModeTransitionResult {
+    const providerSessionId = input.providerSessionId.trim()
+    const title = input.title.trim() || 'Claude'
+    if (!providerSessionId) throw new Error('Provider session identity must not be empty')
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const owner = requireOwner(tx, input.sessionId)
+      const session = requireSession(tx, input.sessionId)
+      const existing = tx.get<BindingRow & { owner_kind: SessionKind; owner_archived_at: number | null }>(
+        `SELECT binding.*, owner.kind AS owner_kind, owner.archived_at AS owner_archived_at
+         FROM provider_bindings AS binding
+         JOIN sessions AS owner ON owner.id = binding.session_id
+         WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?`,
+        providerSessionId
+      )
+      if (
+        existing && existing.session_id !== session.id && existing.owner_archived_at === null &&
+        existing.owner_kind === 'claude-code' && existing.invalidated_at === null &&
+        ['unknown', 'available', 'resuming', 'resumed'].includes(existing.resume_state)
+      ) {
+        throw new Error('该 Claude Code 会话正在另一张卡片中使用')
+      }
+
+      tx.run(
+        `UPDATE provider_bindings
+         SET resume_state = 'expired', restore_state = 'none', restore_error = NULL,
+             invalidated_at = ?, updated_at = ?
+         WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id <> ?`,
+        input.now, input.now, session.id, providerSessionId
+      )
+      const metadata = {
+        ...(existing ? asMetadata(existing.metadata_json) : {}),
+        permissionMode: input.permissionMode,
+        ...(input.model ? { model: input.model } : {}),
+        loadedFromCatalog: true,
+        spawnRevision: input.now,
+        canFork: false,
+        observedUserPrompt: false,
+        observedNormalStop: false
+      }
+      if (existing) {
+        tx.run(
+          `UPDATE provider_bindings
+           SET session_id = ?, resume_state = 'available', restore_state = 'restoring',
+               restore_error = NULL, user_exited_at = NULL, metadata_json = ?,
+               validated_at = ?, invalidated_at = NULL, updated_at = ?
+           WHERE id = ?`,
+          session.id, JSON.stringify(metadata), input.now, input.now, existing.id
+        )
+      } else {
+        tx.run(
+          `INSERT INTO provider_bindings (
+             id, session_id, provider, provider_session_id, resume_state, restore_state,
+             restore_error, user_exited_at, metadata_json, created_at, updated_at,
+             validated_at, invalidated_at
+           ) VALUES (?, ?, 'claude-code', ?, 'available', 'restoring',
+                     NULL, NULL, ?, ?, ?, ?, NULL)`,
+          input.bindingId, session.id, providerSessionId, JSON.stringify(metadata),
+          input.now, input.now, input.now
+        )
+      }
+      tx.run(
+        `UPDATE sessions SET kind = 'claude-code', title = ?, status = 'starting',
+           work_status = 'starting', updated_at = ?, last_activity_at = ?, version = version + 1
+         WHERE id = ?`,
+        title, input.now, input.now, session.id
+      )
+      const binding = existing
+        ? requireBinding(tx, existing.id)
+        : requireBinding(tx, input.bindingId)
+      const result = buildResult(tx, owner, requireSession(tx, session.id), binding)
+      emitTransition(emit, command.commandId, 'session.mode-changed', owner, result, input.now)
+      emitRecoveryNotification(emit, command.commandId, owner, result, input.now, 'restoring')
+      return result
+    }).result
   }
 
   markClaudeActive(
