@@ -41,7 +41,7 @@
 .session-card .pane-fork { width: 27px; height: 27px; padding: 0 5px; color: rgba(151,185,224,.72); }
 .session-card .pane-fork svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .session-card .pane-more { width: 28px; font-size: 12px; font-weight: 700; letter-spacing: 1px; }
-.session-card .terminal-pane .terminal-surface { padding: 12px 14px; background: #191c21; }
+.session-card .terminal-pane .terminal-surface { --terminal-padding-block: 12px; --terminal-padding-inline: 14px; padding: 0; background: #191c21; }
 .session-card .terminal-pane.has-notification::after { border-radius: 11px 11px 0 0; }
 .session-canvas-empty { display: grid; flex: 1; place-items: center; color: rgba(255,255,255,.45); }
 .parent-projection { position: absolute; z-index: 1; inset: 0 auto 0 0; display: flex; width: min(360px,46vw); box-sizing: border-box; align-items: center; padding: 20px; opacity: calc(.14 + var(--parent-pull-progress) * .86); pointer-events: none; transform: translateX(calc(-24px + var(--parent-pull-progress) * 24px)); }

@@ -77,13 +77,16 @@ body {
 }
 
 .terminal-surface {
+  --terminal-padding-block: 14px;
+  --terminal-padding-inline: 12px;
   width: 100%;
   height: 100%;
-  padding: 14px 12px;
+  padding: 0;
 }
 
 .terminal-surface .xterm {
   height: 100%;
+  padding: var(--terminal-padding-block) var(--terminal-padding-inline);
 }
 
 .terminal-surface .xterm-viewport {
