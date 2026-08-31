@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { SceneOverflowMenu } from './SceneOverflowMenu'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
@@ -19,10 +18,9 @@ export interface SceneCommands {
   createShellSibling?(sceneId: string, sessionId: string): unknown
 }
 
-export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid = true, onOpenDag }: {
+export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag }: {
   projection: HierarchyProjection
   commands: SceneCommands
-  visibleLimit?: number
   pathValid?: boolean
   onOpenDag?(): void
 }) {
@@ -31,9 +29,6 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter((scene) => scene.taskId === taskId)
     .map((scene) => ({ ...scene, name: sceneDisplayName(scene, projection) }))
-  const visible = scenes.slice(0, visibleLimit)
-  const overflow = scenes.slice(visibleLimit)
-  const [overflowOpen, setOverflowOpen] = useState(false)
   const [closingSceneId, setClosingSceneId] = useState<string | null>(null)
   const [menuSceneId, setMenuSceneId] = useState<string | null>(null)
   const [renamingSceneId, setRenamingSceneId] = useState<string | null>(null)
@@ -85,7 +80,7 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
     }
   }}>
     <div className="scene-tabs tab-bar-left">
-      {visible.map((scene) => <div key={scene.id} data-scene-id={scene.id}
+      {scenes.map((scene) => <div key={scene.id} data-scene-id={scene.id}
         className={`tab-item${scene.id === activeSceneId ? ' active' : ''}`}
         onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
@@ -95,29 +90,14 @@ export function SceneTabBar({ projection, commands, visibleLimit = 10, pathValid
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
         <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
       </div>)}
-      {overflow.length === 0 && <button className="tab-add-btn" aria-label="新建页签"
+      <button className="tab-add-btn" aria-label="新建页签"
         disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
         onClick={() => {
           if (!taskId) return
           if (commands.createCanvas) commands.createCanvas(taskId)
           else commands.createScene(taskId)
-        }}>+</button>}
-    </div>
-    {overflow.length > 0 && <div className="tab-bar-overflow-actions">
-      <div>
-      <button className="tab-overflow-btn" aria-label="更多页签" onClick={() => setOverflowOpen(!overflowOpen)}>···</button>
-      {overflowOpen && <SceneOverflowMenu scenes={overflow} hasUnread={sceneHasUnread} onSelect={(scene) => {
-        setOverflowOpen(false); select(scene.id, true)
-      }} />}
-      </div>
-      <button className="tab-add-btn" aria-label="新建页签" disabled={!pathValid}
-        title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-        onClick={() => {
-          if (!taskId) return
-          if (commands.createCanvas) commands.createCanvas(taskId)
-          else commands.createScene(taskId)
         }}>+</button>
-    </div>}
+    </div>
     <div className="tab-bar-right">
     {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
       title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}

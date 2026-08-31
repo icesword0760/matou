@@ -82,12 +82,10 @@ button { -webkit-app-region: no-drag; }
 .tab-item.active .tab-close, .tab-item:hover .tab-close { visibility: visible; }
 .tab-status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #ff4524; }
 .tab-close:hover { color: #fff; background: rgba(255,255,255,.1); }
-.tab-bar-overflow-actions, .tab-bar-right { display: flex; flex: 0 0 auto; align-items: center; -webkit-app-region: no-drag; }
-.tab-bar-overflow-actions { gap: 4px; margin-left: 8px; }
+.tab-bar-right { display: flex; flex: 0 0 auto; align-items: center; -webkit-app-region: no-drag; }
 .tab-bar-right { gap: 2px; margin-left: 8px; }
-.tab-overflow-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: #8b949e; background: transparent; cursor: pointer; font-size: 13px; font-weight: 700; letter-spacing: 1px; }
 .tab-add-btn { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin-left: 4px; padding: 0; border: 0; border-radius: 6px; color: #888; background: rgba(255,255,255,.04); cursor: pointer; font-size: 16px; }
-.tab-add-btn:hover, .tab-overflow-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
+.tab-add-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
 .toolbar-btn { display: flex; align-items: center; padding: 4px; border: 0; border-radius: 4px; color: #7b7b7b; background: transparent; cursor: pointer; font-size: 12px; }
 .toolbar-btn img { display: block; width: 16px; height: 16px; object-fit: contain; }
 .toolbar-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
@@ -96,12 +94,9 @@ button { -webkit-app-region: no-drag; }
   .tab-bar-right .split-horizontal-icon { display: none; }
 }
 .tab-bar-separator { flex: 0 0 auto; width: 1px; height: 16px; margin: 0 4px; background: #333; }
-.scene-tab-menu, .scene-overflow-menu { position: absolute; z-index: 9999; top: 35px; right: 76px; display: grid; min-width: 160px; padding: 6px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(35,35,40,.98); box-shadow: 0 12px 40px rgba(0,0,0,.6); }
-.scene-tab-menu button, .scene-overflow-menu button { padding: 8px 12px; border: 0; border-radius: 6px; color: #dfdfdf; background: transparent; text-align: left; }
-.scene-tab-menu button:hover, .scene-overflow-menu button:hover { background: rgba(255,255,255,.06); }
-.scene-overflow-menu button { display: flex; align-items: center; gap: 8px; }
-.tab-overflow-dot { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: #ff4524; }
-.tab-overflow-title { min-width: 0; overflow: hidden; color: rgba(255,255,255,.85); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.scene-tab-menu { position: absolute; z-index: 9999; top: 35px; right: 76px; display: grid; min-width: 160px; padding: 6px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(35,35,40,.98); box-shadow: 0 12px 40px rgba(0,0,0,.6); }
+.scene-tab-menu button { padding: 8px 12px; border: 0; border-radius: 6px; color: #dfdfdf; background: transparent; text-align: left; }
+.scene-tab-menu button:hover { background: rgba(255,255,255,.06); }
 
 .scene-stack.terminals-area { position: relative; z-index: 1; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; border-top: 1px solid var(--kooky-border); background: var(--kooky-terminal); }
 .scene-stage { width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--kooky-terminal); }
@@ -438,7 +433,6 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .tab-add-btn { background: #eff0f4; }
 .hierarchy-shell[data-theme="light"] .tab-close:hover,
 .hierarchy-shell[data-theme="light"] .tab-add-btn:hover,
-.hierarchy-shell[data-theme="light"] .tab-overflow-btn:hover,
 .hierarchy-shell[data-theme="light"] .toolbar-btn:hover,
 .hierarchy-shell[data-theme="light"] .pane-close:hover { color: #2f3547; background: rgba(0,0,0,.08); }
 .hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
@@ -520,17 +514,14 @@ button { -webkit-app-region: no-drag; }
 
 .light-theme .detach-context-menu,
 .light-theme .scene-tab-menu,
-.light-theme .scene-overflow-menu,
 .light-theme .workbench-action-popover,
 .light-theme .perm-menu { border-color: transparent; color: #2f3547; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.1); }
 .light-theme .detach-menu-item,
 .light-theme .scene-tab-menu button,
-.light-theme .scene-overflow-menu button,
 .light-theme .workbench-action-popover button,
 .light-theme .perm-menu button.perm-menu__item { color: #2f3547; }
 .light-theme .detach-menu-item:hover,
 .light-theme .scene-tab-menu button:hover,
-.light-theme .scene-overflow-menu button:hover,
 .light-theme .workbench-action-popover button:hover,
 .light-theme .perm-menu button.perm-menu__item:hover { background: #eceef3; }
 .light-theme .kooky-rename-dialog,

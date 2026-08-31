@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { SceneTabBar, type SceneCommands } from './SceneTabBar'
-import { SceneOverflowMenu } from './SceneOverflowMenu'
 import { SplitDivider } from './SplitDivider'
 import type { HierarchyProjection } from './hierarchy-types'
 
 afterEach(cleanup)
+beforeEach(() => { Element.prototype.scrollIntoView = vi.fn() })
 
 describe('Scene tabs and split actions', () => {
   it('creates a right-hand Shell sibling for the active terminal', async () => {
@@ -26,11 +26,10 @@ describe('Scene tabs and split actions', () => {
   })
 
   it('keeps the add-tab control beside the last visible tab like Kooky', () => {
-    const { container } = render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
+    render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
 
     const add = screen.getByRole('button', { name: '新建页签' })
     expect(add.parentElement?.classList.contains('tab-bar-left')).toBe(true)
-    expect(container.querySelector('.tab-bar-overflow-actions')).toBeNull()
   })
 
   it('keeps horizontal Shell creation and removes the unused file toolbar action', () => {
@@ -41,28 +40,25 @@ describe('Scene tabs and split actions', () => {
     expect(screen.queryByRole('button', { name: '文件' })).toBeNull()
   })
 
-  it('opens overflow and centers the selected Scene', async () => {
-    const user = userEvent.setup()
-    const scrollIntoView = vi.fn()
-    Element.prototype.scrollIntoView = scrollIntoView
-    render(<SceneTabBar projection={fixture(20)} commands={sceneCommands()} visibleLimit={6} />)
+  it('keeps every canvas and the add control in one horizontally scrollable strip like Kooky', () => {
+    const { container } = render(<SceneTabBar projection={fixture(20)} commands={sceneCommands()} />)
 
-    await user.click(screen.getByRole('button', { name: '更多页签' }))
-    await user.click(screen.getByRole('menuitem', { name: '页签 20' }))
-    expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: 'center' }))
+    expect(screen.getAllByRole('tab')).toHaveLength(20)
+    expect(screen.queryByRole('button', { name: '更多页签' })).toBeNull()
     expect(screen.getByRole('button', { name: '新建页签' }).parentElement?.classList
-      .contains('tab-bar-overflow-actions')).toBe(true)
+      .contains('tab-bar-left')).toBe(true)
+    expect(container.querySelector('.scene-tabs')?.classList.contains('tab-bar-left')).toBe(true)
   })
 
-  it('keeps the Kooky unread marker visible for a Scene inside the overflow menu', () => {
-    render(<SceneOverflowMenu
-      scenes={fixture(2).scenes}
-      hasUnread={(sceneId) => sceneId === 'scene-2'}
-      onSelect={vi.fn()}
-    />)
+  it('reveals the active canvas when switching reaches a tab beyond the viewport', () => {
+    const projection = fixture(20)
+    projection.navigation.sceneByTask['task-1'] = 'scene-20'
+    const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView)
 
-    expect(screen.getByRole('menuitem', { name: '页签 1' }).querySelector('.tab-overflow-dot')).toBeNull()
-    expect(screen.getByRole('menuitem', { name: '页签 2' }).querySelector('.tab-overflow-dot')).not.toBeNull()
+    render(<SceneTabBar projection={projection} commands={sceneCommands()} />)
+
+    expect(screen.getByRole('tab', { selected: true }).textContent).toContain('页签 20')
+    expect(scrollIntoView).toHaveBeenCalledWith({ inline: 'nearest', block: 'nearest' })
   })
 
   it('renames a Scene and blocks a duplicate pinned title', async () => {
