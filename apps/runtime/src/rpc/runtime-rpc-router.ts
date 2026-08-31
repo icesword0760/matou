@@ -175,23 +175,27 @@ export class RuntimeRpcRouter {
         limit: optionalInteger(input.limit, 100)
       })
       const scopeProviderSessionId = optionalText(input.providerSessionId, 'providerSessionId')
-      const sessions = result.sessions.filter(({ providerSessionId }) =>
-        this.#providerConversationAvailable(providerSessionId, sessionId) &&
-        (scopeProviderSessionId === undefined || providerSessionId === scopeProviderSessionId)
-      )
-      return { sessions, total: sessions.length }
+      const sessions = result.sessions
+        .filter(({ providerSessionId }) =>
+          scopeProviderSessionId === undefined || providerSessionId === scopeProviderSessionId)
+        .map((session) => ({
+          ...session,
+          ...this.#providerConversationUsage(session.providerSessionId, sessionId)
+        }))
+      return { sessions, total: scopeProviderSessionId === undefined ? result.total : sessions.length }
     }
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
       const sessionId = text(input.sessionId, 'sessionId')
       const providerSessionId = text(input.providerSessionId, 'providerSessionId')
-      if (!this.#providerConversationAvailable(providerSessionId, sessionId)) {
-        throw new RpcFault('CONFLICT', '该 Claude Code 会话正在另一张卡片中使用')
-      }
-      return this.#claudeSessions.detail({
+      const detail = await this.#claudeSessions.detail({
         cwd: this.#sessionCwd(sessionId), providerSessionId,
         query: optionalString(input.query)
       })
+      return {
+        ...detail,
+        ...this.#providerConversationUsage(providerSessionId, sessionId)
+      }
     }
 
     const envelope = record(payload)
@@ -201,7 +205,7 @@ export class RuntimeRpcRouter {
       case 'claude-sessions.load': {
         const sessionId = text(input.sessionId, 'sessionId')
         const providerSessionId = text(input.providerSessionId, 'providerSessionId')
-        if (!this.#providerConversationAvailable(providerSessionId, sessionId)) {
+        if (this.#providerConversationUsage(providerSessionId, sessionId).availability === 'loaded-elsewhere') {
           throw new RpcFault('CONFLICT', '该 Claude Code 会话正在另一张卡片中使用')
         }
         const detail = await this.#claudeSessions.detail({
@@ -776,25 +780,36 @@ export class RuntimeRpcRouter {
     return row.cwd
   }
 
-  #providerConversationAvailable(providerSessionId: string, targetSessionId: string): boolean {
+  #providerConversationUsage(providerSessionId: string, targetSessionId: string): {
+    availability: 'available' | 'loaded-here' | 'loaded-elsewhere'
+    loadedSessionId?: string
+    loadedSessionTitle?: string
+  } {
     const binding = this.#database.get<{
       session_id: string
+      title: string
       kind: SessionKind
       archived_at: number | null
       resume_state: string
       invalidated_at: number | null
     }>(
-      `SELECT binding.session_id, owner.kind, owner.archived_at,
+      `SELECT binding.session_id, owner.title, owner.kind, owner.archived_at,
               binding.resume_state, binding.invalidated_at
        FROM provider_bindings AS binding
        JOIN sessions AS owner ON owner.id = binding.session_id
        WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?`,
       providerSessionId
     )
-    if (!binding || binding.session_id === targetSessionId) return true
-    return binding.archived_at !== null || binding.kind !== 'claude-code' ||
+    if (!binding || binding.archived_at !== null || binding.kind !== 'claude-code' ||
       binding.invalidated_at !== null ||
-      !['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state)
+      !['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state)) {
+      return { availability: 'available' }
+    }
+    return {
+      availability: binding.session_id === targetSessionId ? 'loaded-here' : 'loaded-elsewhere',
+      loadedSessionId: binding.session_id,
+      loadedSessionTitle: binding.title
+    }
   }
 
   #snapshot(payload: unknown): unknown {

@@ -218,7 +218,8 @@ function summarize(transcript: ParsedTranscript, query: string): ClaudeSessionSu
     permissionMode: transcript.permissionMode,
     eventCount: transcript.events.length,
     matchCount: hits.length + (metadataMatch ? 1 : 0),
-    hits: hits.slice(0, 4)
+    hits: hits.slice(0, 4),
+    availability: 'available'
   }
 }
 

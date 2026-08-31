@@ -7,6 +7,11 @@ export type ClaudeSessionPermissionMode =
 
 export type ClaudeSessionEventKind = 'user' | 'assistant' | 'tool' | 'system'
 
+export type ClaudeSessionAvailability =
+  | 'available'
+  | 'loaded-here'
+  | 'loaded-elsewhere'
+
 export interface ClaudeSessionSearchHit {
   eventIndex: number
   kind: ClaudeSessionEventKind
@@ -23,6 +28,9 @@ export interface ClaudeSessionSummary {
   eventCount: number
   matchCount: number
   hits: ClaudeSessionSearchHit[]
+  availability: ClaudeSessionAvailability
+  loadedSessionId?: string
+  loadedSessionTitle?: string
 }
 
 export interface ClaudeSessionPreviewEvent {

@@ -75,6 +75,53 @@ describe('RuntimeRpcRouter', () => {
     })
   })
 
+  it('lists Claude history already loaded by another card instead of reporting an empty workspace', async () => {
+    const workspaceRoot = join(testRoot, 'occupied-workspace')
+    const projectsRoot = join(testRoot, 'claude-projects')
+    await mkdir(workspaceRoot)
+    const projectDirectory = join(projectsRoot, encodeClaudeProjectPath(workspaceRoot))
+    await mkdir(projectDirectory, { recursive: true })
+    await writeFile(join(projectDirectory, 'provider-occupied.jsonl'), JSON.stringify({
+      type: 'user', sessionId: 'provider-occupied', cwd: workspaceRoot,
+      timestamp: '2026-08-31T10:00:00.000Z', permissionMode: 'default',
+      message: { role: 'user', content: '继续已载入的会话' }
+    }))
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), { projectsRoot })
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('occupied-bootstrap', {
+      windowId: 'window-occupied', defaultRootDirectory: workspaceRoot,
+      defaultName: 'occupied-workspace', now: 1
+    })) as {
+      session: { id: string; taskId: string; executionContextId: string }
+    }
+    await router.handle('claude-sessions.load', payload('occupy-provider', {
+      sessionId: initial.session.id, providerSessionId: 'provider-occupied', now: 2
+    }))
+    await router.handle('session.create', payload('loader-target', {
+      id: 'loader-target', taskId: initial.session.taskId,
+      executionContextId: initial.session.executionContextId,
+      kind: 'shell', title: '目标 Shell', now: 3
+    }))
+
+    const list = await router.handle('claude-sessions.list', {
+      sessionId: 'loader-target', query: ''
+    }) as {
+      sessions: Array<{
+        providerSessionId: string
+        availability: string
+        loadedSessionTitle?: string
+      }>
+    }
+
+    expect(list.sessions).toEqual([expect.objectContaining({
+      providerSessionId: 'provider-occupied',
+      availability: 'loaded-elsewhere',
+      loadedSessionTitle: '继续已载入的会话'
+    })])
+    await expect(router.handle('claude-sessions.detail', {
+      sessionId: 'loader-target', providerSessionId: 'provider-occupied', query: ''
+    })).resolves.toMatchObject({ providerSessionId: 'provider-occupied' })
+  })
+
   it('routes Git status and branch mutations for the active repository', async () => {
     const repositoryRoot = join(testRoot, 'repository')
     await mkdir(repositoryRoot)

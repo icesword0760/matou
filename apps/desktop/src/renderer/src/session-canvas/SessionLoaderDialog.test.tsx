@@ -17,7 +17,8 @@ describe('SessionLoaderDialog', () => {
         providerSessionId: 'provider-1', title: '通知中心聚合', cwd: '/workspace',
         updatedAt: 10, model: 'claude-opus-4-6', permissionMode: 'bypassPermissions',
         eventCount: 2, matchCount: 1,
-        hits: [{ eventIndex: 2, kind: 'assistant', excerpt: '定位 hover width 动画' }]
+        hits: [{ eventIndex: 2, kind: 'assistant', excerpt: '定位 hover width 动画' }],
+        availability: 'available'
       }]
     }))
     const loadDetail = vi.fn(async (): Promise<ClaudeSessionDetail> => detail())
@@ -76,13 +77,33 @@ describe('SessionLoaderDialog', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('所选会话已在另一张卡片中使用')
     expect(screen.getByRole('dialog', { name: '载入 Claude Code 会话' })).toBeTruthy()
   })
+
+  it('shows a session loaded by another card while preventing a duplicate load', async () => {
+    const onLoad = vi.fn(async () => undefined)
+    const occupied = {
+      ...summary(),
+      availability: 'loaded-elsewhere' as const,
+      loadedSessionId: 'session-owner',
+      loadedSessionTitle: 'Claude 主会话'
+    }
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={async () => ({ total: 1, sessions: [occupied] })}
+      loadDetail={async () => ({ ...detail(), ...occupied })}
+      onLoad={onLoad} onCancel={() => undefined} />)
+
+    expect(await screen.findByText('已载入“Claude 主会话”')).toBeTruthy()
+    const loadButton = screen.getByRole('button', { name: '已在其他卡片中' })
+    expect((loadButton as HTMLButtonElement).disabled).toBe(true)
+    await userEvent.setup().click(loadButton)
+    expect(onLoad).not.toHaveBeenCalled()
+  })
 })
 
 function summary() {
   return {
     providerSessionId: 'provider-1', title: '通知中心聚合', cwd: '/workspace',
     updatedAt: 10, model: 'claude-opus-4-6', permissionMode: 'bypassPermissions' as const,
-    eventCount: 2, matchCount: 0, hits: []
+    eventCount: 2, matchCount: 0, hits: [], availability: 'available' as const
   }
 }
 

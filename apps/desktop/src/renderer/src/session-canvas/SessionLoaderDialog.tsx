@@ -104,6 +104,9 @@ export function SessionLoaderDialog(props: {
     () => detail?.events.filter(({ matched }) => matched) ?? [],
     [detail]
   )
+  const selectedSession = sessions.find(({ providerSessionId }) => providerSessionId === selectedId)
+  const selectedAvailability = selectedSession?.availability ?? detail?.availability ?? 'available'
+  const selectedLoadBlocked = selectedAvailability !== 'available'
   const jumpTo = (eventIndex: number) => {
     const matchIndex = matchedEvents.findIndex(({ index }) => index === eventIndex)
     if (matchIndex >= 0) setActiveMatch(matchIndex)
@@ -121,7 +124,7 @@ export function SessionLoaderDialog(props: {
     jumpTo(matchedEvents[next]!.index)
   }
   const submitLoad = async () => {
-    if (!selectedId || loadingSession) return
+    if (!selectedId || loadingSession || selectedLoadBlocked) return
     if (targetRunning && !confirmRunning) {
       setConfirmRunning(true)
       return
@@ -164,7 +167,7 @@ export function SessionLoaderDialog(props: {
             {query && <button type="button" aria-label="清除搜索" onClick={() => setQuery('')}>×</button>}
           </label>
           <div className="session-loader-list-meta">
-            <span>{loadingList ? '正在查找…' : `${sessions.length} 个可恢复会话`}</span>
+            <span>{loadingList ? '正在查找…' : `${sessions.length} 个会话`}</span>
             <button type="button" className="session-loader-scope" onClick={() => {
               if (scope === 'all' && selectedId) {
                 setCurrentScopeId(selectedId)
@@ -183,6 +186,9 @@ export function SessionLoaderDialog(props: {
                 <strong>{session.title}</strong>
                 <span>{relativeTime(session.updatedAt)} · {session.model ?? 'Claude Code'}</span>
                 <small>{permissionLabel(session.permissionMode)} · {session.eventCount} 条内容</small>
+                {session.availability === 'loaded-here' && <small>已载入当前卡片</small>}
+                {session.availability === 'loaded-elsewhere' &&
+                  <small>已载入“{session.loadedSessionTitle ?? '其他卡片'}”</small>}
               </button>
               {session.hits.map((hit) => <button type="button" className="session-loader-hit"
                 key={`${session.providerSessionId}:${hit.eventIndex}`}
@@ -196,7 +202,7 @@ export function SessionLoaderDialog(props: {
                 }}>{hit.excerpt}</button>)}
             </article>)}
             {!loadingList && sessions.length === 0 && <div className="session-loader-empty">
-              {effectiveQuery ? '当前工作空间内没有匹配内容' : '当前工作空间内没有可恢复的 Claude Code 会话'}
+              {effectiveQuery ? '当前工作空间内没有匹配内容' : '当前工作空间内没有 Claude Code 会话'}
             </div>}
           </div>
         </aside>
@@ -232,9 +238,16 @@ export function SessionLoaderDialog(props: {
           {confirmRunning && <span className="session-loader-confirm">当前卡片正在运行，继续会结束当前进程。</span>}
         </div>
         <button type="button" onClick={onCancel}>取消</button>
-        <button type="button" className="primary" disabled={!selectedId || loadingSession}
+        <button type="button" className="primary"
+          disabled={!selectedId || loadingSession || selectedLoadBlocked}
           onClick={() => void submitLoad()}>
-          {loadingSession ? '正在载入…' : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
+          {loadingSession
+            ? '正在载入…'
+            : selectedAvailability === 'loaded-here'
+              ? '已载入当前卡片'
+              : selectedAvailability === 'loaded-elsewhere'
+                ? '已在其他卡片中'
+                : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
         </button>
       </footer>
     </section>
