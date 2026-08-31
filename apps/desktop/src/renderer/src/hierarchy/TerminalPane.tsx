@@ -70,6 +70,7 @@ export function TerminalPane(props: {
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
   const [removalOpen, setRemovalOpen] = useState(false)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('waiting-for-port')
   const [runtimeError, setRuntimeError] = useState('')
@@ -119,6 +120,25 @@ export function TerminalPane(props: {
   useEffect(() => {
     if (canFork) setForkReadinessHint(false)
   }, [canFork])
+  useEffect(() => {
+    if (!contextMenu) return
+    const closeOutside = (event: Event) => {
+      const target = event.target
+      if (target instanceof Node && contextMenuRef.current?.contains(target)) return
+      setContextMenu(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setContextMenu(null)
+    }
+    window.addEventListener('pointerdown', closeOutside, true)
+    window.addEventListener('contextmenu', closeOutside, true)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeOutside, true)
+      window.removeEventListener('contextmenu', closeOutside, true)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [contextMenu])
   const hasNotification = notificationStore.sessionHasVisibleIndicator(session.id)
   const isTeamMember = session.kind === 'agent-team-member'
   // A sibling Fork resumes the common Claude parent, not this card. The
@@ -293,7 +313,7 @@ export function TerminalPane(props: {
     {contextMenu && createPortal(<>
       <div className="detach-context-overlay" onClick={() => setContextMenu(null)}
         onContextMenu={(event) => { event.preventDefault(); setContextMenu(null) }} />
-      <div className="detach-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}
+      <div ref={contextMenuRef} className="detach-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}
         onClick={(event) => event.stopPropagation()}>
         {canFork && <button className="detach-menu-item" role="menuitem" onClick={() => {
           setContextMenu(null)

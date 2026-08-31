@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -133,6 +133,18 @@ describe('Terminal pane', () => {
 
     expect(screen.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeTruthy()
+  })
+
+  it('dismisses pane actions on a pointer press anywhere outside the menu', async () => {
+    const user = userEvent.setup()
+    render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
+    expect(screen.getByRole('menu')).toBeTruthy()
+
+    fireEvent.pointerDown(document.body)
+
+    expect(screen.queryByRole('menu')).toBeNull()
   })
 
   it.each([
