@@ -489,4 +489,84 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('activates a far-right preview without width or position reversals', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      for (let index = 0; index < 2; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const cards = fixture.page.locator('.session-card')
+      await expect(cards).toHaveCount(3)
+      const first = cards.first()
+      const target = cards.last()
+      await first.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
+      await expect(first).toHaveClass(/is-focused/)
+      await fixture.page.mouse.move(2, 2)
+      await fixture.page.waitForTimeout(520)
+
+      const targetBox = await target.boundingBox()
+      const carouselBox = await fixture.page.getByRole('region', { name: '同级会话列表' }).boundingBox()
+      expect(targetBox).not.toBeNull()
+      expect(carouselBox).not.toBeNull()
+      const clickPoint = {
+        x: Math.min(targetBox!.x + 30, carouselBox!.x + carouselBox!.width - 20),
+        y: targetBox!.y + 80
+      }
+      const samplesPromise = target.evaluate(async (element) => {
+        const viewport = element.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        const source = viewport.querySelector<HTMLElement>('.session-card.is-focused')!
+        const samples: Array<{
+          targetWidth: number
+          targetLeft: number
+          sourceWidth: number
+          scrollLeft: number
+          targetFocused: boolean
+        }> = []
+        const started = performance.now()
+        while (performance.now() - started < 760) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          const targetRect = element.getBoundingClientRect()
+          samples.push({
+            targetWidth: targetRect.width,
+            targetLeft: targetRect.left,
+            sourceWidth: source.getBoundingClientRect().width,
+            scrollLeft: viewport.scrollLeft,
+            targetFocused: element.classList.contains('is-focused')
+          })
+        }
+        return samples
+      })
+      await fixture.page.mouse.move(clickPoint.x, clickPoint.y)
+      await fixture.page.mouse.down()
+      await fixture.page.mouse.up()
+      const samples = await samplesPromise
+      await expect(target).toHaveClass(/is-focused/)
+
+      expect(directionReversals(samples.map(({ targetWidth }) => targetWidth), 1)).toBe(0)
+      expect(directionReversals(samples.map(({ targetLeft }) => targetLeft), 1)).toBe(0)
+      expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
+        Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(12)
+      const focusedAt = samples.findIndex(({ targetFocused }) => targetFocused)
+      expect(focusedAt).toBeGreaterThanOrEqual(0)
+      expect(directionReversals(samples.slice(focusedAt).map(({ sourceWidth }) => sourceWidth), 1))
+        .toBe(0)
+    } finally {
+      await fixture.close()
+    }
+  })
 })
+
+function directionReversals(values: number[], tolerance: number): number {
+  let direction = 0
+  let reversals = 0
+  for (let index = 1; index < values.length; index += 1) {
+    const delta = values[index]! - values[index - 1]!
+    const nextDirection = delta > tolerance ? 1 : delta < -tolerance ? -1 : 0
+    if (nextDirection === 0) continue
+    if (direction !== 0 && nextDirection !== direction) reversals += 1
+    direction = nextDirection
+  }
+  return reversals
+}

@@ -54,11 +54,40 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('does not replay refreshed persisted geometry over the live viewport', () => {
+    vi.useFakeTimers()
+    const nodes = fixtures(5)
+    const view = render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      geometryKey="session-group:scene:root" initialScrollLeft={120}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    expect(viewport.scrollLeft).toBe(120)
+
+    viewport.scrollLeft = 360
+    view.rerender(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      geometryKey="session-group:scene:root" initialScrollLeft={40}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(viewport.scrollLeft).toBe(360)
+    vi.useRealTimers()
+  })
+
   it('reduces visible columns before terminal cards become unreadable in a narrow window', () => {
     expect(visibleColumnsForWidth(7, 1440)).toBe(4)
     expect(visibleColumnsForWidth(7, 900)).toBe(3)
     expect(visibleColumnsForWidth(7, 700)).toBe(2)
     expect(visibleColumnsForWidth(7, 420)).toBe(1)
+  })
+
+  it('keeps the Mockup four-column density when a wide level has only two Sessions', () => {
+    expect(visibleColumnsForWidth(2, 1440)).toBe(4)
   })
 
   it('shows at most four cards in the viewport while retaining every stable Session card', () => {

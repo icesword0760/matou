@@ -169,7 +169,14 @@ export function SessionCarousel(props: {
     return () => {
       cancelAnimationFrame(frame)
     }
-  }, [geometryKey, initialAnchor?.sessionId, initialAnchor?.viewportOffset, initialScrollLeft, visibleCount])
+    // Persisted geometry is an entry/resize seed, not a live controller. A
+    // Runtime projection refresh may contain an older checkpoint while the
+    // user is activating another card; replaying that prop update makes the
+    // strip jump backward before focus navigation moves it forward again.
+    // Re-entering a level or changing responsive column capacity are the only
+    // events that should restore the viewport.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [geometryKey, visibleCount])
 
   useLayoutEffect(() => {
     const next = new Map<string, number>()
@@ -695,9 +702,12 @@ function reducedMotion(): boolean {
   return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
-export function visibleColumnsForWidth(nodeCount: number, width: number): number {
+export function visibleColumnsForWidth(_nodeCount: number, width: number): number {
   const available = width > 0 ? Math.floor((width + 12) / (280 + 12)) : 4
-  return Math.min(4, Math.max(1, nodeCount, 1), Math.max(1, available))
+  // The Mockup defines a stable four-column grid. A level with only one or
+  // two Sessions still keeps inactive cards compact instead of stretching
+  // every item to fill the row and making them look selected.
+  return Math.min(4, Math.max(1, available))
 }
 
 function compactStatus(status: SessionGraphNodeView['workStatus']): string {

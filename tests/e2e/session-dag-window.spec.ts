@@ -40,6 +40,37 @@ test.describe('native session DAG window', () => {
     }
   })
 
+  test('returns from DAG with only the selected Session expanded', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+      await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+      const dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
+      await dag.getByRole('button', { name: /^打开会话：/ }).first().click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
+      await fixture.page.mouse.move(2, 2)
+      await fixture.page.waitForTimeout(500)
+
+      const slots = fixture.page.locator('.session-card-slot')
+      await expect(slots).toHaveCount(2)
+      await expect(slots.filter({ has: fixture.page.locator('.session-card.is-focused') })).toHaveCount(1)
+      const widths = await slots.evaluateAll((elements) => elements.map((element) => ({
+        focused: element.classList.contains('is-focused'),
+        expanded: element.classList.contains('is-expanded'),
+        width: element.getBoundingClientRect().width
+      })))
+      const selected = widths.find(({ focused }) => focused)!
+      const inactive = widths.find(({ focused }) => !focused)!
+      expect(widths.filter(({ expanded }) => expanded)).toHaveLength(1)
+      expect(inactive.width).toBeLessThan(selected.width * 0.75)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('opens on a long Option Tab hold while a short hold remains terminal input', async () => {
     const fixture = await launchSessionCanvas()
     try {
@@ -104,9 +135,14 @@ test.describe('native session DAG window', () => {
       )
       await expect(stableTarget.locator('.xterm-rows')).toContainText('DAG_FAR_NODE_UNIQUE_830')
 
-      const carousel = fixture.page.getByRole('region', { name: '会话画布' })
-      await carousel.evaluate((element) => { element.scrollLeft = element.scrollWidth })
-      await expect(target).not.toBeInViewport()
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await carousel.evaluate((element, sessionId) => {
+        const slot = element.querySelector<HTMLElement>(`[data-session-id="${sessionId}"]`)!
+        const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth)
+        const targetCenter = slot.offsetLeft + slot.offsetWidth / 2
+        element.scrollLeft = targetCenter < element.scrollWidth / 2 ? maxScrollLeft : 0
+      }, targetSessionId)
+      await expect(stableTarget).not.toBeInViewport()
       await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
       const dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
