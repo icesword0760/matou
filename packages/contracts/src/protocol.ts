@@ -144,6 +144,14 @@ export const RPC_METHODS = [
   'scene.archive',
   'geometry.put',
   'geometry.list',
+  'git.status',
+  'git.checkout',
+  'git.create-branch',
+  'git.commit',
+  'git.push',
+  'git.worktree-create',
+  'git.worktree-open',
+  'git.worktree-remove',
   'events.replay',
   'events.ack'
 ] as const
