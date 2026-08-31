@@ -504,6 +504,11 @@ export class RuntimeServer {
             persisted: false
           }
         : await this.#router.handle(message.method, message.payload)
+      if (isGitMutation(message.method)) {
+        await Promise.all([...this.#attachedSessionIds].map((sessionId) =>
+          this.refreshSessionHud(sessionId)
+        ))
+      }
       await this.#applyHudRpc(message.method, message.payload, beforeHud?.permissionMode)
       const sessionHuds = this.#hud.snapshots()
       if (message.method === 'projection.snapshot') result = withSessionHuds(result, sessionHuds)
@@ -1844,6 +1849,13 @@ async function gitEnvironment(cwd: string): Promise<{ gitBranch: string; gitDirt
   } catch {
     return undefined
   }
+}
+
+function isGitMutation(method: string): boolean {
+  return method === 'git.checkout' || method === 'git.create-branch' ||
+    method === 'git.commit' || method === 'git.push' ||
+    method === 'git.worktree-create' || method === 'git.worktree-open' ||
+    method === 'git.worktree-remove'
 }
 
 export function terminalSummaryLines(raw: string): string[] {

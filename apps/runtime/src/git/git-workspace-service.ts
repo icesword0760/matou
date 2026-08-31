@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { realpath } from 'node:fs/promises'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import type {
@@ -8,11 +10,30 @@ import type {
   GitRepositoryStatus,
   GitWorktreeSummary
 } from '@matou/contracts'
+import type { DomainCommandMetadata } from '@matou/domain'
+
+import type { RuntimeDatabase } from '../storage/database'
+import { DomainTransactionManager } from '../storage/domain-transaction'
+import { WorktreeService } from '../worktrees/worktree-service'
 
 const exec = promisify(execFile)
 const MAX_GIT_OUTPUT = 8 * 1024 * 1024
 
 export class GitWorkspaceService {
+  readonly #database: RuntimeDatabase | undefined
+  readonly #dataRoot: string | undefined
+  readonly #worktreeService: WorktreeService | undefined
+
+  constructor(options: { database?: RuntimeDatabase; dataRoot?: string } = {}) {
+    this.#database = options.database
+    this.#dataRoot = options.dataRoot ? resolve(options.dataRoot) : undefined
+    this.#worktreeService = options.database
+      ? new WorktreeService(options.database, new DomainTransactionManager(options.database), {
+          stopRuns: async () => undefined
+        })
+      : undefined
+  }
+
   async status(cwd: string): Promise<GitRepositoryStatus> {
     const repositoryRoot = (await git(cwd, ['rev-parse', '--show-toplevel'])).trim()
     const actualCwd = await realpath(cwd).catch(() => cwd)
@@ -106,6 +127,77 @@ export class GitWorkspaceService {
     return this.status(cwd)
   }
 
+  async createWorktree(
+    command: DomainCommandMetadata,
+    input: {
+      workspaceId: string
+      repositoryRoot: string
+      branch: string
+      baseRef: string
+      now: number
+    }
+  ): Promise<GitRepositoryStatus> {
+    const worktrees = this.#requireWorktrees()
+    const dataRoot = this.#requireDataRoot()
+    const id = randomUUID()
+    const repositoryRoot = (await git(input.repositoryRoot, ['rev-parse', '--show-toplevel'])).trim()
+    await worktrees.create(command, {
+      id,
+      executionContextId: randomUUID(),
+      workspaceId: input.workspaceId,
+      repositoryRoot,
+      path: join(dataRoot, 'worktrees', input.workspaceId, id),
+      branch: requiredBranch(input.branch),
+      baseRef: input.baseRef.trim() || 'HEAD',
+      setupPolicy: [],
+      now: input.now
+    })
+    return this.status(repositoryRoot)
+  }
+
+  async ensureWorktreeContext(
+    command: DomainCommandMetadata,
+    input: {
+      workspaceId: string
+      repositoryRoot: string
+      path: string
+      branch: string
+      now: number
+    }
+  ): Promise<{ worktreeId: string; executionContextId: string }> {
+    const worktrees = this.#requireWorktrees()
+    const path = await realpath(input.path)
+    const existing = worktrees.getByPath(path)
+    if (existing) return {
+      worktreeId: existing.id, executionContextId: existing.executionContextId
+    }
+    const registered = await worktrees.registerExisting(command, {
+      id: randomUUID(), executionContextId: randomUUID(),
+      workspaceId: input.workspaceId,
+      repositoryRoot: (await git(input.repositoryRoot, ['rev-parse', '--show-toplevel'])).trim(),
+      path, branch: requiredBranch(input.branch), now: input.now
+    })
+    return { worktreeId: registered.id, executionContextId: registered.executionContextId }
+  }
+
+  async removeWorktree(
+    command: DomainCommandMetadata,
+    input: { worktreeId: string; now: number }
+  ): Promise<GitRepositoryStatus> {
+    const database = this.#requireDatabase()
+    const worktrees = this.#requireWorktrees()
+    const worktree = worktrees.get(input.worktreeId)
+    if (!worktree) throw new Error(`Worktree ${input.worktreeId} does not exist`)
+    const sessionCount = database.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM sessions
+       WHERE execution_context_id = ? AND archived_at IS NULL`,
+      worktree.executionContextId
+    )?.count ?? 0
+    if (sessionCount > 0) throw new Error(`该 Worktree 仍有关联会话（${sessionCount}）`)
+    await worktrees.remove(command, worktree.id, input.now)
+    return this.status(worktree.repositoryRoot)
+  }
+
   async #branches(
     repositoryRoot: string,
     currentBranch: string | undefined,
@@ -135,11 +227,31 @@ export class GitWorkspaceService {
     output: string
   ): Promise<GitWorktreeSummary[]> {
     const parsed = parseWorktreePorcelain(output)
+    const rows = this.#database?.all<{
+      id: string; execution_context_id: string; worktree_path: string; state: string
+    }>(
+      `SELECT id, execution_context_id, worktree_path, state FROM worktrees
+       WHERE repository_root = ? AND state <> 'removed'`, repositoryRoot
+    ) ?? []
+    const rowByPath = new Map<string, typeof rows[number]>()
+    for (const row of rows) {
+      rowByPath.set(await realpath(row.worktree_path).catch(() => row.worktree_path), row)
+    }
+    const managedRoot = this.#dataRoot
+      ? await realpath(join(this.#dataRoot, 'worktrees')).catch(() => join(this.#dataRoot!, 'worktrees'))
+      : undefined
     return Promise.all(parsed.map(async (entry, index) => {
       const path = await realpath(entry.path).catch(() => entry.path)
+      const row = rowByPath.get(path)
       const dirty = (await optionalGit(path, [
         'status', '--porcelain=v1', '--untracked-files=normal'
       ]))?.trim().length !== 0
+      const sessionCount = row && this.#database
+        ? this.#database.get<{ count: number }>(
+            `SELECT COUNT(*) AS count FROM sessions
+             WHERE execution_context_id = ? AND archived_at IS NULL`, row.execution_context_id
+          )?.count ?? 0
+        : 0
       return {
         path,
         branch: entry.branch,
@@ -147,10 +259,26 @@ export class GitWorkspaceService {
         current: actualCwd === path || actualCwd.startsWith(`${path}/`),
         main: index === 0 || path === repositoryRoot,
         dirty,
-        managed: false,
-        sessionCount: 0
+        managed: Boolean(row && managedRoot && pathWithin(managedRoot, path)),
+        sessionCount,
+        ...(row ? { worktreeId: row.id } : {})
       }
     }))
+  }
+
+  #requireDatabase(): RuntimeDatabase {
+    if (!this.#database) throw new Error('Git Worktree persistence is not configured')
+    return this.#database
+  }
+
+  #requireDataRoot(): string {
+    if (!this.#dataRoot) throw new Error('Git Worktree data root is not configured')
+    return this.#dataRoot
+  }
+
+  #requireWorktrees(): WorktreeService {
+    if (!this.#worktreeService) throw new Error('Git Worktree persistence is not configured')
+    return this.#worktreeService
   }
 }
 
@@ -280,4 +408,9 @@ function checkoutConflictPaths(output: string): string[] {
   const match = output.match(/would be overwritten by checkout:\s*([\s\S]*?)(?:Please commit|Please move|Aborting|$)/i)
   if (!match?.[1]) return []
   return match[1].split('\n').map((line) => line.trim()).filter(Boolean)
+}
+
+function pathWithin(parent: string, child: string): boolean {
+  const difference = relative(parent, child)
+  return difference === '' || (!difference.startsWith('..') && !isAbsolute(difference))
 }

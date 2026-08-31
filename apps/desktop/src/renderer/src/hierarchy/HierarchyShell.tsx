@@ -636,7 +636,10 @@ function HierarchyProduct({ projection, commands }: {
                         )
                       } : {})} />}
                     <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
-                      onModel={commands.setModel} />
+                      onModel={commands.setModel}
+                      {...(activeSceneId ? {
+                        gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
+                      } : {})} />
                   </div>
                 </section>
               </div>

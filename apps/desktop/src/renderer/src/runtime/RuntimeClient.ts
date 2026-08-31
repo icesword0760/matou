@@ -63,9 +63,14 @@ export class RuntimeClient {
     this.#bindPort(port)
   }
 
-  async request<T = unknown>(method: RpcMethod, payload: unknown): Promise<T> {
+  async request<T = unknown>(
+    method: RpcMethod,
+    payload: unknown,
+    options: { timeoutMs?: number } = {}
+  ): Promise<T> {
     await this.whenReady()
     const requestId = crypto.randomUUID()
+    const timeoutMs = options.timeoutMs ?? this.#requestTimeoutMs
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#requests.delete(requestId)
@@ -73,14 +78,14 @@ export class RuntimeClient {
           type: 'rpc.cancel', protocolVersion: PROTOCOL_VERSION, requestId
         })
         reject(new Error(`Runtime request ${method} timed out`))
-      }, this.#requestTimeoutMs)
+      }, timeoutMs)
       this.#requests.set(requestId, {
         resolve: (value) => resolve(value as T), reject, timeout
       })
       this.#post({
         type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
         requestId, method, capability: 'renderer',
-        deadlineAt: Date.now() + this.#requestTimeoutMs, payload
+        deadlineAt: Date.now() + timeoutMs, payload
       })
     })
   }

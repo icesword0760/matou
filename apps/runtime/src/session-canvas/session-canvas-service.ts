@@ -73,6 +73,7 @@ export interface CreateShellSiblingInput {
   sceneId: string
   sourceSessionId: string
   parentSessionId?: string
+  executionContextId?: string
   now: number
 }
 
@@ -245,6 +246,13 @@ export class SessionCanvasService {
            AND (sessions.archived_at IS NULL OR ? IS NOT NULL)`,
         input.sourceSessionId, input.sceneId, input.parentSessionId ?? null
       ), 'Session')
+      const executionContext = input.executionContextId
+        ? requireRow(tx.get<{ id: string; cwd: string }>(
+            `SELECT id, cwd FROM execution_contexts
+             WHERE id = ? AND workspace_id = ? AND archived_at IS NULL`,
+            input.executionContextId, task.workspace_id
+          ), 'ExecutionContext')
+        : { id: source.execution_context_id, cwd: source.cwd }
       const sourceMount = requireRow(tx.get<SourceMountRow>(
         `SELECT mounts.id, mounts.scene_node_id, mounts.scene_window_id
          FROM session_mounts AS mounts
@@ -299,7 +307,7 @@ export class SessionCanvasService {
            id, task_id, execution_context_id, kind, status, title, cwd,
            created_at, updated_at, last_activity_at, version
          ) VALUES (?, ?, ?, 'shell', 'created', 'Shell', ?, ?, ?, ?, 1)`,
-        ids.sessionId, task.id, source.execution_context_id, source.cwd,
+        ids.sessionId, task.id, executionContext.id, executionContext.cwd,
         input.now, input.now, input.now
       )
       tx.run(

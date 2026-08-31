@@ -6,6 +6,11 @@ import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { WorkspaceTaskRepository } from '../domain/workspace-task-repository'
+import { RuntimeDatabase } from '../storage/database'
+import { DomainTransactionManager } from '../storage/domain-transaction'
+import { MigrationRunner } from '../storage/migration-runner'
+import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { GitWorkspaceService } from './git-workspace-service'
 
 const exec = promisify(execFile)
@@ -150,3 +155,122 @@ describe('GitWorkspaceService commit and push', () => {
       .toBe((await exec('git', ['-C', repository, 'rev-parse', 'HEAD'])).stdout.trim())
   })
 })
+
+describe('GitWorkspaceService worktrees', () => {
+  it('creates a managed Worktree and merges its Matou session count into Git discovery', async () => {
+    const database = await openDatabase()
+    try {
+      const managed = new GitWorkspaceService({ database, dataRoot: root })
+
+      const status = await managed.createWorktree(command('create-worktree'), {
+        workspaceId: 'workspace-1', repositoryRoot: repository,
+        branch: 'feature/managed', baseRef: 'HEAD', now: 10
+      })
+      const created = status.worktrees.find(({ branch }) => branch === 'feature/managed')
+      expect(created).toMatchObject({ managed: true, dirty: false, sessionCount: 0 })
+      expect(created?.path).toContain(join(root, 'worktrees', 'workspace-1'))
+
+      seedSession(database, created!.worktreeId!, created!.path)
+      const refreshed = await managed.status(repository)
+      expect(refreshed.worktrees.find(({ branch }) => branch === 'feature/managed'))
+        .toMatchObject({ managed: true, sessionCount: 1 })
+    } finally {
+      database.close()
+    }
+  })
+
+  it('registers an existing external Worktree for a session without making it Matou-removable', async () => {
+    const database = await openDatabase()
+    try {
+      const externalPath = join(root, 'external-worktree')
+      await exec('git', [
+        '-C', repository, 'worktree', 'add', '-b', 'feature/external', externalPath, 'HEAD'
+      ])
+      const managed = new GitWorkspaceService({ database, dataRoot: root })
+
+      const context = await managed.ensureWorktreeContext(command('register-external'), {
+        workspaceId: 'workspace-1', repositoryRoot: repository,
+        path: externalPath, branch: 'feature/external', now: 20
+      })
+      const second = await managed.ensureWorktreeContext(command('register-external-again'), {
+        workspaceId: 'workspace-1', repositoryRoot: repository,
+        path: externalPath, branch: 'feature/external', now: 21
+      })
+
+      expect(second).toEqual(context)
+      expect(database.get('SELECT kind, cwd FROM execution_contexts WHERE id = ?', context.executionContextId))
+        .toEqual({ kind: 'git-worktree', cwd: await realpath(externalPath) })
+      expect((await managed.status(repository)).worktrees.find(({ branch }) => branch === 'feature/external'))
+        .toMatchObject({ managed: false })
+    } finally {
+      database.close()
+    }
+  })
+
+  it('keeps a managed Worktree when it is dirty or still has sessions', async () => {
+    const database = await openDatabase()
+    try {
+      const managed = new GitWorkspaceService({ database, dataRoot: root })
+      let status = await managed.createWorktree(command('create-retained'), {
+        workspaceId: 'workspace-1', repositoryRoot: repository,
+        branch: 'feature/retained', baseRef: 'HEAD', now: 10
+      })
+      const created = status.worktrees.find(({ branch }) => branch === 'feature/retained')!
+      seedSession(database, created.worktreeId!, created.path)
+
+      await expect(managed.removeWorktree(command('remove-with-session'), {
+        worktreeId: created.worktreeId!, now: 30
+      })).rejects.toThrow('仍有关联会话')
+
+      database.run('UPDATE sessions SET archived_at = 31, status = ? WHERE id = ?', 'archived', 'session-worktree')
+      await writeFile(join(created.path, 'local.txt'), 'keep\n')
+      status = await managed.removeWorktree(command('remove-dirty'), {
+        worktreeId: created.worktreeId!, now: 32
+      })
+
+      expect(status.worktrees.find(({ branch }) => branch === 'feature/retained')).toMatchObject({
+        managed: true, dirty: true
+      })
+      expect(database.get('SELECT state FROM worktrees WHERE id = ?', created.worktreeId!))
+        .toEqual({ state: 'retained' })
+    } finally {
+      database.close()
+    }
+  })
+})
+
+async function openDatabase(): Promise<RuntimeDatabase> {
+  const database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
+  await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+  const transactions = new DomainTransactionManager(database)
+  new WorkspaceTaskRepository(database, transactions).createWorkspace(command('workspace'), {
+    id: 'workspace-1', name: 'Workspace', rootDirectory: repository, now: 1
+  })
+  return database
+}
+
+function seedSession(database: RuntimeDatabase, worktreeId: string, path: string): void {
+  const worktree = database.get<{ execution_context_id: string }>(
+    'SELECT execution_context_id FROM worktrees WHERE id = ?', worktreeId
+  )!
+  database.transaction((tx) => {
+    tx.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, sort_key,
+         created_at, updated_at, last_opened_at, version
+       ) VALUES (?, ?, ?, ?, 'active', 'a', 1, 1, 1, 1)`,
+      'task-worktree', 'workspace-1', worktree.execution_context_id, 'Worktree'
+    )
+    tx.run(
+      `INSERT INTO sessions (
+         id, task_id, execution_context_id, kind, status, title, cwd,
+         created_at, updated_at, last_activity_at, version
+       ) VALUES (?, ?, ?, 'shell', 'running', 'Shell', ?, 1, 1, 1, 1)`,
+      'session-worktree', 'task-worktree', worktree.execution_context_id, path
+    )
+  })
+}
+
+function command(commandId: string) {
+  return { commandId, commandType: 'git-workspace', requestHash: `hash-${commandId}` }
+}

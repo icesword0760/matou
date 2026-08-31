@@ -215,6 +215,60 @@ export class WorktreeService {
     const row = this.#database.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', id)
     return row ? mapWorktree(row) : undefined
   }
+
+  async registerExisting(
+    command: DomainCommandMetadata,
+    input: {
+      id: string
+      executionContextId: string
+      workspaceId: string
+      repositoryRoot: string
+      path: string
+      branch: string
+      now: number
+    }
+  ): Promise<Worktree> {
+    const existing = this.#database.get<WorktreeRow>(
+      `SELECT * FROM worktrees WHERE worktree_path = ? AND state <> 'removed'`, input.path
+    )
+    if (existing) return mapWorktree(existing)
+    if (!(await pathIsGitWorktree(input.path))) {
+      throw new Error(`Worktree path does not exist: ${input.path}`)
+    }
+    const baseRevision = (await exec('git', ['-C', input.path, 'rev-parse', 'HEAD'])).stdout.trim()
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      if (!tx.get('SELECT id FROM workspaces WHERE id = ? AND archived_at IS NULL', input.workspaceId)) {
+        throw new Error(`Workspace ${input.workspaceId} does not exist`)
+      }
+      tx.run(
+        `INSERT INTO execution_contexts (
+           id, workspace_id, kind, cwd, created_at
+         ) VALUES (?, ?, 'git-worktree', ?, ?)`,
+        input.executionContextId, input.workspaceId, input.path, input.now
+      )
+      tx.run(
+        `INSERT INTO worktrees (
+           id, execution_context_id, repository_root, worktree_path, branch_name,
+           base_ref, base_revision, state, setup_policy_json, setup_result_json,
+           cleanup_policy, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', '[]', '[]', 'retain-dirty', ?, ?)`,
+        input.id, input.executionContextId, input.repositoryRoot, input.path, input.branch,
+        baseRevision, baseRevision, input.now, input.now
+      )
+      const registered = requireWorktreeRow(tx.get<WorktreeRow>(
+        'SELECT * FROM worktrees WHERE id = ?', input.id
+      ))
+      emitWorktree(emit, command.commandId, 'worktree.registered', registered, input.workspaceId, input.now)
+      return mapWorktree(registered)
+    }).result
+  }
+
+  getByPath(path: string): Worktree | undefined {
+    const row = this.#database.get<WorktreeRow>(
+      `SELECT * FROM worktrees WHERE worktree_path = ? AND state <> 'removed'`, path
+    )
+    return row ? mapWorktree(row) : undefined
+  }
 }
 
 function emitWorktree(
