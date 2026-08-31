@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" href="data:," />
-  <title>Matou · 会话分支交互 Mockup</title>
+  <title>Matou · 会话载入与分支交互 Mockup</title>
   <style>
     :root {
       color-scheme: light;
@@ -228,7 +228,7 @@
     .icon-btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
     .branch-create { color: #4f6d94; }
-    .branch-create::after, .split-create::after {
+    .branch-create::after, .split-create::after, .load-session::after {
       content: attr(data-tip);
       position: absolute;
       top: 38px;
@@ -246,7 +246,8 @@
       transform: translateY(-3px);
       transition: .15s ease;
     }
-    .branch-create:hover::after, .split-create:hover::after { opacity: 1; transform: translateY(0); }
+    .branch-create:hover::after, .split-create:hover::after, .load-session:hover::after { opacity: 1; transform: translateY(0); }
+    .load-session { color: #45668f; }
 
     .branch-badge {
       display: inline-flex;
@@ -520,6 +521,239 @@
     .btn:hover { background: #f2f4f7; }
     .btn.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
     .btn.primary:hover { background: #0969df; }
+
+    .session-manager-backdrop {
+      position: fixed;
+      z-index: 58;
+      top: 58px;
+      right: 0;
+      bottom: 0;
+      left: 410px;
+      display: grid;
+      place-items: center;
+      padding: 28px;
+      background: rgba(31, 38, 48, .30);
+      backdrop-filter: blur(6px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .18s ease;
+    }
+    .session-manager-backdrop.open { opacity: 1; pointer-events: auto; }
+    .session-manager {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto auto;
+      width: min(1120px, calc(100vw - 474px));
+      height: min(760px, calc(100vh - 116px));
+      min-height: 560px;
+      overflow: hidden;
+      border: 1px solid rgba(201, 208, 218, .98);
+      border-radius: 18px;
+      background: #fff;
+      box-shadow: 0 28px 90px rgba(25, 34, 48, .25);
+      transform: translateY(10px) scale(.985);
+      transition: transform .22s cubic-bezier(.2,.8,.2,1);
+    }
+    .session-manager-backdrop.open .session-manager { transform: none; }
+    .session-manager-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+      padding: 17px 18px;
+      border-bottom: 1px solid #e2e6eb;
+      background: rgba(255,255,255,.98);
+    }
+    .session-manager-title { min-width: 0; }
+    .session-manager-title h2 { margin: 0 0 3px; font-size: 17px; letter-spacing: -.02em; }
+    .session-manager-title p { margin: 0; overflow: hidden; color: #7b8490; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .session-scope {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      padding: 7px 10px;
+      border: 1px solid #d9e6f8;
+      border-radius: 999px;
+      background: #f3f8ff;
+      color: #356ba9;
+      font-size: 11px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .session-scope i { width: 7px; height: 7px; border-radius: 50%; background: #4c91ea; }
+    .session-manager-close {
+      width: 32px;
+      height: 32px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #747d89;
+      cursor: pointer;
+      font-size: 20px;
+    }
+    .session-manager-close:hover { background: #f0f2f5; color: #333a44; }
+    .session-manager-body { display: grid; grid-template-columns: minmax(300px, 38%) minmax(0, 1fr); min-height: 0; }
+    .session-browser {
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      min-width: 0;
+      min-height: 0;
+      border-right: 1px solid #e1e5ea;
+      background: #f8f9fb;
+    }
+    .session-search-wrap { position: relative; padding: 14px 14px 10px; }
+    .session-search-wrap svg {
+      position: absolute;
+      top: 25px;
+      left: 27px;
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: #7c8692;
+      stroke-width: 2;
+      stroke-linecap: round;
+    }
+    .session-search {
+      width: 100%;
+      height: 38px;
+      padding: 0 12px 0 38px;
+      border: 1px solid #d9dee5;
+      border-radius: 9px;
+      outline: 0;
+      background: #fff;
+      color: #2d343e;
+      font-size: 12px;
+    }
+    .session-search:focus { border-color: #74aaf1; box-shadow: 0 0 0 3px rgba(22,119,255,.10); }
+    .session-filterbar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 14px 11px;
+      color: #78818d;
+      font-size: 11px;
+    }
+    .session-filterbar .label { margin-right: 2px; }
+    .filter-chip {
+      padding: 5px 9px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: #6d7682;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .filter-chip.active { border-color: #c9ddfa; background: #eaf3ff; color: #2367b6; font-weight: 680; }
+    .session-list { min-height: 0; overflow: auto; padding: 0 10px 14px; }
+    .session-record {
+      width: 100%;
+      margin: 0 0 7px;
+      padding: 12px;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      background: transparent;
+      color: #343b45;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
+    }
+    .session-record:hover { background: #fff; border-color: #e0e5eb; }
+    .session-record.selected { border-color: #9bc2f5; background: #edf5ff; box-shadow: 0 0 0 2px rgba(22,119,255,.08); }
+    .session-record-title { display: block; overflow: hidden; margin-bottom: 6px; font-size: 12px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+    .session-record-summary {
+      display: -webkit-box;
+      overflow: hidden;
+      min-height: 34px;
+      color: #6f7884;
+      font-size: 11px;
+      line-height: 1.5;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+    .session-record-meta { display: flex; align-items: center; gap: 8px; margin-top: 9px; color: #8b939e; font-size: 10px; }
+    .session-record-meta .source { padding: 3px 6px; border-radius: 5px; background: #e8eef6; color: #536b89; font-weight: 700; }
+    .permission-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      max-width: 150px;
+      padding: 4px 7px;
+      border-radius: 6px;
+      background: #edf1f5;
+      color: #68727e;
+      font-size: 10px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .permission-badge.open { background: #fff0e9; color: #b24d25; }
+    .permission-badge.edit { background: #e9f6ef; color: #267756; }
+    .permission-badge.plan { background: #f2ecff; color: #6d4ca1; }
+    .session-empty { padding: 36px 18px; color: #858e99; font-size: 12px; line-height: 1.6; text-align: center; }
+    .session-preview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; background: #fff; }
+    .session-preview-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 17px 20px 13px;
+      border-bottom: 1px solid #e5e8ec;
+    }
+    .session-preview-head h3 { margin: 0 0 5px; font-size: 15px; }
+    .session-preview-head p { margin: 0; color: #7d8692; font-size: 10px; }
+    .session-preview-head .permission-badge { margin-left: auto; }
+    .permission-note {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 8px 10px;
+      border: 1px solid #dbe8f7;
+      border-radius: 8px;
+      background: #f5f9ff;
+      color: #536d8e;
+      font-size: 10px;
+    }
+    .session-transcript { min-height: 0; overflow: auto; padding: 18px 20px 28px; background: #fafbfc; }
+    .transcript-turn { margin-bottom: 17px; }
+    .transcript-meta { display: flex; justify-content: space-between; margin-bottom: 6px; color: #7f8894; font-size: 10px; }
+    .transcript-bubble { padding: 11px 13px; border: 1px solid #e0e5eb; border-radius: 12px; background: #fff; color: #3b424d; font-size: 11px; line-height: 1.55; box-shadow: 0 2px 5px rgba(35,44,57,.04); }
+    .transcript-turn.user .transcript-bubble { border-color: #d6e5f7; background: #f1f7ff; }
+    .transcript-turn.tool .transcript-bubble { border-color: #dfd4ef; background: #f7f2fc; color: #5f4978; }
+    .session-manager-foot {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 62px;
+      padding: 12px 18px;
+      border-top: 1px solid #e1e5ea;
+      background: #f8f9fb;
+    }
+    .load-target { min-width: 0; color: #747d89; font-size: 11px; }
+    .load-target strong { color: #3b424c; }
+    .load-error { display: none; flex: 1; color: #a03b35; font-size: 11px; }
+    .session-manager-foot.error .load-target { display: none; }
+    .session-manager-foot.error .load-error { display: block; }
+    .session-manager-foot .spacer { flex: 1; }
+    .replace-confirm {
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 18px;
+      border-top: 1px solid #efd6a3;
+      background: #fff8e8;
+      color: #78591d;
+      font-size: 11px;
+    }
+    .replace-confirm.visible { display: flex; }
+    .replace-confirm strong { color: #64450d; }
+    .replace-confirm .spacer { flex: 1; }
+    .btn.danger-confirm { border-color: #d48a36; background: #d48a36; color: #fff; }
+    .btn.danger-confirm:hover { background: #bd7427; }
+
+    @media (max-width: 980px) {
+      .session-manager-backdrop { left: 280px; padding: 16px; }
+      .session-manager { width: calc(100vw - 312px); }
+      .session-manager-body { grid-template-columns: 42% minmax(0, 1fr); }
+    }
 
     .toast {
       position: fixed;
@@ -833,7 +1067,7 @@
       </div>
       <div class="titlebar-main">
         <div class="tabs">
-          <div class="tab active" id="primaryCanvasTab" onclick="showPrimaryCanvas()"><span class="label">分支交互设计</span><span class="x">×</span></div>
+          <div class="tab active" id="primaryCanvasTab" onclick="showPrimaryCanvas()"><span class="label">会话载入与分支交互</span><span class="x">×</span></div>
           <button class="new-tab" onclick="createCanvas()" aria-label="新建画布">+</button>
         </div>
         <div class="window-tools"><span>◧</span><span>▰</span><span>│</span><span>▱</span></div>
@@ -844,7 +1078,7 @@
       <aside class="sidebar">
         <div class="workspace active"><span>⌄</span><span class="home">⌂</span><span class="workspace-name">matou_workspace</span><span class="default">默认</span><span class="actions">⌖ ＋ •••</span></div>
         <div class="task-list">
-          <div class="task active"><span>☰</span><span>分支交互设计</span><span class="dots">•••</span></div>
+          <div class="task active"><span>☰</span><span>会话载入设计</span><span class="dots">•••</span></div>
           <div class="task"><span>☰</span><span>默认</span><span class="dots">•••</span></div>
         </div>
         <div class="workspace"><span>›</span><span>▱</span><span class="workspace-name">kookey</span><span class="actions">＋ •••</span></div>
@@ -852,7 +1086,7 @@
 
         <div class="prototype-note">
           <strong>可交互 Mockup</strong>
-          普通横向新建会在当前层追加 Shell 兄弟；Shell 与 Claude Code 可混合显示。会话提交真实输入后会移动到列表最前，长按 Option + Tab 打开 DAG。
+          所有卡片都可从右上角载入当前工作空间的 Claude Code 会话；选择时先预览内容与权限，确认后在卡片原位恢复。长按 Option + Tab 打开 DAG。
         </div>
       </aside>
 
@@ -862,6 +1096,9 @@
             <span class="session-type">Claude Code</span>
             <span class="session-path">主线会话 · ~/Documents/AIProjects/matou</span>
             <div class="session-actions">
+              <button class="icon-btn load-session" data-tip="载入 Claude Code 会话" onclick="openSessionManager('current')" aria-label="载入 Claude Code 会话">
+                <svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18.5z"/><path d="M8 3v5h8V3"/><path d="M12 12v6m0 0-3-3m3 3 3-3"/></svg>
+              </button>
               <button class="icon-btn branch-create" data-tip="Fork 当前 Claude Code 会话" onclick="openBranchModal('parent')" aria-label="创建子分支">
                 <svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v5a4 4 0 0 0 4 4h3a5 5 0 0 0 5-5V10"/><path d="M15 4v4M13 6h4"/></svg>
               </button>
@@ -931,6 +1168,9 @@ On branch main
           <button onclick="this.parentElement.remove()">×</button>
           <h3>建议按此顺序体验</h3>
           <ol>
+            <li>点击任一卡片右上角“载入会话”图标</li>
+            <li>搜索或选择会话，查看右侧内容与权限预览，再点击“载入到当前卡片”</li>
+            <li>选择“会话恢复异常状态验证”，体验失败后保持当前卡片并原位重试</li>
             <li>点击标题行“分支”图标并创建</li>
             <li>点击分支状态徽章进入子会话组</li>
             <li>悬浮会话，观察自动变宽</li>
@@ -1009,11 +1249,327 @@ On branch main
     </div>
   </div>
 
+  <div class="session-manager-backdrop" id="sessionManagerBackdrop" onclick="sessionManagerBackdropClose(event)">
+    <section class="session-manager" role="dialog" aria-modal="true" aria-labelledby="sessionManagerTitle">
+      <header class="session-manager-head">
+        <div class="session-manager-title">
+          <h2 id="sessionManagerTitle">载入 Claude Code 会话</h2>
+          <p>选择会话后先查看内容与权限，确认后载入到当前卡片</p>
+        </div>
+        <span class="session-scope"><i></i>当前工作空间 · ~/Documents/AIProjects/matou</span>
+        <button class="session-manager-close" onclick="closeSessionManager()" aria-label="关闭会话管理">×</button>
+      </header>
+
+      <div class="session-manager-body">
+        <aside class="session-browser">
+          <div class="session-search-wrap">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input class="session-search" id="sessionSearch" placeholder="搜索会话标题、内容或 ID" oninput="filterRecoverableSessions(this.value)" />
+          </div>
+          <div class="session-filterbar">
+            <span class="label">来源</span>
+            <button class="filter-chip active">Claude Code CLI</button>
+            <span class="spacer"></span>
+            <span>按最近使用排序</span>
+          </div>
+          <div class="session-list" id="recoverableSessionList"></div>
+        </aside>
+
+        <section class="session-preview" id="sessionPreview">
+          <div class="session-preview-head">
+            <div>
+              <h3 id="previewSessionTitle">选择一个会话</h3>
+              <p id="previewSessionMeta">会话内容、模型与权限将在这里预览</p>
+              <div class="permission-note" id="permissionNote">🔐 载入后继续使用该会话原有权限模式</div>
+            </div>
+            <span class="permission-badge" id="previewPermission">默认权限</span>
+          </div>
+          <div class="session-transcript" id="sessionTranscript"></div>
+        </section>
+      </div>
+
+      <div class="replace-confirm" id="replaceConfirm">
+        <span>当前卡片正在运行。载入后将结束当前进程，并切换为 <strong id="confirmSessionName">所选 Claude 会话</strong>。</span>
+        <span class="spacer"></span>
+        <button class="btn" onclick="hideReplaceConfirm()">返回查看</button>
+        <button class="btn danger-confirm" onclick="performSessionLoad()">结束并载入</button>
+      </div>
+
+      <footer class="session-manager-foot" id="sessionManagerFoot">
+        <div class="load-target" id="loadTarget">将载入到：<strong>当前卡片</strong></div>
+        <div class="load-error" id="loadError">会话连接暂时被占用，当前卡片保持原状。释放占用后可重试。</div>
+        <span class="spacer"></span>
+        <button class="btn" onclick="closeSessionManager()">取消</button>
+        <button class="btn primary" id="loadSelectedSession" onclick="requestLoadSelectedSession()">载入到当前卡片</button>
+      </footer>
+    </section>
+  </div>
+
   <div class="toast" id="toast"><span class="ok">✓</span><span id="toastText">子分支已创建</span></div>
 
   <script>
+    const loadSessionIcon = `<svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18.5z"/><path d="M8 3v5h8V3"/><path d="M12 12v6m0 0-3-3m3 3 3-3"/></svg>`;
     const branchIcon = `<svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v5a4 4 0 0 0 4 4h3a5 5 0 0 0 5-5V10"/><path d="M15 4v4M13 6h4"/></svg>`;
     const splitIcon = `<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/><path d="m16 9 2 2-2 2"/></svg>`;
+
+    const recoverableSessions = [
+      {
+        id: '7A91',
+        title: '载入会话与权限继承设计',
+        summary: '梳理卡片载入已有 Claude 会话的范围、预览流程与权限继承规则。',
+        updated: '8 分钟前',
+        model: 'claude-opus-5',
+        permissionMode: 'bypassPermissions',
+        permissionLabel: '开放全部权限',
+        cwd: '~/Documents/AIProjects/matou',
+        messages: [
+          { role: 'user', time: '14:22', text: '载入已有会话时，需要保留该会话原来的权限模式。' },
+          { role: 'assistant', time: '14:23', text: '已确认：恢复会话身份、上下文与权限模式，当前卡片位置和宽度保持不动。' },
+          { role: 'tool', time: '14:24', text: '读取 Claude Code 会话索引 · 当前工作空间 · 完成' },
+          { role: 'assistant', time: '14:25', text: '下一步将会话列表、预览与显式载入动作整合到卡片右上角入口。' }
+        ]
+      },
+      {
+        id: '42C8',
+        title: 'Git 与 Worktree 控件开发',
+        summary: '完成分支切换、提交推送和本地 Worktree 状态入口的产品实现。',
+        updated: '35 分钟前',
+        model: 'claude-opus-5',
+        permissionMode: 'acceptEdits',
+        permissionLabel: '自动接受编辑',
+        cwd: '~/Documents/AIProjects/matou',
+        messages: [
+          { role: 'user', time: '13:46', text: '右下角 Git 地址需要支持切换分支、提交、推送和 Worktree 管理。' },
+          { role: 'assistant', time: '13:52', text: '已完成独立分支实现，提交区与 Worktree 区共享当前仓库状态。' },
+          { role: 'tool', time: '13:54', text: '测试 687 项 · 全部通过' }
+        ]
+      },
+      {
+        id: '18F3',
+        title: '会话画布滑动性能修复',
+        summary: '修正悬浮扩展、左右边缘自动推进及激活卡片视野保持逻辑。',
+        updated: '昨天 21:18',
+        model: 'claude-sonnet-4.5',
+        permissionMode: 'default',
+        permissionLabel: '默认权限',
+        cwd: '~/Documents/AIProjects/matou',
+        messages: [
+          { role: 'user', time: '21:02', text: '激活卡片默认保持最大宽度，悬浮其他卡片时临时交接视野。' },
+          { role: 'assistant', time: '21:11', text: '已将激活态与预览态拆开，并统一左右边缘的自动滑动节奏。' }
+        ]
+      },
+      {
+        id: 'B602',
+        title: '通知状态与 DAG 呼吸框',
+        summary: '将任务红点、卡片通知状态与 DAG 节点蓝色呼吸边框统一。',
+        updated: '2 天前',
+        model: 'claude-opus-5',
+        permissionMode: 'plan',
+        permissionLabel: '计划模式',
+        cwd: '~/Documents/AIProjects/matou',
+        messages: [
+          { role: 'user', time: '18:31', text: 'DAG 节点存在通知状态时，同样展示蓝色呼吸边框。' },
+          { role: 'assistant', time: '18:35', text: '通知状态将使用同一数据源，并在用户查看节点后同步清除。' }
+        ]
+      },
+      {
+        id: 'E019',
+        title: '会话恢复异常状态验证',
+        summary: '用于体验恢复连接失败时保留当前卡片、原位提示及重试流程。',
+        updated: '3 天前',
+        model: 'claude-opus-5',
+        permissionMode: 'default',
+        permissionLabel: '默认权限',
+        cwd: '~/Documents/AIProjects/matou',
+        failOnce: true,
+        messages: [
+          { role: 'user', time: '16:08', text: '恢复失败时当前卡片内容保持原状，用户可以在同一浮框中重试。' },
+          { role: 'assistant', time: '16:12', text: '已记录恢复原子性要求：成功后再切换卡片，失败时维持现状。' }
+        ]
+      }
+    ];
+
+    let selectedRecoverableSessionId = recoverableSessions[0].id;
+    let sessionLoadTarget = null;
+    const sessionLoadAttempts = new Set();
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character]);
+    }
+
+    function permissionClass(mode) {
+      return mode === 'bypassPermissions' ? 'open' : mode === 'acceptEdits' ? 'edit' : mode === 'plan' ? 'plan' : '';
+    }
+
+    function resolveSessionLoadTarget(targetId) {
+      const resolvedId = targetId === 'current' ? currentGraphNodeId : targetId;
+      if (resolvedId === 'new-root') return { id: resolvedId, name: 'Shell · 新画布', mode: 'shell', running: false, kind: 'empty-root' };
+      const branch = branches.find(item => item.id === resolvedId);
+      if (branch) return { id: branch.id, name: branch.name, mode: branch.mode || 'claude', running: Boolean(branch.running), kind: 'branch' };
+      const node = dagNodes[resolvedId] || dagNodes.main;
+      return { id: node.id, name: node.name, mode: node.mode || 'claude', running: Boolean(node.running), kind: 'node' };
+    }
+
+    function openSessionManager(targetId) {
+      sessionLoadTarget = resolveSessionLoadTarget(targetId);
+      selectedRecoverableSessionId = recoverableSessions[0].id;
+      document.getElementById('sessionSearch').value = '';
+      document.getElementById('sessionManagerFoot').classList.remove('error');
+      document.getElementById('loadSelectedSession').textContent = '载入到当前卡片';
+      hideReplaceConfirm();
+      document.getElementById('loadTarget').innerHTML = `将载入到：<strong>${escapeHtml(sessionLoadTarget.name)}</strong> · ${sessionLoadTarget.mode === 'shell' ? 'Shell' : 'Claude Code'}`;
+      renderRecoverableSessionList();
+      selectRecoverableSession(selectedRecoverableSessionId);
+      document.getElementById('sessionManagerBackdrop').classList.add('open');
+      requestAnimationFrame(() => document.getElementById('sessionSearch').focus({ preventScroll: true }));
+    }
+
+    function closeSessionManager() {
+      document.getElementById('sessionManagerBackdrop').classList.remove('open');
+      hideReplaceConfirm();
+    }
+
+    function sessionManagerBackdropClose(event) {
+      if (event.target.id === 'sessionManagerBackdrop') closeSessionManager();
+    }
+
+    function filterRecoverableSessions(query) {
+      renderRecoverableSessionList(query);
+      const visibleSelected = document.querySelector(`.session-record[data-session-id="${selectedRecoverableSessionId}"]`);
+      if (!visibleSelected) {
+        const first = document.querySelector('.session-record');
+        if (first) selectRecoverableSession(first.dataset.sessionId);
+      }
+    }
+
+    function renderRecoverableSessionList(query = '') {
+      const normalized = query.trim().toLowerCase();
+      const matches = recoverableSessions.filter(session => [session.title, session.summary, session.id].some(value => value.toLowerCase().includes(normalized)));
+      const root = document.getElementById('recoverableSessionList');
+      if (!matches.length) {
+        root.innerHTML = '<div class="session-empty">当前工作空间中没有匹配的可恢复会话<br/>换一个关键词继续搜索</div>';
+        return;
+      }
+      root.innerHTML = matches.map(session => `<button class="session-record ${session.id === selectedRecoverableSessionId ? 'selected' : ''}" data-session-id="${session.id}" onclick="selectRecoverableSession('${session.id}')">
+        <span class="session-record-title">${escapeHtml(session.title)}</span>
+        <span class="session-record-summary">${escapeHtml(session.summary)}</span>
+        <span class="session-record-meta"><span>◷ ${session.updated}</span><span># ${session.id}</span><span class="source">CLI</span><span class="permission-badge ${permissionClass(session.permissionMode)}">${escapeHtml(session.permissionLabel)}</span></span>
+      </button>`).join('');
+    }
+
+    function selectRecoverableSession(sessionId) {
+      const session = recoverableSessions.find(item => item.id === sessionId);
+      if (!session) return;
+      selectedRecoverableSessionId = session.id;
+      document.querySelectorAll('.session-record').forEach(record => record.classList.toggle('selected', record.dataset.sessionId === session.id));
+      document.getElementById('previewSessionTitle').textContent = session.title;
+      document.getElementById('previewSessionMeta').textContent = `${session.model} · #${session.id} · ${session.updated} · ${session.cwd}`;
+      const badge = document.getElementById('previewPermission');
+      badge.textContent = session.permissionLabel;
+      badge.className = `permission-badge ${permissionClass(session.permissionMode)}`;
+      document.getElementById('permissionNote').innerHTML = `🔐 载入后继续使用 <strong>${escapeHtml(session.permissionLabel)}</strong>，不会套用当前卡片的权限`;
+      document.getElementById('sessionTranscript').innerHTML = session.messages.map(message => `<div class="transcript-turn ${message.role}">
+        <div class="transcript-meta"><span>${message.role === 'user' ? '你' : message.role === 'tool' ? '工具调用' : 'Claude'}</span><span>${message.time} · ${session.model}</span></div>
+        <div class="transcript-bubble">${escapeHtml(message.text)}</div>
+      </div>`).join('');
+      document.getElementById('sessionManagerFoot').classList.remove('error');
+      document.getElementById('loadSelectedSession').textContent = '载入到当前卡片';
+      hideReplaceConfirm();
+    }
+
+    function requestLoadSelectedSession() {
+      if (!sessionLoadTarget || !selectedRecoverableSessionId) return;
+      const session = recoverableSessions.find(item => item.id === selectedRecoverableSessionId);
+      if (!session) return;
+      if (sessionLoadTarget.running) {
+        document.getElementById('confirmSessionName').textContent = session.title;
+        document.getElementById('replaceConfirm').classList.add('visible');
+        return;
+      }
+      performSessionLoad();
+    }
+
+    function hideReplaceConfirm() {
+      document.getElementById('replaceConfirm').classList.remove('visible');
+    }
+
+    function performSessionLoad() {
+      const session = recoverableSessions.find(item => item.id === selectedRecoverableSessionId);
+      if (!session || !sessionLoadTarget) return;
+      hideReplaceConfirm();
+      if (session.failOnce && !sessionLoadAttempts.has(session.id)) {
+        sessionLoadAttempts.add(session.id);
+        document.getElementById('sessionManagerFoot').classList.add('error');
+        document.getElementById('loadSelectedSession').textContent = '重试载入';
+        return;
+      }
+      applyLoadedSession(session);
+      closeSessionManager();
+      showToast(`“${session.title}”已载入，继续使用${session.permissionLabel}`);
+    }
+
+    function loadedSessionLines(session) {
+      return [
+        `✓ 已恢复 Claude Code 会话 #${session.id}`,
+        `✓ 权限模式：${session.permissionLabel}`,
+        session.messages[session.messages.length - 1].text
+      ];
+    }
+
+    function applyLoadedSession(session) {
+      const target = sessionLoadTarget;
+      if (target.kind === 'empty-root') {
+        const canvas = document.getElementById('emptyCanvas');
+        canvas.querySelector('.session-type').textContent = 'Claude Code';
+        canvas.querySelector('.session-path').textContent = `${session.title} · ${session.cwd}`;
+        canvas.querySelector('.terminal-content').innerHTML = `<span class="term-muted">Claude Code · ${escapeHtml(session.title)}</span>\n\n${loadedSessionLines(session).map(escapeHtml).join('\n')}\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">会话 #${session.id}</span> <span class="cursor"></span>`;
+        const statusItems = canvas.querySelectorAll('.statusbar span');
+        if (statusItems.length) statusItems[0].textContent = 'Claude Code';
+        document.querySelector('#newCanvasTab .label').textContent = `Claude · ${session.title}`;
+        return;
+      }
+
+      const branch = branches.find(item => item.id === target.id);
+      if (branch) {
+        Object.assign(branch, {
+          name: session.title,
+          mode: 'claude',
+          running: false,
+          status: 'needs-input',
+          restoreState: null,
+          sessionId: session.id,
+          permissionMode: session.permissionMode,
+          lines: loadedSessionLines(session)
+        });
+        if (dagNodes[target.id]) Object.assign(dagNodes[target.id], {
+          name: session.title,
+          mode: 'claude',
+          running: false,
+          status: 'needs-input',
+          restoreState: null,
+          sessionId: session.id,
+          permissionMode: session.permissionMode,
+          lines: branch.lines.slice()
+        });
+        renderBranches();
+        requestAnimationFrame(() => focusGraphPane(target.id));
+        return;
+      }
+
+      const node = dagNodes[target.id] || dagNodes.main;
+      Object.assign(node, {
+        name: session.title,
+        mode: 'claude',
+        running: false,
+        status: 'needs-input',
+        restoreState: null,
+        sessionId: session.id,
+        permissionMode: session.permissionMode,
+        lines: loadedSessionLines(session)
+      });
+      showSingleDagNode(node);
+      singleView.querySelector('.session-path').textContent = `${session.title} · ${session.cwd}`;
+    }
 
     const branches = [
       { id: 'notification', name: '通知中心', mode: 'claude', edgeType: 'fork', git: 'feat/notification', status: 'running', running: true, nested: 2, nestedRunning: 1, lines: ['分析 Kooky 通知触发条件…', '✓ 已识别 4 类用户状态', '› 正在实现通知聚合视图'] },
@@ -1124,6 +1680,7 @@ On branch main
           <span class="branch-tag">${branch.git}</span>
           <div class="tiny-actions">
             ${nestedBadge}
+            <button class="icon-btn load-session" data-tip="载入 Claude Code 会话" aria-label="为 ${branch.name} 载入 Claude Code 会话" onclick="event.stopPropagation(); openSessionManager('${branch.id}')">${loadSessionIcon}</button>
             ${forkActions}
             <button class="icon-btn" data-tip="停止运行或移除节点" aria-label="更多会话操作：${branch.name}" onclick="event.stopPropagation(); showToast('卡片更多：停止运行 / 移除节点…')">•••</button>
           </div>
@@ -1362,7 +1919,7 @@ ${restoreAlert}
       document.querySelector('#newCanvasTab .label').textContent = 'Shell · 新画布';
       const canvas = document.getElementById('emptyCanvas');
       canvas.classList.add('ready');
-      canvas.innerHTML = `<div class="session-titlebar"><span class="session-type">Shell</span><span class="session-path">~/Documents/AIProjects/matou</span><div class="session-actions"><button class="icon-btn split-create" data-tip="直接横向创建根级 Shell" onclick="showToast('演示：直接横向创建新的根级 Shell，不展示弹框')" aria-label="横向创建 Shell 兄弟">＋</button><button class="icon-btn" data-tip="停止运行或移除节点" onclick="showToast('卡片更多：停止运行 / 移除节点…')" aria-label="更多会话操作">•••</button></div></div><div class="terminal-wrap"><div class="terminal-content"><span class="term-muted">Shell · 当前工作空间目录</span>\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">matou</span> <span class="cursor"></span></div></div><div class="statusbar"><span>Shell</span><span class="spacer"></span><span>空闲</span><span>~/Documents/AIProjects/matou</span></div>`;
+      canvas.innerHTML = `<div class="session-titlebar"><span class="session-type">Shell</span><span class="session-path">~/Documents/AIProjects/matou</span><div class="session-actions"><button class="icon-btn load-session" data-tip="载入 Claude Code 会话" onclick="openSessionManager('new-root')" aria-label="载入 Claude Code 会话">${loadSessionIcon}</button><button class="icon-btn split-create" data-tip="直接横向创建根级 Shell" onclick="showToast('演示：直接横向创建新的根级 Shell，不展示弹框')" aria-label="横向创建 Shell 兄弟">＋</button><button class="icon-btn" data-tip="停止运行或移除节点" onclick="showToast('卡片更多：停止运行 / 移除节点…')" aria-label="更多会话操作">•••</button></div></div><div class="terminal-wrap"><div class="terminal-content"><span class="term-muted">Shell · 当前工作空间目录</span>\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">matou</span> <span class="cursor"></span></div></div><div class="statusbar"><span>Shell</span><span class="spacer"></span><span>空闲</span><span>~/Documents/AIProjects/matou</span></div>`;
       showToast('Shell 已作为新画布的根级会话创建并自动聚焦');
     }
 
@@ -1653,7 +2210,7 @@ ${restoreAlert}
     }
 
     function openDagView() {
-      if (document.getElementById('branchModal').classList.contains('open')) return;
+      if (document.getElementById('branchModal').classList.contains('open') || document.getElementById('sessionManagerBackdrop').classList.contains('open')) return;
       const focusedPane = childrenStrip.querySelector('.active-pane');
       if (!childrenView.classList.contains('view-hidden') && focusedPane && dagNodes[focusedPane.dataset.id]) {
         currentGraphNodeId = focusedPane.dataset.id;
@@ -1912,7 +2469,7 @@ ${restoreAlert}
 
     document.addEventListener('keydown', event => {
       if (event.key === 'Tab' && event.altKey && !event.metaKey && !event.ctrlKey) {
-        if (document.getElementById('branchModal').classList.contains('open')) return;
+        if (document.getElementById('branchModal').classList.contains('open') || document.getElementById('sessionManagerBackdrop').classList.contains('open')) return;
         event.preventDefault();
         if (document.getElementById('dagOverlay').classList.contains('open') || dagHoldActive || event.repeat) return;
         dagHoldActive = true;
@@ -1925,7 +2482,8 @@ ${restoreAlert}
         return;
       }
       if (event.key === 'Escape') {
-        if (document.getElementById('dagOverlay').classList.contains('open')) closeDagView();
+        if (document.getElementById('sessionManagerBackdrop').classList.contains('open')) closeSessionManager();
+        else if (document.getElementById('dagOverlay').classList.contains('open')) closeDagView();
         else closeBranchModal();
       }
       if (event.key === 'Enter' && document.getElementById('branchModal').classList.contains('open')) createBranch();
