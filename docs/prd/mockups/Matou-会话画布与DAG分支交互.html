@@ -555,14 +555,12 @@
     }
     .session-manager-backdrop.open .session-manager { transform: none; }
     .session-manager-head {
-      display: flex;
-      align-items: center;
-      gap: 14px;
       min-width: 0;
-      padding: 17px 18px;
+      padding: 16px 18px 14px;
       border-bottom: 1px solid #e2e6eb;
       background: rgba(255,255,255,.98);
     }
+    .session-manager-heading-row { display: flex; align-items: center; gap: 14px; min-width: 0; }
     .session-manager-title { min-width: 0; }
     .session-manager-title h2 { margin: 0 0 3px; font-size: 17px; letter-spacing: -.02em; }
     .session-manager-title p { margin: 0; overflow: hidden; color: #7b8490; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -595,17 +593,18 @@
     .session-manager-body { display: grid; grid-template-columns: minmax(300px, 38%) minmax(0, 1fr); min-height: 0; }
     .session-browser {
       display: grid;
-      grid-template-rows: auto auto minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
       min-width: 0;
       min-height: 0;
       border-right: 1px solid #e1e5ea;
       background: #f8f9fb;
     }
-    .session-search-wrap { position: relative; padding: 14px 14px 10px; }
-    .session-search-wrap svg {
+    .session-search-wrap { display: flex; align-items: center; gap: 8px; padding-top: 13px; }
+    .session-search-input { position: relative; flex: 1; min-width: 0; }
+    .session-search-input svg {
       position: absolute;
-      top: 25px;
-      left: 27px;
+      top: 11px;
+      left: 12px;
       width: 16px;
       height: 16px;
       fill: none;
@@ -625,6 +624,25 @@
       font-size: 12px;
     }
     .session-search:focus { border-color: #74aaf1; box-shadow: 0 0 0 3px rgba(22,119,255,.10); }
+    .search-scope-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 9px;
+      width: 108px;
+      height: 38px;
+      padding: 0 10px;
+      border: 1px solid #d9dee5;
+      border-radius: 9px;
+      background: #f8f9fb;
+      color: #5d6773;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .search-scope-btn:hover { border-color: #bfc9d5; background: #f1f4f7; }
+    .search-help { color: #8a939e; font-size: 10px; white-space: nowrap; }
     .session-filterbar {
       display: flex;
       align-items: center;
@@ -688,6 +706,26 @@
     .permission-badge.open { background: #fff0e9; color: #b24d25; }
     .permission-badge.edit { background: #e9f6ef; color: #267756; }
     .permission-badge.plan { background: #f2ecff; color: #6d4ca1; }
+    .session-match-count { margin-left: auto; color: #2c6db9; font-weight: 700; }
+    .session-match-snippets { display: grid; gap: 5px; margin-top: 9px; }
+    .session-match-snippet {
+      width: 100%;
+      padding: 7px 8px;
+      overflow: hidden;
+      border: 1px solid #d9e5f3;
+      border-radius: 7px;
+      background: rgba(255,255,255,.74);
+      color: #5f6875;
+      cursor: pointer;
+      font-size: 10px;
+      line-height: 1.35;
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .session-match-snippet:hover { border-color: #9fc2ee; background: #fff; color: #334e70; }
+    .session-match-more { padding-left: 4px; color: #7e8b9a; font-size: 9px; }
+    mark { padding: 0 2px; border-radius: 3px; background: #ffe19a; color: #5f4410; }
     .session-empty { padding: 36px 18px; color: #858e99; font-size: 12px; line-height: 1.6; text-align: center; }
     .session-preview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; background: #fff; }
     .session-preview-head {
@@ -700,6 +738,23 @@
     .session-preview-head h3 { margin: 0 0 5px; font-size: 15px; }
     .session-preview-head p { margin: 0; color: #7d8692; font-size: 10px; }
     .session-preview-head .permission-badge { margin-left: auto; }
+    .session-preview-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    .session-match-nav {
+      display: none;
+      align-items: center;
+      gap: 3px;
+      height: 28px;
+      padding: 0 4px 0 9px;
+      border: 1px solid #d8dee6;
+      border-radius: 8px;
+      background: #fff;
+      color: #66717e;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .session-match-nav.visible { display: inline-flex; }
+    .session-match-nav button { width: 24px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: #55616e; cursor: pointer; }
+    .session-match-nav button:hover { background: #edf1f5; }
     .permission-note {
       display: flex;
       align-items: center;
@@ -718,6 +773,7 @@
     .transcript-bubble { padding: 11px 13px; border: 1px solid #e0e5eb; border-radius: 12px; background: #fff; color: #3b424d; font-size: 11px; line-height: 1.55; box-shadow: 0 2px 5px rgba(35,44,57,.04); }
     .transcript-turn.user .transcript-bubble { border-color: #d6e5f7; background: #f1f7ff; }
     .transcript-turn.tool .transcript-bubble { border-color: #dfd4ef; background: #f7f2fc; color: #5f4978; }
+    .transcript-turn.active-match .transcript-bubble { border-color: #e4b75a; box-shadow: 0 0 0 3px rgba(228,183,90,.18); }
     .session-manager-foot {
       display: flex;
       align-items: center;
@@ -1169,7 +1225,9 @@ On branch main
           <h3>建议按此顺序体验</h3>
           <ol>
             <li>点击任一卡片右上角“载入会话”图标</li>
-            <li>搜索或选择会话，查看右侧内容与权限预览，再点击“载入到当前卡片”</li>
+            <li>搜索“权限”或“工具调用”，从左侧命中片段跳到右侧具体消息，再用 ↑ ↓ 浏览命中位置</li>
+            <li>按 ⌘F 将同一个搜索框切换为“当前会话”范围</li>
+            <li>查看右侧内容与权限预览，再点击“载入到当前卡片”</li>
             <li>选择“会话恢复异常状态验证”，体验失败后保持当前卡片并原位重试</li>
             <li>点击标题行“分支”图标并创建</li>
             <li>点击分支状态徽章进入子会话组</li>
@@ -1252,25 +1310,31 @@ On branch main
   <div class="session-manager-backdrop" id="sessionManagerBackdrop" onclick="sessionManagerBackdropClose(event)">
     <section class="session-manager" role="dialog" aria-modal="true" aria-labelledby="sessionManagerTitle">
       <header class="session-manager-head">
-        <div class="session-manager-title">
-          <h2 id="sessionManagerTitle">载入 Claude Code 会话</h2>
-          <p>选择会话后先查看内容与权限，确认后载入到当前卡片</p>
+        <div class="session-manager-heading-row">
+          <div class="session-manager-title">
+            <h2 id="sessionManagerTitle">载入 Claude Code 会话</h2>
+            <p>选择会话后先查看内容与权限，确认后载入到当前卡片</p>
+          </div>
+          <span class="session-scope"><i></i>当前工作空间 · ~/Documents/AIProjects/matou</span>
+          <button class="session-manager-close" onclick="closeSessionManager()" aria-label="关闭会话管理">×</button>
         </div>
-        <span class="session-scope"><i></i>当前工作空间 · ~/Documents/AIProjects/matou</span>
-        <button class="session-manager-close" onclick="closeSessionManager()" aria-label="关闭会话管理">×</button>
+        <div class="session-search-wrap">
+          <button class="search-scope-btn" id="searchScopeButton" onclick="toggleSessionSearchScope()" aria-label="切换搜索范围"><span id="searchScopeLabel">全部会话</span><span>⌄</span></button>
+          <div class="session-search-input">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input class="session-search" id="sessionSearch" placeholder="搜索标题、对话内容、工具调用或会话 ID" oninput="filterRecoverableSessions(this.value)" />
+          </div>
+          <span class="search-help">⌘F 搜索当前会话</span>
+        </div>
       </header>
 
       <div class="session-manager-body">
         <aside class="session-browser">
-          <div class="session-search-wrap">
-            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-            <input class="session-search" id="sessionSearch" placeholder="搜索会话标题、内容或 ID" oninput="filterRecoverableSessions(this.value)" />
-          </div>
           <div class="session-filterbar">
             <span class="label">来源</span>
             <button class="filter-chip active">Claude Code CLI</button>
             <span class="spacer"></span>
-            <span>按最近使用排序</span>
+            <span id="resultSummary">按最近使用排序</span>
           </div>
           <div class="session-list" id="recoverableSessionList"></div>
         </aside>
@@ -1282,7 +1346,10 @@ On branch main
               <p id="previewSessionMeta">会话内容、模型与权限将在这里预览</p>
               <div class="permission-note" id="permissionNote">🔐 载入后继续使用该会话原有权限模式</div>
             </div>
-            <span class="permission-badge" id="previewPermission">默认权限</span>
+            <div class="session-preview-tools">
+              <div class="session-match-nav" id="sessionMatchNav"><span id="sessionMatchPosition">0 / 0</span><button onclick="moveSessionMatch(-1)" aria-label="上一个命中">↑</button><button onclick="moveSessionMatch(1)" aria-label="下一个命中">↓</button></div>
+              <span class="permission-badge" id="previewPermission">默认权限</span>
+            </div>
           </div>
           <div class="session-transcript" id="sessionTranscript"></div>
         </section>
@@ -1391,10 +1458,37 @@ On branch main
 
     let selectedRecoverableSessionId = recoverableSessions[0].id;
     let sessionLoadTarget = null;
+    let sessionSearchScope = 'all';
+    let activeSessionMatchIndex = 0;
     const sessionLoadAttempts = new Set();
 
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character]);
+    }
+
+    function highlightSearchText(value, query) {
+      const safe = escapeHtml(value);
+      const normalized = query.trim();
+      if (!normalized) return safe;
+      const pattern = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return safe.replace(new RegExp(`(${pattern})`, 'ig'), '<mark>$1</mark>');
+    }
+
+    function currentSessionSearchQuery() {
+      return document.getElementById('sessionSearch')?.value.trim() || '';
+    }
+
+    function sessionContentMatches(session, query = currentSessionSearchQuery()) {
+      const normalized = query.trim().toLowerCase();
+      if (!normalized) return [];
+      return session.messages.map((message, messageIndex) => ({ message, messageIndex })).filter(item => item.message.text.toLowerCase().includes(normalized));
+    }
+
+    function sessionMatchesSearch(session, query) {
+      const normalized = query.trim().toLowerCase();
+      if (!normalized) return true;
+      const metadata = [session.title, session.summary, session.id, session.model, session.permissionLabel, session.cwd];
+      return metadata.some(value => value.toLowerCase().includes(normalized)) || sessionContentMatches(session, query).length > 0;
     }
 
     function permissionClass(mode) {
@@ -1413,7 +1507,10 @@ On branch main
     function openSessionManager(targetId) {
       sessionLoadTarget = resolveSessionLoadTarget(targetId);
       selectedRecoverableSessionId = recoverableSessions[0].id;
+      sessionSearchScope = 'all';
+      activeSessionMatchIndex = 0;
       document.getElementById('sessionSearch').value = '';
+      updateSessionSearchScopeControl();
       document.getElementById('sessionManagerFoot').classList.remove('error');
       document.getElementById('loadSelectedSession').textContent = '载入到当前卡片';
       hideReplaceConfirm();
@@ -1436,31 +1533,50 @@ On branch main
     function filterRecoverableSessions(query) {
       renderRecoverableSessionList(query);
       const visibleSelected = document.querySelector(`.session-record[data-session-id="${selectedRecoverableSessionId}"]`);
-      if (!visibleSelected) {
+      if (!visibleSelected && sessionSearchScope === 'all') {
         const first = document.querySelector('.session-record');
-        if (first) selectRecoverableSession(first.dataset.sessionId);
+        if (first) {
+          selectRecoverableSession(first.dataset.sessionId, 0);
+          return;
+        }
       }
+      selectRecoverableSession(selectedRecoverableSessionId, 0, false);
     }
 
     function renderRecoverableSessionList(query = '') {
-      const normalized = query.trim().toLowerCase();
-      const matches = recoverableSessions.filter(session => [session.title, session.summary, session.id].some(value => value.toLowerCase().includes(normalized)));
+      const normalized = query.trim();
+      const scopedSessions = sessionSearchScope === 'current'
+        ? recoverableSessions.filter(session => session.id === selectedRecoverableSessionId)
+        : recoverableSessions;
+      const matches = scopedSessions.filter(session => sessionMatchesSearch(session, normalized));
       const root = document.getElementById('recoverableSessionList');
+      const contentMatchCount = matches.reduce((count, session) => count + sessionContentMatches(session, normalized).length, 0);
+      document.getElementById('resultSummary').textContent = normalized
+        ? `${matches.length} 个会话 · ${contentMatchCount} 处内容命中`
+        : '按最近使用排序';
       if (!matches.length) {
-        root.innerHTML = '<div class="session-empty">当前工作空间中没有匹配的可恢复会话<br/>换一个关键词继续搜索</div>';
+        root.innerHTML = `<div class="session-empty">${sessionSearchScope === 'current' ? '当前会话' : '当前工作空间'}中没有匹配内容<br/>换一个关键词继续搜索</div>`;
         return;
       }
-      root.innerHTML = matches.map(session => `<button class="session-record ${session.id === selectedRecoverableSessionId ? 'selected' : ''}" data-session-id="${session.id}" onclick="selectRecoverableSession('${session.id}')">
-        <span class="session-record-title">${escapeHtml(session.title)}</span>
-        <span class="session-record-summary">${escapeHtml(session.summary)}</span>
-        <span class="session-record-meta"><span>◷ ${session.updated}</span><span># ${session.id}</span><span class="source">CLI</span><span class="permission-badge ${permissionClass(session.permissionMode)}">${escapeHtml(session.permissionLabel)}</span></span>
-      </button>`).join('');
+      root.innerHTML = matches.map(session => {
+        const contentMatches = sessionContentMatches(session, normalized);
+        const matchSnippets = normalized && contentMatches.length
+          ? `<div class="session-match-snippets">${contentMatches.slice(0, 2).map((item, matchIndex) => `<button class="session-match-snippet" onclick="event.stopPropagation(); selectRecoverableSession('${session.id}', ${matchIndex})"><strong>${item.message.role === 'user' ? '你' : item.message.role === 'tool' ? '工具调用' : 'Claude'} · ${item.message.time}</strong>　${highlightSearchText(item.message.text, normalized)}</button>`).join('')}${contentMatches.length > 2 ? `<span class="session-match-more">另有 ${contentMatches.length - 2} 处命中</span>` : ''}</div>`
+          : '';
+        return `<article class="session-record ${session.id === selectedRecoverableSessionId ? 'selected' : ''}" data-session-id="${session.id}" tabindex="0" role="button" onclick="selectRecoverableSession('${session.id}', 0)" onkeydown="if(event.key === 'Enter') selectRecoverableSession('${session.id}', 0)">
+          <span class="session-record-title">${highlightSearchText(session.title, normalized)}</span>
+          <span class="session-record-summary">${highlightSearchText(session.summary, normalized)}</span>
+          <span class="session-record-meta"><span>◷ ${session.updated}</span><span># ${session.id}</span><span class="source">CLI</span><span class="permission-badge ${permissionClass(session.permissionMode)}">${escapeHtml(session.permissionLabel)}</span>${normalized ? `<span class="session-match-count">${contentMatches.length || 1} 处</span>` : ''}</span>
+          ${matchSnippets}
+        </article>`;
+      }).join('');
     }
 
-    function selectRecoverableSession(sessionId) {
+    function selectRecoverableSession(sessionId, matchIndex = 0, scrollToMatch = true) {
       const session = recoverableSessions.find(item => item.id === sessionId);
       if (!session) return;
       selectedRecoverableSessionId = session.id;
+      activeSessionMatchIndex = matchIndex;
       document.querySelectorAll('.session-record').forEach(record => record.classList.toggle('selected', record.dataset.sessionId === session.id));
       document.getElementById('previewSessionTitle').textContent = session.title;
       document.getElementById('previewSessionMeta').textContent = `${session.model} · #${session.id} · ${session.updated} · ${session.cwd}`;
@@ -1468,13 +1584,51 @@ On branch main
       badge.textContent = session.permissionLabel;
       badge.className = `permission-badge ${permissionClass(session.permissionMode)}`;
       document.getElementById('permissionNote').innerHTML = `🔐 载入后继续使用 <strong>${escapeHtml(session.permissionLabel)}</strong>，不会套用当前卡片的权限`;
-      document.getElementById('sessionTranscript').innerHTML = session.messages.map(message => `<div class="transcript-turn ${message.role}">
+      const query = currentSessionSearchQuery();
+      const contentMatches = sessionContentMatches(session, query);
+      activeSessionMatchIndex = Math.max(0, Math.min(activeSessionMatchIndex, Math.max(0, contentMatches.length - 1)));
+      const matchRankByMessage = new Map(contentMatches.map((item, index) => [item.messageIndex, index]));
+      document.getElementById('sessionTranscript').innerHTML = session.messages.map((message, messageIndex) => {
+        const matchRank = matchRankByMessage.get(messageIndex);
+        return `<div class="transcript-turn ${message.role} ${matchRank === activeSessionMatchIndex ? 'active-match' : ''}" ${matchRank === undefined ? '' : `data-content-match="${matchRank}"`}>
         <div class="transcript-meta"><span>${message.role === 'user' ? '你' : message.role === 'tool' ? '工具调用' : 'Claude'}</span><span>${message.time} · ${session.model}</span></div>
-        <div class="transcript-bubble">${escapeHtml(message.text)}</div>
-      </div>`).join('');
+        <div class="transcript-bubble">${highlightSearchText(message.text, query)}</div>
+      </div>`;
+      }).join('');
+      const nav = document.getElementById('sessionMatchNav');
+      nav.classList.toggle('visible', contentMatches.length > 0);
+      document.getElementById('sessionMatchPosition').textContent = contentMatches.length ? `${activeSessionMatchIndex + 1} / ${contentMatches.length}` : '0 / 0';
       document.getElementById('sessionManagerFoot').classList.remove('error');
       document.getElementById('loadSelectedSession').textContent = '载入到当前卡片';
       hideReplaceConfirm();
+      if (scrollToMatch && contentMatches.length) requestAnimationFrame(scrollToActiveSessionMatch);
+    }
+
+    function scrollToActiveSessionMatch() {
+      document.querySelector(`.transcript-turn[data-content-match="${activeSessionMatchIndex}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function moveSessionMatch(direction) {
+      const session = recoverableSessions.find(item => item.id === selectedRecoverableSessionId);
+      if (!session) return;
+      const matches = sessionContentMatches(session);
+      if (!matches.length) return;
+      activeSessionMatchIndex = (activeSessionMatchIndex + direction + matches.length) % matches.length;
+      selectRecoverableSession(session.id, activeSessionMatchIndex);
+    }
+
+    function updateSessionSearchScopeControl() {
+      const current = sessionSearchScope === 'current';
+      document.getElementById('searchScopeLabel').textContent = current ? '当前会话' : '全部会话';
+      document.getElementById('sessionSearch').placeholder = current
+        ? '搜索当前会话中的消息或工具调用'
+        : '搜索标题、对话内容、工具调用或会话 ID';
+    }
+
+    function toggleSessionSearchScope() {
+      sessionSearchScope = sessionSearchScope === 'all' ? 'current' : 'all';
+      updateSessionSearchScopeControl();
+      filterRecoverableSessions(currentSessionSearchQuery());
     }
 
     function requestLoadSelectedSession() {
@@ -2468,6 +2622,15 @@ ${restoreAlert}
     }, 1400);
 
     document.addEventListener('keydown', event => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f' && document.getElementById('sessionManagerBackdrop').classList.contains('open')) {
+        event.preventDefault();
+        sessionSearchScope = 'current';
+        updateSessionSearchScopeControl();
+        filterRecoverableSessions(currentSessionSearchQuery());
+        document.getElementById('sessionSearch').focus();
+        document.getElementById('sessionSearch').select();
+        return;
+      }
       if (event.key === 'Tab' && event.altKey && !event.metaKey && !event.ctrlKey) {
         if (document.getElementById('branchModal').classList.contains('open') || document.getElementById('sessionManagerBackdrop').classList.contains('open')) return;
         event.preventDefault();
