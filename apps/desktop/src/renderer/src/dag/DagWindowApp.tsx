@@ -17,6 +17,9 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
   const graphSignature = useRef('')
   const [error, setError] = useState('')
   const [runtimeConnection, setRuntimeConnection] = useState<RuntimeConnectionState>('ready')
+  const [notifiedSessionIds, setNotifiedSessionIds] = useState<string[]>(
+    context.notificationSessionIds ?? []
+  )
   const refresh = useCallback(async () => {
     if (fixtureGraph || !client) return
     try {
@@ -42,7 +45,9 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     graphSignature.current = ''
     setInitialTransform(undefined)
     setGeometryReady(false)
+    setNotifiedSessionIds(next.notificationSessionIds ?? [])
   }), [])
+  useEffect(() => window.matouDesktop?.onDagNotifications?.(setNotifiedSessionIds), [])
   useEffect(() => window.matouDesktop?.onRuntimeConnectionState?.(setRuntimeConnection), [])
   useEffect(() => {
     if (fixtureGraph || !client) return
@@ -134,6 +139,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
       {runtimeConnection === 'ready' && error && <button onClick={() => void refresh()}>立即重试</button>}
     </div>}
     <DagCanvas key={context.sceneId} graph={graph} focusedSessionId={focusedSessionId}
+      notifiedSessionIds={notifiedSessionIds}
       {...(initialTransform ? { initialTransform } : {})} onTransformChange={persistTransform}
       onSelect={(sessionId) => {
       const target = graph.nodes.find((node) => node.sessionId === sessionId)
@@ -165,7 +171,7 @@ function sessionGraphSignature(graph: SessionGraphView): string {
       node.sessionId, node.parentSessionId, node.currentMode, node.workStatus,
       node.providerRestoreState, node.title, node.cwd, node.archivedAt,
       node.detachedWindowId, node.latestLines, node.lastActivityAt,
-      node.activeChildCount, node.historicalChildCount
+      node.activeChildCount, node.stoppedChildCount
     ]),
     graph.edges
   ])

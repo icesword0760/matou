@@ -42,6 +42,15 @@ describe('Kooky notification hierarchy interactions', () => {
     expect(screen.getByTestId('scene-unread-scene-a')).toBeTruthy()
   })
 
+  it('does not show an orphan Task badge when no Session notification indicator exists', () => {
+    const projection = fixture()
+    projection.unreadByTask = { 'task-a': 1 }
+    renderWithStore(<TaskSidebar projection={projection} commands={commands()} />, new AgentNotificationStore())
+
+    expect(screen.queryByText('1')).toBeNull()
+    expect(document.querySelector('.terminal-pane.has-notification')).toBeNull()
+  })
+
   it('marks all notifications for a selected Workspace read', async () => {
     const user = userEvent.setup()
     const store = notificationStore('workspace-2')
@@ -199,7 +208,7 @@ function commands(): HierarchyCommands {
     splitSession: vi.fn(), forkSession: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
     retryFork: vi.fn(), removeFailedFork: vi.fn(),
-    retryProviderRestore: vi.fn(), reopenHistoricalSession: vi.fn(), getSceneSessionGraph: vi.fn(),
+    retryProviderRestore: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
     detachSession: vi.fn(), returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()

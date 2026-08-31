@@ -306,12 +306,14 @@
     .statusbar .spacer { flex: 1; }
     .statusbar .mode { color: #2b72c8; font-weight: 650; }
 
-    .children-view { grid-template-rows: 48px minmax(0, 1fr) 42px; }
-    .children-topbar { overflow: hidden; }
+    .children-view { grid-template-rows: minmax(0, 1fr) 42px; }
     .breadcrumb { display: flex; align-items: center; gap: 7px; min-width: 0; font-weight: 620; }
     .breadcrumb .root { color: #808792; font-weight: 560; }
     .breadcrumb .current { color: #343942; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .gesture-hint { margin-left: 6px; color: #949ba5; font-size: 11px; font-weight: 520; }
+    .bottom-breadcrumb { display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 28px; padding: 0 8px; border: 0; border-radius: 7px; color: #4f5864; background: transparent; font: inherit; cursor: pointer; }
+    .bottom-breadcrumb:hover { color: #2666b1; background: #edf4fd; }
+    .bottom-breadcrumb .breadcrumb { overflow: hidden; }
 
     .carousel-shell {
       position: relative;
@@ -866,7 +868,7 @@
               <button class="branch-badge" id="parentBadge" onclick="enterChildren()">
                 <span class="status-dot"></span><span id="parentBadgeText">5 分支 · 1 待输入</span><span>›</span>
               </button>
-              <button class="icon-btn" aria-label="关闭">×</button>
+              <button class="icon-btn" data-tip="停止运行或移除节点" onclick="showToast('卡片更多：停止运行 / 移除节点…')" aria-label="更多会话操作">•••</button>
             </div>
           </div>
 
@@ -880,22 +882,10 @@
 <span class="prompt-green">➜</span> 请继续描述下一项产品决策 <span class="cursor"></span></div>
           </div>
 
-          <div class="statusbar"><span>Claude Code</span><span class="spacer"></span><span>长按 ⌥ Option + Tab · 会话关系</span><span>空闲</span><span>~/matou_workspace</span></div>
+          <div class="statusbar"><span class="breadcrumb"><span class="current">根会话</span><span class="root">· 1 个会话</span></span><span class="spacer"></span><span>长按 ⌥ Option + Tab · 会话关系</span><span>空闲</span><span>~/matou_workspace</span></div>
         </section>
 
         <section class="children-view view-hidden" id="childrenView">
-          <div class="session-titlebar children-topbar">
-            <div class="breadcrumb"><span class="root">Claude Code /</span><span class="current">主线会话</span><span>›</span><span>兄弟分支</span></div>
-            <span class="gesture-hint">已进入 5 个子分支 · 滑到最左后继续右拉可返回父会话</span>
-            <div class="session-actions">
-              <button class="icon-btn split-create" data-tip="新建普通 Shell · 加入当前兄弟列表" onclick="createShellSibling()" aria-label="新建普通 Shell 兄弟">＋</button>
-              <button class="icon-btn branch-create" data-tip="由父会话继续创建子分支" onclick="openBranchModal('parent')">
-                <svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v5a4 4 0 0 0 4 4h3a5 5 0 0 0 5-5V10"/><path d="M15 4v4M13 6h4"/></svg>
-              </button>
-              <button class="icon-btn" onclick="returnToParent()" aria-label="返回父会话">⌃</button>
-            </div>
-          </div>
-
           <div class="carousel-shell" id="carouselShell">
             <div class="parent-projection" id="parentProjection">
               <div class="parent-card">
@@ -916,10 +906,14 @@ On branch main
           </div>
 
           <div class="statusbar carousel-status">
+            <button class="bottom-breadcrumb" onclick="returnToParent()" aria-label="返回父会话">
+              <span aria-hidden="true">←</span>
+              <span class="breadcrumb" id="levelBreadcrumb"><span class="root">Claude Code /</span><span class="current">主线会话</span><span>›</span><span>兄弟分支</span></span>
+            </button>
             <span id="visibleRange">正在查看 1–4 / 5</span>
             <div class="scroll-indicator"><i class="active"></i><i></i><i></i></div>
             <span class="spacer"></span>
-            <span>触摸板横滑 / 按住会话空白处拖拽</span>
+            <span class="gesture-hint" id="levelHint">滑到最左后继续右拉可返回父会话</span>
             <span>长按 ⌥ Option + Tab · DAG</span>
             <span class="mode">3 个会话运行中</span>
           </div>
@@ -1097,7 +1091,7 @@ On branch main
     const meter = document.getElementById('pullMeter');
 
     function branchStatusLabel(branch) {
-      return ({ running: '运行中', 'needs-input': '待输入', error: '错误', 'restore-failed': 'Claude Code 恢复失败', restoring: '正在恢复 Claude Code', interrupted: '已中断', idle: '空闲', exited: '已退出' })[branch.status || (branch.running ? 'running' : 'idle')] || '空闲';
+      return ({ running: '运行中', 'needs-input': '待输入', error: '错误', 'restore-failed': 'Claude Code 恢复失败', restoring: '正在恢复 Claude Code', interrupted: '已中断', idle: '空闲', exited: '已停止' })[branch.status || (branch.running ? 'running' : 'idle')] || '空闲';
     }
 
     function dominantBranchStatus() {
@@ -1131,6 +1125,7 @@ On branch main
           <div class="tiny-actions">
             ${nestedBadge}
             ${forkActions}
+            <button class="icon-btn" data-tip="停止运行或移除节点" aria-label="更多会话操作：${branch.name}" onclick="event.stopPropagation(); showToast('卡片更多：停止运行 / 移除节点…')">•••</button>
           </div>
         </div>
         <div class="child-terminal"><span class="term-muted">${isClaude ? 'Claude Code' : 'Shell'} · ${branch.name}</span>
@@ -1153,7 +1148,7 @@ ${restoreAlert}
       document.getElementById('parentBadgeText').textContent = `${branches.length} 会话 · ${claudeCount} Claude · ${shellCount} Shell · ${dominant.count} ${dominant.label}`;
       document.querySelector('.carousel-status .mode').textContent = `${running} 运行中 · ${branches.filter(item => item.status === 'needs-input').length} 待输入`;
       document.getElementById('visibleRange').textContent = `正在查看 1–${Math.min(4, branches.length)} / ${branches.length}`;
-      document.querySelector('.children-topbar .gesture-hint').textContent = `已进入 ${branches.length} 个子节点 · 滑到最左后继续右拉可返回父会话`;
+      document.getElementById('levelHint').textContent = `已进入 ${branches.length} 个子节点 · 滑到最左后继续右拉可返回父会话`;
     }
 
     function recordSessionInteraction(id, input, event) {
@@ -1367,7 +1362,7 @@ ${restoreAlert}
       document.querySelector('#newCanvasTab .label').textContent = 'Shell · 新画布';
       const canvas = document.getElementById('emptyCanvas');
       canvas.classList.add('ready');
-      canvas.innerHTML = `<div class="session-titlebar"><span class="session-type">Shell</span><span class="session-path">~/Documents/AIProjects/matou</span><div class="session-actions"><button class="icon-btn split-create" data-tip="直接横向创建根级 Shell" onclick="showToast('演示：直接横向创建新的根级 Shell，不展示弹框')" aria-label="横向创建 Shell 兄弟">＋</button><button class="icon-btn" aria-label="关闭">×</button></div></div><div class="terminal-wrap"><div class="terminal-content"><span class="term-muted">Shell · 当前工作空间目录</span>\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">matou</span> <span class="cursor"></span></div></div><div class="statusbar"><span>Shell</span><span class="spacer"></span><span>空闲</span><span>~/Documents/AIProjects/matou</span></div>`;
+      canvas.innerHTML = `<div class="session-titlebar"><span class="session-type">Shell</span><span class="session-path">~/Documents/AIProjects/matou</span><div class="session-actions"><button class="icon-btn split-create" data-tip="直接横向创建根级 Shell" onclick="showToast('演示：直接横向创建新的根级 Shell，不展示弹框')" aria-label="横向创建 Shell 兄弟">＋</button><button class="icon-btn" data-tip="停止运行或移除节点" onclick="showToast('卡片更多：停止运行 / 移除节点…')" aria-label="更多会话操作">•••</button></div></div><div class="terminal-wrap"><div class="terminal-content"><span class="term-muted">Shell · 当前工作空间目录</span>\n\n<span class="prompt-green">➜</span> <span class="prompt-blue">matou</span> <span class="cursor"></span></div></div><div class="statusbar"><span>Shell</span><span class="spacer"></span><span>空闲</span><span>~/Documents/AIProjects/matou</span></div>`;
       showToast('Shell 已作为新画布的根级会话创建并自动聚焦');
     }
 
@@ -1816,8 +1811,8 @@ ${restoreAlert}
         activeGroupCount = group.length;
         childrenStrip.innerHTML = group.map((branch, index) => paneTemplate(branch, index)).join('');
         const parentNode = dagNodes[node.parent];
-        document.querySelector('.children-topbar .breadcrumb').innerHTML = `<span class="root">${parentNode.name} /</span><span class="current">${node.name}</span><span>›</span><span>同级会话</span>`;
-        document.querySelector('.children-topbar .gesture-hint').textContent = `已聚焦“${node.name}” · 同时显示 ${group.length} 个兄弟会话`;
+        document.getElementById('levelBreadcrumb').innerHTML = `<span class="root">${parentNode.name} /</span><span class="current">${node.name}</span><span>›</span><span>同级会话</span>`;
+        document.getElementById('levelHint').textContent = `已聚焦“${node.name}” · 同时显示 ${group.length} 个兄弟会话`;
         const running = group.filter(item => item.running).length;
         document.querySelector('.carousel-status .mode').textContent = `${running} 个会话运行中`;
         document.getElementById('visibleRange').textContent = `正在查看 1–${Math.min(4, group.length)} / ${group.length}`;

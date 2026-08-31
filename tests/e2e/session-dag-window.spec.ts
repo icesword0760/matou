@@ -40,6 +40,46 @@ test.describe('native session DAG window', () => {
     }
   })
 
+  test('mirrors a live Session notification into the DAG until selecting that node clears it', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      const surface = visibleSurfaces(fixture.page).first()
+      const sessionId = await surface.getAttribute('data-session-id')
+      expect(sessionId).toBeTruthy()
+
+      await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+      let dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
+      const node = dag.locator(`.dag-node-card[data-session-id="${sessionId}"]`)
+      await expect(node).not.toHaveClass(/has-notification/)
+
+      await fixture.page.evaluate((targetSessionId) => {
+        if (!window.matouE2e) throw new Error('Matou E2E bridge is missing')
+        const workspaceId = document.querySelector<HTMLElement>('.workspace-group.is-active')?.dataset.workspaceId
+        const taskId = document.querySelector<HTMLElement>('.workbench-item.is-active')?.dataset.testid?.replace(/^task-/, '')
+        const sceneId = document.querySelector<HTMLElement>('.tab-item.active')?.dataset.sceneId
+        if (!workspaceId || !taskId || !sceneId) throw new Error('Hierarchy identity is missing')
+        window.matouE2e.pushNotification({
+          eventId: 'dag-notification-e2e', eventType: 'attention',
+          title: 'Shell', body: 'DAG node attention', sound: false,
+          workspaceId, taskId, sceneId, sessionId: targetSessionId,
+          isFocusedSession: true
+        })
+      }, sessionId)
+      await expect(node).toHaveClass(/has-notification/)
+
+      await node.click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
+      await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+      dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
+      await expect(dag.locator(`.dag-node-card[data-session-id="${sessionId}"]`))
+        .not.toHaveClass(/has-notification/)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('returns from DAG with only the selected Session expanded', async () => {
     const fixture = await launchSessionCanvas()
     try {

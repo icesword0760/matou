@@ -139,7 +139,7 @@ describe('SessionCanvasService', () => {
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
   })
 
-  it('adds a Shell to a child level after every prior child became historical', () => {
+  it('adds a Shell to a child level after every prior child stopped', () => {
     const initial = bootstrap()
     const historical = service.createShellSibling(command('only-child-shell'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
@@ -167,7 +167,7 @@ describe('SessionCanvasService', () => {
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
   })
 
-  it('reopens a historical Shell as a new live sibling while retaining the historical node', () => {
+  it('restarts a stopped Shell in the same graph node', () => {
     const initial = bootstrap()
     const historical = service.createShellSibling(command('historical-shell'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
@@ -176,20 +176,19 @@ describe('SessionCanvasService', () => {
     insertStructuralRelation('historical-parent', historical.session!.id, initial.session!.id, 21)
     archiveSession(historical.session!.id, 22)
 
-    const reopened = service.reopenHistoricalSession(command('reopen-shell'), {
+    const reopened = service.restartStoppedSession(command('restart-shell'), {
       windowId: 'window-1', sessionId: historical.session!.id, now: 23
     })
 
     expect(reopened.session).toMatchObject({ kind: 'shell', status: 'created' })
-    expect(reopened.session!.id).not.toBe(historical.session!.id)
-    expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === historical.session!.id)?.archivedAt).toBe(22)
-    expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === reopened.session!.id))
+    expect(reopened.session!.id).toBe(historical.session!.id)
+    expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === historical.session!.id)?.archivedAt).toBeUndefined()
+    expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === historical.session!.id))
       .toMatchObject({ parentSessionId: initial.session!.id, relationKind: 'derived-from' })
-    expect(reopened.graph.nodes.at(-1)?.sessionId).toBe(reopened.session!.id)
-    expect(reopened.graph.focusedSessionId).toBe(reopened.session!.id)
+    expect(reopened.graph.focusedSessionId).toBe(historical.session!.id)
   })
 
-  it('reopens the first historical Session after a closed canvas is restored', () => {
+  it('restarts the same stopped Session after a closed canvas is restored', () => {
     const initial = bootstrap()
     service.createCanvas(command('second-canvas-before-close'), {
       windowId: 'window-1', taskId: initial.task!.id, now: 20
@@ -201,14 +200,15 @@ describe('SessionCanvasService', () => {
       windowId: 'window-1', sceneId: initial.scene!.id, now: 22
     })
 
-    const reopened = service.reopenHistoricalSession(command('reopen-first-history'), {
+    const reopened = service.restartStoppedSession(command('restart-first-stopped'), {
       windowId: 'window-1', sessionId: initial.session!.id, now: 23
     })
 
     expect(reopened.session).toMatchObject({ kind: 'shell', status: 'created' })
-    expect(reopened.graph.focusedSessionId).toBe(reopened.session!.id)
+    expect(reopened.session!.id).toBe(initial.session!.id)
+    expect(reopened.graph.focusedSessionId).toBe(initial.session!.id)
     expect(reopened.graph.nodes.find(({ sessionId }) => sessionId === initial.session!.id)?.archivedAt)
-      .toBe(21)
+      .toBeUndefined()
   })
 
   it('removes an exited leaf from the canvas without changing its surviving parent', () => {
@@ -220,13 +220,14 @@ describe('SessionCanvasService', () => {
     insertStructuralRelation('history-parent', historical.session!.id, initial.session!.id, 21)
     archiveSession(historical.session!.id, 22)
 
-    const result = service.removeHistoricalSession(command('remove-history-leaf'), {
+    const result = service.removeSessionBranch(command('remove-history-leaf'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: historical.session!.id,
       includeDescendants: false, now: 23
     })
 
     expect(result.graph.nodes.map(({ sessionId }) => sessionId)).not.toContain(historical.session!.id)
     expect(result.graph.nodes.map(({ sessionId }) => sessionId)).toContain(initial.session!.id)
+    expect(result.graph.focusedSessionId).toBe(initial.session!.id)
     expect(database.get('SELECT session_id FROM session_canvas_memberships WHERE session_id = ?', historical.session!.id))
       .toBeUndefined()
   })
@@ -244,12 +245,12 @@ describe('SessionCanvasService', () => {
     })
     archiveSession(parent.session!.id, 23)
 
-    expect(() => service.removeHistoricalSession(command('remove-parent-without-branch'), {
+    expect(() => service.removeSessionBranch(command('remove-parent-without-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: parent.session!.id,
       includeDescendants: false, now: 25
-    })).toThrow('Historical Session has descendants')
+    })).toThrow('Session has descendants')
 
-    const result = service.removeHistoricalSession(command('remove-whole-history-branch'), {
+    const result = service.removeSessionBranch(command('remove-whole-history-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: parent.session!.id,
       includeDescendants: true, now: 26
     })
@@ -259,7 +260,36 @@ describe('SessionCanvasService', () => {
     expect(result.graph.nodes.map(({ sessionId }) => sessionId)).not.toContain(child.session!.id)
   })
 
-  it('moves a durable Claude identity onto a new continuation Session', () => {
+  it('removes an active parent and its complete descendant branch from both projections', () => {
+    const initial = bootstrap()
+    const child = service.createShellSibling(command('active-branch-child'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, parentSessionId: initial.session!.id, now: 20
+    })
+    const grandchild = service.createShellSibling(command('active-branch-grandchild'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: child.session!.id, parentSessionId: child.session!.id, now: 21
+    })
+
+    expect(() => service.removeSessionBranch(command('remove-active-parent-without-branch'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
+      includeDescendants: false, now: 22
+    })).toThrow('Session has descendants')
+
+    const result = service.removeSessionBranch(command('remove-active-whole-branch'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
+      includeDescendants: true, now: 23
+    })
+    expect(result.removedSessionIds).toEqual(expect.arrayContaining([
+      initial.session!.id, child.session!.id, grandchild.session!.id
+    ]))
+    expect(result.disposedSessionIds).toEqual(expect.arrayContaining([
+      initial.session!.id, child.session!.id, grandchild.session!.id
+    ]))
+    expect(result.graph.nodes).toEqual([])
+  })
+
+  it('restores a durable Claude identity on the same stopped node', () => {
     const initial = bootstrap()
     const historical = service.createShellSibling(command('historical-claude'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
@@ -276,11 +306,12 @@ describe('SessionCanvasService', () => {
     )
     archiveSession(historical.session!.id, 22)
 
-    const reopened = service.reopenHistoricalSession(command('reopen-claude'), {
+    const reopened = service.restartStoppedSession(command('restart-claude'), {
       windowId: 'window-1', sessionId: historical.session!.id, now: 23
     })
 
     expect(reopened.session).toMatchObject({ kind: 'claude-code', title: '方案分支' })
+    expect(reopened.session!.id).toBe(historical.session!.id)
     expect(database.get(
       `SELECT session_id, provider_session_id, resume_state, restore_state
        FROM provider_bindings WHERE id = 'historical-binding'`

@@ -75,6 +75,12 @@ export class DagWindowManager {
     }
   }
 
+  updateNotifications(mainWindowId: string, sessionIds: string[]): void {
+    const window = this.#windows.get(mainWindowId)
+    if (!window || window.isDestroyed()) return
+    window.send(DESKTOP_CHANNELS.dagNotifications, sessionIds)
+  }
+
   close(mainWindowId: string): void {
     const window = this.#windows.get(mainWindowId)
     if (!window || window.isDestroyed()) return

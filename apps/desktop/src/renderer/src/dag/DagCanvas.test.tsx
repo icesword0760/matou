@@ -83,7 +83,17 @@ describe('DagCanvas', () => {
     expect(screen.getByText('普通关联：不继承对话')).toBeTruthy()
   })
 
-  it('renders an archived node as historical even when its last live status was starting', () => {
+  it('shows the same blue breathing border for a node with a pending notification', () => {
+    render(<DagCanvas graph={graph()} focusedSessionId="root" onSelect={vi.fn()}
+      notifiedSessionIds={['child']} />)
+
+    const root = screen.getByRole('button', { name: '打开会话：Root' })
+    const child = screen.getByRole('button', { name: '打开会话：Child' })
+    expect(root.classList.contains('has-notification')).toBe(false)
+    expect(child.classList.contains('has-notification')).toBe(true)
+  })
+
+  it('renders a legacy archived node as stopped without exposing a history concept', () => {
     const archived = {
       ...node('archived', 'Archived child'),
       workStatus: 'starting' as const,
@@ -93,10 +103,12 @@ describe('DagCanvas', () => {
       focusedSessionId="archived" onSelect={vi.fn()} />)
 
     const card = screen.getByRole('button', { name: '打开会话：Archived child' })
-    expect(card.classList.contains('is-historical')).toBe(true)
+    expect(card.classList.contains('is-stopped')).toBe(true)
+    expect(card.classList.contains('is-historical')).toBe(false)
     expect(card.classList.contains('status-exited')).toBe(true)
     expect(card.classList.contains('status-starting')).toBe(false)
-    expect(card.querySelector('.dag-node-card__top')?.textContent).toContain('历史')
+    expect(card.querySelector('.dag-node-card__top')?.textContent).toContain('已停止')
+    expect(card.textContent).not.toContain('历史')
     expect(card.querySelector('.dag-node-card__top')?.textContent).not.toContain('运行中')
   })
 
@@ -128,7 +140,7 @@ function node(sessionId: string, title: string) {
   return {
     sessionId, sceneId: 'scene', currentMode: 'shell' as const, workStatus: 'idle' as const,
     providerRestoreState: 'none' as const, canFork: false, title, cwd: '/tmp', activeChildCount: 0,
-    historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+    stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
     latestLines: [], lastUserInteractionSeq: 0
   }
 }

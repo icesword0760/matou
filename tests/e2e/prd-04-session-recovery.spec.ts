@@ -10,7 +10,7 @@ import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 
-test('restores the work structure, cwd, and existing Shell history', async () => {
+test('restores the work structure, cwd, and completed Shell command Blocks', async () => {
   let fixture: MatouFixture = await launchMatou()
   const sessionDirectory = join(fixture.workspaceDirectory, 'session-directory')
   await mkdir(sessionDirectory)
@@ -43,6 +43,7 @@ test('restores the work structure, cwd, and existing Shell history', async () =>
     expect(restoredPid).not.toBe(originalPid)
     await expect(restoredSurface.locator('.xterm-rows'))
       .toContainText('__PRD04_OLD_SHELL_OUTPUT__')
+    await expect(restoredSurface.locator('.xterm-rows')).toContainText('会话已恢复')
     await expect.poll(async () => realpath(await processCwd(Number(restoredPid))))
       .toBe(await realpath(sessionDirectory))
   } finally {
@@ -290,7 +291,7 @@ test('opens a restored work scene from an ephemeral copy when durable storage is
   }
 })
 
-test('restores committed structure after a forced stop without restarting the foreground command', async () => {
+test('restores committed structure after a forced stop without presenting an unfinished command as history', async () => {
   let fixture: MatouFixture = await launchMatou()
   try {
     await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
@@ -313,12 +314,9 @@ test('restores committed structure after a forced stop without restarting the fo
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     const restored = visibleSurfaces(fixture).first()
     expect(await positivePid(restored)).not.toBe(originalPid)
-    await expect(restored.locator('.xterm-rows')).toContainText('__PRD04_FOREGROUND_STARTED__')
-    await expect.poll(async () => {
-      const text = await restored.locator('.xterm-rows').textContent() ?? ''
-      return text.split('__PRD04_FOREGROUND_FINISHED__').length - 1
-    }).toBe(1)
-    await expect(restored.locator('.xterm-rows')).toContainText('上次命令已中断，未自动重新执行')
+    await expect(restored.locator('.xterm-rows')).not.toContainText('__PRD04_FOREGROUND_STARTED__')
+    await expect(restored.locator('.xterm-rows')).not.toContainText('__PRD04_FOREGROUND_FINISHED__')
+    await expect(restored.locator('.xterm-rows')).not.toContainText('上次命令已中断')
   } finally {
     await fixture.close()
   }

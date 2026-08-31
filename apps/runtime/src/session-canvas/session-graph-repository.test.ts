@@ -93,7 +93,7 @@ describe('SessionGraphRepository', () => {
     expect(graph.nodes.find(({ sessionId }) => sessionId === 'parent')).toMatchObject({
       sharedWorkingDirectory: true,
       activeChildCount: 2,
-      historicalChildCount: 1,
+      stoppedChildCount: 1,
       childModeCounts: { shell: 1, claudeCode: 1 }
     })
     expect(graph.nodes.find(({ sessionId }) => sessionId === 'claude-child')).toMatchObject({

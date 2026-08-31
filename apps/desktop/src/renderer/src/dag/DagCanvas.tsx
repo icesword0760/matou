@@ -10,10 +10,12 @@ export function DagCanvas(props: {
   graph: SessionGraphView
   focusedSessionId: string
   onSelect(sessionId: string): void
+  notifiedSessionIds?: string[]
   initialTransform?: DagTransform
   onTransformChange?(transform: DagTransform): void
 }) {
-  const { graph, focusedSessionId, onSelect, initialTransform, onTransformChange } = props
+  const { graph, focusedSessionId, onSelect, notifiedSessionIds = [], initialTransform, onTransformChange } = props
+  const notified = new Set(notifiedSessionIds)
   const layout = useMemo(() => layoutGraph(graph), [graph])
   const viewportRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ id: number; x: number; y: number; originX: number; originY: number } | null>(null)
@@ -163,13 +165,14 @@ export function DagCanvas(props: {
       {renderedNodes.map((positioned) =>
         <DagNodeCard key={positioned.sessionId} node={positioned.node}
           focused={positioned.sessionId === previewSessionId}
+          notified={notified.has(positioned.sessionId)}
           style={{ left: positioned.x, top: positioned.y, width: positioned.width, height: positioned.height }}
           onClick={() => {
             setPreviewSessionId(positioned.sessionId)
             onSelect(positioned.sessionId)
           }} />)}
       {ghostNodes.map((positioned) => <DagNodeCard key={`ghost:${positioned.sessionId}`}
-        node={positioned.node} focused={false} ghost
+        node={positioned.node} focused={false} ghost notified={notified.has(positioned.sessionId)}
         style={{ left: positioned.x, top: positioned.y, width: positioned.width, height: positioned.height }}
         onClick={() => focusNode(positioned.sessionId)} />)}
     </div>
@@ -179,17 +182,18 @@ export function DagCanvas(props: {
 function DagNodeCard(props: {
   node: SessionGraphNodeView
   focused: boolean
+  notified: boolean
   ghost?: boolean
   style: CSSProperties
   onClick(): void
 }) {
-  const { node, focused, ghost = false, style, onClick } = props
+  const { node, focused, notified, ghost = false, style, onClick } = props
   const branch = node.worktree?.branch ?? node.git?.branch
   const shared = node.sharedWorkingDirectory === true || node.worktree?.shared === true
-  const historical = node.archivedAt !== undefined
-  const visualStatus = historical ? 'exited' : node.workStatus
-  return <button type="button" className={`dag-node-card status-${visualStatus}${historical ? ' is-historical' : ''}${focused ? ' is-focused' : ''}${ghost ? ' is-ghost' : ''}`}
-    style={style} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
+  const legacyStopped = node.archivedAt !== undefined
+  const visualStatus = legacyStopped ? 'exited' : node.workStatus
+  return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}${ghost ? ' is-ghost' : ''}`}
+    style={style} data-session-id={node.sessionId} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
     <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{modeLabel(node.currentMode)}</em></span>
     <strong>{node.title}</strong>
     <span className="dag-node-card__path" title={node.cwd}>
@@ -197,7 +201,7 @@ function DagNodeCard(props: {
     </span>
     {branch && <span className="dag-node-card__cwd" title={node.cwd}>{compactPath(node.cwd)}</span>}
     <pre>{node.latestLines.slice(-4).join('\n') || '等待会话输出…'}</pre>
-    <span className="dag-node-card__meta">子会话 {node.activeChildCount}{historical ? ' · 历史节点' : ''} · {activityLabel(node)}</span>
+    <span className="dag-node-card__meta">子会话 {node.activeChildCount + node.stoppedChildCount}{legacyStopped ? ' · 已停止' : ''} · {activityLabel(node)}</span>
     {shared && <span className="dag-node-card__shared">{branch ? '共享工作树' : '共享目录'}</span>}
   </button>
 }
@@ -233,7 +237,7 @@ function statusLabel(status: SessionGraphNodeView['workStatus']) {
   if (status === 'running' || status === 'starting') return '运行中'
   if (status === 'error') return '异常'
   if (status === 'interrupted') return '中断'
-  if (status === 'exited') return '历史'
+  if (status === 'exited') return '已停止'
   return '空闲'
 }
 

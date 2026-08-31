@@ -45,7 +45,7 @@ export type SessionGraphEventType =
   | 'session.mode-changed'
   | 'session.restore-state-changed'
   | 'session.graph-summary-changed'
-  | 'session.historical-state-changed'
+  | 'session.stopped-state-changed'
 
 export type AgentSemanticKind =
   | 'agent.message'

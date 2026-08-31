@@ -3,6 +3,8 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { AgentNotificationStore } from '../notifications/AgentNotificationStore'
+import { NotificationProvider } from '../notifications/NotificationProvider'
 import { TaskSidebar } from './TaskSidebar'
 import { WorkspaceSwitcher } from './WorkspaceSwitcher'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
@@ -254,8 +256,16 @@ describe('Workspace and Task navigation', () => {
   it('matches Kooky unread badge priority, cap, and long-name truncation', () => {
     const data = fixture()
     data.tasks[0]!.title = '这是一个非常非常长的事项名称，用于验证完整名称提示'
-    data.unreadByTask = { 'task-a': 120 }
-    render(<TaskSidebar projection={data} commands={commands()} />)
+    const store = new AgentNotificationStore({ cooldownMs: 0 })
+    for (let index = 0; index < 120; index += 1) {
+      store.push({
+        eventId: `event-${index}`, eventType: 'attention', title: 'Claude Code',
+        taskId: 'task-a', sessionId: `session-${index}`
+      })
+    }
+    render(<NotificationProvider store={store}>
+      <TaskSidebar projection={data} commands={commands()} />
+    </NotificationProvider>)
 
     expect(screen.getByText('99+').classList.contains('workbench-item__badge')).toBe(true)
     expect(screen.queryByRole('button', { name: /事项菜单：这是一个/ })).toBeNull()
@@ -321,7 +331,7 @@ function commands(): HierarchyCommands {
     reorderScene: vi.fn(), closeScene: vi.fn(), reopenScene: vi.fn(), splitSession: vi.fn(), forkSession: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
     retryFork: vi.fn(), removeFailedFork: vi.fn(),
-    retryProviderRestore: vi.fn(), reopenHistoricalSession: vi.fn(), removeHistoricalSession: vi.fn(), getSceneSessionGraph: vi.fn(),
+    retryProviderRestore: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(),
     activateSession: vi.fn(), deleteSession: vi.fn(), detachSession: vi.fn(),

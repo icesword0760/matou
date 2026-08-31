@@ -1,3 +1,6 @@
+import { DatabaseSync } from 'node:sqlite'
+import { join } from 'node:path'
+
 import { expect, test } from '@playwright/test'
 
 import { restartMatou, restartMatouGracefully } from './matou-fixture'
@@ -8,7 +11,7 @@ import {
 test.describe('session canvas lifecycle', () => {
   test.setTimeout(60_000)
 
-  test('keeps a detached Session as history and reopens a continuation after the native window closes', async () => {
+  test('returns a detached Session to the canvas as a live terminal when its window closes', async () => {
     const fixture = await launchSessionCanvas()
     try {
       const original = activeSurface(fixture.page)
@@ -24,18 +27,60 @@ test.describe('session canvas lifecycle', () => {
       await detached.close()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
       await expect(fixture.page.getByTestId('detached-placeholder')).toHaveCount(0)
-      await expect(fixture.page.locator(`.terminal-surface[data-session-id="${sessionId}"]`)).toHaveCount(0)
-      await expect(fixture.page.locator('.historical-session-card')).toContainText('Shell 已结束')
-
-      await fixture.page.getByRole('button', { name: '重新打开 Shell' }).click()
-      await expect(activeSurface(fixture.page)).toHaveAttribute('data-session-id', /.+/)
-      await expect(activeSurface(fixture.page)).not.toHaveAttribute('data-session-id', sessionId!)
+      const returned = fixture.page.locator(`.terminal-surface[data-session-id="${sessionId}"]`)
+      await expect(returned).toHaveAttribute('data-pid', /\d+/)
+      await expect(returned.locator('.xterm-helper-textarea')).toBeAttached()
+      await expect(fixture.page.locator('.stopped-session-card')).toHaveCount(0)
     } finally {
       await fixture.close()
     }
   })
 
-  test('replays prior terminal output and preserves sibling membership after a full restart', async () => {
+  test('removes one Session from the horizontal list and DAG without moving focus to a missing node', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      const parent = activeSurface(fixture.page)
+      const parentId = await parent.getAttribute('data-session-id')
+      await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+      await expect(activeSurface(fixture.page)).not.toHaveAttribute('data-session-id', parentId!)
+      const removable = activeSurface(fixture.page)
+      const removableId = await removable.getAttribute('data-session-id')
+      const pane = removable.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]')
+
+      await pane.getByRole('button', { name: /移出节点/ }).click()
+      const dialog = fixture.page.getByRole('alertdialog')
+      const centers = await Promise.all([
+        dialog.boundingBox(),
+        fixture.page.getByRole('region', { name: '会话画布' }).boundingBox()
+      ])
+      expect(centers[0]).not.toBeNull()
+      expect(centers[1]).not.toBeNull()
+      expect(Math.abs(
+        (centers[0]!.x + centers[0]!.width / 2) -
+        (centers[1]!.x + centers[1]!.width / 2)
+      )).toBeLessThan(3)
+      expect(Math.abs(
+        (centers[0]!.y + centers[0]!.height / 2) -
+        (centers[1]!.y + centers[1]!.height / 2)
+      )).toBeLessThan(3)
+      await fixture.page.getByRole('button', { name: '移除整个分支', exact: true }).click()
+
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
+      await expect(activeSurface(fixture.page)).toHaveAttribute('data-session-id', parentId!)
+      await expect(fixture.page.locator(`.terminal-surface[data-session-id="${removableId}"]`)).toHaveCount(0)
+
+      await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
+      await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+      const dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
+      await expect(dag.locator(`.dag-node-card[data-session-id="${removableId}"]`)).toHaveCount(0)
+      await expect(dag.locator(`.dag-node-card[data-session-id="${parentId}"]`)).toHaveCount(1)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test('restores completed command Blocks and preserves sibling membership after a full restart', async () => {
     let fixture = await launchSessionCanvas()
     try {
       await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
@@ -43,8 +88,11 @@ test.describe('session canvas lifecycle', () => {
       // load the projection can arrive after the button click has resolved;
       // wait for the requested sibling before resolving the active Session.
       await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
-      await terminalCommand(activeSurface(fixture.page), 'printf "RESTART_JOURNAL_OK\\n"')
-      await expect(activeSurface(fixture.page).locator('.xterm-rows')).toContainText('RESTART_JOURNAL_OK')
+      const active = activeSurface(fixture.page)
+      const activeId = await active.getAttribute('data-session-id')
+      await terminalCommand(active, 'printf "RESTART_JOURNAL_OK\\n"')
+      await expect(active.locator('.xterm-rows')).toContainText('RESTART_JOURNAL_OK')
+      await waitForCompletedShellBlock(fixture.dataDirectory, activeId!, 'RESTART_JOURNAL_OK')
       fixture = await restartMatou(fixture)
       await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
       await expect(visibleSurfaces(fixture.page).filter({ hasText: 'RESTART_JOURNAL_OK' })).toHaveCount(1)
@@ -65,6 +113,7 @@ test.describe('session canvas lifecycle', () => {
       const firstId = await first.getAttribute('data-session-id')
       await terminalCommand(first, "printf 'GRACEFUL_FIRST\\n'")
       await expect.poll(() => occurrences(first, 'GRACEFUL_FIRST')).toBeGreaterThanOrEqual(2)
+      await waitForCompletedShellBlock(fixture.dataDirectory, firstId!, 'GRACEFUL_FIRST')
 
       await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
       await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
@@ -72,6 +121,7 @@ test.describe('session canvas lifecycle', () => {
       const secondId = await second.getAttribute('data-session-id')
       await terminalCommand(second, "printf 'GRACEFUL_SECOND\\n'")
       await expect.poll(() => occurrences(second, 'GRACEFUL_SECOND')).toBeGreaterThanOrEqual(2)
+      await waitForCompletedShellBlock(fixture.dataDirectory, secondId!, 'GRACEFUL_SECOND')
 
       fixture = { ...await restartMatouGracefully(fixture), nonGitDirectory: fixture.nonGitDirectory }
       const restored = visibleSurfaces(fixture.page)
@@ -90,4 +140,23 @@ test.describe('session canvas lifecycle', () => {
 
 async function occurrences(surface: ReturnType<typeof activeSurface>, marker: string): Promise<number> {
   return ((await surface.locator('.xterm-rows').textContent()) ?? '').split(marker).length - 1
+}
+
+async function waitForCompletedShellBlock(
+  dataDirectory: string,
+  sessionId: string,
+  commandMarker: string
+): Promise<void> {
+  await expect.poll(() => {
+    const database = new DatabaseSync(join(dataDirectory, 'matou.sqlite'), { readOnly: true })
+    try {
+      return database.prepare(
+        `SELECT COUNT(*) AS count
+         FROM shell_history_blocks
+         WHERE session_id = ? AND command_text LIKE ?`
+      ).get(sessionId, `%${commandMarker}%`) as { count: number }
+    } finally {
+      database.close()
+    }
+  }).toEqual({ count: 1 })
 }

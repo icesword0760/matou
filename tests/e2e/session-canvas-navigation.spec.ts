@@ -72,6 +72,109 @@ test.describe('horizontal sibling navigation', () => {
     }
   })
 
+  test('browses the nearest hidden card from the right edge and stops when intent leaves', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 5; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await fixture.page.mouse.move(2, 2)
+      await fixture.page.waitForTimeout(600)
+      await expect.poll(() => carousel.evaluate((viewport) =>
+        viewport.scrollWidth - viewport.clientWidth
+      )).toBeGreaterThan(200)
+      await carousel.evaluate((viewport) => { viewport.scrollLeft = 0 })
+      await fixture.page.waitForTimeout(80)
+      const right = await carousel.evaluate((viewport) => {
+        const viewportRect = viewport.getBoundingClientRect()
+        const hiddenCard = [...viewport.querySelectorAll<HTMLElement>('[data-session-card]')]
+          .filter((card) => card.getBoundingClientRect().right > viewportRect.right - 10)
+          .sort((leftCard, rightCard) =>
+            leftCard.getBoundingClientRect().left - rightCard.getBoundingClientRect().left
+          )[0]!
+        return {
+          sessionId: hiddenCard.dataset.sessionCard!,
+          before: viewport.scrollLeft,
+          edgePoint: { x: viewportRect.right - 20, y: viewportRect.top + 100 }
+        }
+      })
+      expect(right.sessionId).toBeTruthy()
+      const hiddenCard = fixture.page.locator(`[data-session-card="${right.sessionId}"]`)
+
+      await fixture.page.mouse.move(right.edgePoint.x, right.edgePoint.y)
+
+      await expect(carousel).toHaveAttribute('data-edge-browse-direction', 'right')
+      await expect.poll(() => carousel.evaluate((viewport) => viewport.scrollLeft))
+        .toBeGreaterThan(right.before)
+      await expect.poll(() => hiddenCard.evaluate((card) => {
+        const viewport = card.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        const viewportRect = viewport.getBoundingClientRect()
+        const cardRect = card.getBoundingClientRect()
+        return Math.min(viewportRect.right, cardRect.right) - Math.max(viewportRect.left, cardRect.left)
+      })).toBeGreaterThan(300)
+
+      await fixture.page.mouse.move(right.edgePoint.x - 180, right.edgePoint.y)
+      await expect(carousel).toHaveAttribute('data-edge-browse-phase', 'idle')
+      await fixture.page.waitForTimeout(1_050)
+      await expect(carousel).toHaveAttribute('data-edge-browse-phase', 'idle')
+      await expect(carousel).toHaveAttribute('data-edge-browse-direction', 'none')
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test('reveals the nearest hidden card when the pointer dwells at the left edge', async () => {
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1200, 820))
+      for (let index = 0; index < 5; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
+      await fixture.page.mouse.move(2, 2)
+      await fixture.page.waitForTimeout(600)
+      await expect.poll(() => carousel.evaluate((viewport) =>
+        viewport.scrollWidth - viewport.clientWidth
+      )).toBeGreaterThan(200)
+      await carousel.evaluate((viewport) => {
+        viewport.scrollLeft = viewport.scrollWidth - viewport.clientWidth
+      })
+      await fixture.page.waitForTimeout(80)
+      const left = await carousel.evaluate((viewport) => {
+        const viewportRect = viewport.getBoundingClientRect()
+        const hiddenCard = [...viewport.querySelectorAll<HTMLElement>('[data-session-card]')]
+          .filter((card) => card.getBoundingClientRect().left < viewportRect.left + 10)
+          .sort((leftCard, rightCard) =>
+            rightCard.getBoundingClientRect().left - leftCard.getBoundingClientRect().left
+          )[0]!
+        return {
+          sessionId: hiddenCard.dataset.sessionCard!,
+          before: viewport.scrollLeft,
+          edgePoint: { x: viewportRect.left + 20, y: viewportRect.top + 100 }
+        }
+      })
+      expect(left.sessionId).toBeTruthy()
+      const hiddenCard = fixture.page.locator(`[data-session-card="${left.sessionId}"]`)
+
+      await fixture.page.mouse.move(left.edgePoint.x, left.edgePoint.y)
+
+      await expect(carousel).toHaveAttribute('data-edge-browse-direction', 'left')
+      await expect(hiddenCard).toHaveClass(/is-expanded/, { timeout: 2_000 })
+      await expect.poll(() => carousel.evaluate((viewport) => viewport.scrollLeft))
+        .toBeLessThan(left.before)
+      await expect.poll(() => hiddenCard.evaluate((card) => {
+        const viewport = card.closest<HTMLElement>('[aria-label="同级会话列表"]')!
+        const viewportRect = viewport.getBoundingClientRect()
+        const cardRect = card.getBoundingClientRect()
+        return Math.min(viewportRect.right, cardRect.right) - Math.max(viewportRect.left, cardRect.left)
+      })).toBeGreaterThan(300)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('retargets a stationary pointer within one responsive frame during horizontal scrolling', async () => {
     const fixture = await launchSessionCanvas()
     try {
@@ -196,15 +299,33 @@ test.describe('horizontal sibling navigation', () => {
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await expect(carousel).toBeVisible()
+      // Let the last newly focused Session finish its own visibility handoff;
+      // the assertion below is about hover previews, not creation navigation.
+      await fixture.page.waitForTimeout(500)
       const baseline = await carousel.evaluate((element) => element.scrollLeft)
       const carouselBox = await carousel.boundingBox()
       expect(carouselBox).not.toBeNull()
+      const previewCards = fixture.page.locator('.session-card:not(.is-focused)')
+      let previewIndex = -1
+      for (let index = 0; index < await previewCards.count(); index += 1) {
+        const box = await previewCards.nth(index).boundingBox()
+        if (box && box.x + box.width > carouselBox!.x + 80
+          && box.x < carouselBox!.x + carouselBox!.width - 80) {
+          previewIndex = index
+          break
+        }
+      }
+      expect(previewIndex).toBeGreaterThanOrEqual(0)
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const card = fixture.page.locator('.session-card').nth(2)
+        const card = previewCards.nth(previewIndex)
         const box = await card.boundingBox()
         expect(box).not.toBeNull()
-        await fixture.page.mouse.move(box!.x + box!.width / 2, box!.y + 90)
+        const hoverX = Math.min(
+          carouselBox!.x + carouselBox!.width - 90,
+          Math.max(carouselBox!.x + 90, box!.x + box!.width / 2)
+        )
+        await fixture.page.mouse.move(hoverX, box!.y + 90)
         await expect(card).toHaveClass(/is-expanded/)
         await fixture.page.mouse.move(carouselBox!.x + 20, Math.max(1, carouselBox!.y - 20))
         await expect(card).not.toHaveClass(/is-expanded/)
@@ -327,9 +448,26 @@ test.describe('horizontal sibling navigation', () => {
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       const cards = fixture.page.locator('.session-card[data-in-viewport="true"]')
       await expect(cards).toHaveCount(4)
-      const target = cards.nth(1)
-      const sibling = cards.nth(2)
+      const nonFocused = fixture.page.locator(
+        '.session-card[data-in-viewport="true"]:not(.is-focused)'
+      )
+      await expect(nonFocused).toHaveCount(3)
       await fixture.page.mouse.move(2, 2)
+      const carouselBox = await carousel.boundingBox()
+      expect(carouselBox).not.toBeNull()
+      const candidates = await nonFocused.evaluateAll((elements) => elements.map((element) => {
+        const rect = element.getBoundingClientRect()
+        return { id: element.getAttribute('data-session-card'), left: rect.left, right: rect.right }
+      }))
+      const fullyVisible = candidates.filter(({ left, right }) =>
+        left >= carouselBox!.x && right <= carouselBox!.x + carouselBox!.width)
+      expect(fullyVisible.length).toBeGreaterThanOrEqual(2)
+      const target = fixture.page.locator(
+        `.session-card[data-session-card="${fullyVisible.at(-1)!.id}"]`
+      )
+      const sibling = fixture.page.locator(
+        `.session-card[data-session-card="${fullyVisible.at(-2)!.id}"]`
+      )
       await expect(target).not.toHaveClass(/is-expanded/)
       await fixture.page.waitForTimeout(450)
       const targetBox = await target.boundingBox()
@@ -341,9 +479,10 @@ test.describe('horizontal sibling navigation', () => {
         return Math.min(innerWidth * 0.48, 620)
       })
 
-      const samplesPromise = target.evaluate(async (element) => {
+      const siblingId = await sibling.getAttribute('data-session-card')
+      const samplesPromise = target.evaluate(async (element, id) => {
         const sibling = element.closest('[aria-label="同级会话列表"]')!
-          .querySelectorAll<HTMLElement>('.session-card')[2]!
+          .querySelector<HTMLElement>(`[data-session-card="${id}"]`)!
         const samples: Array<{ target: number; sibling: number }> = []
         const started = performance.now()
         while (performance.now() - started < 520) {
@@ -354,7 +493,7 @@ test.describe('horizontal sibling navigation', () => {
           })
         }
         return samples
-      })
+      }, siblingId)
       await fixture.page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + 90)
       const samples = await samplesPromise
 
@@ -378,7 +517,8 @@ test.describe('horizontal sibling navigation', () => {
       const cards = fixture.page.locator('.session-card[data-in-viewport="true"]')
       await expect(cards).toHaveCount(4)
       const source = cards.nth(0)
-      const target = cards.nth(1)
+      const targetId = await cards.nth(1).getAttribute('data-session-card')
+      const target = fixture.page.locator(`.session-card[data-session-card="${targetId}"]`)
       await target.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
       await expect(target).toHaveClass(/is-focused/)
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
@@ -422,8 +562,10 @@ test.describe('horizontal sibling navigation', () => {
       const reversals = samples.slice(1).filter((sample, index) =>
         sample.width < samples[index]!.width - 1)
       expect(reversals).toEqual([])
-      expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
-        Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(1)
+      // If this focused card is also the visible tail, the strip now advances
+      // once to expose the next pointer target. That motion must remain a
+      // single trajectory rather than jittering back and forth.
+      expect(directionReversals(samples.map(({ scrollLeft }) => scrollLeft), 1)).toBe(0)
 
       await fixture.page.mouse.move(carouselBox!.x + 20, Math.max(1, carouselBox!.y - 20))
       await expect(target).toHaveClass(/is-expanded/)
@@ -446,7 +588,8 @@ test.describe('horizontal sibling navigation', () => {
       const cards = fixture.page.locator('.session-card[data-in-viewport="true"]')
       await expect(cards).toHaveCount(4)
       const source = cards.nth(0)
-      const target = cards.nth(1)
+      const targetId = await cards.nth(1).getAttribute('data-session-card')
+      const target = fixture.page.locator(`.session-card[data-session-card="${targetId}"]`)
       await expect(source.locator('.pane-title')).toHaveText('Claude')
       await target.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
       await expect(target).toHaveClass(/is-focused/)
@@ -483,8 +626,7 @@ test.describe('horizontal sibling navigation', () => {
         Math.min(...samples.map(({ width }) => width))).toBeLessThan(2)
       expect(samples.slice(1).filter((sample, index) =>
         sample.left > samples[index]!.left + 1)).toEqual([])
-      expect(Math.max(...samples.map(({ scrollLeft }) => scrollLeft)) -
-        Math.min(...samples.map(({ scrollLeft }) => scrollLeft))).toBeLessThan(1)
+      expect(directionReversals(samples.map(({ scrollLeft }) => scrollLeft), 1)).toBe(0)
     } finally {
       await fixture.close()
     }
@@ -499,9 +641,14 @@ test.describe('horizontal sibling navigation', () => {
       }
       const cards = fixture.page.locator('.session-card')
       await expect(cards).toHaveCount(3)
-      const first = cards.first()
-      const target = cards.last()
-      await first.locator('.terminal-surface').click({ position: { x: 30, y: 80 } })
+      const firstSessionId = await cards.first().getAttribute('data-session-card')
+      const targetSessionId = await cards.last().getAttribute('data-session-card')
+      expect(firstSessionId).toBeTruthy()
+      expect(targetSessionId).toBeTruthy()
+      const first = fixture.page.locator(`[data-session-card="${firstSessionId}"]`)
+      const target = fixture.page.locator(`[data-session-card="${targetSessionId}"]`)
+      await first.scrollIntoViewIfNeeded()
+      await terminalCommand(first.locator('.terminal-surface'), 'true')
       await expect(first).toHaveClass(/is-focused/)
       await fixture.page.mouse.move(2, 2)
       await fixture.page.waitForTimeout(520)

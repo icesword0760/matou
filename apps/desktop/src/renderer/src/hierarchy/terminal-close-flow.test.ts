@@ -20,14 +20,14 @@ describe('destructive hierarchy copy', () => {
       .toEqual({ action: 'silent', steps: [] })
   })
 
-  it('requires confirmation when ending a running parent Session', () => {
+  it('requires confirmation when stopping a running parent Session', () => {
     expect(sessionDeleteFlow({
       isWorkspaceFinal: false, taskName: '事项', sessionTitle: '主会话',
       workStatus: 'running', childCount: 3
     })).toMatchObject({
       action: 'confirm',
       steps: [{
-        title: '结束会话', confirmLabel: '结束会话',
+        title: '停止会话', confirmLabel: '停止会话',
         body: expect.stringContaining('正在运行，并有 3 个子会话')
       }]
     })

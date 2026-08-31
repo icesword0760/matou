@@ -29,7 +29,7 @@ function node(sessionId: string, title: string): SessionGraphNodeView {
   return {
     sessionId, sceneId: 'scene', currentMode: 'shell', workStatus: 'idle',
     providerRestoreState: 'none', canFork: false, title, cwd: '/tmp', activeChildCount: 0,
-    historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+    stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
     latestLines: [], lastUserInteractionSeq: 0
   }
 }

@@ -56,10 +56,17 @@ const desktopApi: MatouDesktopApi = {
   openDagWindow: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.openDagWindow, input),
   selectDagNode: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.selectDagNode, input),
   closeDagWindow: (mainWindowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.closeDagWindow, mainWindowId),
+  updateDagNotifications: (mainWindowId, sessionIds) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.updateDagNotifications, mainWindowId, sessionIds),
   onDagContext: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
     ipcRenderer.on(DESKTOP_CHANNELS.dagContext, handler)
     return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.dagContext, handler)
+  },
+  onDagNotifications: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: string[]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.dagNotifications, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.dagNotifications, handler)
   },
   onDagNodeSelected: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)

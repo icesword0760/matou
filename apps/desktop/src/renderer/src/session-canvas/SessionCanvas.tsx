@@ -2,8 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
 import { SessionCarousel } from './SessionCarousel'
-import { SessionHeader } from './SessionHeader'
-import { HistoricalSessionCard } from './HistoricalSessionCard'
+import { StoppedSessionCard } from './StoppedSessionCard'
 
 export function SessionCanvas(props: {
   graph: SessionGraphView
@@ -11,21 +10,18 @@ export function SessionCanvas(props: {
   disabled?: boolean
   renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
   onActivate(sessionId: string): void
-  onCreateShellSibling(sourceSessionId: string, parentSessionId?: string): void
-  onCreateForkSibling(source: SessionGraphNodeView, parent: SessionGraphNodeView): void
-  onReopenHistorical(sessionId: string): void
+  onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
   onNavigateToChildren?(sessionId: string): void
-  onRemoveHistorical?(sessionId: string, includeDescendants: boolean): void
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
-  revealRequest?: { sessionId: string; sequence: number; historical?: boolean }
+  revealRequest?: { sessionId: string; sequence: number; stopped?: boolean }
   geometry?: Array<{ ownerKey: string; geometry: Record<string, unknown> }>
   onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): unknown
 }) {
   const {
-    graph, levelParentSessionId, disabled = false, renderSession, onActivate,
-    onCreateShellSibling, onCreateForkSibling, onReopenHistorical, onNavigateToChildren,
-    onRemoveHistorical, onReturnParent,
+    graph, levelParentSessionId, renderSession, onActivate,
+    onRemoveBranch, onNavigateToChildren,
+    onReturnParent,
     onEnsureSessionVisible, revealRequest, geometry, onPutGeometry
   } = props
   const geometryTimer = useRef<number | undefined>(undefined)
@@ -36,19 +32,14 @@ export function SessionCanvas(props: {
   const geometryWriteSequence = useRef(0)
   const geometryAckSequence = useRef(0)
   const onPutGeometryRef = useRef(onPutGeometry)
-  const [showHistory, setShowHistory] = useState(false)
   const [geometryPending, setGeometryPending] = useState(false)
   const [lastSavedScrollLeft, setLastSavedScrollLeft] = useState<number | undefined>(undefined)
-  const activeNodes = graph.nodes.filter(({ archivedAt }) => archivedAt === undefined)
-  const focused = activeNodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? activeNodes[0]
+  const focused = graph.nodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? graph.nodes[0]
   const parentId = levelParentSessionId !== undefined
     ? levelParentSessionId ?? undefined
     : focused?.parentSessionId
   const direct = graph.nodes.filter((node) => node.parentSessionId === parentId)
-  const activeDirect = direct.filter(({ archivedAt }) => archivedAt === undefined)
-  const historicalCount = direct.length - activeDirect.length
-  const historyVisible = showHistory || (activeDirect.length === 0 && historicalCount > 0)
-  const siblings = historyVisible ? direct : activeDirect
+  const siblings = direct
   const parent = parentId ? graph.nodes.find(({ sessionId }) => sessionId === parentId) : undefined
   const ownerKey = `session-group:${graph.sceneId}:${parentId ?? 'root'}`
   const storedGeometry = geometry?.find((item) => item.ownerKey === ownerKey)?.geometry
@@ -60,12 +51,7 @@ export function SessionCanvas(props: {
         viewportOffset: storedGeometry.anchorViewportOffset
       }
     : undefined
-  const levelFocus = focused && focused.parentSessionId === parentId ? focused : activeDirect[0] ?? direct[0]
-  useEffect(() => { setShowHistory(false) }, [parentId])
-  useEffect(() => {
-    if (!revealRequest?.historical) return
-    if (direct.some(({ sessionId }) => sessionId === revealRequest.sessionId)) setShowHistory(true)
-  }, [direct, revealRequest?.historical, revealRequest?.sequence, revealRequest?.sessionId])
+  const levelFocus = focused && focused.parentSessionId === parentId ? focused : direct[0]
   useEffect(() => { onPutGeometryRef.current = onPutGeometry }, [onPutGeometry])
   useEffect(() => () => {
     if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
@@ -137,29 +123,19 @@ export function SessionCanvas(props: {
   return <section className="session-canvas" aria-label="会话画布" aria-busy={geometryPending}
     data-last-saved-scroll-left={lastSavedScrollLeft}
     data-parent-session-id={parentId ?? ''}>
-    <SessionHeader {...(parent ? { parentTitle: parent.title } : {})} sessionCount={siblings.length}
-      canForkSibling={parent?.canFork === true} disabled={disabled}
-      historicalCount={historicalCount} showHistory={historyVisible}
-      onToggleHistory={() => setShowHistory((value) => !value)}
-      {...(parent && onReturnParent ? { onReturnParent: () => onReturnParent(parent.sessionId) } : {})}
-      onAddShell={() => onCreateShellSibling(levelFocus.sessionId, parentId)}
-      onAddForkSibling={() => parent && onCreateForkSibling(levelFocus, parent)} />
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
       renderSession={(node, inViewport) => {
         if (node.archivedAt === undefined) return renderSession(node, inViewport)
-        const affected = descendants(graph, node.sessionId)
-          .map((sessionId) => graph.nodes.find((candidate) => candidate.sessionId === sessionId))
-          .filter((candidate): candidate is SessionGraphNodeView => candidate !== undefined)
-        return <HistoricalSessionCard node={node}
-          directChildCount={directChildren(graph, node.sessionId).length}
-          descendantCount={affected.length}
+        const directChildren = graph.nodes.filter(({ parentSessionId }) => parentSessionId === node.sessionId)
+        const descendants = sessionDescendants(graph.nodes, node.sessionId)
+        return <StoppedSessionCard node={node}
+          directChildCount={directChildren.length} descendantCount={descendants.length}
           descendantImpact={{
-            running: affected.filter(({ workStatus }) => workStatus === 'running' || workStatus === 'starting').length,
-            needsInput: affected.filter(({ workStatus }) => workStatus === 'needs-input').length
+            running: descendants.filter(({ workStatus }) =>
+              workStatus === 'running' || workStatus === 'starting').length,
+            needsInput: descendants.filter(({ workStatus }) => workStatus === 'needs-input').length
           }}
-          onReopen={onReopenHistorical}
-          {...(onNavigateToChildren ? { onNavigateToChildren } : {})}
-          onRemove={onRemoveHistorical ?? NOOP_REMOVE} />
+          {...(onRemoveBranch ? { onRemoveBranch } : {})} />
       }}
       onActivate={(sessionId) => {
         const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
@@ -177,21 +153,7 @@ export function SessionCanvas(props: {
   </section>
 }
 
-function directChildren(graph: SessionGraphView, sessionId: string): string[] {
-  return graph.edges.filter(({ parentSessionId }) => parentSessionId === sessionId)
-    .map(({ childSessionId }) => childSessionId)
+function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
+  const children = nodes.filter(({ parentSessionId }) => parentSessionId === sessionId)
+  return children.flatMap((child) => [child, ...sessionDescendants(nodes, child.sessionId)])
 }
-
-function descendants(graph: SessionGraphView, sessionId: string): string[] {
-  const found: string[] = []
-  const queue = [...directChildren(graph, sessionId)]
-  while (queue.length > 0) {
-    const current = queue.shift()!
-    if (found.includes(current)) continue
-    found.push(current)
-    queue.push(...directChildren(graph, current))
-  }
-  return found
-}
-
-function NOOP_REMOVE(): void {}

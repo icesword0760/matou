@@ -94,7 +94,10 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
     setMenuPosition({ top: rect.top + rect.height / 2, left: rect.right + 6 })
     setMenuTask(null); setMenuWorkspace(menuWorkspace?.id === workspace.id ? null : workspace)
   }
-  const unreadCount = (taskId: string) => notificationStore.unreadForTask(taskId) || projection.unreadByTask?.[taskId] || 0
+  // The browser notification store is the single UI source for both the Task
+  // badge and the Session pulse. Mixing in a second aggregate count leaves an
+  // orphan red badge after the visible Session indicator has been dismissed.
+  const unreadCount = (taskId: string) => notificationStore.unreadForTask(taskId)
   const resetDrag = () => { setDragTaskId(null); setDragWorkspaceId(null); setDragOverId(null) }
   const navigateNotification = async (notification: AgentNotification) => {
     const workspace = projection.workspaces.find(({ id }) => id === notification.workspaceId)

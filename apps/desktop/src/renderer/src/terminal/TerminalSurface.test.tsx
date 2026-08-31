@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
   terminalResize: vi.fn(),
+  terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
   sendTerminalInput: vi.fn(),
   recordTerminalInteraction: vi.fn()
 }))
@@ -26,7 +27,7 @@ vi.mock('@xterm/xterm', () => ({
     loadAddon = vi.fn()
     open = vi.fn()
     focus = state.focus
-    write = vi.fn((_data: unknown, done?: () => void) => done?.())
+    write = state.terminalWrite
     resize = state.terminalResize
     onData = vi.fn((listener: (data: string) => void) => {
       state.onData = listener
@@ -76,6 +77,7 @@ describe('TerminalSurface focus continuity', () => {
     state.sendTerminalInput.mockClear()
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
+    state.terminalWrite.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -107,6 +109,24 @@ describe('TerminalSurface focus continuity', () => {
     })
 
     expect(state.terminalResize).toHaveBeenCalledWith(100, 40)
+  })
+
+  it('shows durable completed Shell Blocks before the fresh live prompt', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    const history = new TextEncoder().encode('❯ previous\r\ndone\r\n── 会话已恢复 ──\r\n')
+
+    state.onMessage?.({
+      type: 'terminal.restored-history', sessionId: 'session-1', data: history, blockCount: 1
+    })
+    state.onMessage?.({ type: 'terminal.data', data: new TextEncoder().encode('% '), sequence: 1 })
+
+    expect(state.terminalWrite.mock.calls.map(([data]) =>
+      new TextDecoder().decode(data as Uint8Array)
+    )).toEqual([
+      '❯ previous\r\ndone\r\n── 会话已恢复 ──\r\n',
+      '% '
+    ])
   })
 
   it('restores the active terminal after agent output while leaving dialogs and controls alone', async () => {

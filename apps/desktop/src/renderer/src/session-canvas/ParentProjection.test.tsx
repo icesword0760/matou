@@ -27,7 +27,7 @@ function parent(): SessionGraphNodeView {
   return {
     sessionId: 'parent', sceneId: 'scene', currentMode: 'claude-code',
     workStatus: 'needs-input', providerRestoreState: 'none', canFork: true,
-    title: '父会话', cwd: '/tmp', activeChildCount: 2, historicalChildCount: 0,
+    title: '父会话', cwd: '/tmp', activeChildCount: 2, stoppedChildCount: 0,
     childModeCounts: { shell: 1, claudeCode: 1 }, latestLines: ['较早一行', '最近一行'],
     lastUserInteractionSeq: 2
   }

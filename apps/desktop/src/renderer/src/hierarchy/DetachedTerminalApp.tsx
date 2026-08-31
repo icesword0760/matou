@@ -149,7 +149,6 @@ export function DetachedTerminalApp() {
       {...(searchOpen ? { searchRequest } : {})} onSearchResults={setSearchResults}
       focusRequest={focusRequest} />}
     {!isTeamMember && <div className="shortcut-bar" aria-label="快捷指令栏">
-      <button className="add-btn" aria-label="添加快捷指令">+</button><div className="btn-list" />
       <TerminalHud hud={hud} onPermissionMode={(_sessionId: string, permissionMode: HudPermissionMode, respawn: boolean) =>
         command('session.set-permission-mode', {
           sessionId, provider: 'claude-code', permissionMode, respawn

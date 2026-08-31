@@ -29,6 +29,9 @@ describe('PreferenceRepository', () => {
     const preferences = new PreferenceRepository(database)
 
     expect(preferences.get('notification.soundEnabled')).toBe(true)
+    expect(preferences.get('shell.restoreHistoryEnabled')).toBe(true)
+    preferences.set('shell.restoreHistoryEnabled', false, 2)
+    expect(new PreferenceRepository(database).get('shell.restoreHistoryEnabled')).toBe(false)
     preferences.set('notification.soundEnabled', false, 2)
     expect(new PreferenceRepository(database).get('notification.soundEnabled')).toBe(false)
     expect(() => preferences.set('unknown' as never, true as never, 3)).toThrow('Unsupported preference')
@@ -87,7 +90,7 @@ describe('NotificationProjection', () => {
     })
     database.run('DELETE FROM session_mounts WHERE id = ?', 'mount-1')
     expect(notifications.resolveNavigation(item.id, database)).toEqual({
-      kind: 'session-history', workspaceId: 'workspace-1', taskId: 'task-1', sessionId: 'session-1'
+      kind: 'session-stopped', workspaceId: 'workspace-1', taskId: 'task-1', sessionId: 'session-1'
     })
   })
 })

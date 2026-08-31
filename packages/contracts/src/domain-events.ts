@@ -8,7 +8,7 @@ export const SESSION_GRAPH_EVENT_TYPES = [
   'session.mode-changed',
   'session.restore-state-changed',
   'session.graph-summary-changed',
-  'session.historical-state-changed'
+  'session.stopped-state-changed'
 ] as const
 
 export type SessionGraphEventWireType = (typeof SESSION_GRAPH_EVENT_TYPES)[number]

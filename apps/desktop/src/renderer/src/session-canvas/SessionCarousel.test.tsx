@@ -364,6 +364,295 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('does not advance the strip when the pointer is only previewing a card body', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const tailSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const tailCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const nextSlot = document.querySelector<HTMLElement>('[data-session-id="session-4"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+    Object.defineProperties(tailSlot, {
+      offsetLeft: { configurable: true, value: 600 },
+      offsetWidth: { configurable: true, value: 432 }
+    })
+    Object.defineProperties(nextSlot, {
+      offsetLeft: { configurable: true, value: 1_044 },
+      offsetWidth: { configurable: true, value: 280 }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 0
+
+    fireEvent.mouseEnter(tailCard)
+    act(() => vi.advanceTimersByTime(460))
+
+    const nextVisibleWidth = viewport.clientWidth - (nextSlot.offsetLeft - viewport.scrollLeft)
+    expect(nextVisibleWidth).toBeLessThan(1)
+    expect(tailSlot.offsetLeft - viewport.scrollLeft).toBeGreaterThanOrEqual(10)
+    vi.useRealTimers()
+  })
+
+  it('starts a paced next-card preview only after dwelling in the right edge intent zone', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const tailSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const tailCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const nextSlot = document.querySelector<HTMLElement>('[data-session-id="session-4"]')!
+    const nextCard = document.querySelector<HTMLElement>('[data-session-card="session-4"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0, writable: true },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600 })
+      }
+    })
+    Object.defineProperties(tailSlot, {
+      offsetLeft: { configurable: true, value: 600 },
+      offsetWidth: { configurable: true, value: 432 }
+    })
+    Object.defineProperties(nextSlot, {
+      offsetLeft: { configurable: true, value: 1_044 },
+      offsetWidth: { configurable: true, value: 432 }
+    })
+    const originalElementFromPoint = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => tailCard)
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 0
+
+    fireEvent.mouseEnter(tailCard)
+    act(() => vi.advanceTimersByTime(460))
+    // The intent zone is 84px wide: 80px from the right edge should already
+    // start the paced browse without forcing the pointer against the border.
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 820, clientY: 100 })
+    act(() => vi.advanceTimersByTime(179))
+    expect(nextCard.classList.contains('is-expanded')).toBe(false)
+
+    act(() => vi.advanceTimersByTime(1))
+    expect(nextCard.classList.contains('is-expanded')).toBe(true)
+    act(() => vi.advanceTimersByTime(460))
+    expect(viewport.scrollLeft).toBeGreaterThan(0)
+
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint
+    })
+    vi.useRealTimers()
+  })
+
+  it('reveals the partially hidden card under the left edge instead of skipping past it', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(6)} focusedSessionId="session-6"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const shiftingSlot = document.querySelector<HTMLElement>('[data-session-id="session-2"]')!
+    const previousSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const previousCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const edgeSlot = document.querySelector<HTMLElement>('[data-session-id="session-4"]')!
+    const edgeCard = document.querySelector<HTMLElement>('[data-session-card="session-4"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_600 },
+      scrollLeft: { configurable: true, value: 900, writable: true },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600 })
+      }
+    })
+    Object.defineProperties(previousSlot, {
+      offsetLeft: { configurable: true, value: 600 },
+      offsetWidth: { configurable: true, value: 432 }
+    })
+    Object.defineProperties(shiftingSlot, {
+      offsetLeft: { configurable: true, value: 0, writable: true },
+      offsetWidth: { configurable: true, value: 432 }
+    })
+    Object.defineProperties(edgeSlot, {
+      offsetLeft: { configurable: true, value: 1_044 },
+      offsetWidth: { configurable: true, value: 432 }
+    })
+    const originalElementFromPoint = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => previousCard)
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 900
+
+    fireEvent.mouseEnter(edgeCard)
+    // Left and right intent zones stay symmetric after the 50% expansion.
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 80, clientY: 100 })
+    act(() => vi.advanceTimersByTime(100))
+    Object.defineProperty(shiftingSlot, 'offsetLeft', { configurable: true, value: 850 })
+    act(() => vi.advanceTimersByTime(79))
+    expect(previousCard.classList.contains('is-expanded')).toBe(false)
+
+    act(() => vi.advanceTimersByTime(1))
+    expect(previousCard.classList.contains('is-expanded')).toBe(true)
+    act(() => vi.advanceTimersByTime(460))
+    expect(viewport.scrollLeft).toBeLessThan(900)
+
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint
+    })
+    vi.useRealTimers()
+  })
+
+  it('cancels edge browsing when a fast pointer leaves the intent zone', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const tailCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const nextCard = document.querySelector<HTMLElement>('[data-session-card="session-4"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0, writable: true },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600 })
+      }
+    })
+    const originalElementFromPoint = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => tailCard)
+    })
+    act(() => vi.advanceTimersByTime(600))
+
+    fireEvent.mouseEnter(tailCard)
+    act(() => vi.advanceTimersByTime(460))
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 880, clientY: 100 })
+    act(() => vi.advanceTimersByTime(90))
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 700, clientY: 100 })
+    act(() => vi.advanceTimersByTime(1_200))
+
+    expect(nextCard.classList.contains('is-expanded')).toBe(false)
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint
+    })
+    vi.useRealTimers()
+  })
+
+  it('continues one card at a time while the pointer deliberately stays at the right edge', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(6)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const tailSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const nextSlot = document.querySelector<HTMLElement>('[data-session-id="session-4"]')!
+    const followingSlot = document.querySelector<HTMLElement>('[data-session-id="session-5"]')!
+    const tailCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const nextCard = document.querySelector<HTMLElement>('[data-session-card="session-4"]')!
+    const followingCard = document.querySelector<HTMLElement>('[data-session-card="session-5"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_600 },
+      scrollLeft: { configurable: true, value: 0, writable: true },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600 })
+      }
+    })
+    for (const [slot, left] of [[tailSlot, 600], [nextSlot, 1_044], [followingSlot, 1_488]] as const) {
+      Object.defineProperties(slot, {
+        offsetLeft: { configurable: true, value: left },
+        offsetWidth: { configurable: true, value: 432 }
+      })
+    }
+    let cardAtPointer = tailCard
+    const originalElementFromPoint = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => cardAtPointer)
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 0
+
+    fireEvent.mouseEnter(tailCard)
+    act(() => vi.advanceTimersByTime(460))
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 880, clientY: 100 })
+    act(() => vi.advanceTimersByTime(180))
+    expect(nextCard.classList.contains('is-expanded')).toBe(true)
+
+    cardAtPointer = nextCard
+    act(() => vi.advanceTimersByTime(899))
+    expect(followingCard.classList.contains('is-expanded')).toBe(false)
+    act(() => vi.advanceTimersByTime(1))
+    expect(followingCard.classList.contains('is-expanded')).toBe(true)
+
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint
+    })
+    vi.useRealTimers()
+  })
+
+  it('keeps the reached viewport when moving left cancels an edge browse', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const earlierSlot = document.querySelector<HTMLElement>('[data-session-id="session-2"]')!
+    const earlierCard = document.querySelector<HTMLElement>('[data-session-card="session-2"]')!
+    const tailSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const tailCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    const nextSlot = document.querySelector<HTMLElement>('[data-session-id="session-4"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0, writable: true },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ x: 0, y: 0, left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600 })
+      }
+    })
+    for (const [slot, left] of [[earlierSlot, 0], [tailSlot, 600], [nextSlot, 1_044]] as const) {
+      Object.defineProperties(slot, {
+        offsetLeft: { configurable: true, value: left },
+        offsetWidth: { configurable: true, value: 432 }
+      })
+    }
+    const originalElementFromPoint = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: vi.fn(() => tailCard)
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 0
+
+    fireEvent.mouseEnter(tailCard)
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 880, clientY: 100 })
+    act(() => vi.advanceTimersByTime(640))
+    const reached = viewport.scrollLeft
+    expect(reached).toBeGreaterThan(0)
+
+    fireEvent.pointerMove(viewport, { pointerId: 1, clientX: 700, clientY: 100 })
+    fireEvent.mouseEnter(earlierCard)
+    act(() => vi.advanceTimersByTime(460))
+    expect(viewport.scrollLeft).toBe(reached)
+
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: originalElementFromPoint
+    })
+    vi.useRealTimers()
+  })
+
   it('hands hover immediately to the next card without an intermediate layout reset', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
@@ -414,7 +703,7 @@ describe('SessionCarousel', () => {
   it('restores the pre-hover viewport without checkpointing transient card movement', () => {
     vi.useFakeTimers()
     const onGeometryChange = vi.fn()
-    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
       onGeometryChange={onGeometryChange} onActivate={() => undefined}
       renderSession={(node) => <span>{node.title}</span>} />)
     const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
@@ -448,6 +737,36 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('does not move the active card back out of view when the pointer leaves it', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const focusedSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const focusedCard = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    Object.defineProperties(viewport, {
+      scrollLeft: { configurable: true, value: 320, writable: true },
+      clientWidth: { configurable: true, value: 720 },
+      scrollWidth: { configurable: true, value: 2_000 }
+    })
+    Object.defineProperties(focusedSlot, {
+      offsetLeft: { configurable: true, value: 280 },
+      offsetWidth: { configurable: true, value: 620 }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 320
+
+    fireEvent.mouseEnter(focusedCard)
+    act(() => vi.advanceTimersByTime(460))
+    expect(viewport.scrollLeft).toBe(270)
+
+    fireEvent.pointerLeave(viewport)
+    fireEvent.transitionEnd(focusedSlot, { propertyName: 'flex-basis' })
+
+    expect(viewport.scrollLeft).toBe(270)
+    vi.useRealTimers()
+  })
+
   it('keeps the new viewport when the user activates a card during its hover preview', () => {
     vi.useFakeTimers()
     const onActivate = vi.fn()
@@ -476,6 +795,17 @@ describe('SessionCarousel', () => {
 
     expect(viewport.scrollLeft).toBe(260)
     vi.useRealTimers()
+  })
+
+  it('activates a mounted terminal again from a real pointer press even when focus does not change', () => {
+    const onActivate = vi.fn()
+    render(<SessionCarousel nodes={fixtures(3)} focusedSessionId="session-1"
+      onActivate={onActivate}
+      renderSession={(node) => <div className="terminal-surface" data-testid={`surface-${node.sessionId}`} />} />)
+
+    fireEvent.pointerDown(screen.getByTestId('surface-session-3'), { button: 0 })
+
+    expect(onActivate).toHaveBeenCalledWith('session-3')
   })
 
   it('keeps a focused terminal beside compact sibling summaries in a narrow window', () => {
@@ -616,7 +946,7 @@ function fixtures(count: number): SessionGraphNodeView[] {
     sessionId: `session-${index + 1}`, sceneId: 'scene-1', currentMode: 'shell',
     workStatus: 'idle', providerRestoreState: 'none', canFork: false,
     title: `Shell ${index + 1}`, cwd: '/tmp', activeChildCount: 0,
-    historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+    stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
     latestLines: [], lastUserInteractionSeq: 0
   }))
 }

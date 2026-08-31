@@ -183,8 +183,8 @@ describe('parseRendererMessage', () => {
       'hierarchy.remove-failed-fork',
       'hierarchy.record-session-interaction',
       'hierarchy.retry-provider-restore',
-      'hierarchy.reopen-historical-session',
-      'hierarchy.remove-historical-session',
+      'hierarchy.restart-stopped-session',
+      'hierarchy.remove-session-branch',
       'hierarchy.reopen-scene',
       'hierarchy.get-scene-session-graph',
       'hierarchy.set-focused-session'

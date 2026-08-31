@@ -6,7 +6,7 @@ import { activeSurface, launchSessionCanvas, terminalCommand } from './fixtures/
 test.describe('session recovery uses real process state', () => {
   test.setTimeout(90_000)
 
-  test('marks an unfinished command as interrupted after restart without executing it a second time', async () => {
+  test('omits an unfinished command after restart without executing it a second time', async () => {
     let fixture = await launchSessionCanvas()
     try {
       const marker = `${fixture.rootDirectory}/command-count.txt`
@@ -17,7 +17,8 @@ test.describe('session recovery uses real process state', () => {
       await expect.poll(() => readFile(marker, 'utf8').catch(() => '')).toBe('x')
       fixture = await restartMatou(fixture)
       expect(await readFile(marker, 'utf8')).toBe('x')
-      await expect(activeSurface(fixture.page).locator('.xterm-rows')).toContainText('上次命令已中断')
+      await expect(activeSurface(fixture.page).locator('.xterm-rows')).not.toContainText('LONG_COMMAND_STARTED')
+      await expect(activeSurface(fixture.page).locator('.xterm-rows')).not.toContainText('上次命令已中断')
     } finally {
       await fixture.close()
     }

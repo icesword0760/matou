@@ -266,7 +266,7 @@ export interface ActivateSessionInput {
 }
 
 export interface DeleteSessionResult extends HierarchyMutationResult {
-  outcome: 'scene-remains' | 'session-history-remains' | 'scene-archives' | 'default-task-created'
+  outcome: 'scene-remains' | 'session-stopped-remains' | 'scene-archives' | 'default-task-created'
 }
 
 export class HierarchyApplicationService {
@@ -1550,7 +1550,7 @@ export class HierarchyApplicationService {
       } else if (input.preserveSceneOnLastSession) {
         // Closing the native window ends that Session, but the owning canvas
         // remains as the user's historical graph and continuation surface.
-        outcome = 'session-history-remains'
+        outcome = 'session-stopped-remains'
       } else {
         outcome = 'scene-archives'
         tx.run('UPDATE scenes SET archived_at = ?, updated_at = ? WHERE id = ?', input.now, input.now, scene.id)

@@ -328,7 +328,8 @@ export class ForkWorkflowService {
       ? await this.#resolveGitPlan(source, name.displayName, ids.sessionId)
       : undefined
     const initial = this.#createPreparingNode(
-      command, input, source, name.displayName, ids, relationId, gitPlan
+      command, input, source, name.displayName, ids, relationId, gitPlan,
+      placement === 'sibling' ? source.selected.id : undefined
     )
     if (!gitPlan) return initial
 
@@ -345,11 +346,13 @@ export class ForkWorkflowService {
         now: input.now
       })
       return this.#bindReadyWorktree(
-        derivedCommand(command, 'bind-worktree'), input, ids.sessionId, worktree
+        derivedCommand(command, 'bind-worktree'), input, ids.sessionId, worktree,
+        placement === 'sibling' ? source.selected.id : undefined
       )
     } catch (error) {
       return this.#markFailed(
-        derivedCommand(command, 'worktree-failed'), input, ids.sessionId, errorMessage(error)
+        derivedCommand(command, 'worktree-failed'), input, ids.sessionId, errorMessage(error),
+        placement === 'sibling' ? source.selected.id : undefined
       )
     }
   }
@@ -465,7 +468,8 @@ export class ForkWorkflowService {
     displayName: string,
     ids: ReturnType<typeof createHierarchyIds>,
     relationId: string,
-    gitPlan: GitPlan | undefined
+    gitPlan: GitPlan | undefined,
+    preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
@@ -523,8 +527,9 @@ export class ForkWorkflowService {
         JSON.stringify({ worktreeMode: input.worktreeMode }), input.now, input.now,
         Number(relationInsertion.lastInsertRowid)
       )
-      activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
-      const result = readResult(tx, input.windowId, input.sceneId, ids.sessionId)
+      const result = readCreatedForkResult(
+        tx, input.windowId, input.sceneId, ids.sessionId, input.now, preserveFocusedSessionId
+      )
       emitForkEvents(emit, command.commandId, source, result, relationId, input.now)
       return { ...result, forkState: 'pending' as const }
     }).result
@@ -534,7 +539,8 @@ export class ForkWorkflowService {
     command: DomainCommandMetadata,
     input: MutationLocation,
     sessionId: string,
-    worktree: Worktree
+    worktree: Worktree,
+    preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       tx.run(
@@ -548,7 +554,9 @@ export class ForkWorkflowService {
         worktree.id, worktree.executionContextId, worktree.path, worktree.branch,
         input.now, sessionId
       )
-      const result = readResult(tx, input.windowId, input.sceneId, sessionId)
+      const result = readCreatedForkResult(
+        tx, input.windowId, input.sceneId, sessionId, input.now, preserveFocusedSessionId
+      )
       emit({
         eventId: `${command.commandId}:worktree-ready`,
         eventType: 'session.fork-worktree-ready',
@@ -565,7 +573,8 @@ export class ForkWorkflowService {
     command: DomainCommandMetadata,
     input: MutationLocation,
     sessionId: string,
-    reason: string
+    reason: string,
+    preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       tx.run(
@@ -578,7 +587,9 @@ export class ForkWorkflowService {
            version = version + 1 WHERE id = ?`,
         input.now, sessionId
       )
-      const result = readResult(tx, input.windowId, input.sceneId, sessionId)
+      const result = readCreatedForkResult(
+        tx, input.windowId, input.sceneId, sessionId, input.now, preserveFocusedSessionId
+      )
       emit({
         eventId: `${command.commandId}:fork-failed`, eventType: 'session.fork-failed',
         aggregateType: 'session', aggregateId: sessionId,
@@ -656,6 +667,30 @@ function readResult(
   const hierarchy = readHierarchyResult(tx, windowId)
   if (hierarchy.session?.id !== sessionId) throw new Error('Fork Session did not become active')
   return { ...hierarchy, graph: projectSceneGraphFrom(tx, sceneId, windowId) }
+}
+
+function readCreatedForkResult(
+  tx: DatabaseTransaction,
+  windowId: string,
+  sceneId: string,
+  createdSessionId: string,
+  now: number,
+  preserveFocusedSessionId?: string
+): WorkspaceHierarchyResult & { graph: SceneSessionGraph } {
+  activateSessionInTransaction(tx, windowId, createdSessionId, now)
+  const created = readResult(tx, windowId, sceneId, createdSessionId)
+  if (preserveFocusedSessionId === undefined) return created
+
+  // A sibling is appended to the common parent's queue, but creating it is
+  // not a navigation action. Restore the selected sibling inside the same
+  // transaction so no intermediate projection can move the user's viewport.
+  activateSessionInTransaction(tx, windowId, preserveFocusedSessionId, now)
+  const active = readHierarchyResult(tx, windowId)
+  return {
+    ...created,
+    navigation: active.navigation,
+    graph: projectSceneGraphFrom(tx, sceneId, windowId)
+  }
 }
 
 function emitForkEvents(

@@ -359,14 +359,14 @@ export class RuntimeRpcRouter {
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })
-      case 'hierarchy.reopen-historical-session':
-        return this.#sessionCanvas.reopenHistoricalSession(command, {
+      case 'hierarchy.restart-stopped-session':
+        return this.#sessionCanvas.restartStoppedSession(command, {
           windowId: text(input.windowId, 'windowId'),
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })
-      case 'hierarchy.remove-historical-session':
-        return this.#sessionCanvas.removeHistoricalSession(command, {
+      case 'hierarchy.remove-session-branch':
+        return this.#sessionCanvas.removeSessionBranch(command, {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sessionId: text(input.sessionId, 'sessionId'),

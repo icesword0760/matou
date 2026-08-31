@@ -60,7 +60,7 @@ interface EdgeRow {
 interface ChildCountRow {
   parent_session_id: string
   active_count: number
-  historical_count: number
+  stopped_count: number
   shell_count: number
   claude_count: number
 }
@@ -227,7 +227,7 @@ export function projectSceneGraphFrom(
         `SELECT
            relation.to_session_id AS parent_session_id,
            SUM(CASE WHEN child.archived_at IS NULL THEN 1 ELSE 0 END) AS active_count,
-           SUM(CASE WHEN child.archived_at IS NOT NULL THEN 1 ELSE 0 END) AS historical_count,
+           SUM(CASE WHEN child.archived_at IS NOT NULL THEN 1 ELSE 0 END) AS stopped_count,
            SUM(CASE WHEN child.archived_at IS NULL AND child.kind = 'shell' THEN 1 ELSE 0 END) AS shell_count,
            SUM(CASE WHEN child.archived_at IS NULL
                      AND child.kind IN ('claude-code', 'agent-team-member')
@@ -285,7 +285,7 @@ export function projectSceneGraphFrom(
           }
         }),
         activeChildCount: counts?.active_count ?? 0,
-        historicalChildCount: counts?.historical_count ?? 0,
+        stoppedChildCount: counts?.stopped_count ?? 0,
         childModeCounts: {
           shell: counts?.shell_count ?? 0,
           claudeCode: counts?.claude_count ?? 0

@@ -132,9 +132,16 @@ button { -webkit-app-region: no-drag; }
 .terminal-pane-actions { display: flex; align-items: center; gap: 2px; }
 @container (max-width: 620px) { .pane-cwd { display: none; } }
 @container (max-width: 500px) { .pane-environment-badge:not(.is-shared) { display: none; } }
-@container (max-width: 420px) { .pane-environment-badge.is-shared,.terminal-pane-actions .pane-fork { display: none; } .pane-title { max-width: 54%; } }
+@container (max-width: 420px) { .pane-environment-badge.is-shared { display: none; } .pane-title { max-width: 54%; } }
 .pane-fork { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; color: rgba(255,255,255,.55); background: transparent; cursor: pointer; }
 .pane-fork:hover { color: rgba(255,255,255,.9); background: rgba(255,255,255,.08); }
+.pane-fork[aria-disabled="true"] { opacity: .38; cursor: help; }
+.pane-fork[aria-disabled="true"]:hover { color: inherit; background: transparent; }
+.fork-readiness-toast { position: fixed; z-index: 11000; top: 72px; left: 50%; max-width: min(420px,calc(100vw - 32px)); box-sizing: border-box; padding: 9px 14px; border: 1px solid rgba(111,170,240,.38); border-radius: 8px; color: #c7daf2; background: #202b38; box-shadow: 0 10px 28px rgba(0,0,0,.32); font-size: 12px; line-height: 1.45; pointer-events: none; transform: translateX(-50%); }
+.session-card-menu { position: fixed; z-index: 10001; display: grid; min-width: 170px; padding: 6px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #25282d; box-shadow: 0 12px 34px rgba(0,0,0,.38); transform: translateX(-100%); }
+.session-card-menu button { padding: 8px 10px; border: 0; border-radius: 6px; color: #e4e7eb; background: transparent; font-size: 12px; text-align: left; cursor: pointer; }
+.session-card-menu button:hover { background: rgba(255,255,255,.08); }
+.session-card-menu button.is-danger { margin-top: 4px; border-top: 1px solid rgba(255,255,255,.08); border-radius: 0 0 6px 6px; color: #ef7770; }
 .pane-close { display: flex; align-items: center; justify-content: center; padding: 3px; border: 0; border-radius: 3px; color: rgba(255,255,255,.35); background: transparent; cursor: pointer; font-size: 12px; }
 .pane-close:hover { color: #fff; background: rgba(255,255,255,.1); }
 .terminal-pane > [role="status"] { padding: 7px 10px; color: #e4aa78; background: #2a1e17; font-size: 11px; }
@@ -170,9 +177,14 @@ button { -webkit-app-region: no-drag; }
 .detach-menu-item { display: block; box-sizing: border-box; width: 100%; padding: 6px 14px; border: 0; color: rgba(255,255,255,.85); background: transparent; cursor: pointer; font: 13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; text-align: left; white-space: nowrap; }
 .detach-menu-item:hover { background: rgba(255,255,255,.1); }
 .shortcut-bar { position: relative; z-index: 10; display: flex; flex: 0 0 38px; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; height: 38px; padding: 0 20px; overflow: visible; border-top: 1px solid var(--kooky-border); background: var(--kooky-chrome); user-select: none; transform: translateZ(0); backface-visibility: hidden; }
-.shortcut-bar .add-btn { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; color: #8c8c8c; background: #2b2b2c; cursor: pointer; font-size: 16px; line-height: 1; }
-.shortcut-bar .add-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.12); }
-.shortcut-bar .btn-list { display: flex; flex: 0 1 auto; align-items: center; min-width: 0; height: 100%; gap: 8px; overflow: hidden; }
+.session-level-breadcrumb { display: flex; flex: 0 1 auto; align-items: center; min-width: 0; max-width: min(44vw,520px); height: 100%; color: rgba(255,255,255,.72); font-size: 11px; }
+.session-level-breadcrumb__root,
+.session-level-breadcrumb button { display: flex; align-items: center; min-width: 0; height: 26px; box-sizing: border-box; gap: 0; padding: 0 8px; border: 0; border-radius: 6px; color: inherit; background: transparent; font: inherit; white-space: nowrap; }
+.session-level-breadcrumb button { cursor: pointer; }
+.session-level-breadcrumb button:hover { color: rgba(255,255,255,.94); background: rgba(255,255,255,.08); }
+.session-level-breadcrumb button > span[aria-hidden="true"] { flex: none; margin-right: 6px; font-size: 13px; }
+.session-level-breadcrumb strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.session-level-breadcrumb strong + span { flex: none; color: rgba(255,255,255,.4); }
 .status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: min(46vw,760px); margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
 .status-field, .team-role-badge, .status-divider { flex-shrink: 0; }
 .status-info button.status-field { width: auto; height: auto; border: 0; background: transparent; font-family: inherit; }
@@ -276,6 +288,7 @@ button { -webkit-app-region: no-drag; }
 @keyframes notification-panel-drop-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 
 .kooky-dialog-overlay { position: fixed; z-index: 9999; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.58); }
+.kooky-dialog-overlay.is-session-scoped { position: absolute; }
 .kooky-rename-dialog, [role="alertdialog"] { display: flex; flex-direction: column; width: 420px; max-width: calc(100vw - 40px); padding: 0; overflow: hidden; border: 0; border-radius: 12px; color: #f4f4f4; background: #292929; box-shadow: none; }
 .kooky-rename-dialog header, [role="alertdialog"] header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; }
 .kooky-rename-dialog h2, [role="alertdialog"] h2 { margin: 0; color: #f4f4f4; font-size: 16px; font-weight: 600; }
@@ -436,6 +449,12 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .pane-environment-badge.is-shared { color: #936410; background: #fff4d9; }
 .hierarchy-shell[data-theme="light"] .pane-fork { color: rgba(0,0,0,.52); }
 .hierarchy-shell[data-theme="light"] .pane-fork:hover { color: rgba(0,0,0,.82); background: rgba(0,0,0,.06); }
+.hierarchy-shell[data-theme="light"] .pane-fork[aria-disabled="true"]:hover { color: inherit; background: transparent; }
+.light-theme .fork-readiness-toast { border-color: #bdd7f6; color: #365a83; background: #f3f8ff; box-shadow: 0 10px 28px rgba(49,70,96,.18); }
+.light-theme .session-card-menu { border-color: #dde1e7; background: #fff; box-shadow: 0 10px 30px rgba(31,40,55,.16); }
+.light-theme .session-card-menu button { color: #303744; }
+.light-theme .session-card-menu button:hover { background: #f0f2f5; }
+.light-theme .session-card-menu button.is-danger { border-top-color: #eceef2; color: #c5443e; }
 .fork-failure-card { display: grid; place-content: center; gap: 14px; flex: 1; min-height: 0; padding: 28px; color: #d9dce2; background: #181a1e; text-align: center; }
 .fork-failure-card strong { display: block; font-size: 14px; }
 .fork-failure-reason { display: block; max-width: 520px; margin-top: 8px; color: #f08a80; font-size: 12px; line-height: 1.5; }
@@ -487,8 +506,9 @@ button { -webkit-app-region: no-drag; }
 .light-theme .branch-worktree-card.is-selected { border-color: #458bd7; background: #eef6ff; }
 .light-theme .branch-dialog__footer button { border-color: #ccd2dc; color: #394250; background: #f4f5f7; }
 .light-theme .branch-dialog__footer button.primary { color: #fff; background: #347bc8; }
-.hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn { color: rgba(0,0,0,.4); background: #eff0f4; }
-.hierarchy-shell[data-theme="light"] .shortcut-bar .add-btn:hover,
+.hierarchy-shell[data-theme="light"] .session-level-breadcrumb { color: rgba(0,0,0,.68); }
+.hierarchy-shell[data-theme="light"] .session-level-breadcrumb strong + span { color: rgba(0,0,0,.38); }
+.hierarchy-shell[data-theme="light"] .session-level-breadcrumb button:hover,
 .hierarchy-shell[data-theme="light"] .is-clickable:hover { color: #2f3547; background: rgba(0,0,0,.08) !important; }
 .hierarchy-shell[data-theme="light"] .status-info { border-left-color: #e8e8e8; color: #606572; }
 .hierarchy-shell[data-theme="light"] .status-divider { background: #e8e8e8; }

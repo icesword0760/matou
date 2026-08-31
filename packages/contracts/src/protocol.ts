@@ -107,8 +107,8 @@ export const RPC_METHODS = [
   'hierarchy.remove-failed-fork',
   'hierarchy.record-session-interaction',
   'hierarchy.retry-provider-restore',
-  'hierarchy.reopen-historical-session',
-  'hierarchy.remove-historical-session',
+  'hierarchy.restart-stopped-session',
+  'hierarchy.remove-session-branch',
   'hierarchy.reopen-scene',
   'hierarchy.get-scene-session-graph',
   'hierarchy.set-focused-session',
@@ -241,6 +241,13 @@ export type RuntimeMessage =
       protocolVersion: typeof PROTOCOL_VERSION
       sessionId: string
       sequence: number
+      data: Uint8Array
+    }
+  | {
+      type: 'terminal.restored-history'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      blockCount: number
       data: Uint8Array
     }
   | {

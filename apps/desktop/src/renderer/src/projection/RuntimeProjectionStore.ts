@@ -159,6 +159,8 @@ export class RuntimeProjectionStore {
     } else if (event.eventType === 'scene.mode-changed' || event.eventType === 'scene.archived') {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
     } else if (isSessionGraphEvent(event.eventType)) {
+      const session = asEntity(asObject(event.payload)?.session)
+      if (session) this.#sessions.set(event.sessionId ?? event.aggregateId, session)
       const graph = asSessionGraph(asObject(event.payload)?.graph)
       if (graph) this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
     }
@@ -173,7 +175,7 @@ function isSessionGraphEvent(eventType: string): boolean {
     eventType === 'session.mode-changed' ||
     eventType === 'session.restore-state-changed' ||
     eventType === 'session.graph-summary-changed' ||
-    eventType === 'session.historical-state-changed'
+    eventType === 'session.stopped-state-changed'
 }
 
 function asSessionGraph(value: unknown): SessionGraphProjection | undefined {

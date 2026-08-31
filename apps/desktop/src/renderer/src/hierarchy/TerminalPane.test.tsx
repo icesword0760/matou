@@ -31,36 +31,18 @@ describe('Terminal pane', () => {
     expect(screen.getByTestId('surface-session-1').dataset.visible).toBe('false')
   })
 
-  it('reasserts the Session focus when its terminal input wins a projection race', () => {
+  it('keeps programmatic terminal focus from stealing the active Session', async () => {
     const onActivate = vi.fn()
     render(<TerminalPane {...fixture()} active={false} onActivate={onActivate} />)
 
-    screen.getByRole('textbox', { name: 'Terminal input' }).focus()
+    const input = screen.getByRole('textbox', { name: 'Terminal input' })
+    input.focus()
+    expect(onActivate).not.toHaveBeenCalled()
+
+    await userEvent.setup().click(input)
     expect(onActivate).toHaveBeenCalledWith('session-1')
   })
 
-  it('deletes a non-final Session without a dialog', async () => {
-    const onDelete = vi.fn()
-    const user = userEvent.setup()
-    render(<TerminalPane {...fixture()} workspaceSessionCount={2} onDelete={onDelete} />)
-
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
-    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
-    expect(screen.queryByRole('alertdialog')).toBeNull()
-    expect(onDelete).toHaveBeenCalledWith('session-1', false)
-  })
-
-  it('matches Kooky by protecting the Workspace final Session', async () => {
-    const onDelete = vi.fn()
-    const user = userEvent.setup()
-    render(<TerminalPane {...fixture()} workspaceSessionCount={1} onDelete={onDelete} />)
-
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
-    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
-    expect(screen.getByRole('alertdialog', { name: '提示' })).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '我知道了' }))
-    expect(onDelete).not.toHaveBeenCalled()
-  })
 
   it('matches the Kooky fork source by showing Fork and Detach together only for a resumable Claude pane', async () => {
     const onFork = vi.fn()
@@ -107,6 +89,42 @@ describe('Terminal pane', () => {
     expect(onForkSibling).toHaveBeenCalledWith('session-1')
   })
 
+  it('offers a sibling Fork on a Shell child when its common Claude parent is fork-ready', async () => {
+    const onForkSibling = vi.fn()
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'shell', title: '检查日志' }}
+      forkReady={false} onForkSibling={onForkSibling} />)
+
+    const button = screen.getByRole('button', {
+      name: '从共同父会话创建“检查日志”的兄弟分支'
+    })
+    await userEvent.setup().click(button)
+    expect(onForkSibling).toHaveBeenCalledWith('session-1')
+  })
+
+  it('keeps only structural actions in the card header without process controls', async () => {
+    const user = userEvent.setup()
+    const onRemoveBranch = vi.fn()
+    render(<TerminalPane {...fixture()} workStatus="running"
+      childNodes={[childNode('child-1'), childNode('child-2')]}
+      descendantCount={4} descendantImpact={{ running: 2, needsInput: 1 }}
+      onRemoveBranch={onRemoveBranch} />)
+
+    expect(screen.queryByRole('button', { name: '更多会话操作：Claude 主会话' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '停止运行' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '重新启动' })).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
+    const dialog = screen.getByRole('alertdialog', { name: '移除“Claude 主会话”及其整个分支？' })
+    expect(dialog.textContent).toContain('2 个直接子节点')
+    expect(dialog.textContent).toContain('共 4 个后代节点')
+    expect(dialog.textContent).toContain('2 个运行中、1 个待输入')
+    expect(dialog.textContent).toContain('项目文件和工作树不会被删除')
+    await user.click(screen.getByRole('button', { name: '停止 3 个会话并移除' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', true)
+  })
+
   it('opens the pane actions when the user right-clicks the terminal content area', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
@@ -147,31 +165,23 @@ describe('Terminal pane', () => {
     expect(screen.queryByText('② Fork 会话')).toBeNull()
   })
 
-  it('keeps Fork visible but disabled until the Claude conversation is ready', () => {
+  it('keeps an unready Fork visibly inactive and explains the next step when clicked', async () => {
     const props = fixture()
-    render(<TerminalPane {...props} forkReady={false} onFork={vi.fn()} />)
+    const onFork = vi.fn()
+    render(<TerminalPane {...props} forkReady={false} onFork={onFork} />)
 
     const button = screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })
-    expect(button).toHaveProperty('disabled', true)
+    expect(button.getAttribute('aria-disabled')).toBe('true')
     expect(button.getAttribute('title')).toContain('完成首轮对话')
+    await userEvent.setup().click(button)
+
+    expect(screen.getByRole('status', { name: '创建子分支条件说明' }).textContent)
+      .toContain('在当前会话输入一次，并等待 Claude Code 完成回复')
+    expect(onFork).not.toHaveBeenCalled()
   })
 
-  it('confirms before ending a running parent while preserving its children as live work', async () => {
-    const user = userEvent.setup()
-    const onDelete = vi.fn()
-    render(<TerminalPane {...fixture()} workspaceSessionCount={4} workStatus="running"
-      childNodes={[childNode('child-1'), childNode('child-2')]} onDelete={onDelete} />)
 
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByText('Claude 主会话') })
-    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
-    expect(screen.getByRole('alertdialog', { name: '结束会话' }).textContent)
-      .toContain('正在运行，并有 2 个子会话')
-    await user.click(screen.getByRole('button', { name: '结束会话' }))
-    expect(onDelete).toHaveBeenCalledWith('session-1', true)
-  })
-
-  it('keeps a failed Claude restore usable as Shell with one retry action', async () => {
-    const user = userEvent.setup()
+  it('keeps an expired Claude identity usable as Shell without a retry loop', () => {
     const onRetryRestore = vi.fn()
     const props = fixture()
     render(<TerminalPane {...props}
@@ -179,11 +189,28 @@ describe('Terminal pane', () => {
       providerRestoreState="failed" restoreError="provider session not found"
       onRetryRestore={onRetryRestore} />)
 
-    expect(screen.getByRole('status').textContent).toContain('Claude Code 恢复失败')
-    expect(screen.getByText('provider session not found')).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toContain('原 Claude Code 对话已失效')
+    expect(screen.getByRole('status').textContent).toContain('当前已切换到 Shell')
     expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '重试恢复' })).toBeNull()
+    expect(onRetryRestore).not.toHaveBeenCalled()
+  })
+
+  it('shows immediate progress while retrying a transient Claude restore failure', async () => {
+    const user = userEvent.setup()
+    let resolveRetry: (() => void) | undefined
+    const onRetryRestore = vi.fn(() => new Promise<void>((resolve) => { resolveRetry = resolve }))
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'shell', title: 'Shell' }}
+      providerRestoreState="failed" restoreError="temporary transport error"
+      onRetryRestore={onRetryRestore} />)
+
     await user.click(screen.getByRole('button', { name: '重试恢复' }))
+    expect(screen.getByRole('button', { name: '正在恢复…' })).toHaveProperty('disabled', true)
     expect(onRetryRestore).toHaveBeenCalledWith('session-1')
+    resolveRetry?.()
+    await waitFor(() => expect(screen.getByRole('button', { name: '重试恢复' })).toBeTruthy())
   })
 
   it('shows a real Claude round failure with its reason and retries in the same pane', async () => {
@@ -251,11 +278,11 @@ describe('Terminal pane', () => {
         sessionId: 'child-1', sceneId: 'scene-1', parentSessionId: 'session-1',
         currentMode: 'claude-code', workStatus: 'running', providerRestoreState: 'none',
         canFork: true, title: '子会话', cwd: '/tmp', activeChildCount: 0,
-        historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+        stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
         latestLines: [], lastUserInteractionSeq: 0
-      }]} historicalChildCount={1} onOpenChildren={onOpenChildren} />)
+      }]} onOpenChildren={onOpenChildren} />)
 
-    await user.click(screen.getByRole('button', { name: '查看 2 个子会话' }))
+    await user.click(screen.getByRole('button', { name: '查看 1 个子会话' }))
     expect(onOpenChildren).toHaveBeenCalledWith('session-1')
   })
 
@@ -323,7 +350,7 @@ function childNode(sessionId: string) {
     sessionId, sceneId: 'scene-1', parentSessionId: 'session-1',
     currentMode: 'shell' as const, workStatus: 'idle' as const,
     providerRestoreState: 'none' as const, canFork: false, title: sessionId,
-    cwd: '/tmp', activeChildCount: 0, historicalChildCount: 0,
+    cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }

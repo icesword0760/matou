@@ -142,6 +142,30 @@ describe('RuntimeProjectionStore', () => {
     })
   })
 
+  it('updates both the terminal entity and graph during restore and legacy stopped-node recovery', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], relations: [], scenes: [],
+      sessions: [{ id: 'session-1', kind: 'shell', status: 'archived', archivedAt: 1 }],
+      sessionGraphs: { 'scene-1': { sceneId: 'scene-1', nodes: [], edges: [] } }
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'restart-2', eventType: 'session.stopped-state-changed',
+      aggregateType: 'session', aggregateId: 'session-1',
+      payload: {
+        session: { id: 'session-1', kind: 'shell', status: 'created' },
+        graph: { sceneId: 'scene-1', nodes: [{ sessionId: 'session-1', currentMode: 'shell' }], edges: [] }
+      },
+      schemaVersion: 1, commandId: 'restart', occurredAt: 2
+    }])
+
+    expect(store.view().sessions).toEqual([expect.objectContaining({ id: 'session-1', status: 'created' })])
+    expect(store.view().sessionGraphs['scene-1']?.nodes).toEqual([
+      expect.objectContaining({ sessionId: 'session-1', currentMode: 'shell' })
+    ])
+  })
+
   it('updates the visible terminal path when a live Shell changes directory', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

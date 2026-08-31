@@ -62,7 +62,7 @@ describe('session canvas graph models', () => {
       title: '方案 A',
       cwd: '/tmp/workspace',
       activeChildCount: 2,
-      historicalChildCount: 1,
+      stoppedChildCount: 1,
       childModeCounts: { shell: 1, claudeCode: 1 },
       latestLines: ['Claude Code 恢复失败'],
       lastUserInteractionSeq: membership.lastUserInteractionSeq

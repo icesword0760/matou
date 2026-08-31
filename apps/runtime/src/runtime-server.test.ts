@@ -23,6 +23,8 @@ import { RuntimeDatabase } from './storage/database'
 import { MigrationRunner } from './storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
+import { ShellHistoryRepository } from './shell-history/shell-history'
+import { PreferenceRepository } from './product/experience-foundation'
 
 let root: string
 let database: RuntimeDatabase
@@ -166,6 +168,153 @@ describe('RuntimeServer domain RPC', () => {
     })
     expect(port.last('terminal.exited')).toMatchObject({ sequence: 4, exitCode: 0 })
     expect(port.last('terminal.replay-complete')).toMatchObject({ throughSequence: 4 })
+  })
+
+  it('restores completed Shell Blocks instead of replaying old raw terminal output on launch', async () => {
+    registerSession(database, 'block-restore-session')
+    new ShellHistoryRepository(database).complete({
+      sessionId: 'block-restore-session', command: 'printf durable-block', cwd: root,
+      output: 'durable-block\r\n', exitCode: 0, startedAt: 1, completedAt: 2
+    })
+    const journal = await SegmentJournal.open(root, 'block-restore-session')
+    await journal.appendOutput(1, new TextEncoder().encode('OLD_RAW_HISTORY_MUST_NOT_RETURN'))
+    await journal.close()
+    const executable = join(root, 'fresh-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "FRESH_PROMPT\\n"\nsleep 5\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'block-restore-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned') !== undefined)
+
+      const restored = port.last('terminal.restored-history')
+      expect(new TextDecoder().decode(restored?.data)).toContain('❯ printf durable-block')
+      expect(new TextDecoder().decode(restored?.data)).toContain('会话已恢复')
+      expect(new TextDecoder().decode(restored?.data)).not.toContain('OLD_RAW_HISTORY_MUST_NOT_RETURN')
+      expect(port.last('terminal.spawned')).not.toHaveProperty('reattached', true)
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'block-restore-session'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('captures only zsh commands that reach a completion boundary', async () => {
+    registerSession(database, 'block-capture-session')
+    const executable = join(root, 'zsh')
+    const encoded = Buffer.from('printf captured', 'utf8').toString('base64')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '\\033]633;E;${encoded}\\007\\033]133;C\\007captured\\n\\033]133;D;0\\007\\033]133;A\\007'`,
+      'sleep 5',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'block-capture-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => new ShellHistoryRepository(database).list('block-capture-session').length === 1)
+
+      expect(new ShellHistoryRepository(database).list('block-capture-session')[0]).toMatchObject({
+        command: 'printf captured', output: 'captured\r\n', exitCode: 0, cwd: root
+      })
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'block-capture-session'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('falls back to the Matou Workspace root when the saved Shell directory disappeared', async () => {
+    const workspaceRoot = join(root, 'workspace-root')
+    const contextRoot = join(root, 'worktree-context')
+    await mkdir(workspaceRoot, { recursive: true })
+    await mkdir(contextRoot, { recursive: true })
+    database.run('UPDATE workspaces SET root_directory = ? WHERE id = ?', workspaceRoot, 'replay-workspace')
+    database.run('UPDATE execution_contexts SET cwd = ? WHERE id = ?', contextRoot, 'replay-context')
+    registerSession(database, 'missing-cwd-session')
+    database.run('UPDATE sessions SET cwd = ? WHERE id = ?', join(root, 'deleted-directory'), 'missing-cwd-session')
+    const observedCwd = join(root, 'observed-cwd.txt')
+    const executable = join(root, 'cwd-shell.sh')
+    await writeFile(executable, `#!/bin/sh\npwd > ${JSON.stringify(observedCwd)}\nsleep 5\n`)
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'missing-cwd-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => (await readFile(observedCwd, 'utf8').catch(() => '')).length > 0)
+
+      expect((await readFile(observedCwd, 'utf8')).trim()).toBe(workspaceRoot)
+      expect(database.get<{ cwd: string }>('SELECT cwd FROM sessions WHERE id = ?', 'missing-cwd-session'))
+        .toEqual({ cwd: workspaceRoot })
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'missing-cwd-session'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('keeps saved Shell Blocks private when restoration is disabled and stops recording new ones', async () => {
+    registerSession(database, 'history-disabled-session')
+    const history = new ShellHistoryRepository(database)
+    history.complete({
+      sessionId: 'history-disabled-session', command: 'kept-but-hidden', cwd: root,
+      output: 'old\r\n', exitCode: 0, startedAt: 1, completedAt: 2
+    })
+    new PreferenceRepository(database).set('shell.restoreHistoryEnabled', false)
+    const executable = join(root, 'zsh')
+    const encoded = Buffer.from('new-command', 'utf8').toString('base64')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '\\033]633;E;${encoded}\\007new\\n\\033]133;D;0\\007'`,
+      'sleep 5',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'history-disabled-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => terminalText(port).includes('new'))
+
+      expect(port.sent.filter(({ type }) => type === 'terminal.restored-history')).toHaveLength(0)
+      expect(history.list('history-disabled-session').map(({ command }) => command))
+        .toEqual(['kept-but-hidden'])
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'history-disabled-session'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
   })
 
   it('does not report a historical exit while replaying into a new live Shell run', async () => {

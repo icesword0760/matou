@@ -691,7 +691,7 @@ describe('HierarchyApplicationService Session workflows', () => {
       preserveSceneOnLastSession: true, now: 31
     })
 
-    expect(deleted.outcome).toBe('session-history-remains')
+    expect(deleted.outcome).toBe('session-stopped-remains')
     expect(database.get<{ archived_at: number | null }>(
       'SELECT archived_at FROM sessions WHERE id = ?', initial.session!.id
     )?.archived_at).toBe(31)

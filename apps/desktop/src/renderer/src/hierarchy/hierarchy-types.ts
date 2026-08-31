@@ -43,7 +43,7 @@ export interface SessionGraphNodeView {
   sharedWorkingDirectory?: boolean
   worktree?: { branch: string; path: string; shared: boolean }
   activeChildCount: number
-  historicalChildCount: number
+  stoppedChildCount: number
   childModeCounts: { shell: number; claudeCode: number }
   latestLines: string[]
   siblingCreatedSeq?: number
@@ -172,8 +172,8 @@ export interface HierarchyCommands {
   retryFork(sceneId: string, sessionId: string): unknown
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
-  reopenHistoricalSession(sessionId: string): unknown
-  removeHistoricalSession?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown
+  restartStoppedSession?(sessionId: string): unknown
+  removeSessionBranch?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown
   getSceneSessionGraph(sceneId: string): unknown
   recordSessionInteraction(sessionId: string, interactionKind: 'submit' | 'control' | 'provider-action'): unknown
   setFocusedSession(sceneId: string, sessionId: string): unknown

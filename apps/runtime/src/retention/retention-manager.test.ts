@@ -77,9 +77,16 @@ describe('RetentionManager', () => {
     const journal = join(root, 'journal', 'session-1')
     await mkdir(journal, { recursive: true })
     await writeFile(join(journal, 'segment-000001.bin'), Buffer.from('journal'))
+    database.run(
+      `INSERT INTO shell_history_blocks (
+         id, session_id, command_text, cwd, output, exit_code, started_at, completed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      'block-1', 'session-1', 'printf retained', '/tmp/workspace', 'retained', 0, 1, 2
+    )
 
     retention.archiveSession(command('archive'), 'session-1', 3)
     expect(database.get<{ status: string }>('SELECT status FROM sessions WHERE id = ?', 'session-1')?.status).toBe('archived')
+    expect(database.get('SELECT id FROM shell_history_blocks WHERE id = ?', 'block-1')).toBeDefined()
     expect(await stat(journal)).toBeDefined()
 
     const plan = await retention.planSessionPurge('session-1')
@@ -87,6 +94,7 @@ describe('RetentionManager', () => {
     expect(database.get('SELECT id FROM sessions WHERE id = ?', 'session-1')).toBeDefined()
     await retention.executeSessionPurge(command('purge'), plan, 4)
     expect(database.get('SELECT id FROM sessions WHERE id = ?', 'session-1')).toBeUndefined()
+    expect(database.get('SELECT id FROM shell_history_blocks WHERE id = ?', 'block-1')).toBeUndefined()
     expect(database.get<{ event_type: string }>("SELECT event_type FROM domain_events WHERE event_type = 'retention.session-purged'")?.event_type).toBe('retention.session-purged')
   })
 

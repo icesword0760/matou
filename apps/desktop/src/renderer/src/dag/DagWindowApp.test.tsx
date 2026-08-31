@@ -10,13 +10,19 @@ import { DagWindowApp } from './DagWindowApp'
 const runtime = vi.hoisted(() => ({ current: null as null | { request: ReturnType<typeof vi.fn> } }))
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
 let runtimeConnectionListener: ((state: 'reconnecting' | 'ready') => void) | undefined
+let dagNotificationListener: ((sessionIds: string[]) => void) | undefined
 
 beforeEach(() => {
   runtime.current = null
   runtimeConnectionListener = undefined
+  dagNotificationListener = undefined
   window.history.replaceState({}, '', '/?kind=dag&mainWindowId=main-1&sceneId=scene-1&sessionId=child&theme=light')
   Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
     selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn(() => () => {}),
+    onDagNotifications: vi.fn((listener) => {
+      dagNotificationListener = listener
+      return () => { dagNotificationListener = undefined }
+    }),
     onRuntimeConnectionState: vi.fn((listener) => {
       runtimeConnectionListener = listener
       return () => { runtimeConnectionListener = undefined }
@@ -52,6 +58,18 @@ describe('DagWindowApp', () => {
 
     expect(screen.getByText('feature/dag*')).toBeTruthy()
     expect(screen.getByText('共享工作树')).toBeTruthy()
+  })
+
+  it('updates node notification breathing borders while the DAG window stays open', () => {
+    render(<DagWindowApp fixtureGraph={graph()} />)
+
+    act(() => dagNotificationListener?.(['child']))
+    expect(screen.getByRole('button', { name: '打开会话：Child' })
+      .classList.contains('has-notification')).toBe(true)
+
+    act(() => dagNotificationListener?.([]))
+    expect(screen.getByRole('button', { name: '打开会话：Child' })
+      .classList.contains('has-notification')).toBe(false)
   })
 
   it('keeps the last DAG visible while clearly saying that Runtime information is temporarily stale', () => {
@@ -98,7 +116,7 @@ function node(sessionId: string, title: string) {
   return {
     sessionId, sceneId: 'scene-1', currentMode: 'shell' as const, workStatus: 'idle' as const,
     providerRestoreState: 'none' as const, canFork: false, title, cwd: '/tmp', activeChildCount: 0,
-    historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [],
+    stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [],
     lastUserInteractionSeq: 0
   }
 }

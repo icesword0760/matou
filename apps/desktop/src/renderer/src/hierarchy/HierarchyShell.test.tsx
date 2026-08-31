@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,11 +29,64 @@ afterEach(() => {
 })
 
 describe('PRD 05 hierarchy shell', () => {
+  it('moves the current session level into the bottom bar without the obsolete add shortcut', () => {
+    const data = fixture()
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+        nodes: [graphNode('session-a1', '终端 A1')]
+      }
+    }
+
+    render(<HierarchyShell fixture={data} />)
+
+    const bottomBar = screen.getByLabelText('快捷指令栏')
+    expect(within(bottomBar).getByRole('navigation', { name: '会话层级' }).textContent)
+      .toContain('根会话 · 1 个会话')
+    expect(screen.queryByRole('button', { name: '添加快捷指令' })).toBeNull()
+    expect(document.querySelector('.session-level-header')).toBeNull()
+  })
+
+  it('returns to the parent from the bottom breadcrumb', async () => {
+    const data = fixture()
+    data.sessions.push({
+      id: 'session-child', taskId: 'task-a1', title: '子会话', executionContextId: 'context-a'
+    })
+    data.sceneSnapshots![0]!.nodes.push({
+      id: 'node-child', sceneId: 'scene-a1', kind: 'mount', ordinal: 1
+    })
+    data.sceneSnapshots![0]!.mounts.push({
+      id: 'mount-child', sceneId: 'scene-a1', sceneNodeId: 'node-child', sessionId: 'session-child'
+    })
+    data.navigation.sessionByScene['scene-a1'] = 'session-child'
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-child',
+        edges: [{
+          parentSessionId: 'session-a1', childSessionId: 'session-child',
+          relationKind: 'derived-from', createdAt: 2
+        }],
+        nodes: [
+          graphNode('session-a1', '父会话'),
+          { ...graphNode('session-child', '子会话'), parentSessionId: 'session-a1', relationKind: 'derived-from' }
+        ]
+      }
+    }
+
+    render(<HierarchyShell fixture={data} />)
+
+    const breadcrumb = screen.getByRole('navigation', { name: '会话层级' })
+    expect(breadcrumb.textContent).toContain('父会话 的子会话 · 1 个会话')
+    await userEvent.setup().click(within(breadcrumb).getByRole('button', { name: '返回父会话' }))
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+      .toBe('')
+  })
+
   it('opens the highest-priority active child represented by the aggregate badge', () => {
     const idle = { ...graphNode('idle-child', '空闲子会话'), workStatus: 'idle' as const }
     const running = { ...graphNode('running-child', '运行子会话'), workStatus: 'running' as const }
     const error = { ...graphNode('error-child', '错误子会话'), workStatus: 'error' as const }
-    const archivedError = { ...graphNode('archived-error', '历史错误'), workStatus: 'error' as const, archivedAt: 1 }
+    const archivedError = { ...graphNode('archived-error', '已停止错误'), workStatus: 'error' as const, archivedAt: 1 }
 
     expect(preferredActiveChild([idle, running, archivedError, error])?.sessionId)
       .toBe('error-child')
@@ -81,7 +134,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('button', { name: '横向新增 Shell' })).toBeTruthy()
   })
 
-  it('opens DAG from a restored historical-only canvas without a live navigation focus', async () => {
+  it('opens DAG from a restored stopped-only canvas without a running navigation focus', async () => {
     const data = fixture()
     delete data.navigation.sessionByScene['scene-a1']
     data.sessionGraphs = {
@@ -92,9 +145,9 @@ describe('PRD 05 hierarchy shell', () => {
           relationKind: 'derived-from', createdAt: 2
         }],
         nodes: [
-          { ...graphNode('history-parent', '历史父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 0 },
+          { ...graphNode('history-parent', '已停止父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 0 },
           {
-            ...graphNode('history-child', '历史子会话'), parentSessionId: 'history-parent',
+            ...graphNode('history-child', '已停止子会话'), parentSessionId: 'history-parent',
             relationKind: 'derived-from', archivedAt: 11, workStatus: 'exited'
           }
         ]
@@ -112,7 +165,8 @@ describe('PRD 05 hierarchy shell', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '打开会话 DAG' }))
 
     expect(openDagWindow).toHaveBeenCalledWith({
-      mainWindowId: 'window-1', sceneId: 'scene-a1', sessionId: 'history-parent', theme: 'light'
+      mainWindowId: 'window-1', sceneId: 'scene-a1', sessionId: 'history-parent', theme: 'light',
+      notificationSessionIds: []
     })
   })
 
@@ -311,7 +365,7 @@ describe('PRD 05 hierarchy shell', () => {
           sessionId: 'session-a1', sceneId: 'scene-a1', currentMode: 'claude-code',
           workStatus: 'idle', providerRestoreState: 'none', canFork: true,
           title: 'Claude 主会话', cwd: '/tmp/a', activeChildCount: 0,
-          historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+          stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
           latestLines: [], lastUserInteractionSeq: 0
         }]
       }
@@ -437,11 +491,11 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByTestId('xterm-session-child')).toBeTruthy()
   })
 
-  it('opens a root historical notification as node detail instead of inferring its active children', async () => {
+  it('opens a stopped root notification as the same node instead of inferring its running children', async () => {
     window.history.replaceState({}, '', '/?e2e=1')
     const data = fixture()
     data.sessions.push({
-      id: 'history-parent', taskId: 'task-a1', title: '历史父会话', executionContextId: 'context-a'
+      id: 'history-parent', taskId: 'task-a1', title: '已停止父会话', executionContextId: 'context-a'
     })
     data.sceneSnapshots![0]!.nodes.push({
       id: 'node-history-parent', sceneId: 'scene-a1', kind: 'mount', ordinal: 1
@@ -457,27 +511,27 @@ describe('PRD 05 hierarchy shell', () => {
           relationKind: 'derived-from', createdAt: 2
         }],
         nodes: [
-          { ...graphNode('history-parent', '历史父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 1 },
+          { ...graphNode('history-parent', '已停止父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 1 },
           { ...graphNode('session-a1', '活动子会话'), parentSessionId: 'history-parent', relationKind: 'derived-from' }
         ]
       }
     }
     render(<HierarchyShell fixture={data} />)
     window.matouE2e!.pushNotification({
-      eventId: 'history-parent-completed', eventType: 'completed', title: 'Claude Code', body: '历史父会话已完成',
+      eventId: 'history-parent-completed', eventType: 'completed', title: 'Claude Code', body: '已停止父会话已完成',
       workspaceId: 'workspace-a', taskId: 'task-a1', sceneId: 'scene-a1', sessionId: 'history-parent'
     })
     const user = userEvent.setup()
 
     await user.click(screen.getByRole('button', { name: '通知中心' }))
-    await user.click(screen.getByRole('button', { name: '打开通知：历史父会话已完成' }))
+    await user.click(screen.getByRole('button', { name: '打开通知：已停止父会话已完成' }))
 
-    expect(await screen.findByText('历史父会话')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '重新打开 Shell' })).toBeTruthy()
+    expect(await screen.findByText('已停止父会话')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
-  it('opens a root historical node detail from the DAG instead of falling back to its active children', async () => {
+  it('opens a stopped root node from the DAG with structural removal and no process controls', async () => {
     const data = fixture()
     data.sessionGraphs = {
       'scene-a1': {
@@ -487,7 +541,7 @@ describe('PRD 05 hierarchy shell', () => {
           relationKind: 'derived-from', createdAt: 2
         }],
         nodes: [
-          { ...graphNode('history-parent', '历史父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 1 },
+          { ...graphNode('history-parent', '已停止父会话'), archivedAt: 10, workStatus: 'exited', activeChildCount: 1 },
           { ...graphNode('session-a1', '活动子会话'), parentSessionId: 'history-parent', relationKind: 'derived-from' }
         ]
       }
@@ -506,9 +560,9 @@ describe('PRD 05 hierarchy shell', () => {
       mainWindowId: 'window-1', sceneId: 'scene-a1', sessionId: 'history-parent'
     }))
 
-    expect(await screen.findByText('历史父会话')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '重新打开 Shell' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '移除整条分支：历史父会话' })).toBeTruthy()
+    expect(await screen.findByText('已停止父会话')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
+    expect(screen.getByRole('button', { name: '移出节点：已停止父会话' })).toBeTruthy()
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
@@ -586,7 +640,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
-  it('ends a detached Session when its independent window closes instead of silently remounting it', async () => {
+  it('returns a detached Session when its independent window closes', async () => {
     const data = fixture()
     const first = data.sceneSnapshots![0]!
     first.scene.rootNodeId = 'split-detached'
@@ -598,7 +652,7 @@ describe('PRD 05 hierarchy shell', () => {
     first.mounts[0]!.sceneWindowId = 'detached-1'
     first.mounts.push({ id: 'mount-a2', sceneId: first.scene.id, sceneNodeId: 'node-a2', sessionId: 'session-a2' })
     first.windows.push({ id: 'detached-1', sceneId: first.scene.id, state: 'detached' })
-    let closeListener: ((event: { mainWindowId: string; sessionId: string }) => void) | undefined
+    let closeListener: ((event: { windowId: string; mainWindowId: string; sessionId: string }) => void) | undefined
     Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
       selectWorkspaceDirectory: vi.fn(), hideWindow: vi.fn(), showWindow: vi.fn(),
       createDetachedTerminalWindow: vi.fn(), closeDetachedTerminalWindow: vi.fn(),
@@ -607,9 +661,10 @@ describe('PRD 05 hierarchy shell', () => {
     render(<HierarchyShell fixture={data} />)
 
     expect(screen.getByTestId('detached-placeholder')).toBeTruthy()
-    closeListener?.({ mainWindowId: 'window-1', sessionId: 'session-a1' })
+    closeListener?.({ windowId: 'detached-1', mainWindowId: 'window-1', sessionId: 'session-a1' })
 
     await vi.waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull())
+    expect(screen.getAllByTestId('xterm-session-a1').length).toBeGreaterThan(0)
     expect(screen.getAllByTestId('xterm-session-a2').length).toBeGreaterThan(0)
   })
 })
@@ -664,7 +719,7 @@ function graphNode(sessionId: string, title: string) {
     sessionId, sceneId: 'scene-a1', currentMode: 'shell' as const,
     workStatus: 'idle' as const, providerRestoreState: 'none' as const, canFork: false,
     title, cwd: '/tmp/a', activeChildCount: sessionId === 'session-a1' ? 1 : 0,
-    historicalChildCount: 0, childModeCounts: { shell: sessionId === 'session-a1' ? 1 : 0, claudeCode: 0 },
+    stoppedChildCount: 0, childModeCounts: { shell: sessionId === 'session-a1' ? 1 : 0, claudeCode: 0 },
     latestLines: [], lastUserInteractionSeq: 0
   }
 }

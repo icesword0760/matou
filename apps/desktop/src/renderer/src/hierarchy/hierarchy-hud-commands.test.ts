@@ -40,4 +40,22 @@ describe('PRD 02 HUD commands', () => {
       })]
     ])
   })
+
+  it('reasserts focus on a newly created Shell after its authoritative mutation', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ session: { id: 'new-shell' } })
+      .mockResolvedValueOnce({})
+    const commands = createHierarchyCommands({ request } as never, 'window-1')
+
+    await commands.createShellSibling('scene-1', 'source-shell')
+
+    expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
+      ['hierarchy.create-shell-sibling', expect.objectContaining({
+        sceneId: 'scene-1', sourceSessionId: 'source-shell'
+      })],
+      ['hierarchy.set-focused-session', expect.objectContaining({
+        sceneId: 'scene-1', sessionId: 'new-shell'
+      })]
+    ])
+  })
 })

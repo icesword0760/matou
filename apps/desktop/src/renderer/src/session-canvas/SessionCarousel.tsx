@@ -19,7 +19,7 @@ export function SessionCarousel(props: {
   geometryKey?: string
   initialScrollLeft?: number
   initialAnchor?: { sessionId: string; viewportOffset: number }
-  revealRequest?: { sessionId: string; sequence: number; historical?: boolean }
+  revealRequest?: { sessionId: string; sequence: number; stopped?: boolean }
   onGeometryChange?(
     geometry: {
       scrollLeft: number
@@ -48,6 +48,10 @@ export function SessionCarousel(props: {
   const focusVisibilitySessionId = useRef<string | null>(null)
   const wheelTimer = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
+  const edgeBrowseTimer = useRef<number | undefined>(undefined)
+  const edgeBrowseBlocked = useRef(false)
+  const edgeBrowseDirectionRef = useRef<-1 | 0 | 1>(0)
+  const edgeBrowseTargetSessionId = useRef<string | undefined>(undefined)
   const hoverBaselineScrollLeft = useRef<number | undefined>(undefined)
   const hoverIntentSessionId = useRef<string | null>(null)
   const hoverRef = useRef<(sessionId: string | null) => void>(() => undefined)
@@ -67,6 +71,8 @@ export function SessionCarousel(props: {
   const previousFocusedSessionId = useRef(focusedSessionId)
   const [firstVisible, setFirstVisible] = useState(0)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
+  const [edgeBrowsePhase, setEdgeBrowsePhase] = useState<'idle' | 'confirming' | 'cruising'>('idle')
+  const [edgeBrowseDirection, setEdgeBrowseDirection] = useState<-1 | 0 | 1>(0)
   const [pull, setPull] = useState({ distance: 0, progress: 0, springBack: false })
   const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
   const [narrow, setNarrow] = useState(false)
@@ -101,6 +107,7 @@ export function SessionCarousel(props: {
       if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      if (edgeBrowseTimer.current !== undefined) window.clearTimeout(edgeBrowseTimer.current)
     }
   }, [])
   useLayoutEffect(() => {
@@ -303,7 +310,7 @@ export function SessionCarousel(props: {
       // setting the owning viewport also avoids Chromium scrolling the page
       // instead of the horizontal strip while the native DAG window closes.
       centerCardInViewport(viewport, card)
-      const focusTarget = revealRequest.historical
+      const focusTarget = revealRequest.stopped
         ? card.querySelector<HTMLElement>('button,[tabindex="0"]')
         : undefined
       focusTarget?.focus({ preventScroll: true })
@@ -393,11 +400,116 @@ export function SessionCarousel(props: {
     }
     hoverVisibilityFrame.current = requestAnimationFrame(followPreview)
   }
+  const stopEdgeBrowse = (blockUntilExit = false) => {
+    if (edgeBrowseTimer.current !== undefined) {
+      window.clearTimeout(edgeBrowseTimer.current)
+      edgeBrowseTimer.current = undefined
+    }
+    edgeBrowseBlocked.current = blockUntilExit
+    edgeBrowseDirectionRef.current = 0
+    edgeBrowseTargetSessionId.current = undefined
+    setEdgeBrowseDirection(0)
+    setEdgeBrowsePhase('idle')
+  }
+  const nearestHiddenCard = (direction: -1 | 1) => {
+    const viewport = viewportRef.current
+    if (!viewport) return undefined
+    const visibleLeft = viewport.scrollLeft + CARD_EDGE_INSET
+    const visibleRight = viewport.scrollLeft + viewport.clientWidth - CARD_EDGE_INSET
+    const candidates = nodes.flatMap((node) => {
+      const card = cardsRef.current.get(node.sessionId)
+      return card ? [{ node, card }] : []
+    }).filter(({ card }) => direction === -1
+      ? card.offsetLeft < visibleLeft - 0.5
+      : card.offsetLeft + card.offsetWidth > visibleRight + 0.5)
+    candidates.sort((left, right) => direction === -1
+      ? right.card.offsetLeft - left.card.offsetLeft
+      : left.card.offsetLeft - right.card.offsetLeft)
+    return candidates[0]?.node
+  }
+  const edgeBrowseStep = () => {
+    edgeBrowseTimer.current = undefined
+    const viewport = viewportRef.current
+    const pointer = pointerPosition.current
+    const direction = edgeBrowseDirectionRef.current
+    if (!viewport || !pointer || edgeBrowseBlocked.current || direction === 0) {
+      stopEdgeBrowse()
+      return
+    }
+    const rect = viewport.getBoundingClientRect()
+    const remainsAtEdge = pointer.y >= rect.top && pointer.y <= rect.bottom && (direction === 1
+      ? pointer.x >= rect.right - EDGE_INTENT_WIDTH && pointer.x <= rect.right
+      : pointer.x >= rect.left && pointer.x <= rect.left + EDGE_INTENT_WIDTH)
+    const requestedTarget = edgeBrowseTargetSessionId.current
+    edgeBrowseTargetSessionId.current = undefined
+    const next = remainsAtEdge
+      ? nodes.find((node) => node.sessionId === requestedTarget) ?? nearestHiddenCard(direction)
+      : undefined
+    if (!next) {
+      stopEdgeBrowse()
+      return
+    }
+
+    // Reaching the edge is an explicit browsing action, not a temporary hover
+    // correction. Keep the advanced viewport when the pointer later leaves.
+    if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+    hoverRestoreTimer.current = undefined
+    hoverBaselineScrollLeft.current = undefined
+    focusVisibilitySessionId.current = null
+    if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
+    focusVisibilityFrame.current = undefined
+    hoverIntentSessionId.current = next.sessionId
+    setHoveredSessionId(next.sessionId)
+    keepHoveredCardFullyVisible(next.sessionId)
+    setEdgeBrowsePhase('cruising')
+    edgeBrowseTimer.current = window.setTimeout(edgeBrowseStep, EDGE_BROWSE_INTERVAL_MS)
+  }
+  const updateEdgeBrowseIntent = (x: number, y: number, deltaX = 0) => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    const rect = viewport.getBoundingClientRect()
+    const insideY = y >= rect.top && y <= rect.bottom
+    const direction: -1 | 0 | 1 = insideY && x >= rect.left && x <= rect.left + EDGE_INTENT_WIDTH
+      ? -1
+      : insideY && x >= rect.right - EDGE_INTENT_WIDTH && x <= rect.right
+        ? 1
+        : 0
+    const currentDirection = edgeBrowseDirectionRef.current
+    if (direction === 0) {
+      const movingAway = (currentDirection === 1 && deltaX < -EDGE_DIRECTION_CANCEL_DISTANCE) ||
+        (currentDirection === -1 && deltaX > EDGE_DIRECTION_CANCEL_DISTANCE)
+      stopEdgeBrowse(movingAway)
+      return
+    }
+    if (currentDirection !== 0 && currentDirection !== direction) stopEdgeBrowse()
+    const movingAway = (direction === 1 && deltaX < -EDGE_DIRECTION_CANCEL_DISTANCE) ||
+      (direction === -1 && deltaX > EDGE_DIRECTION_CANCEL_DISTANCE)
+    if (movingAway) {
+      stopEdgeBrowse(true)
+      return
+    }
+    if (pointerGesture.current !== null || wheelGesture.current) {
+      stopEdgeBrowse(true)
+      return
+    }
+    if (edgeBrowseBlocked.current || edgeBrowseTimer.current !== undefined) return
+    const target = nearestHiddenCard(direction)
+    if (!target) {
+      stopEdgeBrowse()
+      return
+    }
+    edgeBrowseDirectionRef.current = direction
+    edgeBrowseTargetSessionId.current = target.sessionId
+    setEdgeBrowseDirection(direction)
+    setEdgeBrowsePhase('confirming')
+    edgeBrowseTimer.current = window.setTimeout(edgeBrowseStep, EDGE_INTENT_DWELL_MS)
+  }
   const markScrolling = (userInitiated = false) => {
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
     // point onward and must not be mistaken for a programmatic restore event.
     if (userInitiated) {
+      stopEdgeBrowse(true)
       restoringGeometry.current = false
       focusVisibilitySessionId.current = null
       if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
@@ -448,6 +560,20 @@ export function SessionCarousel(props: {
       hoverRestoreTimer.current = window.setTimeout(() => restoreHoverBaseline(true), 220)
       return
     }
+    if (sessionId === focusedSessionId) {
+      if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
+      hoverRestoreTimer.current = undefined
+      hoverBaselineScrollLeft.current = undefined
+      hoverVisibilitySessionId.current = null
+      if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
+      hoverVisibilityFrame.current = undefined
+      setHoveredSessionId(null)
+      // The active card owns the viewport. Pointer entry may reveal a clipped
+      // edge, but pointer exit must never restore it to a partially hidden
+      // position as if this were a temporary preview.
+      keepHoveredCardFullyVisible(sessionId)
+      return
+    }
     if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
     hoverRestoreTimer.current = undefined
     focusVisibilitySessionId.current = null
@@ -460,7 +586,7 @@ export function SessionCarousel(props: {
     // During a live horizontal gesture, retargeting is visual only. Starting
     // an automatic visibility correction here would compete with the next
     // wheel delta and can leave the user stuck before the far edge.
-    if (!wheelGesture.current) keepHoveredCardFullyVisible(sessionId)
+    if (!wheelGesture.current && !edgeBrowseBlocked.current) keepHoveredCardFullyVisible(sessionId)
   }
   hoverRef.current = hover
   const finishPullGesture = () => {
@@ -504,6 +630,7 @@ export function SessionCarousel(props: {
       ? (Math.abs(event.deltaX) > 0 ? event.deltaX : event.deltaY)
       : event.deltaY
     if (delta === 0) return
+    stopEdgeBrowse(true)
     if (!wheelGesture.current) {
       wheelGesture.current = true
       pullController.current.begin({ scrollLeft: viewport.scrollLeft, hasParent: Boolean(parent) })
@@ -549,7 +676,13 @@ export function SessionCarousel(props: {
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const previousPointer = pointerPosition.current
     pointerPosition.current = { x: event.clientX, y: event.clientY }
+    updateEdgeBrowseIntent(
+      event.clientX,
+      event.clientY,
+      previousPointer === null ? 0 : event.clientX - previousPointer.x
+    )
     const gesture = pointerGesture.current
     const viewport = viewportRef.current
     if (!gesture || !viewport || gesture.id !== event.pointerId) return
@@ -580,20 +713,26 @@ export function SessionCarousel(props: {
     finishPullGesture()
   }
 
-  return <div className={`session-carousel-shell${pull.springBack ? ' is-springing' : ''}`}
+  return <div className={`session-carousel-shell${pull.springBack ? ' is-springing' : ''}${edgeBrowsePhase === 'confirming' ? ' is-edge-confirming' : ''}${edgeBrowsePhase === 'cruising' ? ' is-edge-cruising' : ''}${edgeBrowseDirection === -1 ? ' is-edge-left' : ''}${edgeBrowseDirection === 1 ? ' is-edge-right' : ''}`}
     style={{ '--parent-pull-distance': `${pull.distance}px` } as React.CSSProperties}>
     {parent && pull.distance > 0 && <ParentProjection parent={parent}
       pullDistance={pull.distance} progress={pull.progress} />}
     <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
       ref={viewportRef} role="region" aria-label="同级会话列表"
-      data-visible-columns={visibleCount} onScroll={() => markScrolling()}
+      data-visible-columns={visibleCount} data-edge-browse-phase={edgeBrowsePhase}
+      data-edge-browse-direction={edgeBrowseDirection === -1 ? 'left' : edgeBrowseDirection === 1 ? 'right' : 'none'}
+      onScroll={() => markScrolling()}
+      onPointerDownCapture={() => stopEdgeBrowse(true)}
       onPointerDown={pointerDown} onPointerMove={pointerMove}
       onPointerUp={pointerEnd} onPointerCancel={pointerEnd}
       onPointerEnter={(event) => {
         pointerPosition.current = { x: event.clientX, y: event.clientY }
+        edgeBrowseBlocked.current = false
+        updateEdgeBrowseIntent(event.clientX, event.clientY)
       }}
       onPointerLeave={() => {
         pointerPosition.current = null
+        stopEdgeBrowse()
         hover(null)
       }}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
@@ -642,6 +781,7 @@ export function SessionCarousel(props: {
         </SessionCard>
       </div>)}
     </div>
+    {edgeBrowsePhase !== 'idle' && <div className="session-edge-intent" aria-hidden="true" />}
   </div>
 }
 
@@ -671,7 +811,7 @@ export function fullyVisibleCardScrollLeft(
   viewportScrollLeft: number,
   viewportWidth: number,
   maxScrollLeft: number,
-  edgeInset = 10
+  edgeInset = CARD_EDGE_INSET
 ): number {
   const visibleLeft = viewportScrollLeft + edgeInset
   const visibleRight = viewportScrollLeft + viewportWidth - edgeInset
@@ -684,6 +824,12 @@ export function fullyVisibleCardScrollLeft(
   }
   return viewportScrollLeft
 }
+
+const CARD_EDGE_INSET = 10
+const EDGE_INTENT_WIDTH = 84
+const EDGE_INTENT_DWELL_MS = 180
+const EDGE_BROWSE_INTERVAL_MS = 900
+const EDGE_DIRECTION_CANCEL_DISTANCE = 2
 
 function centerCardInViewport(viewport: HTMLElement, card: HTMLElement): void {
   const target = centeredCardScrollLeft(
@@ -715,6 +861,6 @@ function compactStatus(status: SessionGraphNodeView['workStatus']): string {
   if (status === 'running' || status === 'starting') return '运行中'
   if (status === 'error') return '异常'
   if (status === 'interrupted') return '中断'
-  if (status === 'exited') return '历史'
+  if (status === 'exited') return '已停止'
   return '空闲'
 }

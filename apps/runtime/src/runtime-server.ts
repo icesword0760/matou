@@ -41,6 +41,12 @@ import { HierarchyApplicationService } from './hierarchy/hierarchy-application-s
 import { SessionInteractionService } from './session-canvas/session-interaction-service'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
+import { PreferenceRepository } from './product/experience-foundation'
+import {
+  ShellCommandBlockCollector,
+  ShellHistoryRepository,
+  formatShellHistoryForTerminal
+} from './shell-history/shell-history'
 
 export interface PortMessageEvent {
   data: unknown
@@ -100,6 +106,8 @@ export class RuntimeServer {
   readonly #sessionInteractions: SessionInteractionService
   readonly #providerModes: ProviderModeService
   readonly #workStatuses: SessionWorkStatusService
+  readonly #preferences: PreferenceRepository
+  readonly #shellHistory: ShellHistoryRepository
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
@@ -151,6 +159,8 @@ export class RuntimeServer {
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#providerModes = new ProviderModeService(database, transactions)
     this.#workStatuses = new SessionWorkStatusService(database, transactions)
+    this.#preferences = new PreferenceRepository(database)
+    this.#shellHistory = new ShellHistoryRepository(database)
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#control = control
@@ -773,9 +783,14 @@ export class RuntimeServer {
       execution_context_id: string
       cwd: string
       kind: 'shell' | 'claude-code' | 'codex'
+      workspace_root: string
     }>(
-      `SELECT execution_context_id, cwd, kind FROM sessions
-       WHERE id = ? AND archived_at IS NULL`,
+      `SELECT sessions.execution_context_id, sessions.cwd, sessions.kind,
+              workspaces.root_directory AS workspace_root
+       FROM sessions
+       JOIN tasks ON tasks.id = sessions.task_id
+       JOIN workspaces ON workspaces.id = tasks.workspace_id
+       WHERE sessions.id = ? AND sessions.archived_at IS NULL`,
       message.sessionId
     )
     if (this.#sessions.has(message.sessionId)) {
@@ -845,6 +860,7 @@ export class RuntimeServer {
         )?.cwd
     const cwd = await firstUsableDirectory([
       persistentAuthority?.cwd,
+      persistentAuthority?.workspace_root,
       contextCwd,
       process.env.HOME,
       os.homedir()
@@ -884,10 +900,29 @@ export class RuntimeServer {
       ? undefined
       : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
     const providerSessionId = forkLaunch?.sourceProviderSessionId ?? resumeBinding?.providerSessionId
+    const persistOrdinaryShellHistory = message.profile === 'shell' &&
+      persistentAuthority?.kind === 'shell' &&
+      this.#preferences.get('shell.restoreHistoryEnabled')
+    if (persistOrdinaryShellHistory) {
+      const blocks = this.#shellHistory.listForLaunch(message.sessionId, true)
+      const restored = formatShellHistoryForTerminal(blocks)
+      if (restored) {
+        this.#port.postMessage({
+          type: 'terminal.restored-history',
+          protocolVersion: PROTOCOL_VERSION,
+          sessionId: message.sessionId,
+          blockCount: blocks.length,
+          data: new TextEncoder().encode(restored)
+        })
+      }
+    }
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
     try {
       const runId = persistentAuthority ? randomUUID() : undefined
+      const shellBlockCollector = persistOrdinaryShellHistory
+        ? new ShellCommandBlockCollector()
+        : undefined
       const cwdTracker = new TerminalCwdTracker()
       const workStatusTracker = message.profile === 'shell' || message.profile === 'claude-code'
         ? new TerminalWorkStatusTracker(
@@ -961,6 +996,24 @@ export class RuntimeServer {
         send: this.#sendToPort,
         onOutput: (data) => {
           emittedTerminalOutput = true
+          for (const block of shellBlockCollector?.ingest(data) ?? []) {
+            if (!this.#closed) {
+              try {
+                this.#shellHistory.complete({
+                  sessionId: message.sessionId,
+                  cwd,
+                  ...block
+                })
+              } catch (error) {
+                // PTY output can race a Runtime teardown by one event-loop turn.
+                // History is supplementary; never crash or corrupt the live
+                // terminal because storage has already closed.
+                if (!/database is closed/i.test(errorMessage(error))) {
+                  console.error(`[shell.history] ${errorMessage(error)}`)
+                }
+              }
+            }
+          }
           this.#recordSessionSummary(message.sessionId, data)
           const reportedCwd = cwdTracker.ingest(data)
           if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
@@ -1156,10 +1209,7 @@ export class RuntimeServer {
         type: 'terminal.spawned',
         protocolVersion: PROTOCOL_VERSION,
         sessionId: message.sessionId,
-        pid: session.pid,
-        ...(persistentAuthority && session.replayFromSequence > 1
-          ? { reattached: true, replayFromSequence: 0 }
-          : {})
+        pid: session.pid
       })
       this.publishSessionHud(message.sessionId)
       void this.refreshSessionHud(message.sessionId)

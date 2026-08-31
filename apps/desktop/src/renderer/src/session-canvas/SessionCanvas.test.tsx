@@ -14,27 +14,18 @@ describe('SessionCanvas', () => {
   it('projects the focused node sibling level with a distinct active card', () => {
     renderCanvas(graph())
 
-    expect(screen.getByText('父会话 的子会话')).toBeTruthy()
+    expect(document.querySelector('.session-level-header')).toBeNull()
     expect(screen.getAllByLabelText(/^会话：/).map((node) => node.getAttribute('aria-label')))
       .toEqual(['会话：Shell 子会话', '会话：Claude 子会话'])
     expect(screen.getByLabelText('会话：Claude 子会话').getAttribute('aria-current')).toBe('true')
     expect(screen.queryByLabelText('会话：父会话')).toBeNull()
   })
 
-  it('creates an ordinary Shell sibling directly and offers a Fork sibling only for a valid common Claude parent', async () => {
-    const onCreateShellSibling = vi.fn()
-    const onCreateForkSibling = vi.fn()
-    const data = graph()
-    renderCanvas(data, { onCreateShellSibling, onCreateForkSibling })
-    const user = userEvent.setup()
+  it('leaves level-wide creation outside the canvas and keeps Fork on each card header', () => {
+    renderCanvas(graph())
 
-    await user.click(screen.getByRole('button', { name: '新增同级 Shell' }))
-    expect(onCreateShellSibling).toHaveBeenCalledWith('child-claude', 'parent')
-    await user.click(screen.getByRole('button', { name: '创建同级 Claude 分支' }))
-    expect(onCreateForkSibling).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: 'child-claude' }),
-      expect.objectContaining({ sessionId: 'parent', canFork: true })
-    )
+    expect(screen.queryByRole('button', { name: '新增同级 Shell' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '创建同级 Claude 分支' })).toBeNull()
   })
 
   it('keeps a mixed Shell and Claude root list without inventing persistent sibling edges', () => {
@@ -43,125 +34,70 @@ describe('SessionCanvas', () => {
     data.nodes.push(node('root-shell', '根 Shell'))
     renderCanvas(data)
 
-    expect(screen.getByText('根会话')).toBeTruthy()
     expect(screen.getAllByLabelText(/^会话：/).map((element) => element.getAttribute('aria-label')))
       .toEqual(['会话：父会话', '会话：根 Shell'])
     expect(screen.queryByRole('button', { name: '创建同级 Claude 分支' })).toBeNull()
   })
 
-  it('keeps history folded by default and reopens it as a new live continuation', async () => {
+  it('keeps stopped nodes in the ordinary horizontal list without a history projection', () => {
     const data = graph()
-    data.nodes.push({ ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
-    const onReopenHistorical = vi.fn()
-    renderCanvas(data, { onReopenHistorical })
+    data.nodes.push({ ...node('stopped', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
+    renderCanvas(data)
+
+    expect(screen.getByText('已停止 Shell')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /历史会话/ })).toBeNull()
+    expect(screen.queryByText('历史会话')).toBeNull()
+  })
+
+  it('keeps only structural removal on a stopped card without process controls', async () => {
+    const data = graph()
+    data.nodes.push(
+      { ...node('stopped', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' },
+      { ...node('stopped-child', '已停止子节点', 'stopped'), archivedAt: 21, workStatus: 'exited' }
+    )
+    const onRemoveBranch = vi.fn()
+    renderCanvas(data, { onRemoveBranch })
     const user = userEvent.setup()
 
-    expect(screen.queryByText('历史 Shell')).toBeNull()
-    await user.click(screen.getByRole('button', { name: '显示历史会话 (1)' }))
-    expect(screen.getByText('历史 Shell')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '重新打开 Shell' }))
-    expect(onReopenHistorical).toHaveBeenCalledWith('archived')
+    expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: '移出节点：已停止 Shell' }))
+
+    expect(screen.getByRole('alertdialog').textContent).toContain('共 1 个后代节点')
+    await user.click(screen.getByRole('button', { name: '移除整个分支' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('stopped', true)
   })
 
-  it('unfolds and reveals a historical Session selected from the DAG', async () => {
+  it('reveals a stopped Session selected from the DAG without changing projections', async () => {
     const data = graph()
-    data.nodes.push({ ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
+    data.nodes.push({ ...node('archived', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
     render(<SessionCanvas graph={data} levelParentSessionId="parent" onActivate={() => undefined}
-      revealRequest={{ sessionId: 'archived', sequence: 1, historical: true }}
-      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
-      onReopenHistorical={vi.fn()} renderSession={(item) => <div>{item.title}</div>} />)
+      revealRequest={{ sessionId: 'archived', sequence: 1, stopped: true }}
+      renderSession={(item) => <div>{item.title}</div>} />)
 
-    expect(await screen.findByText('历史 Shell')).toBeTruthy()
-    const reopen = screen.getByRole('button', { name: '重新打开 Shell' })
-    expect(reopen).toBeTruthy()
-    await vi.waitFor(() => expect(document.activeElement).toBe(reopen))
+    expect(await screen.findByText('已停止 Shell')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
   })
 
-  it('keeps the current parent when adding a Shell after all children became history', async () => {
+  it('keeps the current parent projection after all children stopped', () => {
     const data = graph()
     data.nodes = [
       data.nodes[0]!,
-      { ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' }
+      { ...node('archived', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' }
     ]
     data.focusedSessionId = 'parent'
-    const onCreateShellSibling = vi.fn()
     render(<SessionCanvas graph={data} levelParentSessionId="parent" onActivate={() => undefined}
-      onCreateShellSibling={onCreateShellSibling} onCreateForkSibling={vi.fn()}
-      onReopenHistorical={vi.fn()} renderSession={(item) => <div>{item.title}</div>} />)
-
-    await userEvent.setup().click(screen.getByRole('button', { name: '新增同级 Shell' }))
-
-    expect(onCreateShellSibling).toHaveBeenCalledWith('archived', 'parent')
-  })
-
-  it('removes an exited leaf only after a clear confirmation', async () => {
-    const data = graph()
-    data.nodes.push({ ...node('archived', '历史 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
-    const onRemoveHistorical = vi.fn()
-    renderCanvas(data, { onRemoveHistorical })
-    const user = userEvent.setup()
-
-    await user.click(screen.getByRole('button', { name: '显示历史会话 (1)' }))
-    await user.click(screen.getByRole('button', { name: '移除历史会话：历史 Shell' }))
-    expect(screen.getByRole('alertdialog', { name: '移除历史会话' }).textContent)
-      .toContain('只会从当前画布移除这个历史节点')
-    await user.click(screen.getByRole('button', { name: '确认移除' }))
-    expect(onRemoveHistorical).toHaveBeenCalledWith('archived', false)
-  })
-
-  it('keeps a historical parent navigable and double-confirms whole-branch removal', async () => {
-    const data = graph()
-    data.nodes = [
-      { ...node('archived-parent', '历史父会话'), archivedAt: 20, workStatus: 'exited' },
-      { ...node('descendant', '仍在工作的子会话', 'archived-parent'), workStatus: 'running' },
-      { ...node('grandchild', '孙会话', 'descendant'), workStatus: 'needs-input' }
-    ]
-    data.edges = [
-      { parentSessionId: 'archived-parent', childSessionId: 'descendant', relationKind: 'derived-from', createdAt: 1 },
-      { parentSessionId: 'descendant', childSessionId: 'grandchild', relationKind: 'derived-from', createdAt: 2 }
-    ]
-    data.focusedSessionId = 'descendant'
-    const onNavigateToChildren = vi.fn()
-    const onRemoveHistorical = vi.fn()
-    render(<SessionCanvas graph={data} levelParentSessionId={null} onActivate={() => undefined}
-      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()} onReopenHistorical={vi.fn()}
-      onNavigateToChildren={onNavigateToChildren} onRemoveHistorical={onRemoveHistorical}
-      renderSession={(item) => <div>{item.title}</div>} />)
-    const user = userEvent.setup()
-
-    await user.click(screen.getByRole('button', { name: '查看 1 个子会话' }))
-    expect(onNavigateToChildren).toHaveBeenCalledWith('archived-parent')
-    await user.click(screen.getByRole('button', { name: '移除整条分支：历史父会话' }))
-    expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
-      .toContain('2 个后代节点')
-    expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
-      .toContain('1 个运行中、1 个待输入')
-    expect(screen.getByRole('alertdialog', { name: '移除整条分支' }).textContent)
-      .toContain('本地工作树和未提交修改会继续保留')
-    await user.click(screen.getByRole('button', { name: '继续' }))
-    expect(screen.getByRole('alertdialog', { name: '再次确认' })).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '移除整条分支' }))
-    expect(onRemoveHistorical).toHaveBeenCalledWith('archived-parent', true)
-  })
-
-  it('provides an explicit keyboard-accessible return to the parent', async () => {
-    const onReturnParent = vi.fn()
-    render(<SessionCanvas graph={graph()} onActivate={() => undefined}
-      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
-      onReopenHistorical={vi.fn()} onReturnParent={onReturnParent}
       renderSession={(item) => <div>{item.title}</div>} />)
 
-    await userEvent.setup().click(screen.getByRole('button', { name: '返回父会话' }))
-
-    expect(onReturnParent).toHaveBeenCalledWith('parent')
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+      .toBe('parent')
+    expect(screen.getByText('已停止 Shell')).toBeTruthy()
   })
 
   it('restores the sibling viewport and persists navigation geometry after a short debounce', () => {
     vi.useFakeTimers()
     const onPutGeometry = vi.fn()
     render(<SessionCanvas graph={graph()} onActivate={() => undefined}
-      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
-      onReopenHistorical={vi.fn()} onPutGeometry={onPutGeometry}
+      onPutGeometry={onPutGeometry}
       geometry={[{ ownerKey: 'session-group:scene-1:parent', geometry: { scrollLeft: 77 } }]}
       renderSession={(item) => <div>{item.title}</div>} />)
     const viewport = screen.getByRole('region', { name: '同级会话列表' })
@@ -186,8 +122,7 @@ describe('SessionCanvas', () => {
       .mockRejectedValueOnce(new Error('layout revision changed'))
       .mockResolvedValueOnce(undefined)
     render(<SessionCanvas graph={graph()} onActivate={() => undefined}
-      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
-      onReopenHistorical={vi.fn()} onPutGeometry={onPutGeometry}
+      onPutGeometry={onPutGeometry}
       renderSession={(item) => <div>{item.title}</div>} />)
     const viewport = screen.getByRole('region', { name: '同级会话列表' })
     viewport.scrollLeft = 96
@@ -209,8 +144,7 @@ describe('SessionCanvas', () => {
       .mockReturnValueOnce(firstWrite)
       .mockResolvedValueOnce(undefined)
     render(<SessionCanvas graph={graph()} onActivate={() => undefined}
-      onCreateShellSibling={vi.fn()} onCreateForkSibling={vi.fn()}
-      onReopenHistorical={vi.fn()} onPutGeometry={onPutGeometry}
+      onPutGeometry={onPutGeometry}
       renderSession={(item) => <div>{item.title}</div>} />)
     const viewport = screen.getByRole('region', { name: '同级会话列表' })
 
@@ -234,16 +168,10 @@ describe('SessionCanvas', () => {
 })
 
 function renderCanvas(data: SessionGraphView, handlers?: {
-  onCreateShellSibling?: (sourceSessionId: string, parentSessionId?: string) => void
-  onCreateForkSibling?: (source: SessionGraphNodeView, parent: SessionGraphNodeView) => void
-  onReopenHistorical?: (sessionId: string) => void
-  onRemoveHistorical?: (sessionId: string, includeDescendants: boolean) => void
+  onRemoveBranch?: (sessionId: string, includeDescendants: boolean) => void
 }) {
   return render(<SessionCanvas graph={data} onActivate={() => undefined}
-    onCreateShellSibling={handlers?.onCreateShellSibling ?? vi.fn()}
-    onCreateForkSibling={handlers?.onCreateForkSibling ?? vi.fn()}
-    onReopenHistorical={handlers?.onReopenHistorical ?? vi.fn()}
-    onRemoveHistorical={handlers?.onRemoveHistorical ?? vi.fn()}
+    {...(handlers?.onRemoveBranch ? { onRemoveBranch: handlers.onRemoveBranch } : {})}
     renderSession={(item) => <div>{item.title}</div>} />)
 }
 
@@ -272,7 +200,7 @@ function node(
   return {
     sessionId, sceneId: 'scene-1', ...(parentSessionId ? { parentSessionId } : {}),
     currentMode, workStatus: 'idle', providerRestoreState: 'none', canFork,
-    title, cwd: '/tmp', activeChildCount: 0, historicalChildCount: 0,
+    title, cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }

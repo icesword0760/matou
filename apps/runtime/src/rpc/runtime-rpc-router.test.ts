@@ -88,7 +88,7 @@ describe('RuntimeRpcRouter', () => {
       preserveSceneOnLastSession: true, now: 2
     })) as { outcome: string }
 
-    expect(result.outcome).toBe('session-history-remains')
+    expect(result.outcome).toBe('session-stopped-remains')
     expect(database.get('SELECT archived_at FROM scenes WHERE id = ?', initial.scene.id))
       .toEqual({ archived_at: null })
   })

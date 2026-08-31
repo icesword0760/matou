@@ -8,6 +8,7 @@ export interface PreferenceValues {
   'retention.perSessionBytes': number
   'retention.checkpointGenerations': number
   'diagnostics.enabled': boolean
+  'shell.restoreHistoryEnabled': boolean
 }
 
 const PREFERENCE_DEFAULTS: PreferenceValues = {
@@ -15,7 +16,8 @@ const PREFERENCE_DEFAULTS: PreferenceValues = {
   'retention.globalBytes': 2 * 1024 * 1024 * 1024,
   'retention.perSessionBytes': 256 * 1024 * 1024,
   'retention.checkpointGenerations': 2,
-  'diagnostics.enabled': true
+  'diagnostics.enabled': true,
+  'shell.restoreHistoryEnabled': true
 }
 
 export class PreferenceRepository {
@@ -61,7 +63,8 @@ export class PreferenceRepository {
   }
 
   #validate<K extends keyof PreferenceValues>(key: K, value: PreferenceValues[K]): void {
-    const valid = key === 'notification.soundEnabled' || key === 'diagnostics.enabled'
+    const valid = key === 'notification.soundEnabled' || key === 'diagnostics.enabled' ||
+      key === 'shell.restoreHistoryEnabled'
       ? typeof value === 'boolean'
       : typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     if (!valid) throw new Error(`Invalid preference value for ${key}`)
@@ -92,7 +95,7 @@ export interface NotificationItem extends NotificationEvent {
 
 export type NotificationNavigationTarget =
   | { kind: 'live-mount'; workspaceId: string; taskId: string; sessionId: string; sceneId: string; mountId: string }
-  | { kind: 'session-history'; workspaceId: string; taskId: string; sessionId: string }
+  | { kind: 'session-stopped'; workspaceId: string; taskId: string; sessionId: string }
 
 export class NotificationProjection {
   readonly #cooldownMs: number
@@ -193,7 +196,7 @@ export class NotificationProjection {
       item.sessionId
     )
     return session
-      ? { kind: 'session-history', workspaceId: session.workspace_id, taskId: session.task_id, sessionId: item.sessionId }
+      ? { kind: 'session-stopped', workspaceId: session.workspace_id, taskId: session.task_id, sessionId: item.sessionId }
       : undefined
   }
 }

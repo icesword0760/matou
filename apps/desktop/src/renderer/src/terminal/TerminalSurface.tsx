@@ -189,6 +189,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           client.acknowledgeTerminal(sessionId, message.sequence)
           if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) terminal.focus()
         })
+      } else if (message.type === 'terminal.restored-history') {
+        const bytes = message.data instanceof Uint8Array
+          ? message.data
+          : new Uint8Array(message.data)
+        terminal.write(bytes)
       } else if (message.type === 'terminal.exited') {
         spawned = false
         onStatusChange('exited')

@@ -64,7 +64,7 @@ function node(sessionId: string, title: string, parentSessionId?: string, siblin
     sessionId, sceneId: 'scene', ...(parentSessionId ? { parentSessionId } : {}),
     currentMode: 'shell' as const, workStatus: 'idle' as const,
     providerRestoreState: 'none' as const, canFork: false, title, cwd: `/tmp/${sessionId}`,
-    activeChildCount: 0, historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+    activeChildCount: 0, stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
     latestLines: [] as string[], siblingCreatedSeq, lastUserInteractionSeq: 0
   }
 }

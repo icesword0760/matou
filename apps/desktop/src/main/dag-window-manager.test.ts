@@ -31,6 +31,9 @@ describe('DagWindowManager', () => {
     expect(adapters[0]!.shown).toBe(2)
     expect(adapters[0]!.focused).toBe(2)
     expect(adapters[0]!.sent.at(-1)).toMatchObject({ value: { sessionId: 'session-b' } })
+
+    manager.updateNotifications('main-1', ['session-b'])
+    expect(adapters[0]!.sent.at(-1)).toMatchObject({ value: ['session-b'] })
   })
 
   it('routes node selection, activates detached targets and closes without touching a PTY', () => {

@@ -237,7 +237,7 @@ export interface SessionGraphNode {
     shared: boolean
   }
   activeChildCount: number
-  historicalChildCount: number
+  stoppedChildCount: number
   childModeCounts: {
     shell: number
     claudeCode: number

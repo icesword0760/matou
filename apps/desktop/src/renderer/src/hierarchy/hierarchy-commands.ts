@@ -60,9 +60,19 @@ export function createHierarchyCommands(
       sceneId, sourceSessionId
     }),
     createCanvas: (taskId) => command('hierarchy.create-canvas', { taskId }),
-    createShellSibling: (sceneId, sourceSessionId, parentSessionId) => command('hierarchy.create-shell-sibling', {
-      sceneId, sourceSessionId, ...(parentSessionId ? { parentSessionId } : {})
-    }),
+    createShellSibling: async (sceneId, sourceSessionId, parentSessionId) => {
+      const result = await command('hierarchy.create-shell-sibling', {
+        sceneId, sourceSessionId, ...(parentSessionId ? { parentSessionId } : {})
+      })
+      const createdSessionId = mutationSessionId(result)
+      if (createdSessionId) {
+        // A mounted xterm may emit one last focus event while the new card is
+        // entering the DOM. Reassert the user's create intent after the
+        // authoritative mutation so every entry point opens keyboard-ready.
+        await command('hierarchy.set-focused-session', { sceneId, sessionId: createdSessionId })
+      }
+      return result
+    },
     createForkChild: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-child', {
       sceneId, sourceSessionId, name, worktreeMode
     }),
@@ -74,9 +84,11 @@ export function createHierarchyCommands(
       sceneId, sessionId
     }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
-    reopenHistoricalSession: (sessionId) => command('hierarchy.reopen-historical-session', { sessionId }),
-    removeHistoricalSession: (sceneId, sessionId, includeDescendants) => command(
-      'hierarchy.remove-historical-session', { sceneId, sessionId, includeDescendants }
+    restartStoppedSession: (sessionId) => command('hierarchy.restart-stopped-session', {
+      windowId, sessionId
+    }),
+    removeSessionBranch: (sceneId, sessionId, includeDescendants) => command(
+      'hierarchy.remove-session-branch', { sceneId, sessionId, includeDescendants }
     ),
     getSceneSessionGraph: (sceneId) => client.request('hierarchy.get-scene-session-graph', {
       sceneId, windowId
@@ -107,4 +119,11 @@ export function createHierarchyCommands(
       sessionId, modelStrategy
     })
   }
+}
+
+function mutationSessionId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || !('session' in value)) return undefined
+  const session = value.session
+  if (!session || typeof session !== 'object' || !('id' in session)) return undefined
+  return typeof session.id === 'string' ? session.id : undefined
 }

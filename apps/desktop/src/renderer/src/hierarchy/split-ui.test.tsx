@@ -184,7 +184,7 @@ function graphNode(sessionId: string, workStatus: 'running' | 'needs-input' | 'i
   return {
     sessionId, sceneId: 'scene-1', currentMode: 'shell' as const, workStatus,
     providerRestoreState: 'none' as const, canFork: false, title: sessionId,
-    cwd: '/tmp', activeChildCount: 0, historicalChildCount: 0,
+    cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }

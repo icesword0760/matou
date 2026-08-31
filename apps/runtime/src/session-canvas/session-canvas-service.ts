@@ -83,13 +83,13 @@ export interface SetFocusedSessionInput {
   now: number
 }
 
-export interface ReopenHistoricalSessionInput {
+export interface RestartStoppedSessionInput {
   windowId: string
   sessionId: string
   now: number
 }
 
-export interface RemoveHistoricalSessionInput {
+export interface RemoveSessionBranchInput {
   windowId: string
   sceneId: string
   sessionId: string
@@ -97,7 +97,7 @@ export interface RemoveHistoricalSessionInput {
   now: number
 }
 
-export interface RemoveHistoricalSessionResult {
+export interface RemoveSessionBranchResult {
   graph: SceneSessionGraph
   removedSessionIds: string[]
   disposedSessionIds: string[]
@@ -377,12 +377,11 @@ export class SessionCanvasService {
     }).result
   }
 
-  reopenHistoricalSession(
+  restartStoppedSession(
     command: DomainCommandMetadata,
-    input: ReopenHistoricalSessionInput
+    input: RestartStoppedSessionInput
   ): SessionCanvasMutationResult {
     const ids = createHierarchyIds()
-    const relationId = randomUUID()
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
       const source = requireRow(tx.get<{
@@ -400,7 +399,7 @@ export class SessionCanvasService {
          JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
          WHERE sessions.id = ? AND sessions.archived_at IS NOT NULL`,
         input.sessionId
-      ), 'Historical Session')
+      ), 'Stopped Session')
       const scene = requireRow(tx.get<SceneRow>(
         'SELECT id, task_id FROM scenes WHERE id = ? AND archived_at IS NULL', source.scene_id
       ), 'Scene')
@@ -409,24 +408,6 @@ export class SessionCanvasService {
          WHERE id = ? AND archived_at IS NULL`, scene.task_id
       ), 'Task')
       assertWorkspacePathAvailable(tx, task.workspace_id)
-      const anchor = requireRow(tx.get<{ scene_node_id: string }>(
-        `SELECT mounts.scene_node_id
-         FROM session_mounts AS mounts
-         JOIN sessions ON sessions.id = mounts.session_id
-         WHERE mounts.scene_id = ? AND mounts.scene_node_id IS NOT NULL
-           AND (sessions.archived_at IS NULL OR sessions.id = ?)
-         ORDER BY CASE WHEN sessions.archived_at IS NULL THEN 0 ELSE 1 END,
-                  sessions.last_activity_at DESC, mounts.created_at, mounts.id LIMIT 1`,
-        scene.id, source.id
-      ), 'Active Session anchor')
-      const sourceNode = requireRow(tx.get<SceneNodeRow>(
-        'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?', anchor.scene_node_id
-      ), 'SceneNode')
-      const structuralParent = tx.get<{ parent_session_id: string }>(
-        `SELECT to_session_id AS parent_session_id FROM session_relations_current
-         WHERE from_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')`,
-        source.id
-      )
       const providerBinding = source.kind === 'claude-code' ? tx.get<{ id: string }>(
         `SELECT id FROM provider_bindings
          WHERE session_id = ? AND provider = 'claude-code'
@@ -437,75 +418,89 @@ export class SessionCanvasService {
       ) : undefined
       const nextKind = providerBinding ? 'claude-code' : 'shell'
 
-      insertHorizontalNode(tx, scene.id, sourceNode, ids, input.now)
       tx.run(
-        `INSERT INTO sessions (
-           id, task_id, execution_context_id, kind, status, title, cwd,
-           created_at, updated_at, last_activity_at, version
-         ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, 1)`,
-        ids.sessionId, source.task_id, source.execution_context_id, nextKind,
-        source.title, source.cwd, input.now, input.now, input.now
+        `UPDATE sessions SET kind = ?, status = 'created', archived_at = NULL,
+           updated_at = ?, last_activity_at = ?, version = version + 1
+         WHERE id = ?`,
+        nextKind, input.now, input.now, source.id
       )
-      tx.run(
-        `INSERT INTO session_mounts (
-           id, scene_id, scene_node_id, session_id, created_at
-         ) VALUES (?, ?, ?, ?, ?)`,
-        ids.mountId, scene.id, ids.rootNodeId, ids.sessionId, input.now
+      const existingMount = tx.get<{ id: string }>(
+        'SELECT id FROM session_mounts WHERE scene_id = ? AND session_id = ? LIMIT 1',
+        scene.id, source.id
       )
-      tx.run(
-        `UPDATE scenes SET root_node_id = CASE WHEN root_node_id = ? THEN ? ELSE root_node_id END,
-           layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
-        sourceNode.id, ids.secondaryNodeId, input.now, scene.id
-      )
-      if (structuralParent) {
-        const relationEvent = tx.run(
-          `INSERT INTO session_relation_events (
-             event_id, relation_id, operation, task_id, from_session_id, to_session_id,
-             relation_kind, metadata_json, command_id, occurred_at
-           ) VALUES (?, ?, 'created', ?, ?, ?, 'derived-from', ?, ?, ?)`,
-          `${command.commandId}:historical-relation-created`, relationId, task.id,
-          ids.sessionId, structuralParent.parent_session_id,
-          JSON.stringify({ reopenedFromSessionId: source.id }), command.commandId, input.now
+      if (!existingMount) {
+        const anchor = tx.get<{ scene_node_id: string }>(
+          `SELECT mounts.scene_node_id
+           FROM session_mounts AS mounts
+           JOIN sessions ON sessions.id = mounts.session_id
+           WHERE mounts.scene_id = ? AND mounts.scene_node_id IS NOT NULL
+             AND sessions.archived_at IS NULL AND sessions.id <> ?
+           ORDER BY sessions.last_activity_at DESC, mounts.created_at, mounts.id LIMIT 1`,
+          scene.id, source.id
         )
-        tx.run(
-          `INSERT INTO session_relations_current (
-             relation_id, task_id, from_session_id, to_session_id, relation_kind,
-             metadata_json, created_at, updated_at, source_event_sequence
-           ) VALUES (?, ?, ?, ?, 'derived-from', ?, ?, ?, ?)`,
-          relationId, task.id, ids.sessionId, structuralParent.parent_session_id,
-          JSON.stringify({ reopenedFromSessionId: source.id }), input.now, input.now,
-          Number(relationEvent.lastInsertRowid)
-        )
+        if (anchor) {
+          const sourceNode = requireRow(tx.get<SceneNodeRow>(
+            'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?', anchor.scene_node_id
+          ), 'SceneNode')
+          insertHorizontalNode(tx, scene.id, sourceNode, ids, input.now)
+          tx.run(
+            `INSERT INTO session_mounts (
+               id, scene_id, scene_node_id, session_id, created_at
+             ) VALUES (?, ?, ?, ?, ?)`,
+            ids.mountId, scene.id, ids.rootNodeId, source.id, input.now
+          )
+          tx.run(
+            `UPDATE scenes SET root_node_id = CASE WHEN root_node_id = ? THEN ? ELSE root_node_id END,
+               layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
+            sourceNode.id, ids.secondaryNodeId, input.now, scene.id
+          )
+        } else {
+          tx.run(
+            `INSERT INTO scene_nodes (
+               id, scene_id, parent_node_id, kind, ordinal, created_at
+             ) VALUES (?, ?, NULL, 'mount', 0, ?)`,
+            ids.rootNodeId, scene.id, input.now
+          )
+          tx.run(
+            `INSERT INTO session_mounts (
+               id, scene_id, scene_node_id, session_id, created_at
+             ) VALUES (?, ?, ?, ?, ?)`,
+            ids.mountId, scene.id, ids.rootNodeId, source.id, input.now
+          )
+          tx.run(
+            `UPDATE scenes SET root_node_id = ?, layout_revision = layout_revision + 1,
+               updated_at = ? WHERE id = ?`,
+            ids.rootNodeId, input.now, scene.id
+          )
+        }
       }
       if (providerBinding) {
         tx.run(
-          `UPDATE provider_bindings SET session_id = ?, resume_state = 'available',
+          `UPDATE provider_bindings SET resume_state = 'available',
              restore_state = 'none', restore_error = NULL, user_exited_at = NULL,
              updated_at = ? WHERE id = ?`,
-          ids.sessionId, input.now, providerBinding.id
+          input.now, providerBinding.id
         )
       }
-      activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
+      activateSessionInTransaction(tx, input.windowId, source.id, input.now)
       const hierarchy = readHierarchyResult(tx, input.windowId)
-      const membership = readMembership(tx, ids.sessionId)
       const graph = projectSceneGraphFrom(tx, scene.id, input.windowId)
       emit({
-        eventId: `${command.commandId}:historical-session-reopened`,
-        eventType: 'session.historical-reopened', aggregateType: 'session',
-        aggregateId: ids.sessionId, workspaceId: task.workspace_id, taskId: task.id,
-        sessionId: ids.sessionId,
-        payload: { session: hierarchy.session, reopenedFromSessionId: source.id, graph },
+        eventId: `${command.commandId}:stopped-session-restarted`,
+        eventType: 'session.stopped-state-changed', aggregateType: 'session',
+        aggregateId: source.id, workspaceId: task.workspace_id, taskId: task.id,
+        sessionId: source.id,
+        payload: { session: hierarchy.session, graph },
         occurredAt: input.now
       })
-      emitMembership(command.commandId, membership, task.workspace_id, task.id, emit, input.now)
       return { ...hierarchy, graph }
     }).result
   }
 
-  removeHistoricalSession(
+  removeSessionBranch(
     command: DomainCommandMetadata,
-    input: RemoveHistoricalSessionInput
-  ): RemoveHistoricalSessionResult {
+    input: RemoveSessionBranchInput
+  ): RemoveSessionBranchResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
       const target = requireRow(tx.get<{
@@ -521,9 +516,7 @@ export class SessionCanvasService {
          JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
          WHERE sessions.id = ? AND membership.scene_id = ?`,
         input.sessionId, input.sceneId
-      ), 'Historical Session')
-      if (target.archived_at === null) throw new Error('Session must be exited before removal')
-
+      ), 'Session')
       const descendants = tx.all<{ session_id: string }>(
         `WITH RECURSIVE branch(session_id) AS (
            SELECT ?
@@ -540,12 +533,41 @@ export class SessionCanvasService {
         input.sessionId, input.sceneId
       ).map(({ session_id }) => session_id)
       if (!input.includeDescendants && descendants.length > 1) {
-        throw new Error('Historical Session has descendants')
+        throw new Error('Session has descendants')
       }
       const removedSessionIds = input.includeDescendants
         ? descendants
         : [input.sessionId]
       const placeholders = removedSessionIds.map(() => '?').join(', ')
+      const focusedSessionId = tx.get<{ active_session_id: string | null }>(
+        `SELECT active_session_id FROM window_scene_focus
+         WHERE window_id = ? AND scene_id = ?`,
+        input.windowId, input.sceneId
+      )?.active_session_id ?? undefined
+      const removesFocus = focusedSessionId !== undefined && removedSessionIds.includes(focusedSessionId)
+      const survivingParent = removesFocus ? tx.get<{ id: string }>(
+        `SELECT parent.id
+         FROM session_relations_current AS relation
+         JOIN sessions AS parent ON parent.id = relation.to_session_id
+         JOIN session_canvas_memberships AS membership ON membership.session_id = parent.id
+         WHERE relation.from_session_id = ?
+           AND relation.relation_kind IN ('derived-from', 'forked-from')
+           AND membership.scene_id = ? AND parent.archived_at IS NULL
+         LIMIT 1`,
+        input.sessionId, input.sceneId
+      ) : undefined
+      const survivingPeer = removesFocus && !survivingParent ? tx.get<{ id: string }>(
+        `SELECT sessions.id
+         FROM session_canvas_memberships AS membership
+         JOIN sessions ON sessions.id = membership.session_id
+         WHERE membership.scene_id = ? AND membership.session_id NOT IN (${placeholders})
+           AND sessions.archived_at IS NULL
+         ORDER BY membership.last_user_interaction_seq DESC,
+           membership.sibling_created_seq ASC, sessions.id
+         LIMIT 1`,
+        input.sceneId, ...removedSessionIds
+      ) : undefined
+      const replacementSessionId = survivingParent?.id ?? survivingPeer?.id
       const disposedSessionIds = tx.all<{ id: string }>(
         `SELECT id FROM sessions WHERE id IN (${placeholders}) AND archived_at IS NULL
          ORDER BY created_at, id`,
@@ -570,9 +592,20 @@ export class SessionCanvasService {
         `DELETE FROM session_canvas_memberships WHERE session_id IN (${placeholders})`,
         ...removedSessionIds
       )
+      if (removesFocus) {
+        if (replacementSessionId) {
+          activateSessionInTransaction(tx, input.windowId, replacementSessionId, input.now)
+        } else {
+          tx.run(
+            `UPDATE window_scene_focus SET active_session_id = NULL, updated_at = ?
+             WHERE window_id = ? AND scene_id = ?`,
+            input.now, input.windowId, input.sceneId
+          )
+        }
+      }
       const graph = projectSceneGraphFrom(tx, input.sceneId, input.windowId)
       emit({
-        eventId: `${command.commandId}:historical-session-removed`,
+        eventId: `${command.commandId}:session-branch-removed`,
         eventType: 'session.graph-summary-changed', aggregateType: 'scene',
         aggregateId: input.sceneId, workspaceId: target.workspace_id,
         taskId: target.task_id, sessionId: input.sessionId,

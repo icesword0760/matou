@@ -168,7 +168,7 @@ export class RetentionManager {
       'SELECT worktree_path FROM worktrees WHERE execution_context_id = ?', session.execution_context_id
     )
     const metadataTables = [
-      'annotations', 'terminal_commands', 'journal_checkpoints', 'session_mounts',
+      'annotations', 'terminal_commands', 'shell_history_blocks', 'journal_checkpoints', 'session_mounts',
       'session_relations_current', 'session_relation_events', 'provider_bindings',
       'session_runs', 'domain_events', 'sessions'
     ]
@@ -196,6 +196,7 @@ export class RetentionManager {
         }
         tx.run('DELETE FROM annotations WHERE session_id = ?', plan.sessionId)
         tx.run('DELETE FROM terminal_commands WHERE session_id = ?', plan.sessionId)
+        tx.run('DELETE FROM shell_history_blocks WHERE session_id = ?', plan.sessionId)
         tx.run('DELETE FROM journal_checkpoints WHERE session_id = ?', plan.sessionId)
         tx.run('DELETE FROM session_mounts WHERE session_id = ?', plan.sessionId)
         tx.run('DELETE FROM session_relations_current WHERE from_session_id = ? OR to_session_id = ?', plan.sessionId, plan.sessionId)

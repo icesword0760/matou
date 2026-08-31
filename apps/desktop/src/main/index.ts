@@ -319,6 +319,11 @@ ipcMain.handle(DESKTOP_CHANNELS.selectDagNode, (_event, input: DagNodeSelection)
 ipcMain.handle(DESKTOP_CHANNELS.closeDagWindow, (_event, mainWindowId: string) => {
   dagWindows.close(mainWindowId)
 })
+ipcMain.handle(DESKTOP_CHANNELS.updateDagNotifications, (
+  _event, mainWindowId: string, sessionIds: string[]
+) => {
+  dagWindows.updateNotifications(mainWindowId, sessionIds)
+})
 
 app.on('before-quit', () => {
   quitting = true

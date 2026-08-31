@@ -835,5 +835,23 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         WHEN 'archived' THEN 'exited'
       END;
     `
+  },
+  {
+    version: 18,
+    name: 'warp-style-shell-command-blocks',
+    sql: `
+      CREATE TABLE shell_history_blocks (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        command_text TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        output TEXT NOT NULL,
+        exit_code INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX shell_history_blocks_session_completed_idx
+      ON shell_history_blocks(session_id, completed_at DESC, id DESC);
+    `
   }
 ]

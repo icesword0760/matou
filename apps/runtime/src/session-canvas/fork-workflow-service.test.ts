@@ -93,6 +93,9 @@ describe('ForkWorkflowService', () => {
     })
     expect(sibling.graph.nodes.filter(({ parentSessionId }) => parentSessionId === parent.sessionId)
       .map(({ title }) => title)).toEqual(['第一分支', '并行分支'])
+    expect(sibling.graph.focusedSessionId).toBe(first.session!.id)
+    expect(sibling.graph.nodes.filter(({ parentSessionId }) => parentSessionId === parent.sessionId)
+      .map(({ sessionId }) => sessionId)).toEqual([first.session!.id, sibling.session!.id])
   })
 
   it('returns typed product errors for root sibling Fork and ineligible Claude attempts', async () => {

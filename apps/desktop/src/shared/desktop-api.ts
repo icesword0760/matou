@@ -9,7 +9,9 @@ export interface MatouDesktopApi {
   openDagWindow(input: DagWindowContext): Promise<void>
   selectDagNode(input: DagNodeSelection): Promise<void>
   closeDagWindow(mainWindowId: string): Promise<void>
+  updateDagNotifications(mainWindowId: string, sessionIds: string[]): Promise<void>
   onDagContext(listener: (context: DagWindowContext) => void): () => void
+  onDagNotifications(listener: (sessionIds: string[]) => void): () => void
   onDagNodeSelected(listener: (selection: DagNodeSelection) => void): () => void
   onDagShortcut(listener: (kind: 'short' | 'long') => void): () => void
   onRuntimeConnectionState(listener: (state: RuntimeConnectionState) => void): () => void
@@ -41,6 +43,7 @@ export interface DagWindowContext {
   sceneId: string
   sessionId: string
   theme: 'light' | 'dark'
+  notificationSessionIds?: string[]
 }
 
 export interface DagNodeSelection extends DagWindowContext {
@@ -58,7 +61,9 @@ export const DESKTOP_CHANNELS = {
   openDagWindow: 'matou:open-dag-window',
   selectDagNode: 'matou:select-dag-node',
   closeDagWindow: 'matou:close-dag-window',
+  updateDagNotifications: 'matou:update-dag-notifications',
   dagContext: 'matou:dag-context',
+  dagNotifications: 'matou:dag-notifications',
   dagNodeSelected: 'matou:dag-node-selected',
   dagShortcut: 'matou:dag-shortcut',
   runtimeConnectionState: 'matou:runtime-connection-state'

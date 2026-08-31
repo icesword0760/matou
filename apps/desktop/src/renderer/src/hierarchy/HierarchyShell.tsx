@@ -9,7 +9,10 @@ import type { RuntimeMessage } from '@matou/contracts'
 import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
-import { NotificationProvider } from '../notifications/NotificationProvider'
+import type { AgentNotificationStore } from '../notifications/AgentNotificationStore'
+import {
+  NotificationProvider, useNotificationSnapshot, useNotificationStore
+} from '../notifications/NotificationProvider'
 import { ingestAgentNotification } from '../notifications/agent-event-ingestion'
 import { TerminalHud } from '../hud/TerminalHud'
 import { createHierarchyCommands } from './hierarchy-commands'
@@ -25,6 +28,7 @@ import { TerminalPane } from './TerminalPane'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
+import { SessionBreadcrumb } from '../session-canvas/SessionBreadcrumb'
 import { SessionCanvas } from '../session-canvas/SessionCanvas'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
@@ -162,6 +166,8 @@ function HierarchyProduct({ projection, commands }: {
   commands: HierarchyCommands
 }) {
   const client = useRuntimeClient()
+  const notificationStore = useNotificationStore()
+  useNotificationSnapshot()
   const projectionRef = useRef(projection)
   useEffect(() => { projectionRef.current = projection }, [projection])
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
@@ -197,10 +203,11 @@ function HierarchyProduct({ projection, commands }: {
     gitAvailable: boolean
   } | null>(null)
   const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | null | undefined>>({})
+  const restartingStoppedSessions = useRef(new Set<string>())
   const [revealSessionByScene, setRevealSessionByScene] = useState<Record<string, {
     sessionId: string
     sequence: number
-    historical?: boolean
+    stopped?: boolean
   }>>({})
   const ratioTimers = useRef(new Map<string, number>())
   useEffect(() => () => {
@@ -210,10 +217,9 @@ function HierarchyProduct({ projection, commands }: {
   useEffect(() => {
     const unsubscribe = window.matouDesktop?.onDetachedWindowClosed((event) => {
       if (event.mainWindowId === projection.windowId) {
-        // Closing the independent window is an explicit end of that terminal.
-        // Keep the stable graph node as history so DAG selection exposes the
-        // continue/reopen path instead of silently remounting a live process.
-        void Promise.resolve(commands.deleteSession(event.sessionId, true, true)).catch(() => {})
+        // Closing the independent window only closes that presentation. The
+        // same Session returns to its canvas instead of becoming a dead card.
+        void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
       }
     })
     return () => { if (typeof unsubscribe === 'function') unsubscribe() }
@@ -232,6 +238,17 @@ function HierarchyProduct({ projection, commands }: {
   const task = projection.tasks.find(({ id }) => id === taskId)
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
+  useEffect(() => {
+    if (!activeSceneId || !commands.restartStoppedSession) return
+    const graph = projection.sessionGraphs?.[activeSceneId]
+    for (const node of graph?.nodes ?? []) {
+      if (node.archivedAt === undefined || restartingStoppedSessions.current.has(node.sessionId)) continue
+      restartingStoppedSessions.current.add(node.sessionId)
+      void Promise.resolve(commands.restartStoppedSession(node.sessionId)).catch(() => {
+        restartingStoppedSessions.current.delete(node.sessionId)
+      })
+    }
+  }, [activeSceneId, commands, projection.sessionGraphs])
   const workspaceTaskIds = new Set(
     projection.tasks.filter(({ id, workspaceId: owner }) =>
       owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
@@ -244,8 +261,20 @@ function HierarchyProduct({ projection, commands }: {
   const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
   const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
   const dagFocusSessionId = dagFocusTarget(activeGraph, focusedSessionId)
+  const dagNotificationSessionIds = notifiedSessionIds(projection, notificationStore)
+  const dagNotificationSignature = dagNotificationSessionIds.join(':')
   const activeGraphFocused = activeGraph?.nodes.find(({ sessionId }) => sessionId === focusedSessionId) ??
     activeGraph?.nodes.find(({ sessionId }) => sessionId === activeGraph.focusedSessionId)
+  const selectedLevelParent = activeSceneId ? levelParentByScene[activeSceneId] : undefined
+  const activeLevelParentId = selectedLevelParent !== undefined
+    ? selectedLevelParent ?? undefined
+    : activeGraphFocused?.parentSessionId
+  const activeLevelParent = activeLevelParentId
+    ? activeGraph?.nodes.find(({ sessionId }) => sessionId === activeLevelParentId)
+    : undefined
+  const activeLevelSessionCount = activeGraph?.nodes.filter(
+    ({ parentSessionId }) => parentSessionId === activeLevelParentId
+  ).length ?? 0
   const paneSessionIds = activeGraph && activeGraphFocused
     ? activeGraph.nodes.filter(({ archivedAt, parentSessionId }) =>
         archivedAt === undefined && parentSessionId === activeGraphFocused.parentSessionId
@@ -253,6 +282,20 @@ function HierarchyProduct({ projection, commands }: {
     : activeSnapshot ? orderedSessionIds(activeSnapshot) : []
   const activeRatios = activeSnapshot ? layoutRatios(activeSnapshot, liveRatios) : {}
   const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
+  const returnToLevelParent = (
+    sceneId: string,
+    parentSessionId: string,
+    graph: SessionGraphView
+  ) => {
+    const parentNode = graph.nodes.find(({ sessionId }) => sessionId === parentSessionId)
+    setLevelParentByScene((current) => ({
+      ...current,
+      [sceneId]: parentNode?.parentSessionId ?? null
+    }))
+    run(Promise.resolve(commands.setFocusedSession(sceneId, parentSessionId)).then(() => {
+      setTerminalFocusRequest((value) => value + 1)
+    }))
+  }
   const focusPane = (offset: number) => {
     if (paneSessionIds.length <= 1) return
     const current = Math.max(0, paneSessionIds.indexOf(focusedSessionId ?? ''))
@@ -316,7 +359,8 @@ function HierarchyProduct({ projection, commands }: {
       mainWindowId: projection.windowId,
       sceneId: activeSceneId,
       sessionId: dagFocusSessionId,
-      theme: themeKey
+      theme: themeKey,
+      notificationSessionIds: dagNotificationSessionIds
     })
     if (request === undefined) {
       setDagOpenError(true)
@@ -340,10 +384,11 @@ function HierarchyProduct({ projection, commands }: {
     const graph = currentProjection.sessionGraphs?.[selection.sceneId]
     const target = graph?.nodes.find(({ sessionId }) => sessionId === selection.sessionId)
     if (!target) return
+    notificationStore.dismissSessionIndicator(selection.sessionId)
     setLevelParentByScene((current) => ({
       ...current,
-      // An undefined value means "infer the level from the focused live node".
-      // A root historical selection instead needs an explicit root projection.
+      // An undefined value means "infer the level from the focused running node".
+      // A stopped root selection instead needs an explicit root projection.
       [selection.sceneId]: target.parentSessionId ?? null
     }))
     setRevealSessionByScene((current) => ({
@@ -351,7 +396,7 @@ function HierarchyProduct({ projection, commands }: {
       [selection.sceneId]: {
         sessionId: selection.sessionId,
         sequence: (current[selection.sceneId]?.sequence ?? 0) + 1,
-        ...(target.archivedAt === undefined ? {} : { historical: true })
+        ...(target.archivedAt === undefined ? {} : { stopped: true })
       }
     }))
     const activate = Promise.resolve(commands.activateScene(selection.sceneId))
@@ -359,7 +404,13 @@ function HierarchyProduct({ projection, commands }: {
       ? activate.then(() => commands.setFocusedSession(selection.sceneId, selection.sessionId))
         .then(() => setTerminalFocusRequest((value) => value + 1))
       : activate)
-  }), [commands])
+  }), [commands, notificationStore])
+  useEffect(() => {
+    void window.matouDesktop?.updateDagNotifications?.(
+      projection.windowId,
+      dagNotificationSessionIds
+    )
+  }, [dagNotificationSignature, projection.windowId])
   useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
     document.documentElement.dataset.theme = themeKey
@@ -385,7 +436,7 @@ function HierarchyProduct({ projection, commands }: {
                       [sceneId]: {
                         sessionId,
                         sequence: (current[sceneId]?.sequence ?? 0) + 1,
-                        ...(node?.archivedAt === undefined ? {} : { historical: true })
+                        ...(node?.archivedAt === undefined ? {} : { stopped: true })
                       }
                     }))
                   }} />
@@ -420,6 +471,7 @@ function HierarchyProduct({ projection, commands }: {
                   ? graph?.nodes.find(({ sessionId: candidate }) => candidate === graphNode.parentSessionId)
                   : undefined
                 const childNodes = graph?.nodes.filter(({ parentSessionId }) => parentSessionId === session.id) ?? []
+                const descendantNodes = graph ? sessionDescendants(graph.nodes, session.id) : []
                 const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
@@ -454,6 +506,16 @@ function HierarchyProduct({ projection, commands }: {
                   {...(workspace ? { workspaceId: workspace.id } : {})}
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
                   onDelete={commands.deleteSession}
+                  descendantCount={descendantNodes.length}
+                  descendantImpact={{
+                    running: descendantNodes.filter(({ workStatus }) =>
+                      workStatus === 'running' || workStatus === 'starting').length,
+                    needsInput: descendantNodes.filter(({ workStatus }) => workStatus === 'needs-input').length
+                  }}
+                  {...(commands.removeSessionBranch ? {
+                    onRemoveBranch: (sessionId: string, includeDescendants: boolean) =>
+                      commands.removeSessionBranch?.(scene.id, sessionId, includeDescendants)
+                  } : {})}
                   onRetryRestore={commands.retryProviderRestore}
                   {...(client ? { onRetryWork: (sessionId: string) => {
                     client.retryLastTerminalInput(sessionId)
@@ -461,7 +523,6 @@ function HierarchyProduct({ projection, commands }: {
                   onRetryFork={() => commands.retryFork(scene.id, session.id)}
                   onRemoveFailedFork={() => commands.removeFailedFork(scene.id, session.id)}
                   childNodes={childNodes}
-                  historicalChildCount={graphNode?.historicalChildCount ?? 0}
                   onOpenChildren={() => {
                     setLevelParentByScene((current) => ({ ...current, [scene.id]: session.id }))
                     const preferredChild = preferredActiveChild(childNodes)
@@ -517,35 +578,18 @@ function HierarchyProduct({ projection, commands }: {
                         scene.id, ownerKey, graph.layoutRevision ?? scene.layoutRevision ?? 0, geometry
                       )}
                       onActivate={(sessionId) => run(commands.setFocusedSession(scene.id, sessionId))}
-                      onCreateShellSibling={(sessionId, parentSessionId) =>
-                        run(commands.createShellSibling(scene.id, sessionId, parentSessionId))}
-                      onCreateForkSibling={(source, parent) => {
-                        const parentHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === parent.sessionId)
-                        setBranchDialog({
-                          sceneId: scene.id, sourceSessionId: source.sessionId,
-                          sourceTitle: parent.title, relationMode: 'sibling',
-                          gitAvailable: Boolean(parentHud?.gitBranch)
-                        })
-                      }}
-                      onReopenHistorical={(sessionId) => run(commands.reopenHistoricalSession(sessionId))}
+                      {...(commands.removeSessionBranch ? {
+                        onRemoveBranch: (sessionId: string, includeDescendants: boolean) =>
+                          commands.removeSessionBranch?.(scene.id, sessionId, includeDescendants)
+                      } : {})}
                       onNavigateToChildren={(sessionId) => {
                         setLevelParentByScene((current) => ({ ...current, [scene.id]: sessionId }))
                         const firstChild = graph.nodes.find((node) =>
                           node.parentSessionId === sessionId && node.archivedAt === undefined)
                         if (firstChild) run(commands.setFocusedSession(scene.id, firstChild.sessionId))
                       }}
-                      onRemoveHistorical={(sessionId, includeDescendants) => run(
-                        commands.removeHistoricalSession?.(scene.id, sessionId, includeDescendants)
-                      )}
                       onReturnParent={(parentSessionId) => {
-                        const parentNode = graph.nodes.find(({ sessionId }) => sessionId === parentSessionId)
-                        setLevelParentByScene((current) => ({
-                          ...current,
-                          [scene.id]: parentNode?.parentSessionId
-                        }))
-                        run(Promise.resolve(commands.setFocusedSession(scene.id, parentSessionId)).then(() => {
-                          setTerminalFocusRequest((value) => value + 1)
-                        }))
+                        returnToLevelParent(scene.id, parentSessionId, graph)
                       }}
                       onEnsureSessionVisible={(sessionId) => {
                         if (sessionId === activeSessionId) setTerminalFocusRequest((value) => value + 1)
@@ -583,8 +627,14 @@ function HierarchyProduct({ projection, commands }: {
                       setTerminalFocusRequest((value) => value + 1)
                     }} />
                   <div className="shortcut-bar" aria-label="快捷指令栏">
-                    <button className="add-btn" aria-label="添加快捷指令">+</button>
-                    <div className="btn-list" />
+                    {activeGraph && <SessionBreadcrumb
+                      {...(activeLevelParent ? { parentTitle: activeLevelParent.title } : {})}
+                      sessionCount={activeLevelSessionCount}
+                      {...(activeSceneId && activeLevelParentId ? {
+                        onReturnParent: () => returnToLevelParent(
+                          activeSceneId, activeLevelParentId, activeGraph
+                        )
+                      } : {})} />}
                     <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
                       onModel={commands.setModel} />
                   </div>
@@ -604,9 +654,13 @@ function HierarchyProduct({ projection, commands }: {
                 onConfirm={async (input: BranchDialogSubmit) => {
                   const { sceneId, sourceSessionId, relationMode } = branchDialog
                   if (relationMode === 'child') {
-                    await Promise.resolve(commands.createForkChild(
+                    const result = await Promise.resolve(commands.createForkChild(
                       sceneId, sourceSessionId, input.name, input.worktreeMode
                     ))
+                    const createdSessionId = mutationSessionId(result)
+                    if (createdSessionId) {
+                      await Promise.resolve(commands.setFocusedSession(sceneId, createdSessionId))
+                    }
                     // A child Fork creates the next level in the same canvas. Keep
                     // the newly focused child visible instead of leaving the user
                     // on the source session's sibling level.
@@ -844,7 +898,7 @@ function createFixtureCommands(
       sessionId, sceneId, currentMode: 'claude-code', workStatus: 'starting',
       providerRestoreState: 'none', canFork: false, title: name, cwd: source.cwd,
       parentSessionId: sourceSessionId, relationKind: 'forked-from',
-      activeChildCount: 0, historicalChildCount: 0,
+      activeChildCount: 0, stoppedChildCount: 0,
       childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [],
       lastUserInteractionSeq: 0
     })
@@ -877,7 +931,8 @@ function createFixtureCommands(
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
     createForkChild: createFixtureForkChild, createForkSibling: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
-    retryProviderRestore: NOOP, reopenHistoricalSession: NOOP, getSceneSessionGraph: NOOP,
+    retryProviderRestore: NOOP, restartStoppedSession: NOOP, removeSessionBranch: NOOP,
+    getSceneSessionGraph: NOOP,
     recordSessionInteraction: NOOP,
     setFocusedSession: (sceneId, sessionId) => updateNavigation((value) => {
       value.navigation.sessionByScene[sceneId] = sessionId
@@ -906,13 +961,37 @@ function createFixtureCommands(
       value.sessions = value.sessions.filter(({ id }) => id !== sessionId)
       const fallback = snapshot.mounts[0]?.sessionId
       if (fallback) value.navigation.sessionByScene[snapshot.scene.id] = fallback
-    }), detachSession: NOOP, returnSession: NOOP,
+    }), detachSession: NOOP, returnSession: (sceneWindowId) => updateNavigation((value) => {
+      const snapshot = value.sceneSnapshots?.find(({ windows }) =>
+        windows.some(({ id }) => id === sceneWindowId)
+      )
+      if (!snapshot) return
+      const mount = snapshot.mounts.find(({ sceneWindowId: owner }) => owner === sceneWindowId)
+      if (mount) delete mount.sceneWindowId
+      snapshot.windows = snapshot.windows.map((candidate) => candidate.id === sceneWindowId
+        ? { ...candidate, state: 'closed' as const }
+        : candidate)
+    }),
     setPermissionMode: NOOP, setModel: NOOP
   }
 }
 
 function toHierarchyProjection(value: unknown): HierarchyProjection {
   return value as HierarchyProjection
+}
+
+function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
+  const found: SessionGraphNodeView[] = []
+  const queue = nodes.filter(({ parentSessionId }) => parentSessionId === sessionId)
+  const seen = new Set<string>()
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    if (seen.has(current.sessionId)) continue
+    seen.add(current.sessionId)
+    found.push(current)
+    queue.push(...nodes.filter(({ parentSessionId }) => parentSessionId === current.sessionId))
+  }
+  return found
 }
 function queryValue(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name)
@@ -921,11 +1000,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function mutationSessionId(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || !('session' in value)) return undefined
+  const session = value.session
+  if (!session || typeof session !== 'object' || !('id' in session)) return undefined
+  return typeof session.id === 'string' ? session.id : undefined
+}
+
 function focusedSession(projection: HierarchyProjection): string | undefined {
   const workspaceId = projection.navigation.activeWorkspaceId
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
   const sceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   return sceneId ? projection.navigation.sessionByScene[sceneId] : undefined
+}
+
+function notifiedSessionIds(
+  projection: HierarchyProjection,
+  store: AgentNotificationStore
+): string[] {
+  const ids = new Set(Object.values(projection.sessionGraphs ?? {})
+    .flatMap(({ nodes }) => nodes.map(({ sessionId }) => sessionId)))
+  return [...ids].filter((sessionId) => store.sessionHasVisibleIndicator(sessionId))
 }
 
 function dagFocusTarget(

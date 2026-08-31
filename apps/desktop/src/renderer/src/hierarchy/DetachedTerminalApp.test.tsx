@@ -86,7 +86,7 @@ describe('PRD 02 detached HUD', () => {
               sessionId: 'teammate-1', sceneId: 'scene-1', currentMode: 'agent-team-member',
               workStatus: 'idle', providerRestoreState: 'none', canFork: false,
               title: 'MATOU_QA_TEAMMATE', cwd: '/tmp', activeChildCount: 0,
-              historicalChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+              stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
               latestLines: ['TEAMMATE_REAL_READY'], lastUserInteractionSeq: 0
             }], edges: []
           }

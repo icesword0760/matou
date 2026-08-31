@@ -12,6 +12,9 @@ const ZSH_RC = `if [[ -n "$MATOU_ORIGINAL_ZDOTDIR" && "$MATOU_ORIGINAL_ZDOTDIR" 
 fi
 
 _matou_preexec() {
+  local _matou_command_base64
+  _matou_command_base64=$(printf '%s' "$1" | base64 | tr -d '\\n')
+  printf '\\033]633;E;%s\\007' "$_matou_command_base64"
   printf '\\033]133;C\\007'
 }
 

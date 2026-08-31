@@ -48,7 +48,7 @@ describe('domain event wire contract', () => {
       'session.mode-changed',
       'session.restore-state-changed',
       'session.graph-summary-changed',
-      'session.historical-state-changed'
+      'session.stopped-state-changed'
     ])
   })
 })

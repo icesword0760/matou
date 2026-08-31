@@ -49,7 +49,7 @@
 - 子会话数量、类型构成和聚合状态徽章。
 - Claude Code 恢复失败与重试。
 - 独立 DAG 窗口、三层默认视野、远层虚影、平移、缩放、搜索、实时摘要和跳转。
-- 历史节点、独立终端窗口、主题和应用重启下的关系恢复。
+- 已停止节点、独立终端窗口、主题和应用重启下的关系恢复。
 - 100 节点画布的交互质量门槛。
 
 ### 3.2 本期边界外
@@ -65,7 +65,7 @@
 
 ### 4.1 会话节点与运行形态分离
 
-`Session` 是稳定的关系节点。节点的 `currentMode` 在 `shell` 与 `claude-code` 之间变化，父子关系、兄弟归属、画布归属和历史不随模式变化而重建。
+`Session` 是稳定的关系节点。节点的 `currentMode` 在 `shell` 与 `claude-code` 之间变化，父子关系、兄弟归属和画布归属不随模式变化而重建。
 
 因此：
 
@@ -120,16 +120,18 @@ Fork 入口进入可用状态需同时满足：
 
 恢复失败属于节点附加状态，不创建新节点。恢复成功继续使用原节点、原 provider 身份和原关系。
 
-### 4.6 子会话徽章与历史
+### 4.6 子会话徽章与停止状态
 
 父会话标题显示：
 
-- 活跃直接子会话数量。
+- 全部直接子会话数量。
 - `Claude N · Shell M` 形态构成。
 - 最高优先级聚合状态。
-- 存在已结束历史子节点时显示 `+H 历史`。
+- 运行、待输入、异常、空闲与已停止的真实状态构成。
 
-点击徽章默认进入活跃子会话列表；“显示历史”开关把已结束节点加入列表。DAG 始终保留历史节点，并以降低对比度的卡片展示。
+点击徽章进入完整的直接子会话列表。横向列表与 DAG 投影同一节点集合；停止后的节点在两侧同时显示为“已停止”，支持原位重新启动。产品中没有历史会话分类、显示/隐藏历史开关或单独历史列表。
+
+创建子 Fork 后进入下一层并聚焦新子节点；从当前子节点创建共同父节点的 Fork 兄弟时保留当前焦点和横向位置，新节点只追加到队尾。
 
 ### 4.7 工作状态
 
@@ -162,7 +164,7 @@ Claude 判断：语义事件或 hook 表示生成/工具执行为 `running`，�
 
 点击、聚焦、滚动、复制、选择文本、草稿输入、后台输出、Claude 回答、通知和 DAG 查看不更新顺序。
 
-新会话追加到队列末尾。应用整体恢复保留原顺序；用户主动重新打开历史会话时追加到末尾。
+新会话追加到队列末尾。应用整体恢复保留原顺序；重新启动已停止节点不改变节点身份和既有关系。
 
 `lastUserInteractionSeq` 由 Runtime 在 SQLite 事务中单调递增。值相同时按同层创建顺序，再按 Session ID 稳定排序。
 
@@ -283,7 +285,7 @@ export interface SessionGraphNode {
   cwd: string
   worktree?: { branch: string; path: string; shared: boolean }
   activeChildCount: number
-  historicalChildCount: number
+  stoppedChildCount: number
   childModeCounts: { shell: number; claudeCode: number }
   latestLines: string[]
   lastUserInteractionSeq: number
@@ -384,7 +386,8 @@ export class SessionCanvasService {
   createForkSibling(command: DomainCommandMetadata, input: CreateForkSiblingInput): Promise<CreateForkResult>
   recordUserInteraction(command: DomainCommandMetadata, input: RecordUserInteractionInput): SessionCanvasMembership
   retryProviderRestore(command: DomainCommandMetadata, input: RetryProviderRestoreInput): Promise<RetryProviderRestoreResult>
-  reopenHistoricalSession(command: DomainCommandMetadata, input: ReopenHistoricalSessionInput): Promise<Session>
+  restartStoppedSession(command: DomainCommandMetadata, input: RestartStoppedSessionInput): Promise<RestartStoppedSessionResult>
+  removeSessionBranch(command: DomainCommandMetadata, input: RemoveSessionBranchInput): Promise<RemoveSessionBranchResult>
   projectSceneGraph(sceneId: string, windowId: string): SceneSessionGraph
 }
 ```
@@ -456,7 +459,8 @@ hierarchy.create-fork-child
 hierarchy.create-fork-sibling
 hierarchy.record-session-interaction
 hierarchy.retry-provider-restore
-hierarchy.reopen-historical-session
+hierarchy.restart-stopped-session
+hierarchy.remove-session-branch
 hierarchy.get-scene-session-graph
 hierarchy.set-focused-session
 ```
@@ -481,7 +485,7 @@ session.user-interacted
 session.mode-changed
 session.restore-state-changed
 session.graph-summary-changed
-session.historical-state-changed
+session.stopped-state-changed
 ```
 
 恢复缺口仍使用现有序号检测与全量投影重建。DAG Renderer 与主 Renderer 读取同一个 Runtime 权威投影。

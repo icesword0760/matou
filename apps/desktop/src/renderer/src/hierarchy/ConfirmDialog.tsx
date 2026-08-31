@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import type { ConfirmStep } from './terminal-close-flow'
 
@@ -8,6 +9,7 @@ export function ConfirmDialog(props: {
   confirmLabel: string
   cancelLabel?: string
   showCancel?: boolean
+  scope?: 'viewport' | 'session'
   onConfirm(): void
   onCancel(): void
 }) {
@@ -20,7 +22,7 @@ export function ConfirmDialog(props: {
     firstButton?.focus()
   }, [])
 
-  return <div className="kooky-dialog-overlay" onPointerDown={(event) => {
+  const overlay = <div className={`kooky-dialog-overlay${props.scope === 'session' ? ' is-session-scoped' : ''}`} onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onCancel()
   }}><div ref={dialogRef} role="alertdialog" aria-modal="true" aria-label={props.title}
     onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)}
@@ -43,6 +45,10 @@ export function ConfirmDialog(props: {
       <button className="dialog-primary" onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
     </footer>
   </div></div>
+  if (props.scope !== 'session') return overlay
+  const sessionCanvas = document.querySelector<HTMLElement>('.scene-stage:not([hidden]) .session-canvas') ??
+    document.querySelector<HTMLElement>('.session-canvas')
+  return sessionCanvas ? createPortal(overlay, sessionCanvas) : overlay
 }
 
 export function ConfirmationSequence(props: {

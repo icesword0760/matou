@@ -2,29 +2,24 @@ import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 
 export function ChildSessionBadge(props: {
   children: SessionGraphNodeView[]
-  historicalCount: number
   onOpen(): void
 }) {
-  const { children, historicalCount, onOpen } = props
-  const active = children.filter(({ archivedAt }) => archivedAt === undefined)
-  const total = active.length + historicalCount
-  if (total === 0) return null
-  const counts = statusCounts(active)
-  const claude = active.filter(({ currentMode }) => currentMode === 'claude-code').length
-  const shell = active.filter(({ currentMode }) => currentMode === 'shell').length
+  const { children, onOpen } = props
+  if (children.length === 0) return null
+  const counts = statusCounts(children)
+  const claude = children.filter(({ currentMode }) => currentMode === 'claude-code').length
+  const shell = children.filter(({ currentMode }) => currentMode === 'shell').length
   const highest = highestStatus(counts)
   const detail = [
     `Claude ${claude} · Shell ${shell}`,
-    `运行中 ${counts.running} · 待输入 ${counts.needsInput} · 空闲 ${counts.idle}`,
-    `错误 ${counts.error} · 中断 ${counts.interrupted}`,
-    historicalCount > 0 ? `+${historicalCount} 历史` : ''
-  ].filter(Boolean).join('；')
-  const summary = counts.running > 0
-    ? `${total} 分支 · ${counts.running} 运行中`
-    : `${total} 分支 · 空闲`
+    statusDetail(counts)
+  ].filter((value) => Boolean(value)).join('；')
+  const status = summaryStatus(counts)
+  const summary = `${children.length} 分支${status ? ` · ${status}` : ''}`
+  const accessibleLabel = `查看 ${children.length} 个子会话`
   return <span className="child-session-badge-wrap">
     <button type="button" className={`child-session-badge status-${highest}`}
-      aria-label={`查看 ${total} 个子会话`} title={detail}
+      aria-label={accessibleLabel}
       onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }} onClick={(event) => {
         event.stopPropagation()
         onOpen()
@@ -41,17 +36,33 @@ function statusCounts(nodes: SessionGraphNodeView[]) {
   return nodes.reduce((counts, node) => {
     if (node.workStatus === 'error') counts.error += 1
     else if (node.workStatus === 'needs-input') counts.needsInput += 1
-    else if (node.workStatus === 'running' || node.workStatus === 'starting') counts.running += 1
-    else if (node.workStatus === 'interrupted') counts.interrupted += 1
-    else counts.idle += 1
+    else if (node.workStatus === 'running') counts.running += 1
+    else if (node.workStatus === 'starting') counts.starting += 1
     return counts
-  }, { error: 0, needsInput: 0, running: 0, interrupted: 0, idle: 0 })
+  }, { error: 0, needsInput: 0, running: 0, starting: 0 })
 }
 
 function highestStatus(counts: ReturnType<typeof statusCounts>): string {
   if (counts.error > 0) return 'error'
   if (counts.needsInput > 0) return 'needs-input'
   if (counts.running > 0) return 'running'
-  if (counts.interrupted > 0) return 'interrupted'
+  if (counts.starting > 0) return 'starting'
   return 'idle'
+}
+
+function summaryStatus(counts: ReturnType<typeof statusCounts>): string {
+  if (counts.error > 0) return `${counts.error} 异常`
+  if (counts.needsInput > 0) return `${counts.needsInput} 待输入`
+  if (counts.running > 0) return `${counts.running} 运行中`
+  if (counts.starting > 0) return `${counts.starting} 准备中`
+  return ''
+}
+
+function statusDetail(counts: ReturnType<typeof statusCounts>): string {
+  return [
+    counts.running > 0 ? `运行中 ${counts.running}` : '',
+    counts.starting > 0 ? `准备中 ${counts.starting}` : '',
+    counts.needsInput > 0 ? `待输入 ${counts.needsInput}` : '',
+    counts.error > 0 ? `错误 ${counts.error}` : ''
+  ].filter(Boolean).join(' · ')
 }

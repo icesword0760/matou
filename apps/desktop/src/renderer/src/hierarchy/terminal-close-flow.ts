@@ -45,7 +45,7 @@ export function sceneCloseFlow(input: {
     action: 'confirm',
     steps: [{
       title: '关闭画布',
-      body: `这张画布中有 ${affected}。关闭后这些会话将结束，画布、关系和历史摘要会进入“已关闭画布”，本地目录和工作树保持原样。`,
+      body: `这张画布中有 ${affected}。关闭后这些会话将停止，画布和关系会进入“已关闭画布”，本地目录和工作树保持原样。`,
       confirmLabel: '确认关闭',
       cancelLabel: '取消'
     }]
@@ -68,9 +68,9 @@ export function sessionDeleteFlow(input: {
   return {
     action: 'confirm',
     steps: [{
-      title: '结束会话',
-      body: `“${input.sessionTitle ?? '当前会话'}”${activity}${descendants}。结束后节点将在 DAG 中保留为历史，子会话继续工作。`,
-      confirmLabel: '结束会话', cancelLabel: '取消'
+      title: '停止会话',
+      body: `“${input.sessionTitle ?? '当前会话'}”${activity}${descendants}。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。`,
+      confirmLabel: '停止会话', cancelLabel: '取消'
     }]
   }
 }

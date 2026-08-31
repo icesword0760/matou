@@ -88,11 +88,7 @@ describe('RuntimeRecoveryService', () => {
     ])
     expect(await readSessionFrames(root, 'session-good')).toEqual([
       { kind: 'output', sequence: 1, data: Uint8Array.from([65]) },
-      expect.objectContaining({
-        kind: 'output', sequence: 2,
-        data: new TextEncoder().encode('\r\n\u001b[33m[上次命令已中断，未自动重新执行]\u001b[0m\r\n')
-      }),
-      { kind: 'domain-cursor', sequence: 3, domainEventSequence: 2 }
+      { kind: 'domain-cursor', sequence: 2, domainEventSequence: 2 }
     ])
 
     const repeated = await new RuntimeRecoveryService(root, after).recoverAll()
