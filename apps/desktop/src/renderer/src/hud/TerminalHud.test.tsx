@@ -2,8 +2,10 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { RpcMethod } from '@matou/contracts'
 
 import { TerminalHud } from './TerminalHud'
+import type { GitRequestClient } from './GitControlMenu'
 import type { SessionHudView } from '../hierarchy/hierarchy-types'
 
 afterEach(cleanup)
@@ -20,6 +22,46 @@ describe('PRD 02 bottom HUD', () => {
     )
     expect(screen.queryByText(/unknown|N\/A|--/i)).toBeNull()
     expect(container.querySelector('.status-git')?.textContent).toBe('feature/hud*')
+  })
+
+  it('opens the Git control from the branch field and switches branches', async () => {
+    const user = userEvent.setup()
+    const status = {
+      repositoryRoot: '/Users/demo/project', cwd: '/Users/demo/project',
+      currentBranch: 'main', defaultBranch: 'main', dirty: false,
+      stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+      additions: 0, deletions: 0, ahead: 0, behind: 0,
+      hasRemote: false, canPush: false,
+      branches: [
+        { name: 'main', current: true, commitTimestamp: 2 },
+        { name: 'feature/menu', current: false, commitTimestamp: 1 }
+      ],
+      worktrees: [{
+        path: '/Users/demo/project', branch: 'main', head: 'abc',
+        current: true, main: true, dirty: false, managed: false, sessionCount: 1
+      }]
+    }
+    const request = vi.fn(async (method: string, _payload: unknown, _options?: { timeoutMs?: number }) => method === 'git.checkout'
+        ? { kind: 'switched', status: { ...status, currentBranch: 'feature/menu' } }
+        : status)
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
+    }
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/Users/demo/project',
+      gitBranch: 'main', gitDirty: false, startedAt: Date.now()
+    }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: '打开 Git 与 Worktree' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    await user.click(await screen.findByRole('button', { name: /feature\/menu/ }))
+    expect(request).toHaveBeenCalledWith(
+      'git.checkout', expect.objectContaining({ input: expect.objectContaining({
+        cwd: '/Users/demo/project', branch: 'feature/menu'
+      }) }), { timeoutMs: 120_000 }
+    )
   })
 
   it('renders the current Kooky Agent order and process fields without hidden metrics', () => {

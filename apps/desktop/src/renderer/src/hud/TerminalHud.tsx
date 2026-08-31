@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
+import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { GitControlMenu, type GitControlContext, type GitRequestClient } from './GitControlMenu'
 import type {
   HudModelStrategy, HudPermissionMode, SessionHudView
 } from '../hierarchy/hierarchy-types'
@@ -22,8 +24,12 @@ export function TerminalHud(props: {
   hud: SessionHudView | undefined
   onPermissionMode(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
   onModel(sessionId: string, strategy: HudModelStrategy): unknown
+  gitContext?: GitControlContext
+  runtimeClient?: GitRequestClient
 }) {
   const { hud } = props
+  const contextClient = useRuntimeClient()
+  const gitClient = props.runtimeClient ?? contextClient
   const [permissionMode, setPermissionMode] = useState<HudPermissionMode>(hud?.permissionMode ?? 'default')
   const [modelStrategy, setModelStrategy] = useState<HudModelStrategy>(hud?.modelStrategy ?? 'opusplan')
   const [menu, setMenu] = useState<'permission' | 'model' | null>(null)
@@ -31,6 +37,7 @@ export function TerminalHud(props: {
   const [confirmTarget, setConfirmTarget] = useState<HudPermissionMode | null>(null)
   const [switching, setSwitching] = useState(false)
   const [switchError, setSwitchError] = useState('')
+  const [gitOpen, setGitOpen] = useState(false)
   const [elapsed, setElapsed] = useState(() => formatElapsed(hud?.startedAt))
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -50,8 +57,8 @@ export function TerminalHud(props: {
       }
     }
     const closeEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || !menu) return
-      setMenu(null)
+      if (event.key !== 'Escape' || (!menu && !gitOpen)) return
+      setMenu(null); setGitOpen(false)
       event.preventDefault()
       event.stopPropagation()
     }
@@ -61,7 +68,7 @@ export function TerminalHud(props: {
       document.removeEventListener('pointerdown', closeOutside, true)
       document.removeEventListener('keydown', closeEscape, true)
     }
-  }, [menu])
+  }, [menu, gitOpen])
 
   if (!hud) return null
   const shortCwd = cwdShortName(hud.cwd)
@@ -98,12 +105,16 @@ export function TerminalHud(props: {
       </span>}
       {hasAgentInfo(hud) && (shortCwd || gitDisplay || elapsed) && <span className="status-divider status-priority-3" />}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
-      {gitDisplay && <span className="status-field status-git status-priority-2">{gitDisplay}</span>}
+      {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
+        disabled={!gitClient} aria-label="打开 Git 与 Worktree" title="Git 与 Worktree"
+        onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </> : <>
       {hud.shell && <span className="status-field">{hud.shell}</span>}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
-      {gitDisplay && <span className="status-field status-git status-priority-2">{gitDisplay}</span>}
+      {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
+        disabled={!gitClient} aria-label="打开 Git 与 Worktree" title="Git 与 Worktree"
+        onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </>}
     {menu && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
@@ -148,6 +159,9 @@ export function TerminalHud(props: {
         }).finally(() => setSwitching(false))
       }} />, document.body)}
     {switchError && createPortal(<div className="kooky-toast is-error" role="status">{switchError}</div>, document.body)}
+    {gitOpen && gitClient && hud.cwd && createPortal(<GitControlMenu client={gitClient}
+      cwd={hud.cwd} sessionId={hud.sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
+      onClose={() => setGitOpen(false)} />, document.body)}
   </div>
 }
 

@@ -31,6 +31,7 @@ import { ForkWorkflowError, ForkWorkflowService } from '../session-canvas/fork-w
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
+import { GitWorkspaceService } from '../git/git-workspace-service'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -70,6 +71,7 @@ export class RuntimeRpcRouter {
   readonly #sessionInteractions: SessionInteractionService
   readonly #providerModes: ProviderModeService
   readonly #forkWorkflows: ForkWorkflowService
+  readonly #git: GitWorkspaceService
 
   constructor(database: RuntimeDatabase, notifications = new NotificationProjection()) {
     this.#database = database
@@ -94,6 +96,7 @@ export class RuntimeRpcRouter {
     this.#forkWorkflows = new ForkWorkflowService(
       dirname(database.path), database, transactions, { stopRuns: async () => undefined }
     )
+    this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -156,6 +159,80 @@ export class RuntimeRpcRouter {
     const command = commandMetadata(envelope.command)
     const input = record(envelope.input)
     switch (method) {
+      case 'git.status':
+        return this.#git.status(text(input.cwd, 'cwd'))
+      case 'git.checkout':
+        return this.#git.checkout(
+          text(input.cwd, 'cwd'), text(input.branch, 'branch')
+        )
+      case 'git.create-branch':
+        return this.#git.createBranch(
+          text(input.cwd, 'cwd'), text(input.branch, 'branch')
+        )
+      case 'git.commit':
+        return this.#git.commit(text(input.cwd, 'cwd'), {
+          message: text(input.message, 'message'),
+          includeUnstaged: flag(input.includeUnstaged, 'includeUnstaged')
+        })
+      case 'git.push':
+        return this.#git.push(text(input.cwd, 'cwd'))
+      case 'git.worktree-create': {
+        const owner = this.#sessionOwner(text(input.sessionId, 'sessionId'))
+        const status = await this.#git.status(text(input.cwd, 'cwd'))
+        return this.#git.createWorktree(command, {
+          workspaceId: owner.workspaceId,
+          repositoryRoot: status.repositoryRoot,
+          branch: text(input.branch, 'branch'),
+          baseRef: optionalText(input.baseRef, 'baseRef') ?? status.currentBranch ?? 'HEAD',
+          now: integer(input.now, 'now', 0)
+        })
+      }
+      case 'git.worktree-open': {
+        const sourceSessionId = text(input.sessionId, 'sessionId')
+        const owner = this.#sessionOwner(sourceSessionId)
+        const context = await this.#git.ensureWorktreeContext(
+          derivedCommand(command, 'worktree-context'), {
+            workspaceId: owner.workspaceId,
+            repositoryRoot: text(input.repositoryRoot, 'repositoryRoot'),
+            path: text(input.path, 'path'),
+            branch: text(input.branch, 'branch'),
+            now: integer(input.now, 'now', 0)
+          }
+        )
+        const sceneId = text(input.sceneId, 'sceneId')
+        const existing = this.#database.get<{ id: string }>(
+          `SELECT sessions.id FROM sessions
+           JOIN session_canvas_memberships AS membership
+             ON membership.session_id = sessions.id
+           WHERE membership.scene_id = ? AND sessions.execution_context_id = ?
+             AND sessions.archived_at IS NULL
+           ORDER BY sessions.last_activity_at DESC, sessions.created_at DESC LIMIT 1`,
+          sceneId, context.executionContextId
+        )
+        const now = integer(input.now, 'now', 0)
+        if (existing) {
+          return {
+            created: false,
+            focusedSessionId: existing.id,
+            graph: this.#sessionCanvas.setFocusedSession({
+              windowId: text(input.windowId, 'windowId'), sceneId,
+              sessionId: existing.id, now
+            })
+          }
+        }
+        const result = this.#sessionCanvas.createShellSibling(
+          derivedCommand(command, 'worktree-shell'), {
+            windowId: text(input.windowId, 'windowId'), sceneId,
+            sourceSessionId, executionContextId: context.executionContextId, now
+          }
+        )
+        return { ...result, created: true, focusedSessionId: result.session?.id }
+      }
+      case 'git.worktree-remove':
+        return this.#git.removeWorktree(command, {
+          worktreeId: text(input.worktreeId, 'worktreeId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.bootstrap-window':
         return this.#withActivePathState(this.#hierarchy.bootstrapWindow(command, {
           windowId: text(input.windowId, 'windowId'),
@@ -701,6 +778,31 @@ export class RuntimeRpcRouter {
     if (result.workspace === null) return result
     const pathState = await this.#workspacePaths.validateWorkspace(result.workspace.id)
     return { ...result, pathState }
+  }
+
+  #sessionOwner(sessionId: string): { workspaceId: string } {
+    const owner = this.#database.get<{ workspace_id: string }>(
+      `SELECT tasks.workspace_id FROM sessions
+       JOIN tasks ON tasks.id = sessions.task_id
+       WHERE sessions.id = ? AND sessions.archived_at IS NULL
+         AND tasks.archived_at IS NULL`,
+      sessionId
+    )
+    if (!owner) throw new RpcFault('NOT_FOUND', `Session ${sessionId} does not exist`)
+    return { workspaceId: owner.workspace_id }
+  }
+}
+
+function derivedCommand(
+  command: DomainCommandMetadata,
+  suffix: string
+): DomainCommandMetadata {
+  return {
+    ...command,
+    commandId: `${command.commandId}:${suffix}`,
+    commandType: `${command.commandType}:${suffix}`,
+    requestHash: `${command.requestHash}:${suffix}`,
+    causationId: command.commandId
   }
 }
 

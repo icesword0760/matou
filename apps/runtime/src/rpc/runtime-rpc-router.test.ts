@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -24,6 +25,59 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('routes Git status and branch mutations for the active repository', async () => {
+    const repositoryRoot = join(testRoot, 'repository')
+    await mkdir(repositoryRoot)
+    runGit(repositoryRoot, 'init', '-b', 'main')
+    runGit(repositoryRoot, 'config', 'user.name', 'Matou Test')
+    runGit(repositoryRoot, 'config', 'user.email', 'matou@example.test')
+    execFileSync('sh', ['-c', 'printf baseline > README.md'], { cwd: repositoryRoot })
+    runGit(repositoryRoot, 'add', 'README.md')
+    runGit(repositoryRoot, 'commit', '-m', 'baseline')
+
+    const status = await router.handle('git.status', payload('git-status', {
+      cwd: repositoryRoot, now: 1
+    })) as { currentBranch: string }
+    expect(status.currentBranch).toBe('main')
+
+    const created = await router.handle('git.create-branch', payload('git-branch', {
+      cwd: repositoryRoot, branch: 'feature/rpc', now: 2
+    })) as { currentBranch: string }
+    expect(created.currentBranch).toBe('feature/rpc')
+  })
+
+  it('opens a selected Worktree as a focused Shell in the current canvas', async () => {
+    const repositoryRoot = join(testRoot, 'worktree-repository')
+    const worktreePath = join(testRoot, 'external-worktree')
+    await mkdir(repositoryRoot)
+    runGit(repositoryRoot, 'init', '-b', 'main')
+    runGit(repositoryRoot, 'config', 'user.name', 'Matou Test')
+    runGit(repositoryRoot, 'config', 'user.email', 'matou@example.test')
+    execFileSync('sh', ['-c', 'printf baseline > README.md'], { cwd: repositoryRoot })
+    runGit(repositoryRoot, 'add', 'README.md')
+    runGit(repositoryRoot, 'commit', '-m', 'baseline')
+    runGit(repositoryRoot, 'worktree', 'add', '-b', 'feature/open', worktreePath, 'main')
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('worktree-bootstrap', {
+      windowId: 'window-worktree', defaultRootDirectory: repositoryRoot,
+      defaultName: 'worktree-repository', now: 1
+    })) as { session: { id: string }; scene: { id: string } }
+
+    const opened = await router.handle('git.worktree-open', payload('worktree-open', {
+      cwd: repositoryRoot, sessionId: initial.session.id,
+      windowId: 'window-worktree', sceneId: initial.scene.id,
+      repositoryRoot, path: worktreePath, branch: 'feature/open', now: 2
+    })) as { created: boolean; focusedSessionId: string; session: { cwd: string } }
+    const actualWorktreePath = await realpath(worktreePath)
+
+    expect(opened).toMatchObject({ created: true, session: { cwd: actualWorktreePath } })
+    expect(opened.focusedSessionId).toBeTruthy()
+    expect(database.get(
+      `SELECT execution_contexts.kind, execution_contexts.cwd FROM sessions
+       JOIN execution_contexts ON execution_contexts.id = sessions.execution_context_id
+       WHERE sessions.id = ?`, opened.focusedSessionId
+    )).toEqual({ kind: 'git-worktree', cwd: actualWorktreePath })
+  })
+
   it('routes atomic Workspace hierarchy workflows', async () => {
     const bootstrapped = await router.handle('hierarchy.bootstrap-window', payload('bootstrap', {
       windowId: 'window-1',
@@ -369,4 +423,8 @@ function payload(commandId: string, input: Record<string, unknown>) {
     command: { commandId, commandType: commandId, requestHash: `hash-${commandId}` },
     input
   }
+}
+
+function runGit(cwd: string, ...args: string[]): string {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' })
 }

@@ -110,6 +110,28 @@ describe('SessionCanvasService', () => {
     expect(result.graph.nodes.at(-1)?.sessionId).toBe(result.session!.id)
   })
 
+  it('creates a Shell sibling in an explicitly selected execution context', async () => {
+    const initial = bootstrap()
+    const worktreeRoot = join(workspaceRoot, 'feature-worktree')
+    await mkdir(worktreeRoot)
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('context-worktree', ?, 'git-worktree', ?, 19)`,
+      initial.workspace!.id, worktreeRoot
+    )
+
+    const result = service.createShellSibling(command('worktree-shell'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id,
+      executionContextId: 'context-worktree', now: 20
+    })
+
+    expect(result.session).toMatchObject({
+      executionContextId: 'context-worktree', cwd: worktreeRoot,
+      kind: 'shell', title: 'Shell'
+    })
+  })
+
   it('adds a child-list Shell as derived-from the same structural parent', () => {
     const initial = bootstrap()
     const firstChild = service.createShellSibling(command('first-child-shell'), {

@@ -141,6 +141,36 @@ describe('RuntimeServer domain RPC', () => {
     })
   })
 
+  it('republishes attached HUD branch state immediately after a Git mutation', async () => {
+    const repositoryRoot = join(root, 'hud-repository')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'baseline\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'baseline'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'branch', 'feature/hud-refresh'])
+    database.run('UPDATE execution_contexts SET cwd = ? WHERE id = ?', repositoryRoot, 'replay-context')
+    registerSession(database, 'git-hud-session')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'git-hud-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('terminal.hud')?.hud?.gitBranch === 'main')
+
+    port.receive(rpc('git-hud-checkout', 'git.checkout', {
+      cwd: repositoryRoot, branch: 'feature/hud-refresh', now: Date.now()
+    }))
+
+    await waitUntil(() => port.findRpcResponse('git-hud-checkout') !== undefined)
+    await waitUntil(() => port.last('terminal.hud')?.hud?.gitBranch === 'feature/hud-refresh')
+    expect(port.last('terminal.hud')).toMatchObject({
+      sessionId: 'git-hud-session', hud: { gitBranch: 'feature/hud-refresh', gitDirty: false }
+    })
+  })
+
   it('advertises replay and replays durable output after a Runtime reconnect', async () => {
     const journal = await SegmentJournal.open(root, 'persisted-session')
     registerSession(database, 'persisted-session')
