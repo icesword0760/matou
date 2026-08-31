@@ -149,6 +149,9 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)
+  const effectiveRestoreState = providerRestoreState === 'failed' && session.kind === 'claude-code'
+    ? 'none'
+    : providerRestoreState
   const providerWorkFailure = session.kind === 'claude-code' && workStatus === 'error'
     ? claudeWorkFailureReason(latestLines)
     : undefined
@@ -235,7 +238,7 @@ export function TerminalPane(props: {
         }}>移除</button>}
       </div>
     </div>}
-    {providerRestoreState === 'failed' && forkState !== 'failed' && visible && <div className="provider-restore-banner" role="status">
+    {effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && <div className="provider-restore-banner" role="status">
       <div><strong>{restoreIdentityExpired ? '原 Claude Code 对话已失效' : 'Claude Code 恢复失败'}</strong>
         <span className="provider-restore-reason">{restoreIdentityExpired
           ? '当前已切换到 Shell，可继续使用终端'
@@ -248,10 +251,10 @@ export function TerminalPane(props: {
         void Promise.resolve(onRetryRestore(session.id)).finally(() => setRestoreRetryPending(false))
       }}>{restoreRetryPending ? '正在恢复…' : '重试恢复'}</button>}
     </div>}
-    {providerRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
+    {effectiveRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
       <strong>正在恢复 Claude Code 会话…</strong>
     </div>}
-    {providerWorkFailure && providerRestoreState !== 'failed' && forkState !== 'failed' && visible &&
+    {providerWorkFailure && effectiveRestoreState !== 'failed' && forkState !== 'failed' && visible &&
       <div className="provider-work-failure-banner" role="status" aria-label="Claude Code 任务失败">
         <div><strong>Claude Code 任务失败</strong>
           <span className="provider-work-failure-reason">{providerWorkFailure}</span>
@@ -261,7 +264,7 @@ export function TerminalPane(props: {
           void onRetryWork(session.id)
         }}>重试</button>}
       </div>}
-    {runtimeStatus === 'error' && forkState !== 'failed' && providerRestoreState !== 'failed' && visible &&
+    {runtimeStatus === 'error' && forkState !== 'failed' && effectiveRestoreState !== 'failed' && visible &&
       <div className="session-start-failure-card" role="status">
         <div><strong>会话启动失败</strong>
           <span className="session-start-failure-reason">{runtimeError || '终端进程未能启动'}</span>

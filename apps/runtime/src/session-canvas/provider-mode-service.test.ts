@@ -230,6 +230,46 @@ describe('ProviderModeService', () => {
       .toMatchObject({ currentMode: 'claude-code', workStatus: 'idle', canFork: true })
   })
 
+  it('dismisses an obsolete restore failure when a replacement Claude identity becomes live', () => {
+    const initial = bootstrapClaudeTree({ canFork: false })
+    providerModes.markRestoreFailed(command('old-restore-failed'), {
+      sessionId: initial.parentSessionId,
+      bindingId: 'binding-parent',
+      reason: 'provider session not found',
+      now: 30
+    })
+    database.run(
+      `UPDATE sessions SET kind = 'claude-code', work_status = 'starting' WHERE id = ?`,
+      initial.parentSessionId
+    )
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES ('binding-replacement', ?, 'claude-code', 'provider-replacement',
+                 'available', 'none', '{}', 31, 31, 31)`,
+      initial.parentSessionId
+    )
+
+    const active = providerModes.observeHook(command('replacement-statusline'), {
+      sessionId: initial.parentSessionId,
+      providerSessionId: 'provider-replacement',
+      eventName: 'unknown',
+      now: 32
+    })
+
+    expect(active.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
+      .toMatchObject({ currentMode: 'claude-code', providerRestoreState: 'none', workStatus: 'idle' })
+    expect(database.get(
+      `SELECT resume_state, restore_state, restore_error FROM provider_bindings
+       WHERE id = 'binding-parent'`
+    )).toEqual({ resume_state: 'expired', restore_state: 'none', restore_error: null })
+    expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
+      operation: 'dismiss',
+      replacementKey: `provider-restore:${initial.parentSessionId}`
+    })
+  })
+
   it('preserves the user-visible node name across Claude recovery and mode transitions', () => {
     const initial = bootstrapClaudeTree({ canFork: false })
     database.run(`UPDATE sessions SET title = 'same-visible-name' WHERE id = ?`, initial.parentSessionId)

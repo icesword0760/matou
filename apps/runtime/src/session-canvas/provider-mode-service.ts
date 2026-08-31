@@ -296,7 +296,15 @@ export class ProviderModeService {
         return buildResult(tx, owner, session, binding)
       }
 
-      const wasRecovering = binding.restore_state !== 'none' || binding.restore_error !== null
+      const staleRestoreFailure = tx.get<{ id: string }>(
+        `SELECT id FROM provider_bindings
+         WHERE session_id = ? AND provider = 'claude-code' AND id <> ?
+           AND restore_state = 'failed'
+         LIMIT 1`,
+        input.sessionId, binding.id
+      )
+      const wasRecovering = binding.restore_state !== 'none' ||
+        binding.restore_error !== null || staleRestoreFailure !== undefined
       const metadata = asMetadata(binding.metadata_json)
       if (input.eventName === 'UserPromptSubmit') metadata.observedUserPrompt = true
       if (input.eventName === 'Stop') metadata.observedNormalStop = true
@@ -323,6 +331,18 @@ export class ProviderModeService {
          WHERE id = ?`,
         JSON.stringify(metadata), input.now, input.now, binding.id
       )
+      if (staleRestoreFailure) {
+        // The current identity is now authoritative. Retain older identities
+        // as expired history, but remove their user-facing recovery failure.
+        tx.run(
+          `UPDATE provider_bindings
+           SET resume_state = 'expired', restore_state = 'none', restore_error = NULL,
+               invalidated_at = COALESCE(invalidated_at, ?)
+           WHERE session_id = ? AND provider = 'claude-code' AND id <> ?
+             AND restore_state = 'failed'`,
+          input.now, input.sessionId, binding.id
+        )
+      }
       const result = buildResult(
         tx, owner, requireSession(tx, session.id), requireBinding(tx, binding.id)
       )

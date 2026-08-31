@@ -921,6 +921,13 @@ export class RuntimeServer {
       ? undefined
       : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
     const providerSessionId = forkLaunch?.sourceProviderSessionId ?? resumeBinding?.providerSessionId
+    const supersedesRestoreFailure = message.profile === 'claude-code' &&
+      providerSessionId === undefined && Boolean(this.#database.get(
+        `SELECT 1 FROM provider_bindings
+         WHERE session_id = ? AND provider = 'claude-code' AND restore_state = 'failed'
+         LIMIT 1`,
+        message.sessionId
+      ))
     const persistOrdinaryShellHistory = message.profile === 'shell' &&
       persistentAuthority?.kind === 'shell' &&
       this.#preferences.get('shell.restoreHistoryEnabled')
@@ -990,7 +997,10 @@ export class RuntimeServer {
         hookRegistration = await this.#providerHooks.registerClaudeSession({
           runId,
           sessionId: message.sessionId,
-          acceptStatuslineIdentity: providerSessionId !== undefined,
+          // A fresh Claude process that replaces an invalid resume is already
+          // live when its statusline arrives. Accept that identity immediately
+          // so the obsolete Shell fallback state does not cover a working UI.
+          acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
           inheritedConversation: forkLaunch !== undefined,
           ...(permissionMode === undefined ? {} : { permissionMode })
         })

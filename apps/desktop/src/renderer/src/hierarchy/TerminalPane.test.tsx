@@ -224,6 +224,17 @@ describe('Terminal pane', () => {
     expect(onRetryRestore).not.toHaveBeenCalled()
   })
 
+  it('does not describe a live Claude card as Shell when an older failure projection arrives', () => {
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, kind: 'claude-code', title: '测试1' }}
+      providerRestoreState="failed" restoreError="provider session not found" />)
+
+    expect(screen.queryByText('原 Claude Code 对话已失效')).toBeNull()
+    expect(screen.queryByText('当前已切换到 Shell，可继续使用终端')).toBeNull()
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+  })
+
   it('shows immediate progress while retrying a transient Claude restore failure', async () => {
     const user = userEvent.setup()
     let resolveRetry: (() => void) | undefined

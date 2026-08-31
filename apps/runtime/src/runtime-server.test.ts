@@ -1198,6 +1198,79 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('accepts a fresh Claude statusline immediately when it supersedes a stale restore failure', async () => {
+    const executable = join(root, 'provider-replacement-fixture.sh')
+    const argumentFile = join(root, 'provider-replacement-arguments.txt')
+    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let replacementServer: RuntimeServer | undefined
+    let replacementPort: MockPort | undefined
+    const providerHooks = new ProviderHookServer(root, repository, {
+      onIdentityRecorded: ({ sessionId, runId }) => {
+        replacementServer?.providerIdentityRecorded(sessionId, runId)
+      }
+    })
+    await providerHooks.start()
+    try {
+      registerSession(database, 'provider-replacement-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           restore_error, metadata_json, created_at, updated_at, validated_at, invalidated_at
+         ) VALUES ('binding-stale-failure', 'provider-replacement-session', 'claude-code',
+                   'provider-missing', 'failed', 'failed', 'provider session not found',
+                   '{}', 1, 1, 1, 1)`
+      )
+      const sessions = new RuntimeSessionRegistry()
+      replacementPort = new MockPort()
+      replacementServer = new RuntimeServer(
+        replacementPort, root, database, undefined, undefined, sessions,
+        providerHooks, undefined, { providerResumeTimeoutMs: 500 }
+      )
+      replacementPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-replacement-renderer'
+      })
+      replacementPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-replacement-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      expect(arguments_).not.toContain('--resume')
+      const settingsIndex = arguments_.indexOf('--settings')
+      const settings = JSON.parse(await readFile(arguments_[settingsIndex + 1]!, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const hookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+      expect((await fetch(hookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session_id: 'provider-replacement', cwd: root })
+      })).status).toBe(200)
+
+      await waitUntil(() => repository.getResumeBinding(
+        'provider-replacement-session', 'claude-code'
+      )?.providerSessionId === 'provider-replacement')
+    } finally {
+      replacementPort?.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-replacement-session'
+      })
+      await settle()
+      replacementServer?.close()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
   it('consumes a fork launch exactly once and passes Claude the Kooky fork arguments', async () => {
     const executable = join(root, 'provider-fork-fixture.sh')
     const argumentFile = join(root, 'provider-fork-arguments.txt')
