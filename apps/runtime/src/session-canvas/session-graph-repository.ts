@@ -271,6 +271,9 @@ export function projectSceneGraphFrom(
         ...(row.fork_state === null ? {} : { forkState: row.fork_state }),
         ...(row.fork_error === null ? {} : { forkError: row.fork_error }),
         ...(row.fork_attempt === null ? {} : { forkAttempt: row.fork_attempt }),
+        ...(providerSpawnRevision(row.provider_metadata_json) === undefined ? {} : {
+          providerSpawnRevision: providerSpawnRevision(row.provider_metadata_json)!
+        }),
         canFork: row.kind === 'claude-code' &&
           row.restore_state !== 'failed' &&
           providerCanFork(row.provider_metadata_json),
@@ -359,6 +362,18 @@ function providerCanFork(metadataJson: string | null): boolean {
       (metadata as Record<string, unknown>).canFork === true
   } catch {
     return false
+  }
+}
+
+function providerSpawnRevision(metadataJson: string | null): number | undefined {
+  if (metadataJson === null) return undefined
+  try {
+    const metadata = JSON.parse(metadataJson) as unknown
+    if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return undefined
+    const value = (metadata as Record<string, unknown>).spawnRevision
+    return typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined
+  } catch {
+    return undefined
   }
 }
 

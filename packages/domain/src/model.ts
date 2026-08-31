@@ -223,6 +223,7 @@ export interface SessionGraphNode {
   forkState?: SessionForkState
   forkError?: string
   forkAttempt?: number
+  providerSpawnRevision?: number
   canFork: boolean
   title: string
   cwd: string

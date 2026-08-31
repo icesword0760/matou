@@ -1,5 +1,8 @@
 import type { RuntimeClient } from '../runtime/RuntimeClient'
 import type { HierarchyCommands } from './hierarchy-types'
+import type {
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
+} from '@matou/contracts'
 
 export function createHierarchyCommands(
   client: RuntimeClient,
@@ -84,6 +87,18 @@ export function createHierarchyCommands(
       sceneId, sessionId
     }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
+    listClaudeSessions: (sessionId, query, providerSessionId) => client.request<ClaudeSessionListResult>(
+      'claude-sessions.list', { sessionId, query, ...(providerSessionId ? { providerSessionId } : {}) }
+    ),
+    getClaudeSessionDetail: (sessionId, providerSessionId, query) => client.request<ClaudeSessionDetail>(
+      'claude-sessions.detail', { sessionId, providerSessionId, query }
+    ),
+    loadClaudeSession: async (sessionId, providerSessionId) => {
+      const result = await command('claude-sessions.load', { sessionId, providerSessionId }) as {
+        load: ClaudeSessionLoadResult
+      }
+      return result.load
+    },
     restartStoppedSession: (sessionId) => command('hierarchy.restart-stopped-session', {
       windowId, sessionId
     }),

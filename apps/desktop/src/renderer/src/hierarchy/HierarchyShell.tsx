@@ -30,6 +30,7 @@ import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchB
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
 import { SessionBreadcrumb } from '../session-canvas/SessionBreadcrumb'
 import { SessionCanvas } from '../session-canvas/SessionCanvas'
+import { SessionLoaderDialog } from '../session-canvas/SessionLoaderDialog'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
@@ -175,6 +176,12 @@ function HierarchyProduct({ projection, commands }: {
   const [fontSize, setFontSize] = useState(11)
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [sessionLoader, setSessionLoader] = useState<{
+    sessionId: string
+    sceneId: string
+    title: string
+    running: boolean
+  } | null>(null)
   const [searchRequest, setSearchRequest] = useState({
     query: '', options: { caseSensitive: false, regex: false, wholeWord: false } as TerminalSearchOptions,
     direction: 'next' as 'next' | 'previous', sequence: 0
@@ -183,6 +190,28 @@ function HierarchyProduct({ projection, commands }: {
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [dagOpenError, setDagOpenError] = useState(false)
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  const workspaceStageRef = useRef<HTMLElement>(null)
+  const loaderSessionId = sessionLoader?.sessionId ?? ''
+  const loaderSceneId = sessionLoader?.sceneId ?? ''
+  const listLoaderSessions = useCallback((query: string, providerSessionId?: string) => {
+    if (!loaderSessionId) return Promise.resolve({ sessions: [], total: 0 })
+    return commands.listClaudeSessions(loaderSessionId, query, providerSessionId)
+  }, [commands, loaderSessionId])
+  const loadLoaderDetail = useCallback((providerSessionId: string, query: string) => {
+    if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
+    return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, query)
+  }, [commands, loaderSessionId])
+  const cancelSessionLoader = useCallback(() => {
+    setSessionLoader(null)
+    setTerminalFocusRequest((value) => value + 1)
+  }, [])
+  const loadIntoCurrentCard = useCallback(async (providerSessionId: string) => {
+    if (!loaderSessionId || !loaderSceneId) return
+    await commands.loadClaudeSession(loaderSessionId, providerSessionId)
+    await Promise.resolve(commands.setFocusedSession(loaderSceneId, loaderSessionId))
+    setSessionLoader(null)
+    setTerminalFocusRequest((value) => value + 1)
+  }, [commands, loaderSceneId, loaderSessionId])
   useEffect(() => {
     const restoreTerminalFocus = () => setTerminalFocusRequest((value) => value + 1)
     const restoreVisibleTerminalFocus = () => {
@@ -440,7 +469,7 @@ function HierarchyProduct({ projection, commands }: {
                       }
                     }))
                   }} />
-                <section className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
+                <section ref={workspaceStageRef} className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
         {dagOpenError && <div className="dag-open-error" role="alert">
           <span>会话关系视图打开失败，当前会话列表和返回入口仍可继续使用。</span>
           <button type="button" onClick={openDag}>重试打开 DAG</button>
@@ -490,7 +519,8 @@ function HierarchyProduct({ projection, commands }: {
                     latestLines: graphNode.latestLines,
                     providerRestoreState: graphNode.providerRestoreState,
                     forkState: graphNode.forkState,
-                    spawnRevision: graphNode.forkAttempt ?? 0,
+                    spawnRevision: (graphNode.forkAttempt ?? 0) +
+                      (graphNode.providerSpawnRevision ?? 0),
                     ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
                     ...(graphNode.providerRestoreError ? { restoreError: graphNode.providerRestoreError } : {})
                   } : {})}
@@ -505,6 +535,13 @@ function HierarchyProduct({ projection, commands }: {
                   sharedWorkingDirectory={graphNode?.sharedWorkingDirectory === true || graphNode?.worktree?.shared === true}
                   {...(workspace ? { workspaceId: workspace.id } : {})}
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
+                  onLoadSession={() => setSessionLoader({
+                    sessionId: session.id,
+                    sceneId: scene.id,
+                    title: session.title,
+                    running: graphNode?.workStatus === 'running' ||
+                      graphNode?.workStatus === 'starting'
+                  })}
                   onDelete={commands.deleteSession}
                   descendantCount={descendantNodes.length}
                   descendantImpact={{
@@ -648,6 +685,14 @@ function HierarchyProduct({ projection, commands }: {
                   setShortcutPanelOpen(false)
                   setTerminalFocusRequest((value) => value + 1)
                 }} />
+              {sessionLoader && <SessionLoaderDialog
+                targetTitle={sessionLoader.title}
+                targetRunning={sessionLoader.running}
+                {...(workspaceStageRef.current ? { portalTarget: workspaceStageRef.current } : {})}
+                listSessions={listLoaderSessions}
+                loadDetail={loadLoaderDetail}
+                onCancel={cancelSessionLoader}
+                onLoad={loadIntoCurrentCard} />}
               {branchDialog && <BranchDialog relationMode={branchDialog.relationMode}
                 sourceTitle={branchDialog.sourceTitle} gitAvailable={branchDialog.gitAvailable}
                 onCancel={() => {
@@ -935,6 +980,11 @@ function createFixtureCommands(
     createForkChild: createFixtureForkChild, createForkSibling: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
     retryProviderRestore: NOOP, restartStoppedSession: NOOP, removeSessionBranch: NOOP,
+    listClaudeSessions: async () => ({ sessions: [], total: 0 }),
+    getClaudeSessionDetail: async () => { throw new Error('fixture session is unavailable') },
+    loadClaudeSession: async (sessionId, providerSessionId) => ({
+      sessionId, providerSessionId, permissionMode: 'default' as const
+    }),
     getSceneSessionGraph: NOOP,
     recordSessionInteraction: NOOP,
     setFocusedSession: (sceneId, sessionId) => updateNavigation((value) => {

@@ -804,7 +804,10 @@ export class RuntimeServer {
         this.#sendError('SESSION_FORBIDDEN', 'live Session identity does not match the attach request', message.sessionId)
         return
       }
-      if (existing.profile !== message.profile) {
+      const previousSpawnRevision = this.#spawnDescriptors.get(message.sessionId)?.spawnRevision ?? 0
+      const nextSpawnRevision = message.spawnRevision ?? 0
+      const revisionReplacement = nextSpawnRevision > previousSpawnRevision
+      if (existing.profile !== message.profile || revisionReplacement) {
         // A restore retry deliberately changes the same stable Session from its
         // fallback Shell process back to the authoritative provider profile.
         // Replace only when persisted domain state already authorizes the exact

@@ -17,6 +17,7 @@ export interface TerminalAttachment {
   profile: 'shell' | 'claude-code' | 'codex'
   cols: number
   rows: number
+  spawnRevision?: number
 }
 
 interface PendingRequest {

@@ -33,6 +33,61 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('ProviderModeService', () => {
+  it('loads an existing provider conversation into the same focused graph node atomically', () => {
+    const initial = bootstrapClaudeTree()
+    const focusedBefore = database.get<{ active_session_id: string }>(
+      'SELECT active_session_id FROM window_scene_focus WHERE scene_id = ?', initial.sceneId
+    )
+
+    const result = providerModes.loadClaudeSession(command('load-existing'), {
+      sessionId: initial.childSessionId,
+      bindingId: 'binding-loaded',
+      providerSessionId: 'provider-loaded',
+      title: '通知中心聚合',
+      permissionMode: 'bypassPermissions',
+      model: 'claude-opus-4-6',
+      now: 30
+    })
+
+    expect(result.session).toMatchObject({
+      id: initial.childSessionId, kind: 'claude-code', title: '通知中心聚合'
+    })
+    expect(result.binding).toMatchObject({
+      id: 'binding-loaded', sessionId: initial.childSessionId,
+      providerSessionId: 'provider-loaded', restoreState: 'restoring',
+      metadata: expect.objectContaining({
+        permissionMode: 'bypassPermissions', model: 'claude-opus-4-6', loadedFromCatalog: true
+      })
+    })
+    expect(result.graph.edges).toContainEqual(expect.objectContaining({
+      parentSessionId: initial.parentSessionId,
+      childSessionId: initial.childSessionId
+    }))
+    expect(database.get(
+      'SELECT active_session_id FROM window_scene_focus WHERE scene_id = ?', initial.sceneId
+    )).toEqual(focusedBefore)
+  })
+
+  it('rejects a conversation already active in another Claude card without changing the target', () => {
+    const initial = bootstrapClaudeTree()
+    const targetBefore = database.get('SELECT * FROM sessions WHERE id = ?', initial.childSessionId)
+
+    expect(() => providerModes.loadClaudeSession(command('load-conflict'), {
+      sessionId: initial.childSessionId,
+      bindingId: 'binding-unused',
+      providerSessionId: 'provider-parent',
+      title: '不应写入',
+      permissionMode: 'default',
+      now: 30
+    })).toThrow('该 Claude Code 会话正在另一张卡片中使用')
+
+    expect(database.get('SELECT * FROM sessions WHERE id = ?', initial.childSessionId))
+      .toEqual(targetBefore)
+    expect(database.get<{ session_id: string }>(
+      'SELECT session_id FROM provider_bindings WHERE provider_session_id = ?', 'provider-parent'
+    )?.session_id).toBe(initial.parentSessionId)
+  })
+
   it('returns a manually exited Claude node to ordinary Shell and preserves its children', () => {
     const initial = bootstrapClaudeTree()
 

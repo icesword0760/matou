@@ -224,7 +224,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       executionContextId,
       profile,
       cols: terminal.cols,
-      rows: terminal.rows
+      rows: terminal.rows,
+      spawnRevision
     }, onMessage)
     const input = terminal.onData((data) => {
       if (inputDisabledRef.current) return

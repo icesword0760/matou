@@ -23,7 +23,8 @@ const spawnSchema = z.object({
   executionContextId: identifier,
   profile: z.enum(['shell', 'claude-code', 'codex']),
   cols: z.number().int().min(2).max(1000),
-  rows: z.number().int().min(1).max(500)
+  rows: z.number().int().min(1).max(500),
+  spawnRevision: z.number().int().nonnegative().optional()
 })
 
 const inputSchema = z.object({
@@ -118,6 +119,9 @@ export const RPC_METHODS = [
   'hierarchy.detach-session',
   'hierarchy.return-session',
   'hierarchy.move-task-to-window',
+  'claude-sessions.list',
+  'claude-sessions.detail',
+  'claude-sessions.load',
   'workspace.create',
   'workspace.update',
   'workspace.archive',
