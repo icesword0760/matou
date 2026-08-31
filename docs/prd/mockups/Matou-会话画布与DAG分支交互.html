@@ -555,12 +555,15 @@
     }
     .session-manager-backdrop.open .session-manager { transform: none; }
     .session-manager-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
       min-width: 0;
-      padding: 16px 18px 14px;
+      padding: 16px 18px;
       border-bottom: 1px solid #e2e6eb;
       background: rgba(255,255,255,.98);
     }
-    .session-manager-heading-row { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .session-manager-heading-row { display: contents; }
     .session-manager-title { min-width: 0; }
     .session-manager-title h2 { margin: 0 0 3px; font-size: 17px; letter-spacing: -.02em; }
     .session-manager-title p { margin: 0; overflow: hidden; color: #7b8490; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -593,18 +596,29 @@
     .session-manager-body { display: grid; grid-template-columns: minmax(300px, 38%) minmax(0, 1fr); min-height: 0; }
     .session-browser {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-rows: auto auto minmax(0, 1fr);
       min-width: 0;
       min-height: 0;
       border-right: 1px solid #e1e5ea;
       background: #f8f9fb;
     }
-    .session-search-wrap { display: flex; align-items: center; gap: 8px; padding-top: 13px; }
-    .session-search-input { position: relative; flex: 1; min-width: 0; }
+    .session-search-wrap { padding: 13px 12px 8px; }
+    .session-search-input {
+      position: relative;
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      height: 38px;
+      overflow: hidden;
+      border: 1px solid #d9dee5;
+      border-radius: 9px;
+      background: #fff;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    .session-search-input:focus-within { border-color: #74aaf1; box-shadow: 0 0 0 3px rgba(22,119,255,.10); }
     .session-search-input svg {
-      position: absolute;
-      top: 11px;
-      left: 12px;
+      flex: none;
+      margin-left: 11px;
       width: 16px;
       height: 16px;
       fill: none;
@@ -613,36 +627,46 @@
       stroke-linecap: round;
     }
     .session-search {
-      width: 100%;
-      height: 38px;
-      padding: 0 12px 0 38px;
-      border: 1px solid #d9dee5;
-      border-radius: 9px;
+      min-width: 0;
+      flex: 1;
+      height: 36px;
+      padding: 0 8px;
+      border: 0;
       outline: 0;
-      background: #fff;
+      background: transparent;
       color: #2d343e;
       font-size: 12px;
     }
-    .session-search:focus { border-color: #74aaf1; box-shadow: 0 0 0 3px rgba(22,119,255,.10); }
     .search-scope-btn {
       display: inline-flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 9px;
-      width: 108px;
-      height: 38px;
-      padding: 0 10px;
-      border: 1px solid #d9dee5;
-      border-radius: 9px;
-      background: #f8f9fb;
-      color: #5d6773;
+      gap: 4px;
+      flex: none;
+      height: 24px;
+      margin-right: 7px;
+      padding: 0 7px;
+      border: 0;
+      border-radius: 6px;
+      background: #edf3fb;
+      color: #46688f;
       cursor: pointer;
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 650;
       white-space: nowrap;
     }
-    .search-scope-btn:hover { border-color: #bfc9d5; background: #f1f4f7; }
-    .search-help { color: #8a939e; font-size: 10px; white-space: nowrap; }
+    .search-scope-btn:hover { background: #e1ecfa; color: #285f9d; }
+    .search-help {
+      flex: none;
+      margin-right: 9px;
+      padding: 2px 5px;
+      border: 1px solid #e1e5ea;
+      border-radius: 5px;
+      background: #f7f8fa;
+      color: #949ba5;
+      font-size: 9px;
+      font-family: var(--mono);
+      white-space: nowrap;
+    }
     .session-filterbar {
       display: flex;
       align-items: center;
@@ -1318,18 +1342,18 @@ On branch main
           <span class="session-scope"><i></i>当前工作空间 · ~/Documents/AIProjects/matou</span>
           <button class="session-manager-close" onclick="closeSessionManager()" aria-label="关闭会话管理">×</button>
         </div>
-        <div class="session-search-wrap">
-          <button class="search-scope-btn" id="searchScopeButton" onclick="toggleSessionSearchScope()" aria-label="切换搜索范围"><span id="searchScopeLabel">全部会话</span><span>⌄</span></button>
-          <div class="session-search-input">
-            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-            <input class="session-search" id="sessionSearch" placeholder="搜索标题、对话内容、工具调用或会话 ID" oninput="filterRecoverableSessions(this.value)" />
-          </div>
-          <span class="search-help">⌘F 搜索当前会话</span>
-        </div>
       </header>
 
       <div class="session-manager-body">
         <aside class="session-browser">
+          <div class="session-search-wrap">
+            <div class="session-search-input">
+              <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+              <input class="session-search" id="sessionSearch" placeholder="搜索所有会话内容" oninput="filterRecoverableSessions(this.value)" />
+              <button class="search-scope-btn" id="searchScopeButton" onclick="toggleSessionSearchScope()" aria-label="切换搜索范围"><span id="searchScopeLabel">全部</span><span>⌄</span></button>
+              <span class="search-help">⌘F</span>
+            </div>
+          </div>
           <div class="session-filterbar">
             <span class="label">来源</span>
             <button class="filter-chip active">Claude Code CLI</button>
@@ -1619,10 +1643,10 @@ On branch main
 
     function updateSessionSearchScopeControl() {
       const current = sessionSearchScope === 'current';
-      document.getElementById('searchScopeLabel').textContent = current ? '当前会话' : '全部会话';
+      document.getElementById('searchScopeLabel').textContent = current ? '当前' : '全部';
       document.getElementById('sessionSearch').placeholder = current
-        ? '搜索当前会话中的消息或工具调用'
-        : '搜索标题、对话内容、工具调用或会话 ID';
+        ? '搜索当前会话内容'
+        : '搜索所有会话内容';
     }
 
     function toggleSessionSearchScope() {
