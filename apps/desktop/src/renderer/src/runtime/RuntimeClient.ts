@@ -123,6 +123,15 @@ export class RuntimeClient {
     }
   }
 
+  updateTerminalProfile(
+    sessionId: string,
+    profile: TerminalAttachment['profile']
+  ): void {
+    const consumer = this.#terminals.get(sessionId)
+    if (!consumer || consumer.config.profile === profile) return
+    consumer.config = { ...consumer.config, profile }
+  }
+
   sendTerminalInput(sessionId: string, data: string): void {
     this.#post({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data })
   }
@@ -135,11 +144,12 @@ export class RuntimeClient {
 
   recordTerminalInteraction(
     sessionId: string,
-    interactionKind: 'submit' | 'control' | 'provider-action'
+    interactionKind: 'submit' | 'control' | 'provider-action',
+    deferOrdering = false
   ): void {
     this.#post({
       type: 'terminal.user-interaction', protocolVersion: PROTOCOL_VERSION,
-      sessionId, interactionKind
+      sessionId, interactionKind, deferOrdering
     })
   }
 

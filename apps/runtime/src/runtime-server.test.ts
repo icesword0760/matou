@@ -1665,7 +1665,13 @@ describe('RuntimeServer domain RPC', () => {
     const previousPath = process.env.PATH
     const previousShell = process.env.SHELL
     const previousZdotdir = process.env.ZDOTDIR
-    await writeFile(join(root, '.zshrc'), "sleep 2.2\nalias cc='claude --dangerously-skip-permissions'\n")
+    const aliasReadyFile = join(root, 'alias-ready.txt')
+    await writeFile(join(root, '.zshrc'), [
+      'sleep 2.2',
+      "alias cc='claude --dangerously-skip-permissions'",
+      `print -r -- ready > ${JSON.stringify(aliasReadyFile)}`,
+      ''
+    ].join('\n'))
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
     process.env.PATH = `${root}:${previousPath ?? ''}`
@@ -1685,13 +1691,17 @@ describe('RuntimeServer domain RPC', () => {
         profile: 'shell', cols: 80, rows: 24
       })
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'shell')
+      await waitUntilAsync(async () => (await readFile(aliasReadyFile, 'utf8').catch(() => '')) === 'ready\n', 6_000)
+      await new Promise((resolve) => setTimeout(resolve, 50))
 
+      const submittedAt = Date.now()
       promotedPort.receive({
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'shell-promoted-provider', data: 'cc\r'
       })
 
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'claude-code', 6_000)
+      expect(Date.now() - submittedAt).toBeLessThan(750)
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0, 6_000)
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
         '--dangerously-skip-permissions'

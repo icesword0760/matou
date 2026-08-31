@@ -63,6 +63,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
   const activeRef = useRef(active)
+  const profileRef = useRef(profile)
   const inputDisabledRef = useRef(inputDisabled)
   const onOscNotificationRef = useRef(onOscNotification)
   const onFontSizeChangeRef = useRef(onFontSizeChange)
@@ -75,8 +76,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   // late output from the previously active Session cannot reclaim focus.
   visibleRef.current = visible
   activeRef.current = active
+  profileRef.current = profile
 
   useEffect(() => { pendingInputRef.current = '' }, [sessionId])
+  useEffect(() => {
+    client?.updateTerminalProfile(sessionId, profile)
+  }, [client, profile, sessionId])
 
   useEffect(() => {
     if (visible) requestAnimationFrame(() => fitRef.current?.fit())
@@ -222,19 +227,27 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const detach = client.attachTerminal({
       sessionId,
       executionContextId,
-      profile,
+      profile: profileRef.current,
       cols: terminal.cols,
       rows: terminal.rows
     }, onMessage)
     const input = terminal.onData((data) => {
       if (inputDisabledRef.current) return
-      const interactionKind = classifyCompletedUserInteraction(data, profile !== 'shell')
+      const interactionKind = classifyCompletedUserInteraction(
+        data,
+        profileRef.current !== 'shell'
+      )
       // Deliver bytes first. Reordering the surrounding Session carousel may
       // cause a fit/resize; doing that before Enter can reset full-screen CLI
       // choices before the confirmation reaches the PTY.
       sendOrBufferInput(data)
       if (interactionKind !== undefined) {
-        client.recordTerminalInteraction(sessionId, interactionKind)
+        // Pointer activation and the focus RPC can settle a frame after xterm
+        // already receives Enter. Treat the visibly active or keyboard-owned
+        // card as active immediately so submitting `cc` never reorders the
+        // carousel underneath the user.
+        const deferOrdering = activeRef.current || container.contains(document.activeElement)
+        client.recordTerminalInteraction(sessionId, interactionKind, deferOrdering)
       }
     })
     const forwardTab = () => {
@@ -276,7 +289,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminalRef.current = null
       terminal.dispose()
     }
-  }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, profile, sessionId, spawnRevision])
+  }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, sessionId, spawnRevision])
 
   useEffect(() => {
     if (!active || !visible || focusRequest <= 0) return

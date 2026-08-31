@@ -15,7 +15,9 @@ const state = vi.hoisted(() => ({
   onData: undefined as undefined | ((data: string) => void),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
+  attachTerminal: vi.fn(),
   sendTerminalInput: vi.fn(),
+  updateTerminalProfile: vi.fn(),
   recordTerminalInteraction: vi.fn()
 }))
 
@@ -52,8 +54,10 @@ vi.mock('@xterm/addon-search', () => ({
   }
 }))
 vi.mock('../runtime/RuntimeProvider', () => ({
-  useRuntimeClient: () => ({
+  useRuntimeClient: (() => {
+    const client = {
     attachTerminal: (_descriptor: unknown, onMessage: (message: unknown) => void) => {
+      state.attachTerminal(_descriptor)
       state.onMessage = onMessage
       return vi.fn()
     },
@@ -61,8 +65,11 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     requestTerminalReplay: vi.fn(),
     resizeTerminal: vi.fn(),
     sendTerminalInput: state.sendTerminalInput,
+    updateTerminalProfile: state.updateTerminalProfile,
     recordTerminalInteraction: state.recordTerminalInteraction
-  })
+    }
+    return () => client
+  })()
 }))
 
 describe('TerminalSurface focus continuity', () => {
@@ -75,6 +82,8 @@ describe('TerminalSurface focus continuity', () => {
     state.onMessage = undefined
     state.onData = undefined
     state.sendTerminalInput.mockClear()
+    state.attachTerminal.mockClear()
+    state.updateTerminalProfile.mockClear()
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
     state.terminalWrite.mockClear()
@@ -222,12 +231,12 @@ describe('TerminalSurface focus continuity', () => {
     state.recordTerminalInteraction.mockImplementation(() => callOrder.push('interaction'))
     state.sendTerminalInput.mockImplementation(() => callOrder.push('input'))
     state.onData?.('\r')
-    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'submit')
+    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'submit', true)
     expect(callOrder).toEqual(['input', 'interaction'])
 
     callOrder.length = 0
     state.onData?.('\u0003')
-    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'control')
+    expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith('session-1', 'control', true)
     expect(callOrder).toEqual(['input', 'interaction'])
 
     state.recordTerminalInteraction.mockClear()
@@ -245,7 +254,7 @@ describe('TerminalSurface focus continuity', () => {
     state.onData?.('\u001b')
     expect(state.sendTerminalInput).toHaveBeenLastCalledWith('session-1', '\u001b')
     expect(state.recordTerminalInteraction).toHaveBeenLastCalledWith(
-      'session-1', 'provider-action'
+      'session-1', 'provider-action', true
     )
 
     state.recordTerminalInteraction.mockClear()
@@ -253,6 +262,42 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     state.onData?.('\u001b')
     expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
+  })
+
+  it('keeps one terminal stream while a Shell card is promoted to Claude', async () => {
+    const view = render(
+      <TerminalSurface sessionId="session-1" profile="shell" active visible />
+    )
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const inputBeforePromotion = state.onData
+    const messageBeforePromotion = state.onMessage
+    const attachesBeforePromotion = state.attachTerminal.mock.calls.length
+
+    state.onMessage?.({
+      type: 'terminal.data', data: new TextEncoder().encode('(base) % cc'), sequence: 1
+    })
+    view.rerender(
+      <TerminalSurface sessionId="session-1" profile="claude-code" active visible />
+    )
+    state.onMessage?.({
+      type: 'terminal.data', data: new TextEncoder().encode('Claude Code ready'), sequence: 2
+    })
+
+    expect(state.attachTerminal).toHaveBeenCalledTimes(attachesBeforePromotion)
+    expect(state.onData).toBe(inputBeforePromotion)
+    expect(state.onMessage).toBe(messageBeforePromotion)
+    expect(state.terminalWrite.mock.calls.map(([data]) =>
+      new TextDecoder().decode(data as Uint8Array)
+    )).toEqual(expect.arrayContaining(['(base) % cc', 'Claude Code ready']))
+    expect(state.updateTerminalProfile).toHaveBeenLastCalledWith(
+      'session-1', 'claude-code'
+    )
+    state.recordTerminalInteraction.mockClear()
+    state.onData?.('\u001b')
+    expect(state.recordTerminalInteraction).toHaveBeenCalledWith(
+      'session-1', 'provider-action', true
+    )
   })
 
   it('buffers keystrokes during an agent-to-Shell respawn and flushes them after the new PTY is attached', async () => {
@@ -273,7 +318,7 @@ describe('TerminalSurface focus continuity', () => {
 
     const providerInput = state.onData
     view.rerender(<TerminalSurface sessionId="session-1" profile="shell" active visible />)
-    await waitFor(() => expect(state.onData).not.toBe(providerInput))
+    expect(state.onData).toBe(providerInput)
     state.onData?.(")\"\r")
     state.onMessage?.({ type: 'terminal.spawned', pid: 789 })
 

@@ -90,8 +90,9 @@ describe('parseRendererMessage', () => {
         type: 'terminal.user-interaction',
         protocolVersion: PROTOCOL_VERSION,
         sessionId: 'session-1',
-        interactionKind
-      })).toMatchObject({ type: 'terminal.user-interaction', interactionKind })
+        interactionKind,
+        deferOrdering: true
+      })).toMatchObject({ type: 'terminal.user-interaction', interactionKind, deferOrdering: true })
     }
   )
 

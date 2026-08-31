@@ -12,6 +12,7 @@ export type SessionInteractionKind = 'submit' | 'control' | 'provider-action'
 export interface RecordSessionInteractionInput {
   sessionId: string
   interactionKind: SessionInteractionKind
+  deferOrdering?: boolean
   now: number
 }
 
@@ -72,7 +73,7 @@ export class SessionInteractionService {
       )?.value
       if (sequence === undefined) throw new Error('session-user-interaction sequence does not exist')
 
-      const active = tx.get<{ active: number }>(
+      const active = input.deferOrdering === true || tx.get<{ active: number }>(
         `SELECT 1 AS active FROM window_scene_focus
          WHERE active_session_id = ? LIMIT 1`,
         input.sessionId

@@ -43,7 +43,8 @@ const userInteractionSchema = z.object({
   type: z.literal('terminal.user-interaction'),
   protocolVersion,
   sessionId,
-  interactionKind: z.enum(['submit', 'control', 'provider-action'])
+  interactionKind: z.enum(['submit', 'control', 'provider-action']),
+  deferOrdering: z.boolean().optional()
 })
 
 const resizeSchema = z.object({

@@ -81,15 +81,43 @@ describe('RuntimeClient', () => {
       runtimeId: 'runtime-1', capabilities: ['terminal-v1']
     })
 
-    client.recordTerminalInteraction('session-1', 'submit')
+    client.recordTerminalInteraction('session-1', 'submit', true)
     client.sendTerminalInput('session-1', '\r')
 
     expect(port.sent.slice(-2)).toEqual([
       expect.objectContaining({
-        type: 'terminal.user-interaction', sessionId: 'session-1', interactionKind: 'submit'
+        type: 'terminal.user-interaction', sessionId: 'session-1', interactionKind: 'submit',
+        deferOrdering: true
       }),
       expect.objectContaining({ type: 'terminal.input', sessionId: 'session-1', data: '\r' })
     ])
+  })
+
+  it('updates a promoted terminal profile without spawning again until channel recovery', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1',
+      profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+    first.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    const spawnCount = first.sent.filter(({ type }) => type === 'terminal.spawn').length
+
+    client.updateTerminalProfile('session-1', 'claude-code')
+
+    expect(first.sent.filter(({ type }) => type === 'terminal.spawn')).toHaveLength(spawnCount)
+    const second = new FakePort()
+    client.replacePort(second)
+    second.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2', capabilities: ['terminal-v1']
+    })
+    expect(second.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.spawn', sessionId: 'session-1', profile: 'claude-code'
+    }))
   })
 
   it('asks Runtime to retry the last submitted input in the same Session', () => {

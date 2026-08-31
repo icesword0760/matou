@@ -87,6 +87,16 @@ const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const execFileAsync = promisify(execFile)
 
+interface InteractiveClaudeLaunch {
+  permissionMode: HudPermissionMode
+}
+
+// Resolving an interactive alias starts the user's login shell and may execute
+// a costly zsh configuration. Start it with the Runtime instead of making the
+// first Enter on `cc` pay that startup cost. The environment key keeps tests,
+// alternate shells and ZDOTDIR-based configurations isolated from each other.
+const configuredCcLaunches = new Map<string, Promise<InteractiveClaudeLaunch | undefined>>()
+
 export class RuntimeServer {
   readonly #runtimeId = randomUUID()
   readonly #port: RuntimePort
@@ -172,6 +182,7 @@ export class RuntimeServer {
       DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
     )
     this.#workspacePaths = workspacePaths
+    void configuredCcLaunch()
     for (const session of [...this.#sessions.values()]) {
       const authority = this.#database.get<{ archived_at: number | null }>(
         'SELECT archived_at FROM sessions WHERE id = ?', session.sessionId
@@ -302,6 +313,9 @@ export class RuntimeServer {
         }, {
           sessionId: message.sessionId,
           interactionKind: message.interactionKind,
+          ...(message.deferOrdering === undefined ? {} : {
+            deferOrdering: message.deferOrdering
+          }),
           now
         })
         this.flushSemanticEvents()
@@ -1909,21 +1923,33 @@ function updateShellInputBuffer(previous: string, data: string): {
   return { buffer, submitted, command }
 }
 
-async function resolveInteractiveClaudeLaunch(command: string): Promise<{
-  permissionMode: HudPermissionMode
-} | undefined> {
+async function resolveInteractiveClaudeLaunch(
+  command: string
+): Promise<InteractiveClaudeLaunch | undefined> {
   const normalized = command.trim().replace(/\s+/g, ' ')
   if (normalized === 'claude') return { permissionMode: 'default' }
   if (normalized === 'claude --dangerously-skip-permissions') {
     return { permissionMode: 'bypassPermissions' }
   }
   if (normalized !== 'cc') return undefined
-  const alias = await configuredShellAlias('cc')
-  if (alias === 'claude') return { permissionMode: 'default' }
-  if (alias === 'claude --dangerously-skip-permissions') {
-    return { permissionMode: 'bypassPermissions' }
-  }
-  return undefined
+  return configuredCcLaunch()
+}
+
+function configuredCcLaunch(): Promise<InteractiveClaudeLaunch | undefined> {
+  const key = [
+    process.env.SHELL ?? '', process.env.HOME ?? '', process.env.ZDOTDIR ?? ''
+  ].join('\u0000')
+  const existing = configuredCcLaunches.get(key)
+  if (existing) return existing
+  const pending = configuredShellAlias('cc').then((alias) => {
+    if (alias === 'claude') return { permissionMode: 'default' as const }
+    if (alias === 'claude --dangerously-skip-permissions') {
+      return { permissionMode: 'bypassPermissions' as const }
+    }
+    return undefined
+  })
+  configuredCcLaunches.set(key, pending)
+  return pending
 }
 
 async function configuredShellAlias(name: string): Promise<string | undefined> {

@@ -70,6 +70,36 @@ describe('SessionInteractionService', () => {
     ])
   })
 
+  it('defers ordering while keyboard focus leads the persisted focus projection', () => {
+    const initial = bootstrap()
+    const second = canvas.createShellSibling(command('second'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+    canvas.setFocusedSession({
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sessionId: initial.session!.id, now: 21
+    })
+
+    interactions.record(command('keyboard-focused-second'), {
+      sessionId: second.session!.id, interactionKind: 'submit',
+      deferOrdering: true, now: 30
+    })
+
+    expect(rootOrder(initial.scene!.id)).toEqual([
+      initial.session!.id,
+      second.session!.id
+    ])
+    expect(database.get<{
+      last_user_interaction_seq: number
+      pending_user_interaction_seq: number
+    }>(
+      `SELECT last_user_interaction_seq, pending_user_interaction_seq
+       FROM session_canvas_memberships WHERE session_id = ?`,
+      second.session!.id
+    )).toEqual({ last_user_interaction_seq: 0, pending_user_interaction_seq: 1 })
+  })
+
   it('moves only true user interactions to the front with a persistent monotonic order', async () => {
     const initial = bootstrap()
     const second = canvas.createShellSibling(command('second'), {
