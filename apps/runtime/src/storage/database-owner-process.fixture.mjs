@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { stat, writeFile } from 'node:fs/promises'
+import { rename, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import {
@@ -24,12 +24,15 @@ try {
 } catch (caught) {
   error = caught instanceof Error ? caught.message : String(caught)
 }
-await writeFile(join(root, `result-${fixtureId}.json`), JSON.stringify({
+const resultPath = join(root, `result-${fixtureId}.json`)
+const partialResultPath = `${resultPath}.partial`
+await writeFile(partialResultPath, JSON.stringify({
   id: fixtureId,
   owned,
   runtimeGeneration: owned ? runtimeGeneration : undefined,
   error
 }))
+await rename(partialResultPath, resultPath)
 
 if (owned) {
   await waitForFile(join(root, 'release-owner'))

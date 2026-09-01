@@ -1,13 +1,16 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { RuntimeDatabase } from './database'
+import { readDatabaseOwner } from './database-owner'
 
 const opened: RuntimeDatabase[] = []
+const OWNER_RACE_CONTENDERS = 2
+const OWNER_RACE_ITERATIONS = 2
 
 afterEach(() => {
   for (const database of opened.splice(0)) {
@@ -137,6 +140,49 @@ describe('RuntimeDatabase', () => {
     })
   })
 
+  it('keeps a live legacy owner directory fail-closed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-live-legacy-owner-'))
+    const path = join(directory, 'matou.sqlite')
+    await mkdir(`${path}.owner`)
+    await writeFile(`${path}.owner/owner.json`, JSON.stringify({
+      pid: process.pid,
+      runtimeGeneration: 'live-legacy-owner-token'
+    }))
+
+    expect(() => RuntimeDatabase.acquireOwnership(path))
+      .toThrow('database is already owned by a live Runtime')
+    expect((await stat(`${path}.owner`)).isDirectory()).toBe(true)
+  })
+
+  it('safely replaces a dead legacy owner directory with the atomic owner file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-dead-legacy-owner-'))
+    const path = join(directory, 'matou.sqlite')
+    await mkdir(`${path}.owner`)
+    await writeFile(`${path}.owner/owner.json`, JSON.stringify({
+      pid: 2_147_483_647,
+      runtimeGeneration: 'dead-legacy-owner-token'
+    }))
+
+    const database = RuntimeDatabase.open(path)
+    opened.push(database)
+
+    expect((await stat(`${path}.owner`)).isFile()).toBe(true)
+    expect(JSON.parse(await readFile(`${path}.owner`, 'utf8'))).toEqual({
+      pid: process.pid,
+      runtimeGeneration: database.runtimeGeneration
+    })
+  })
+
+  it.each([0, -1, -42])('rejects non-positive owner pid %s as malformed', async (pid) => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-invalid-owner-pid-'))
+    const ownerPath = join(directory, 'matou.sqlite.owner')
+    await writeFile(ownerPath, JSON.stringify({ pid, runtimeGeneration: 'invalid-pid-token' }))
+
+    expect(readDatabaseOwner(ownerPath)).toBeUndefined()
+    expect(() => RuntimeDatabase.acquireOwnership(join(directory, 'matou.sqlite')))
+      .toThrow('database is already owned by a live Runtime')
+  })
+
   it('releases an owner file only when its generation token still matches', async () => {
     const { database, path } = await openDatabase()
     await rm(`${path}.owner`, { recursive: true, force: true })
@@ -154,36 +200,62 @@ describe('RuntimeDatabase', () => {
     })
   })
 
-  it('allows exactly one owner across processes released from the same barrier', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'matou-owner-race-'))
-    const first = spawnOwnerFixture(root, 'first')
-    const second = spawnOwnerFixture(root, 'second')
+  it.each([
+    'empty', 'stale-file', 'dead-legacy-directory', 'abandoned-takeover'
+  ] as const)(
+    'allows exactly one owner across processes racing over %s',
+    async (scenario) => {
+      for (let iteration = 0; iteration < OWNER_RACE_ITERATIONS; iteration += 1) {
+        const result = await runOwnerRaceScenario(scenario, iteration)
+        expect(result.owners, `${scenario} iteration ${iteration}`).toHaveLength(1)
+        expect(result.ownerIsFile, `${scenario} iteration ${iteration}`).toBe(true)
+        expect(result.ownerRecord, `${scenario} iteration ${iteration}`).toMatchObject({
+          runtimeGeneration: result.owners[0]!.runtimeGeneration
+        })
+      }
+    },
+    60_000
+  )
 
-    await waitForFiles(join(root, 'ready-first'), join(root, 'ready-second'))
+  it('continues stale takeover after the lock-holding process crashes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-owner-crashed-takeover-'))
+    const ownerPath = join(root, 'matou.sqlite.owner')
+    await writeFile(ownerPath, JSON.stringify({
+      pid: 2_147_483_647,
+      runtimeGeneration: 'stale-before-takeover-crash'
+    }))
+    const holder = spawnTakeoverLockHolder(root)
+    await waitForFiles(join(root, 'takeover-lock-ready'))
+    const ids = Array.from({ length: OWNER_RACE_CONTENDERS }, (_, index) => String(index))
+    const contenders = ids.map((id) => spawnOwnerFixture(root, id))
+    await waitForFiles(...ids.map((id) => join(root, `ready-${id}`)))
     await writeFile(join(root, 'acquire-barrier'), 'go')
-    await waitForFiles(join(root, 'result-first.json'), join(root, 'result-second.json'))
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250))
+    const resultsBeforeCrash = await Promise.all(ids.map((id) =>
+      stat(join(root, `result-${id}.json`)).then(() => true, () => false)
+    ))
 
-    const results = await Promise.all(['first', 'second'].map(async (id) =>
+    holder.kill()
+    await holder.completed
+    await waitForFiles(...ids.map((id) => join(root, `result-${id}.json`)))
+    const results = await Promise.all(ids.map(async (id) =>
       JSON.parse(await readFile(join(root, `result-${id}.json`), 'utf8')) as {
         id: string
         owned: boolean
         runtimeGeneration?: string
       }
     ))
-    const owners = results.filter(({ owned }) => owned)
-    const ownerIsFile = (await stat(join(root, 'matou.sqlite.owner'))).isFile()
-    const ownerRecord = ownerIsFile
-      ? JSON.parse(await readFile(join(root, 'matou.sqlite.owner'), 'utf8')) as {
-          runtimeGeneration?: string
-        }
-      : undefined
+    const canonical = JSON.parse(await readFile(ownerPath, 'utf8')) as {
+      runtimeGeneration?: string
+    }
     await writeFile(join(root, 'release-owner'), 'release')
-    await expect(Promise.all([first.completed, second.completed])).resolves.toEqual([0, 0])
+    await Promise.all(contenders.map(({ completed }) => completed))
 
+    expect(resultsBeforeCrash).toEqual(Array(OWNER_RACE_CONTENDERS).fill(false))
+    const owners = results.filter(({ owned }) => owned)
     expect(owners).toHaveLength(1)
-    expect(ownerIsFile).toBe(true)
-    expect(ownerRecord).toMatchObject({ runtimeGeneration: owners[0]!.runtimeGeneration })
-  })
+    expect(canonical.runtimeGeneration).toBe(owners[0]!.runtimeGeneration)
+  }, 20_000)
 
   it('releases ownership when closed', async () => {
     const { database, path } = await openDatabase()
@@ -196,6 +268,55 @@ describe('RuntimeDatabase', () => {
   })
 })
 
+async function runOwnerRaceScenario(
+  scenario: 'empty' | 'stale-file' | 'dead-legacy-directory' | 'abandoned-takeover',
+  iteration: number
+): Promise<{
+  owners: Array<{ id: string; owned: boolean; runtimeGeneration?: string }>
+  ownerIsFile: boolean
+  ownerRecord: { runtimeGeneration?: string } | undefined
+}> {
+  const root = await mkdtemp(join(tmpdir(), `matou-owner-${scenario}-${iteration}-`))
+  const ownerPath = join(root, 'matou.sqlite.owner')
+  if (scenario === 'stale-file' || scenario === 'abandoned-takeover') {
+    await writeFile(ownerPath, JSON.stringify({
+      pid: 2_147_483_647,
+      runtimeGeneration: `stale-file-${iteration}`
+    }))
+    if (scenario === 'abandoned-takeover') {
+      await writeFile(`${ownerPath}.takeover`, JSON.stringify({
+        pid: 2_147_483_647,
+        runtimeGeneration: `abandoned-takeover-${iteration}`
+      }))
+    }
+  } else if (scenario === 'dead-legacy-directory') {
+    await mkdir(ownerPath)
+    await writeFile(join(ownerPath, 'owner.json'), JSON.stringify({
+      pid: 2_147_483_647,
+      runtimeGeneration: `dead-legacy-${iteration}`
+    }))
+  }
+  const ids = Array.from({ length: OWNER_RACE_CONTENDERS }, (_, index) => String(index))
+  const contenders = ids.map((id) => spawnOwnerFixture(root, id))
+  await waitForFiles(...ids.map((id) => join(root, `ready-${id}`)))
+  await writeFile(join(root, 'acquire-barrier'), 'go')
+  await waitForFiles(...ids.map((id) => join(root, `result-${id}.json`)))
+  const results = await Promise.all(ids.map(async (id) =>
+    JSON.parse(await readFile(join(root, `result-${id}.json`), 'utf8')) as {
+      id: string
+      owned: boolean
+      runtimeGeneration?: string
+    }
+  ))
+  const ownerIsFile = (await stat(ownerPath)).isFile()
+  const ownerRecord = ownerIsFile
+    ? JSON.parse(await readFile(ownerPath, 'utf8')) as { runtimeGeneration?: string }
+    : undefined
+  await writeFile(join(root, 'release-owner'), 'release')
+  await Promise.all(contenders.map(({ completed }) => completed))
+  return { owners: results.filter(({ owned }) => owned), ownerIsFile, ownerRecord }
+}
+
 function spawnOwnerFixture(root: string, id: string): {
   completed: Promise<number | null>
 } {
@@ -203,7 +324,7 @@ function spawnOwnerFixture(root: string, id: string): {
     process.cwd(), 'src/storage/database-owner-process.fixture.mjs'
   )
   const child = spawn(process.execPath, [
-    '--experimental-strip-types', fixturePath
+    '--experimental-sqlite', '--experimental-strip-types', fixturePath
   ], {
     cwd: process.cwd(),
     env: { ...process.env, MATOU_OWNER_RACE_ROOT: root, MATOU_OWNER_RACE_ID: id },
@@ -218,6 +339,35 @@ function spawnOwnerFixture(root: string, id: string): {
       child.once('exit', (code) => {
         if (code !== 0) reject(new Error(`owner fixture ${id} failed:\n${output}`))
         else resolveExit(code)
+      })
+    })
+  }
+}
+
+function spawnTakeoverLockHolder(root: string): {
+  kill(): void
+  completed: Promise<void>
+} {
+  const fixturePath = resolve(
+    process.cwd(), 'src/storage/database-owner-lock-holder.fixture.mjs'
+  )
+  const child = spawn(process.execPath, [
+    '--experimental-sqlite', fixturePath
+  ], {
+    cwd: process.cwd(),
+    env: { ...process.env, MATOU_OWNER_RACE_ROOT: root },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let output = ''
+  child.stdout.on('data', (chunk) => { output += String(chunk) })
+  child.stderr.on('data', (chunk) => { output += String(chunk) })
+  return {
+    kill: () => { child.kill('SIGKILL') },
+    completed: new Promise((resolveExit, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => {
+        if (signal === 'SIGKILL') resolveExit()
+        else reject(new Error(`takeover lock holder exited ${code ?? signal}:\n${output}`))
       })
     })
   }
