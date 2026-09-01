@@ -24,6 +24,7 @@ import type {
 import { SceneTabBar } from './SceneTabBar'
 import { SplitTree } from './SplitTree'
 import { TaskSidebar } from './TaskSidebar'
+import { ModelSwitchSettings } from './ModelSwitchSettings'
 import { TerminalPane } from './TerminalPane'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
@@ -190,6 +191,7 @@ function HierarchyProduct({ projection, commands }: {
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [dagOpenError, setDagOpenError] = useState(false)
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  const [settingsActive, setSettingsActive] = useState(false)
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
@@ -452,6 +454,7 @@ function HierarchyProduct({ projection, commands }: {
   return <main className="hierarchy-shell cli-module" data-theme={themeKey}>
               <div className="claude-code-view hierarchy-body">
                 <TaskSidebar projection={projection} commands={commands} pathValid={pathValid}
+                  settingsActive={settingsActive} onSettingsActiveChange={setSettingsActive}
                   onRevealSession={(sceneId, sessionId) => {
                     const node = projection.sessionGraphs?.[sceneId]?.nodes.find((candidate) =>
                       candidate.sessionId === sessionId)
@@ -476,8 +479,15 @@ function HierarchyProduct({ projection, commands }: {
           <button type="button" aria-label="关闭 DAG 异常提示" onClick={() => setDagOpenError(false)}>×</button>
         </div>}
         {task && <>
-          <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
-            onOpenDag={openDag} />
+          {settingsActive ? <div className="scene-bar tab-bar" role="tablist">
+            <div className="scene-tabs tab-bar-left">
+              <div className="tab-item active">
+                <button role="tab" className="tab-title" aria-selected="true">设置 · 模型切换</button>
+                <button className="tab-close" aria-label="关闭设置页签" onClick={() => setSettingsActive(false)}>✕</button>
+              </div>
+            </div>
+          </div> : <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
+            onOpenDag={openDag} />}
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)
@@ -651,6 +661,10 @@ function HierarchyProduct({ projection, commands }: {
               </section>
             })}
           </div>
+          {settingsActive && <ModelSwitchSettings client={client} onClose={() => {
+            setSettingsActive(false)
+            setTerminalFocusRequest((value) => value + 1)
+          }} />}
         </>}
         {!task && <div className="scene-recovery" role="status">选择或新建一个事项开始工作</div>}
                   <TerminalSearchBar open={searchOpen} themeKey={themeKey}

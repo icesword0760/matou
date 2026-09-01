@@ -29,6 +29,17 @@ afterEach(() => {
 })
 
 describe('PRD 05 hierarchy shell', () => {
+  it('opens global model switching from the new bottom-left settings entry', async () => {
+    render(<HierarchyShell fixture={fixture()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '设置' }))
+
+    expect(screen.getByRole('region', { name: '模型切换设置' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '关闭设置' }))
+    expect(screen.queryByRole('region', { name: '模型切换设置' })).toBeNull()
+  })
+
   it('moves the current session level into the bottom bar without the obsolete add shortcut', () => {
     const data = fixture()
     data.sessionGraphs = {

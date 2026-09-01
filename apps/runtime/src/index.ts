@@ -30,6 +30,7 @@ import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { nextProviderWorkStatus } from './session/provider-work-status'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
+import { ProviderConfigStore } from './provider-config/provider-config-store'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -53,6 +54,7 @@ interface RuntimeState {
   rpcRouter: RuntimeRpcRouter
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
+  providerConfigs: ProviderConfigStore
 }
 
 let runtimeState: RuntimeState | undefined
@@ -78,7 +80,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionCanvas = new SessionCanvasService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
-  const rpcRouter = new RuntimeRpcRouter(database, notifications)
+  const providerConfigs = new ProviderConfigStore(runtimeDataRoot)
+  const rpcRouter = new RuntimeRpcRouter(database, notifications, { providerConfigs })
   const hostControl = new HostControlServer({
     socketPath: controlEndpoint,
     tokenService: controlTokens,
@@ -177,7 +180,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     controlBackend,
     rpcRouter,
     hostControl,
-    providerHooks
+    providerHooks,
+    providerConfigs
   }
 }
 
@@ -230,6 +234,7 @@ parentPort.on('message', async (event) => {
       endpoint: state.controlEndpoint
     }, sessions, state.providerHooks, undefined, {
       hudRegistry: sessionHuds,
+      providerConfigs: state.providerConfigs,
       ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
         controlAssetRoot: process.env.MATOU_CONTROL_ASSET_ROOT
       }),

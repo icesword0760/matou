@@ -26,6 +26,27 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('persists and activates provider configurations through explicit RPC methods', async () => {
+    const created = await router.handle('provider-config.upsert', {
+      provider: {
+        cli: 'codex', name: 'Team gateway', endpoint: 'https://gateway.example/v1',
+        model: 'gpt-team', apiKey: 'TOKEN'
+      }
+    }) as { provider: { id: string } }
+    const activated = await router.handle('provider-config.activate', {
+      cli: 'codex', providerId: created.provider.id
+    }) as { activeProviderIds: { codex: string } }
+
+    expect(activated.activeProviderIds.codex).toBe(created.provider.id)
+    const snapshot = await router.handle('provider-config.snapshot', {}) as {
+      providers: { codex: Array<{ name: string; hasApiKey: boolean }> }
+    }
+    expect(snapshot.providers.codex).toContainEqual(expect.objectContaining({
+      name: 'Team gateway', hasApiKey: true
+    }))
+    expect(JSON.stringify(snapshot)).not.toContain('TOKEN')
+  })
+
   it('lists workspace Claude history and loads the selected permission into the same Session', async () => {
     const workspaceRoot = join(testRoot, 'load-workspace')
     const projectsRoot = join(testRoot, 'claude-projects')

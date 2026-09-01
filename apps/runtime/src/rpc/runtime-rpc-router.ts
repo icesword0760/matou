@@ -35,6 +35,8 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
+import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import type { ProviderCli, ProviderConfigInput } from '@matou/contracts'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -76,11 +78,12 @@ export class RuntimeRpcRouter {
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
   readonly #claudeSessions: ClaudeSessionCatalog
+  readonly #providerConfigs: ProviderConfigStore
 
   constructor(
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
-    options: { projectsRoot?: string } = {}
+    options: { projectsRoot?: string; providerConfigs?: ProviderConfigStore } = {}
   ) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
@@ -109,6 +112,7 @@ export class RuntimeRpcRouter {
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
     )
+    this.#providerConfigs = options.providerConfigs ?? new ProviderConfigStore(dirname(database.path))
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -130,6 +134,24 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
+    if (method === 'provider-config.snapshot') return this.#providerConfigs.snapshot()
+    if (method === 'provider-config.upsert') {
+      const input = record(payload)
+      const provider = record(input.provider) as unknown as ProviderConfigInput
+      return { provider: await this.#providerConfigs.upsert(provider) }
+    }
+    if (method === 'provider-config.delete') {
+      const input = record(payload)
+      return this.#providerConfigs.delete(
+        providerCli(input.cli), text(input.providerId, 'providerId')
+      )
+    }
+    if (method === 'provider-config.activate') {
+      const input = record(payload)
+      return this.#providerConfigs.activate(
+        providerCli(input.cli), text(input.providerId, 'providerId')
+      )
+    }
     if (method === 'projection.snapshot') return this.#snapshot(payload)
     if (method === 'hierarchy.get-scene-session-graph') {
       const input = record(payload)
@@ -962,6 +984,9 @@ function integer(value: unknown, label: string, minimum: number): number {
 function flag(value: unknown, label: string): boolean {
   if (typeof value !== 'boolean') throw new RpcFault('INVALID_REQUEST', `${label} must be a boolean`)
   return value
+}
+function providerCli(value: unknown): ProviderCli {
+  return enumeration(value, ['claude-code', 'codex'] as const, 'cli')
 }
 function enumeration<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] {
   if (typeof value !== 'string' || !values.includes(value)) {

@@ -14,11 +14,14 @@ import workbenchIcon from '../assets/kooky/terminal/dark_lujing.svg'
 const TASK_TRANSFER = 'application/x-matou-pinned-task'
 const WORKSPACE_TRANSFER = 'application/x-matou-pinned-workspace'
 
-export function TaskSidebar({ projection, commands, onRevealSession }: {
+export function TaskSidebar({ projection, commands, onRevealSession,
+  settingsActive = false, onSettingsActiveChange }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
   pathValid?: boolean
   onRevealSession?(sceneId: string, sessionId: string): void
+  settingsActive?: boolean
+  onSettingsActiveChange?(active: boolean): void
 }) {
   const workspaces = useMemo(() => orderNavigation(projection.workspaces), [projection.workspaces])
   const placedIds = new Set(projection.taskPlacements
@@ -197,8 +200,8 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
                 if (source?.workspaceId === workspace.id && task.isPinned) void commands.reorderPinnedTask(workspace.id, source.taskId, task.id)
                 resetDrag()
               }} onDragEnd={resetDrag}
-              onClick={() => { notificationStore.markWorkspaceRead(workspace.id); void commands.activateTask(task.id) }}
-              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void commands.activateTask(task.id) } }}
+              onClick={() => { notificationStore.markWorkspaceRead(workspace.id); onSettingsActiveChange?.(false); void commands.activateTask(task.id) }}
+              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSettingsActiveChange?.(false); void commands.activateTask(task.id) } }}
               onContextMenu={(event) => { event.preventDefault(); openTaskMenu(task, event) }}>
               <div className="workbench-item__left">
                 <span className="workbench-item__icon" style={{ maskImage: `url(${workbenchIcon})`, WebkitMaskImage: `url(${workbenchIcon})` }} />
@@ -220,6 +223,13 @@ export function TaskSidebar({ projection, commands, onRevealSession }: {
         </section>
       })}
     </nav>
+    <footer className="flat-sidebar__toolbar" aria-label="应用设置">
+      <button type="button" className={`flat-sidebar__settings-toggle${settingsActive ? ' is-active' : ''}`}
+        aria-label="设置" aria-pressed={settingsActive}
+        onClick={() => onSettingsActiveChange?.(!settingsActive)}>
+        <SettingsIcon /><span>设置</span>
+      </button>
+    </footer>
     {menuWorkspace && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
       {projection.pathStates.find(({ workspaceId }) => workspaceId === menuWorkspace.id)?.status === 'invalid' &&
         !menuWorkspace.isDefault && <button role="menuitem" onClick={() => {
@@ -297,6 +307,7 @@ function FolderIcon({ home }: { home?: boolean }) { return <svg width="16" heigh
 function PinIcon() { return <svg className="pin-icon" data-icon="pushpin" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5"/><path d="M5 17h14"/><path d="M15 2.5a1 1 0 0 0-1 1V7a3 3 0 0 0 3 3v2H7v-2a3 3 0 0 0 3-3V3.5a1 1 0 0 0-1-1Z"/></svg> }
 function EditIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> }
 function TrashIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/></svg> }
+function SettingsIcon() { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.2.36.52.7 1 .9.3.13.64.2 1 .2h.1v4h-.1c-.4 0-.74.07-1 .2-.48.2-.8.54-1 .9Z"/></svg> }
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}
 function parseTransfer(value: string): { workspaceId: string; taskId: string } | undefined {

@@ -128,6 +128,57 @@ sleep 30
     }
   })
 
+  it('applies a global Claude provider to launches and refreshes the live session', async () => {
+    const executable = join(root, 'provider-config-claude.sh')
+    const log = join(root, 'provider-config-invocations.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s|%s|%s|%s\\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> "${log}"\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'provider-config-live', 'claude-code')
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-live', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).split('\n').length >= 2)
+      const firstPid = (port.last('terminal.spawned') as { pid: number }).pid
+
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-upsert', method: 'provider-config.upsert', capability: 'renderer',
+        deadlineAt: Date.now() + 2_000,
+        payload: { provider: {
+          cli: 'claude-code', name: 'Team Gateway', endpoint: 'https://gateway.example/',
+          model: 'claude-team', apiKey: 'TOKEN'
+        } }
+      })
+      await waitUntil(() => port.findRpcResponse('provider-config-upsert') !== undefined)
+      const providerId = (port.findRpcResponse('provider-config-upsert') as {
+        result: { provider: { id: string } }
+      }).result.provider.id
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-activate', method: 'provider-config.activate', capability: 'renderer',
+        deadlineAt: Date.now() + 2_000, payload: { cli: 'claude-code', providerId }
+      })
+      await waitUntil(() => port.findRpcResponse('provider-config-activate') !== undefined)
+      await waitUntilAsync(async () => (await readFile(log, 'utf8')).trim().split('\n').length === 2)
+
+      const lines = (await readFile(log, 'utf8')).trim().split('\n')
+      expect(lines[1]).toBe('--model claude-team|https://gateway.example|TOKEN|TOKEN')
+      expect((port.last('terminal.spawned') as { pid: number }).pid).not.toBe(firstPid)
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-live'
+      })
+      await settle()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previous)
+    }
+  })
+
   it('adds current cwd and Git information to a direct DAG graph response', () => {
     const result = withSessionRuntimeEnvironment({
       sceneId: 'scene-1',

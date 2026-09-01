@@ -49,6 +49,16 @@ describe('PRD 04 provider launch plan', () => {
     })
   })
 
+  it('launches each provider with the globally selected default model', () => {
+    expect(resolvePtyCommand({
+      profile: 'claude-code', executable: '/fixture/claude', model: 'claude-team'
+    }).args).toEqual(['--model', 'claude-team'])
+    expect(resolvePtyCommand({
+      profile: 'codex', executable: '/fixture/codex', model: 'gpt-team',
+      providerSessionId: 'codex-session-1'
+    }).args).toEqual(['--model', 'gpt-team', 'resume', 'codex-session-1'])
+  })
+
   it('opens an ordinary login Shell without any provider resume arguments', () => {
     const command = resolvePtyCommand({ profile: 'shell', executable: '/bin/zsh' })
     expect(command.file).toBe('/bin/zsh')

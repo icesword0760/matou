@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,6 +14,16 @@ describe('Workspace and Task navigation', () => {
     cleanup()
     Reflect.deleteProperty(window, 'matouDesktop')
   })
+  it('keeps settings at the bottom of the sidebar', async () => {
+    const onSettingsActiveChange = vi.fn()
+    render(<TaskSidebar projection={fixture()} commands={commands()}
+      settingsActive={false} onSettingsActiveChange={onSettingsActiveChange} />)
+
+    const toolbar = screen.getByRole('contentinfo', { name: '应用设置' })
+    await userEvent.setup().click(within(toolbar).getByRole('button', { name: '设置' }))
+    expect(onSettingsActiveChange).toHaveBeenCalledWith(true)
+  })
+
   it('renders all Workspaces as flat groups and creates a Task in the selected group', async () => {
     const user = userEvent.setup()
     const data = fixture()

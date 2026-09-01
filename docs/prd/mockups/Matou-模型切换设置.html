@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Matou · 模型切换设置 Mockup</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      color-scheme: light;
+      --text: #2f3542;
+      --muted: #7c8493;
+      --line: rgba(72, 91, 115, .12);
+      --blue: #347fd5;
+      --blue-soft: rgba(52, 127, 213, .11);
+      --panel: rgba(250, 251, 253, .88);
+      --sidebar: rgba(244, 246, 249, .76);
+      --shadow: 0 22px 60px rgba(44, 65, 92, .12);
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      color: var(--text);
+      background: #e9edf4;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .app {
+      position: relative;
+      display: grid;
+      grid-template-columns: 242px minmax(0, 1fr);
+      width: 100vw;
+      height: 100vh;
+      min-width: 980px;
+      min-height: 640px;
+      overflow: hidden;
+      background:
+        radial-gradient(920px 720px at 20% 3%, rgba(255,255,255,.94), transparent 65%),
+        linear-gradient(135deg, #e7ebf2, #f4f6fa 54%, #e4e9f2);
+    }
+
+    .sidebar {
+      position: relative;
+      z-index: 4;
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      border-right: 1px solid rgba(85, 103, 125, .12);
+      background: var(--sidebar);
+      box-shadow: 8px 0 28px rgba(55,79,105,.055), inset -1px 0 rgba(255,255,255,.5);
+      backdrop-filter: blur(26px) saturate(1.35);
+    }
+    .sidebar::before {
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(220px 250px at 13% 14%, rgba(255,255,255,.94), transparent 68%),
+        linear-gradient(110deg, rgba(255,255,255,.3), transparent 44%);
+      content: "";
+      pointer-events: none;
+    }
+    .windowbar, .workspace-groups, .side-footer { position: relative; z-index: 1; }
+    .windowbar {
+      display: flex;
+      height: 48px;
+      flex: 0 0 48px;
+      align-items: center;
+      padding: 0 10px 0 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .traffic { display: flex; gap: 7px; margin-right: 14px; }
+    .traffic i { width: 10px; height: 10px; border: 1px solid rgba(76,85,99,.13); border-radius: 50%; background: rgba(124,132,147,.16); }
+    .compose { display: flex; min-width: 0; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
+    .compose span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mini-icon { width: 16px; height: 16px; flex: 0 0 16px; }
+
+    .workspace-groups { flex: 1; min-height: 0; padding: 12px 8px; overflow: auto; }
+    .workspace { margin-bottom: 14px; }
+    .workspace-head {
+      display: flex;
+      height: 28px;
+      align-items: center;
+      gap: 6px;
+      padding: 0 7px;
+      color: #4e5665;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .workspace-head .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .workspace-head .push { margin-left: auto; color: #8d95a1; }
+    .task {
+      display: flex;
+      height: 33px;
+      align-items: center;
+      gap: 8px;
+      margin-top: 2px;
+      padding: 0 9px 0 20px;
+      border: 0;
+      border-radius: 8px;
+      color: #6c7482;
+      background: transparent;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .task.active { color: #323847; background: rgba(87,101,127,.095); font-weight: 650; }
+    .task .dots { margin-left: auto; opacity: 0; }
+    .task:hover .dots, .task.active .dots { opacity: .8; }
+
+    .side-footer {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      flex: 0 0 51px;
+      padding: 8px;
+      border-top: 1px solid var(--line);
+    }
+    .side-action {
+      display: inline-flex;
+      height: 34px;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 7px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 8px;
+      color: #687283;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .16s ease-out, color .16s ease-out, transform .16s ease-out;
+    }
+    .side-action:hover { color: #2f3547; background: rgba(47,53,71,.06); }
+    .side-action:active { transform: scale(.98); }
+    .side-action.active { color: #2f7fe6; background: rgba(72,139,225,.11); box-shadow: inset 0 0 0 1px rgba(72,139,225,.12); }
+
+    .shell { position: relative; display: flex; min-width: 0; min-height: 0; flex-direction: column; }
+    .top-tabs {
+      position: relative;
+      z-index: 3;
+      display: flex;
+      height: 48px;
+      flex: 0 0 48px;
+      align-items: center;
+      gap: 7px;
+      padding: 0 12px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(247,248,251,.67);
+      backdrop-filter: blur(22px);
+    }
+    .scene-tab {
+      display: flex;
+      min-width: 0;
+      max-width: 360px;
+      height: 34px;
+      align-items: center;
+      gap: 8px;
+      padding: 0 12px;
+      border-radius: 8px;
+      color: #7a8290;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .scene-tab.active { color: #39404e; background: rgba(76,86,105,.09); box-shadow: inset 0 0 0 1px rgba(91,109,131,.08); }
+    .scene-tab .close { margin-left: auto; color: #a1a7b1; }
+    .tab-add { display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 8px; color: #7c8492; background: rgba(74,84,101,.055); font-size: 21px; cursor: pointer; }
+    .top-spacer { flex: 1; }
+    .top-icon { display: grid; width: 30px; height: 30px; place-items: center; color: #77808d; }
+
+    .work-area { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+    .terminal-view, .settings-view { position: absolute; inset: 0; }
+    .terminal-view {
+      display: flex;
+      align-items: stretch;
+      padding: 8px 8px 0;
+      background: linear-gradient(145deg, rgba(232,236,244,.95), rgba(241,244,249,.8));
+      transition: opacity .18s ease-out, transform .18s ease-out;
+    }
+    .terminal-card {
+      display: flex;
+      width: min(560px, 58%);
+      min-width: 460px;
+      margin-bottom: 8px;
+      overflow: hidden;
+      flex-direction: column;
+      border: 1px solid rgba(92,115,143,.16);
+      border-radius: 12px;
+      background: rgba(253,253,254,.92);
+      box-shadow: 0 17px 42px rgba(47,69,96,.12);
+    }
+    .terminal-head { display: flex; height: 42px; align-items: center; padding: 0 13px; border-bottom: 1px solid rgba(91,111,136,.1); font-size: 13px; font-weight: 650; }
+    .terminal-head .tools { display: flex; gap: 12px; margin-left: auto; color: #a0a8b4; }
+    .terminal-body { flex: 1; padding: 42px 24px; color: #404653; font: 12px/1.46 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-line; }
+    .terminal-input { padding: 0 16px 12px; color: #59606d; font: 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .terminal-status {
+      display: flex;
+      height: 32px;
+      align-items: center;
+      gap: 12px;
+      padding: 0 14px;
+      border-top: 1px solid rgba(91,111,136,.09);
+      color: #7d8592;
+      font-size: 10px;
+    }
+    .terminal-status .permission { color: #616a78; font-weight: 700; }
+    .terminal-status .path { margin-left: auto; }
+    .empty-plane { flex: 1; }
+
+    .settings-view {
+      display: none;
+      padding: 22px 26px 26px;
+      overflow: auto;
+      background:
+        radial-gradient(650px 430px at 85% 0%, rgba(255,255,255,.76), transparent 68%),
+        linear-gradient(145deg, rgba(233,237,245,.97), rgba(246,247,250,.94));
+    }
+    .app.is-settings .terminal-view { opacity: 0; transform: scale(.985); pointer-events: none; }
+    .app.is-settings .settings-view { display: block; animation: settings-in .22s ease-out both; }
+    @keyframes settings-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+
+    .settings-frame {
+      display: grid;
+      grid-template-columns: 188px minmax(0, 1fr);
+      width: min(1050px, 100%);
+      min-height: calc(100vh - 96px);
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid rgba(91,111,136,.12);
+      border-radius: 15px;
+      background: rgba(251,252,254,.84);
+      box-shadow: var(--shadow), inset 0 1px rgba(255,255,255,.72);
+      backdrop-filter: blur(24px);
+    }
+    .settings-nav { padding: 24px 13px; border-right: 1px solid var(--line); background: rgba(241,244,248,.66); }
+    .settings-title { margin: 0 10px 18px; color: #323947; font-size: 18px; letter-spacing: -.02em; }
+    .settings-nav-label { margin: 18px 10px 7px; color: #979eaa; font-size: 10px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .settings-nav-item {
+      display: flex;
+      width: 100%;
+      height: 36px;
+      align-items: center;
+      gap: 9px;
+      padding: 0 10px;
+      border: 0;
+      border-radius: 8px;
+      color: #687180;
+      background: transparent;
+      font-size: 12px;
+      font-weight: 620;
+      text-align: left;
+      cursor: pointer;
+    }
+    .settings-nav-item.active { color: #256fc3; background: rgba(65,133,214,.11); }
+    .settings-nav-hint { margin: auto 10px 0; color: #9ba2ad; font-size: 10px; line-height: 1.5; }
+    .settings-main { min-width: 0; padding: 26px 30px 34px; }
+    .settings-heading { display: flex; align-items: flex-start; gap: 18px; }
+    .settings-heading h1 { margin: 0 0 7px; color: #2c3340; font-size: 22px; letter-spacing: -.025em; }
+    .settings-heading p { margin: 0; color: #7e8795; font-size: 12px; line-height: 1.55; }
+    .settings-close { display: grid; width: 30px; height: 30px; margin-left: auto; place-items: center; border: 0; border-radius: 8px; color: #89919e; background: rgba(84,98,118,.06); cursor: pointer; }
+    .settings-close:hover { color: #4f5866; background: rgba(84,98,118,.11); }
+
+    .app-tabs { display: inline-flex; gap: 4px; margin: 24px 0 18px; padding: 3px; border-radius: 9px; background: rgba(84,98,118,.07); }
+    .app-tab { height: 30px; padding: 0 14px; border: 0; border-radius: 7px; color: #76808e; background: transparent; font-size: 11px; font-weight: 680; cursor: pointer; }
+    .app-tab.active { color: #353c49; background: rgba(255,255,255,.9); box-shadow: 0 2px 7px rgba(54,73,96,.09); }
+
+    .current-summary {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      margin-bottom: 14px;
+      padding: 13px 15px;
+      border: 1px solid rgba(64,133,214,.18);
+      border-radius: 11px;
+      background: rgba(68,139,223,.07);
+    }
+    .summary-mark { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; border-radius: 9px; color: white; background: linear-gradient(145deg, #5c9ce4, #3378c8); font-size: 13px; font-weight: 800; box-shadow: 0 6px 15px rgba(49,112,188,.18); }
+    .summary-copy strong { display: block; color: #344050; font-size: 12px; }
+    .summary-copy span { color: #748090; font-size: 10px; }
+    .global-chip { margin-left: auto; padding: 4px 8px; border-radius: 999px; color: #3576bd; background: rgba(53,118,189,.1); font-size: 9px; font-weight: 700; }
+
+    .provider-toolbar { display: flex; align-items: center; margin: 20px 0 9px; }
+    .provider-toolbar h2 { margin: 0; color: #3c4452; font-size: 13px; }
+    .provider-toolbar .count { margin-left: 7px; color: #929aa6; font-size: 10px; }
+    .add-provider { display: inline-flex; height: 30px; margin-left: auto; align-items: center; gap: 6px; padding: 0 11px; border: 0; border-radius: 8px; color: white; background: #3b80cf; box-shadow: 0 5px 12px rgba(53,116,191,.16); font-size: 10px; font-weight: 700; cursor: pointer; }
+    .add-provider:hover { background: #3478c5; }
+
+    .provider-list { display: flex; flex-direction: column; gap: 8px; }
+    .provider-card {
+      display: grid;
+      grid-template-columns: 38px minmax(150px, 1fr) minmax(150px, .9fr) auto;
+      min-height: 61px;
+      align-items: center;
+      gap: 11px;
+      padding: 10px 12px;
+      border: 1px solid rgba(86,105,129,.12);
+      border-radius: 11px;
+      background: rgba(255,255,255,.66);
+      transition: border-color .16s ease-out, box-shadow .16s ease-out, transform .16s ease-out;
+    }
+    .provider-card:hover { transform: translateY(-1px); border-color: rgba(65,126,198,.23); box-shadow: 0 8px 18px rgba(55,78,106,.07); }
+    .provider-card.current { border-color: rgba(57,126,208,.31); background: rgba(248,251,255,.92); box-shadow: inset 3px 0 #3b80cf; }
+    .provider-logo { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; color: white; background: #707986; font-size: 12px; font-weight: 800; }
+    .provider-logo.anthropic { background: linear-gradient(145deg, #c68054, #9f5f3d); }
+    .provider-logo.kimi { background: linear-gradient(145deg, #22252b, #505866); }
+    .provider-logo.packy { background: linear-gradient(145deg, #4d8ee0, #6f67c8); }
+    .provider-logo.openai { background: linear-gradient(145deg, #1b8673, #145d51); }
+    .provider-name strong { display: flex; align-items: center; gap: 7px; color: #333b48; font-size: 12px; }
+    .provider-name span, .provider-detail span { display: block; margin-top: 3px; color: #8a929e; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .active-pill { padding: 2px 5px; border-radius: 999px; color: #3477c3; background: rgba(57,126,208,.1); font-size: 8px; font-weight: 750; }
+    .provider-detail strong { display: block; color: #65707f; font-size: 10px; font-weight: 650; }
+    .provider-actions { display: flex; justify-content: flex-end; gap: 6px; }
+    .ghost-btn, .switch-btn {
+      height: 29px;
+      padding: 0 10px;
+      border: 1px solid rgba(84,102,125,.13);
+      border-radius: 7px;
+      background: rgba(255,255,255,.78);
+      font-size: 9px;
+      font-weight: 680;
+      cursor: pointer;
+    }
+    .ghost-btn:hover { background: white; }
+    .switch-btn { border-color: transparent; color: white; background: #3b80cf; }
+    .switch-btn:hover { background: #3274bf; }
+    .switch-btn[disabled] { color: #77808d; background: rgba(85,100,120,.09); cursor: default; }
+    .impact-note { display: flex; gap: 8px; margin: 13px 2px 0; color: #858d99; font-size: 9px; line-height: 1.5; }
+    .impact-note b { color: #626c7a; }
+
+    .toast {
+      position: fixed;
+      z-index: 30;
+      right: 24px;
+      bottom: 24px;
+      display: flex;
+      min-width: 260px;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 1px solid rgba(72,133,202,.2);
+      border-radius: 11px;
+      color: #384354;
+      background: rgba(252,253,255,.93);
+      box-shadow: 0 18px 44px rgba(41,63,91,.17);
+      backdrop-filter: blur(18px);
+      font-size: 11px;
+      opacity: 0;
+      transform: translateY(9px);
+      pointer-events: none;
+      transition: opacity .18s ease-out, transform .18s ease-out;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast i { display: grid; width: 20px; height: 20px; place-items: center; border-radius: 50%; color: white; background: #3f8b59; font-style: normal; font-size: 11px; }
+
+    .modal-layer { position: fixed; z-index: 20; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(48,57,70,.26); backdrop-filter: blur(5px); }
+    .modal-layer.open { display: flex; animation: fade .16s ease-out both; }
+    @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+    .provider-modal { width: min(510px, 100%); overflow: hidden; border: 1px solid rgba(83,102,125,.16); border-radius: 14px; background: rgba(251,252,254,.96); box-shadow: 0 28px 90px rgba(36,50,70,.25); }
+    .modal-head { display: flex; height: 57px; align-items: center; padding: 0 20px; border-bottom: 1px solid var(--line); }
+    .modal-head strong { font-size: 14px; }
+    .modal-head button { display: grid; width: 28px; height: 28px; margin-left: auto; place-items: center; border: 0; border-radius: 7px; color: #8c94a0; background: transparent; cursor: pointer; }
+    .modal-body { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 20px; }
+    .field { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+    .field.wide { grid-column: 1 / -1; }
+    .field label { color: #626c7a; font-size: 10px; font-weight: 700; }
+    .field input { width: 100%; height: 34px; padding: 0 10px; border: 1px solid rgba(83,102,125,.16); border-radius: 8px; outline: none; color: #39414f; background: rgba(255,255,255,.84); font-size: 11px; }
+    .field input:focus { border-color: rgba(52,127,213,.46); box-shadow: 0 0 0 3px rgba(52,127,213,.09); }
+    .secret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+    .advanced { grid-column: 1 / -1; padding: 10px 11px; border-radius: 8px; color: #7f8793; background: rgba(79,97,120,.055); font-size: 9px; }
+    .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 18px; border-top: 1px solid var(--line); }
+    .modal-foot button { height: 32px; padding: 0 14px; border: 1px solid rgba(83,102,125,.14); border-radius: 8px; background: rgba(255,255,255,.75); font-size: 10px; font-weight: 700; cursor: pointer; }
+    .modal-foot .primary { border: 0; color: white; background: #3b80cf; }
+    .hotspot { position: fixed; z-index: 50; left: 8px; bottom: 60px; max-width: 210px; padding: 9px 11px; border-radius: 9px; color: #f2f6fb; background: rgba(31,38,48,.88); box-shadow: 0 10px 26px rgba(22,31,45,.22); font-size: 10px; line-height: 1.45; opacity: 0; transform: translateY(4px); transition: opacity .16s ease-out, transform .16s ease-out; pointer-events: none; }
+    .hotspot.show { opacity: 1; transform: translateY(0); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; } }
+  </style>
+</head>
+<body>
+  <main class="app" id="app">
+    <aside class="sidebar" aria-label="工作空间与事项侧栏">
+      <header class="windowbar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="compose">
+          <svg class="mini-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg>
+          <span>新增工作空间</span>
+        </div>
+      </header>
+      <nav class="workspace-groups">
+        <section class="workspace">
+          <div class="workspace-head"><span>⌄</span><span>▱</span><span class="name">matou_workspace</span><span class="push">＋ ···</span></div>
+          <button class="task"><span>≡</span><span>新事项 3</span><span class="dots">···</span></button>
+          <button class="task active"><span>≡</span><span>新事项 2</span><span class="dots">···</span></button>
+          <button class="task"><span>≡</span><span>新事项</span><span class="dots">···</span></button>
+          <button class="task"><span>≡</span><span>默认</span><span class="dots">···</span></button>
+        </section>
+        <section class="workspace">
+          <div class="workspace-head"><span>⌄</span><span>⌂</span><span class="name">icesword</span><span class="push">默认</span></div>
+          <button class="task"><span>≡</span><span>默认</span><span class="dots">···</span></button>
+        </section>
+        <section class="workspace">
+          <div class="workspace-head"><span>⌄</span><span>▱</span><span class="name">AIWriteX</span></div>
+          <button class="task"><span>≡</span><span>默认</span><span class="dots">···</span></button>
+        </section>
+      </nav>
+      <footer class="side-footer">
+        <button class="side-action" id="boardButton" type="button">
+          <svg class="mini-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg>
+          <span>看板</span>
+        </button>
+        <button class="side-action" id="settingsButton" type="button" aria-label="打开设置">
+          <svg class="mini-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.2.36.52.7 1 .9.3.13.64.2 1 .2h.1v4h-.1c-.4 0-.74.07-1 .2-.48.2-.8.54-1 .9Z"/></svg>
+          <span>设置</span>
+        </button>
+      </footer>
+    </aside>
+
+    <section class="shell">
+      <header class="top-tabs">
+        <div class="scene-tab active" id="mainTab"><span id="mainTabLabel">Claude · /Users/icesword/…</span><span class="close">×</span></div>
+        <button class="tab-add" type="button">+</button>
+        <span class="top-spacer"></span>
+        <span class="top-icon">⌘</span><span class="top-icon">◧</span>
+      </header>
+      <div class="work-area">
+        <section class="terminal-view" aria-label="终端工作区">
+          <article class="terminal-card">
+            <header class="terminal-head"><span>Claude</span><span class="tools">▧ ⑂ ⊖</span></header>
+            <div class="terminal-body">Claude Code v2.1.251
+Opus 5 (1M context) with xhigh effort
+Claude Max
+~/matou_workspace
+
+△ Your login expires in 1 day · run /login to renew</div>
+            <div class="terminal-input">› ▏</div>
+            <footer class="terminal-status">
+              <span class="permission">DEFAULT</span>
+              <span>上下文 18%</span>
+              <span>空闲</span>
+              <span class="path">~/matou_workspace</span>
+            </footer>
+          </article>
+          <div class="empty-plane"></div>
+        </section>
+
+        <section class="settings-view" aria-label="设置">
+          <div class="settings-frame">
+            <nav class="settings-nav" aria-label="设置分类">
+              <h2 class="settings-title">设置</h2>
+              <div class="settings-nav-label">AI 服务</div>
+              <button class="settings-nav-item active" type="button">
+                <svg class="mini-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+                模型切换
+              </button>
+              <p class="settings-nav-hint">供应商切换是全局设置，将同步影响所有 Matou 窗口。</p>
+            </nav>
+            <section class="settings-main">
+              <header class="settings-heading">
+                <div>
+                  <h1>模型切换</h1>
+                  <p>配置 Claude Code 与 Codex 使用的供应商，并设置全局默认。</p>
+                </div>
+                <button class="settings-close" id="settingsClose" aria-label="关闭设置" type="button">×</button>
+              </header>
+
+              <div class="app-tabs" role="tablist" aria-label="CLI 类型">
+                <button class="app-tab active" data-cli="claude" role="tab" type="button">Claude Code</button>
+                <button class="app-tab" data-cli="codex" role="tab" type="button">Codex</button>
+              </div>
+
+              <div class="current-summary">
+                <div class="summary-mark" id="summaryLogo">A</div>
+                <div class="summary-copy"><strong id="summaryTitle">Anthropic 官方</strong><span id="summaryDetail">Claude Opus 5 · api.anthropic.com</span></div>
+                <span class="global-chip">全局使用中</span>
+              </div>
+
+              <div class="provider-toolbar">
+                <h2>供应商</h2><span class="count" id="providerCount">3 个配置</span>
+                <button class="add-provider" id="addProvider" type="button"><span>＋</span>新增供应商</button>
+              </div>
+              <div class="provider-list" id="providerList"></div>
+              <div class="impact-note"><span>ⓘ</span><span><b>切换会影响所有 Matou 窗口。</b> Claude Code 从下一次请求开始生效；Codex 新会话直接生效，运行中的会话需要重启。</span></div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status"><i>✓</i><span id="toastText"></span></div>
+  <div class="hotspot show" id="hotspot">新入口：点击左侧栏底部的「设置」</div>
+
+  <div class="modal-layer" id="providerModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <section class="provider-modal">
+      <header class="modal-head"><strong id="modalTitle">新增供应商</strong><button id="modalClose" type="button">×</button></header>
+      <div class="modal-body">
+        <div class="field"><label>供应商名称</label><input id="providerName" value="自定义供应商" /></div>
+        <div class="field"><label>默认模型</label><input id="providerModel" value="claude-opus-5" /></div>
+        <div class="field wide"><label>API 地址</label><input id="providerEndpoint" value="https://api.example.com" /></div>
+        <div class="field wide"><label>API Key</label><input class="secret" id="providerKey" type="password" value="sk-demo-placeholder" /></div>
+        <div class="advanced">▸ 高级配置　模型映射与未知配置字段将在这里保留</div>
+      </div>
+      <footer class="modal-foot"><button id="modalCancel" type="button">取消</button><button class="primary" id="modalSave" type="button">保存配置</button></footer>
+    </section>
+  </div>
+
+  <script>
+    const app = document.getElementById('app');
+    const settingsButton = document.getElementById('settingsButton');
+    const boardButton = document.getElementById('boardButton');
+    const hotspot = document.getElementById('hotspot');
+    const toast = document.getElementById('toast');
+    const toastText = document.getElementById('toastText');
+    const providerModal = document.getElementById('providerModal');
+    const cliTabs = [...document.querySelectorAll('.app-tab')];
+    const state = {
+      cli: 'claude',
+      current: { claude: 'anthropic', codex: 'openai' },
+      providers: {
+        claude: [
+          { id: 'anthropic', logo: 'A', tone: 'anthropic', name: 'Anthropic 官方', model: 'Claude Opus 5', endpoint: 'api.anthropic.com' },
+          { id: 'packy', logo: 'P', tone: 'packy', name: 'PackyCode', model: 'Claude Opus 5', endpoint: 'api.packycode.com' },
+          { id: 'kimi', logo: 'K', tone: 'kimi', name: 'Kimi Coding', model: 'Kimi K3', endpoint: 'api.kimi.com/coding' }
+        ],
+        codex: [
+          { id: 'openai', logo: 'O', tone: 'openai', name: 'OpenAI 官方', model: 'GPT-5.6 Sol', endpoint: 'api.openai.com/v1' },
+          { id: 'packy-codex', logo: 'P', tone: 'packy', name: 'PackyCode', model: 'GPT-5.6 Sol', endpoint: 'api.packycode.com/v1' }
+        ]
+      }
+    };
+
+    function showSettings() {
+      app.classList.add('is-settings');
+      settingsButton.classList.add('active');
+      boardButton.classList.remove('active');
+      document.getElementById('mainTabLabel').textContent = '设置 · 模型切换';
+      hotspot.classList.remove('show');
+      renderProviders();
+    }
+    function closeSettings() {
+      app.classList.remove('is-settings');
+      settingsButton.classList.remove('active');
+      document.getElementById('mainTabLabel').textContent = 'Claude · /Users/icesword/…';
+    }
+    function showToast(message) {
+      toastText.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => toast.classList.remove('show'), 2400);
+    }
+    function renderProviders() {
+      const providers = state.providers[state.cli];
+      const currentId = state.current[state.cli];
+      const current = providers.find(item => item.id === currentId) || providers[0];
+      document.getElementById('summaryLogo').textContent = current.logo;
+      document.getElementById('summaryLogo').className = `summary-mark ${current.tone}`;
+      document.getElementById('summaryTitle').textContent = current.name;
+      document.getElementById('summaryDetail').textContent = `${current.model} · ${current.endpoint}`;
+      document.getElementById('providerCount').textContent = `${providers.length} 个配置`;
+      document.getElementById('providerList').innerHTML = providers.map(provider => {
+        const active = provider.id === currentId;
+        return `<article class="provider-card${active ? ' current' : ''}">
+          <div class="provider-logo ${provider.tone}">${provider.logo}</div>
+          <div class="provider-name"><strong>${provider.name}${active ? '<span class="active-pill">使用中</span>' : ''}</strong><span>${provider.endpoint}</span></div>
+          <div class="provider-detail"><strong>${provider.model}</strong><span>${state.cli === 'claude' ? '主模型' : '默认模型 · xhigh'}</span></div>
+          <div class="provider-actions"><button class="ghost-btn" data-edit="${provider.id}">编辑</button><button class="switch-btn" data-switch="${provider.id}" ${active ? 'disabled' : ''}>${active ? '当前配置' : '切换'}</button></div>
+        </article>`;
+      }).join('');
+      document.querySelectorAll('[data-switch]').forEach(button => button.addEventListener('click', () => switchProvider(button.dataset.switch)));
+      document.querySelectorAll('[data-edit]').forEach(button => button.addEventListener('click', () => openModal(button.dataset.edit)));
+    }
+    function switchProvider(providerId) {
+      const provider = state.providers[state.cli].find(item => item.id === providerId);
+      if (!provider) return;
+      state.current[state.cli] = providerId;
+      renderProviders();
+      const suffix = state.cli === 'codex' ? '；新会话立即生效' : '；所有窗口已更新';
+      showToast(`已切换为 ${provider.name}${suffix}`);
+    }
+    function openModal(providerId) {
+      const provider = state.providers[state.cli].find(item => item.id === providerId);
+      document.getElementById('modalTitle').textContent = provider ? `编辑 ${provider.name}` : '新增供应商';
+      document.getElementById('providerName').value = provider?.name || '自定义供应商';
+      document.getElementById('providerModel').value = provider?.model || (state.cli === 'claude' ? 'claude-opus-5' : 'gpt-5.6-sol');
+      document.getElementById('providerEndpoint').value = provider ? `https://${provider.endpoint}` : 'https://api.example.com';
+      document.getElementById('providerKey').value = 'sk-demo-placeholder';
+      providerModal.dataset.editId = providerId || '';
+      providerModal.classList.add('open');
+    }
+    function closeModal() { providerModal.classList.remove('open'); }
+    function saveModal() {
+      const editId = providerModal.dataset.editId;
+      const list = state.providers[state.cli];
+      const next = {
+        id: editId || `custom-${Date.now()}`,
+        logo: document.getElementById('providerName').value.trim().slice(0, 1).toUpperCase() || 'C',
+        tone: 'packy',
+        name: document.getElementById('providerName').value.trim() || '自定义供应商',
+        model: document.getElementById('providerModel').value.trim(),
+        endpoint: document.getElementById('providerEndpoint').value.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      };
+      const index = list.findIndex(item => item.id === editId);
+      if (index >= 0) list[index] = { ...list[index], ...next };
+      else list.push(next);
+      closeModal();
+      renderProviders();
+      showToast(index >= 0 ? '供应商配置已保存' : '供应商已添加');
+    }
+
+    settingsButton.addEventListener('click', showSettings);
+    document.getElementById('settingsClose').addEventListener('click', closeSettings);
+    boardButton.addEventListener('click', () => { closeSettings(); boardButton.classList.toggle('active'); showToast('看板入口保持原位置'); });
+    cliTabs.forEach(tab => tab.addEventListener('click', () => {
+      cliTabs.forEach(item => item.classList.toggle('active', item === tab));
+      state.cli = tab.dataset.cli;
+      renderProviders();
+    }));
+    document.getElementById('addProvider').addEventListener('click', () => openModal());
+    document.getElementById('modalClose').addEventListener('click', closeModal);
+    document.getElementById('modalCancel').addEventListener('click', closeModal);
+    document.getElementById('modalSave').addEventListener('click', saveModal);
+    providerModal.addEventListener('click', event => { if (event.target === providerModal) closeModal(); });
+    window.addEventListener('keydown', event => { if (event.key === 'Escape') providerModal.classList.contains('open') ? closeModal() : closeSettings(); });
+    setTimeout(() => hotspot.classList.remove('show'), 4200);
+  </script>
+</body>
+</html>

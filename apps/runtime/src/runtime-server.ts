@@ -9,7 +9,8 @@ import {
   PROTOCOL_VERSION,
   parseRendererMessage,
   type RendererMessage,
-  type RuntimeMessage
+  type RuntimeMessage,
+  type ProviderCli
 } from '@matou/contracts'
 
 import { DomainEventStore } from './events/domain-event-store'
@@ -47,6 +48,7 @@ import {
   ShellHistoryRepository,
   formatShellHistoryForTerminal
 } from './shell-history/shell-history'
+import { ProviderConfigStore } from './provider-config/provider-config-store'
 
 export interface PortMessageEvent {
   data: unknown
@@ -82,6 +84,7 @@ export interface RuntimeServerOptions {
   hudRegistry?: SessionHudRegistry
   controlAssetRoot?: string
   controlNodeExecutable?: string
+  providerConfigs?: ProviderConfigStore
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -100,6 +103,7 @@ interface InteractiveClaudeLaunch {
 const configuredCcLaunches = new Map<string, Promise<InteractiveClaudeLaunch | undefined>>()
 
 export class RuntimeServer {
+  static readonly #instances = new Set<RuntimeServer>()
   readonly #runtimeId = randomUUID()
   readonly #port: RuntimePort
   readonly #sessions: RuntimeSessionRegistry
@@ -119,6 +123,7 @@ export class RuntimeServer {
   readonly #providerModes: ProviderModeService
   readonly #workStatuses: SessionWorkStatusService
   readonly #preferences: PreferenceRepository
+  readonly #providerConfigs: ProviderConfigStore
   readonly #shellHistory: ShellHistoryRepository
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
@@ -173,6 +178,7 @@ export class RuntimeServer {
     this.#providerModes = new ProviderModeService(database, transactions)
     this.#workStatuses = new SessionWorkStatusService(database, transactions)
     this.#preferences = new PreferenceRepository(database)
+    this.#providerConfigs = options.providerConfigs ?? new ProviderConfigStore(dataRoot)
     this.#shellHistory = new ShellHistoryRepository(database)
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
@@ -188,6 +194,7 @@ export class RuntimeServer {
     this.#controlNodeExecutable = options.controlNodeExecutable ??
       process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
     this.#workspacePaths = workspacePaths
+    RuntimeServer.#instances.add(this)
     void configuredCcLaunch()
     for (const session of [...this.#sessions.values()]) {
       const authority = this.#database.get<{ archived_at: number | null }>(
@@ -251,6 +258,7 @@ export class RuntimeServer {
     this.#summaryTimers.clear()
     for (const sessionId of this.#summaryBuffers.keys()) this.#flushSessionSummary(sessionId)
     this.#closed = true
+    RuntimeServer.#instances.delete(this)
     for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
     this.#cwdTimers.clear()
     for (const timer of this.#providerResumeTimers.values()) clearTimeout(timer)
@@ -524,6 +532,11 @@ export class RuntimeServer {
             persisted: false
           }
         : await this.#router.handle(message.method, message.payload)
+      if (message.method === 'provider-config.activate') {
+        const input = isRecord(message.payload) ? message.payload : undefined
+        const cli = input?.cli === 'claude-code' || input?.cli === 'codex' ? input.cli : undefined
+        if (cli === 'claude-code') await RuntimeServer.#restartProviderSessions(cli)
+      }
       if (isGitMutation(message.method)) {
         await Promise.all([...this.#attachedSessionIds].map((sessionId) =>
           this.refreshSessionHud(sessionId)
@@ -1006,6 +1019,9 @@ export class RuntimeServer {
           })
         }
       }
+      const providerLaunch = message.profile === 'shell'
+        ? { env: {} as Record<string, string> }
+        : await this.#providerConfigs.launchConfig(message.profile)
       if (message.profile === 'claude-code' && runId && this.#providerHooks) {
         hookRegistration = await this.#providerHooks.registerClaudeSession({
           runId,
@@ -1038,8 +1054,11 @@ export class RuntimeServer {
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
         }),
+        ...(providerLaunch.model === undefined ? {} : { model: providerLaunch.model }),
         ...(runId === undefined ? {} : { runId }),
-        ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
+        ...((controlEnvironment === undefined && Object.keys(providerLaunch.env).length === 0) ? {} : {
+          env: { ...providerLaunch.env, ...controlEnvironment }
+        }),
         send: this.#sendToPort,
         onOutput: (data) => {
           emittedTerminalOutput = true
@@ -1635,6 +1654,35 @@ export class RuntimeServer {
       throw new RpcFault('INTERNAL_ERROR', 'AI Session permission respawn failed')
     }
     replacement.display('\u001b[2J\u001b[3J\u001b[H')
+  }
+
+  static async #restartProviderSessions(cli: ProviderCli): Promise<void> {
+    const restarted = new Set<string>()
+    for (const server of RuntimeServer.#instances) {
+      for (const [sessionId, descriptor] of server.#spawnDescriptors) {
+        if (descriptor.profile !== cli || restarted.has(sessionId)) continue
+        restarted.add(sessionId)
+        await server.#respawnForProviderConfig(sessionId, descriptor)
+      }
+    }
+  }
+
+  async #respawnForProviderConfig(sessionId: string, descriptor: TerminalSpawnMessage): Promise<void> {
+    await this.#sessions.runExclusive(sessionId, async () => {
+      const session = this.#sessions.get(sessionId)
+      if (!session || session.profile !== descriptor.profile) return
+      this.#clearProviderResumeTimer(sessionId)
+      this.#sessions.delete(sessionId, session)
+      this.#control?.backend.unregister(sessionId, session)
+      this.#control?.tokens.revokeRun(session.runId ?? sessionId)
+      session.dispose({ notifyExit: false })
+      await session.whenClosed()
+      await this.#spawn(descriptor)
+      const replacement = this.#sessions.get(sessionId)
+      if (replacement && replacement.profile === descriptor.profile) {
+        replacement.display('\u001b[2J\u001b[3J\u001b[H')
+      }
+    })
   }
 
   async #maybePromoteShellAgent(session: PtySession, data: string): Promise<boolean> {

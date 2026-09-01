@@ -206,6 +206,15 @@ describe('parseRendererMessage', () => {
     })).toMatchObject({ type: 'rpc.request', method: 'session.set-permission-mode' })
   })
 
+  it('allowlists global provider configuration and switching', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'provider-config.snapshot',
+      'provider-config.upsert',
+      'provider-config.delete',
+      'provider-config.activate'
+    ]))
+  })
+
   it('rejects RPC methods outside the explicit allowlist', () => {
     expect(() => parseRendererMessage({
       type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'request-1',

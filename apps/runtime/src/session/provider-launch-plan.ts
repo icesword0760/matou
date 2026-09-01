@@ -9,6 +9,7 @@ export interface PtyCommandInput {
   settingsPath?: string
   controlAssetRoot?: string
   codexDeveloperInstructions?: string
+  model?: string
 }
 
 export interface PtyCommand {
@@ -26,6 +27,7 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     if (controlAssetRoot) {
       args.push('--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'))
     }
+    if (input.model?.trim()) args.push('--model', input.model.trim())
     if (identity) args.push('--resume', identity)
     if (identity && input.forkSession) args.push('--fork-session')
     if (input.permissionMode === 'bypassPermissions') {
@@ -41,6 +43,7 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
         `developer_instructions=${JSON.stringify(input.codexDeveloperInstructions)}`
       )
     }
+    if (input.model?.trim()) args.push('--model', input.model.trim())
     if (input.permissionMode === 'bypassPermissions') {
       args.push('--dangerously-bypass-approvals-and-sandbox')
     }

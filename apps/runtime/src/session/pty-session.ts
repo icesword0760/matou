@@ -25,6 +25,7 @@ interface PtySessionOptions {
   permissionMode?: string
   settingsPath?: string
   controlAssetRoot?: string
+  model?: string
   env?: Record<string, string>
   send: (message: RuntimeMessage) => void
   onExit?: (
@@ -115,7 +116,8 @@ export class PtySession {
       ...(options.controlAssetRoot === undefined ? {} : {
         controlAssetRoot: options.controlAssetRoot
       }),
-      ...(codexDeveloperInstructions === undefined ? {} : { codexDeveloperInstructions })
+      ...(codexDeveloperInstructions === undefined ? {} : { codexDeveloperInstructions }),
+      ...(options.model === undefined ? {} : { model: options.model })
     })
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)

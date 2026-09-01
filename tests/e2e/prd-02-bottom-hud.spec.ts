@@ -78,7 +78,8 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
     await expect(hud).toHaveAttribute('data-hud-mode', 'agent')
     await expect.poll(() => positivePid(surface)).not.toBe(shellPid)
     await expect(hud.getByRole('button', { name: /当前权限模式：Default/ })).toBeVisible()
-    await expect(hud.getByRole('button', { name: '点击切换模型' })).toHaveText('Opus Plan')
+    await expect(hud.getByRole('button', { name: '点击切换模型' })).toHaveCount(0)
+    await expect(fixture.page.getByRole('button', { name: '设置' })).toBeVisible()
     await expect(hud).toContainText('72%')
     await expect(hud.locator('.context-ring-fg')).toHaveAttribute('stroke', '#d29922')
     await expect(hud).toContainText('任务中')
@@ -92,17 +93,21 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
       await hudGeometry(fixture.page.locator('body')), null, 2
     ))
 
+    await fixture.page.getByRole('button', { name: '设置' }).click()
+    const providerSettings = fixture.page.getByRole('region', { name: '模型切换设置' })
+    await expect(providerSettings.getByRole('heading', { name: '模型切换' })).toBeVisible()
+    await expect(providerSettings).toContainText('Anthropic 官方')
+    await fixture.page.waitForTimeout(250)
+    await fixture.page.locator('.hierarchy-shell').screenshot({
+      path: join(evidenceDirectory, 'model-switch-settings.png')
+    })
+    await providerSettings.getByRole('button', { name: '关闭设置' }).click()
+
     await hud.getByRole('button', { name: /当前权限模式/ }).click()
     const permissionMenu = fixture.page.getByRole('menu', { name: '权限模式' })
     await expect(permissionMenu.getByRole('menuitem')).toHaveCount(4)
     await permissionMenu.getByRole('menuitem', { name: 'Plan Mode' }).click()
     await expect(hud.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeVisible()
-
-    await hud.getByRole('button', { name: '点击切换模型' }).click()
-    const modelMenu = fixture.page.getByRole('menu', { name: '模型' })
-    await expect(modelMenu.getByRole('menuitem')).toHaveCount(3)
-    await modelMenu.getByRole('menuitem', { name: 'Claude Sonnet 4.6' }).click()
-    await expect(hud.getByRole('button', { name: '点击切换模型' })).toHaveText('Sonnet')
 
     const beforeBypassPid = await positivePid(surface)
     await hud.getByRole('button', { name: /当前权限模式/ }).click()
