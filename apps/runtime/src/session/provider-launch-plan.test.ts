@@ -7,11 +7,13 @@ describe('PRD 04 provider launch plan', () => {
     expect(resolvePtyCommand({
       profile: 'claude-code', executable: '/fixture/claude',
       providerSessionId: 'claude-session-1', permissionMode: 'bypassPermissions',
-      settingsPath: '/private/matou/settings.json'
+      settingsPath: '/private/matou/settings.json',
+      controlAssetRoot: '/Applications/Matou Resources/control assets'
     })).toEqual({
       file: '/fixture/claude',
       args: [
         '--settings', '/private/matou/settings.json',
+        '--plugin-dir', '/Applications/Matou Resources/control assets/providers/claude-plugin',
         '--resume', 'claude-session-1', '--dangerously-skip-permissions'
       ],
       resuming: true
@@ -21,19 +23,29 @@ describe('PRD 04 provider launch plan', () => {
   it('captures a new Claude conversation through additive hooks without changing user settings', () => {
     expect(resolvePtyCommand({
       profile: 'claude-code', executable: '/fixture/claude',
-      settingsPath: '/private/matou/settings.json'
+      settingsPath: '/private/matou/settings.json',
+      controlAssetRoot: '/private/matou/control-assets'
     })).toEqual({
       file: '/fixture/claude',
-      args: ['--settings', '/private/matou/settings.json'],
+      args: [
+        '--settings', '/private/matou/settings.json',
+        '--plugin-dir', '/private/matou/control-assets/providers/claude-plugin'
+      ],
       resuming: false
     })
   })
 
   it('resumes Codex by its independent session identity', () => {
     expect(resolvePtyCommand({
-      profile: 'codex', executable: '/fixture/codex', providerSessionId: 'codex-session-1'
+      profile: 'codex', executable: '/fixture/codex', providerSessionId: 'codex-session-1',
+      codexDeveloperInstructions: '第一行\n第二行有 "引号" 和 \\ 路径'
     })).toEqual({
-      file: '/fixture/codex', args: ['resume', 'codex-session-1'], resuming: true
+      file: '/fixture/codex',
+      args: [
+        '-c', 'developer_instructions="第一行\\n第二行有 \\"引号\\" 和 \\\\ 路径"',
+        'resume', 'codex-session-1'
+      ],
+      resuming: true
     })
   })
 
@@ -48,14 +60,30 @@ describe('PRD 04 provider launch plan', () => {
     expect(resolvePtyCommand({
       profile: 'claude-code', executable: '/fixture/claude',
       providerSessionId: 'claude-source-1', forkSession: true,
-      settingsPath: '/private/matou/settings.json'
+      settingsPath: '/private/matou/settings.json',
+      controlAssetRoot: '/private/matou/control-assets'
     })).toEqual({
       file: '/fixture/claude',
       args: [
         '--settings', '/private/matou/settings.json',
+        '--plugin-dir', '/private/matou/control-assets/providers/claude-plugin',
         '--resume', 'claude-source-1', '--fork-session'
       ],
       resuming: true
+    })
+  })
+
+  it('keeps Codex permission flags global while loading session-only instructions', () => {
+    expect(resolvePtyCommand({
+      profile: 'codex', executable: '/fixture/codex',
+      permissionMode: 'bypassPermissions', codexDeveloperInstructions: 'Use mt.'
+    })).toEqual({
+      file: '/fixture/codex',
+      args: [
+        '-c', 'developer_instructions="Use mt."',
+        '--dangerously-bypass-approvals-and-sandbox'
+      ],
+      resuming: false
     })
   })
 })

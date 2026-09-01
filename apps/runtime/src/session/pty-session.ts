@@ -1,4 +1,6 @@
 import os from 'node:os'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import type { RuntimeMessage } from '@matou/contracts'
 import { PROTOCOL_VERSION } from '@matou/contracts'
@@ -22,6 +24,7 @@ interface PtySessionOptions {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  controlAssetRoot?: string
   env?: Record<string, string>
   send: (message: RuntimeMessage) => void
   onExit?: (
@@ -93,6 +96,9 @@ export class PtySession {
   static async create(options: PtySessionOptions): Promise<PtySession> {
     const journal = await SegmentJournal.open(options.dataRoot, options.sessionId)
     const profile = options.profile ?? 'shell'
+    const codexDeveloperInstructions = profile === 'codex' && options.controlAssetRoot
+      ? await readProviderInstructions(options.controlAssetRoot)
+      : undefined
     const command = resolvePtyCommand({
       profile,
       executable: resolveExecutable(profile),
@@ -105,7 +111,11 @@ export class PtySession {
       }),
       ...(options.settingsPath === undefined ? {} : {
         settingsPath: options.settingsPath
-      })
+      }),
+      ...(options.controlAssetRoot === undefined ? {} : {
+        controlAssetRoot: options.controlAssetRoot
+      }),
+      ...(codexDeveloperInstructions === undefined ? {} : { codexDeveloperInstructions })
     })
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)
@@ -319,6 +329,22 @@ export class PtySession {
       }
     })
   }
+}
+
+async function readProviderInstructions(controlAssetRoot: string): Promise<string | undefined> {
+  try {
+    return await readFile(
+      join(controlAssetRoot, 'providers', 'codex-developer-instructions.md'),
+      'utf8'
+    )
+  } catch (error) {
+    console.error(`[host-control.instructions] ${errorMessage(error)}`)
+    return undefined
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {

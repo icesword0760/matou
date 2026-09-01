@@ -1035,6 +1035,9 @@ export class RuntimeServer {
         ...(hookRegistration === undefined ? {} : {
           settingsPath: hookRegistration.settingsPath
         }),
+        ...(this.#controlAssetRoot === undefined ? {} : {
+          controlAssetRoot: this.#controlAssetRoot
+        }),
         ...(runId === undefined ? {} : { runId }),
         ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
         send: this.#sendToPort,
