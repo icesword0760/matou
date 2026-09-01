@@ -4,6 +4,7 @@ import { SessionEnvironmentRepository } from '../session/session-environment-rep
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 import {
+  managedWorktreeIdentityExpectation,
   WorktreeHealthService,
   type WorktreeHealth
 } from './worktree-health-service'
@@ -163,11 +164,12 @@ export class WorktreeReconciler {
   }
 
   async #check(row: ReconcileRow): Promise<WorktreeHealth> {
-    return this.#health.check({
+    return this.#health.check(managedWorktreeIdentityExpectation({
       repositoryRoot: row.repository_root,
       path: row.worktree_path,
-      expectedBranch: row.branch_name
-    })
+      branch: row.branch_name,
+      baseRevision: row.base_revision
+    }))
   }
 
   #degrade(row: ReconcileRow, health: Exclude<WorktreeHealth, { kind: 'ready' }>, now: number): void {

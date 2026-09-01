@@ -49,7 +49,10 @@ import { SessionInteractionService } from './session-canvas/session-interaction-
 import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { PreferenceRepository } from './product/experience-foundation'
-import { WorktreeHealthService } from './worktrees/worktree-health-service'
+import {
+  managedWorktreeIdentityExpectation,
+  WorktreeHealthService
+} from './worktrees/worktree-health-service'
 import {
   ShellCommandBlockCollector,
   ShellHistoryRepository,
@@ -1511,9 +1514,10 @@ export class RuntimeServer {
           repository_root: string
           worktree_path: string
           branch_name: string
+          base_revision: string | null
           state: string
         }>(
-          `SELECT repository_root, worktree_path, branch_name, state
+          `SELECT repository_root, worktree_path, branch_name, base_revision, state
            FROM worktrees WHERE id = ?`,
           worktreeId
         )
@@ -1532,11 +1536,28 @@ export class RuntimeServer {
       return false
     }
 
-    const health = await this.#worktreeHealth.check({
-      repositoryRoot: worktree.repository_root,
-      path: worktree.worktree_path,
-      expectedBranch: worktree.branch_name
-    })
+    let health
+    try {
+      health = await this.#worktreeHealth.check(managedWorktreeIdentityExpectation({
+        repositoryRoot: worktree.repository_root,
+        path: worktree.worktree_path,
+        branch: worktree.branch_name,
+        baseRevision: worktree.base_revision
+      }))
+    } catch (error) {
+      this.#markEnvironmentUnavailable(
+        sessionId,
+        worktreeId,
+        'failed',
+        `health-check-failed:${errorMessage(error)}`
+      )
+      this.#sendError(
+        'SESSION_ENVIRONMENT_UNAVAILABLE',
+        '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续',
+        sessionId
+      )
+      return false
+    }
     if (health.kind === 'ready') return true
 
     this.#markEnvironmentUnavailable(

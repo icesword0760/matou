@@ -220,12 +220,55 @@ describe('WorktreeReconciler', () => {
       `SELECT state FROM session_environment_bindings WHERE session_id = 'session-1'`
     )).toEqual({ state: 'missing' })
   })
+
+  it('accepts a registered detached Worktree only while its recorded HEAD still matches', async () => {
+    const path = join(root, 'worktrees', 'detached')
+    await exec('git', ['-C', repositoryRoot, 'worktree', 'add', '--detach', path, 'HEAD'])
+    const head = (await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim()
+    seedWorktree({
+      id: 'detached', path, branch: '(detached)', baseRevision: head, state: 'ready'
+    })
+
+    await expect(reconciler.reconcileAll(100)).resolves.toEqual({
+      checked: 1, repaired: 0, degraded: 0
+    })
+    await writeFile(join(path, 'next.txt'), 'next\n')
+    await exec('git', ['-C', path, 'add', 'next.txt'])
+    await exec('git', ['-C', path, 'commit', '-m', 'next'])
+
+    await expect(reconciler.reconcileAll(101)).resolves.toEqual({
+      checked: 1, repaired: 0, degraded: 1
+    })
+    expect(worktrees.get('detached')?.state).toBe('failed')
+  })
+
+  it('marks the active environment failed when Git refuses to remove a locked Worktree', async () => {
+    const path = join(root, 'worktrees', 'locked')
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/locked', path, 'HEAD'
+    ])
+    await exec('git', ['-C', repositoryRoot, 'worktree', 'lock', path])
+    seedWorktree({ id: 'locked', path, branch: 'feature/locked', state: 'removing' })
+    seedBoundSession('locked', 'context-locked')
+    const sessionBefore = database.get('SELECT * FROM sessions WHERE id = ?', 'session-1')
+
+    await expect(reconciler.reconcileAll(100)).resolves.toEqual({
+      checked: 1, repaired: 0, degraded: 1
+    })
+    expect(worktrees.get('locked')?.state).toBe('failed')
+    expect(database.get(
+      `SELECT active_target, state FROM session_environment_bindings
+       WHERE session_id = 'session-1'`
+    )).toEqual({ active_target: 'worktree', state: 'failed' })
+    expect(database.get('SELECT * FROM sessions WHERE id = ?', 'session-1')).toEqual(sessionBefore)
+  })
 })
 
 function seedWorktree(input: {
   id: string
   path: string
   branch: string
+  baseRevision?: string
   state: 'creating' | 'ready' | 'retained' | 'removing'
   setupPolicy?: Array<{ command: string; args: string[] }>
 }): void {
@@ -238,10 +281,11 @@ function seedWorktree(input: {
     tx.run(
       `INSERT INTO worktrees (
          id, execution_context_id, repository_root, worktree_path, branch_name,
-         base_ref, state, setup_policy_json, setup_result_json,
+         base_ref, base_revision, state, setup_policy_json, setup_result_json,
          cleanup_policy, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, 'HEAD', ?, ?, '[]', 'retain-dirty', 1, 1)`,
-      input.id, `context-${input.id}`, repositoryRoot, input.path, input.branch, input.state,
+       ) VALUES (?, ?, ?, ?, ?, 'HEAD', ?, ?, ?, '[]', 'retain-dirty', 1, 1)`,
+      input.id, `context-${input.id}`, repositoryRoot, input.path, input.branch,
+      input.baseRevision ?? null, input.state,
       JSON.stringify(input.setupPolicy ?? [])
     )
   })

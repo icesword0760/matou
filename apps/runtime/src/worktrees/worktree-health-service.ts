@@ -23,6 +23,27 @@ export interface WorktreeIdentityExpectation {
   expectedDetachedHead?: string
 }
 
+export function managedWorktreeIdentityExpectation(input: {
+  repositoryRoot: string
+  path: string
+  branch: string
+  baseRevision?: string | null
+}): WorktreeIdentityExpectation {
+  if (input.branch === '(detached)') {
+    if (!input.baseRevision) throw new Error('detached Worktree identity requires a base revision')
+    return {
+      repositoryRoot: input.repositoryRoot,
+      path: input.path,
+      expectedDetachedHead: input.baseRevision
+    }
+  }
+  return {
+    repositoryRoot: input.repositoryRoot,
+    path: input.path,
+    expectedBranch: input.branch
+  }
+}
+
 export class WorktreeHealthService {
   async check(expectation: WorktreeIdentityExpectation): Promise<WorktreeHealth> {
     const canonicalPath = await realpath(expectation.path).catch(() => undefined)

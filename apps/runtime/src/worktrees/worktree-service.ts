@@ -164,48 +164,56 @@ export class WorktreeService {
     const worktree = this.get(worktreeId)
     if (!worktree) throw new Error(`Worktree ${worktreeId} does not exist`)
     if (worktree.state === 'removed') return worktree
-    if (!(await pathExists(worktree.path))) {
-      await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'prune'])
-      return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
-    }
-    const status = await exec('git', ['-C', worktree.path, 'status', '--porcelain'])
-    if (status.stdout.trim() !== '') {
-      return this.#transactions.execute(command, ({ tx, emit }) => {
-        tx.run(
-          "UPDATE worktrees SET state = 'retained', retained_at = ?, updated_at = ? WHERE id = ?",
-          now,
-          now,
-          worktreeId
-        )
-        const retained = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
-        emitWorktree(emit, command.commandId, 'worktree.retained-dirty', retained, undefined, now)
-        return mapWorktree(retained)
-      }).result
-    }
-
-    const runIds = this.#database
-      .all<{ id: string }>(
-        `SELECT session_runs.id
-         FROM session_runs
-         JOIN sessions ON sessions.id = session_runs.session_id
-         WHERE sessions.execution_context_id = ?
-           AND session_runs.status IN ('starting', 'running')`,
-        worktree.executionContextId
-      )
-      .map(({ id }) => id)
-    await this.#stopRuns(runIds)
-    this.#transactions.execute(command, ({ tx, emit }) => {
-      tx.run("UPDATE worktrees SET state = 'removing', updated_at = ? WHERE id = ?", now, worktreeId)
-      const removing = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
-      emitWorktree(emit, command.commandId, 'worktree.removal-started', removing, undefined, now)
-      return null
-    })
     try {
+      if (!(await pathExists(worktree.path))) {
+        await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'prune'])
+        return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
+      }
+      const status = await exec('git', ['-C', worktree.path, 'status', '--porcelain'])
+      if (status.stdout.trim() !== '') {
+        return this.#transactions.execute(command, ({ tx, emit }) => {
+          tx.run(
+            "UPDATE worktrees SET state = 'retained', retained_at = ?, updated_at = ? WHERE id = ?",
+            now,
+            now,
+            worktreeId
+          )
+          const retained = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
+          emitWorktree(emit, command.commandId, 'worktree.retained-dirty', retained, undefined, now)
+          return mapWorktree(retained)
+        }).result
+      }
+
+      const runIds = this.#database
+        .all<{ id: string }>(
+          `SELECT session_runs.id
+           FROM session_runs
+           JOIN sessions ON sessions.id = session_runs.session_id
+           WHERE sessions.execution_context_id = ?
+             AND session_runs.status IN ('starting', 'running')`,
+          worktree.executionContextId
+        )
+        .map(({ id }) => id)
+      await this.#stopRuns(runIds)
+      this.#transactions.execute(command, ({ tx, emit }) => {
+        tx.run("UPDATE worktrees SET state = 'removing', updated_at = ? WHERE id = ?", now, worktreeId)
+        const removing = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
+        emitWorktree(emit, command.commandId, 'worktree.removal-started', removing, undefined, now)
+        return null
+      })
       await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'remove', worktree.path])
       return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
     } catch (error) {
       this.#transactions.execute(derivedCommand(command, 'remove-failed'), ({ tx, emit }) => {
         tx.run("UPDATE worktrees SET state = 'failed', updated_at = ? WHERE id = ?", now, worktreeId)
+        const sessions = tx.all<{ session_id: string }>(
+          `SELECT session_id FROM session_environment_bindings
+           WHERE managed_worktree_id = ? AND active_target = 'worktree'`,
+          worktreeId
+        )
+        for (const { session_id: sessionId } of sessions) {
+          this.#environments.markFailed(sessionId, `worktree-removal-failed:${errorMessage(error)}`, now, tx)
+        }
         const failed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
         emitWorktree(emit, `${command.commandId}:remove-failed`, 'worktree.removal-failed', failed, undefined, now, { error: errorMessage(error) })
         return null
