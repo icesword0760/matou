@@ -60,6 +60,17 @@ describe('parseRendererMessage', () => {
     ).toThrow()
   })
 
+  it('requires a resize identity so Runtime application can be observed exactly', () => {
+    expect(parseRendererMessage({
+      type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', resizeId: 7, cols: 120, rows: 40
+    })).toMatchObject({ type: 'terminal.resize', resizeId: 7, cols: 120, rows: 40 })
+    expect(() => parseRendererMessage({
+      type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', cols: 120, rows: 40
+    })).toThrow(/resizeId/)
+  })
+
   it('rejects session identifiers that could escape journal directories', () => {
     expect(() =>
       parseRendererMessage({

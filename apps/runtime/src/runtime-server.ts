@@ -396,7 +396,15 @@ export class RuntimeServer {
       }
       case 'terminal.resize':
         if (this.#attachedSessionIds.has(message.sessionId)) {
-          this.#sessions.get(message.sessionId)?.resize(message.cols, message.rows)
+          const session = this.#sessions.get(message.sessionId)
+          if (session) {
+            session.resize(message.cols, message.rows)
+            this.#port.postMessage({
+              type: 'terminal.resized', protocolVersion: PROTOCOL_VERSION,
+              sessionId: message.sessionId, resizeId: message.resizeId,
+              cols: message.cols, rows: message.rows
+            })
+          }
         }
         break
       case 'terminal.ack':

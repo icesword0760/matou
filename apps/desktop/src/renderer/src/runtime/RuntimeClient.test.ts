@@ -5,6 +5,20 @@ import { PROTOCOL_VERSION, parseRendererMessage } from '@matou/contracts'
 import { RuntimeClient, type RuntimeClientPort } from './RuntimeClient'
 
 describe('RuntimeClient', () => {
+  it('gives every terminal resize a session-local identity', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port)
+
+    client.resizeTerminal('session-a', 80, 24)
+    client.resizeTerminal('session-a', 100, 30)
+    client.resizeTerminal('session-b', 120, 40)
+
+    expect(port.sent.filter((message) => message.type === 'terminal.resize')).toEqual([
+      expect.objectContaining({ sessionId: 'session-a', resizeId: 1, cols: 80, rows: 24 }),
+      expect.objectContaining({ sessionId: 'session-a', resizeId: 2, cols: 100, rows: 30 }),
+      expect.objectContaining({ sessionId: 'session-b', resizeId: 1, cols: 120, rows: 40 })
+    ])
+  })
   it('correlates RPC and reattaches terminal consumers after a new port', async () => {
     const first = new FakePort()
     const client = new RuntimeClient(first, { clientId: 'renderer-1' })

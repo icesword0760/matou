@@ -728,17 +728,32 @@ test.describe('horizontal sibling navigation', () => {
 
       await fixture.page.evaluate(() => {
         type ResizeProbe = {
-          entries: Array<{ sessionId: string; cols: number; rows: number; at: number }>
+          entries: Array<{ sessionId: string; resizeId: number; cols: number; rows: number; at: number }>
+          applied: Array<{ sessionId: string; resizeId: number; cols: number; rows: number; at: number }>
         }
         const scope = window as typeof window & { __matouResizeProbe?: ResizeProbe }
-        scope.__matouResizeProbe = { entries: [] }
+        scope.__matouResizeProbe = { entries: [], applied: [] }
+        const observed = new WeakSet<MessagePort>()
         const original = MessagePort.prototype.postMessage
         MessagePort.prototype.postMessage = function(message: unknown, transferOrOptions?: unknown) {
+          if (!observed.has(this)) {
+            observed.add(this)
+            this.addEventListener('message', (event: MessageEvent<unknown>) => {
+              const value = event.data
+              if (!value || typeof value !== 'object' || !('type' in value) ||
+                value.type !== 'terminal.resized' || !('sessionId' in value) ||
+                !('resizeId' in value) || !('cols' in value) || !('rows' in value)) return
+              scope.__matouResizeProbe?.applied.push({
+                sessionId: String(value.sessionId), resizeId: Number(value.resizeId),
+                cols: Number(value.cols), rows: Number(value.rows), at: performance.now()
+              })
+            })
+          }
           if (message && typeof message === 'object' && 'type' in message &&
             message.type === 'terminal.resize' && 'sessionId' in message &&
-            'cols' in message && 'rows' in message) {
+            'resizeId' in message && 'cols' in message && 'rows' in message) {
             scope.__matouResizeProbe?.entries.push({
-              sessionId: String(message.sessionId),
+              sessionId: String(message.sessionId), resizeId: Number(message.resizeId),
               cols: Number(message.cols), rows: Number(message.rows), at: performance.now()
             })
           }
@@ -797,40 +812,76 @@ test.describe('horizontal sibling navigation', () => {
         expect(maximumMessagesInOneSecond(sessionEntries.map(({ at }) => at))).toBeLessThanOrEqual(60)
       }
 
-      const finalActive = activeSurface(fixture.page)
+      // Pick a card that is actually mounted in the horizontal viewport. The
+      // domain-focused Session can legitimately be outside the viewport while
+      // still counting as foreground, in which case it has no view resize to
+      // offer for this acceptance barrier.
+      const finalActive = visibleSurfaces(fixture.page).last()
+      await finalActive.click({ position: { x: 12, y: 12 } })
+      await expect(finalActive.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]'))
+        .toHaveAttribute('data-active', 'true')
       const finalActiveSessionId = await finalActive.getAttribute('data-session-id')
       expect(finalActiveSessionId).toBeTruthy()
-      const finalTextarea = finalActive.locator('.xterm-helper-textarea')
-      const marker = `__FINAL_STTY_${Date.now()}__`
-      const sttyResultPath = `${fixture.rootDirectory}/final-stty-size.txt`
+      // The Runtime may publish activity ordering while the test is typing.
+      // Bind every subsequent action to the captured Session identity instead
+      // of re-resolving the dynamic [data-active] selector.
+      const stableFinalActive = fixture.page.locator(
+        `.terminal-surface[data-session-id="${finalActiveSessionId}"]`
+      )
+      const finalTextarea = stableFinalActive.locator('.xterm-helper-textarea')
+      const evidenceId = Date.now().toString(36)
+      const marker = `R${evidenceId}`
+      const sttyResultPath = `/tmp/m-${evidenceId}`
+      await fixture.page.evaluate(() => {
+        const scope = window as typeof window & {
+          __matouResizeProbe?: { entries: unknown[]; applied: unknown[] }
+        }
+        if (scope.__matouResizeProbe) {
+          scope.__matouResizeProbe.entries = []
+          scope.__matouResizeProbe.applied = []
+        }
+      })
+      await fixture.app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.setSize(1200, 650)
+      )
+      await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
+      // The first real command can publish activity ordering and move the
+      // selected card. Let that product behavior finish before measuring the
+      // terminal dimensions so the acceptance check observes the stable card.
+      const settleMarker = `S${evidenceId}`
+      await finalTextarea.focus()
+      await finalTextarea.pressSequentially(`printf '${settleMarker}\\n'`, { delay: 2 })
+      await finalTextarea.press('Enter')
+      await expect(stableFinalActive.locator('.xterm-rows')).toContainText(settleMarker)
+      await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
       await finalTextarea.focus()
       await finalTextarea.pressSequentially(
         `stty size > '${sttyResultPath}'; printf '${marker}\\n'`,
         { delay: 2 }
       )
-      await fixture.page.evaluate(() => {
-        const scope = window as typeof window & {
-          __matouResizeProbe?: { entries: unknown[] }
-        }
-        if (scope.__matouResizeProbe) scope.__matouResizeProbe.entries = []
-      })
-      await fixture.app.evaluate(({ BrowserWindow }) =>
-        BrowserWindow.getAllWindows()[0]?.setSize(1200, 650)
+      // Focusing and laying out a long input line can change xterm by one or
+      // two columns. Settle that final offer too, then require Runtime's exact
+      // application ACK before Enter reaches the PTY.
+      const submitResize = await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
       )
-      await expect.poll(async () => (await readResizeEntries(fixture.page))
-        .filter(({ sessionId }) => sessionId === finalActiveSessionId).length).toBeGreaterThan(0)
-      await waitForResizeProbeToSettle(fixture.page, finalActiveSessionId!)
       await finalTextarea.press('Enter')
       await expect.poll(async () => readText(sttyResultPath).catch(() => '')).toMatch(/^\d+ \d+\n$/)
-      await expect(finalActive.locator('.xterm-rows')).toContainText(marker)
+      await expect(stableFinalActive.locator('.xterm-rows')).toContainText(marker)
+      const appliedAfterSubmit = await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
       const size = (await readText(sttyResultPath)).trim().match(/^(\d+) (\d+)$/)
       expect(size).not.toBeNull()
-      await waitForResizeProbeToSettle(fixture.page, finalActiveSessionId!)
-      const finalEntries = await readResizeEntries(fixture.page)
-      const finalResize = finalEntries.filter(({ sessionId }) => sessionId === finalActiveSessionId).at(-1)
-      expect(finalResize).toBeDefined()
+      expect({ rows: submitResize.rows, cols: submitResize.cols }).toEqual({
+        rows: appliedAfterSubmit.rows, cols: appliedAfterSubmit.cols
+      })
       expect({ rows: Number(size![1]), cols: Number(size![2]) }).toEqual({
-        rows: finalResize!.rows, cols: finalResize!.cols
+        rows: appliedAfterSubmit.rows, cols: appliedAfterSubmit.cols
       })
     } finally {
       await fixture.close()
@@ -863,7 +914,13 @@ function maximumMessagesInOneSecond(timestamps: number[]): number {
   return maximum
 }
 
-type ResizeProbeEntry = { sessionId: string; cols: number; rows: number; at: number }
+type ResizeProbeEntry = {
+  sessionId: string
+  resizeId: number
+  cols: number
+  rows: number
+  at: number
+}
 
 async function readResizeEntries(page: import('@playwright/test').Page): Promise<ResizeProbeEntry[]> {
   return page.evaluate(() => (
@@ -873,27 +930,42 @@ async function readResizeEntries(page: import('@playwright/test').Page): Promise
   ).__matouResizeProbe?.entries ?? [])
 }
 
-async function waitForResizeProbeToSettle(
-  page: import('@playwright/test').Page,
-  sessionId: string
-): Promise<void> {
-  await page.evaluate(async (targetSessionId) => {
-    const scope = window as typeof window & {
-      __matouResizeProbe?: { entries: ResizeProbeEntry[] }
+async function readAppliedResizeEntries(
+  page: import('@playwright/test').Page
+): Promise<ResizeProbeEntry[]> {
+  return page.evaluate(() => (
+    window as typeof window & {
+      __matouResizeProbe?: { applied: ResizeProbeEntry[] }
     }
-    await new Promise<void>((resolve) => {
-      let previous = ''
-      let stableFrames = 0
-      const observe = () => {
-        const entries = scope.__matouResizeProbe?.entries ?? []
-        const last = entries.filter(({ sessionId }) => sessionId === targetSessionId).at(-1)
-        const current = last ? `${last.cols}x${last.rows}:${entries.length}` : ''
-        stableFrames = current !== '' && current === previous ? stableFrames + 1 : 0
-        previous = current
-        if (stableFrames >= 4) resolve()
-        else requestAnimationFrame(observe)
-      }
-      requestAnimationFrame(observe)
-    })
-  }, sessionId)
+  ).__matouResizeProbe?.applied ?? [])
+}
+
+async function waitForCurrentXtermResizeApplied(
+  page: import('@playwright/test').Page,
+  surface: import('@playwright/test').Locator,
+  sessionId: string
+): Promise<ResizeProbeEntry> {
+  const deadline = Date.now() + 15_000
+  let previous = ''
+  let stableFrames = 0
+  while (Date.now() < deadline) {
+    const last = (await readResizeEntries(page))
+      .filter((entry) => entry.sessionId === sessionId).at(-1)
+    const current = await surface.locator('.terminal-surface__viewport').evaluate((element) => ({
+      cols: Number((element as HTMLElement).dataset.terminalCols),
+      rows: Number((element as HTMLElement).dataset.terminalRows)
+    }))
+    const applied = last !== undefined && (await readAppliedResizeEntries(page)).some((entry) =>
+      entry.sessionId === last.sessionId && entry.resizeId === last.resizeId &&
+      entry.cols === last.cols && entry.rows === last.rows
+    )
+    const signature = last && applied && current.cols === last.cols && current.rows === last.rows
+      ? `${last.resizeId}:${last.cols}x${last.rows}`
+      : ''
+    stableFrames = signature !== '' && signature === previous ? stableFrames + 1 : 0
+    previous = signature
+    if (stableFrames >= 4 && last) return last
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  }
+  throw new Error(`xterm and Runtime did not settle on one applied resize for ${sessionId}`)
 }

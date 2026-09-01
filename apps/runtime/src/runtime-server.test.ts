@@ -1021,12 +1021,32 @@ describe('RuntimeServer domain RPC', () => {
     })
     shutdownPort.receive({
       type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
-      sessionId: 'shutdown-session', cols: 100, rows: 30
+      sessionId: 'shutdown-session', resizeId: 1, cols: 100, rows: 30
     })
     await settle()
 
     expect(shutdownPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(errorsBefore)
     shutdownPort.disconnect()
+  })
+
+  it('acknowledges a resize only after the attached PTY has applied its exact offer', async () => {
+    registerSession(database, 'resize-ack-session')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'resize-ack-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('terminal.spawned')?.sessionId === 'resize-ack-session')
+
+    port.receive({
+      type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'resize-ack-session', resizeId: 9, cols: 111, rows: 37
+    })
+    await waitUntil(() => port.last('terminal.resized')?.resizeId === 9)
+
+    expect(port.last('terminal.resized')).toMatchObject({
+      sessionId: 'resize-ack-session', resizeId: 9, cols: 111, rows: 37
+    })
   })
 
   it('pushes replayable domain batches directly to a subscribed Renderer', async () => {

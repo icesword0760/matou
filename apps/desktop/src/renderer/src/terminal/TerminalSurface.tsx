@@ -155,6 +155,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     terminal.open(container)
     terminalRef.current = terminal
     fit.fit()
+    const publishTerminalDimensions = () => {
+      container.dataset.terminalCols = String(terminal.cols)
+      container.dataset.terminalRows = String(terminal.rows)
+    }
+    publishTerminalDimensions()
     fitRef.current = fit
     searchRef.current = search
     const resizeCoalescer = new ResizeCoalescer((cols, rows) => {
@@ -286,6 +291,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // sequence instead of replaying every byte at today's card width.
         terminal.write('', () => {
           terminal.resize(message.cols, message.rows)
+          publishTerminalDimensions()
           lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-reset') {
@@ -299,6 +305,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           replaying = false
           lastAppliedSequence = Math.max(lastAppliedSequence, message.throughSequence)
           fit.fit()
+          publishTerminalDimensions()
           if (validTerminalDimensions(terminal.cols, terminal.rows)) {
             resizeCoalescer.offer(terminal.cols, terminal.rows)
           }
@@ -349,6 +356,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       fit.fit()
+      publishTerminalDimensions()
       if (validTerminalDimensions(terminal.cols, terminal.rows)) {
         resizeCoalescer.offer(terminal.cols, terminal.rows)
       }

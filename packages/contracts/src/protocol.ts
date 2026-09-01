@@ -55,6 +55,7 @@ const resizeSchema = z.object({
   type: z.literal('terminal.resize'),
   protocolVersion,
   sessionId,
+  resizeId: z.number().int().nonnegative(),
   cols: z.number().int().min(2).max(1000),
   rows: z.number().int().min(1).max(500)
 })
@@ -314,6 +315,14 @@ export type RuntimeMessage =
       sequence: number
       exitCode: number
       signal?: number
+    }
+  | {
+      type: 'terminal.resized'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      resizeId: number
+      cols: number
+      rows: number
     }
   | {
       type: 'terminal.replay-start'

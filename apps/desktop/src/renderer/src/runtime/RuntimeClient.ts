@@ -53,6 +53,7 @@ export class RuntimeClient {
   readonly #requests = new Map<string, PendingRequest>()
   readonly #terminals = new Map<string, TerminalConsumer>()
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
+  readonly #terminalResizeIds = new Map<string, number>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
@@ -206,7 +207,12 @@ export class RuntimeClient {
 
   resizeTerminal(sessionId: string, cols: number, rows: number): void {
     if (this.#readOnly) return
-    this.#post({ type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION, sessionId, cols, rows })
+    const resizeId = (this.#terminalResizeIds.get(sessionId) ?? 0) + 1
+    this.#terminalResizeIds.set(sessionId, resizeId)
+    this.#post({
+      type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+      sessionId, resizeId, cols, rows
+    })
   }
 
   acknowledgeTerminal(sessionId: string, throughSequence: number): void {
@@ -245,6 +251,7 @@ export class RuntimeClient {
   disposeDeletedTerminal(sessionId: string): void {
     this.#terminals.delete(sessionId)
     this.#terminalCheckpoints.delete(sessionId)
+    this.#terminalResizeIds.delete(sessionId)
     if (this.#readOnly) return
     this.#post({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
   }
