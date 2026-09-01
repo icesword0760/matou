@@ -11,7 +11,7 @@ import type { SessionHudView } from '../hierarchy/hierarchy-types'
 afterEach(cleanup)
 
 describe('PRD 02 bottom HUD', () => {
-  it('renders the Kooky Shell field order and hides unavailable data silently', () => {
+  it('renders the reference product Shell field order and hides unavailable data silently', () => {
     const { container } = render(<TerminalHud hud={{
       sessionId: 'session-1', mode: 'shell', shell: 'zsh', cwd: '/Users/demo/project',
       gitBranch: 'feature/hud', gitDirty: true, startedAt: Date.now() - 70_000
@@ -64,7 +64,7 @@ describe('PRD 02 bottom HUD', () => {
     )
   })
 
-  it('renders the current Kooky Agent order and process fields without hidden metrics', () => {
+  it('renders the current reference product Agent order and process fields without hidden metrics', () => {
     const hud: SessionHudView = {
       sessionId: 'session-1', mode: 'agent', shell: 'zsh', cwd: '/Users/demo/project',
       gitBranch: 'main', gitDirty: false, startedAt: Date.now() - 3_700_000,
@@ -96,7 +96,7 @@ describe('PRD 02 bottom HUD', () => {
 
   it.each([
     [69, '#3fb950'], [70, '#d29922'], [84, '#d29922'], [85, '#f85149'], [130, '#f85149']
-  ])('uses the Kooky risk color for %s%% context', (contextPercent, color) => {
+  ])('uses the reference product risk color for %s%% context', (contextPercent, color) => {
     const { container } = render(<TerminalHud hud={agent({ contextPercent })}
       onPermissionMode={vi.fn()} onModel={vi.fn()} />)
     expect(container.querySelector('.context-ring-fg')?.getAttribute('stroke')).toBe(color)
@@ -105,7 +105,7 @@ describe('PRD 02 bottom HUD', () => {
 
   it.each([
     ['running', '任务中'], ['needs-input', '待输入'], ['error', '错误']
-  ] as const)('shows the Kooky Agent task label for %s', (taskStatus, label) => {
+  ] as const)('shows the reference product Agent task label for %s', (taskStatus, label) => {
     render(<TerminalHud hud={agent({ taskStatus })} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
     expect(screen.getByText(label)).toBeTruthy()
   })
@@ -140,7 +140,7 @@ describe('PRD 02 bottom HUD', () => {
     expect(onModel).not.toHaveBeenCalled()
   })
 
-  it('uses Kooky confirmation copy across the Bypass boundary and keeps the old mode on cancel', async () => {
+  it('uses reference product confirmation copy across the Bypass boundary and keeps the old mode on cancel', async () => {
     const user = userEvent.setup()
     const onPermissionMode = vi.fn()
     render(<TerminalHud hud={agent({ resumable: true })} onPermissionMode={onPermissionMode} onModel={vi.fn()} />)
@@ -170,7 +170,7 @@ describe('PRD 02 bottom HUD', () => {
     )
   })
 
-  it('keeps the old badge and shows Kooky failure feedback when a Bypass respawn fails', async () => {
+  it('keeps the old badge and shows reference product failure feedback when a Bypass respawn fails', async () => {
     const user = userEvent.setup()
     const onPermissionMode = vi.fn().mockRejectedValue(new Error('进程启动失败'))
     render(<TerminalHud hud={agent({ resumable: true })} onPermissionMode={onPermissionMode} onModel={vi.fn()} />)

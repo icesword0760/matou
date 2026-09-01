@@ -7,9 +7,9 @@ import { taskDeleteFlow } from './terminal-close-flow'
 import { NotificationCenter } from '../notifications/NotificationCenter'
 import type { AgentNotification } from '../notifications/AgentNotificationStore'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
-import notificationIcon from '../assets/kooky/terminal/dark_toongzhi.svg'
-import notificationAnimatedIcon from '../assets/kooky/terminal/rongzhi_ani.gif'
-import workbenchIcon from '../assets/kooky/terminal/dark_lujing.svg'
+import notificationIcon from '../assets/terminal-reference/terminal/dark_toongzhi.svg'
+import notificationAnimatedIcon from '../assets/terminal-reference/terminal/rongzhi_ani.gif'
+import workbenchIcon from '../assets/terminal-reference/terminal/dark_lujing.svg'
 
 const TASK_TRANSFER = 'application/x-matou-pinned-task'
 const WORKSPACE_TRANSFER = 'application/x-matou-pinned-workspace'
@@ -284,7 +284,7 @@ export function TaskSidebar({ projection, commands, onRevealSession,
     }).steps} onCancel={() => setDeleteTask(null)} onComplete={() => {
       const taskId = deleteTask.id; setDeleteTask(null); void Promise.resolve(commands.deleteTask(taskId)).catch(NOOP)
     }} />}
-    {toast && <div className="kooky-toast" role="status">{toast}</div>}
+    {toast && <div className="terminal-toast" role="status">{toast}</div>}
   </aside>
 }
 

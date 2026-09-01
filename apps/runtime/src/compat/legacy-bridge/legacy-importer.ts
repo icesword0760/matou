@@ -10,7 +10,7 @@ import type { DomainTransactionManager } from '../../storage/domain-transaction'
 
 type LegacyRecord = Record<string, unknown>
 
-interface KookySnapshot extends LegacyRecord {
+interface LegacySnapshot extends LegacyRecord {
   version: number
   projects: { list: LegacyRecord[]; activeProjectId?: string }
   workbenches: Record<string, LegacyRecord>
@@ -19,7 +19,7 @@ interface KookySnapshot extends LegacyRecord {
   recoveryOffsets?: { metadataJournalBytes?: number }
 }
 
-export interface KookyImportReport {
+export interface LegacyImportReport {
   source: 'snapshot.json' | 'checkpoint.json' | 'checkpoint.prev.json'
   counts: {
     workspaces: number; tasks: number; scenes: number; sessions: number
@@ -30,20 +30,20 @@ export interface KookyImportReport {
   consistency: { danglingLayoutPanels: string[]; unresolvedTeamLeads: string[] }
 }
 
-export interface KookyImportResult {
+export interface LegacyImportResult {
   importRunId: string
   sourceFingerprint: string
-  report: KookyImportReport
+  report: LegacyImportReport
   replayed: boolean
 }
 
 interface LoadedSource {
-  snapshot: KookySnapshot
-  source: KookyImportReport['source']
-  repaired: KookyImportReport['repaired']
+  snapshot: LegacySnapshot
+  source: LegacyImportReport['source']
+  repaired: LegacyImportReport['repaired']
 }
 
-export class KookyImporter {
+export class LegacyImporter {
   readonly #dataRoot: string
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
@@ -54,7 +54,7 @@ export class KookyImporter {
     this.#transactions = transactions
   }
 
-  async importSource(sourceRoot: string): Promise<KookyImportResult> {
+  async importSource(sourceRoot: string): Promise<LegacyImportResult> {
     const sourceFingerprint = await fingerprintSource(sourceRoot)
     const existing = this.#database.get<{ id: string; report_json: string }>(
       "SELECT id, report_json FROM legacy_import_runs WHERE source_fingerprint = ? AND status = 'completed'",
@@ -63,7 +63,7 @@ export class KookyImporter {
     if (existing) {
       return {
         importRunId: existing.id, sourceFingerprint,
-        report: JSON.parse(existing.report_json) as KookyImportReport, replayed: true
+        report: JSON.parse(existing.report_json) as LegacyImportReport, replayed: true
       }
     }
     const loaded = await loadSource(sourceRoot)
@@ -73,16 +73,16 @@ export class KookyImporter {
     const report = emptyReport(loaded.source, loaded.repaired)
     const panels = sanitizePanels(loaded.snapshot.panels, report)
     loaded.snapshot.panels = panels
-    const commandId = `kooky-import:${sourceFingerprint}`
-    const command = { commandId, commandType: 'kooky.import', requestHash: sourceFingerprint }
+    const commandId = `legacy-import:${sourceFingerprint}`
+    const command = { commandId, commandType: 'legacy.import', requestHash: sourceFingerprint }
 
-    const commit: DomainCommit<KookyImportResult> = this.#transactions.execute(command, ({ tx, emit }) => {
+    const commit: DomainCommit<LegacyImportResult> = this.#transactions.execute(command, ({ tx, emit }) => {
       tx.run(
         `INSERT INTO legacy_import_runs (id, source_fingerprint, status, report_json, started_at)
          VALUES (?, ?, 'running', '{}', ?)`, importRunId, sourceFingerprint, Date.now()
       )
       const ids = this.#importSnapshot(tx, importRunId, loaded.snapshot, report)
-      const result: KookyImportResult = { importRunId, sourceFingerprint, report, replayed: false }
+      const result: LegacyImportResult = { importRunId, sourceFingerprint, report, replayed: false }
       tx.run(
         "UPDATE legacy_import_runs SET status = 'completed', report_json = ?, completed_at = ? WHERE id = ?",
         JSON.stringify(report), Date.now(), importRunId
@@ -104,8 +104,8 @@ export class KookyImporter {
   #importSnapshot(
     tx: DatabaseTransaction,
     importRunId: string,
-    snapshot: KookySnapshot,
-    report: KookyImportReport
+    snapshot: LegacySnapshot,
+    report: LegacyImportReport
   ): Map<string, string> {
     const panelSessionIds = new Map<string, string>()
     const projectWorkspaceIds = new Map<string, string>()
@@ -261,7 +261,7 @@ export class KookyImporter {
     tx: DatabaseTransaction,
     panels: Record<string, LegacyRecord>,
     panelSessionIds: Map<string, string>,
-    report: KookyImportReport,
+    report: LegacyImportReport,
     now: number
   ): void {
     const providerToPanel = new Map<string, string>()
@@ -314,7 +314,7 @@ export class KookyImporter {
     sourceRoot: string,
     importRunId: string,
     panels: Record<string, LegacyRecord>,
-    report: KookyImportReport
+    report: LegacyImportReport
   ): Promise<number> {
     let imported = 0
     for (const [panelId, panel] of Object.entries(panels)) {
@@ -348,7 +348,7 @@ export class KookyImporter {
 }
 
 async function loadSource(sourceRoot: string): Promise<LoadedSource> {
-  const repaired: KookyImportReport['repaired'] = []
+  const repaired: LegacyImportReport['repaired'] = []
   let firstFailure = false
   for (const source of ['snapshot.json', 'checkpoint.json', 'checkpoint.prev.json'] as const) {
     try {
@@ -360,17 +360,17 @@ async function loadSource(sourceRoot: string): Promise<LoadedSource> {
       firstFailure = true
     }
   }
-  throw new Error('Kooky source has no valid snapshot or checkpoint')
+  throw new Error('Legacy source has no valid snapshot or checkpoint')
 }
 
-export async function readKookySnapshot(sourceRoot: string): Promise<KookySnapshot> {
+export async function readLegacySnapshot(sourceRoot: string): Promise<LegacySnapshot> {
   const loaded = await loadSource(sourceRoot)
   await applyMetadataTail(sourceRoot, loaded.snapshot)
   return loaded.snapshot
 }
 
-async function applyMetadataTail(sourceRoot: string, snapshot: KookySnapshot): Promise<KookyImportReport['repaired']> {
-  const repaired: KookyImportReport['repaired'] = []
+async function applyMetadataTail(sourceRoot: string, snapshot: LegacySnapshot): Promise<LegacyImportReport['repaired']> {
+  const repaired: LegacyImportReport['repaired'] = []
   let raw: Buffer
   try { raw = await readFile(join(sourceRoot, 'journals', 'metadata.ndjson')) } catch { return repaired }
   const offset = Number.isSafeInteger(snapshot.recoveryOffsets?.metadataJournalBytes)
@@ -392,7 +392,7 @@ async function applyMetadataTail(sourceRoot: string, snapshot: KookySnapshot): P
   return repaired
 }
 
-export function applyLegacyEvent(snapshot: KookySnapshot, type: string, payload: LegacyRecord): void {
+export function applyLegacyEvent(snapshot: LegacySnapshot, type: string, payload: LegacyRecord): void {
   const projectId = text(payload.projectId) || text(payload.id)
   const workbenchId = text(payload.workbenchId) || text(payload.id)
   const tabId = text(payload.tabId) || text(payload.id)
@@ -441,7 +441,7 @@ async function fingerprintSource(root: string): Promise<string> {
   return digest.digest('hex')
 }
 
-function sanitizePanels(input: Record<string, LegacyRecord>, report: KookyImportReport): Record<string, LegacyRecord> {
+function sanitizePanels(input: Record<string, LegacyRecord>, report: LegacyImportReport): Record<string, LegacyRecord> {
   const output: Record<string, LegacyRecord> = {}
   for (const [key, panel] of Object.entries(input ?? {})) {
     const id = text(panel?.id) || key
@@ -534,7 +534,7 @@ function findTeamLeader(panels: Record<string, LegacyRecord>, teamId: string): s
   return Object.entries(panels).find(([, panel]) => text(panel.teamId) === teamId && text(panel.teamRole) === 'leader')?.[0]
 }
 
-function isSnapshot(value: unknown): value is KookySnapshot {
+function isSnapshot(value: unknown): value is LegacySnapshot {
   if (!isRecord(value) || !Number.isFinite(value.version) || !isRecord(value.projects) || !Array.isArray(value.projects.list)) return false
   return isRecord(value.workbenches) && isRecord(value.tabs) && isRecord(value.panels)
 }
@@ -547,12 +547,12 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function snapshotTime(snapshot: KookySnapshot): number {
+function snapshotTime(snapshot: LegacySnapshot): number {
   const parsed = Date.parse(text(snapshot.savedAt))
   return Number.isFinite(parsed) ? parsed : Date.now()
 }
 
-function emptyReport(source: KookyImportReport['source'], repaired: KookyImportReport['repaired']): KookyImportReport {
+function emptyReport(source: LegacyImportReport['source'], repaired: LegacyImportReport['repaired']): LegacyImportReport {
   return {
     source,
     counts: { workspaces: 0, tasks: 0, scenes: 0, sessions: 0, providerBindings: 0, relations: 0, journals: 0 },

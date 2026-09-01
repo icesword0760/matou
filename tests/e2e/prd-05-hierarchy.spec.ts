@@ -93,7 +93,7 @@ test('keeps navigation order stable on clicks, then promotes the Task after real
   } finally { await fixture.close() }
 })
 
-test('uses the Kooky light palette to separate the sidebar, active Workspace, and active Task levels', async () => {
+test('uses the reference product light palette to separate the sidebar, active Workspace, and active Task levels', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
@@ -149,7 +149,7 @@ test('uses the Kooky light palette to separate the sidebar, active Workspace, an
   } finally { await fixture.close() }
 })
 
-test('matches Kooky when deleting a Task from its sidebar menu', async () => {
+test('matches reference product when deleting a Task from its sidebar menu', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
@@ -162,7 +162,7 @@ test('matches Kooky when deleting a Task from its sidebar menu', async () => {
   } finally { await fixture.close() }
 })
 
-test('matches Kooky terminal shortcuts, real search, focus, zoom, and white skin end to end', async () => {
+test('matches reference product terminal shortcuts, real search, focus, zoom, and white skin end to end', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture

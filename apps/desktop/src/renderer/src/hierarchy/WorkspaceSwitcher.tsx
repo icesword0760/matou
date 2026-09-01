@@ -5,8 +5,8 @@ import { EmptyWorkspaceState } from './EmptyWorkspaceState'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
-import notificationIcon from '../assets/kooky/terminal/dark_toongzhi.svg'
-import notificationAnimatedIcon from '../assets/kooky/terminal/rongzhi_ani.gif'
+import notificationIcon from '../assets/terminal-reference/terminal/dark_toongzhi.svg'
+import notificationAnimatedIcon from '../assets/terminal-reference/terminal/rongzhi_ani.gif'
 
 export function WorkspaceSwitcher({
   projection, commands, notificationCenterOpen = false, onNotificationToggle, onWorkspaceMenuOpen

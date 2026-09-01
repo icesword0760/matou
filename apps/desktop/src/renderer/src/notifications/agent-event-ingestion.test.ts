@@ -18,7 +18,7 @@ describe('ingestAgentNotification', () => {
     })
   })
 
-  it('marks a focused Session event read while preserving the Kooky visible indicator', () => {
+  it('marks a focused Session event read while preserving the reference product visible indicator', () => {
     const playSound = vi.fn()
     const store = new AgentNotificationStore({ now: () => 20, playSound })
 

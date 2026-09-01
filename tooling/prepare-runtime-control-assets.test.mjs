@@ -59,7 +59,7 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
   )
   assert.match(claudeSessionStart, /Matou host control is active/)
   assert.match(claudeSessionStart, /invoke `matou-host-control:mt-terminal` immediately/)
-  assert.match(claudeSessionStart, /Skip cmux environment discovery/)
+  assert.match(claudeSessionStart, /Skip alternate terminal host environment discovery/)
   for (const document of [shared, claudeSkill, targetRules, commands, codex]) {
     assert.match(document, /identify/)
     assert.match(document, /list/)

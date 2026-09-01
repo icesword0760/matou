@@ -28,7 +28,7 @@
 8. 默认界面不新增宿主控制开关、权限标签或操作提示。
 9. `agent-team-member` 是内部兼容与预留投影，不作为本期正式产品功能，也不新增入口。
 
-## 3. Kooky 对照结论
+## 3. reference product 对照结论
 
 ### 3.1 复用的产品逻辑
 
@@ -42,7 +42,7 @@
 
 ### 3.2 Matou 的结构适配
 
-Kooky 的 `window/workspace/pane/surface` 不直接复制。Matou 使用自己的产品层级：
+reference product 的 `window/workspace/pane/surface` 不直接复制。Matou 使用自己的产品层级：
 
 ```text
 窗口
@@ -52,9 +52,9 @@ Kooky 的 `window/workspace/pane/surface` 不直接复制。Matou 使用自己�
          └─ 会话卡片 + DAG 父子关系
 ```
 
-Matou 的卡片横向顺序、DAG 层级和独立窗口状态必须由 Runtime 权威数据投影，不能从 Kooky 的 Pane 或分屏结构反推。
+Matou 的卡片横向顺序、DAG 层级和独立窗口状态必须由 Runtime 权威数据投影，不能从 reference product 的 Pane 或分屏结构反推。
 
-### 3.3 Kooky 参考实现
+### 3.3 reference product 参考实现
 
 - 控制协议与服务：`/Users/icesword/Documents/AIProjects/kookey/electron/kc-control-server.js`
 - 控制分发：`/Users/icesword/Documents/AIProjects/kookey/electron/kc-control-dispatcher.js`
@@ -70,12 +70,12 @@ Matou 的卡片横向顺序、DAG 层级和独立窗口状态必须由 Runtime �
 
 Runtime 继续作为唯一权威层，扩展已经存在的本地控制面，补齐拓扑投影、调用方身份、最新屏幕、CLI 和 Provider 规则。
 
-该方案保留 Matou 现有数据和生命周期边界，不建立第二套 Renderer 权威，也避免把 Kooky 的结构模型硬套到 DAG 上。
+该方案保留 Matou 现有数据和生命周期边界，不建立第二套 Renderer 权威，也避免把 reference product 的结构模型硬套到 DAG 上。
 
 ### 4.2 未采用方案
 
 - Claude Code 与 Codex 分别实现专属工具：会导致 Shell 缺少统一命令，并使两种 AI 的行为逐渐分叉。
-- 整体移植 Kooky 控制面：会引入与 Matou 事项、画布和 DAG 不一致的第二套层级语义。
+- 整体移植 reference product 控制面：会引入与 Matou 事项、画布和 DAG 不一致的第二套层级语义。
 
 ## 5. 架构
 
@@ -220,7 +220,7 @@ AI 首先通过 `mt identify` 获得调用方当前窗口、工作空间、事�
 
 - 文本和可选回车作为一个完整动作串行写入目标 PTY；
 - 同一会话上的并发写入按完整动作排队，字符不会相互穿插；
-- 控制键使用固定 allowlist，覆盖 Kooky PRD 定义的回车、Tab、Esc、退格、删除、方向键、Home/End、翻页键及常用 Ctrl 组合键；
+- 控制键使用固定 allowlist，覆盖 reference product PRD 定义的回车、Tab、Esc、退格、删除、方向键、Home/End、翻页键及常用 Ctrl 组合键；
 - 未知按键返回结构化 `UNSUPPORTED`；
 - 输入不触发焦点切换、滚动、窗口激活、边框动画或通知。
 
@@ -229,7 +229,7 @@ AI 首先通过 `mt identify` 获得调用方当前窗口、工作空间、事�
 - 控制 endpoint 仅监听本机私有 socket 或 Named Pipe；
 - 每个 SessionRun 获得独立令牌，绑定 runId、scope、runtime generation 和生命周期；
 - 所有 Matou 托管会话均获得首期 read/send scopes；
-- 子进程继承当前托管会话身份，与 Kooky 的托管进程模型一致；
+- 子进程继承当前托管会话身份，与 reference product 的托管进程模型一致；
 - Matou 外部进程缺少有效令牌，默认返回 `CAPABILITY_DENIED`；
 - 首期令牌不包含创建、Fork、移出、关闭、聚焦和切换视图能力；
 - 控制服务异常不影响 PTY 和终端日常输入。

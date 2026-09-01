@@ -1,5 +1,5 @@
 {
-  "scenario": "Kooky current main-window close hides and live terminal survives",
+  "scenario": "reference product current main-window close hides and live terminal survives",
   "closeState": {
     "visible": false,
     "destroyed": false

@@ -12,7 +12,7 @@ import {
 } from './terminal-themes'
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
-const KOOKY_FILE_TREE_MIME = 'application/x-file-tree-nodes'
+const FILE_TREE_MIME = 'application/x-file-tree-nodes'
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -375,11 +375,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
 function isTerminalFileDrop(dataTransfer: DataTransfer): boolean {
   const types = Array.from(dataTransfer.types ?? [])
-  return types.includes(KOOKY_FILE_TREE_MIME) || types.includes('Files') || dataTransfer.files.length > 0
+  return types.includes(FILE_TREE_MIME) || types.includes('Files') || dataTransfer.files.length > 0
 }
 
 function terminalDropPaths(dataTransfer: DataTransfer): string {
-  if (Array.from(dataTransfer.types ?? []).includes(KOOKY_FILE_TREE_MIME)) {
+  if (Array.from(dataTransfer.types ?? []).includes(FILE_TREE_MIME)) {
     return dataTransfer.getData('text/plain')
   }
   return Array.from(dataTransfer.files ?? [])

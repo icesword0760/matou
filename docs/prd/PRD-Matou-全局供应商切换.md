@@ -50,14 +50,14 @@ Matou 原“会话内切换模型”调整为“全局配置并切换 CLI 供应
 - 地址、名称、默认模型不合法：弹窗内直接显示错误。
 - Runtime 尚在连接：设置页保留并提供明确错误状态。
 
-## 5. Kooky 交互对照矩阵
+## 5. reference product 交互对照矩阵
 
-| 场景 | Kooky 基线 | Matou 结果 | 运行证据 | 差异结论 |
+| 场景 | reference product 基线 | Matou 结果 | 运行证据 | 差异结论 |
 |---|---|---|---|---|
 | 左侧边栏保持工作上下文 | 黑色 CLI 工作区内侧栏持续可见 | 设置打开后事项侧栏持续可见 | `docs/acceptance/evidence/prd-02/matou/model-switch-settings.png` | 一致 |
-| 终端底部 HUD | Kooky HUD 承载会话状态和权限，不承担供应商配置 | 移除旧会话模型入口，保留权限、上下文、任务与路径状态 | `tests/e2e/prd-02-bottom-hud.spec.ts` | 按确认规格调整 |
-| 设置页面 | Kooky 当前对照范围无同类供应商配置页 | 在 CLI 工作区内部新增设置页，沿用当前 Matou 玻璃侧栏与页签层级 | `docs/acceptance/evidence/prd-02/matou/model-switch-settings.png` | 新增能力，无同范围基线 |
-| 弹窗和状态反馈 | Kooky 使用居中弹窗与即时反馈 | 新增/编辑使用居中弹窗，切换结果使用 Toast | `apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.test.tsx` | 交互模式一致 |
+| 终端底部 HUD | reference product HUD 承载会话状态和权限，不承担供应商配置 | 移除旧会话模型入口，保留权限、上下文、任务与路径状态 | `tests/e2e/prd-02-bottom-hud.spec.ts` | 按确认规格调整 |
+| 设置页面 | reference product 当前对照范围无同类供应商配置页 | 在 CLI 工作区内部新增设置页，沿用当前 Matou 玻璃侧栏与页签层级 | `docs/acceptance/evidence/prd-02/matou/model-switch-settings.png` | 新增能力，无同范围基线 |
+| 弹窗和状态反馈 | reference product 使用居中弹窗与即时反馈 | 新增/编辑使用居中弹窗，切换结果使用 Toast | `apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.test.tsx` | 交互模式一致 |
 
 ## 6. 验收结果
 

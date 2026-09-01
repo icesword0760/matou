@@ -258,7 +258,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(onUserInput).toHaveBeenCalledTimes(1)
   })
 
-  it('matches Kooky by previewing an internal file-tree drag and inserting its quoted paths without submitting', async () => {
+  it('matches reference product by previewing an internal file-tree drag and inserting its quoted paths without submitting', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
@@ -288,7 +288,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.focus).toHaveBeenCalled()
   })
 
-  it('uses native file paths for Finder drops while preserving Kooky path quoting', async () => {
+  it('uses native file paths for Finder drops while preserving reference product path quoting', async () => {
     const getPathForFile = vi.fn((file: File) => file.name === 'plain.txt'
       ? '/tmp/plain.txt'
       : '/tmp/with space.txt')
@@ -315,7 +315,7 @@ describe('TerminalSurface focus continuity', () => {
     )
   })
 
-  it('keeps the Kooky drop overlay stable across nested drag enter and leave events', async () => {
+  it('keeps the reference product drop overlay stable across nested drag enter and leave events', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     const dataTransfer = {

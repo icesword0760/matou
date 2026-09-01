@@ -1,38 +1,38 @@
-# PRD 05 — Kooky CLI 模块 1:1 对照矩阵
+# PRD 05 — reference product CLI 模块 1:1 对照矩阵
 
 ## 对照边界
 
 - **纳入**：黑色 CLI 工作区域中的工作区/事项侧栏、标签栏、终端及分屏、底部快捷区，以及从这些入口打开的菜单、弹窗、状态反馈和恢复行为。
-- **排除**：Kooky 顶部 Logo/品牌区、最外侧产品导航栏及其它非 CLI 产品外壳。Matou 使用自己的原生窗口标题和应用级导航。
-- **双基线**：原始 Kooky 可运行界面 + `/Users/icesword/Documents/AIProjects/kookey` 现存代码逻辑。
+- **排除**：reference product 顶部 Logo/品牌区、最外侧产品导航栏及其它非 CLI 产品外壳。Matou 使用自己的原生窗口标题和应用级导航。
+- **双基线**：原始 reference product 可运行界面 + `/Users/icesword/Documents/AIProjects/kookey` 现存代码逻辑。
 
 ## 基线证据
 
-- Kooky CLI 模块截图：`docs/acceptance/evidence/prd-05/kooky/cli-module-baseline.png`
-- Kooky CLI 计算样式：`docs/acceptance/evidence/prd-05/kooky/cli-module-computed-styles.json`
+- reference product CLI 模块截图：`docs/acceptance/evidence/prd-05/reference/cli-module-baseline.png`
+- reference product CLI 计算样式：`docs/acceptance/evidence/prd-05/reference/cli-module-computed-styles.json`
 - Matou 当前 CLI 截图：`docs/acceptance/evidence/prd-05/matou-cli-module.png`
-- Kooky 代码入口：`ProjectSidebar.vue`、`ProjectDropdown.vue`、`ClaudeCodeView.vue`、`ClaudeCodeTerminal.vue`、`SplitLayout.vue`、`SplitNode.vue`、`SplitDivider.vue`
+- reference product 代码入口：`ProjectSidebar.vue`、`ProjectDropdown.vue`、`ClaudeCodeView.vue`、`ClaudeCodeTerminal.vue`、`SplitLayout.vue`、`SplitNode.vue`、`SplitDivider.vue`
 
 ## 对照矩阵
 
-| 用户场景 | Kooky 基线 | Matou 当前结果 | 证据 | 状态 |
+| 用户场景 | reference product 基线 | Matou 当前结果 | 证据 | 状态 |
 |---|---|---|---|---|
-| 进入 CLI | 黑色模块直接呈现工作区、事项、标签、终端和快捷区 | 已移除误加的 Kooky Logo 与最外侧导航，仅保留 CLI 模块 | 双方 CLI 截图 | 已对齐 |
+| 进入 CLI | 黑色模块直接呈现工作区、事项、标签、终端和快捷区 | 已移除误加的 reference product Logo 与最外侧导航，仅保留 CLI 模块 | 双方 CLI 截图 | 已对齐 |
 | 浏览事项 | 196px 侧栏；41px 工作区行；32px「+ 事项」行；事项项高 36px | 尺寸、层级、颜色、选中/悬停样式已按基线重建 | 计算样式 + Matou 截图 | 已对齐 |
 | 切换工作区 | 点击名称与箭头展开 330px 下拉，显示 workspace、新增入口、工作区列表与路径 | 入口、面板尺寸、列表路径和失效状态已实现 | component tests | 已对齐，待双应用手工回放 |
 | 新建事项 | 点击「+ 事项」创建并立即进入默认标签和终端 | 文案、位置、禁用状态与创建后焦点已实现 | unit + E2E | 已对齐，待双应用手工回放 |
 | 切换/排序事项 | 单击切换；Enter/Space 可进入；拖拽排序；激活项自动滚入视野 | 四类行为均已实现 | component tests | 已对齐，待双应用手工回放 |
-| 事项操作菜单 | 悬停/选中显示三点；点击或右键打开；菜单含「重命名」「删除」 | 可见性、入口和菜单项已按 Kooky 调整 | component tests | 已对齐，待验证菜单跟随位置 |
+| 事项操作菜单 | 悬停/选中显示三点；点击或右键打开；菜单含「重命名」「删除」 | 可见性、入口和菜单项已按 reference product 调整 | component tests | 已对齐，待验证菜单跟随位置 |
 | 重命名事项 | 420px 弹窗；标题「重命名」；20 字计数；取消/确定；重名阻止提交 | 弹窗结构、文案、计数、校验和按键行为已实现 | unit tests | 已对齐，待截图对照 |
-| 删除事项 | 标题「提示」；说明会话丢失但本地目录保留；取消/确定 | 已按当前 Kooky 实际行为调整为单次提示 | unit + E2E | 已对齐，待双应用手工回放 |
+| 删除事项 | 标题「提示」；说明会话丢失但本地目录保留；取消/确定 | 已按当前 reference product 实际行为调整为单次提示 | unit + E2E | 已对齐，待双应用手工回放 |
 | 浏览标签 | 40px 标签栏；标签高 28px；激活背景 #2C2C2C；关闭按钮仅激活/悬停可见 | 尺寸、颜色、显隐和溢出结构已重建 | 计算样式 + unit tests | 已对齐 |
 | 新建/切换标签 | 加号紧随最后一个标签；仅发生溢出时与更多按钮固定在右侧；切换后终端获得输入焦点 | DOM 结构已按两种状态分别实现，不再把单标签场景的加号推到最右侧 | `split-ui.test.tsx` + E2E | 已对齐，待双应用手工回放 |
-| 标签右键与重命名 | 右键打开标签菜单；「重命名标签页」弹窗；20 字计数 | 已移除常驻三点，改为 Kooky 右键入口和对应弹窗 | unit tests | 已对齐，待截图对照 |
+| 标签右键与重命名 | 右键打开标签菜单；「重命名标签页」弹窗；20 字计数 | 已移除常驻三点，改为 reference product 右键入口和对应弹窗 | unit tests | 已对齐，待截图对照 |
 | 关闭最后标签 | 最后事项的最后标签不删除，提示从左侧事项菜单处理 | 已取消原「隐藏窗口」，改为同文案单按钮提示 | unit tests | 已对齐，待双应用手工回放 |
-| 分屏 | 右上水平/垂直分屏使用 Kooky 图形按钮；1px 分隔线；拖拽改变比例并持久化 | 已接入 Kooky 基线中的左右分屏、上下分屏和文件图形，布局、分隔线、拖拽与持久化保持一致 | `split-ui.test.tsx` + E2E | 已对齐，待双应用手工回放 |
-| 终端面板 | 32px 标题行；正文全铺；激活面板仅细描边；关闭按钮在右侧 | 已去除卡片、圆角和外边距，按 Kooky 面板结构重建 | 双方截图 | 已对齐 |
+| 分屏 | 右上水平/垂直分屏使用 reference product 图形按钮；1px 分隔线；拖拽改变比例并持久化 | 已接入 reference product 基线中的左右分屏、上下分屏和文件图形，布局、分隔线、拖拽与持久化保持一致 | `split-ui.test.tsx` + E2E | 已对齐，待双应用手工回放 |
+| 终端面板 | 32px 标题行；正文全铺；激活面板仅细描边；关闭按钮在右侧 | 已去除卡片、圆角和外边距，按 reference product 面板结构重建 | 双方截图 | 已对齐 |
 | 终端显示 | SF Mono 14px；#1B1B1B；前景 #FAFAFA；橙色条形光标；暗色 ANSI 色板 | xterm 配置已改为同一组字体、字号、光标和色板 | 代码比对 + Matou 截图 | 已对齐 |
-| 关闭最后终端 | 最后事项/最后标签受保护，显示「我知道了」提示 | 已按 Kooky 保护，不再销毁或隐藏窗口 | unit tests | 已对齐，待双应用手工回放 |
+| 关闭最后终端 | 最后事项/最后标签受保护，显示「我知道了」提示 | 已按 reference product 保护，不再销毁或隐藏窗口 | unit tests | 已对齐，待双应用手工回放 |
 | 路径失效 | 显示路径失效；保留历史；阻止新建和终端输入 | 已实现相同入口禁用与提示 | unit + E2E | 已对齐，待双应用手工回放 |
 | 底部快捷区 | 50px 高、#151515、顶部 1px 分隔线 | 几何与基础入口已对齐；快捷指令完整功能属于后续 PRD | 计算样式 + Matou 截图 | PRD 05 范围闭合 |
 | 脱出/回收窗口 | 面板拖出窗口后独立承载，会话仅有一个所有者，关闭后回原位置 | 已实现所有权占位、关闭回收和全事项迁移 | detached/multi-window E2E | 已对齐，待双应用手工回放 |
@@ -40,4 +40,4 @@
 
 ## 当前结论
 
-PRD 05 的 CLI 视觉骨架已按纠正后的范围完成重建；外层 Kooky 产品壳已从 Matou 移除。矩阵仍保留双应用手工回放与弹层截图项，因此 PRD 05 继续处于实现阶段，不提交产品验收。
+PRD 05 的 CLI 视觉骨架已按纠正后的范围完成重建；外层 reference product 产品壳已从 Matou 移除。矩阵仍保留双应用手工回放与弹层截图项，因此 PRD 05 继续处于实现阶段，不提交产品验收。
