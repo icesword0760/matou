@@ -1,10 +1,12 @@
 import { MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron'
+import { dirname, join } from 'node:path'
 
 import { PROTOCOL_VERSION, type RuntimeConnectRequest } from '@matou/contracts'
 import { DESKTOP_CHANNELS, type RuntimeConnectionState } from '../shared/desktop-api'
 
 export class RuntimeHost {
   readonly #runtimeEntry: string
+  readonly #controlAssetRoot: string
   readonly #renderers = new Set<WebContents>()
   #child: UtilityProcess | undefined
   #restartTimer: ReturnType<typeof setTimeout> | undefined
@@ -13,8 +15,9 @@ export class RuntimeHost {
   #stopPromise: Promise<void> | undefined
   #connectionState: RuntimeConnectionState = 'ready'
 
-  constructor(runtimeEntry: string) {
+  constructor(runtimeEntry: string, controlAssetRoot = join(dirname(runtimeEntry), 'control-assets')) {
     this.#runtimeEntry = runtimeEntry
+    this.#controlAssetRoot = controlAssetRoot
   }
 
   async start(): Promise<void> {
@@ -30,7 +33,11 @@ export class RuntimeHost {
     const child = utilityProcess.fork(this.#runtimeEntry, [], {
       serviceName: 'Matou Terminal Runtime',
       stdio: 'pipe',
-      env: { ...process.env }
+      env: {
+        ...process.env,
+        MATOU_CONTROL_ASSET_ROOT: this.#controlAssetRoot,
+        MATOU_CONTROL_NODE_EXECUTABLE: process.execPath
+      }
     })
     child.stdout?.pipe(process.stdout)
     child.stderr?.pipe(process.stderr)
