@@ -14,18 +14,31 @@ export interface RuntimeDatabaseBootstrapResult {
   quarantinedPath?: string
 }
 
+export interface RuntimeDatabaseBootstrapObserver {
+  onDatabaseOpened?(
+    database: RuntimeDatabase,
+    effectiveDataRoot: string,
+    backups: DatabaseBackupService
+  ): void
+  onDatabaseClosed?(database: RuntimeDatabase): void
+  isShutdownRequested?(): boolean
+}
+
 export async function openRecoverableRuntimeDatabase(
   dataRoot: string,
-  migrations: readonly Migration[]
+  migrations: readonly Migration[],
+  observer: RuntimeDatabaseBootstrapObserver = {}
 ): Promise<RuntimeDatabaseBootstrapResult> {
   const databasePath = join(dataRoot, 'matou.sqlite')
   let database: RuntimeDatabase | undefined
   try {
     database = RuntimeDatabase.open(databasePath)
+    const backups = new DatabaseBackupService(dataRoot)
+    observer.onDatabaseOpened?.(database, dataRoot, backups)
     await new MigrationRunner(
       database,
       migrations,
-      new DatabaseBackupService(dataRoot)
+      backups
     ).migrate()
     return {
       database,
@@ -34,12 +47,13 @@ export async function openRecoverableRuntimeDatabase(
       ephemeral: false
     }
   } catch (error) {
-    database?.close()
+    if (database && observer.isShutdownRequested?.()) throw error
+    if (database) closeObservedDatabase(database, observer)
     if (isWriteDenied(error)) {
-      return openEphemeralCopy(databasePath, migrations)
+      return openEphemeralCopy(databasePath, migrations, true, observer)
     }
     if (isNewerSchema(error)) {
-      return openEphemeralCopy(databasePath, migrations, false)
+      return openEphemeralCopy(databasePath, migrations, false, observer)
     }
     if (!isPhysicalDatabaseCorruption(error)) throw error
     const quarantinedPath = `${databasePath}.corrupt-${Date.now()}`
@@ -47,11 +61,13 @@ export async function openRecoverableRuntimeDatabase(
     await rename(`${databasePath}-wal`, `${quarantinedPath}-wal`).catch(() => undefined)
     await rename(`${databasePath}-shm`, `${quarantinedPath}-shm`).catch(() => undefined)
     const clean = RuntimeDatabase.open(databasePath)
+    const backups = new DatabaseBackupService(dataRoot)
+    observer.onDatabaseOpened?.(clean, dataRoot, backups)
     try {
       await new MigrationRunner(
         clean,
         migrations,
-        new DatabaseBackupService(dataRoot)
+        backups
       ).migrate()
       return {
         database: clean,
@@ -61,7 +77,7 @@ export async function openRecoverableRuntimeDatabase(
         quarantinedPath
       }
     } catch (migrationError) {
-      clean.close()
+      closeObservedDatabase(clean, observer)
       throw migrationError
     }
   }
@@ -70,7 +86,8 @@ export async function openRecoverableRuntimeDatabase(
 async function openEphemeralCopy(
   durableDatabasePath: string,
   migrations: readonly Migration[],
-  migrate = true
+  migrate = true,
+  observer: RuntimeDatabaseBootstrapObserver = {}
 ): Promise<RuntimeDatabaseBootstrapResult> {
   const effectiveDataRoot = await mkdtemp(join(tmpdir(), 'matou-ephemeral-'))
   const ephemeralDatabasePath = join(effectiveDataRoot, 'matou.sqlite')
@@ -79,12 +96,14 @@ async function openEphemeralCopy(
   await copyFile(`${durableDatabasePath}-wal`, `${ephemeralDatabasePath}-wal`).catch(() => undefined)
   await copyFile(`${durableDatabasePath}-shm`, `${ephemeralDatabasePath}-shm`).catch(() => undefined)
   const database = RuntimeDatabase.open(ephemeralDatabasePath)
+  const backups = new DatabaseBackupService(effectiveDataRoot)
+  observer.onDatabaseOpened?.(database, effectiveDataRoot, backups)
   try {
     if (migrate) {
       await new MigrationRunner(
         database,
         migrations,
-        new DatabaseBackupService(effectiveDataRoot)
+        backups
       ).migrate()
     }
     return {
@@ -94,9 +113,17 @@ async function openEphemeralCopy(
       ephemeral: true
     }
   } catch (error) {
-    database.close()
+    closeObservedDatabase(database, observer)
     throw error
   }
+}
+
+function closeObservedDatabase(
+  database: RuntimeDatabase,
+  observer: RuntimeDatabaseBootstrapObserver
+): void {
+  database.close()
+  observer.onDatabaseClosed?.(database)
 }
 
 function isPhysicalDatabaseCorruption(error: unknown): boolean {

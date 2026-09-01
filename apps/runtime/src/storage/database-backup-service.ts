@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   copyFile,
+  link,
   mkdir,
   readFile,
   readdir,
@@ -13,7 +14,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 
 import type { RuntimeDatabase } from './database'
 
-const { DatabaseSync } = process.getBuiltinModule(
+const { DatabaseSync, backup } = process.getBuiltinModule(
   'node:sqlite'
 ) as typeof import('node:sqlite')
 
@@ -120,35 +121,40 @@ export class DatabaseBackupService {
     const restoredAt = this.#nextTimestamp()
     const temporaryPath = `${targetPath}.restore-${restoredAt}-${randomUUID()}.partial`
     const replacedPath = `${targetPath}.replaced-${restoredAt}`
+    const replacedPartialPath = `${replacedPath}.partial`
 
     try {
       await copyFile(descriptor.path, temporaryPath)
       await verifyBackup(temporaryPath, descriptor.size, descriptor.sha256)
 
-      let movedOriginal = false
-      try {
-        await this.#rename(targetPath, replacedPath)
-        movedOriginal = true
-      } catch (error) {
-        if (errorCode(error) !== 'ENOENT') throw error
+      const targetExists = await isFile(targetPath)
+      if (targetExists) {
+        const oldDatabase = new DatabaseSync(targetPath, { readOnly: true })
+        try {
+          await backup(oldDatabase, replacedPartialPath)
+        } finally {
+          oldDatabase.close()
+        }
+        await inspectBackup(replacedPartialPath)
+        await this.#rename(replacedPartialPath, replacedPath)
       }
-      if (movedOriginal) {
-        await this.#moveIfPresent(`${targetPath}-wal`, `${replacedPath}-wal`)
-        await this.#moveIfPresent(`${targetPath}-shm`, `${replacedPath}-shm`)
-      } else {
-        await rm(`${targetPath}-wal`, { force: true })
-        await rm(`${targetPath}-shm`, { force: true })
-      }
+
       try {
         await this.#rename(temporaryPath, targetPath)
       } catch (error) {
-        if (!movedOriginal) {
-          await rm(temporaryPath, { force: true }).catch(() => undefined)
+        if (!targetExists) {
+          await link(temporaryPath, targetPath)
+          await verifyBackup(targetPath, descriptor.size, descriptor.sha256)
+          await rm(`${targetPath}-wal`, { force: true })
+          await rm(`${targetPath}-shm`, { force: true })
         }
         throw error
       }
+      await rm(`${targetPath}-wal`, { force: true })
+      await rm(`${targetPath}-shm`, { force: true })
     } finally {
       await rm(temporaryPath, { force: true }).catch(() => undefined)
+      await rm(replacedPartialPath, { force: true }).catch(() => undefined)
     }
   }
 
@@ -169,13 +175,6 @@ export class DatabaseBackupService {
     return timestamp
   }
 
-  async #moveIfPresent(from: string, to: string): Promise<void> {
-    try {
-      await this.#rename(from, to)
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error
-    }
-  }
 }
 
 function readSchemaVersion(database: RuntimeDatabase): number {
@@ -256,4 +255,13 @@ function errorCode(error: unknown): string | undefined {
   return typeof error === 'object' && error !== null && 'code' in error
     ? String(error.code)
     : undefined
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile()
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false
+    throw error
+  }
 }

@@ -15,6 +15,29 @@ const { DatabaseSync } = process.getBuiltinModule(
 ) as typeof import('node:sqlite')
 
 describe('openRecoverableRuntimeDatabase', () => {
+  it('publishes database lifecycle ownership before pre-migration work starts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-bootstrap-ownership-'))
+    const events: string[] = []
+
+    const opening = openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS, {
+      onDatabaseOpened(database, effectiveDataRoot, backups) {
+        expect(database.path).toBe(join(root, 'matou.sqlite'))
+        expect(effectiveDataRoot).toBe(root)
+        expect(backups).toBeInstanceOf(DatabaseBackupService)
+        events.push('owned')
+      },
+      onDatabaseClosed() { events.push('released') }
+    })
+
+    expect(events).toEqual(['owned'])
+    const result = await opening
+    try {
+      expect(events).toEqual(['owned'])
+    } finally {
+      result.database.close()
+    }
+  })
+
   it('creates a retained pre-migration snapshot when initializing a durable database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-initial-backup-'))
 

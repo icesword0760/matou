@@ -20,7 +20,6 @@ import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
-import { DatabaseBackupService } from './storage/database-backup-service'
 import { DatabaseLifecycleService } from './storage/database-lifecycle-service'
 import { openRecoverableRuntimeDatabase } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
@@ -32,6 +31,7 @@ import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { nextProviderWorkStatus } from './session/provider-work-status'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
+import { RuntimeLifecycleCoordinator } from './runtime-lifecycle-coordinator'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -55,24 +55,32 @@ interface RuntimeState {
   rpcRouter: RuntimeRpcRouter
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
-  databaseLifecycle: DatabaseLifecycleService
 }
 
 let runtimeState: RuntimeState | undefined
-const runtimeReady = initializeRuntime().then((state) => {
+const lifecycleCoordinator = new RuntimeLifecycleCoordinator()
+const runtimeReady = lifecycleCoordinator.startInitialization(initializeRuntime).then((state) => {
   runtimeState = state
   return state
 })
 
 async function initializeRuntime(): Promise<RuntimeState> {
-  const opened = await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS)
+  const opened = await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS, {
+    onDatabaseOpened: (database, _effectiveDataRoot, backups) => {
+      lifecycleCoordinator.registerDatabaseLifecycle(
+        database,
+        new DatabaseLifecycleService(database, backups)
+      )
+    },
+    onDatabaseClosed: (database) => {
+      lifecycleCoordinator.releaseDatabaseLifecycle(database)
+    },
+    isShutdownRequested: () => lifecycleCoordinator.shutdownRequested
+  })
+  lifecycleCoordinator.assertStartupActive()
   const database = opened.database
   const runtimeDataRoot = opened.effectiveDataRoot
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
-  const databaseLifecycle = new DatabaseLifecycleService(
-    database,
-    new DatabaseBackupService(runtimeDataRoot)
-  )
   if (opened.recoveredFromCorruption) {
     console.error(`[runtime.storage] corrupt database quarantined at ${opened.quarantinedPath}`)
   }
@@ -91,6 +99,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     tokenService: controlTokens,
     backend: controlBackend
   })
+  lifecycleCoordinator.registerHostControl(hostControl)
   const agentNotifications = new AgentNotificationRepository(database, transactions)
   const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository, {
     onNotification: (notification) => {
@@ -166,6 +175,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
       }
     }
   })
+  lifecycleCoordinator.registerProviderHooks(providerHooks)
   new DetachedSessionService(database, transactions)
     .normalizeOnStartup(Date.now())
   const recovery = await new RuntimeRecoveryService(runtimeDataRoot, database).recoverAll()
@@ -173,8 +183,11 @@ async function initializeRuntime(): Promise<RuntimeState> {
     console.error(`[runtime.recovery] ${failure.sessionId} ${failure.code}: ${failure.message}`)
   }
   telemetry.purgeStaleGenerations()
+  lifecycleCoordinator.assertStartupActive()
   await hostControl.start()
+  lifecycleCoordinator.assertStartupActive()
   await providerHooks.start()
+  lifecycleCoordinator.assertStartupActive()
   return {
     dataRoot: runtimeDataRoot,
     controlEndpoint,
@@ -184,26 +197,22 @@ async function initializeRuntime(): Promise<RuntimeState> {
     controlBackend,
     rpcRouter,
     hostControl,
-    providerHooks,
-    databaseLifecycle
+    providerHooks
   }
 }
 
-let shutdownStarted = false
-let shutdownPromise: Promise<void> | undefined
 function shutdown(): Promise<void> {
-  if (shutdownPromise) return shutdownPromise
-  shutdownStarted = true
-  shutdownPromise = (async () => {
-    for (const server of servers) server.close()
-    servers.clear()
-    await sessions.shutdownAll()
-    await runtimeState?.providerHooks.stop()
-    await runtimeState?.hostControl.stop()
-    await runtimeState?.databaseLifecycle.closeCleanly()
-  })()
-  return shutdownPromise
+  return lifecycleCoordinator.shutdown(runtimeReady, {
+    closeIncoming: () => {
+      for (const server of servers) server.close()
+      servers.clear()
+    },
+    shutdownSessions: () => sessions.shutdownAll()
+  })
 }
+void runtimeReady.catch(() => {
+  if (!lifecycleCoordinator.shutdownRequested) void shutdown().catch(() => undefined)
+})
 process.once('SIGTERM', () => {
   void shutdown().then(
     () => process.exit(0),
@@ -228,7 +237,7 @@ parentPort.on('message', async (event) => {
 
   try {
     const state = await runtimeReady
-    if (shutdownStarted) {
+    if (lifecycleCoordinator.shutdownRequested) {
       port.close()
       return
     }

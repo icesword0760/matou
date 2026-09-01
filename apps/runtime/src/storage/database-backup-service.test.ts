@@ -97,8 +97,17 @@ describe('DatabaseBackupService', () => {
     expect(replacedName).toBeDefined()
     expect(namesAfterRestore).not.toContain('target.sqlite-wal')
     expect(namesAfterRestore).not.toContain('target.sqlite-shm')
-    expect(namesAfterRestore).toContain(`${replacedName}-wal`)
-    expect(namesAfterRestore).toContain(`${replacedName}-shm`)
+    expect(namesAfterRestore).not.toContain(`${replacedName}-wal`)
+    expect(namesAfterRestore).not.toContain(`${replacedName}-shm`)
+    const rollback = new DatabaseSync(join(root, replacedName!), { readOnly: true })
+    try {
+      expect(rollback.prepare('SELECT value FROM original_rows').get()).toEqual({
+        value: 'before-restore'
+      })
+      expect(rollback.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+    } finally {
+      rollback.close()
+    }
     const restored = new DatabaseSync(targetPath, { readOnly: true })
     try {
       expect(restored.prepare('SELECT value FROM restored_rows').get()).toEqual({
@@ -110,7 +119,13 @@ describe('DatabaseBackupService', () => {
     }
   })
 
-  it('preserves the source backup and the original database when replacement rename is interrupted', async () => {
+  it.each([
+    { targetExists: true, phase: 'old-rollback' as const, expected: 'original' },
+    { targetExists: true, phase: 'publish' as const, expected: 'original' },
+    { targetExists: false, phase: 'publish' as const, expected: 'from-backup' }
+  ])(
+    'keeps a valid canonical database when $phase rename fails with targetExists=$targetExists',
+    async ({ targetExists, phase, expected }) => {
     const root = await mkdtemp(join(tmpdir(), 'matou-backup-interrupt-'))
     const source = RuntimeDatabase.open(join(root, 'source.sqlite'))
     opened.push(source)
@@ -119,30 +134,79 @@ describe('DatabaseBackupService', () => {
     const creator = new DatabaseBackupService(root, { now: () => 3_000 })
     const backup = await creator.create(source, 'clean-exit')
     const targetPath = join(root, 'target.sqlite')
-    createStandaloneDatabase(targetPath, 'original')
+    if (targetExists) createStandaloneDatabase(targetPath, 'original')
+    let injected = false
     const interrupted = new DatabaseBackupService(root, {
       now: () => 4_000,
       rename: async (from, to) => {
-        if (to === targetPath) throw new Error('injected replacement interruption')
+        const isRollbackFinalize = to.includes('.replaced-') && !to.endsWith('.partial')
+        const isPublish = to === targetPath
+        if (!injected && (
+          (phase === 'old-rollback' && isRollbackFinalize) ||
+          (phase === 'publish' && isPublish)
+        )) {
+          injected = true
+          throw new Error(`injected ${phase} interruption`)
+        }
         const { rename } = await import('node:fs/promises')
         await rename(from, to)
       }
     })
 
     await expect(interrupted.restore(backup.id, targetPath)).rejects.toThrow(
-      'injected replacement interruption'
+      `injected ${phase} interruption`
     )
 
-    expect(await readFile(backup.path)).toBeDefined()
-    const replacedPath = (await readdir(root))
-      .find((name) => name.startsWith('target.sqlite.replaced-'))
-    expect(replacedPath).toBeDefined()
-    const original = new DatabaseSync(join(root, replacedPath!), { readOnly: true })
+    const canonical = new DatabaseSync(targetPath, { readOnly: true })
     try {
-      expect(original.prepare('SELECT value FROM original_rows').get()).toEqual({ value: 'original' })
-      expect(original.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+      const table = expected === 'original' ? 'original_rows' : 'restored_rows'
+      expect(canonical.prepare(`SELECT value FROM ${table}`).get()).toEqual({ value: expected })
+      expect(canonical.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
     } finally {
-      original.close()
+      canonical.close()
+    }
+    const sourceSnapshot = new DatabaseSync(backup.path, { readOnly: true })
+    try {
+      expect(sourceSnapshot.prepare('SELECT value FROM restored_rows').get()).toEqual({
+        value: 'from-backup'
+      })
+      expect(sourceSnapshot.prepare('PRAGMA integrity_check').get()).toEqual({
+        integrity_check: 'ok'
+      })
+    } finally {
+      sourceSnapshot.close()
+    }
+  })
+
+  it('solidifies committed target WAL data into an independently valid rollback snapshot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-backup-old-wal-'))
+    const source = RuntimeDatabase.open(join(root, 'source.sqlite'))
+    opened.push(source)
+    source.exec('CREATE TABLE restored_rows (value TEXT NOT NULL) STRICT;')
+    source.run('INSERT INTO restored_rows (value) VALUES (?)', 'from-backup')
+    const service = new DatabaseBackupService(root, { now: () => 5_000 })
+    const backup = await service.create(source, 'clean-exit')
+    const targetPath = join(root, 'target.sqlite')
+    const old = new DatabaseSync(targetPath)
+    old.exec('PRAGMA journal_mode = WAL; CREATE TABLE original_rows (value TEXT NOT NULL) STRICT;')
+    old.prepare('INSERT INTO original_rows (value) VALUES (?)').run('committed-old-wal')
+    expect((await stat(`${targetPath}-wal`)).size).toBeGreaterThan(0)
+
+    await service.restore(backup.id, targetPath)
+    old.close()
+
+    const replacedName = (await readdir(root)).find((name) =>
+      /^target\.sqlite\.replaced-\d+$/.test(name)
+    )
+    expect(replacedName).toBeDefined()
+    const rollback = new DatabaseSync(join(root, replacedName!), { readOnly: true })
+    try {
+      expect(rollback.prepare('SELECT value FROM original_rows').get()).toEqual({
+        value: 'committed-old-wal'
+      })
+      expect(rollback.prepare('PRAGMA integrity_check').get()).toEqual({ integrity_check: 'ok' })
+    } finally {
+      rollback.close()
     }
   })
 })
