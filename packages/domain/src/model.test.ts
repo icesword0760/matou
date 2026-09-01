@@ -5,6 +5,7 @@ import type {
   SessionCanvasMembership,
   SessionEnvironment,
   SessionGitState,
+  ForkProgress,
   SessionGraphNode,
   TaskPlacement,
   WindowNavigation,
@@ -151,5 +152,46 @@ describe('recovery graph models', () => {
     } satisfies SessionGraphNode
 
     expect(node).toMatchObject({ git: { branch: 'feature/recovery', dirty: true } })
+  })
+})
+
+
+describe('recovery contract impossible states', () => {
+  it('rejects invalid environment, Git, and mixed fork projection combinations at compile time', () => {
+    // @ts-expect-error ready worktrees require their persisted Worktree identity.
+    const missingReadyWorktree: SessionEnvironment = {
+      kind: 'worktree', state: 'ready', path: '/tmp/worktree', localExecutionContextId: 'local-1'
+    }
+    // @ts-expect-error local environments do not carry a Worktree identity.
+    const localWithWorktreeIdentity: SessionEnvironment = {
+      kind: 'local', state: 'ready', path: '/tmp/local', localExecutionContextId: 'local-1',
+      worktreeId: 'worktree-1', worktreeExecutionContextId: 'context-worktree'
+    }
+    // @ts-expect-error ready Git state must identify a branch or detached HEAD.
+    const readyGitWithoutReference: SessionGitState = { state: 'ready', dirty: false }
+    // @ts-expect-error branch and detached HEAD are mutually exclusive Git states.
+    const readyGitWithBothReferences: SessionGitState = {
+      state: 'ready', branch: 'main', detachedHead: 'abc123', dirty: false
+    }
+    const forkProgress = {
+      operationId: 'fork-operation-1', sessionId: 'session-1', submissionKey: 'submission-1',
+      stage: 'creating-worktree', completedSteps: 1, totalSteps: 5, attempt: 0
+    } satisfies ForkProgress
+    // @ts-expect-error legacy fork fields and ForkProgress are mutually exclusive projections.
+    const mixedForkProjection: SessionGraphNode = {
+      sessionId: 'session-1', sceneId: 'scene-1', currentMode: 'claude-code', workStatus: 'starting',
+      providerRestoreState: 'none', canFork: false, title: 'Fork', cwd: '/tmp/worktree',
+      forkState: 'starting', forkProgress,
+      activeChildCount: 0, stoppedChildCount: 0, childModeCounts: { shell: 0, claudeCode: 0 },
+      latestLines: [], lastUserInteractionSeq: 0
+    }
+
+    expect({
+      missingReadyWorktree,
+      localWithWorktreeIdentity,
+      readyGitWithoutReference,
+      readyGitWithBothReferences,
+      mixedForkProjection
+    }).toBeDefined()
   })
 })

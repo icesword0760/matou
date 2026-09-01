@@ -131,24 +131,84 @@ export type SessionWorkStatus =
   | 'interrupted'
   | 'exited'
 export type ProviderRestoreState = 'none' | 'restoring' | 'failed'
+/** @deprecated Use ForkProgress once Task 10 migrates every Fork producer and consumer. */
 export type SessionForkState = 'pending' | 'starting' | 'succeeded' | 'failed'
 
-export interface SessionEnvironment {
-  kind: 'local' | 'worktree'
-  state: 'ready' | 'missing' | 'recovering' | 'handoff' | 'failed'
-  path: string
-  localExecutionContextId: ExecutionContextId
-  worktreeId?: WorktreeId
-  worktreeExecutionContextId?: ExecutionContextId
-  error?: string
-}
+export type SessionEnvironment =
+  | {
+      kind: 'local'
+      state: 'ready'
+      path: string
+      localExecutionContextId: ExecutionContextId
+      worktreeId?: never
+      worktreeExecutionContextId?: never
+      error?: never
+    }
+  | {
+      kind: 'local'
+      state: 'recovering' | 'handoff'
+      path: string
+      localExecutionContextId: ExecutionContextId
+      worktreeId?: never
+      worktreeExecutionContextId?: never
+      error?: string
+    }
+  | {
+      kind: 'local'
+      state: 'failed'
+      path: string
+      localExecutionContextId: ExecutionContextId
+      worktreeId?: never
+      worktreeExecutionContextId?: never
+      error: string
+    }
+  | {
+      kind: 'worktree'
+      state: 'ready'
+      path: string
+      localExecutionContextId: ExecutionContextId
+      worktreeId: WorktreeId
+      worktreeExecutionContextId: ExecutionContextId
+      error?: never
+    }
+  | {
+      kind: 'worktree'
+      state: 'missing' | 'failed'
+      path: string
+      localExecutionContextId: ExecutionContextId
+      worktreeId: WorktreeId
+      worktreeExecutionContextId: ExecutionContextId
+      error: string
+    }
+  | {
+      kind: 'worktree'
+      state: 'recovering' | 'handoff'
+      path: string
+      localExecutionContextId: ExecutionContextId
+      worktreeId: WorktreeId
+      worktreeExecutionContextId: ExecutionContextId
+      error?: string
+    }
 
-export interface SessionGitState {
-  state: 'ready' | 'unavailable'
-  branch?: string
-  detachedHead?: string
-  dirty: boolean
-}
+export type SessionGitState =
+  | {
+      state: 'ready'
+      branch: string
+      detachedHead?: never
+      dirty: boolean
+    }
+  | {
+      state: 'ready'
+      branch?: never
+      detachedHead: string
+      dirty: boolean
+    }
+  | {
+      state: 'unavailable'
+      branch?: never
+      detachedHead?: never
+      dirty: boolean
+    }
 
 export type ForkStage =
   | 'queued'
@@ -250,7 +310,7 @@ export interface SessionCanvasMembership {
   updatedAt: number
 }
 
-export interface SessionGraphNode {
+interface SessionGraphNodeBase {
   sessionId: SessionId
   sceneId: SceneId
   parentSessionId?: SessionId
@@ -259,10 +319,6 @@ export interface SessionGraphNode {
   workStatus: SessionWorkStatus
   providerRestoreState: ProviderRestoreState
   providerRestoreError?: string
-  forkState?: SessionForkState
-  forkError?: string
-  forkAttempt?: number
-  forkProgress?: ForkProgress
   providerSpawnRevision?: number
   canFork: boolean
   title: string
@@ -288,6 +344,25 @@ export interface SessionGraphNode {
   archivedAt?: number
   detachedWindowId?: string
 }
+
+interface LegacyForkProjection {
+  /** @deprecated Use forkProgress. Removed after Task 10 migrates all producers and consumers. */
+  forkState?: SessionForkState
+  /** @deprecated Use forkProgress.error. Removed after Task 10 migrates all producers and consumers. */
+  forkError?: string
+  /** @deprecated Use forkProgress.attempt. Removed after Task 10 migrates all producers and consumers. */
+  forkAttempt?: number
+  forkProgress?: never
+}
+
+interface ForkProgressProjection {
+  forkState?: never
+  forkError?: never
+  forkAttempt?: never
+  forkProgress: ForkProgress
+}
+
+export type SessionGraphNode = SessionGraphNodeBase & (LegacyForkProjection | ForkProgressProjection)
 
 export interface SessionGraphEdge {
   parentSessionId: SessionId

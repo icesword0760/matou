@@ -55,6 +55,8 @@ const runtimeRecoveryFailureSchema = z.object({
 }).strict()
 
 export const runtimeRecoverySnapshotSchema = z.object({
+  recoveryId: identifier,
+  revision: z.number().int().nonnegative(),
   mode: z.enum(RUNTIME_MODES),
   stage: z.enum(RUNTIME_RECOVERY_STAGES),
   completed: z.number().int().nonnegative(),
@@ -107,8 +109,32 @@ export const runtimeRecoveryCommandSchema = z.discriminatedUnion('action', [
 
 export type RuntimeRecoveryCommand = z.infer<typeof runtimeRecoveryCommandSchema>
 
-export function parseRuntimeLifecycleEvent(value: unknown): RuntimeLifecycleEvent {
-  return runtimeLifecycleEventSchema.parse(value)
+export function validateRuntimeRecoveryTransition(
+  previous: RuntimeRecoverySnapshot | undefined,
+  next: RuntimeRecoverySnapshot
+): void {
+  if (!previous || previous.recoveryId !== next.recoveryId) return
+
+  if (next.revision <= previous.revision) {
+    throw new Error('runtime recovery revision must increase within one recovery')
+  }
+
+  if (RUNTIME_RECOVERY_STAGES.indexOf(next.stage) < RUNTIME_RECOVERY_STAGES.indexOf(previous.stage)) {
+    throw new Error('runtime recovery stage must not regress within one recovery')
+  }
+
+  if (next.completed < previous.completed) {
+    throw new Error('runtime recovery completed work must not regress within one recovery')
+  }
+}
+
+export function parseRuntimeLifecycleEvent(
+  value: unknown,
+  previous?: RuntimeRecoverySnapshot
+): RuntimeLifecycleEvent {
+  const event = runtimeLifecycleEventSchema.parse(value)
+  validateRuntimeRecoveryTransition(previous, event.snapshot)
+  return event
 }
 
 export function parseRuntimeRecoveryCommand(value: unknown): RuntimeRecoveryCommand {

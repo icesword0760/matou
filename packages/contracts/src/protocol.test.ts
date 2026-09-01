@@ -233,6 +233,12 @@ describe('runtime storage fault messages', () => {
       message: 'journal is not writable',
       retainedBytes: 1024
     } satisfies import('./protocol').RuntimeMessage
+    const recoveryRequired = {
+      type: 'protocol.error',
+      protocolVersion: PROTOCOL_VERSION,
+      code: 'DATABASE_RECOVERY_REQUIRED',
+      message: 'database recovery is required'
+    } satisfies import('./protocol').RuntimeMessage
     const recovered = {
       type: 'terminal.storage-recovered',
       protocolVersion: PROTOCOL_VERSION,
@@ -240,9 +246,10 @@ describe('runtime storage fault messages', () => {
       sequence: 42
     } satisfies import('./protocol').RuntimeMessage
 
-    expect({ fault, recovered }).toMatchObject({
+    expect({ fault, recoveryRequired, recovered }).toMatchObject({
       fault: { retainedBytes: 1024, sequence: 42 },
-      recovered: { sessionId: 'session-1' }
+      recovered: { sessionId: 'session-1' },
+      recoveryRequired: { code: 'DATABASE_RECOVERY_REQUIRED' }
     })
   })
 })
