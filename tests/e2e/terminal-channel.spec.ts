@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path'
 
 import { _electron as electron, expect, test } from '@playwright/test'
 
+import { launchMatou } from './matou-fixture'
+
 test('streams PTY output from UtilityProcess to xterm over a transferred MessagePort', async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-e2e-'))
   const app = await electron.launch({
@@ -128,4 +130,73 @@ async function dispatchStructuredPathDrop(
 
 async function terminalText(surface: import('@playwright/test').Locator): Promise<string> {
   return (await surface.locator('.xterm-rows').innerText()).replace(/\r?\n/g, '')
+}
+
+test('transparently chunks a large UTF-8 paste into one continuous PTY input', async () => {
+  test.setTimeout(60_000)
+  const fixture = await launchMatou()
+
+  try {
+    const { page } = fixture
+    page.on('console', (message) => console.log(`[renderer:${message.type()}] ${message.text()}`))
+    page.on('pageerror', (error) => console.error(`[renderer:error] ${error.message}`))
+
+    const surface = page.locator(
+      '.scene-stage:not([hidden]) [data-testid="terminal-pane"][data-active="true"] .terminal-surface'
+    )
+    await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
+    const textarea = surface.locator('.xterm-helper-textarea')
+    const rows = surface.locator('.xterm-rows')
+    await textarea.focus()
+    await pasteIntoTerminal(textarea, [
+      "python3 -c 'import sys,termios; a=termios.tcgetattr(0); b=a[:];",
+      ' b[3]&=~(termios.ECHO|termios.ICANON); b[6][termios.VMIN]=1; b[6][termios.VTIME]=0;',
+      ' termios.tcsetattr(0,termios.TCSANOW,b);',
+      ' print(bytes.fromhex("52454144595f464f525f4c415247455f494e505554").decode(),flush=True);',
+      ' d=sys.stdin.buffer.readline();',
+      ' termios.tcsetattr(0,termios.TCSANOW,a);',
+      ' print("LARGE_INPUT_RESULT",len(d),d[-8:].hex(),flush=True)\''
+    ].join(''))
+    await textarea.press('Enter')
+    await expect(rows).toContainText('READY_FOR_LARGE_INPUT')
+
+    const payloadByteLength = Math.floor(2.5 * 1024 * 1024)
+    const unicodeCore = '中文🙂e\u0301'.repeat(4096)
+    const suffix = 'TAILEND!'
+    const unicodeBytes = Buffer.byteLength(unicodeCore)
+    const payload = `${'x'.repeat(payloadByteLength - unicodeBytes - suffix.length)}${unicodeCore}${suffix}`
+    const expectedLine = Buffer.from(`${payload}\n`)
+    const expectedTailHex = expectedLine.subarray(-8).toString('hex')
+
+    await pasteIntoTerminal(textarea, payload)
+    await textarea.press('Enter')
+
+    await expect(rows).toContainText(
+      `LARGE_INPUT_RESULT ${payloadByteLength + 1} ${expectedTailHex}`,
+      { timeout: 30_000 }
+    )
+    await expect(page.locator([
+      '.reference-toast:visible',
+      '[role="dialog"]:visible',
+      '[role="alertdialog"]:visible',
+      '.provider-work-failure-banner:visible'
+    ].join(', '))).toHaveCount(0)
+  } finally {
+    await fixture.close()
+  }
+})
+
+async function pasteIntoTerminal(
+  textarea: import('@playwright/test').Locator,
+  value: string
+): Promise<void> {
+  await textarea.evaluate((element, text) => {
+    const clipboard = new DataTransfer()
+    clipboard.setData('text/plain', text)
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: clipboard
+    }))
+  }, value)
 }

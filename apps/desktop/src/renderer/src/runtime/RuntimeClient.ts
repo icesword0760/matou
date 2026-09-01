@@ -5,6 +5,8 @@ import {
   type RuntimeMode
 } from '@matou/contracts'
 
+import { splitUtf8ForTransport } from '../terminal/terminal-input-chunker'
+
 export interface RuntimeClientPort {
   onmessage: ((event: MessageEvent<RuntimeMessage>) => void) | null
   postMessage(message: unknown): void
@@ -152,7 +154,11 @@ export class RuntimeClient {
 
   sendTerminalInput(sessionId: string, data: string): void {
     if (this.#readOnly) return
-    this.#post({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data })
+    for (const chunk of splitUtf8ForTransport(data)) {
+      this.#post({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data: chunk
+      })
+    }
   }
 
   retryLastTerminalInput(sessionId: string): void {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { PROTOCOL_VERSION } from '@matou/contracts'
+import { PROTOCOL_VERSION, parseRendererMessage } from '@matou/contracts'
 
 import { RuntimeClient, type RuntimeClientPort } from './RuntimeClient'
 
@@ -91,6 +91,22 @@ describe('RuntimeClient', () => {
       }),
       expect.objectContaining({ type: 'terminal.input', sessionId: 'session-1', data: '\r' })
     ])
+  })
+
+  it('transparently sends multi-megabyte UTF-8 input as ordered protocol-safe chunks', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    const value = `${'a'.repeat(1024 * 1024)}🧭${'中文e\u0301'.repeat(32 * 1024)}`
+
+    client.sendTerminalInput('session-1', value)
+
+    const messages = port.sent.filter(({ type }) => type === 'terminal.input')
+    expect(messages.length).toBeGreaterThan(4)
+    expect(messages.map(({ data }) => data).join('')).toBe(value)
+    expect(messages.every((message) => {
+      expect(() => parseRendererMessage(message)).not.toThrow()
+      return new TextEncoder().encode(message.data).byteLength <= 256 * 1024
+    })).toBe(true)
   })
 
   it('updates a promoted terminal profile without spawning again until channel recovery', () => {
