@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,8 +7,21 @@ import { SceneTabBar, type SceneCommands } from './SceneTabBar'
 import { SplitDivider } from './SplitDivider'
 import type { HierarchyProjection } from './hierarchy-types'
 
-afterEach(cleanup)
-beforeEach(() => { Element.prototype.scrollIntoView = vi.fn() })
+let resizeObserverCallback: ResizeObserverCallback | undefined
+
+afterEach(() => {
+  cleanup()
+  resizeObserverCallback = undefined
+  vi.unstubAllGlobals()
+})
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn()
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: ResizeObserverCallback) { resizeObserverCallback = callback }
+    observe() {}
+    disconnect() {}
+  })
+})
 
 describe('Scene tabs and split actions', () => {
   it('creates a right-hand Shell sibling for the active terminal', async () => {
@@ -40,14 +53,36 @@ describe('Scene tabs and split actions', () => {
     expect(screen.queryByRole('button', { name: '文件' })).toBeNull()
   })
 
-  it('keeps every canvas and the add control in one horizontally scrollable strip like Kooky', () => {
-    const { container } = render(<SceneTabBar projection={fixture(20)} commands={sceneCommands()} />)
+  it('pins the overflow and add controls when canvases exceed the visible tab strip like Kooky', () => {
+    const commands = sceneCommands()
+    const { container } = render(<SceneTabBar projection={fixture(8)} commands={commands} />)
+    const strip = container.querySelector<HTMLElement>('.scene-tabs')!
+    setHorizontalGeometry(strip, 0, 400)
+    Object.defineProperties(strip, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 824 }
+    })
+    container.querySelectorAll<HTMLElement>('[data-scene-id]').forEach((tab, index) => {
+      setHorizontalGeometry(tab, index * 100, index * 100 + 100)
+    })
 
-    expect(screen.getAllByRole('tab')).toHaveLength(20)
-    expect(screen.queryByRole('button', { name: '更多页签' })).toBeNull()
+    act(() => resizeObserverCallback?.([], {} as ResizeObserver))
+
+    expect(screen.getAllByRole('tab')).toHaveLength(8)
+    expect(screen.getByRole('button', { name: '更多页签' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '新建页签' }).parentElement?.classList
-      .contains('tab-bar-left')).toBe(true)
-    expect(container.querySelector('.scene-tabs')?.classList.contains('tab-bar-left')).toBe(true)
+      .contains('tab-bar-overflow-actions')).toBe(true)
+
+    fireEvent.click(screen.getByRole('button', { name: '更多页签' }))
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      '页签 5', '页签 6', '页签 7', '页签 8'
+    ])
+
+    fireEvent.click(screen.getByRole('menuitem', { name: '页签 6' }))
+    expect(commands.activateScene).toHaveBeenCalledWith('scene-6')
+    expect(Element.prototype.scrollIntoView).toHaveBeenLastCalledWith({
+      inline: 'center', block: 'nearest', behavior: 'smooth'
+    })
   })
 
   it('reveals the active canvas when switching reaches a tab beyond the viewport', () => {
@@ -181,4 +216,11 @@ function graphNode(sessionId: string, workStatus: 'running' | 'needs-input' | 'i
     cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
+}
+
+function setHorizontalGeometry(element: HTMLElement, left: number, right: number) {
+  element.getBoundingClientRect = () => ({
+    left, right, top: 0, bottom: 40, width: right - left, height: 40, x: left, y: 0,
+    toJSON: () => ({})
+  })
 }

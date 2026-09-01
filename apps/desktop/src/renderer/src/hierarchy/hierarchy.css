@@ -82,6 +82,9 @@ button { -webkit-app-region: no-drag; }
 .tab-item.active .tab-close, .tab-item:hover .tab-close { visibility: visible; }
 .tab-status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #ff4524; }
 .tab-close:hover { color: #fff; background: rgba(255,255,255,.1); }
+.tab-bar-overflow-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-left: 8px; -webkit-app-region: no-drag; }
+.tab-overflow-btn { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: #8b949e; background: transparent; cursor: pointer; font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+.tab-overflow-btn:hover { color: rgba(255,255,255,.9); background: rgba(255,255,255,.08); }
 .tab-bar-right { display: flex; flex: 0 0 auto; align-items: center; -webkit-app-region: no-drag; }
 .tab-bar-right { gap: 2px; margin-left: 8px; }
 .tab-add-btn { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin-left: 4px; padding: 0; border: 0; border-radius: 6px; color: #888; background: rgba(255,255,255,.04); cursor: pointer; font-size: 16px; }
@@ -97,6 +100,17 @@ button { -webkit-app-region: no-drag; }
 .scene-tab-menu { position: absolute; z-index: 9999; top: 35px; right: 76px; display: grid; min-width: 160px; padding: 6px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(35,35,40,.98); box-shadow: 0 12px 40px rgba(0,0,0,.6); }
 .scene-tab-menu button { padding: 8px 12px; border: 0; border-radius: 6px; color: #dfdfdf; background: transparent; text-align: left; }
 .scene-tab-menu button:hover { background: rgba(255,255,255,.06); }
+.tab-overflow-mask { position: fixed; z-index: 9998; inset: 0; }
+.tab-overflow-panel { position: fixed; z-index: 9999; min-width: 200px; max-width: 360px; max-height: 320px; padding: 6px 0; overflow-y: auto; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(35,35,40,.96); box-shadow: 0 12px 40px rgba(0,0,0,.6); backdrop-filter: blur(16px); }
+.tab-overflow-panel::-webkit-scrollbar { width: 4px; }
+.tab-overflow-panel::-webkit-scrollbar-thumb { border-radius: 2px; background: rgba(255,255,255,.15); }
+.tab-overflow-item { display: flex; width: 100%; align-items: center; gap: 8px; box-sizing: border-box; padding: 8px 12px; border: 0; color: inherit; background: transparent; cursor: pointer; text-align: left; }
+.tab-overflow-item:hover { background: rgba(255,255,255,.06); }
+.tab-overflow-item.is-active { background: rgba(88,166,255,.1); }
+.tab-overflow-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #ff4524; }
+.tab-overflow-title { flex: 1; min-width: 0; overflow: hidden; color: rgba(255,255,255,.85); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.tab-overflow-item.is-active .tab-overflow-title { color: #58a6ff; }
+.tab-overflow-check { flex: 0 0 auto; color: #58a6ff; }
 
 .scene-stack.terminals-area { position: relative; z-index: 1; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; border-top: 1px solid var(--kooky-border); background: var(--kooky-terminal); }
 .scene-stage { width: 100%; height: 100%; min-width: 0; min-height: 0; background: var(--kooky-terminal); }
@@ -428,11 +442,13 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .tab-item.active { color: #2f3547; background: #eceef3; }
 .hierarchy-shell[data-theme="light"] .tab-close,
 .hierarchy-shell[data-theme="light"] .tab-add-btn,
+.hierarchy-shell[data-theme="light"] .tab-overflow-btn,
 .hierarchy-shell[data-theme="light"] .toolbar-btn,
 .hierarchy-shell[data-theme="light"] .pane-close { color: #606572; }
 .hierarchy-shell[data-theme="light"] .tab-add-btn { background: #eff0f4; }
 .hierarchy-shell[data-theme="light"] .tab-close:hover,
 .hierarchy-shell[data-theme="light"] .tab-add-btn:hover,
+.hierarchy-shell[data-theme="light"] .tab-overflow-btn:hover,
 .hierarchy-shell[data-theme="light"] .toolbar-btn:hover,
 .hierarchy-shell[data-theme="light"] .pane-close:hover { color: #2f3547; background: rgba(0,0,0,.08); }
 .hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
@@ -514,14 +530,17 @@ button { -webkit-app-region: no-drag; }
 
 .light-theme .detach-context-menu,
 .light-theme .scene-tab-menu,
+.light-theme .tab-overflow-panel,
 .light-theme .workbench-action-popover,
 .light-theme .perm-menu { border-color: transparent; color: #2f3547; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.1); }
 .light-theme .detach-menu-item,
 .light-theme .scene-tab-menu button,
+.light-theme .tab-overflow-title,
 .light-theme .workbench-action-popover button,
 .light-theme .perm-menu button.perm-menu__item { color: #2f3547; }
 .light-theme .detach-menu-item:hover,
 .light-theme .scene-tab-menu button:hover,
+.light-theme .tab-overflow-item:hover,
 .light-theme .workbench-action-popover button:hover,
 .light-theme .perm-menu button.perm-menu__item:hover { background: #eceef3; }
 .light-theme .kooky-rename-dialog,

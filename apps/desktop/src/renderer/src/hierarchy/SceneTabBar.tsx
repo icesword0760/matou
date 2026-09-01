@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
@@ -32,17 +33,66 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
   const [closingSceneId, setClosingSceneId] = useState<string | null>(null)
   const [menuSceneId, setMenuSceneId] = useState<string | null>(null)
   const [renamingSceneId, setRenamingSceneId] = useState<string | null>(null)
+  const [isTabOverflowing, setIsTabOverflowing] = useState(false)
+  const [tabOverflowVisible, setTabOverflowVisible] = useState(false)
+  const [hiddenSceneIds, setHiddenSceneIds] = useState<string[]>([])
+  const tabBarLeftRef = useRef<HTMLDivElement>(null)
+  const tabItemRefs = useRef(new Map<string, HTMLDivElement>())
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
-  const activeRef = useRef<HTMLButtonElement>(null)
+  const activeRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     activeRef.current?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
   }, [activeSceneId])
+  useEffect(() => {
+    const container = tabBarLeftRef.current
+    if (!container) return
+    const check = () => {
+      const overflowing = container.scrollWidth - container.clientWidth > 4
+      setIsTabOverflowing(overflowing)
+      if (!overflowing) {
+        setTabOverflowVisible(false)
+        setHiddenSceneIds([])
+      }
+    }
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(check)
+    observer?.observe(container)
+    window.addEventListener('resize', check)
+    check()
+    const frame = requestAnimationFrame(check)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer?.disconnect()
+      window.removeEventListener('resize', check)
+    }
+  }, [scenes.length])
   const activeSessionId = activeSceneId ? projection.navigation.sessionByScene[activeSceneId] : undefined
   const select = (sceneId: string, center = false) => {
     void commands.activateScene(sceneId)
     const tab = document.querySelector<HTMLElement>(`[data-scene-id="${sceneId}"]`)
-    tab?.scrollIntoView({ inline: center ? 'center' : 'nearest', block: 'nearest' })
+    tab?.scrollIntoView({
+      inline: center ? 'center' : 'nearest', block: 'nearest',
+      ...(center ? { behavior: 'smooth' as const } : {})
+    })
+  }
+  const addCanvas = () => {
+    if (!taskId) return
+    if (commands.createCanvas) commands.createCanvas(taskId)
+    else commands.createScene(taskId)
+  }
+  const refreshHiddenTabs = () => {
+    const container = tabBarLeftRef.current
+    if (!container || !isTabOverflowing) {
+      setHiddenSceneIds([])
+      return
+    }
+    const containerRect = container.getBoundingClientRect()
+    setHiddenSceneIds(scenes.filter(({ id }) => {
+      const element = tabItemRefs.current.get(id)
+      if (!element) return true
+      const rect = element.getBoundingClientRect()
+      return rect.right > containerRect.right + 1 || rect.left < containerRect.left - 1
+    }).map(({ id }) => id))
   }
   const task = projection.tasks.find(({ id }) => id === taskId)
   const sceneHasUnread = (sceneId: string) => {
@@ -79,25 +129,36 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
       void commands.reorderScene(activeSceneId, scenes[index + 2]?.id)
     }
   }}>
-    <div className="scene-tabs tab-bar-left">
+    <div ref={tabBarLeftRef} className="scene-tabs tab-bar-left">
       {scenes.map((scene) => <div key={scene.id} data-scene-id={scene.id}
+        ref={(element) => {
+          if (element) tabItemRefs.current.set(scene.id, element)
+          else tabItemRefs.current.delete(scene.id)
+          if (scene.id === activeSceneId) activeRef.current = element
+        }}
         className={`tab-item${scene.id === activeSceneId ? ' active' : ''}`}
         onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
-        <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
-          className="tab-title" aria-selected={scene.id === activeSceneId}
+        <button role="tab" className="tab-title" aria-selected={scene.id === activeSceneId}
           title={`${scene.name}\n双击重命名画布`} onDoubleClick={() => setRenamingSceneId(scene.id)}
           onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
         <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
       </div>)}
+      {!isTabOverflowing && <button className="tab-add-btn" aria-label="新建页签"
+        disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        onClick={addCanvas}>+</button>}
+    </div>
+    {isTabOverflowing && <div className="tab-bar-overflow-actions">
+      <button className="tab-overflow-btn" aria-label="更多页签" title="查看隐藏页签"
+        onClick={(event) => {
+          event.stopPropagation()
+          refreshHiddenTabs()
+          setTabOverflowVisible((visible) => !visible)
+        }}>···</button>
       <button className="tab-add-btn" aria-label="新建页签"
         disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-        onClick={() => {
-          if (!taskId) return
-          if (commands.createCanvas) commands.createCanvas(taskId)
-          else commands.createScene(taskId)
-        }}>+</button>
-    </div>
+        onClick={addCanvas}>+</button>
+    </div>}
     <div className="tab-bar-right">
     {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
       title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}
@@ -114,6 +175,24 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     {menuSceneId && <div role="menu" className="scene-tab-menu">
       <button role="menuitem" onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>
     </div>}
+    {tabOverflowVisible && createPortal(<>
+      <div className="tab-overflow-mask" onMouseDown={() => setTabOverflowVisible(false)} />
+      <div role="menu" aria-label="隐藏页签" className="tab-overflow-panel" style={tabOverflowPanelStyle(tabBarLeftRef.current)}>
+        {hiddenSceneIds.map((sceneId) => {
+          const scene = scenes.find(({ id }) => id === sceneId)
+          if (!scene) return null
+          return <button key={scene.id} role="menuitem" className={`tab-overflow-item${scene.id === activeSceneId ? ' is-active' : ''}`}
+            onClick={() => {
+              setTabOverflowVisible(false)
+              select(scene.id, true)
+            }}>
+            {sceneHasUnread(scene.id) && <span className="tab-overflow-dot" />}
+            <span className="tab-overflow-title">{scene.name}</span>
+            {scene.id === activeSceneId && <span className="tab-overflow-check">✓</span>}
+          </button>
+        })}
+      </div>
+    </>, document.body)}
     {renamingSceneId && (() => {
       const scene = scenes.find(({ id }) => id === renamingSceneId)
       if (!scene) return null
@@ -140,6 +219,11 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
 }
 
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
+function tabOverflowPanelStyle(element: HTMLElement | null) {
+  if (!element) return { top: 48, right: 80 }
+  const rect = element.getBoundingClientRect()
+  return { top: rect.bottom + 4, right: window.innerWidth - rect.right }
+}
 function NOOP(): void {}
 
 export function sceneDisplayName(
