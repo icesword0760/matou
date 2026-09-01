@@ -11,6 +11,7 @@ export interface MatouDesktopApi {
   showWindow(windowId: string): Promise<void>
   createDetachedTerminalWindow(input: DetachedTerminalWindowInput): Promise<void>
   closeDetachedTerminalWindow(windowId: string): Promise<void>
+  detachedTerminalWindowExists(windowId: string): Promise<boolean>
   onDetachedWindowClosed(listener: (event: DetachedWindowClosedEvent) => void): () => void
   openDagWindow(input: DagWindowContext): Promise<void>
   selectDagNode(input: DagNodeSelection): Promise<void>
@@ -108,6 +109,7 @@ export const DESKTOP_CHANNELS = {
   showWindow: 'matou:show-window',
   createDetachedTerminalWindow: 'matou:create-detached-terminal-window',
   closeDetachedTerminalWindow: 'matou:close-detached-terminal-window',
+  detachedTerminalWindowExists: 'matou:detached-terminal-window-exists',
   detachedWindowClosed: 'matou:detached-window-closed',
   openDagWindow: 'matou:open-dag-window',
   selectDagNode: 'matou:select-dag-node',

@@ -39,7 +39,7 @@ import { useTerminalShortcuts } from './useTerminalShortcuts'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
-import { ReadOnlyRecoveryBanner } from '../recovery/ReadOnlyRecoveryBanner'
+import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 
 export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
   fixture?: HierarchyProjection
@@ -203,6 +203,38 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   useNotificationSnapshot()
   const projectionRef = useRef(projection)
   useEffect(() => { projectionRef.current = projection }, [projection])
+  const detachedWindowIds = useMemo(() => Array.from(new Set(
+    (projection.sceneSnapshots ?? []).flatMap(({ mounts, windows }) => {
+      const detached = new Set(windows.filter(({ state }) => state === 'detached').map(({ id }) => id))
+      return mounts.flatMap(({ sceneWindowId }) =>
+        sceneWindowId && detached.has(sceneWindowId) ? [sceneWindowId] : [])
+    })
+  )).sort(), [projection.sceneSnapshots])
+  const detachedWindowSignature = detachedWindowIds.join(':')
+  const [liveDetachedWindowIds, setLiveDetachedWindowIds] = useState<Set<string> | null>(null)
+  useEffect(() => {
+    if (!readOnly) {
+      setLiveDetachedWindowIds(null)
+      return
+    }
+    let alive = true
+    setLiveDetachedWindowIds(null)
+    const exists = window.matouDesktop?.detachedTerminalWindowExists
+    void Promise.all(detachedWindowIds.map(async (windowId) => {
+      if (!exists) return [windowId, false] as const
+      try {
+        return [windowId, await exists(windowId)] as const
+      } catch {
+        return [windowId, false] as const
+      }
+    })).then((results) => {
+      if (alive) setLiveDetachedWindowIds(new Set(
+        results.filter(([, present]) => present).map(([windowId]) => windowId)
+      ))
+    })
+    return () => { alive = false }
+  // The stable signature avoids rechecking BrowserWindows for unrelated projection refreshes.
+  }, [detachedWindowSignature, readOnly])
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
   const [themeKey, setThemeKey] = useState<TerminalThemeKey>(DEFAULT_TERMINAL_THEME)
   const [fontSize, setFontSize] = useState(11)
@@ -484,7 +516,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
 
   return <main className="hierarchy-shell cli-module" data-theme={themeKey}
     data-runtime-mode={readOnly ? 'read-only' : 'normal'}>
-              {readOnly && <ReadOnlyRecoveryBanner exportBundle={() =>
+              {readOnly && <ReadOnlyRecoveryBanner onSearch={() => setSearchOpen(true)} exportBundle={() =>
                 window.matouDesktop.exportDatabaseRecoveryBundle()} />}
               <div className="claude-code-view hierarchy-body">
                 <TaskSidebar projection={projection} commands={commands} pathValid={pathValid}
@@ -531,7 +563,12 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   id === mount.sceneWindowId && state === 'detached'
                 )
                 if (detachedWindow) {
-                  return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
+                  if (!readOnly || liveDetachedWindowIds?.has(detachedWindow.id)) {
+                    return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
+                  }
+                  if (liveDetachedWindowIds === null) {
+                    return <div className="scene-recovery" role="status">正在确认历史窗口…</div>
+                  }
                 }
                 const graphNode = graph?.nodes.find(({ sessionId: candidate }) => candidate === session.id)
                 const parentGraphNode = graphNode?.parentSessionId
@@ -639,6 +676,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                 aria-label={`${scene.name} 终端布局`}>
                 {graph && snapshot
                   ? <SessionCanvas graph={graph} disabled={!pathValid || readOnly}
+                      {...(readOnly ? { disabledReason: READ_ONLY_REASON } : {})}
                       {...(levelParentByScene[scene.id] !== undefined
                         ? { levelParentSessionId: levelParentByScene[scene.id]! }
                         : {})}
@@ -712,7 +750,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                       } : {})} />}
                     <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
                       onModel={commands.setModel}
-                      {...(readOnly ? { disabledReason: '数据库处于只读恢复模式' } : {})}
+                      {...(readOnly ? { disabledReason: READ_ONLY_REASON } : {})}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />

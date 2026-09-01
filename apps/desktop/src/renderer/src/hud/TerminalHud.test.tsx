@@ -185,6 +185,58 @@ describe('PRD 02 bottom HUD', () => {
     expect(await screen.findByText('切换失败：进程启动失败')).toBeTruthy()
     expect(screen.getByRole('button', { name: /当前权限模式：Default/ })).toBeTruthy()
   })
+
+  it('closes open agent controls immediately when read-only recovery starts', async () => {
+    const user = userEvent.setup()
+    const onPermissionMode = vi.fn()
+    const onModel = vi.fn()
+    const view = render(<TerminalHud hud={agent({ resumable: true })}
+      onPermissionMode={onPermissionMode} onModel={onModel} />)
+
+    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
+    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+
+    view.rerender(<TerminalHud hud={agent({ resumable: true })}
+      disabledReason="数据库处于只读恢复模式"
+      onPermissionMode={onPermissionMode} onModel={onModel} />)
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.getByRole('button', { name: /当前权限模式/ }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: /当前权限模式/ }).title).toBe('数据库处于只读恢复模式')
+    expect(onPermissionMode).not.toHaveBeenCalled()
+    expect(onModel).not.toHaveBeenCalled()
+  })
+
+  it('closes an open repository control immediately when read-only recovery starts', async () => {
+    const user = userEvent.setup()
+    const request = vi.fn(async () => ({
+      repositoryRoot: '/tmp/project', cwd: '/tmp/project', currentBranch: 'main',
+      defaultBranch: 'main', dirty: false, stagedCount: 0, unstagedCount: 0,
+      untrackedCount: 0, additions: 0, deletions: 0, ahead: 0, behind: 0,
+      hasRemote: false, canPush: false, branches: [], worktrees: []
+    }))
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(): Promise<T> { return await request() as T }
+    }
+    const hud: SessionHudView = {
+      sessionId: 'session-1', mode: 'shell', cwd: '/tmp/project', gitBranch: 'main', startedAt: Date.now()
+    }
+    const view = render(<TerminalHud hud={hud} runtimeClient={runtimeClient}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: '打开 Git 与 Worktree' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    request.mockClear()
+
+    view.rerender(<TerminalHud hud={hud} runtimeClient={runtimeClient}
+      disabledReason="数据库处于只读恢复模式"
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.queryByRole('dialog', { name: 'Git 与 Worktree' })).toBeNull()
+    expect(screen.getByRole('button', { name: '打开 Git 与 Worktree' }).hasAttribute('disabled')).toBe(true)
+    expect(request).not.toHaveBeenCalled()
+  })
 })
 
 function agent(patch: Partial<SessionHudView> = {}): SessionHudView {

@@ -771,6 +771,47 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
+  it('returns a persisted detached Session to the main Scene for replay-only browsing when its window is gone', async () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.mounts[0]!.sceneWindowId = 'detached-missing'
+    first.windows.push({ id: 'detached-missing', sceneId: first.scene.id, state: 'detached' })
+    const detachedTerminalWindowExists = vi.fn(async () => false)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      detachedTerminalWindowExists,
+      exportDatabaseRecoveryBundle: vi.fn(async () => ({ exportedPath: '/tmp/export' })),
+      onDagShortcut: vi.fn(() => vi.fn()),
+      onDagNodeSelected: vi.fn(() => vi.fn()),
+      onDetachedWindowClosed: vi.fn(() => vi.fn())
+    } })
+
+    render(<HierarchyShell fixture={data} runtimeMode="read-only" />)
+
+    expect(await screen.findByTestId('xterm-session-a1')).toBeTruthy()
+    expect(screen.getByTestId('xterm-session-a1').dataset.readOnly).toBe('true')
+    expect(screen.queryByTestId('detached-placeholder')).toBeNull()
+    expect(detachedTerminalWindowExists).toHaveBeenCalledWith('detached-missing')
+  })
+
+  it('keeps the ownership placeholder in read-only mode when the detached BrowserWindow still exists', async () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.mounts[0]!.sceneWindowId = 'detached-live'
+    first.windows.push({ id: 'detached-live', sceneId: first.scene.id, state: 'detached' })
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      detachedTerminalWindowExists: vi.fn(async () => true),
+      exportDatabaseRecoveryBundle: vi.fn(async () => ({ exportedPath: '/tmp/export' })),
+      onDagShortcut: vi.fn(() => vi.fn()),
+      onDagNodeSelected: vi.fn(() => vi.fn()),
+      onDetachedWindowClosed: vi.fn(() => vi.fn())
+    } })
+
+    render(<HierarchyShell fixture={data} runtimeMode="read-only" />)
+
+    expect(await screen.findByTestId('detached-placeholder')).toBeTruthy()
+    expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
+  })
+
   it('returns a detached Session when its independent window closes', async () => {
     const data = fixture()
     const first = data.sceneSnapshots![0]!

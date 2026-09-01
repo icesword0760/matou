@@ -8,6 +8,7 @@ export function SessionCanvas(props: {
   graph: SessionGraphView
   levelParentSessionId?: string | null
   disabled?: boolean
+  disabledReason?: string
   renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
   onActivate(sessionId: string): void
   onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
@@ -19,7 +20,7 @@ export function SessionCanvas(props: {
   onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): unknown
 }) {
   const {
-    graph, levelParentSessionId, renderSession, onActivate,
+    graph, levelParentSessionId, disabled = false, disabledReason, renderSession, onActivate,
     onRemoveBranch, onNavigateToChildren,
     onReturnParent,
     onEnsureSessionVisible, revealRequest, geometry, onPutGeometry
@@ -52,7 +53,14 @@ export function SessionCanvas(props: {
       }
     : undefined
   const levelFocus = focused && focused.parentSessionId === parentId ? focused : direct[0]
-  useEffect(() => { onPutGeometryRef.current = onPutGeometry }, [onPutGeometry])
+  useEffect(() => {
+    onPutGeometryRef.current = disabled ? undefined : onPutGeometry
+    if (!disabled) return
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    geometryTimer.current = undefined
+    pendingGeometry.current = undefined
+    setGeometryPending(false)
+  }, [disabled, onPutGeometry])
   useEffect(() => () => {
     if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
     const pending = pendingGeometry.current
@@ -100,6 +108,7 @@ export function SessionCanvas(props: {
     },
     options?: { continuous?: boolean }
   ) => {
+    if (disabled) return
     geometryRetryCount.current = 0
     setGeometryPending(true)
     pendingGeometry.current = { ownerKey, geometry: next }
@@ -135,6 +144,7 @@ export function SessionCanvas(props: {
               workStatus === 'running' || workStatus === 'starting').length,
             needsInput: descendants.filter(({ workStatus }) => workStatus === 'needs-input').length
           }}
+          disabled={disabled} {...(disabledReason ? { disabledReason } : {})}
           {...(onRemoveBranch ? { onRemoveBranch } : {})} />
       }}
       onActivate={(sessionId) => {
@@ -148,7 +158,7 @@ export function SessionCanvas(props: {
       geometryKey={ownerKey} initialScrollLeft={initialScrollLeft}
       {...(initialAnchor ? { initialAnchor } : {})}
       {...(revealRequest ? { revealRequest } : {})}
-      onGeometryChange={putGeometry}
+      {...(disabled ? {} : { onGeometryChange: putGeometry })}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
 }

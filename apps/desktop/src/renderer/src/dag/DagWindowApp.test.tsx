@@ -102,6 +102,48 @@ describe('DagWindowApp', () => {
       geometry: expect.objectContaining({ zoom: 1.1 })
     }))
   })
+
+  it('keeps DAG browsing active but never persists viewport geometry in read-only recovery', async () => {
+    const data = graph()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = { request }
+
+    render(<DagWindowApp runtimeMode="read-only" />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+    request.mockClear()
+    await userEvent.setup().click(screen.getByRole('button', { name: '放大' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开会话：Child' }))
+
+    expect(screen.getByRole('status').textContent).toContain('数据库处于只读恢复模式')
+    expect(request).not.toHaveBeenCalledWith('geometry.put', expect.anything())
+    expect(window.matouDesktop.selectDagNode).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'child'
+    }))
+  })
+
+  it('does not flush a pending viewport change while entering read-only recovery', async () => {
+    const data = graph()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = { request }
+
+    const view = render(<DagWindowApp />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+    await userEvent.setup().click(screen.getByRole('button', { name: '放大' }))
+    request.mockClear()
+
+    view.rerender(<DagWindowApp runtimeMode="read-only" />)
+    await screen.findByText('数据库处于只读恢复模式')
+
+    expect(request).not.toHaveBeenCalledWith('geometry.put', expect.anything())
+  })
 })
 
 function graph(): SessionGraphView {

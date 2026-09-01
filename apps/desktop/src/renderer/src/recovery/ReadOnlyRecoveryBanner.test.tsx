@@ -8,6 +8,15 @@ import { ReadOnlyRecoveryBanner } from './ReadOnlyRecoveryBanner'
 afterEach(cleanup)
 
 describe('ReadOnlyRecoveryBanner', () => {
+  it('offers a direct search entry when a terminal history is present', async () => {
+    const onSearch = vi.fn()
+    render(<ReadOnlyRecoveryBanner onSearch={onSearch} exportBundle={vi.fn()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '搜索当前终端' }))
+
+    expect(onSearch).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the recovery explanation visible and exports a browsable database bundle', async () => {
     const exportBundle = vi.fn().mockResolvedValue({ exportedPath: '/tmp/matou-export' })
     render(<ReadOnlyRecoveryBanner exportBundle={exportBundle} />)

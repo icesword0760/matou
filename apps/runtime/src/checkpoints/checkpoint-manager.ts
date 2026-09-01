@@ -164,25 +164,34 @@ export class CheckpointManager {
     )
     for (const candidate of candidates) {
       try {
-        const encoded = await readFile(candidate.file_path)
-        if (digest(encoded) !== candidate.checksum) {
-          throw new Error('checkpoint checksum mismatch')
-        }
-        const decoded = decodeCheckpoint(encoded)
-        assertHeaderMatchesRow(decoded.header, candidate)
-        return {
-          id: candidate.id,
-          generation: candidate.generation,
-          terminalSequence: candidate.terminal_sequence,
-          domainEventSequence: candidate.domain_event_sequence,
-          screenEpoch: candidate.screen_epoch,
-          snapshot: decoded.snapshot
-        }
+        return await this.#readCandidate(candidate)
       } catch {
-        this.#database.run('UPDATE journal_checkpoints SET valid = 0 WHERE id = ?', candidate.id)
+        this.#invalidateUnreadableCandidate(candidate.id)
       }
     }
     return undefined
+  }
+
+  async #readCandidate(candidate: StoredCheckpoint): Promise<LoadedCheckpoint> {
+    const encoded = await readFile(candidate.file_path)
+    if (digest(encoded) !== candidate.checksum) {
+      throw new Error('checkpoint checksum mismatch')
+    }
+    const decoded = decodeCheckpoint(encoded)
+    assertHeaderMatchesRow(decoded.header, candidate)
+    return {
+      id: candidate.id,
+      generation: candidate.generation,
+      terminalSequence: candidate.terminal_sequence,
+      domainEventSequence: candidate.domain_event_sequence,
+      screenEpoch: candidate.screen_epoch,
+      snapshot: decoded.snapshot
+    }
+  }
+
+  #invalidateUnreadableCandidate(id: string): void {
+    if (this.#database.readOnly) return
+    this.#database.run('UPDATE journal_checkpoints SET valid = 0 WHERE id = ?', id)
   }
 
   async removeOrphans(sessionId: string): Promise<number> {

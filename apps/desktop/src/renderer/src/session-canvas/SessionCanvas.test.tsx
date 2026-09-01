@@ -67,6 +67,24 @@ describe('SessionCanvas', () => {
     expect(onRemoveBranch).toHaveBeenCalledWith('stopped', true)
   })
 
+  it('keeps stopped-session navigation visible but disables removal with the recovery reason', async () => {
+    const data = graph()
+    data.nodes.push(
+      { ...node('stopped', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' }
+    )
+    const onRemoveBranch = vi.fn()
+    render(<SessionCanvas graph={data} disabled disabledReason="数据库处于只读恢复模式"
+      onActivate={() => undefined} onRemoveBranch={onRemoveBranch}
+      renderSession={(item) => <div>{item.title}</div>} />)
+
+    const remove = screen.getByRole('button', { name: '移出节点：已停止 Shell' })
+    expect(remove.hasAttribute('disabled')).toBe(true)
+    expect(remove.getAttribute('title')).toBe('数据库处于只读恢复模式')
+    await userEvent.setup().click(remove)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+  })
+
   it('reveals a stopped Session selected from the DAG without changing projections', async () => {
     const data = graph()
     data.nodes.push({ ...node('archived', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })
@@ -113,6 +131,24 @@ describe('SessionCanvas', () => {
       'session-group:scene-1:parent',
       expect.objectContaining({ scrollLeft: 128, focusedSessionId: 'child-shell' })
     )
+    vi.useRealTimers()
+  })
+
+  it('keeps canvas browsing local without persisting geometry while recovery is read-only', () => {
+    vi.useFakeTimers()
+    const onPutGeometry = vi.fn()
+    const onActivate = vi.fn()
+    render(<SessionCanvas graph={graph()} disabled disabledReason="数据库处于只读恢复模式"
+      onActivate={onActivate} onPutGeometry={onPutGeometry}
+      renderSession={(item) => <div>{item.title}</div>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+
+    viewport.scrollLeft = 128
+    fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
+    vi.advanceTimersByTime(500)
+
+    expect(onPutGeometry).not.toHaveBeenCalled()
+    expect(onActivate).toHaveBeenCalledWith('child-shell')
     vi.useRealTimers()
   })
 

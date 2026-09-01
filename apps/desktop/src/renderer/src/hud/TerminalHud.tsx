@@ -51,6 +51,12 @@ export function TerminalHud(props: {
     return () => window.clearInterval(timer)
   }, [hud?.startedAt])
   useEffect(() => {
+    if (!disabled) return
+    setMenu(null)
+    setConfirmTarget(null)
+    setGitOpen(false)
+  }, [disabled])
+  useEffect(() => {
     const closeOutside = (event: Event) => {
       const target = event.target
       if (!(target instanceof Node)) return
@@ -76,7 +82,7 @@ export function TerminalHud(props: {
   const shortCwd = cwdShortName(hud.cwd)
   const gitDisplay = hud.gitBranch ? `${hud.gitBranch}${hud.gitDirty ? '*' : ''}` : ''
   const openMenu = (target: 'permission' | 'model', event: React.MouseEvent<HTMLElement>) => {
-    if (switching) return
+    if (disabled || switching) return
     if (menu === target) { setMenu(null); return }
     const rect = event.currentTarget.getBoundingClientRect()
     setMenuStyle({ left: rect.left, top: rect.top - 8, transform: 'translateY(-100%)' })
@@ -122,7 +128,7 @@ export function TerminalHud(props: {
         onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </>}
-    {menu && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
+    {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label={menu === 'permission' ? '权限模式' : '模型'}>
       <div className="perm-menu__title">{menu === 'permission' ? '权限模式' : '模型'}</div>
@@ -149,7 +155,7 @@ export function TerminalHud(props: {
         {modelStrategy === option.id && <span className="perm-menu__check">✓</span>}
       </button>)}
     </div></div>, document.body)}
-    {confirmTarget && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
+    {confirmTarget && !disabled && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
       body={bypassCopy(confirmTarget, hud.resumable === true)}
       confirmLabel={confirmTarget === 'bypassPermissions' ? '确认切换' : '确认退出'} onCancel={() => setConfirmTarget(null)}
       onConfirm={() => {
@@ -164,7 +170,7 @@ export function TerminalHud(props: {
         }).finally(() => setSwitching(false))
       }} />, document.body)}
     {switchError && createPortal(<div className="kooky-toast is-error" role="status">{switchError}</div>, document.body)}
-    {gitOpen && gitClient && hud.cwd && createPortal(<GitControlMenu client={gitClient}
+    {gitOpen && !disabled && gitClient && hud.cwd && createPortal(<GitControlMenu client={gitClient}
       cwd={hud.cwd} sessionId={hud.sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
       onClose={() => setGitOpen(false)} />, document.body)}
   </div>

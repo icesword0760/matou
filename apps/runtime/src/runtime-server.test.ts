@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -566,6 +566,116 @@ describe('RuntimeServer domain RPC', () => {
     expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
       expect.objectContaining({ sequence: 3, data: Uint8Array.from([66]) })
     ])
+  })
+
+  it('falls back to an older checkpoint without changing recovery sources in read-only mode', async () => {
+    registerSession(database, 'readonly-corrupt-checkpoint')
+    const journal = await SegmentJournal.open(root, 'readonly-corrupt-checkpoint')
+    await journal.appendOutput(1, Uint8Array.from([65]))
+    await journal.appendDomainCursor(2, 1)
+    await journal.appendOutput(3, Uint8Array.from([66]))
+    await journal.appendDomainCursor(4, 2)
+    await journal.appendOutput(5, Uint8Array.from([67]))
+    await journal.close()
+    const checkpoints = new CheckpointManager(root, database)
+    const older = await checkpoints.create({
+      sessionId: 'readonly-corrupt-checkpoint', terminalSequence: 2, domainEventSequence: 1,
+      screenEpoch: 3, snapshot: Uint8Array.from([1, 2, 3])
+    })
+    const newest = await checkpoints.create({
+      sessionId: 'readonly-corrupt-checkpoint', terminalSequence: 4, domainEventSequence: 2,
+      screenEpoch: 4, snapshot: Uint8Array.from([4, 5, 6])
+    })
+    const corrupted = await readFile(newest.filePath)
+    corrupted[corrupted.byteLength - 1] = corrupted[corrupted.byteLength - 1]! ^ 0xff
+    await writeFile(newest.filePath, corrupted)
+
+    server.close()
+    const databasePath = database.path
+    database.close()
+    const recoveryPaths = [
+      databasePath, `${databasePath}-wal`, `${databasePath}-shm`, journal.path,
+      older.filePath, newest.filePath
+    ]
+    const before = await readRecoverySourceBytes(recoveryPaths)
+    await chmod(root, 0o500)
+    expect((await stat(root)).mode & 0o777).toBe(0o500)
+    try {
+      database = RuntimeDatabase.openReadOnly(databasePath)
+      port = new MockPort()
+      server = new RuntimeServer(port, root, database)
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'readonly-corrupt' })
+      port.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'readonly-corrupt-checkpoint', fromSequence: 0
+      })
+      await waitUntil(() => port.last('terminal.replay-complete') !== undefined)
+
+      expect(port.last('terminal.replay-start')).toMatchObject({
+        checkpointSequence: 2,
+        checkpoint: {
+          terminalSequence: 2, domainEventSequence: 1, screenEpoch: 3,
+          snapshot: Uint8Array.from([1, 2, 3])
+        }
+      })
+      expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
+        expect.objectContaining({ sequence: 3, data: Uint8Array.from([66]) }),
+        expect.objectContaining({ sequence: 5, data: Uint8Array.from([67]) })
+      ])
+      expect(port.last('protocol.error')).toBeUndefined()
+      expect(await readRecoverySourceBytes(recoveryPaths)).toEqual(before)
+    } finally {
+      await chmod(root, 0o700)
+    }
+  })
+
+  it('falls back to the raw Journal without changing recovery sources when a read-only checkpoint is missing', async () => {
+    registerSession(database, 'readonly-missing-checkpoint')
+    const journal = await SegmentJournal.open(root, 'readonly-missing-checkpoint')
+    await journal.appendOutput(1, Uint8Array.from([71]))
+    await journal.appendResize(2, 120, 42)
+    await journal.appendOutput(3, Uint8Array.from([72]))
+    await journal.close()
+    const missing = await new CheckpointManager(root, database).create({
+      sessionId: 'readonly-missing-checkpoint', terminalSequence: 2, domainEventSequence: 0,
+      screenEpoch: 5, snapshot: Uint8Array.from([9, 9, 9])
+    })
+    await unlink(missing.filePath)
+
+    server.close()
+    const databasePath = database.path
+    database.close()
+    const recoveryPaths = [
+      databasePath, `${databasePath}-wal`, `${databasePath}-shm`, journal.path, missing.filePath
+    ]
+    const before = await readRecoverySourceBytes(recoveryPaths)
+    await chmod(root, 0o500)
+    expect((await stat(root)).mode & 0o777).toBe(0o500)
+    try {
+      database = RuntimeDatabase.openReadOnly(databasePath)
+      port = new MockPort()
+      server = new RuntimeServer(port, root, database)
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'readonly-missing' })
+      port.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'readonly-missing-checkpoint', fromSequence: 0
+      })
+      await waitUntil(() => port.last('terminal.replay-complete') !== undefined)
+
+      expect(port.last('terminal.replay-start')).toMatchObject({
+        sessionId: 'readonly-missing-checkpoint', availableFromSequence: 1, liveSequence: 3
+      })
+      expect(port.last('terminal.replay-start')).not.toHaveProperty('checkpoint')
+      expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
+        expect.objectContaining({ sequence: 1, data: Uint8Array.from([71]) }),
+        expect.objectContaining({ sequence: 3, data: Uint8Array.from([72]) })
+      ])
+      expect(port.last('terminal.replay-resize')).toMatchObject({ sequence: 2, cols: 120, rows: 42 })
+      expect(port.last('protocol.error')).toBeUndefined()
+      expect(await readRecoverySourceBytes(recoveryPaths)).toEqual(before)
+    } finally {
+      await chmod(root, 0o700)
+    }
   })
 
   it('returns projection responses with runtime generation protection', async () => {
@@ -2538,6 +2648,17 @@ function rpc(requestId: string, method: RpcMethod, input: Record<string, unknown
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name]
   else process.env[name] = value
+}
+
+async function readRecoverySourceBytes(paths: string[]): Promise<Array<Buffer | undefined>> {
+  return Promise.all(paths.map(async (path) => {
+    try {
+      return await readFile(path)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+  }))
 }
 
 async function childProcessCwd(pid: number): Promise<string> {

@@ -47,8 +47,8 @@ export function App() {
     </main>
   }
 
-  if (detached) return <DetachedTerminalApp />
-  if (dag) return <DagWindowApp />
+  if (detached) return <DetachedTerminalApp runtimeMode={lifecycle.snapshot.mode} />
+  if (dag) return <DagWindowApp runtimeMode={lifecycle.snapshot.mode} />
 
   return <>
     <HierarchyShell runtimeMode={lifecycle.snapshot.mode} />

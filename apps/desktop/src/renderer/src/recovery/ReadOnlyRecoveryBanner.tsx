@@ -7,6 +7,7 @@ const READ_ONLY_REASON = '数据库处于只读恢复模式'
 
 export function ReadOnlyRecoveryBanner(props: {
   exportBundle(): Promise<RuntimeRecoveryCommandResult>
+  onSearch?(): void
 }) {
   const [exporting, setExporting] = useState(false)
   const [message, setMessage] = useState('')
@@ -33,9 +34,12 @@ export function ReadOnlyRecoveryBanner(props: {
       <strong>{READ_ONLY_REASON}</strong>
       <span>现有工作空间、事项和会话仍可浏览、搜索与复制；可能改动数据的操作已暂停。</span>
     </div>
-    <button type="button" disabled={exporting} onClick={() => void exportBundle()}>
-      {exporting ? '正在导出…' : '导出数据库资料'}
-    </button>
+    <div className="read-only-recovery-banner__actions">
+      {props.onSearch && <button type="button" onClick={props.onSearch}>搜索当前终端</button>}
+      <button type="button" disabled={exporting} onClick={() => void exportBundle()}>
+        {exporting ? '正在导出…' : '导出数据库资料'}
+      </button>
+    </div>
     {message && <output>{message}</output>}
     {error && <span role="alert">{error}</span>}
   </section>

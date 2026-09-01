@@ -13,6 +13,7 @@ button { -webkit-app-region: no-drag; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .hierarchy-shell.cli-module { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; overflow: hidden; color: #fafafa; background: var(--kooky-terminal); }
+.hierarchy-shell.cli-module { flex-direction: column; }
 .claude-code-view.hierarchy-body { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 
 .workbench-sidebar { position: relative; z-index: 30; display: flex; flex: 0 0 196px; flex-direction: column; width: 196px; height: 100%; border-right: 1px solid var(--kooky-border); color: #dfdfdf; background: var(--kooky-chrome); }
@@ -308,6 +309,8 @@ button { -webkit-app-region: no-drag; }
 .detached-placeholder button { padding: 6px 10px; border: 1px solid #35415a; border-radius: 6px; color: #cbd8f1; background: #1a2333; }
 .detached-terminal-app { display: grid; grid-template-rows: 42px minmax(0,1fr) 38px; width: 100%; height: 100%; background: #0b0e14; }
 .detached-terminal-app:has(.terminal-search-bar) { grid-template-rows: 42px 40px minmax(0,1fr) 38px; }
+.detached-terminal-app:has(.read-only-recovery-banner) { grid-template-rows: 42px auto minmax(0,1fr) 38px; }
+.detached-terminal-app:has(.read-only-recovery-banner):has(.terminal-search-bar) { grid-template-rows: 42px auto 40px minmax(0,1fr) 38px; }
 .detached-terminal-app > header { display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #252a33; color: #dce3ef; background: #11151c; -webkit-app-region: drag; }
 .detached-terminal-app > header span { color: #748096; font-size: 10px; }
 .e2e-diagnostics { position: fixed; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

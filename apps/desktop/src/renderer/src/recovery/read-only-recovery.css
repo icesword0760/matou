@@ -17,6 +17,10 @@
   flex-wrap: wrap;
   gap: 4px 10px;
 }
+.read-only-recovery-banner > .read-only-recovery-banner__actions {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
 
 .read-only-recovery-banner strong { color: #966300; }
 .read-only-recovery-banner span { opacity: 0.78; }

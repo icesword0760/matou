@@ -311,6 +311,10 @@ ipcMain.handle(DESKTOP_CHANNELS.createDetachedTerminalWindow, (
 ipcMain.handle(DESKTOP_CHANNELS.closeDetachedTerminalWindow, (_event, windowId: string) => {
   browserWindows.get(windowId)?.close()
 })
+ipcMain.handle(DESKTOP_CHANNELS.detachedTerminalWindowExists, (_event, windowId: string) => {
+  const window = browserWindows.get(windowId)
+  return Boolean(window && !window.isDestroyed())
+})
 ipcMain.handle(DESKTOP_CHANNELS.openDagWindow, (_event, input: DagWindowContext) => {
   dagWindows.open(input)
 })

@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { DagWindowContext, RuntimeConnectionState } from '../../../shared/desktop-api'
+import type { RuntimeMode } from '@matou/contracts'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagCanvas, type DagTransform } from './DagCanvas'
 import './dag.css'
+import { READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 
-export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView }) {
+export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
+  fixtureGraph?: SessionGraphView
+  runtimeMode?: RuntimeMode
+}) {
   const client = useRuntimeClient()
+  const readOnly = runtimeMode === 'read-only'
   const [context, setContext] = useState(readContext)
   const [graph, setGraph] = useState<SessionGraphView | null>(fixtureGraph ?? null)
   const [initialTransform, setInitialTransform] = useState<DagTransform | undefined>(undefined)
   const [geometryReady, setGeometryReady] = useState(Boolean(fixtureGraph))
   const latestTransform = useRef<DagTransform | undefined>(undefined)
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const layoutRevision = useRef(0)
   const graphSignature = useRef('')
   const [error, setError] = useState('')
@@ -89,7 +97,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     return () => window.removeEventListener('keydown', keyDown)
   }, [context.mainWindowId])
   const flushGeometry = useCallback((value = latestTransform.current) => {
-    if (!client || !value || fixtureGraph) return Promise.resolve()
+    if (!client || !value || fixtureGraph || readOnlyRef.current) return Promise.resolve()
     return client.request('geometry.put', {
       sceneId: context.sceneId,
       ownerKey: `dag-viewport:${context.sceneId}`,
@@ -131,6 +139,10 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     <div className="dag-window-title"><span>Matou 会话画布</span>
       <button aria-label="关闭 DAG" onClick={() => void window.matouDesktop?.closeDagWindow?.(context.mainWindowId)}>×</button>
     </div>
+    {readOnly && <div className="dag-runtime-notice" role="status">
+      <strong>{READ_ONLY_REASON}</strong>
+      <span>会话关系仍可浏览和选择；画布位置变化仅在本次窗口内保留。</span>
+    </div>}
     {(runtimeConnection === 'reconnecting' || error) && <div className="dag-runtime-notice" role="status">
       <strong>会话信息暂时未更新</strong>
       <span>{runtimeConnection === 'reconnecting'

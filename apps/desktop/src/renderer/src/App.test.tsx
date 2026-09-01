@@ -9,8 +9,14 @@ vi.mock('./hierarchy/HierarchyShell', () => ({
   HierarchyShell: ({ runtimeMode }: { runtimeMode?: string }) =>
     <main data-testid="workspace" data-runtime-mode={runtimeMode}>Workspace</main>
 }))
-vi.mock('./hierarchy/DetachedTerminalApp', () => ({ DetachedTerminalApp: () => <div>Detached</div> }))
-vi.mock('./dag/DagWindowApp', () => ({ DagWindowApp: () => <div>Dag</div> }))
+vi.mock('./hierarchy/DetachedTerminalApp', () => ({
+  DetachedTerminalApp: ({ runtimeMode }: { runtimeMode?: string }) =>
+    <div data-testid="detached" data-runtime-mode={runtimeMode}>Detached</div>
+}))
+vi.mock('./dag/DagWindowApp', () => ({
+  DagWindowApp: ({ runtimeMode }: { runtimeMode?: string }) =>
+    <div data-testid="dag" data-runtime-mode={runtimeMode}>Dag</div>
+}))
 vi.mock('./terminal/TerminalSurface', () => ({ TerminalSurface: () => <div /> }))
 
 beforeEach(() => window.history.replaceState({}, '', '/'))
@@ -43,6 +49,31 @@ describe('App database lifecycle gate', () => {
     render(<App />)
 
     expect((await screen.findByTestId('workspace')).getAttribute('data-runtime-mode')).toBe('read-only')
+  })
+
+  it.each([
+    ['detached-terminal', 'detached'],
+    ['dag', 'dag']
+  ])('passes read-only lifecycle into an existing %s presentation', async (kind, testId) => {
+    window.history.replaceState({}, '', `/?kind=${kind}`)
+    const state = readyState()
+    state.snapshot.mode = 'read-only'
+    installApi(state)
+    render(<App />)
+
+    expect((await screen.findByTestId(testId)).getAttribute('data-runtime-mode')).toBe('read-only')
+  })
+
+  it('updates an existing detached presentation immediately when Runtime becomes read-only', async () => {
+    window.history.replaceState({}, '', '/?kind=detached-terminal')
+    const initial = readyState()
+    const api = installDynamicApi(initial)
+    render(<App />)
+    expect((await screen.findByTestId('detached')).getAttribute('data-runtime-mode')).toBe('normal')
+
+    api.publish({ ...initial, snapshot: { ...initial.snapshot, revision: 3, mode: 'read-only' } })
+
+    expect((await screen.findByTestId('detached')).getAttribute('data-runtime-mode')).toBe('read-only')
   })
 
   it('keeps the recovery page visible while a restore reopens the database', async () => {

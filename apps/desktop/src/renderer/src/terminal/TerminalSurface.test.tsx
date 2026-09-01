@@ -258,6 +258,25 @@ describe('TerminalSurface focus continuity', () => {
     expect(onUserInput).toHaveBeenCalledTimes(1)
   })
 
+  it('reattaches an existing Renderer as replay-only and stops terminal input after lifecycle downgrade', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(1))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    state.onData?.('before recovery')
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', 'before recovery')
+
+    state.sendTerminalInput.mockClear()
+    view.rerender(<TerminalSurface sessionId="session-1" active visible readOnly inputDisabled />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+
+    expect(state.attachTerminal.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      sessionId: 'session-1', readOnly: true
+    }))
+    state.onData?.('after recovery')
+    window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+    expect(state.sendTerminalInput).not.toHaveBeenCalled()
+  })
+
   it('matches Kooky by previewing an internal file-tree drag and inserting its quoted paths without submitting', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))

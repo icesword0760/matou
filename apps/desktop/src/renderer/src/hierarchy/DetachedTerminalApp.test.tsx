@@ -6,9 +6,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DetachedTerminalApp } from './DetachedTerminalApp'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, themeKey, fontSize }: {
-    sessionId: string; themeKey?: string; fontSize?: number
-  }) => <div data-testid={`terminal-${sessionId}`} data-theme={themeKey} data-font-size={fontSize} />
+  TerminalSurface: ({ sessionId, themeKey, fontSize, readOnly, inputDisabled }: {
+    sessionId: string; themeKey?: string; fontSize?: number; readOnly?: boolean; inputDisabled?: boolean
+  }) => <div data-testid={`terminal-${sessionId}`} data-theme={themeKey} data-font-size={fontSize}
+    data-read-only={readOnly} data-input-disabled={inputDisabled} />
 }))
 const runtime = vi.hoisted(() => ({
   request: vi.fn(async (method: string) => method === 'projection.snapshot' ? { hierarchy: {} } : {}),
@@ -59,6 +60,30 @@ describe('PRD 02 detached HUD', () => {
     expect(runtime.request).toHaveBeenCalledWith('session.set-model', expect.objectContaining({
       input: expect.objectContaining({ sessionId: 'agent-1', modelStrategy: 'claude-sonnet-4-6' })
     }))
+  })
+
+  it('turns an existing independent terminal into replay-only browsing with one clear reason', async () => {
+    window.matouDesktop = {
+      exportDatabaseRecoveryBundle: vi.fn(async () => ({ exportedPath: '/tmp/export' }))
+    } as unknown as typeof window.matouDesktop
+    window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')
+    const view = render(<DetachedTerminalApp runtimeMode="normal" />)
+    expect(screen.getByText('独立窗口 · 会话保持运行')).toBeTruthy()
+
+    view.rerender(<DetachedTerminalApp runtimeMode="read-only" />)
+
+    expect(screen.getByText('数据库处于只读恢复模式')).toBeTruthy()
+    expect(screen.queryByText('独立窗口 · 会话保持运行')).toBeNull()
+    expect(screen.getByTestId('terminal-agent-1').dataset.readOnly).toBe('true')
+    expect(screen.getByTestId('terminal-agent-1').dataset.inputDisabled).toBe('true')
+    const permission = screen.getByRole('button', { name: /当前权限模式：Default/ })
+    const model = screen.getByRole('button', { name: '点击切换模型' })
+    expect(permission.hasAttribute('disabled')).toBe(true)
+    expect(model.hasAttribute('disabled')).toBe(true)
+    expect(permission.getAttribute('title')).toBe('数据库处于只读恢复模式')
+    expect(model.getAttribute('title')).toBe('数据库处于只读恢复模式')
+    expect(runtime.request).not.toHaveBeenCalledWith('session.set-permission-mode', expect.anything())
+    expect(runtime.request).not.toHaveBeenCalledWith('session.set-model', expect.anything())
   })
 
   it('opens the same scene DAG after a long Option Tab hold from a detached session', () => {

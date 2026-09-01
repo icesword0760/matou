@@ -1,3 +1,5 @@
+import { chmod } from 'node:fs/promises'
+
 import { expect, test } from '@playwright/test'
 
 import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
@@ -40,4 +42,66 @@ test('returns a detached terminal to its Scene instead of reopening a temporary 
     await expect(fixture.page.getByTestId('terminal-pane').locator('.terminal-surface'))
       .toHaveAttribute('data-pid', /\d+/)
   } finally { await fixture.close() }
+})
+
+test('returns persisted detached history to one read-only main window for search and copy', async () => {
+  test.skip(process.platform === 'win32', 'POSIX permissions fixture')
+  test.setTimeout(60_000)
+  let fixture: MatouFixture = await launchMatou()
+  let permissionsRestricted = false
+  try {
+    const embedded = fixture.page.getByTestId('terminal-pane').first().locator('.terminal-surface')
+    await expect(embedded).toHaveAttribute('data-pid', /\d+/)
+    const textarea = embedded.locator('.xterm-helper-textarea')
+    await textarea.focus()
+    await expect(textarea).toBeFocused()
+    await fixture.page.waitForTimeout(100)
+    await textarea.press('Control+u')
+    await textarea.pressSequentially("printf 'MATOU_%s_HISTORY_COPY\\n' READONLY", { delay: 2 })
+    await textarea.press('Enter')
+    await expect(embedded.locator('.xterm-rows')).toContainText('MATOU_READONLY_HISTORY_COPY')
+    await fixture.page.locator('.terminal-pane-header').first()
+      .dispatchEvent('dragend', { screenX: -1, screenY: -1 })
+    await expect(fixture.page.getByTestId('detached-placeholder')).toContainText('已脱出')
+    await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+
+    await fixture.app.evaluate(({ app }) => app.quit())
+    await fixture.app.close().catch(() => undefined)
+    await chmod(fixture.dataDirectory, 0o500)
+    permissionsRestricted = true
+    fixture = await restartMatou(fixture)
+
+    await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
+    await expect(fixture.page.locator('.read-only-recovery-banner'))
+      .toContainText('数据库处于只读恢复模式')
+    await expect(fixture.page.getByTestId('detached-placeholder')).toHaveCount(0)
+    const recovered = fixture.page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
+    await expect(recovered).toBeVisible()
+    await expect(recovered).not.toHaveAttribute('data-pid', /\d+/)
+    await expect(recovered.locator('.xterm-rows')).toContainText('MATOU_READONLY_HISTORY_COPY')
+
+    const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
+    await fixture.page.getByRole('button', { name: '搜索当前终端' }).click()
+    const search = fixture.page.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' })
+    await expect(search).toBeVisible()
+    await search.fill('MATOU_READONLY_HISTORY_COPY')
+    await expect(fixture.page.locator('.terminal-search-bar__count')).toHaveText('1/1')
+    await search.press('Escape')
+
+    const markerRow = recovered.locator('.xterm-rows > div').filter({
+      hasText: 'MATOU_READONLY_HISTORY_COPY'
+    }).last()
+    const row = await markerRow.boundingBox()
+    if (!row) throw new Error('Expected replayed marker row geometry')
+    await fixture.page.mouse.move(row.x + 1, row.y + row.height / 2)
+    await fixture.page.mouse.down()
+    await fixture.page.mouse.move(row.x + row.width - 1, row.y + row.height / 2, { steps: 8 })
+    await fixture.page.mouse.up()
+    await fixture.page.keyboard.press(`${mod}+c`)
+    await expect.poll(() => fixture.app.evaluate(({ clipboard }) => clipboard.readText()))
+      .toContain('MATOU_READONLY_HISTORY_COPY')
+  } finally {
+    if (permissionsRestricted) await chmod(fixture.dataDirectory, 0o700).catch(() => undefined)
+    await fixture.close()
+  }
 })

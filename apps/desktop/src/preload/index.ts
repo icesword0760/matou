@@ -49,6 +49,8 @@ const desktopApi: MatouDesktopApi = {
   showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId),
   createDetachedTerminalWindow: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.createDetachedTerminalWindow, input),
   closeDetachedTerminalWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.closeDetachedTerminalWindow, windowId),
+  detachedTerminalWindowExists: (windowId) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.detachedTerminalWindowExists, windowId),
   onDetachedWindowClosed: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
     ipcRenderer.on(DESKTOP_CHANNELS.detachedWindowClosed, handler)
