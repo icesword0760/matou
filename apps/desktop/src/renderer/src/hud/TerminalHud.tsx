@@ -138,7 +138,7 @@ export function TerminalHud(props: {
           window.setTimeout(() => setSwitchError(''), 3_000)
         }).finally(() => setSwitching(false))
       }} />, document.body)}
-    {switchError && createPortal(<div className="kooky-toast is-error" role="status">{switchError}</div>, document.body)}
+    {switchError && createPortal(<div className="terminal-toast is-error" role="status">{switchError}</div>, document.body)}
     {gitOpen && gitClient && hud.cwd && createPortal(<GitControlMenu client={gitClient}
       cwd={hud.cwd} sessionId={hud.sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
       onClose={() => setGitOpen(false)} />, document.body)}

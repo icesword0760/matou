@@ -146,7 +146,7 @@ export class ProviderModeService {
         : requireBinding(tx, input.bindingId)
       const result = buildResult(tx, owner, requireSession(tx, session.id), binding)
       emitTransition(emit, command.commandId, 'session.mode-changed', owner, result, input.now)
-      emitRecoveryNotification(emit, command.commandId, owner, result, input.now, 'restoring')
+      emitRecoveryNotificationDismissal(emit, command.commandId, owner, result, input.now)
       return result
     }).result
   }
@@ -174,7 +174,7 @@ export class ProviderModeService {
          WHERE id = ?`,
         input.now, input.now, binding.id
       )
-    }, 'session.mode-changed', undefined, 'dismiss')
+    }, 'session.mode-changed', undefined, true)
   }
 
   markUserExited(
@@ -207,7 +207,7 @@ export class ProviderModeService {
           input.now, input.now, input.now, binding.id
         )
       }
-    }, 'session.mode-changed', undefined, 'dismiss')
+    }, 'session.mode-changed', undefined, true)
   }
 
   markRestoreFailed(
@@ -238,7 +238,7 @@ export class ProviderModeService {
          WHERE id = ?`,
         reason, input.now, input.now, binding.id
       )
-    }, 'session.restore-state-changed', input.bindingId, 'failed')
+    }, 'session.restore-state-changed', input.bindingId)
   }
 
   retryRestore(
@@ -264,7 +264,7 @@ export class ProviderModeService {
          WHERE id = ?`,
         input.now, binding.id
       )
-    }, 'session.restore-state-changed', undefined, 'restoring')
+    }, 'session.restore-state-changed', undefined, true)
   }
 
   observeHook(
@@ -344,7 +344,7 @@ export class ProviderModeService {
       )
       emitTransition(emit, command.commandId, 'session.mode-changed', owner, result, input.now)
       if (wasRecovering) {
-        emitRecoveryNotification(emit, command.commandId, owner, result, input.now, 'dismiss')
+        emitRecoveryNotificationDismissal(emit, command.commandId, owner, result, input.now)
       }
       return result
     }).result
@@ -377,7 +377,7 @@ export class ProviderModeService {
     }) => void,
     eventType: 'session.mode-changed' | 'session.restore-state-changed',
     preferredBindingId?: string,
-    recoveryNotification?: 'failed' | 'restoring' | 'dismiss'
+    dismissRecoveryIndicator = false
   ): ProviderModeTransitionResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const owner = requireOwner(tx, sessionId)
@@ -393,8 +393,8 @@ export class ProviderModeService {
       binding = requireBinding(tx, binding.id)
       const result = buildResult(tx, owner, requireSession(tx, sessionId), binding)
       emitTransition(emit, command.commandId, eventType, owner, result, now)
-      if (recoveryNotification) {
-        emitRecoveryNotification(emit, command.commandId, owner, result, now, recoveryNotification)
+      if (dismissRecoveryIndicator) {
+        emitRecoveryNotificationDismissal(emit, command.commandId, owner, result, now)
       }
       return result
     }).result
@@ -413,31 +413,15 @@ function providerWorkStatus(eventName: string, current: SessionWorkStatus): Sess
   return current
 }
 
-function emitRecoveryNotification(
+function emitRecoveryNotificationDismissal(
   emit: Parameters<typeof emitTransition>[0],
   commandId: string,
   owner: SessionOwner,
   result: ProviderModeTransitionResult,
-  now: number,
-  state: 'failed' | 'restoring' | 'dismiss'
+  now: number
 ): void {
   const replacementKey = `provider-restore:${result.session.id}`
-  const event = state === 'dismiss'
-    ? { operation: 'dismiss', replacementKey }
-    : state === 'restoring'
-      ? {
-          operation: 'upsert', replacementKey,
-          eventType: 'attention', title: '正在恢复 Claude Code',
-          subtitle: '原会话恢复中', body: '正在尝试恢复原 Claude Code 会话',
-          sound: false, cooldownKey: 'ClaudeRestore'
-        }
-      : {
-          operation: 'upsert', replacementKey,
-          eventType: 'error', title: 'Claude Code 恢复失败',
-          subtitle: '已切换到 Shell',
-          body: result.binding.restoreError ?? '原 Claude Code 会话恢复失败',
-          sound: true, cooldownKey: 'ClaudeRestore'
-        }
+  const event = { operation: 'dismiss', replacementKey }
   emit({
     eventId: `${commandId}:agent.notification`,
     eventType: 'agent.notification',

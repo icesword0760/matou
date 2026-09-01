@@ -149,7 +149,7 @@ export interface HostTarget {
 - [x] 重跑相关测试、runtime typecheck。
 - [x] 提交：`git add apps/runtime/package.json pnpm-lock.yaml apps/runtime/src/control/terminal-screen-projector* apps/runtime/src/session/pty-session* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): project the latest terminal screen"`。
 
-## Task 4: 串行化远程输入并对齐 Kooky 键位
+## Task 4: 串行化远程输入并对齐 reference product 键位
 
 **Files:**
 - Create: `apps/runtime/src/control/terminal-input-queue.ts`
@@ -170,7 +170,7 @@ CtrlC='\x03' CtrlD='\x04' CtrlL='\x0c' CtrlU='\x15' CtrlZ='\x1a'
 
 - [x] 写失败测试：同一 session 的两个并发 `sendText(..., submit:true)` 产生 `first\r` 后 `second\r`，中间不穿插；不同 session 可独立执行。
 - [x] 写失败测试：session 在排队期间退出时，当前/后续动作返回 `TARGET_NOT_READY`，队列可被清理。
-- [x] 写失败测试：完整 Kooky allowlist 映射精确；`return/esc/up` 等 CLI alias 在 CLI parser 归一化，server 只接收 canonical key。
+- [x] 写失败测试：完整 reference product allowlist 映射精确；`return/esc/up` 等 CLI alias 在 CLI parser 归一化，server 只接收 canonical key。
 - [x] 运行目标测试确认失败，实现 per-session promise queue 和 queue cleanup。
 - [x] backend `sendText(sessionId,text,submit)` 每次只调用一次 `write(text + (submit?'\r':''))`；`sendKey` 走同一动作队列。
 - [x] 重跑测试与 runtime typecheck。
@@ -282,7 +282,7 @@ PATH=<MATOU_CONTROL_ASSET_ROOT/bin>:<inherited PATH>
 
 **Steps:**
 
-- [x] 参考 Kooky `kc-terminal` 完整 skill 和 references，先写资源测试：所有命令、目标解析、歧义、连续指代、错误映射、非目标均出现。
+- [x] 参考 reference product `kc-terminal` 完整 skill 和 references，先写资源测试：所有命令、目标解析、歧义、连续指代、错误映射、非目标均出现。
 - [x] wrapper 使用 `MATOU_CONTROL_NODE_EXECUTABLE` 并设置 `ELECTRON_RUN_AS_NODE=1` 执行 `mt-cli.cjs`，不调用用户 PATH 中的 node；Unix/Windows 都从 wrapper 自身目录解析 `../../mt-cli.cjs`。
 - [x] Claude plugin manifest 和 skill 使用 `mt` 命令；Codex developer instructions 与 Claude 规则语义一致。
 - [x] `prepare-runtime-control-assets.mjs` 在每次 runtime build 后把源资产复制到 `dist/control-assets` 并 chmod Unix wrapper 0755；`apps/runtime/package.json` 的 build 串接该脚本，保证开发与安装包使用同一资产树。

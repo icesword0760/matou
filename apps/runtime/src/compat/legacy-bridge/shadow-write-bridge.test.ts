@@ -8,7 +8,7 @@ import { RuntimeDatabase } from '../../storage/database'
 import { DomainTransactionManager } from '../../storage/domain-transaction'
 import { MigrationRunner } from '../../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../../storage/migrations'
-import { KookyImporter, legacyIdFor } from './kooky-importer'
+import { LegacyImporter, legacyIdFor } from './legacy-importer'
 import { ShadowWriteBridge } from './shadow-write-bridge'
 
 let root: string
@@ -25,7 +25,7 @@ beforeEach(async () => {
   database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
   const transactions = new DomainTransactionManager(database)
-  bridge = new ShadowWriteBridge(database, transactions, new KookyImporter(root, database, transactions))
+  bridge = new ShadowWriteBridge(database, transactions, new LegacyImporter(root, database, transactions))
   await bridge.bootstrap('default', source)
 })
 

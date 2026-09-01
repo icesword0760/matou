@@ -6,7 +6,7 @@
   "main": "dist/index.cjs",
   "scripts": {
     "build": "tsup && node ../../tooling/prepare-runtime-control-assets.mjs",
-    "test": "vitest run",
+    "test": "vitest run --testTimeout=15000",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },

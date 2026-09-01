@@ -46,7 +46,7 @@ describe('TerminalInputQueue', () => {
     await expect(waiting).rejects.toThrow('SessionRun ended before queued input was sent')
   })
 
-  it('matches the Kooky control-key allowlist exactly', () => {
+  it('matches the reference product control-key allowlist exactly', () => {
     expect(CONTROL_KEY_SEQUENCES).toEqual({
       Enter: '\r', Tab: '\t', Escape: '\u001b', Backspace: '\u007f', Delete: '\u001b[3~',
       ArrowUp: '\u001b[A', ArrowDown: '\u001b[B', ArrowLeft: '\u001b[D', ArrowRight: '\u001b[C',

@@ -18,7 +18,7 @@
 ## 2. 执行约束与包切换
 
 - 全程从真实打包 App UI、真实 PTY、真实 Git/worktree、真实 Claude Code 与真实 macOS 窗口行为验收。
-- 测试数据均位于独立 `/tmp` 根目录；未读取或修改用户现有 Matou/Kooky 数据。
+- 测试数据均位于独立 `/tmp` 根目录；未读取或修改用户现有 Matou/reference product 数据。
 - 未使用 mock、fixture 注入、内部接口调用或数据库写入制造业务成功。SQLite/日志仅作只读取证。
 - `a7bdd01` 仅改变 LIFE-004 确认文案，已 fresh 复测 LIFE-004，并回归 LIFE-005/006、EDGE-007/013/014。
 - `a3f47cc` 修复恢复历史画布后 DAG 无响应；已用原失败现场复测 DAG 打开与 EDGE-005 全步骤。

@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 import { prepareRuntimeControlAssets } from './prepare-runtime-control-assets.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const source = join(root, 'apps/runtime/control-assets')
+const execFileAsync = promisify(execFile)
 
 test('copies executable mt wrappers and complete provider guidance', async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'matou-control-assets-'))
@@ -34,12 +37,29 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
   const manifest = JSON.parse(await readFile(
     join(destination, 'providers/claude-plugin/.claude-plugin/plugin.json'), 'utf8'
   ))
+  const claudeHooks = JSON.parse(await readFile(
+    join(destination, 'providers/claude-plugin/hooks/hooks.json'), 'utf8'
+  ))
+  const claudeSessionStartPath = join(
+    destination, 'providers/claude-plugin/hooks/session-start.mjs'
+  )
+  const claudeSessionStart = JSON.parse(
+    (await execFileAsync(process.execPath, [claudeSessionStartPath])).stdout
+  ).hookSpecificOutput.additionalContext
 
   assert.match(unixWrapper, /ELECTRON_RUN_AS_NODE=1/)
   assert.match(unixWrapper, /MATOU_CONTROL_NODE_EXECUTABLE/)
   assert.match(unixWrapper, /mt-cli\.cjs/)
   assert.match(windowsWrapper, /ELECTRON_RUN_AS_NODE/)
   assert.equal(manifest.name, 'matou-host-control')
+  assert.equal(claudeHooks.hooks.SessionStart[0].matcher, 'startup|clear|compact')
+  assert.match(
+    claudeHooks.hooks.SessionStart[0].hooks[0].command,
+    /session-start\.mjs/
+  )
+  assert.match(claudeSessionStart, /Matou host control is active/)
+  assert.match(claudeSessionStart, /invoke `matou-host-control:mt-terminal` immediately/)
+  assert.match(claudeSessionStart, /Skip alternate terminal host environment discovery/)
   for (const document of [shared, claudeSkill, targetRules, commands, codex]) {
     assert.match(document, /identify/)
     assert.match(document, /list/)

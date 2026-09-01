@@ -1,16 +1,16 @@
-# PRD 06 会话 Fork：Kooky CLI 模块对照矩阵
+# PRD 06 会话 Fork：reference product CLI 模块对照矩阵
 
 ## 对照边界与产品决策
 
 - 只对照黑色 CLI 模块内的面板标题、右键菜单、分屏终端、错误输出与独立窗口；外部产品侧栏、Logo 和窗口外壳不参加验收。
-- 当前可运行 Kooky 的 `terminalContextMenu.mjs` 第 15–27 行临时直接返回空数组，因此运行程序看不到 Fork / Detach 菜单。
+- 当前可运行 reference product 的 `terminalContextMenu.mjs` 第 15–27 行临时直接返回空数组，因此运行程序看不到 Fork / Detach 菜单。
 - 同一文件的 dormant 分支已经写出两项菜单；`forkSession.js` 写出完整资格判断；`ClaudeCodeView.vue` 写出右侧建面板、传递源身份并聚焦；`claude-code-launch.js` 写出 `--resume SOURCE --fork-session`；`ClaudeCodeTerminal.vue` 写出失败终止和警示行。
-- 产品已确认激活上述 Kooky 源码基线。当前隐藏状态作为“尚未开放”的运行证据保留，不作为最终交互目标。
+- 产品已确认激活上述 reference product 源码基线。当前隐藏状态作为“尚未开放”的运行证据保留，不作为最终交互目标。
 - 项目后续需要会话父子 / DAG；Matou 内部额外保存 `forked-from`，当前界面无视觉标记。
 
 ## 双基线对照
 
-| 用户场景 | 可运行 Kooky | Kooky dormant 源码 | Matou 实际结果 | 差异结论 |
+| 用户场景 | 可运行 reference product | reference product dormant 源码 | Matou 实际结果 | 差异结论 |
 |---|---|---|---|---|
 | 主窗口可恢复 Claude 内容区右键 | 菜单临时隐藏；终端内容区现有菜单只含复制/粘贴 | dormant 面板菜单含 `⑂ Fork 会话`、`↗ 独立窗口`；PRD 要求面板可操作区域右键 | 终端内容区直接显示两项，顺序一致 | 按已确认 PRD 扩大命中区域，修复标题条入口不易发现的问题 |
 | Shell / Claude 类型表达 | Shell 面板标题来自 Shell；Claude 面板 fallback 使用 `claude ~/cwd` | `normalizePanelTitle()` 根据 `claudeActive/mode` 区分 | 面板进入 Claude 时标题为 `Claude`，退出时为 `Shell` | 类型语义一致；Matou 当前短标题更明确 |
@@ -34,7 +34,7 @@
 | 关系可视化 | 无 | 无 | 无徽章、连线、树 | 一致 |
 | 内部关系事实 | 无 | 无 | 保存 `forked-from` 供未来 DAG | 已确认的演进增量，不改变本期界面 |
 
-## Kooky 源码行为锚点
+## reference product 源码行为锚点
 
 - 菜单临时隐藏与 dormant 两项：`src/modules/terminal/utils/terminalContextMenu.mjs:15-27`
 - Fork 资格：`src/modules/terminal/utils/forkSession.js`
@@ -46,10 +46,10 @@
 
 ## 双应用运行证据
 
-- Kooky 当前运行程序右键后菜单数量为 0：`docs/acceptance/evidence/prd-06/kooky/runnable-menu-hidden.png`、`fork-source-baseline.json`。
+- reference product 当前运行程序右键后菜单数量为 0：`docs/acceptance/evidence/prd-06/reference/runnable-menu-hidden.png`、`fork-source-baseline.json`。
 - Matou 激活后的两项菜单和计算样式：`docs/acceptance/evidence/prd-06/matou/fork-menu.png`、`fork-menu.json`。
 - Matou 连续 Fork 后的三个并列会话：`docs/acceptance/evidence/prd-06/matou/forked-conversations.png`。
 - Matou 失败面板：`docs/acceptance/evidence/prd-06/matou/fork-failure.png`。
 - Matou 使用真实 Claude Code、系统级鼠标与键盘，在终端内容区完成右键、Fork、双侧隔离输入、重启恢复与重启后继续输入：`docs/acceptance/evidence/prd-06/matou/real-system-fork-menu.png`、`real-system-fork-validation.png`、`real-system-fork-validation.json`。
 
-运行截图均只截取黑色 CLI 模块。Kooky 的当前空菜单与 dormant 源码分开记录，避免把“当前尚未开放”误写成最终产品行为。
+运行截图均只截取黑色 CLI 模块。reference product 的当前空菜单与 dormant 源码分开记录，避免把“当前尚未开放”误写成最终产品行为。

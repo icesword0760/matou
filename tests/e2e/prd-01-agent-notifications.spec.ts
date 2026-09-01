@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 
 import { launchMatou } from './matou-fixture'
 
-test('shows the Kooky unread trail and navigates back to the originating terminal', async () => {
+test('shows the reference product unread trail and navigates back to the originating terminal', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture

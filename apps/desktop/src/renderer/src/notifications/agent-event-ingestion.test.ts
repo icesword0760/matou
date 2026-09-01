@@ -18,7 +18,7 @@ describe('ingestAgentNotification', () => {
     })
   })
 
-  it('marks a focused Session event read while preserving the Kooky visible indicator', () => {
+  it('marks a focused Session event read while preserving the reference product visible indicator', () => {
     const playSound = vi.fn()
     const store = new AgentNotificationStore({ now: () => 20, playSound })
 
@@ -56,7 +56,7 @@ describe('ingestAgentNotification', () => {
     expect(store.snapshot().notifications).toHaveLength(0)
   })
 
-  it('updates and dismisses the one recovery notification for a Session', () => {
+  it('discards legacy recovery notifications because recovery state is shown on the card', () => {
     let now = 20
     const store = new AgentNotificationStore({ now: () => now })
     const failed = domainEvent()
@@ -69,6 +69,7 @@ describe('ingestAgentNotification', () => {
       }
     }
     ingestAgentNotification(failed, projection(), undefined, store)
+    expect(store.snapshot().notifications).toHaveLength(0)
 
     now = 21
     const retrying = domainEvent()
@@ -81,10 +82,7 @@ describe('ingestAgentNotification', () => {
       }
     }
     ingestAgentNotification(retrying, projection(), undefined, store)
-    expect(store.snapshot().notifications).toHaveLength(1)
-    expect(store.snapshot().notifications[0]).toMatchObject({
-      eventId: 'restore-retrying', title: '正在恢复 Claude Code'
-    })
+    expect(store.snapshot().notifications).toHaveLength(0)
 
     const dismissed = domainEvent()
     dismissed.eventId = 'restore-succeeded'

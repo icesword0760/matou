@@ -13,9 +13,9 @@
 
 ## 2. 视觉与交互边界
 
-只对照 Kooky 截图中的黑色 CLI 模块。黑色区域外的白色产品侧栏、Logo、顶部品牌区和 Matou 自身窗口外壳不参与视觉差异判断。视觉证据均按 CLI 黑色区域裁切。
+只对照 reference product 截图中的黑色 CLI 模块。黑色区域外的白色产品侧栏、Logo、顶部品牌区和 Matou 自身窗口外壳不参与视觉差异判断。视觉证据均按 CLI 黑色区域裁切。
 
-详细双基线矩阵：`docs/parity/prd-04-kooky-parity.md`。
+详细双基线矩阵：`docs/parity/prd-04-reference-parity.md`。
 
 ## 3. 27 项验收台账
 
@@ -51,19 +51,19 @@
 
 ## 4. 已确认的产品取舍
 
-2026-08-25 确认采用方案 A：发生 PRD 与当前 Kooky 冲突时，本项以“面板最终必须可操作”的 PRD 承诺为准。
+2026-08-25 确认采用方案 A：发生 PRD 与当前 reference product 冲突时，本项以“面板最终必须可操作”的 PRD 承诺为准。
 
 ### 4.1 AI 续接失败提示
 
 - PRD：`[上次会话无法续接，已回到普通终端]`
-- 当前 Kooky：`[resume 失败，正在全新启动...]`
+- 当前 reference product：`[resume 失败，正在全新启动...]`
 
 最终采用 PRD 文案。用户看到的是已经发生的最终结果，而不是仍在进行中的启动描述。
 
 ### 4.2 十秒无响应
 
 - 最终采用 PRD 行为：十秒内未完成续接即回到 Shell，优先保证面板可操作。
-- 当前 Kooky 的“十秒后视为成功”作为已知对照差异保留在矩阵中，不再复制到 Matou。
+- 当前 reference product 的“十秒后视为成功”作为已知对照差异保留在矩阵中，不再复制到 Matou。
 
 十秒到期前不会提前降级；到期后清除失效身份、显示一行温和提示，并在同一面板启动可输入 Shell。第二次打开不再重试该身份或重复提示。
 
@@ -78,12 +78,12 @@
   - `docs/acceptance/evidence/prd-04/matou/after-restart-clean-shell.png`
 - Matou AI 续接失败后可执行 Shell：
   - `docs/acceptance/evidence/prd-04/matou/invalid-ai-fallback-usable-shell.png`
-- 当前 Kooky 的同范围 CLI 运行证据：
-  - `docs/acceptance/evidence/prd-04/kooky/cli-module-current.png`
-  - `docs/acceptance/evidence/prd-04/kooky/before-restart.png`
-  - `docs/acceptance/evidence/prd-04/kooky/after-restart-clean-shell.png`
-  - `docs/acceptance/evidence/prd-04/kooky/runtime-replay.json`
+- 当前 reference product 的同范围 CLI 运行证据：
+  - `docs/acceptance/evidence/prd-04/reference/cli-module-current.png`
+  - `docs/acceptance/evidence/prd-04/reference/before-restart.png`
+  - `docs/acceptance/evidence/prd-04/reference/after-restart-clean-shell.png`
+  - `docs/acceptance/evidence/prd-04/reference/runtime-replay.json`
 - 本机真实 Claude Code 兼容性：2.1.241 的 `--resume`、`--settings`、`--dangerously-skip-permissions` 均为当前有效参数；Matou 生成的附加 Hook settings 已通过 `claude --settings <file> doctor` 解析。真实无效身份输出中的光标定位控制码已按实际字节流固化为 monitor 回归测试，避免错误文本被拆词后漏判。
   - `docs/acceptance/evidence/prd-04/matou/real-claude-compatibility.json`
 
-PRD 04 的实现、Kooky 对照、真实 Claude 兼容性与自动化验收台账均已闭合，等待产品验收。
+PRD 04 的实现、reference product 对照、真实 Claude 兼容性与自动化验收台账均已闭合，等待产品验收。

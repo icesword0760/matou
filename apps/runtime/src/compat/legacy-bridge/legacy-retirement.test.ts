@@ -38,7 +38,7 @@ describe('static authority boundaries', () => {
     const runtimeRoot = join(process.cwd(), 'src')
     const offenders: string[] = []
     for (const path of await walk(runtimeRoot)) {
-      if (path.includes('/compat/kooky-bridge/') || path.endsWith('.test.ts') || path.endsWith('/storage/migrations.ts')) continue
+      if (path.includes('/compat/legacy-bridge/') || path.endsWith('.test.ts') || path.endsWith('/storage/migrations.ts')) continue
       const contents = await readFile(path, 'utf8')
       if (/snapshot\.json|metadata\.ndjson|legacy_entity_mappings|legacy_import_runs/.test(contents)) offenders.push(path)
     }

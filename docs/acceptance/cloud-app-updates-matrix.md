@@ -2,7 +2,7 @@
 
 ## 对照边界
 
-该能力属于 Matou 应用级发布与恢复，不属于 Kooky CLI 黑色工作区。因此 Kooky 同范围基线标记为“不适用”，以用户确认的 HTML Mockup 为可见交互基线，并保持 Matou 原有窗口标题与应用级导航。
+该能力属于 Matou 应用级发布与恢复，不属于 reference product CLI 黑色工作区。因此 reference product 同范围基线标记为“不适用”，以用户确认的 HTML Mockup 为可见交互基线，并保持 Matou 原有窗口标题与应用级导航。
 
 ## 场景矩阵
 

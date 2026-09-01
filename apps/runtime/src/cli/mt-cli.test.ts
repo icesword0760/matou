@@ -35,7 +35,7 @@ describe('mt CLI', () => {
     expect(JSON.parse(fixture.out[0]!)).toEqual({ text: 'screen' })
   })
 
-  it('sends text with optional Enter and normalizes Kooky key aliases', async () => {
+  it('sends text with optional Enter and normalizes reference product key aliases', async () => {
     const fixture = ioFixture()
     const calls: Array<{ method: HostControlScope; params: any }> = []
     const request = async (method: HostControlScope, params: unknown) => {

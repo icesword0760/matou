@@ -46,7 +46,7 @@ describe('Terminal pane', () => {
   })
 
 
-  it('matches the Kooky fork source by showing Fork and Detach together only for a resumable Claude pane', async () => {
+  it('matches the reference product fork source by showing Fork and Detach together only for a resumable Claude pane', async () => {
     const onFork = vi.fn()
     const onDetach = vi.fn()
     const user = userEvent.setup()

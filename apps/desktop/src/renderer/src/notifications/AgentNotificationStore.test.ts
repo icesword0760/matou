@@ -61,7 +61,7 @@ describe('AgentNotificationStore', () => {
     expect(store.push(event({ eventId: 'c', eventType: 'error', sessionId: 'session-b' }))).not.toBeNull()
   })
 
-  it('matches Kooky by cooling all Notification hooks as one source category', () => {
+  it('matches reference product by cooling all Notification hooks as one source category', () => {
     let now = 1_000
     const store = new AgentNotificationStore({ now: () => now })
     expect(store.push(event({ eventId: 'permission', eventType: 'permission', cooldownKey: 'Notification' }))).not.toBeNull()
@@ -70,7 +70,7 @@ describe('AgentNotificationStore', () => {
     expect(store.snapshot().notifications.map(({ eventId }) => eventId)).toEqual(['permission'])
   })
 
-  it('matches Kooky by showing a read indicator without sound for a focused Session event', () => {
+  it('matches reference product by showing a read indicator without sound for a focused Session event', () => {
     const playSound = vi.fn()
     const store = new AgentNotificationStore({ now: () => 1_000, playSound })
 
@@ -82,7 +82,7 @@ describe('AgentNotificationStore', () => {
     expect(playSound).not.toHaveBeenCalled()
   })
 
-  it('matches Kooky by removing the Session notification history when its indicator is dismissed', () => {
+  it('matches reference product by removing the Session notification history when its indicator is dismissed', () => {
     let now = 1_000
     const store = new AgentNotificationStore({ now: () => now })
     store.push(event({ eventId: 'first', eventType: 'completed' }))
@@ -95,7 +95,7 @@ describe('AgentNotificationStore', () => {
     expect(store.sessionHasVisibleIndicator('session')).toBe(false)
   })
 
-  it('matches Kooky by marking a whole Workspace read when the user switches to it', () => {
+  it('matches reference product by marking a whole Workspace read when the user switches to it', () => {
     const store = new AgentNotificationStore({ now: () => 1_000 })
     store.push(event({ eventId: 'target', workspaceId: 'workspace-a', sessionId: 'session-a' }))
     store.push(event({ eventId: 'other', workspaceId: 'workspace-b', sessionId: 'session-b' }))

@@ -10,7 +10,7 @@ import type { HierarchyCommands, HierarchyProjection } from '../hierarchy/hierar
 import { AgentNotificationStore } from './AgentNotificationStore'
 import { NotificationProvider } from './NotificationProvider'
 
-describe('Kooky notification hierarchy interactions', () => {
+describe('reference product notification hierarchy interactions', () => {
   afterEach(cleanup)
 
   it('opens below the Workspace header, swaps to the animated icon, and closes outside or on Escape', async () => {
@@ -80,7 +80,7 @@ describe('Kooky notification hierarchy interactions', () => {
     expect(screen.queryByRole('region', { name: '通知中心' })).toBeNull()
   })
 
-  it('keeps a missing-target notification and shows the exact Kooky warning', async () => {
+  it('keeps a missing-target notification and shows the exact reference product warning', async () => {
     const user = userEvent.setup()
     const store = new AgentNotificationStore()
     store.push({

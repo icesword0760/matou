@@ -9,7 +9,7 @@ describe('browser notification preferences', () => {
     localStorage.clear()
   })
 
-  it('uses the Kooky sound preference key and defaults to enabled', () => {
+  it('uses the reference product sound preference key and defaults to enabled', () => {
     const store = createBrowserNotificationStore({ playSound: vi.fn() })
     expect(store.snapshot().soundEnabled).toBe(true)
 
@@ -20,7 +20,7 @@ describe('browser notification preferences', () => {
     expect(restored.snapshot().soundEnabled).toBe(false)
   })
 
-  it('plays the same two-tone WebAudio cue as Kooky', () => {
+  it('plays the same two-tone WebAudio cue as reference product', () => {
     const setValueAtTime = vi.fn()
     const exponentialRampToValueAtTime = vi.fn()
     const start = vi.fn()

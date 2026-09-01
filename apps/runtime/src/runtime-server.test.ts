@@ -1401,7 +1401,7 @@ sleep 30
     }
   })
 
-  it('consumes a fork launch exactly once and passes Claude the Kooky fork arguments', async () => {
+  it('consumes a fork launch exactly once and passes Claude the reference product fork arguments', async () => {
     const executable = join(root, 'provider-fork-fixture.sh')
     const argumentFile = join(root, 'provider-fork-arguments.txt')
     await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
@@ -1627,7 +1627,7 @@ sleep 30
     }
   })
 
-  it('shows the Kooky fork failure banner when the fork process exits before producing output', async () => {
+  it('shows the reference product fork failure banner when the fork process exits before producing output', async () => {
     const executable = join(root, 'provider-fork-exit.sh')
     await writeFile(executable, '#!/bin/sh\nexit 7\n')
     await chmod(executable, 0o755)
@@ -2005,7 +2005,7 @@ sleep 30
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'atomic-shell-promotion', data: 'claude\r'
       })
-      await waitUntil(() => !sessions.has('atomic-shell-promotion'))
+      await waitUntil(() => !sessions.has('atomic-shell-promotion'), 10_000)
       secondPort.receive(spawn)
 
       await waitUntil(() => sessions.get('atomic-shell-promotion')?.profile === 'claude-code', 4_000)
