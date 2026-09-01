@@ -29,7 +29,10 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
   const [pending, setPending] = useState<string>()
   const [error, setError] = useState<string>()
   const [message, setMessage] = useState<string>()
-  const [confirmEmpty, setConfirmEmpty] = useState(false)
+  const recovery = state.recovery
+  const recoveryId = recovery?.recoveryId ?? ''
+  const recoveryIdRef = useRef(recoveryId)
+  const [confirmationRecoveryId, setConfirmationRecoveryId] = useState<string>()
   const emptyTriggerRef = useRef<HTMLButtonElement>(null)
   const dialogBackRef = useRef<HTMLButtonElement>(null)
   const dialogConfirmRef = useRef<HTMLButtonElement>(null)
@@ -41,11 +44,20 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
   }, [backups, selectedBackupId])
 
   useEffect(() => {
-    if (confirmEmpty) dialogBackRef.current?.focus()
-  }, [confirmEmpty])
+    if (confirmationRecoveryId) dialogBackRef.current?.focus()
+  }, [confirmationRecoveryId])
+
+  useEffect(() => {
+    if (recoveryIdRef.current === recoveryId) return
+    recoveryIdRef.current = recoveryId
+    setConfirmationRecoveryId(undefined)
+    setPending(undefined)
+    setError(undefined)
+    setMessage(undefined)
+  }, [recoveryId])
 
   const closeEmptyConfirmation = () => {
-    setConfirmEmpty(false)
+    setConfirmationRecoveryId(undefined)
     queueMicrotask(() => emptyTriggerRef.current?.focus())
   }
 
@@ -53,21 +65,24 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
   const busy = Boolean(pending || state.operation?.pending || reopening)
   const perform = async (name: string, operation: () => Promise<unknown>) => {
     if (busy) return
+    const operationRecoveryId = recoveryIdRef.current
     setPending(name)
     setError(undefined)
     setMessage(undefined)
     try {
       const result = await operation() as RuntimeRecoveryCommandResult | undefined
-      if (result?.exportedPath) setMessage(`恢复资料已导出到 ${result.exportedPath}`)
+      if (recoveryIdRef.current === operationRecoveryId && result?.exportedPath) {
+        setMessage(`恢复资料已导出到 ${result.exportedPath}`)
+      }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (recoveryIdRef.current === operationRecoveryId) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      }
     } finally {
-      setPending(undefined)
+      if (recoveryIdRef.current === operationRecoveryId) setPending(undefined)
     }
   }
 
-  const recovery = state.recovery
-  const recoveryId = recovery?.recoveryId ?? ''
   const ownershipRecovery = recovery?.reason === 'ownership-recovery-required'
   const title = ownershipRecovery ? '数据库占用状态需要处理' : '数据库需要恢复'
   const description = ownershipRecovery
@@ -134,14 +149,14 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
 
       <footer>
         <button ref={emptyTriggerRef} className="danger-link" disabled={busy}
-          onClick={() => setConfirmEmpty(true)}>
+          onClick={() => setConfirmationRecoveryId(recoveryId)}>
           创建全新空数据库
         </button>
         <p>此入口只在你明确确认后执行；现有隔离文件和备份继续保留。</p>
       </footer>
     </section>
 
-    {confirmEmpty && <div className="database-recovery-dialog-backdrop">
+    {confirmationRecoveryId && <div className="database-recovery-dialog-backdrop">
       <section role="dialog" aria-modal="true" aria-label="确认创建全新空数据库"
         className="database-recovery-dialog" onKeyDown={(event) => {
           if (event.key === 'Escape') {
@@ -163,8 +178,9 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
         <div>
           <button ref={dialogBackRef} onClick={closeEmptyConfirmation}>返回</button>
           <button ref={dialogConfirmRef} className="danger" onClick={() => {
-            setConfirmEmpty(false)
-            void perform('empty', () => actions.startEmpty(recoveryId))
+            const frozenRecoveryId = confirmationRecoveryId
+            setConfirmationRecoveryId(undefined)
+            void perform('empty', () => actions.startEmpty(frozenRecoveryId))
           }}>确认创建空数据库</button>
         </div>
       </section>

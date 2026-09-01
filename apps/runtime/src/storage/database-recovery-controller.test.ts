@@ -28,7 +28,12 @@ describe('database recovery controller', () => {
       'SELECT name FROM workspaces WHERE id = ?', 'workspace-preserved'
     )).toEqual({ name: 'Preserved Workspace' })
     result.bootstrap.database.close()
-    await expect(stat(join(fixture.root, 'matou.sqlite.recovery.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(
+      join(fixture.root, 'matou.sqlite.recovery.json'), 'utf8'
+    ))).toMatchObject({ state: 'resolved', recoveryId: fixture.recovery.recoveryId })
+    const reopened = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
+    expect(reopened.kind).toBe('writable')
+    if (reopened.kind === 'writable') reopened.database.close()
   })
 
   it.each(['restore-backup', 'retry-open', 'start-empty-database'] as const)(
@@ -91,7 +96,7 @@ describe('database recovery controller', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it.each(['commit', 'close', 'marker-unlink'] as const)(
+  it.each(['commit', 'fence-close'] as const)(
     'compensates an action fence %s finalization failure before publishing success',
     async (failure) => {
       const fixture = await corruptFixture()
@@ -103,13 +108,11 @@ describe('database recovery controller', () => {
         fixture.root,
         FOUNDATION_MIGRATIONS,
         { onDatabaseOpened: (database) => { openedDatabase = database } },
-        failure === 'marker-unlink'
-          ? { removeRecoveryMarker: async () => { throw injected } }
-          : {
-              actionFenceObserver: failure === 'commit'
-                ? { beforeCommit: () => { throw injected } }
-                : { beforeClose: () => { throw injected } }
-            }
+        {
+          actionFenceObserver: failure === 'commit'
+            ? { beforeCommit: () => { throw injected } }
+            : { beforeClose: () => { throw injected } }
+        }
       )
 
       await expect(controller.execute(fixture.recovery, {
@@ -125,6 +128,107 @@ describe('database recovery controller', () => {
       expect(next).toMatchObject({
         kind: 'recovery-required', recoveryId: fixture.recovery.recoveryId
       })
+    }
+  )
+
+  it.each([
+    'marker-rewrite',
+    'namespace-transition',
+    'directory-sync',
+    'database-close',
+    'owner-unlink',
+    'namespace-and-owner-unlink'
+  ] as const)(
+    'keeps the same durable recovery cycle after a %s finalization failure',
+    async (failure) => {
+      const fixture = await corruptFixture()
+      const backup = fixture.recovery.backups[0]!
+      await writeFile(join(fixture.root, 'matou.sqlite'), await readFile(backup.path))
+      const injected = new Error(`injected ${failure} failure`)
+      let markerFailures = 1
+      let closeFailures = failure === 'database-close' ? 1 : 0
+      let ownerFailures = ['owner-unlink', 'namespace-and-owner-unlink'].includes(failure) ? 1 : 0
+      const openedDatabases: RuntimeDatabase[] = []
+      const controller = new DatabaseRecoveryController(
+        fixture.root,
+        FOUNDATION_MIGRATIONS,
+        { onDatabaseOpened: (database) => { openedDatabases.push(database) } },
+        {
+          markerFinalizationObserver: {
+            beforeRewrite: () => {
+              if (markerFailures > 0 && (
+                failure === 'marker-rewrite' || failure === 'database-close' || failure === 'owner-unlink'
+              )) {
+                markerFailures -= 1
+                throw injected
+              }
+            },
+            afterNamespaceTransition: () => {
+              if (markerFailures > 0 && (
+                failure === 'namespace-transition' || failure === 'namespace-and-owner-unlink'
+              )) {
+                markerFailures -= 1
+                throw injected
+              }
+            },
+            afterDirectorySync: () => {
+              if (markerFailures > 0 && failure === 'directory-sync') {
+                markerFailures -= 1
+                throw injected
+              }
+            }
+          },
+          cleanupObserver: {
+            beforeDatabaseClose: () => {
+              if (closeFailures > 0) {
+                closeFailures -= 1
+                throw new Error('injected database close failure')
+              }
+            },
+            beforeOwnerRelease: () => {
+              if (ownerFailures > 0) {
+                ownerFailures -= 1
+                throw new Error('injected owner unlink failure')
+              }
+            }
+          }
+        }
+      )
+
+      await expect(controller.execute(fixture.recovery, {
+        type: 'runtime.recovery-command', requestId: `durable-${failure}`,
+        action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+      })).rejects.toThrow()
+
+      expect(JSON.parse(await readFile(fixture.recovery.markerPath, 'utf8')))
+        .toMatchObject({ state: 'required', recoveryId: fixture.recovery.recoveryId })
+      const next = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
+      expect(next).toMatchObject({
+        kind: 'recovery-required', recoveryId: fixture.recovery.recoveryId
+      })
+      if (failure === 'database-close') {
+        expect(openedDatabases[0]?.get('SELECT 1')).toBeTruthy()
+      } else {
+        expect(() => openedDatabases[0]?.get('SELECT 1')).toThrow('database is closed')
+      }
+      const ownerShouldBePending = [
+        'database-close', 'owner-unlink', 'namespace-and-owner-unlink'
+      ].includes(failure)
+      if (ownerShouldBePending) {
+        expect((await stat(join(fixture.root, 'matou.sqlite.owner'))).isFile()).toBe(true)
+      } else {
+        await expect(stat(join(fixture.root, 'matou.sqlite.owner')))
+          .rejects.toMatchObject({ code: 'ENOENT' })
+      }
+
+      const recovered = await controller.execute(fixture.recovery, {
+        type: 'runtime.recovery-command', requestId: `durable-retry-${failure}`,
+        action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+      })
+      expect(recovered.bootstrap?.kind).toBe('writable')
+      if (recovered.bootstrap?.kind === 'writable') recovered.bootstrap.database.close()
+      await expect(stat(join(fixture.root, 'matou.sqlite.owner')))
+        .rejects.toMatchObject({ code: 'ENOENT' })
     }
   )
 

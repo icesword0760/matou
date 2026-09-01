@@ -34,6 +34,27 @@ afterAll(async () => {
 })
 
 describe('database recovery multi-process handoff', () => {
+  it('keeps a legacy marker recoveryId stable across real Runtime process restarts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-legacy-marker-restart-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const markerPath = `${databasePath}.recovery.json`
+    await writeFile(markerPath, JSON.stringify({
+      version: 1,
+      reason: 'physical-corruption',
+      durableDatabasePath: databasePath,
+      quarantinedPath: `${databasePath}.corrupt-1`,
+      markerPath,
+      createdAt: 1
+    }))
+
+    const first = await probeResult(root)
+    const second = await probeResult(root)
+    expect(first).toMatchObject({
+      kind: 'recovery-required', recoveryId: expect.stringMatching(/^[A-Za-z0-9._-]+$/)
+    })
+    expect(second).toEqual(first)
+  })
+
   it.each(['restore-backup', 'retry-open', 'start-empty-database'] as const)(
     'never lets a competing Runtime become ready during %s',
     async (action) => {
@@ -95,8 +116,12 @@ async function corruptFixture() {
 }
 
 async function probe(dataRoot: string): Promise<string> {
+  return (await probeResult(dataRoot)).kind
+}
+
+async function probeResult(dataRoot: string): Promise<{ kind: string; recoveryId?: string }> {
   const contender = fork(contenderEntry, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
-  return new Promise<string>((resolveProbe, reject) => {
+  return new Promise<{ kind: string; recoveryId?: string }>((resolveProbe, reject) => {
     const timeout = setTimeout(() => {
       contender.kill()
       reject(new Error('timed out waiting for competing Runtime bootstrap'))
@@ -108,7 +133,10 @@ async function probe(dataRoot: string): Promise<string> {
         reject(new Error('competing Runtime returned an invalid observation'))
         return
       }
-      resolveProbe(String(message.kind))
+      resolveProbe({
+        kind: String(message.kind),
+        ...('recoveryId' in message ? { recoveryId: String(message.recoveryId) } : {})
+      })
     })
     contender.send({ dataRoot })
   })

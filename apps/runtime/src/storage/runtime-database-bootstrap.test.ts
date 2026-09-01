@@ -247,6 +247,58 @@ describe('openRecoverableRuntimeDatabase', () => {
     ))).toMatchObject({ quarantinedPath: result.quarantinedPath })
   })
 
+  it('durably upgrades a valid legacy v1 recovery marker without a recoveryId', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-legacy-recovery-marker-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const markerPath = `${databasePath}.recovery.json`
+    const legacy = {
+      version: 1,
+      reason: 'physical-corruption',
+      durableDatabasePath: databasePath,
+      quarantinedPath: `${databasePath}.corrupt-1`,
+      markerPath,
+      createdAt: 1
+    }
+    await writeFile(markerPath, JSON.stringify(legacy))
+
+    const first = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
+    expect(first).toMatchObject({
+      kind: 'recovery-required',
+      recoveryId: expect.stringMatching(/^[A-Za-z0-9._-]+$/)
+    })
+    if (first.kind !== 'recovery-required') throw new Error('expected upgraded recovery marker')
+    const upgraded = JSON.parse(await readFile(markerPath, 'utf8')) as Record<string, unknown>
+    expect(upgraded).toMatchObject({
+      ...legacy,
+      state: 'required',
+      recoveryId: first.recoveryId
+    })
+
+    const restarted = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
+    expect(restarted).toMatchObject({
+      kind: 'recovery-required', recoveryId: first.recoveryId
+    })
+  })
+
+  it('keeps malformed legacy recovery markers fail-closed during upgrade', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-malformed-legacy-recovery-marker-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const markerPath = `${databasePath}.recovery.json`
+    const malformed = JSON.stringify({
+      version: 1,
+      reason: 'physical-corruption',
+      durableDatabasePath: join(root, 'different.sqlite'),
+      quarantinedPath: `${databasePath}.corrupt-1`,
+      markerPath,
+      createdAt: 1
+    })
+    await writeFile(markerPath, malformed)
+
+    await expect(openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS))
+      .rejects.toThrow('database recovery marker is invalid')
+    expect(await readFile(markerPath, 'utf8')).toBe(malformed)
+  })
+
   it('publishes a durable marker under the owner fence before moving the corrupt bundle', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-recovery-marker-barrier-'))
     const databasePath = join(root, 'matou.sqlite')

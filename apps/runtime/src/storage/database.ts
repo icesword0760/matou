@@ -212,9 +212,9 @@ export class RuntimeDatabase implements DatabaseTransaction {
     if (this.#closed) {
       return
     }
-    this.#closed = true
     this.#queue.close()
     this.#connection.close()
+    this.#closed = true
   }
 
   #pragmaNumber(name: string): number {
@@ -294,8 +294,8 @@ class RuntimeDatabaseOwnershipLease implements RuntimeDatabaseOwnership {
 
   release(): void {
     if (!this.#held) return
-    this.#held = false
     releaseDatabaseOwner(this.#ownerPath, this.runtimeGeneration)
+    this.#held = false
   }
 
   #assertHeld(): void {

@@ -11,7 +11,10 @@ async function contendOnce(dataRoot: string): Promise<void> {
   try {
     const result = await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS)
     if (result.kind === 'writable' || result.kind === 'read-only') result.database.close()
-    sendAndExit({ kind: result.kind })
+    sendAndExit({
+      kind: result.kind,
+      ...('recoveryId' in result ? { recoveryId: result.recoveryId } : {})
+    })
   } catch (error) {
     sendAndExit({
       kind: /already owned by a live Runtime/i.test(errorMessage(error))

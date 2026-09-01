@@ -56,6 +56,60 @@ describe('database recovery page', () => {
     expect(startEmpty).toHaveBeenCalledWith('durable-recovery-ui')
   })
 
+  it('closes an old empty-database confirmation when the recovery cycle changes', async () => {
+    const startEmpty = vi.fn().mockResolvedValue(undefined)
+    const exportBundle = vi.fn().mockResolvedValue({ exportedPath: '/exports/cycle-a' })
+    const first = state(0)
+    const view = render(<DatabaseRecoveryPage
+      state={first}
+      actions={{ ...actions(), startEmpty, exportBundle }}
+    />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '导出恢复资料' }))
+    expect(await screen.findByText(/\/exports\/cycle-a/)).toBeTruthy()
+    await userEvent.setup().click(screen.getByRole('button', { name: '创建全新空数据库' }))
+    expect(screen.getByRole('dialog', { name: '确认创建全新空数据库' })).toBeTruthy()
+
+    const second = state(0)
+    second.recovery!.recoveryId = 'durable-recovery-ui-cycle-b'
+    second.snapshot.recoveryId = 'recovery-ui-cycle-b'
+    second.snapshot.revision = 1
+    view.rerender(<DatabaseRecoveryPage
+      state={second}
+      actions={{ ...actions(), startEmpty, exportBundle }}
+    />)
+
+    expect(screen.queryByRole('dialog', { name: '确认创建全新空数据库' })).toBeNull()
+    expect(screen.queryByText(/\/exports\/cycle-a/)).toBeNull()
+    expect(startEmpty).not.toHaveBeenCalled()
+  })
+
+  it('drops an old cycle pending result and local error when a new cycle arrives', async () => {
+    let rejectRetry!: (reason: Error) => void
+    const retry = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectRetry = reject }))
+    const first = state(0)
+    const view = render(<DatabaseRecoveryPage
+      state={first}
+      actions={{ ...actions(), retry }}
+    />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '重新检查数据库' }))
+    expect(screen.getByRole('button', { name: '正在检查…' }).hasAttribute('disabled')).toBe(true)
+
+    const second = state(0)
+    second.recovery!.recoveryId = 'durable-recovery-ui-cycle-b'
+    second.snapshot.recoveryId = 'recovery-ui-cycle-b'
+    view.rerender(<DatabaseRecoveryPage
+      state={second}
+      actions={{ ...actions(), retry }}
+    />)
+    expect(screen.getByRole('button', { name: '重新检查数据库' }).hasAttribute('disabled')).toBe(false)
+
+    rejectRetry(new Error('周期 A 的延迟错误'))
+    await Promise.resolve()
+    expect(screen.queryByText('周期 A 的延迟错误')).toBeNull()
+  })
+
   it('moves focus into the empty-database dialog, traps Tab, and restores focus on Escape', async () => {
     const user = userEvent.setup()
     render(<DatabaseRecoveryPage state={state(0)} actions={actions()} />)
