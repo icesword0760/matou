@@ -137,6 +137,10 @@ describe('SessionGraphRepository', () => {
            state = 'missing', error_message = 'path-missing', updated_at = 11
        WHERE session_id = 'claude-child'`
     )
+    insertGitState({
+      executionContextId: 'context', repositoryRoot: '/tmp/workspace',
+      branch: 'main', dirty: false, now: 11
+    })
     database.run(
       `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
        VALUES ('claude-child', '["persisted line"]', 11)`
@@ -160,6 +164,138 @@ describe('SessionGraphRepository', () => {
       parentSessionId: 'parent', childSessionId: 'claude-child'
     }))
     expect(graph.nodes).toHaveLength(4)
+  })
+
+  it('projects Local Git root state independently from a Local environment binding', () => {
+    insertGitState({
+      executionContextId: 'context', repositoryRoot: '/tmp/workspace',
+      branch: 'main', dirty: true, now: 10
+    })
+
+    const node = graphs.projectSceneGraph('scene').nodes
+      .find(({ sessionId }) => sessionId === 'parent')
+
+    expect(node).toMatchObject({
+      environment: {
+        kind: 'local', state: 'ready', path: '/tmp/workspace',
+        localExecutionContextId: 'context'
+      },
+      git: { state: 'ready', branch: 'main', dirty: true }
+    })
+  })
+
+  it('projects registered Worktree Git for Local/shared ordinary and current-Fork Sessions', () => {
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('shared-context', 'workspace', 'git-worktree', '/tmp/shared', 10)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES ('shared-worktree', 'shared-context', '/tmp/workspace', '/tmp/shared',
+                 'feature/shared', 'ready', 10, 10)`
+    )
+    for (const sessionId of ['shell-child', 'claude-child']) {
+      database.run(
+        `UPDATE sessions SET execution_context_id = 'shared-context', cwd = '/tmp/shared'
+         WHERE id = ?`,
+        sessionId
+      )
+      database.run(
+        `UPDATE session_environment_bindings
+         SET local_execution_context_id = 'shared-context', active_target = 'local',
+             managed_worktree_id = NULL, state = 'ready'
+         WHERE session_id = ?`,
+        sessionId
+      )
+    }
+    insertGitState({
+      executionContextId: 'shared-context', repositoryRoot: '/tmp/workspace',
+      branch: 'feature/shared', dirty: false, now: 10
+    })
+
+    const graph = graphs.projectSceneGraph('scene')
+
+    for (const sessionId of ['shell-child', 'claude-child']) {
+      expect(graph.nodes.find((node) => node.sessionId === sessionId)).toMatchObject({
+        environment: {
+          kind: 'local', state: 'ready', path: '/tmp/shared',
+          localExecutionContextId: 'shared-context'
+        },
+        git: { state: 'ready', branch: 'feature/shared', dirty: false }
+      })
+    }
+  })
+
+  it('projects managed Worktree detached HEAD and dirty state from its actual context', () => {
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('owned-context', 'workspace', 'git-worktree', '/tmp/owned', 10)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         base_revision, state, created_at, updated_at
+       ) VALUES ('owned-worktree', 'owned-context', '/tmp/workspace', '/tmp/owned',
+                 '(detached)', 'deadbeef', 'dirty', 10, 10)`
+    )
+    database.run(
+      `UPDATE sessions SET execution_context_id = 'owned-context', cwd = '/tmp/owned'
+       WHERE id = 'claude-child'`
+    )
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'owned-worktree', active_target = 'worktree',
+           state = 'ready', error_message = NULL
+       WHERE session_id = 'claude-child'`
+    )
+    insertGitState({
+      executionContextId: 'owned-context', repositoryRoot: '/tmp/workspace',
+      detachedHead: 'deadbeef', dirty: true, now: 10
+    })
+
+    expect(graphs.projectSceneGraph('scene').nodes
+      .find(({ sessionId }) => sessionId === 'claude-child')).toMatchObject({
+      environment: {
+        kind: 'worktree', state: 'ready', worktreeId: 'owned-worktree',
+        worktreeExecutionContextId: 'owned-context'
+      },
+      git: { state: 'ready', detachedHead: 'deadbeef', dirty: true }
+    })
+  })
+
+  it('uses Local context Git after Handoff instead of the retained owned Worktree branch', () => {
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('owned-context', 'workspace', 'git-worktree', '/tmp/owned', 10)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES ('owned-worktree', 'owned-context', '/tmp/workspace', '/tmp/owned',
+                 'feature/owned', 'ready', 10, 10)`
+    )
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'owned-worktree', active_target = 'local', state = 'ready'
+       WHERE session_id = 'parent'`
+    )
+    insertGitState({
+      executionContextId: 'context', repositoryRoot: '/tmp/workspace',
+      branch: 'main', dirty: false, now: 10
+    })
+    insertGitState({
+      executionContextId: 'owned-context', repositoryRoot: '/tmp/workspace',
+      branch: 'feature/owned', dirty: true, now: 10
+    })
+
+    expect(graphs.projectSceneGraph('scene').nodes
+      .find(({ sessionId }) => sessionId === 'parent')).toMatchObject({
+      environment: { kind: 'local', state: 'ready' },
+      git: { state: 'ready', branch: 'main', dirty: false }
+    })
   })
 
   it('keeps a read-only-compatible legacy v21 graph browsable before binding migration', async () => {
@@ -284,6 +420,28 @@ function insertRelation(
        metadata_json, created_at, updated_at, source_event_sequence
      ) VALUES (?, 'task', ?, ?, ?, '{}', ?, ?, ?)`,
     `relation-${id}`, childSessionId, parentSessionId, kind, now, now, Number(event.lastInsertRowid)
+  )
+}
+
+function insertGitState(input: {
+  executionContextId: string
+  repositoryRoot: string
+  branch?: string
+  detachedHead?: string
+  dirty: boolean
+  now: number
+}): void {
+  database.run(
+    `INSERT INTO execution_context_git_states (
+       execution_context_id, repository_root, state, branch, detached_head,
+       dirty, error_message, updated_at
+     ) VALUES (?, ?, 'ready', ?, ?, ?, NULL, ?)`,
+    input.executionContextId,
+    input.repositoryRoot,
+    input.branch ?? null,
+    input.detachedHead ?? null,
+    input.dirty ? 1 : 0,
+    input.now
   )
 }
 

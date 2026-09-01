@@ -48,6 +48,13 @@ interface GraphRow extends MembershipRow {
   fork_attempt: number | null
   worktree_path: string | null
   branch_name: string | null
+  actual_worktree_base_revision: string | null
+  actual_worktree_state: string | null
+  context_git_state: 'ready' | 'unavailable' | null
+  context_git_repository_root: string | null
+  context_git_branch: string | null
+  context_git_detached_head: string | null
+  context_git_dirty: 0 | 1 | null
   detached_window_id: string | null
   latest_lines_json: string | null
   environment_active_target: 'local' | 'worktree' | null
@@ -209,6 +216,25 @@ export function projectSceneGraphFrom(
        LEFT JOIN worktrees AS managed_worktree
          ON managed_worktree.id = environment.managed_worktree_id`
     : ''
+  const hasGitStates = source.get<{ present: number }>(
+    `SELECT 1 AS present FROM sqlite_master
+     WHERE type = 'table' AND name = 'execution_context_git_states'`
+  ) !== undefined
+  const gitProjection = hasGitStates
+    ? `context_git.state AS context_git_state,
+         context_git.repository_root AS context_git_repository_root,
+         context_git.branch AS context_git_branch,
+         context_git.detached_head AS context_git_detached_head,
+         context_git.dirty AS context_git_dirty,`
+    : `NULL AS context_git_state,
+         NULL AS context_git_repository_root,
+         NULL AS context_git_branch,
+         NULL AS context_git_detached_head,
+         NULL AS context_git_dirty,`
+  const gitJoin = hasGitStates
+    ? `LEFT JOIN execution_context_git_states AS context_git
+         ON context_git.execution_context_id = sessions.execution_context_id`
+    : ''
 
   const rows = source.all<GraphRow>(
       `SELECT
@@ -235,7 +261,10 @@ export function projectSceneGraphFrom(
          fork.attempt_count AS fork_attempt,
          worktrees.worktree_path,
          worktrees.branch_name,
+         worktrees.base_revision AS actual_worktree_base_revision,
+         worktrees.state AS actual_worktree_state,
          ${environmentProjection}
+         ${gitProjection}
          detached.native_window_key AS detached_window_id
          , summary.latest_lines_json
        FROM session_canvas_memberships AS membership
@@ -252,6 +281,7 @@ export function projectSceneGraphFrom(
        LEFT JOIN session_fork_intents AS fork ON fork.session_id = sessions.id
        LEFT JOIN worktrees ON worktrees.execution_context_id = sessions.execution_context_id
        ${environmentJoins}
+       ${gitJoin}
        LEFT JOIN scene_windows AS detached
          ON detached.scene_id = membership.scene_id
         AND detached.state = 'detached'
@@ -443,19 +473,46 @@ function mapEnvironment(row: GraphRow): SessionEnvironment | undefined {
 }
 
 function mapGitState(row: GraphRow): SessionGitState | undefined {
-  if (row.environment_active_target !== 'worktree') return undefined
+  if (row.environment_active_target === 'worktree' && row.environment_state !== 'ready') {
+    return { state: 'unavailable', dirty: false }
+  }
   if (
-    row.environment_state !== 'ready' ||
-    row.managed_worktree_branch === null ||
-    !['ready', 'dirty', 'retained'].includes(row.managed_worktree_state ?? '')
+    row.actual_worktree_state !== null &&
+    !['ready', 'dirty', 'retained'].includes(row.actual_worktree_state)
   ) {
     return { state: 'unavailable', dirty: false }
   }
-  return {
-    state: 'ready',
-    branch: row.managed_worktree_branch,
-    dirty: row.managed_worktree_state === 'dirty' || row.managed_worktree_state === 'retained'
+  if (row.context_git_state === 'unavailable') {
+    return { state: 'unavailable', dirty: false }
   }
+  if (row.context_git_state === 'ready') {
+    if (row.context_git_branch !== null) {
+      return {
+        state: 'ready', branch: row.context_git_branch, dirty: row.context_git_dirty === 1
+      }
+    }
+    if (row.context_git_detached_head !== null) {
+      return {
+        state: 'ready', detachedHead: row.context_git_detached_head,
+        dirty: row.context_git_dirty === 1
+      }
+    }
+    return { state: 'unavailable', dirty: false }
+  }
+  if (
+    row.branch_name !== null &&
+    ['ready', 'dirty', 'retained'].includes(row.actual_worktree_state ?? '')
+  ) {
+    const dirty = row.actual_worktree_state === 'dirty' || row.actual_worktree_state === 'retained'
+    if (row.branch_name !== '(detached)') {
+      return { state: 'ready', branch: row.branch_name, dirty }
+    }
+    if (row.actual_worktree_base_revision !== null) {
+      return { state: 'ready', detachedHead: row.actual_worktree_base_revision, dirty }
+    }
+    return { state: 'unavailable', dirty: false }
+  }
+  return undefined
 }
 
 function mapMembership(row: MembershipRow): SessionCanvasMembership {

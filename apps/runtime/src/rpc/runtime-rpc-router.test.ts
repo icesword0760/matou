@@ -192,7 +192,12 @@ describe('RuntimeRpcRouter', () => {
       cwd: repositoryRoot, sessionId: initial.session.id,
       windowId: 'window-worktree', sceneId: initial.scene.id,
       repositoryRoot, path: worktreePath, branch: 'feature/open', now: 2
-    })) as { created: boolean; focusedSessionId: string; session: { cwd: string } }
+    })) as {
+      created: boolean
+      focusedSessionId: string
+      session: { cwd: string }
+      graph: { nodes: Array<Record<string, unknown>> }
+    }
     const actualWorktreePath = await realpath(worktreePath)
 
     expect(opened).toMatchObject({ created: true, session: { cwd: actualWorktreePath } })
@@ -202,6 +207,11 @@ describe('RuntimeRpcRouter', () => {
        JOIN execution_contexts ON execution_contexts.id = sessions.execution_context_id
        WHERE sessions.id = ?`, opened.focusedSessionId
     )).toEqual({ kind: 'git-worktree', cwd: actualWorktreePath })
+    expect(opened.graph.nodes.find(({ sessionId }) => sessionId === opened.focusedSessionId))
+      .toMatchObject({
+        environment: { kind: 'local', state: 'ready', path: actualWorktreePath },
+        git: { state: 'ready', branch: 'feature/open', dirty: false }
+      })
   })
 
   it('routes atomic Workspace hierarchy workflows', async () => {

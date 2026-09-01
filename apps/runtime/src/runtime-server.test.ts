@@ -265,6 +265,15 @@ describe('RuntimeServer domain RPC', () => {
       profile: 'shell', cols: 80, rows: 24
     })
     await waitUntil(() => port.last('terminal.hud')?.hud?.gitBranch === 'main')
+    expect(database.get<{
+      state: string
+      branch: string | null
+      detached_head: string | null
+      dirty: number
+    }>(
+      `SELECT state, branch, detached_head, dirty
+       FROM execution_context_git_states WHERE execution_context_id = 'replay-context'`
+    )).toEqual({ state: 'ready', branch: 'main', detached_head: null, dirty: 0 })
 
     port.receive(rpc('git-hud-checkout', 'git.checkout', {
       cwd: repositoryRoot, branch: 'feature/hud-refresh', now: Date.now()

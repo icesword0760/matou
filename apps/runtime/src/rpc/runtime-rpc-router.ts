@@ -36,6 +36,7 @@ import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
+import { SessionGitStateRepository } from '../session/session-git-state-repository'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -76,6 +77,7 @@ export class RuntimeRpcRouter {
   readonly #providerModes: ProviderModeService
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
+  readonly #gitStates: SessionGitStateRepository
   readonly #claudeSessions: ClaudeSessionCatalog
   readonly #accessPolicy: RuntimeAccessPolicy
 
@@ -107,6 +109,7 @@ export class RuntimeRpcRouter {
       dirname(database.path), database, transactions, { stopRuns: async () => undefined }
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
+    this.#gitStates = new SessionGitStateRepository(database)
     this.#claudeSessions = new ClaudeSessionCatalog(
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
@@ -139,8 +142,9 @@ export class RuntimeRpcRouter {
     if (method === 'projection.snapshot') return this.#snapshot(payload)
     if (method === 'hierarchy.get-scene-session-graph') {
       const input = record(payload)
+      const sceneId = text(input.sceneId, 'sceneId')
       return this.#sessionGraphs.projectSceneGraph(
-        text(input.sceneId, 'sceneId'),
+        sceneId,
         optionalText(input.windowId, 'windowId')
       )
     }
@@ -274,6 +278,8 @@ export class RuntimeRpcRouter {
           }
         )
         const sceneId = text(input.sceneId, 'sceneId')
+        const now = integer(input.now, 'now', 0)
+        await this.#gitStates.refresh(context.executionContextId, now)
         const existing = this.#database.get<{ id: string }>(
           `SELECT sessions.id FROM sessions
            JOIN session_canvas_memberships AS membership
@@ -283,7 +289,6 @@ export class RuntimeRpcRouter {
            ORDER BY sessions.last_activity_at DESC, sessions.created_at DESC LIMIT 1`,
           sceneId, context.executionContextId
         )
-        const now = integer(input.now, 'now', 0)
         if (existing) {
           return {
             created: false,

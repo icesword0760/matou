@@ -1055,5 +1055,72 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         );
       END;
     `
+  },
+  {
+    version: 23,
+    name: 'execution-context-git-state',
+    sql: `
+      CREATE TABLE execution_context_git_states (
+        execution_context_id TEXT PRIMARY KEY
+          REFERENCES execution_contexts(id) ON DELETE CASCADE,
+        repository_root TEXT,
+        state TEXT NOT NULL CHECK (state IN ('ready', 'unavailable')),
+        branch TEXT,
+        detached_head TEXT,
+        dirty INTEGER NOT NULL CHECK (dirty IN (0, 1)),
+        error_message TEXT,
+        updated_at INTEGER NOT NULL,
+        CHECK (
+          state = 'unavailable' OR (
+            repository_root IS NOT NULL AND
+            ((branch IS NOT NULL) <> (detached_head IS NOT NULL))
+          )
+        ),
+        CHECK (
+          state = 'ready' OR (
+            branch IS NULL AND detached_head IS NULL AND dirty = 0
+          )
+        )
+      ) STRICT;
+
+      INSERT INTO execution_context_git_states (
+        execution_context_id, repository_root, state, branch, detached_head,
+        dirty, error_message, updated_at
+      )
+      SELECT
+        execution_context_id,
+        repository_root,
+        CASE
+          WHEN state IN ('ready', 'dirty', 'retained')
+            AND (branch_name <> '(detached)' OR base_revision IS NOT NULL)
+          THEN 'ready'
+          ELSE 'unavailable'
+        END,
+        CASE
+          WHEN state IN ('ready', 'dirty', 'retained') AND branch_name <> '(detached)'
+          THEN branch_name
+          ELSE NULL
+        END,
+        CASE
+          WHEN state IN ('ready', 'dirty', 'retained') AND branch_name = '(detached)'
+          THEN base_revision
+          ELSE NULL
+        END,
+        CASE
+          WHEN state IN ('dirty', 'retained')
+            AND (branch_name <> '(detached)' OR base_revision IS NOT NULL)
+          THEN 1
+          ELSE 0
+        END,
+        CASE
+          WHEN state NOT IN ('ready', 'dirty', 'retained')
+          THEN 'registered Worktree is unavailable'
+          WHEN branch_name = '(detached)' AND base_revision IS NULL
+          THEN 'detached Worktree HEAD is unavailable'
+          ELSE NULL
+        END,
+        updated_at
+      FROM worktrees;
+    `
   }
 ]

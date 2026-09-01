@@ -22,6 +22,7 @@ import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainMutationContext, DomainTransactionManager } from '../storage/domain-transaction'
 import { SessionEnvironmentRepository } from '../session/session-environment-repository'
+import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import { WorktreeService, type WorktreeSetupStep } from '../worktrees/worktree-service'
 import { createGitBranchName, validateDisplayName } from './branch-name'
 import { projectSceneGraphFrom } from './session-graph-repository'
@@ -147,6 +148,7 @@ export class ForkWorkflowService {
   readonly #transactions: DomainTransactionManager
   readonly #worktrees: WorktreeService
   readonly #environments: SessionEnvironmentRepository
+  readonly #gitStates: SessionGitStateRepository
   readonly #setupPolicyForWorkspace: (workspaceId: string) => WorktreeSetupStep[]
 
   constructor(
@@ -163,6 +165,7 @@ export class ForkWorkflowService {
     this.#transactions = transactions
     this.#worktrees = new WorktreeService(database, transactions, dependencies)
     this.#environments = new SessionEnvironmentRepository(database)
+    this.#gitStates = new SessionGitStateRepository(database)
     this.#setupPolicyForWorkspace = dependencies.setupPolicyForWorkspace ?? (() => [])
   }
 
@@ -186,6 +189,10 @@ export class ForkWorkflowService {
        JOIN tasks ON tasks.id = sessions.task_id WHERE sessions.id = ?`,
       input.sessionId
     ), 'Fork owner')
+    const sourceContext = requireRow(this.#database.get<{ execution_context_id: string }>(
+      'SELECT execution_context_id FROM sessions WHERE id = ?', intent.source_session_id
+    ), 'Fork source')
+    await this.#gitStates.refresh(sourceContext.execution_context_id, input.now)
     const prepared = this.#transactions.execute(command, ({ tx, emit }) => {
       tx.run(
         `UPDATE session_fork_intents SET state = 'pending', error_message = NULL,
@@ -220,6 +227,7 @@ export class ForkWorkflowService {
       )
     }
     if (worktree.state === 'ready') {
+      await this.#gitStates.refresh(worktree.executionContextId, input.now)
       return this.#bindReadyWorktree(
         derivedCommand(command, 'bind-existing-worktree'), input, input.sessionId, worktree
       )
@@ -236,6 +244,7 @@ export class ForkWorkflowService {
         setupPolicy: worktree.setupPolicy as WorktreeSetupStep[],
         now: input.now
       })
+      await this.#gitStates.refresh(ready.executionContextId, input.now)
       return this.#bindReadyWorktree(
         derivedCommand(command, 'bind-worktree'), input, input.sessionId, ready
       )
@@ -327,6 +336,8 @@ export class ForkWorkflowService {
     const name = validateDisplayName(input.name, activeNames)
     if (!name.ok) throw displayNameError(name.code, name.message, name.input)
 
+    await this.#gitStates.refresh(source.forkSource.execution_context_id, input.now)
+
     const gitPlan = input.worktreeMode === 'new'
       ? await this.#resolveGitPlan(source, name.displayName, ids.sessionId)
       : undefined
@@ -348,6 +359,7 @@ export class ForkWorkflowService {
         setupPolicy: this.#setupPolicyForWorkspace(source.task.workspace_id),
         now: input.now
       })
+      await this.#gitStates.refresh(worktree.executionContextId, input.now)
       return this.#bindReadyWorktree(
         derivedCommand(command, 'bind-worktree'), input, ids.sessionId, worktree,
         placement === 'sibling' ? source.selected.id : undefined

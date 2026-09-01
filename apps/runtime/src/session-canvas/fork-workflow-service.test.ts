@@ -38,6 +38,7 @@ afterEach(() => database.close())
 
 describe('ForkWorkflowService', () => {
   it('creates a current-worktree Fork child from a valid Claude conversation', async () => {
+    await initializeGitRepository(workspaceRoot)
     const source = bootstrapClaude('provider-parent')
 
     const result = await service.createForkChild(command('fork-child'), {
@@ -77,6 +78,11 @@ describe('ForkWorkflowService', () => {
       active_target: 'local',
       state: 'ready'
     })
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === result.session!.id))
+      .toMatchObject({
+        environment: { kind: 'local', state: 'ready' },
+        git: { state: 'ready', branch: 'main', dirty: false }
+      })
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
   })
 
@@ -174,6 +180,11 @@ describe('ForkWorkflowService', () => {
       active_target: 'worktree',
       state: 'ready'
     })
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === result.session!.id))
+      .toMatchObject({
+        environment: { kind: 'worktree', state: 'ready' },
+        git: { state: 'ready', branch: result.worktree!.branch, dirty: false }
+      })
   })
 
   it('reports that the new-worktree choice needs a Git repository before creating a node', async () => {

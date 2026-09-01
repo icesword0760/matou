@@ -26,6 +26,7 @@ import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracke
 import { ProviderResumeMonitor } from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
+import { SessionGitStateRepository } from './session/session-git-state-repository'
 import type {
   ProviderHookRegistration,
   ProviderHookServer
@@ -117,6 +118,7 @@ export class RuntimeServer {
   readonly #eventStore: DomainEventStore
   readonly #sessionRepository: SessionRepository
   readonly #forkIntents: SessionForkIntentRepository
+  readonly #gitStates: SessionGitStateRepository
   readonly #workspacePaths: WorkspacePathService
   readonly #hierarchy: HierarchyApplicationService
   readonly #sessionInteractions: SessionInteractionService
@@ -179,6 +181,7 @@ export class RuntimeServer {
     this.#shellHistory = new ShellHistoryRepository(database)
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
+    this.#gitStates = new SessionGitStateRepository(database)
     this.#control = control
     this.#sessions = sessions
     this.#providerHooks = providerHooks
@@ -1575,6 +1578,7 @@ export class RuntimeServer {
   }
 
   async refreshSessionHud(sessionId: string): Promise<void> {
+    if (this.#closed) return
     if (this.#forkIntents.state(sessionId) === 'succeeded') {
       this.#clearProviderResumeTimer(sessionId)
     }
@@ -1583,7 +1587,38 @@ export class RuntimeServer {
       this.publishSessionHud(sessionId)
       return
     }
-    const git = await gitEnvironment(current.cwd)
+    const context = (() => {
+      try {
+        return this.#database.get<{ execution_context_id: string; cwd: string }>(
+          `SELECT sessions.execution_context_id, execution_contexts.cwd
+           FROM sessions
+           JOIN execution_contexts ON execution_contexts.id = sessions.execution_context_id
+           WHERE sessions.id = ?`, sessionId
+        )
+      } catch (error) {
+        if (this.#closed || /database is closed/i.test(errorMessage(error))) return undefined
+        throw error
+      }
+    })()
+    let git: { gitBranch: string; gitDirty: boolean } | undefined
+    let probedCurrentContext = false
+    if (context && !this.#database.readOnly) {
+      const persisted = await this.#gitStates.refresh(context.execution_context_id).catch((error) => {
+        if (this.#closed || /database is closed/i.test(errorMessage(error))) return undefined
+        throw error
+      })
+      if (!persisted) return
+      if (current.cwd === context.cwd) {
+        probedCurrentContext = true
+        if (persisted.git.state === 'ready') {
+          git = {
+            gitBranch: persisted.git.branch ?? persisted.git.detachedHead,
+            gitDirty: persisted.git.dirty
+          }
+        }
+      }
+    }
+    if (!probedCurrentContext) git = await gitEnvironment(current.cwd)
     this.#hud.updateEnvironment(sessionId, {
       cwd: current.cwd,
       ...(current.shell ? { shell: current.shell } : {}),
