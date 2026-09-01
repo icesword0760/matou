@@ -5,6 +5,7 @@ import { PROTOCOL_VERSION } from '@matou/contracts'
 import * as pty from 'node-pty'
 
 import { CreditWindow } from '../flow-control/credit-window'
+import { TerminalScreenProjector, type TerminalScreenSnapshot } from '../control/terminal-screen-projector'
 import { SegmentJournal } from '../journal/segment-journal'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
@@ -53,6 +54,7 @@ export class PtySession {
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
+  readonly #screen: TerminalScreenProjector
 
   #sequence: number
   #writeChain = Promise.resolve()
@@ -81,6 +83,7 @@ export class PtySession {
     this.#creditWindow = this.#newCreditWindow()
     this.#onExit = options.onExit
     this.#onOutput = options.onOutput
+    this.#screen = new TerminalScreenProjector(options.cols, options.rows)
     this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
 
     terminal.onData((data) => this.#enqueueOutput(data))
@@ -139,6 +142,7 @@ export class PtySession {
       throw new Error('session is disposed')
     }
     this.#pty.resize(cols, rows)
+    void this.#screen.resize(cols, rows)
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(() => this.#journal.appendResize(sequence, cols, rows))
   }
@@ -149,6 +153,10 @@ export class PtySession {
 
   readFrames() {
     return this.#writeChain.then(() => this.#journal.readFrames())
+  }
+
+  snapshotScreen(): Promise<TerminalScreenSnapshot> {
+    return this.#screen.snapshot()
   }
 
   whenClosed(): Promise<void> { return this.#closed }
@@ -209,6 +217,7 @@ export class PtySession {
   #enqueueOutput(data: string): void {
     if (this.#forceFinalized) return
     this.#onOutput?.(data)
+    void this.#screen.write(data)
     const bytes = this.#encoder.encode(data)
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(async () => {

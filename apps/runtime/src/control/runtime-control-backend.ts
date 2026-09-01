@@ -7,12 +7,13 @@ import {
 import { HostTopologyProjector } from './host-topology-projector'
 import { CommandBoundaryRepository } from '../anchors/anchor-resolver'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
-import { readSessionFrames } from '../journal/segment-journal'
+import { readSessionFrames, type DecodedJournalFrame } from '../journal/segment-journal'
 import type { PtySession } from '../session/pty-session'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { TaskWindowMigrationService } from '../hierarchy/task-window-migration-service'
 import { NotificationProjection } from '../product/experience-foundation'
+import { TerminalScreenProjector } from './terminal-screen-projector'
 
 export class RuntimeControlBackend implements HostControlBackend {
   readonly #database: RuntimeDatabase
@@ -67,11 +68,31 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   async readCurrent(sessionId: string, limits: { maxLines: number; maxBytes: number }): Promise<unknown> {
-    return { text: tailText(await this.#terminalText(sessionId), limits.maxLines, limits.maxBytes), source: 'journal-tail' }
+    const active = this.#active.get(sessionId)
+    const snapshot = active
+      ? await active.snapshotScreen()
+      : await replayTerminalScreen(await readSessionFrames(this.#dataRoot, sessionId))
+    const bounded = tailText(snapshot.text, limits.maxLines, limits.maxBytes)
+    return {
+      text: bounded,
+      cols: snapshot.cols,
+      rows: snapshot.rows,
+      truncated: bounded !== snapshot.text,
+      source: 'screen'
+    }
   }
 
   async readHistory(sessionId: string, limits: { maxLines: number; maxBytes: number }): Promise<unknown> {
-    return { text: tailText(await this.#terminalText(sessionId), limits.maxLines, limits.maxBytes), source: 'journal' }
+    const frames = await this.#terminalFrames(sessionId)
+    const fullText = outputText(frames)
+    const bounded = tailText(fullText, limits.maxLines, limits.maxBytes)
+    return {
+      text: bounded,
+      truncated: bounded !== fullText,
+      firstSequence: frames.at(0)?.sequence ?? 0,
+      lastSequence: frames.at(-1)?.sequence ?? 0,
+      source: 'journal'
+    }
   }
 
   async readCommands(sessionId: string, limits: { limit: number }): Promise<unknown> {
@@ -154,15 +175,9 @@ export class RuntimeControlBackend implements HostControlBackend {
     }
   }
 
-  async #terminalText(sessionId: string): Promise<string> {
+  async #terminalFrames(sessionId: string): Promise<DecodedJournalFrame[]> {
     const active = this.#active.get(sessionId)
-    const frames = active ? await active.readFrames() : await readSessionFrames(this.#dataRoot, sessionId)
-    const decoder = new TextDecoder()
-    let text = ''
-    for (const frame of frames) {
-      if (frame.kind === 'output') text += decoder.decode(frame.data, { stream: true })
-    }
-    return text + decoder.decode()
+    return active ? active.readFrames() : readSessionFrames(this.#dataRoot, sessionId)
   }
 
   #requireActive(sessionId: string): PtySession {
@@ -196,8 +211,43 @@ const KEY_SEQUENCES = {
 
 function tailText(text: string, maxLines: number, maxBytes: number): string {
   const lines = text.split('\n').slice(-maxLines).join('\n')
-  const encoded = Buffer.from(lines)
-  return encoded.byteLength <= maxBytes
-    ? lines
-    : encoded.subarray(encoded.byteLength - maxBytes).toString('utf8')
+  if (Buffer.byteLength(lines) <= maxBytes) return lines
+  const characters = [...lines]
+  let bytes = 0
+  let start = characters.length
+  while (start > 0) {
+    const nextBytes = Buffer.byteLength(characters[start - 1]!)
+    if (bytes + nextBytes > maxBytes) break
+    bytes += nextBytes
+    start -= 1
+  }
+  return characters.slice(start).join('')
+}
+
+function outputText(frames: DecodedJournalFrame[]): string {
+  const decoder = new TextDecoder()
+  let text = ''
+  for (const frame of frames) {
+    if (frame.kind === 'output') text += decoder.decode(frame.data, { stream: true })
+  }
+  return text + decoder.decode()
+}
+
+async function replayTerminalScreen(
+  frames: DecodedJournalFrame[]
+): Promise<{ text: string; cols: number; rows: number }> {
+  const screen = new TerminalScreenProjector()
+  const decoder = new TextDecoder()
+  try {
+    for (const frame of frames) {
+      if (frame.kind === 'output') await screen.write(decoder.decode(frame.data, { stream: true }))
+      else if (frame.kind === 'resize') await screen.resize(frame.cols, frame.rows)
+      else if (frame.kind === 'reset') await screen.reset()
+    }
+    const tail = decoder.decode()
+    if (tail) await screen.write(tail)
+    return await screen.snapshot()
+  } finally {
+    screen.dispose()
+  }
 }

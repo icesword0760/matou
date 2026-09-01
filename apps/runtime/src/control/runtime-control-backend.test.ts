@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { RuntimeControlBackend } from './runtime-control-backend'
+import { SegmentJournal } from '../journal/segment-journal'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -25,6 +26,30 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeControlBackend Task information channel', () => {
+  it('separates the latest terminal screen from journal history', async () => {
+    const hierarchy = new HierarchyApplicationService(database, new DomainTransactionManager(database))
+    const initial = hierarchy.bootstrapWindow(command('bootstrap-screen'), {
+      windowId: 'window-1', defaultRootDirectory: root, defaultName: 'Workspace', now: 1
+    })
+    const journal = await SegmentJournal.open(root, initial.session!.id)
+    await journal.appendResize(1, 12, 2)
+    await journal.appendOutput(2, new TextEncoder().encode('old line\r\nsecond\r\nlatest'))
+    await journal.close()
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+
+    await expect(backend.readCurrent(initial.session!.id, { maxLines: 10, maxBytes: 4096 }))
+      .resolves.toMatchObject({
+        text: 'second\nlatest', cols: 12, rows: 2, source: 'screen', truncated: false
+      })
+    await expect(backend.readHistory(initial.session!.id, { maxLines: 10, maxBytes: 4096 }))
+      .resolves.toMatchObject({
+        text: 'old line\r\nsecond\r\nlatest', firstSequence: 1, lastSequence: 2,
+        source: 'journal', truncated: false
+      })
+  })
+
   it('turns an external error log into Task unread feedback without changing focus', async () => {
     const hierarchy = new HierarchyApplicationService(database, new DomainTransactionManager(database))
     const initial = hierarchy.bootstrapWindow(command('bootstrap'), {
