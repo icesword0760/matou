@@ -65,6 +65,7 @@ export class RuntimeDatabase implements DatabaseTransaction {
   readonly #connection: DatabaseSyncType
   readonly #queue = new StorageQueue()
   readonly #ownerPath: string | undefined
+  #statementCount: number | undefined
   #closed = false
 
   constructor(
@@ -140,23 +141,34 @@ export class RuntimeDatabase implements DatabaseTransaction {
   exec(sql: string): void {
     this.#assertOpen()
     this.#assertWritable()
+    this.#countStatement()
     this.#connection.exec(sql)
   }
 
   run(sql: string, ...params: SQLInputValue[]): StatementResultingChanges {
     this.#assertOpen()
     this.#assertWritable()
+    this.#countStatement()
     return this.#connection.prepare(sql).run(...params)
   }
 
   get<T extends object>(sql: string, ...params: SQLInputValue[]): T | undefined {
     this.#assertOpen()
+    this.#countStatement()
     return this.#connection.prepare(sql).get(...params) as T | undefined
   }
 
   all<T extends object>(sql: string, ...params: SQLInputValue[]): T[] {
     this.#assertOpen()
+    this.#countStatement()
     return this.#connection.prepare(sql).all(...params) as T[]
+  }
+
+  /** Enables a measurement window on reset and returns only statements executed through this authority. */
+  readStatementCount(reset = false): number {
+    const count = this.#statementCount ?? 0
+    if (reset) this.#statementCount = 0
+    return count
   }
 
   transaction<T>(callback: (transaction: DatabaseTransaction) => T): T {
@@ -235,6 +247,10 @@ export class RuntimeDatabase implements DatabaseTransaction {
 
   #assertWritable(): void {
     if (this.readOnly) throw new StorageReadOnlyError()
+  }
+
+  #countStatement(): void {
+    if (this.#statementCount !== undefined) this.#statementCount += 1
   }
 }
 

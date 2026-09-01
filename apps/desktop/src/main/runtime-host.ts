@@ -28,10 +28,29 @@ type RuntimeChildMessage = RuntimeLifecycleEvent | {
   ok: boolean
   value?: RuntimeRecoveryCommandResult
   error?: string
+} | {
+  type: 'runtime.scale-metrics-result'
+  requestId: string
+  runtimePid: number
+  ptyCount: number
+  ptyPids: number[]
+  statementCount: number
 }
 
 interface PendingRecoveryCommand {
   resolve(value: RuntimeRecoveryCommandResult): void
+  reject(error: Error): void
+}
+
+export interface RuntimeScaleMetrics {
+  runtimePid: number
+  ptyCount: number
+  ptyPids: number[]
+  statementCount: number
+}
+
+interface PendingScaleMetrics {
+  resolve(value: RuntimeScaleMetrics): void
   reject(error: Error): void
 }
 
@@ -40,6 +59,7 @@ export class RuntimeHost {
   readonly #renderers = new Set<WebContents>()
   readonly #connectedRenderers = new Set<WebContents>()
   readonly #pendingRecoveryCommands = new Map<string, PendingRecoveryCommand>()
+  readonly #pendingScaleMetrics = new Map<string, PendingScaleMetrics>()
   #child: UtilityProcess | undefined
   #restartTimer: ReturnType<typeof setTimeout> | undefined
   #restartAttempt = 0
@@ -102,6 +122,21 @@ export class RuntimeHost {
     return result
   }
 
+  getScaleMetrics(options: { resetStatementCount?: boolean } = {}): Promise<RuntimeScaleMetrics> {
+    const child = this.#child
+    if (!child) return Promise.reject(new Error('Runtime is not running'))
+    const requestId = randomUUID()
+    const result = new Promise<RuntimeScaleMetrics>((resolve, reject) => {
+      this.#pendingScaleMetrics.set(requestId, { resolve, reject })
+    })
+    child.postMessage({
+      type: 'runtime.scale-metrics-request',
+      requestId,
+      resetStatementCount: options.resetStatementCount ?? false
+    })
+    return result
+  }
+
   async #launch(): Promise<void> {
     const child = utilityProcess.fork(this.#runtimeEntry, [], {
       serviceName: 'Matou Terminal Runtime',
@@ -129,6 +164,7 @@ export class RuntimeHost {
           new Error('数据库恢复操作未完成：Runtime 在恢复操作期间退出'),
           true
         )
+        this.#rejectScaleMetrics(new Error('Runtime exited during scale measurement'))
         if (!this.#stopping) {
           this.#markReconnecting()
           this.#scheduleRestart()
@@ -163,6 +199,7 @@ export class RuntimeHost {
     if (this.#restartTimer) clearTimeout(this.#restartTimer)
     this.#restartTimer = undefined
     this.#rejectPending(new Error('Runtime stopped during database recovery'))
+    this.#rejectScaleMetrics(new Error('Runtime stopped during scale measurement'))
     const child = this.#child
     if (!child) return Promise.resolve()
     this.#stopPromise = new Promise<void>((resolve) => {
@@ -201,6 +238,18 @@ export class RuntimeHost {
     if (candidate.type === 'runtime.recovery-details') {
       this.#lifecycle = { ...this.#lifecycle, recovery: candidate.recovery }
       this.#publishLifecycle()
+      return
+    }
+    if (candidate.type === 'runtime.scale-metrics-result') {
+      const pending = this.#pendingScaleMetrics.get(candidate.requestId)
+      if (!pending) return
+      this.#pendingScaleMetrics.delete(candidate.requestId)
+      pending.resolve({
+        runtimePid: candidate.runtimePid,
+        ptyCount: candidate.ptyCount,
+        ptyPids: candidate.ptyPids,
+        statementCount: candidate.statementCount
+      })
       return
     }
     if (candidate.type !== 'runtime.recovery-result') return
@@ -306,5 +355,10 @@ export class RuntimeHost {
     }
     for (const pending of this.#pendingRecoveryCommands.values()) pending.reject(error)
     this.#pendingRecoveryCommands.clear()
+  }
+
+  #rejectScaleMetrics(error: Error): void {
+    for (const pending of this.#pendingScaleMetrics.values()) pending.reject(error)
+    this.#pendingScaleMetrics.clear()
   }
 }

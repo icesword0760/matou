@@ -32,6 +32,11 @@ export async function restartMatou(
   return startMatou(fixture.rootDirectory, options)
 }
 
+export async function stopMatouPreservingData(fixture: MatouFixture): Promise<void> {
+  await fixture.app.evaluate(({ app }) => { app.quit() }).catch(() => {})
+  await fixture.app.close().catch(() => {})
+}
+
 export async function restartMatouGracefully(
   fixture: MatouFixture,
   options: LaunchMatouOptions = {}
@@ -68,7 +73,8 @@ async function startMatou(root: string, options: LaunchMatouOptions = {}): Promi
   return {
     app, page, dataDirectory, workspaceDirectory, rootDirectory: root, electronUserDataDirectory,
     close: async () => {
-      await app.close()
+      await app.evaluate(({ app: electronApp }) => { electronApp.quit() }).catch(() => {})
+      await app.close().catch(() => {})
       await rm(root, { recursive: true, force: true })
     }
   }

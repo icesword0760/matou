@@ -27,6 +27,16 @@ let runtimeShutdownComplete = false
 let runtimeShutdownPromise: Promise<void> | undefined
 let mainWindowSequence = 0
 
+if (process.env.MATOU_E2E_SCALE === '1') {
+  Object.defineProperty(globalThis, '__matouE2eScaleMetrics', {
+    configurable: true,
+    value: (options: { resetStatementCount?: boolean } = {}) => {
+      if (!runtimeHost) throw new Error('Runtime is not running')
+      return runtimeHost.getScaleMetrics(options)
+    }
+  })
+}
+
 if (process.env.ELECTRON_USER_DATA_DIR) {
   mkdirSync(process.env.ELECTRON_USER_DATA_DIR, { recursive: true })
   app.setPath('userData', process.env.ELECTRON_USER_DATA_DIR)

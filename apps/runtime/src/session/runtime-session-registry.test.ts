@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from 'vitest'
 import { RuntimeSessionRegistry } from './runtime-session-registry'
 
 describe('RuntimeSessionRegistry', () => {
+  it('reports the Runtime-authoritative number of live PTYs', () => {
+    const registry = new RuntimeSessionRegistry()
+    registry.set(session('first').value)
+    registry.set(session('second').value)
+
+    expect(registry.size).toBe(2)
+    expect(registry.pids()).toEqual([101, 101])
+    registry.delete('first')
+    expect(registry.size).toBe(1)
+  })
+
   it('serializes lifecycle operations for the same Session across Runtime connections', async () => {
     const registry = new RuntimeSessionRegistry()
     const events: string[] = []
@@ -78,6 +89,7 @@ function session(sessionId: string) {
   return {
     value: {
       sessionId,
+      pid: 101,
       shutdownForRuntime,
       whenClosed: () => closed
     } as never,

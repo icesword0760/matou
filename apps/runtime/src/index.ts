@@ -302,6 +302,27 @@ process.once('SIGTERM', () => {
 })
 
 parentPort.on('message', async (event) => {
+  if (
+    process.env.MATOU_E2E_SCALE === '1' &&
+    event.data &&
+    typeof event.data === 'object' &&
+    event.data.type === 'runtime.scale-metrics-request'
+  ) {
+    const request = event.data as {
+      requestId?: unknown
+      resetStatementCount?: unknown
+    }
+    const state = await runtimeReady
+    parentPort.postMessage({
+      type: 'runtime.scale-metrics-result',
+      requestId: String(request.requestId ?? 'invalid'),
+      runtimePid: process.pid,
+      ptyCount: sessions.size,
+      ptyPids: sessions.pids(),
+      statementCount: state.database.readStatementCount(request.resetStatementCount === true)
+    })
+    return
+  }
   if (event.data && typeof event.data === 'object' && event.data.type === 'runtime.recovery-command') {
     let command: RuntimeRecoveryCommand
     try {

@@ -28,6 +28,20 @@ async function openDatabase(): Promise<{ database: RuntimeDatabase; path: string
 }
 
 describe('RuntimeDatabase', () => {
+  it('reads and resets the exact statement count for a scale measurement window', async () => {
+    const { database } = await openDatabase()
+    database.readStatementCount(true)
+
+    database.exec('CREATE TABLE scale_values (value TEXT NOT NULL)')
+    database.run('INSERT INTO scale_values VALUES (?)', 'one')
+    database.get<{ value: string }>('SELECT value FROM scale_values LIMIT 1')
+    database.all<{ value: string }>('SELECT value FROM scale_values')
+
+    expect(database.readStatementCount()).toBe(4)
+    expect(database.readStatementCount(true)).toBe(4)
+    expect(database.readStatementCount()).toBe(0)
+  })
+
   it('configures the durability and isolation pragmas', async () => {
     const { database } = await openDatabase()
 

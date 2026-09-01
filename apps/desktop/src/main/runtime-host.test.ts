@@ -35,6 +35,37 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('RuntimeHost', () => {
+  it('reads and resets Runtime-authoritative scale metrics through a correlated request', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn')
+    await starting
+
+    const pending = host.getScaleMetrics({ resetStatementCount: true })
+    expect(child.postMessage).toHaveBeenCalledWith({
+      type: 'runtime.scale-metrics-request',
+      requestId: expect.any(String),
+      resetStatementCount: true
+    })
+    const request = child.postMessage.mock.calls[0]![0] as { requestId: string }
+    child.emit('message', {
+      type: 'runtime.scale-metrics-result',
+      requestId: request.requestId,
+      runtimePid: 321,
+      ptyCount: 17,
+      ptyPids: [401, 402],
+      statementCount: 81
+    })
+
+    await expect(pending).resolves.toEqual({
+      runtimePid: 321,
+      ptyCount: 17,
+      ptyPids: [401, 402],
+      statementCount: 81
+    })
+  })
+
   it('publishes only child lifecycle states and withholds a terminal port until ready', async () => {
     const host = new RuntimeHost('/runtime/index.cjs')
     const starting = host.start()
