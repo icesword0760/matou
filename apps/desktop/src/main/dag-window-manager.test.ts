@@ -4,7 +4,7 @@ import { DagWindowManager, type DagWindowAdapter } from './dag-window-manager'
 import type { DagWindowContext } from '../shared/desktop-api'
 
 describe('DagWindowManager', () => {
-  it('keeps one centered DAG window per main window and reconnects Runtime on ready', () => {
+  it('keeps one half-area floating DAG window per main window and reconnects Runtime on ready', () => {
     const adapters: FakeDagWindow[] = []
     const connectRuntime = vi.fn()
     const manager = new DagWindowManager({
@@ -21,7 +21,7 @@ describe('DagWindowManager', () => {
 
     manager.open(context('session-a'))
     expect(adapters).toHaveLength(1)
-    expect(adapters[0]!.bounds).toEqual({ x: 320, y: 170, width: 960, height: 640 })
+    expect(adapters[0]!.bounds).toEqual({ x: 314, y: 181, width: 973, height: 619 })
     adapters[0]!.ready()
     expect(connectRuntime).toHaveBeenCalledWith(adapters[0])
     expect(adapters[0]!.sent.at(-1)).toMatchObject({ value: { sessionId: 'session-a' } })

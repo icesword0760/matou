@@ -72,6 +72,49 @@ describe('SessionRepository', () => {
     expect(sessions.getSession('named-shell-1')).toMatchObject({ kind: 'shell', title: '修复登录' })
   })
 
+  it('keeps a manual title above later Claude titles and restores the latest Claude title on request', () => {
+    seedSession()
+
+    sessions.observeProviderTitle(command('auto-title-1'), {
+      sessionId: 'session-1', title: '修复卡片标题同步', now: 3
+    })
+    expect(sessions.getSession('session-1')).toMatchObject({
+      title: '修复卡片标题同步', titleSource: 'auto', providerTitle: '修复卡片标题同步'
+    })
+
+    sessions.updateSession(command('manual-title'), {
+      id: 'session-1', title: '我的发布排查', titleSource: 'manual', now: 4
+    })
+    sessions.observeProviderTitle(command('auto-title-2'), {
+      sessionId: 'session-1', title: '排查发布流水线失败', now: 5
+    })
+    expect(sessions.getSession('session-1')).toMatchObject({
+      title: '我的发布排查', titleSource: 'manual', providerTitle: '排查发布流水线失败'
+    })
+
+    sessions.restoreProviderTitle(command('restore-auto-title'), {
+      sessionId: 'session-1', now: 6
+    })
+    expect(sessions.getSession('session-1')).toMatchObject({
+      title: '排查发布流水线失败', titleSource: 'auto', providerTitle: '排查发布流水线失败'
+    })
+  })
+
+  it('keeps the manual title when Claude has not produced an automatic title yet', () => {
+    seedSession()
+    sessions.renameSession(command('manual-before-auto'), {
+      sessionId: 'session-1', title: '我的临时标题', now: 3
+    })
+
+    sessions.restoreProviderTitle(command('restore-before-auto'), {
+      sessionId: 'session-1', now: 4
+    })
+
+    expect(sessions.getSession('session-1')).toMatchObject({
+      title: '我的临时标题', titleSource: 'manual'
+    })
+  })
+
   it('keeps logical Session identity across multiple process runs', () => {
     sessions.createSession(command('session'), {
       id: 'session-1', taskId: 'task-1', executionContextId: 'context-1',

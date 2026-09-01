@@ -135,7 +135,14 @@ export class RuntimeProjectionStore {
       if (payload) this.#sessions.set(event.aggregateId, payload)
     } else if (event.eventType === 'session.updated') {
       const session = asEntity(asObject(event.payload)?.session)
-      if (session) this.#sessions.set(event.aggregateId, session)
+      if (session) {
+        this.#sessions.set(event.aggregateId, session)
+        for (const graph of Object.values(this.#sessionGraphs)) {
+          graph.nodes = graph.nodes.map((node) => node.sessionId === event.aggregateId
+            ? { ...node, ...(typeof session.title === 'string' ? { title: session.title } : {}) }
+            : node)
+        }
+      }
     } else if (event.eventType === 'session.cwd-updated') {
       patchEntity(this.#sessions, event.aggregateId, event.payload)
       for (const graph of Object.values(this.#sessionGraphs)) {

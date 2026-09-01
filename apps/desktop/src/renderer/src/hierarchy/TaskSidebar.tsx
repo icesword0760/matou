@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { Glass } from '@samasante/liquid-glass'
 
 import { ConfirmDialog, ConfirmationSequence } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
@@ -13,13 +14,45 @@ import workbenchIcon from '../assets/kooky/terminal/dark_lujing.svg'
 
 const TASK_TRANSFER = 'application/x-matou-pinned-task'
 const WORKSPACE_TRANSFER = 'application/x-matou-pinned-workspace'
+const SIDEBAR_GLASS_OPTICS = {
+  strength: 0.015,
+  scaleX: 0.011,
+  scaleY: 0.004,
+  depth: 0.12,
+  dispersion: 0.022,
+  frost: 18,
+  saturate: 0.92,
+  brightness: 0.18,
+  specular: 0.72,
+  sheenAngle: 270,
+  glow: 0.1,
+  glowSpread: 0.16,
+  glowFalloff: 3.2,
+  sheen: 0.7,
+  sheenWidth: 1.25,
+  sheenFalloff: 3.6,
+  curvature: 0.032,
+  splay: 0.38,
+  bend: 0.48,
+  bendWidth: 0.045
+} as const
 
-export function TaskSidebar({ projection, commands, onRevealSession,
+function SidebarGlassMaterial() {
+  const supported = typeof ResizeObserver !== 'undefined' && typeof CSS !== 'undefined' && typeof CSS.supports === 'function' &&
+    (CSS.supports('backdrop-filter', 'blur(1px)') || CSS.supports('-webkit-backdrop-filter', 'blur(1px)'))
+  if (!supported) return <div className="flat-sidebar__glass-material" aria-hidden="true" />
+  return <Glass className="flat-sidebar__glass-material" aria-hidden="true"
+    optics={SIDEBAR_GLASS_OPTICS} radius={0} />
+}
+
+export function TaskSidebar({ projection, commands, onRevealSession, boardActive = false, onBoardActiveChange,
   settingsActive = false, onSettingsActiveChange }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
   pathValid?: boolean
   onRevealSession?(sceneId: string, sessionId: string): void
+  boardActive?: boolean
+  onBoardActiveChange?(active: boolean): void
   settingsActive?: boolean
   onSettingsActiveChange?(active: boolean): void
 }) {
@@ -44,6 +77,7 @@ export function TaskSidebar({ projection, commands, onRevealSession,
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false)
   const notificationStore = useNotificationStore()
   const notificationSnapshot = useNotificationSnapshot()
+  const sidebarRef = useRef<HTMLElement>(null)
   const activeRef = useRef<HTMLSpanElement>(null)
   const activeWorkspaceId = projection.navigation.activeWorkspaceId
   const activeTaskId = activeWorkspaceId ? projection.navigation.taskByWorkspace[activeWorkspaceId] : undefined
@@ -101,6 +135,15 @@ export function TaskSidebar({ projection, commands, onRevealSession,
   // badge and the Session pulse. Mixing in a second aggregate count leaves an
   // orphan red badge after the visible Session indicator has been dismissed.
   const unreadCount = (taskId: string) => notificationStore.unreadForTask(taskId)
+  const moveGlassLight = (event: ReactPointerEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    event.currentTarget.style.setProperty('--sidebar-glass-x', `${event.clientX - rect.left}px`)
+    event.currentTarget.style.setProperty('--sidebar-glass-y', `${event.clientY - rect.top}px`)
+  }
+  const resetGlassLight = () => {
+    sidebarRef.current?.style.setProperty('--sidebar-glass-x', '44%')
+    sidebarRef.current?.style.setProperty('--sidebar-glass-y', '118px')
+  }
   const resetDrag = () => { setDragTaskId(null); setDragWorkspaceId(null); setDragOverId(null) }
   const navigateNotification = async (notification: AgentNotification) => {
     const workspace = projection.workspaces.find(({ id }) => id === notification.workspaceId)
@@ -128,7 +171,9 @@ export function TaskSidebar({ projection, commands, onRevealSession,
     setNotificationCenterOpen(false)
   }
 
-  return <aside className="workbench-sidebar flat-sidebar" aria-label="事项列表">
+  return <aside ref={sidebarRef} className="workbench-sidebar flat-sidebar" aria-label="事项列表"
+    onPointerMove={moveGlassLight} onPointerLeave={resetGlassLight}>
+    <SidebarGlassMaterial />
     <header className="flat-sidebar__topbar">
       <button className="flat-sidebar__new-workspace" aria-label="新增工作空间" onClick={() => void chooseDirectory()}>
         <ComposeIcon /><span>新增工作空间</span>
@@ -200,8 +245,17 @@ export function TaskSidebar({ projection, commands, onRevealSession,
                 if (source?.workspaceId === workspace.id && task.isPinned) void commands.reorderPinnedTask(workspace.id, source.taskId, task.id)
                 resetDrag()
               }} onDragEnd={resetDrag}
-              onClick={() => { notificationStore.markWorkspaceRead(workspace.id); onSettingsActiveChange?.(false); void commands.activateTask(task.id) }}
-              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSettingsActiveChange?.(false); void commands.activateTask(task.id) } }}
+              onClick={() => {
+                notificationStore.markWorkspaceRead(workspace.id)
+                onBoardActiveChange?.(false)
+                onSettingsActiveChange?.(false)
+                void commands.activateTask(task.id)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault(); onBoardActiveChange?.(false); onSettingsActiveChange?.(false); void commands.activateTask(task.id)
+                }
+              }}
               onContextMenu={(event) => { event.preventDefault(); openTaskMenu(task, event) }}>
               <div className="workbench-item__left">
                 <span className="workbench-item__icon" style={{ maskImage: `url(${workbenchIcon})`, WebkitMaskImage: `url(${workbenchIcon})` }} />
@@ -223,10 +277,15 @@ export function TaskSidebar({ projection, commands, onRevealSession,
         </section>
       })}
     </nav>
-    <footer className="flat-sidebar__toolbar" aria-label="应用设置">
+    <footer className="flat-sidebar__toolbar" aria-label="工作空间视图">
+      <button type="button" className={`flat-sidebar__board-toggle${boardActive ? ' is-active' : ''}`}
+        aria-label="看板" aria-pressed={boardActive}
+        onClick={() => { onSettingsActiveChange?.(false); onBoardActiveChange?.(!boardActive) }}>
+        <KanbanIcon /><span>看板</span><i aria-hidden="true" />
+      </button>
       <button type="button" className={`flat-sidebar__settings-toggle${settingsActive ? ' is-active' : ''}`}
         aria-label="设置" aria-pressed={settingsActive}
-        onClick={() => onSettingsActiveChange?.(!settingsActive)}>
+        onClick={() => { onBoardActiveChange?.(false); onSettingsActiveChange?.(!settingsActive) }}>
         <SettingsIcon /><span>设置</span>
       </button>
     </footer>
@@ -307,6 +366,7 @@ function FolderIcon({ home }: { home?: boolean }) { return <svg width="16" heigh
 function PinIcon() { return <svg className="pin-icon" data-icon="pushpin" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5"/><path d="M5 17h14"/><path d="M15 2.5a1 1 0 0 0-1 1V7a3 3 0 0 0 3 3v2H7v-2a3 3 0 0 0 3-3V3.5a1 1 0 0 0-1-1Z"/></svg> }
 function EditIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> }
 function TrashIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/></svg> }
+function KanbanIcon() { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16M15 4v16"/></svg> }
 function SettingsIcon() { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.2.36.52.7 1 .9.3.13.64.2 1 .2h.1v4h-.1c-.4 0-.74.07-1 .2-.48.2-.8.54-1 .9Z"/></svg> }
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}

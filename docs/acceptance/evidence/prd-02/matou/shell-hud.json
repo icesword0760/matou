@@ -11,7 +11,7 @@
       "text": "~/matou_workspace"
     },
     {
-      "className": "status-field status-git status-priority-2",
+      "className": "status-field status-git status-priority-2 is-clickable",
       "text": "hud-main*"
     },
     {

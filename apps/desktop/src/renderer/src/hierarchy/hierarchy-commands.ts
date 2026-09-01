@@ -36,8 +36,13 @@ export function createHierarchyCommands(
     activateTask: (taskId) => command('hierarchy.activate-task', { taskId }),
     createTask: (workspaceId) => command('hierarchy.create-task', { workspaceId }),
     renameTask: (taskId, title) => command('hierarchy.rename-task', { taskId, title }),
+    renameSession: (sessionId, title) => command('hierarchy.rename-session', { sessionId, title }),
+    restoreSessionAutoTitle: (sessionId) => command('hierarchy.restore-session-auto-title', { sessionId }),
     reorderTask: (workspaceId, taskId, beforeTaskId) => command('hierarchy.reorder-task', {
       workspaceId, taskId, ...(beforeTaskId ? { beforeTaskId } : {})
+    }),
+    moveTaskOnBoard: (workspaceId, taskId, status, beforeTaskId) => command('hierarchy.move-task-on-board', {
+      workspaceId, taskId, status, ...(beforeTaskId ? { beforeTaskId } : {})
     }),
     deleteTask: (taskId) => command('hierarchy.delete-task', {
       taskId, confirmedIntent: `delete-task:${taskId}`

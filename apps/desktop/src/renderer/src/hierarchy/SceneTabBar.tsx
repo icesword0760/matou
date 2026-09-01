@@ -31,7 +31,8 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
   const scenes = projection.scenes.filter((scene) => scene.taskId === taskId)
     .map((scene) => ({ ...scene, name: sceneDisplayName(scene, projection) }))
   const [closingSceneId, setClosingSceneId] = useState<string | null>(null)
-  const [menuSceneId, setMenuSceneId] = useState<string | null>(null)
+  const [sceneMenu, setSceneMenu] = useState<{ sceneId: string; x: number; y: number } | null>(null)
+  const sceneMenuRef = useRef<HTMLDivElement>(null)
   const [renamingSceneId, setRenamingSceneId] = useState<string | null>(null)
   const [isTabOverflowing, setIsTabOverflowing] = useState(false)
   const [tabOverflowVisible, setTabOverflowVisible] = useState(false)
@@ -66,6 +67,25 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
       window.removeEventListener('resize', check)
     }
   }, [scenes.length])
+  useEffect(() => {
+    if (!sceneMenu) return
+    const closeOutside = (event: Event) => {
+      const target = event.target
+      if (target instanceof Node && sceneMenuRef.current?.contains(target)) return
+      setSceneMenu(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSceneMenu(null)
+    }
+    window.addEventListener('pointerdown', closeOutside, true)
+    window.addEventListener('contextmenu', closeOutside, true)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeOutside, true)
+      window.removeEventListener('contextmenu', closeOutside, true)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [sceneMenu])
   const activeSessionId = activeSceneId ? projection.navigation.sessionByScene[activeSceneId] : undefined
   const select = (sceneId: string, center = false) => {
     void commands.activateScene(sceneId)
@@ -137,7 +157,11 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
           if (scene.id === activeSceneId) activeRef.current = element
         }}
         className={`tab-item${scene.id === activeSceneId ? ' active' : ''}`}
-        onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
+        onContextMenu={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          setSceneMenu(canvasMenuPosition(scene.id, event.clientX, event.clientY))
+        }}>
         <button role="tab" className="tab-title" aria-selected={scene.id === activeSceneId}
           title={`${scene.name}\n双击重命名画布`} onDoubleClick={() => setRenamingSceneId(scene.id)}
           onClick={() => select(scene.id)}>{scene.name}</button>
@@ -161,7 +185,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     </div>}
     <div className="tab-bar-right">
     {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
-      title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}
+      title="会话 DAG（Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}
     <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell" disabled={!pathValid || !activeSceneId || !activeSessionId}
       title={!pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
       onClick={() => {
@@ -172,9 +196,13 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
       <img src={splitRightIcon} alt="" aria-hidden="true" />
     </button>
     </div>
-    {menuSceneId && <div role="menu" className="scene-tab-menu">
-      <button role="menuitem" onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>
-    </div>}
+    {sceneMenu && createPortal(<div ref={sceneMenuRef} role="menu" className="scene-tab-menu"
+      style={{ left: sceneMenu.x, top: sceneMenu.y }}>
+      <button role="menuitem" onClick={() => {
+        setRenamingSceneId(sceneMenu.sceneId)
+        setSceneMenu(null)
+      }}>重命名页签</button>
+    </div>, document.body)}
     {tabOverflowVisible && createPortal(<>
       <div className="tab-overflow-mask" onMouseDown={() => setTabOverflowVisible(false)} />
       <div role="menu" aria-label="隐藏页签" className="tab-overflow-panel" style={tabOverflowPanelStyle(tabBarLeftRef.current)}>
@@ -219,6 +247,18 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
 }
 
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
+const CANVAS_MENU_WIDTH = 128
+const CANVAS_MENU_HEIGHT = 36
+const CANVAS_MENU_MARGIN = 8
+
+function canvasMenuPosition(sceneId: string, clientX: number, clientY: number) {
+  return {
+    sceneId,
+    x: Math.max(CANVAS_MENU_MARGIN, Math.min(clientX, window.innerWidth - CANVAS_MENU_WIDTH - CANVAS_MENU_MARGIN)),
+    y: Math.max(CANVAS_MENU_MARGIN, Math.min(clientY, window.innerHeight - CANVAS_MENU_HEIGHT - CANVAS_MENU_MARGIN))
+  }
+}
+
 function tabOverflowPanelStyle(element: HTMLElement | null) {
   if (!element) return { top: 48, right: 80 }
   const rect = element.getBoundingClientRect()

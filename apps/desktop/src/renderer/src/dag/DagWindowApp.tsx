@@ -128,9 +128,6 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     ? context.sessionId
     : graph.focusedSessionId ?? graph.nodes[0]?.sessionId ?? ''
   return <main className="dag-window" aria-label="会话 DAG">
-    <div className="dag-window-title"><span>Matou 会话画布</span>
-      <button aria-label="关闭 DAG" onClick={() => void window.matouDesktop?.closeDagWindow?.(context.mainWindowId)}>×</button>
-    </div>
     {(runtimeConnection === 'reconnecting' || error) && <div className="dag-runtime-notice" role="status">
       <strong>会话信息暂时未更新</strong>
       <span>{runtimeConnection === 'reconnecting'

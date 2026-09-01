@@ -1,14 +1,10 @@
 {
   "mode": "agent",
-  "text": "DefaultOpus Plan72%任务中◐Read: src/App.tsx◐TodoWrite▸实现 HUD(1/2)~/matou_workspace⏱0s",
+  "text": "Default72%任务中◐Read: src/App.tsx◐TodoWrite▸实现 HUD(1/2)~/matou_workspace⏱0s",
   "fields": [
     {
       "className": "status-field status-perm-badge is-clickable perm-default",
       "text": "Default"
-    },
-    {
-      "className": "status-field status-model status-priority-8 is-clickable",
-      "text": "Opus Plan"
     },
     {
       "className": "status-field status-context-ring status-priority-7",

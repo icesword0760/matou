@@ -40,6 +40,54 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByRole('region', { name: '模型切换设置' })).toBeNull()
   })
 
+  it('toggles a four-column Workspace board without remounting the current terminal view', async () => {
+    const data = fixture()
+    data.tasks = [
+      { ...data.tasks[0]!, status: 'planned', sortKey: 'a00000000' },
+      { id: 'task-a2', workspaceId: 'workspace-a', title: '运行事项', status: 'active', sortKey: 'a00000000' },
+      { id: 'task-a3', workspaceId: 'workspace-a', title: '阻塞事项', status: 'blocked', sortKey: 'a00000000' },
+      { id: 'task-a4', workspaceId: 'workspace-a', title: '完成事项', status: 'completed', sortKey: 'a00000000' },
+      data.tasks[1]!
+    ]
+    render(<HierarchyShell fixture={data} />)
+    const terminal = screen.getByTestId('xterm-session-a1')
+    const toggle = screen.getByRole('button', { name: '看板' })
+
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    await userEvent.setup().click(toggle)
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('heading', { name: 'Workspace A 看板' })).toBeTruthy()
+    expect(screen.getAllByRole('group', { name: /列$/ }).map((column) => column.getAttribute('aria-label')))
+      .toEqual(['就绪列', '运行中列', '阻塞列', '完成列'])
+    expect(screen.queryByText('等待介入')).toBeNull()
+    expect(within(screen.getByRole('group', { name: '就绪列' }))
+      .getByRole('article', { name: '事项 A1' })).toBeTruthy()
+    expect(screen.getByTestId('xterm-session-a1')).toBe(terminal)
+
+    await userEvent.setup().click(toggle)
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(screen.queryByRole('heading', { name: 'Workspace A 看板' })).toBeNull()
+    expect(screen.getByTestId('xterm-session-a1')).toBe(terminal)
+  })
+
+  it('moves a Task between board columns and keeps its new status in the projection', async () => {
+    const data = fixture()
+    data.tasks[0] = { ...data.tasks[0]!, status: 'planned', sortKey: 'a00000000' }
+    render(<HierarchyShell fixture={data} />)
+    await userEvent.setup().click(screen.getByRole('button', { name: '看板' }))
+
+    const card = screen.getByRole('article', { name: '事项 A1' })
+    const blocked = screen.getByRole('group', { name: '阻塞列' })
+    const dataTransfer = {
+      effectAllowed: 'none', dropEffect: 'none', setData: vi.fn(), getData: vi.fn(() => '')
+    }
+    fireEvent.dragStart(card, { dataTransfer })
+    fireEvent.dragOver(blocked, { dataTransfer })
+    fireEvent.drop(blocked, { dataTransfer })
+
+    await vi.waitFor(() => expect(within(blocked).getByRole('article', { name: '事项 A1' })).toBeTruthy())
+  })
+
   it('moves the current session level into the bottom bar without the obsolete add shortcut', () => {
     const data = fixture()
     data.sessionGraphs = {

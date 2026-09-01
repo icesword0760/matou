@@ -83,6 +83,25 @@ describe('DagCanvas', () => {
     expect(screen.getByText('普通关联：不继承对话')).toBeTruthy()
   })
 
+  it('keeps the complete node name visible in a wrapping title region', () => {
+    const title = '这是一个需要完整显示而不是单行省略的会话节点名称'
+    render(<DagCanvas graph={{ sceneId: 'scene', nodes: [node('long-title', title)], edges: [] }}
+      focusedSessionId="long-title" onSelect={vi.fn()} />)
+
+    const card = screen.getByRole('button', { name: `打开会话：${title}` })
+    const heading = card.querySelector('.dag-node-card__title')
+    expect(heading?.textContent).toBe(title)
+    expect(heading?.getAttribute('title')).toBe(title)
+  })
+
+  it('provides a compact floating-window drag handle without restoring a title row', () => {
+    render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()} />)
+
+    const handle = screen.getByLabelText('拖动浮框')
+    expect(handle.classList.contains('dag-toolbar__drag-handle')).toBe(true)
+    expect(handle.getAttribute('title')).toBe('按住拖动浮框')
+  })
+
   it('shows the same blue breathing border for a node with a pending notification', () => {
     render(<DagCanvas graph={graph()} focusedSessionId="root" onSelect={vi.fn()}
       notifiedSessionIds={['child']} />)

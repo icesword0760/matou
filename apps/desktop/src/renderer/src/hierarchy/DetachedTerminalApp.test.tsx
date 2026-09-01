@@ -56,8 +56,7 @@ describe('PRD 02 detached HUD', () => {
     expect(runtime.request).not.toHaveBeenCalledWith('session.set-model', expect.anything())
   })
 
-  it('opens the same scene DAG after a long Option Tab hold from a detached session', () => {
-    vi.useFakeTimers()
+  it('opens the same scene DAG immediately on Option Tab from a detached session', () => {
     const openDagWindow = vi.fn(async () => undefined)
     window.matouDesktop = { openDagWindow } as unknown as typeof window.matouDesktop
     window.history.replaceState({}, '',
@@ -65,7 +64,6 @@ describe('PRD 02 detached HUD', () => {
     render(<DetachedTerminalApp />)
 
     fireEvent.keyDown(window, { key: 'Tab', altKey: true })
-    vi.advanceTimersByTime(450)
 
     expect(openDagWindow).toHaveBeenCalledWith({
       mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'agent-1', theme: 'light'

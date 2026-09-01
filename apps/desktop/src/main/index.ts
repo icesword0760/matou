@@ -73,11 +73,14 @@ async function createWindow(): Promise<BrowserWindow> {
     minWidth: 720,
     minHeight: 480,
     show: false,
-    backgroundColor: '#F7F8FA',
     ...(process.platform === 'darwin' ? {
+      transparent: true,
+      backgroundColor: '#00000000',
+      vibrancy: 'sidebar' as const,
+      visualEffectState: 'active' as const,
       titleBarStyle: 'hiddenInset' as const,
       trafficLightPosition: { x: 14, y: 16 }
-    } : {}),
+    } : { backgroundColor: '#F7F8FA' }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       nodeIntegration: false,
@@ -98,6 +101,7 @@ async function createWindow(): Promise<BrowserWindow> {
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
   installNativeDagShortcut(window)
+  installNativeScrollGesture(window)
   window.webContents.setWindowOpenHandler(() => {
     void createWindow()
     return { action: 'deny' }
@@ -181,6 +185,8 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
     minHeight: 480,
     show: false,
     frame: true,
+    resizable: true,
+    maximizable: true,
     title: 'Matou 会话 DAG',
     backgroundColor: context.theme === 'light' ? '#F7F8FA' : '#171717',
     ...(process.platform === 'darwin' ? {
@@ -226,31 +232,21 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
 }
 
 function installNativeDagShortcut(window: BrowserWindow): void {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  let opened = false
   window.webContents.on('before-input-event', (event, input) => {
     if (input.key !== 'Tab' || !input.alt || input.control || input.meta || input.shift) return
     event.preventDefault()
-    if (input.type === 'keyDown') {
-      if (timer !== undefined || opened || input.isAutoRepeat) return
-      timer = setTimeout(() => {
-        timer = undefined
-        opened = true
-        if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.dagShortcut, 'long')
-      }, 450)
-      return
-    }
-    if (input.type !== 'keyUp') return
-    if (timer !== undefined) {
-      clearTimeout(timer)
-      timer = undefined
-      if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.dagShortcut, 'short')
-    }
-    opened = false
+    if (input.type !== 'keyDown' || input.isAutoRepeat || window.isDestroyed()) return
+    window.webContents.send(DESKTOP_CHANNELS.dagShortcut, 'long')
   })
-  window.on('closed', () => {
-    if (timer !== undefined) clearTimeout(timer)
-    timer = undefined
+}
+
+function installNativeScrollGesture(window: BrowserWindow): void {
+  window.webContents.on('input-event', (_event, input) => {
+    const phase = input.type === 'gestureScrollBegin'
+      ? 'begin'
+      : input.type === 'gestureScrollEnd' ? 'end' : undefined
+    if (!phase || window.isDestroyed()) return
+    window.webContents.send(DESKTOP_CHANNELS.scrollGesture, phase)
   })
 }
 

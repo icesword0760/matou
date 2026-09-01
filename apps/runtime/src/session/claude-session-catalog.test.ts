@@ -112,6 +112,28 @@ describe('ClaudeSessionCatalog', () => {
 
     expect(detail.permissionMode).toBe('auto')
   })
+
+  it('uses the latest Claude Code ai-title instead of synthesizing one from the first prompt', async () => {
+    await writeSession(workspace, 'titled-session', [
+      row('user', 'titled-session', workspace, '2026-08-30T10:00:00.000Z', {
+        role: 'user', content: '这里是一条很长的原始需求，不适合作为卡片标题直接显示'
+      }),
+      { type: 'ai-title', sessionId: 'titled-session', aiTitle: '第一次生成的标题' },
+      row('assistant', 'titled-session', workspace, '2026-08-30T10:01:00.000Z', {
+        role: 'assistant', content: '已经完成第一轮处理。'
+      }),
+      { type: 'ai-title', sessionId: 'titled-session', aiTitle: '修复卡片标题同步' }
+    ])
+
+    const detail = await catalog.detail({
+      cwd: workspace, providerSessionId: 'titled-session', query: ''
+    })
+
+    expect(detail.title).toBe('修复卡片标题同步')
+    await expect(catalog.autoTitle({
+      cwd: workspace, providerSessionId: 'titled-session'
+    })).resolves.toBe('修复卡片标题同步')
+  })
 })
 
 async function writeSession(cwd: string, id: string, rows: unknown[]): Promise<void> {

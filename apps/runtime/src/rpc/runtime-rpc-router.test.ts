@@ -47,6 +47,45 @@ describe('RuntimeRpcRouter', () => {
     expect(JSON.stringify(snapshot)).not.toContain('TOKEN')
   })
 
+  it('keeps a manual card title until the user restores the current Claude ai-title', async () => {
+    const workspaceRoot = join(testRoot, 'title-workspace')
+    const projectsRoot = join(testRoot, 'claude-projects')
+    await mkdir(workspaceRoot)
+    const projectDirectory = join(projectsRoot, encodeClaudeProjectPath(workspaceRoot))
+    await mkdir(projectDirectory, { recursive: true })
+    await writeFile(join(projectDirectory, 'provider-title.jsonl'), [
+      JSON.stringify({
+        type: 'user', sessionId: 'provider-title', cwd: workspaceRoot,
+        timestamp: '2026-08-31T10:00:00.000Z',
+        message: { role: 'user', content: '排查标题问题' }
+      }),
+      JSON.stringify({
+        type: 'ai-title', sessionId: 'provider-title', aiTitle: '同步 Claude 会话标题'
+      })
+    ].join('\n'))
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), { projectsRoot })
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('title-bootstrap', {
+      windowId: 'window-title', defaultRootDirectory: workspaceRoot,
+      defaultName: 'title-workspace', now: 1
+    })) as { session: { id: string } }
+    await router.handle('claude-sessions.load', payload('title-load', {
+      sessionId: initial.session.id, providerSessionId: 'provider-title', now: 2
+    }))
+
+    await router.handle('hierarchy.rename-session', payload('title-manual', {
+      sessionId: initial.session.id, title: '我的标题', now: 3
+    }))
+    await router.handle('hierarchy.restore-session-auto-title', payload('title-restore', {
+      sessionId: initial.session.id, now: 4
+    }))
+
+    expect(database.get<{ title: string; title_source: string; provider_title: string }>(
+      'SELECT title, title_source, provider_title FROM sessions WHERE id = ?', initial.session.id
+    )).toEqual({
+      title: '同步 Claude 会话标题', title_source: 'auto', provider_title: '同步 Claude 会话标题'
+    })
+  })
+
   it('lists workspace Claude history and loads the selected permission into the same Session', async () => {
     const workspaceRoot = join(testRoot, 'load-workspace')
     const projectsRoot = join(testRoot, 'claude-projects')
@@ -253,6 +292,13 @@ describe('RuntimeRpcRouter', () => {
     await router.handle('hierarchy.rename-task', payload('rename-task', {
       taskId: createdTask.task.id, title: '实施事项', now: 5
     }))
+    await router.handle('hierarchy.move-task-on-board', payload('move-task-on-board', {
+      workspaceId: custom.workspace.id, taskId: createdTask.task.id,
+      status: 'blocked', now: 5
+    }))
+    expect(database.get<{ status: string }>(
+      'SELECT status FROM tasks WHERE id = ?', createdTask.task.id
+    )).toEqual({ status: 'blocked' })
     const taskActivated = await router.handle(
       'hierarchy.activate-task',
       payload('activate-task', {

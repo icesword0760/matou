@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -19,6 +19,7 @@ let hooks: ProviderHookServer
 let notificationEvents: unknown[]
 let hudEvents: unknown[]
 let identityEvents: unknown[]
+let titleEvents: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -44,10 +45,12 @@ beforeEach(async () => {
   notificationEvents = []
   hudEvents = []
   identityEvents = []
+  titleEvents = []
   hooks = new ProviderHookServer(root, sessions, {
     onNotification: (event) => { notificationEvents.push(event) },
     onHudPayload: (event) => { hudEvents.push(event) },
-    onIdentityRecorded: (event) => { identityEvents.push(event) }
+    onIdentityRecorded: (event) => { identityEvents.push(event) },
+    onTitleObserved: (event) => { titleEvents.push(event) }
   })
   await hooks.start()
 })
@@ -99,6 +102,57 @@ describe('ProviderHookServer', () => {
         hook_event_name: 'PreToolUse', tool_name: 'Read'
       }) })
     ])
+  })
+
+  it('observes the latest Claude ai-title from the transcript without turning it into a hook failure', async () => {
+    const registration = await hooks.registerClaudeSession({ runId: 'run-title', sessionId: 'session-1' })
+    const transcriptPath = join(root, 'provider-title.jsonl')
+    await writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'user', sessionId: 'provider-title', cwd: root,
+        message: { role: 'user', content: '处理登录失败' }
+      }),
+      JSON.stringify({ type: 'ai-title', sessionId: 'provider-title', aiTitle: '修复登录恢复流程' })
+    ].join('\n'))
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-title', transcript_path: transcriptPath
+    })
+
+    expect(titleEvents).toEqual([{
+      runId: 'run-title', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-title', title: '修复登录恢复流程'
+    }])
+  })
+
+  it('watches a stopped active transcript until Claude writes its first ai-title', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-delayed-title', sessionId: 'session-1'
+    })
+    const transcriptPath = join(root, 'provider-delayed-title.jsonl')
+    await writeFile(transcriptPath, JSON.stringify({
+      type: 'user', sessionId: 'provider-delayed-title', cwd: root,
+      message: { role: 'user', content: '排查会话标题生成' }
+    }))
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-delayed-title', transcript_path: transcriptPath
+    })
+    await appendFile(transcriptPath, `\n${JSON.stringify({
+      type: 'ai-title', sessionId: 'provider-delayed-title', aiTitle: '排查会话标题生成'
+    })}`)
+
+    await waitFor(() => titleEvents.length === 1, 250)
+    expect(titleEvents).toEqual([{
+      runId: 'run-delayed-title', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-delayed-title', title: '排查会话标题生成'
+    }])
+
+    await appendFile(transcriptPath, `\n${JSON.stringify({
+      type: 'ai-title', sessionId: 'provider-delayed-title', aiTitle: '后续标题不再触发监听'
+    })}`)
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(titleEvents).toHaveLength(1)
   })
 
   it('projects real Agent Teams transcript activity into teammate observations', async () => {
@@ -372,4 +426,12 @@ function postHook(url: string, body: unknown): Promise<Response> {
   return fetch(url, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
   })
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  expect(predicate()).toBe(true)
 }

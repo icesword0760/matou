@@ -31,6 +31,21 @@ describe('DAG layout', () => {
     expect(results[0]?.title).toBe('Deploy Agent')
     expect(results.map(({ sessionId }) => sessionId)).toContain('summary-hit')
   })
+
+  it('reserves vertical card space for a complete multi-line node name', () => {
+    const longTitle = '这是一个足够长并且需要完整换行显示的会话节点名称用于验证布局不会裁切'
+    const graph: SessionGraphView = {
+      sceneId: 'scene',
+      nodes: [node('long', longTitle, undefined, 1), node('short', '短标题', undefined, 2)],
+      edges: []
+    }
+
+    const layout = layoutGraph(graph)
+    const long = layout.nodes.find(({ sessionId }) => sessionId === 'long')!
+    const short = layout.nodes.find(({ sessionId }) => sessionId === 'short')!
+    expect(long.height).toBeGreaterThan(short.height)
+    expect(short.y).toBeGreaterThanOrEqual(long.y + long.height)
+  })
 })
 
 function fixture(count?: number): SessionGraphView {

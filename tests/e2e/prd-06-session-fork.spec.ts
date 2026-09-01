@@ -214,8 +214,8 @@ function paneForSession(page: Page, sessionId: string): Locator {
 async function openPaneMenu(pane: Locator): Promise<void> {
   // The menu overlay is mounted by this real context-menu pointer sequence.
   // Avoid retrying that already-successful sequence after the overlay appears.
-  await pane.locator('.terminal-surface').click({
-    button: 'right', position: { x: 24, y: 80 }, force: true
+  await pane.locator('.terminal-pane-header').click({
+    button: 'right', position: { x: 72, y: 20 }, force: true
   })
 }
 

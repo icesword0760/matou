@@ -46,7 +46,7 @@ export class DagWindowManager {
       existing.focus()
       return
     }
-    const bounds = centeredBounds(this.#dependencies.displayBounds(context.mainWindowId))
+    const bounds = floatingBounds(this.#dependencies.displayBounds(context.mainWindowId))
     const window = this.#dependencies.createWindow({ context, bounds })
     this.#windows.set(context.mainWindowId, window)
     window.onReady(() => {
@@ -88,9 +88,11 @@ export class DagWindowManager {
   }
 }
 
-function centeredBounds(display: Rectangle): Rectangle {
-  const width = Math.min(960, Math.max(680, display.width - 80))
-  const height = Math.min(640, Math.max(480, display.height - 80))
+function floatingBounds(display: Rectangle): Rectangle {
+  const inset = 12
+  const halfAreaScale = Math.SQRT1_2
+  const width = Math.max(680, Math.round((display.width - inset * 2) * halfAreaScale))
+  const height = Math.max(480, Math.round((display.height - inset * 2) * halfAreaScale))
   return {
     x: Math.round(display.x + (display.width - width) / 2),
     y: Math.round(display.y + (display.height - height) / 2),

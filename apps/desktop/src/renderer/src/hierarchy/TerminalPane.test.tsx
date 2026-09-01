@@ -146,21 +146,46 @@ describe('Terminal pane', () => {
     expect(onRemoveBranch).toHaveBeenCalledWith('session-1', true)
   })
 
-  it('opens the pane actions when the user right-clicks the terminal content area', async () => {
+  it('opens pane actions only from the card header', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
 
     await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
+    expect(screen.queryByRole('menu')).toBeNull()
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
 
     expect(screen.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeTruthy()
+  })
+
+  it('renames a card from its header menu and lets a manual Claude title return to the provider title', async () => {
+    const user = userEvent.setup()
+    const onRename = vi.fn()
+    const onRestoreAutoTitle = vi.fn()
+    const props = fixture()
+    render(<TerminalPane {...props}
+      session={{ ...props.session, titleSource: 'manual' }}
+      onRename={onRename} onRestoreAutoTitle={onRestoreAutoTitle} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '重命名…' }))
+    const input = screen.getByRole('textbox', { name: '会话名称' })
+    await user.clear(input)
+    await user.type(input, '发布问题排查')
+    await user.click(screen.getByRole('button', { name: '确定' }))
+    expect(onRename).toHaveBeenCalledWith('session-1', '发布问题排查')
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '恢复 Claude 自动标题' }))
+    expect(onRestoreAutoTitle).toHaveBeenCalledWith('session-1')
   })
 
   it('dismisses pane actions on a pointer press anywhere outside the menu', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
 
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
     expect(screen.getByRole('menu')).toBeTruthy()
 
     fireEvent.pointerDown(document.body)

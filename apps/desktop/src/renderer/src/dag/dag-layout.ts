@@ -27,7 +27,9 @@ export interface DagLayout {
 }
 
 const NODE_WIDTH = 260
-const NODE_HEIGHT = 154
+const NODE_BASE_HEIGHT = 174
+const TITLE_LINE_HEIGHT = 18
+const TITLE_UNITS_PER_LINE = 18
 const X_GAP = 110
 const Y_GAP = 26
 
@@ -54,16 +56,24 @@ export function layoutGraph(graph: SessionGraphView): DagLayout {
     groups.set(depth, peers)
   }
   for (const peers of groups.values()) peers.sort(stableNodeOrder)
-  const maxCount = Math.max(1, ...[...groups.values()].map((nodes) => nodes.length))
-  const nodes = [...groups.entries()].sort(([left], [right]) => left - right).flatMap(([depth, peers]) => {
-    const columnHeight = peers.length * NODE_HEIGHT + Math.max(0, peers.length - 1) * Y_GAP
-    const top = 50 + (maxCount * (NODE_HEIGHT + Y_GAP) - columnHeight) / 2
-    return peers.map((node, index) => ({
-      sessionId: node.sessionId, depth,
-      x: 50 + depth * (NODE_WIDTH + X_GAP),
-      y: top + index * (NODE_HEIGHT + Y_GAP),
-      width: NODE_WIDTH, height: NODE_HEIGHT, node
-    }))
+  const columns = [...groups.entries()].sort(([left], [right]) => left - right).map(([depth, peers]) => {
+    const heights = peers.map(({ title }) => nodeHeight(title))
+    const height = heights.reduce((sum, value) => sum + value, 0) + Math.max(0, peers.length - 1) * Y_GAP
+    return { depth, peers, heights, height }
+  })
+  const maxColumnHeight = Math.max(NODE_BASE_HEIGHT, ...columns.map(({ height }) => height))
+  const nodes = columns.flatMap(({ depth, peers, heights, height }) => {
+    let y = 50 + (maxColumnHeight - height) / 2
+    return peers.map((node, index) => {
+      const nodeHeight = heights[index]!
+      const positioned = {
+        sessionId: node.sessionId, depth,
+        x: 50 + depth * (NODE_WIDTH + X_GAP), y,
+        width: NODE_WIDTH, height: nodeHeight, node
+      }
+      y += nodeHeight + Y_GAP
+      return positioned
+    })
   })
   const positioned = new Map(nodes.map((node) => [node.sessionId, node]))
   const edges = graph.edges.flatMap((edge) => {
@@ -81,8 +91,18 @@ export function layoutGraph(graph: SessionGraphView): DagLayout {
   return {
     nodes, edges, depthCount,
     width: 100 + depthCount * NODE_WIDTH + Math.max(0, depthCount - 1) * X_GAP,
-    height: 100 + maxCount * NODE_HEIGHT + Math.max(0, maxCount - 1) * Y_GAP
+    height: 100 + maxColumnHeight
   }
+}
+
+function nodeHeight(title: string): number {
+  const units = [...title].reduce((sum, character) => sum + (isWideCharacter(character) ? 1 : .55), 0)
+  const lines = Math.max(1, Math.ceil(units / TITLE_UNITS_PER_LINE))
+  return NODE_BASE_HEIGHT + (lines - 1) * TITLE_LINE_HEIGHT
+}
+
+function isWideCharacter(character: string): boolean {
+  return /[\u2e80-\u9fff\uf900-\ufaff\uff01-\uff60\uffe0-\uffe6]/u.test(character)
 }
 
 export function visibleLayers(layout: DagLayout, focusSessionId: string, radius = 1): {

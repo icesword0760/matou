@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 
 export function RenameDialog(props: {
   label: string; initialValue: string; error?: (value: string) => string | undefined
   title?: string; placeholder?: string; emptyError?: string
+  scope?: 'viewport' | 'session'
   onConfirm(value: string): void; onCancel(): void
 }) {
   const [value, setValue] = useState(props.initialValue)
@@ -15,7 +17,7 @@ export function RenameDialog(props: {
     if (!trimmed) { setEmptySubmitted(true); return }
     if (!error) props.onConfirm(trimmed)
   }
-  return <div className="kooky-dialog-overlay" onPointerDown={(event) => {
+  const overlay = <div className={`kooky-dialog-overlay${props.scope === 'session' ? ' is-session-scoped' : ''}`} onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onCancel()
   }}><div className="kooky-rename-dialog" role="dialog" aria-modal="true">
     <header><h2>{props.title ?? '重命名'}</h2><button className="dialog-close" aria-label="关闭" onClick={props.onCancel}>×</button></header>
@@ -34,4 +36,8 @@ export function RenameDialog(props: {
       <button className="dialog-primary" onClick={confirm}
         disabled={Boolean(error) && Boolean(trimmed)}>确定</button></footer>
   </div></div>
+  if (props.scope !== 'session') return overlay
+  const sessionCanvas = document.querySelector<HTMLElement>('.scene-stage:not([hidden]) .session-canvas') ??
+    document.querySelector<HTMLElement>('.session-canvas')
+  return sessionCanvas ? createPortal(overlay, sessionCanvas) : overlay
 }

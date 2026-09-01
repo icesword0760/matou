@@ -389,11 +389,47 @@ export class RuntimeRpcRouter {
           title: text(input.title, 'title'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.rename-session':
+        return this.#sessions.renameSession(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          title: text(input.title, 'title'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.restore-session-auto-title': {
+        const sessionId = text(input.sessionId, 'sessionId')
+        const binding = this.#database.get<{ provider_session_id: string }>(
+          `SELECT provider_session_id FROM provider_bindings
+           WHERE session_id = ? AND provider = 'claude-code'
+           ORDER BY updated_at DESC, id DESC LIMIT 1`,
+          sessionId
+        )
+        const title = binding
+          ? await this.#claudeSessions.autoTitle({
+              cwd: this.#sessionCwd(sessionId),
+              providerSessionId: binding.provider_session_id
+            })
+          : undefined
+        return this.#sessions.restoreProviderTitle(command, {
+          sessionId,
+          ...(title ? { title } : {}),
+          now: integer(input.now, 'now', 0)
+        })
+      }
       case 'hierarchy.reorder-task':
         return this.#hierarchy.reorderTask(command, {
           windowId: text(input.windowId, 'windowId'),
           workspaceId: text(input.workspaceId, 'workspaceId'),
           taskId: text(input.taskId, 'taskId'),
+          ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
+            ? {}
+            : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.move-task-on-board':
+        return this.#hierarchy.moveTaskOnBoard(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          taskId: text(input.taskId, 'taskId'),
+          status: enumeration(input.status, ['planned', 'active', 'blocked', 'completed'] as const, 'status'),
           ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
             ? {}
             : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),

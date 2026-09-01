@@ -39,6 +39,8 @@ describe('DagWindowApp', () => {
     render(<DagWindowApp fixtureGraph={data} />)
 
     expect(screen.getByRole('application', { name: '会话 DAG 画布' })).toBeTruthy()
+    expect(document.querySelector('.dag-window-title')).toBeNull()
+    expect(screen.queryByText('Matou 会话画布')).toBeNull()
     await userEvent.setup().click(screen.getByRole('button', { name: '打开会话：Child' }))
     expect(window.matouDesktop.selectDagNode).toHaveBeenCalledWith(expect.objectContaining({
       mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'child', targetWindowId: 'detached-1'

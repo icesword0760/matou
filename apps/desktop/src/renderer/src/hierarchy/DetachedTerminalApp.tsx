@@ -104,19 +104,14 @@ export function DetachedTerminalApp() {
   const isMac = useTerminalShortcuts(shortcutHandlers)
   useDagShortcut({
     enabled: Boolean(mainWindowId && sceneId && sessionId),
-    onShortPress: () => window.dispatchEvent(new Event('matou:forward-terminal-tab')),
-    onLongPress: () => {
+    onPress: () => {
       void window.matouDesktop?.openDagWindow?.({
         mainWindowId, sceneId, sessionId,
         theme: themeKey === 'dark' ? 'dark' : 'light'
       })
     }
   })
-  useEffect(() => window.matouDesktop?.onDagShortcut?.((kind) => {
-    if (kind === 'short') {
-      window.dispatchEvent(new Event('matou:forward-terminal-tab'))
-      return
-    }
+  useEffect(() => window.matouDesktop?.onDagShortcut?.(() => {
     void window.matouDesktop?.openDagWindow?.({
       mainWindowId, sceneId, sessionId,
       theme: themeKey === 'dark' ? 'dark' : 'light'

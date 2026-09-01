@@ -118,6 +118,19 @@ async function initializeRuntime(): Promise<RuntimeState> {
       sessionHuds.ingestProvider(sessionId, payload)
       for (const server of servers) void server.refreshSessionHud(sessionId)
     },
+    onTitleObserved: ({ sessionId, providerSessionId, title, runId }) => {
+      const now = Date.now()
+      try {
+        sessionRepository.observeProviderTitle({
+          commandId: `provider-title-${runId}-${randomUUID()}`,
+          commandType: 'provider-hook.title',
+          requestHash: `${sessionId}:${providerSessionId}:${title}:${now}`
+        }, { sessionId, title, now })
+        for (const server of servers) server.flushSemanticEvents()
+      } catch (error) {
+        console.error(`[provider-title] ${errorMessage(error)}`)
+      }
+    },
     onTeamObservations: async (observations) => {
       let changed = false
       for (const observation of observations) {
