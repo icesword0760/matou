@@ -19,8 +19,8 @@
 - 每会话最近 256 MiB raw journal；更旧输出异步压缩并保持可查询。
 - Journal 写失败立即暂停单个会话执行；不得拖垮其他会话或 Runtime。
 - App 回焦恢复离开前的原焦点；不得默认抢回终端。
-- 大粘贴按 Kooky：无提示、透明、保持字节顺序地进行 UTF-8 安全分块。
-- 拖入普通路径和含空格路径的可见文本与 Kooky 一致；含特殊字符路径必须安全引用。
+- 大粘贴按 reference product：无提示、透明、保持字节顺序地进行 UTF-8 安全分块。
+- 拖入普通路径和含空格路径的可见文本与 reference product 一致；含特殊字符路径必须安全引用。
 - resize 最多 60Hz 合并，相同 cols/rows 去重。
 - 通知每工作空间最多 1,000 条；已读通知保留 30 天后清理。
 - macOS 是本计划的真实 PTY 和执行暂停验收平台；Windows 构建不得因 POSIX 信号实现而编译失败，并通过平台适配器测试。
@@ -103,7 +103,7 @@
 
 ---
 
-### Task 2: Kooky-Compatible and Safe Dropped Paths
+### Task 2: reference product-Compatible and Safe Dropped Paths
 
 **Files:**
 - Create: `apps/desktop/src/renderer/src/terminal/shell-path-quote.ts`
@@ -116,7 +116,7 @@
 
 **Interfaces:**
 - Produces: `quoteDroppedPath(path: string): string`。
-- 规则：普通路径原样；仅含空格而无其他 shell 特殊字符时使用 Kooky 的双引号形式；含 `'"`、反引号、`$`、反斜线、换行、回车、分号、管道、重定向或 glob 字符时使用 POSIX 单引号安全形式，单引号编码为 `'\''`。
+- 规则：普通路径原样；仅含空格而无其他 shell 特殊字符时使用 reference product 的双引号形式；含 `'"`、反引号、`$`、反斜线、换行、回车、分号、管道、重定向或 glob 字符时使用 POSIX 单引号安全形式，单引号编码为 `'\''`。
 
 - [x] **Step 1: 写 quoting RED 测试**
   - 固定样例：`/tmp/a.txt` → `/tmp/a.txt`；`/tmp/a b.txt` → `"/tmp/a b.txt"`；`/tmp/a$(touch PWN).txt` 必须成为单个 shell argv；`/tmp/a'b.txt` 必须正确引用。
@@ -128,7 +128,7 @@
 
 - [x] **Step 3: 写最小实现并替换 TerminalSurface 内联逻辑**
   - `terminalDropPaths()` 对 `DataTransfer.files` 使用 `quoteDroppedPath`。
-  - Kooky file-tree MIME 提供的结构化文件路径逐项引用；不得把含换行的任意 `text/plain` 直接透传为 shell 命令片段。
+  - reference product file-tree MIME 提供的结构化文件路径逐项引用；不得把含换行的任意 `text/plain` 直接透传为 shell 命令片段。
 
 - [x] **Step 4: 跑 unit GREEN**
   - Run: `pnpm --filter @matou/desktop test -- shell-path-quote.test.ts TerminalSurface.test.tsx`
@@ -136,7 +136,7 @@
 
 - [x] **Step 5: 写真实 Electron drop 验收**
   - 创建普通、空格、单引号、`$()` 四个真实文件名；拖入后不按 Enter，读取 xterm 当前行可见文本。
-  - 普通和空格路径截图文本与 Kooky 基线一致；特殊字符路径执行 `python3 -c` argv 回显后严格等于原路径，且副作用文件不存在。
+  - 普通和空格路径截图文本与 reference product 基线一致；特殊字符路径执行 `python3 -c` argv 回显后严格等于原路径，且副作用文件不存在。
 
 ---
 
@@ -582,7 +582,7 @@
   - Run: `pnpm test`
   - Run: `pnpm exec playwright test tests/e2e/runtime-robustness-scale.spec.ts tests/e2e/terminal-channel.spec.ts tests/e2e/prd-04-session-recovery.spec.ts tests/e2e/session-canvas-navigation.spec.ts tests/e2e/prd-01-agent-notifications.spec.ts --workers=1`
 
-- [ ] **Step 5: 闭合 Kooky 与 Matou 验收证据**
+- [ ] **Step 5: 闭合 reference product 与 Matou 验收证据**
   - 大粘贴：两侧均无提示、终端收到完整内容。
   - 普通/空格拖入：可见文本逐字符一致；特殊字符额外附安全执行证据。
   - 回焦、每卡恢复遮罩、历史查询、磁盘暂停、后台 PTY 继续等 Matou 新的异常行为记录用户结果、截图和实际 PID/sequence 证据。
@@ -609,5 +609,5 @@
 - 磁盘故障只暂停目标会话，用户释放空间后可在原 PID 上继续。
 - 切出/切回 App 后，焦点回到原控件。
 - 大粘贴没有额外提示或步骤；Unicode 内容完整。
-- 路径拖入普通场景与 Kooky 一致，特殊路径不改变 shell 命令结构。
+- 路径拖入普通场景与 reference product 一致，特殊路径不改变 shell 命令结构。
 - resize、通知和大量会话均有确定的容量、频率和真实性能门禁。

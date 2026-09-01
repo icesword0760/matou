@@ -177,7 +177,7 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', true)
   })
 
-  it('keeps the Kooky rename dialog open and explains an empty Task name', async () => {
+  it('keeps the reference product rename dialog open and explains an empty Task name', async () => {
     const user = userEvent.setup()
     const target = commands()
     render(<TaskSidebar projection={fixture()} commands={target} />)
@@ -190,7 +190,7 @@ describe('Workspace and Task navigation', () => {
     expect(target.renameTask).not.toHaveBeenCalled()
   })
 
-  it('keeps the Kooky rename dialog open when the authoritative rename is rejected', async () => {
+  it('keeps the reference product rename dialog open when the authoritative rename is rejected', async () => {
     const user = userEvent.setup()
     const target = commands()
     vi.mocked(target.renameTask).mockRejectedValueOnce(new Error('conflict'))
@@ -233,7 +233,7 @@ describe('Workspace and Task navigation', () => {
     expect(target.reorderTask).not.toHaveBeenCalled()
   })
 
-  it('matches Kooky drag-and-drop Task ordering', async () => {
+  it('matches reference product drag-and-drop Task ordering', async () => {
     const target = commands()
     const data = fixture()
     data.tasks = data.tasks.map((task, index) => ({ ...task, isPinned: true, pinSortKey: `a${index}` }))
@@ -253,7 +253,7 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByTestId('active-task').textContent).toBe('事项 A')
   })
 
-  it('matches Kooky unread badge priority, cap, and long-name truncation', () => {
+  it('matches reference product unread badge priority, cap, and long-name truncation', () => {
     const data = fixture()
     data.tasks[0]!.title = '这是一个非常非常长的事项名称，用于验证完整名称提示'
     const store = new AgentNotificationStore({ cooldownMs: 0 })
@@ -273,7 +273,7 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByText(data.tasks[0]!.title).getAttribute('title')).toBeNull()
   })
 
-  it('closes the Kooky Task menu on Escape and outside interaction', async () => {
+  it('closes the reference product Task menu on Escape and outside interaction', async () => {
     const user = userEvent.setup()
     render(<TaskSidebar projection={fixture()} commands={commands()} />)
 
@@ -287,7 +287,7 @@ describe('Workspace and Task navigation', () => {
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
-  it('uses the original Kooky warning before deleting a Task', async () => {
+  it('uses the original reference product warning before deleting a Task', async () => {
     const user = userEvent.setup()
     const target = commands()
     render(<TaskSidebar projection={fixture()} commands={target} />)

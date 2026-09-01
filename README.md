@@ -1,6 +1,6 @@
 # Matou
 
-Matou 是面向智能体任务的桌面终端。当前仓库是 Electron + React + xterm.js 的绿地实现，旧 Kooky 工程仅作为产品能力与 PRD 参考。
+Matou 是面向智能体任务的桌面终端。当前仓库是 Electron + React + xterm.js 的绿地实现，旧 reference product 工程仅作为产品能力与 PRD 参考。
 
 ## 当前基础能力
 

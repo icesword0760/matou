@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { sceneCloseFlow, sessionDeleteFlow, taskDeleteFlow } from './terminal-close-flow'
 
 describe('destructive hierarchy copy', () => {
-  it('matches Kooky Task deletion and protects the final Session', () => {
+  it('matches reference product Task deletion and protects the final Session', () => {
     expect(taskDeleteFlow({ sessionCount: 1, taskName: '修复登录' }).steps.map(({ title }) => title)).toEqual([
       '提示'
     ])

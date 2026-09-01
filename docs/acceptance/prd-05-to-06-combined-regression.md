@@ -4,14 +4,14 @@
 
 ## 1. 顺序与交付状态
 
-| 顺序 | 模块 | 产品状态 | 独立提交 | Kooky 对照 |
+| 顺序 | 模块 | 产品状态 | 独立提交 | reference product 对照 |
 |---:|---|---|---|---|
-| 1 | PRD 05 四级层级 | 已验收 | `a78a3c5` 及 PRD 05 收口提交 | `docs/parity/prd-05-kooky-parity.md` |
-| 2 | PRD 03 工作台信息 | 已验收 | `fb7bc3c` | `docs/parity/prd-03-kooky-parity.md` |
-| 3 | PRD 04 会话恢复 | 已验收 | `2c4ff72` | `docs/parity/prd-04-kooky-parity.md` |
-| 4 | PRD 01 Agent 通知 | 已验收 | `1029de0` | `docs/parity/prd-01-kooky-parity.md` |
-| 5 | PRD 02 底部 HUD | 已验收 | `137c28e` | `docs/parity/prd-02-kooky-parity.md` |
-| 6 | PRD 06 会话 Fork | 待验收 | `1ad08a4` | `docs/parity/prd-06-kooky-parity.md` |
+| 1 | PRD 05 四级层级 | 已验收 | `a78a3c5` 及 PRD 05 收口提交 | `docs/parity/prd-05-reference-parity.md` |
+| 2 | PRD 03 工作台信息 | 已验收 | `fb7bc3c` | `docs/parity/prd-03-reference-parity.md` |
+| 3 | PRD 04 会话恢复 | 已验收 | `2c4ff72` | `docs/parity/prd-04-reference-parity.md` |
+| 4 | PRD 01 Agent 通知 | 已验收 | `1029de0` | `docs/parity/prd-01-reference-parity.md` |
+| 5 | PRD 02 底部 HUD | 已验收 | `137c28e` | `docs/parity/prd-02-reference-parity.md` |
+| 6 | PRD 06 会话 Fork | 待验收 | `1ad08a4` | `docs/parity/prd-06-reference-parity.md` |
 
 ## 2. 组合用户旅程
 
@@ -33,7 +33,7 @@
 - 单元 / 集成：369 项通过，其中 Contracts 16、Domain 3、Desktop 102、Runtime 248。
 - Electron：34 个真实用户场景通过，覆盖 PRD 05、03、04、01、02、06 及 UtilityProcess → MessagePort → xterm 主链路。
 - 生产构建与全工作区 TypeScript 类型检查通过。
-- 每个 PRD 均保留独立验收文档、Kooky 对照矩阵和黑色 CLI 模块运行证据。
+- 每个 PRD 均保留独立验收文档、reference product 对照矩阵和黑色 CLI 模块运行证据。
 
 ## 4. 最终收口条件
 

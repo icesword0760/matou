@@ -838,7 +838,7 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 18,
-    name: 'warp-style-shell-command-blocks',
+    name: 'shell-command-blocks',
     sql: `
       CREATE TABLE shell_history_blocks (
         id TEXT PRIMARY KEY,

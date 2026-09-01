@@ -8,7 +8,7 @@ import { AgentNotificationStore, type AgentNotification } from './AgentNotificat
 import { NotificationCenter } from './NotificationCenter'
 import { NotificationProvider } from './NotificationProvider'
 
-describe('Kooky notification center', () => {
+describe('reference product notification center', () => {
   afterEach(cleanup)
 
   it('shows the exact empty state and omits the clear action', () => {
@@ -43,7 +43,7 @@ describe('Kooky notification center', () => {
     expect(items[1]?.textContent).toContain('Reviewer')
   })
 
-  it('retains malformed entries with Kooky unknown hierarchy labels', () => {
+  it('retains malformed entries with reference product unknown hierarchy labels', () => {
     const store = new AgentNotificationStore()
     store.push({ eventId: 'orphan', eventType: 'error', title: 'Claude Code', body: '原面板已删除' })
     renderCenter(store)

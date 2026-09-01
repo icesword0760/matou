@@ -11,7 +11,7 @@
 
 1. 当前对话中用户确认的架构决策；
 2. `智能体终端升级`目录中的最终 PRD；
-3. Kooky 当前代码所表达的既有行为；
+3. reference product 当前代码所表达的既有行为；
 4. Matou 既有架构文档；
 5. 工程默认值。
 
@@ -19,13 +19,13 @@
 
 主要证据：
 
-- Kooky 的 Project → Workbench → Tab → Panel 层级分别位于：
+- reference product 的 Project → Workbench → Tab → Panel 层级分别位于：
   - `/Users/icesword/Documents/AIProjects/kookey/src/modules/terminal/stores/project.js`
   - `/Users/icesword/Documents/AIProjects/kookey/src/modules/terminal/stores/workbench.js`
   - `/Users/icesword/Documents/AIProjects/kookey/src/modules/terminal/stores/tab.js`
   - `/Users/icesword/Documents/AIProjects/kookey/src/modules/terminal/stores/panel.js`
-- Kooky Panel 同时持有 UI、终端、provider 和 team 字段，见 `panel.js:140-211`。
-- Kooky 的 snapshot/checkpoint/metadata journal 位于 `electron/session-persistence.js:17-35,506-625,695-740,2195-2244`。
+- reference product Panel 同时持有 UI、终端、provider 和 team 字段，见 `panel.js:140-211`。
+- reference product 的 snapshot/checkpoint/metadata journal 位于 `electron/session-persistence.js:17-35,506-625,695-740,2195-2244`。
 - PRD 05 定义四级层级和独立分屏布局，见 `05-四级层级管理.md` §4.2、§4.6～§4.13。
 - PRD 06 定义 Fork 的上下文继承与独立身份，见 `06-会话增强-fork.md` §4.2～§4.4。
 - PRD 07 定义团队成员、身份、状态和恢复，见 `07-会话增强-agent-teams.md` §4.1～§4.4。
@@ -59,13 +59,13 @@ Workspace
 映射规则：
 
 ```text
-Kooky Project   → Matou Workspace
-Kooky Workbench → Matou Task
-Kooky Tab       → Matou Scene
-Kooky Panel     → Matou Session + SessionMount
-Kooky terminalId      → legacy SessionRun reference
-Kooky claudeSessionId → ProviderBinding
-Kooky layoutRoot      → SceneNode structure + SceneGeometry
+reference product Project   → Matou Workspace
+reference product Workbench → Matou Task
+reference product Tab       → Matou Scene
+reference product Panel     → Matou Session + SessionMount
+reference product terminalId      → legacy SessionRun reference
+reference product claudeSessionId → ProviderBinding
+reference product layoutRoot      → SceneNode structure + SceneGeometry
 ```
 
 Session 是稳定的工作会话，Scene 是展示投影。Session 可以从 tile、card、DAG 或独立窗口呈现，切换 Scene 不改变 Session 身份和运行进程。
@@ -130,7 +130,7 @@ CREATE TABLE schema_migrations (
 - 每个 migration 在单独事务中运行；
 - migration 前调用 SQLite backup API 生成升级备份；
 - schema migration 与 IPC protocol version 分开；
-- Kooky import 版本由 `legacy_import_runs` 管理，不复用 schema version。
+- reference product import 版本由 `legacy_import_runs` 管理，不复用 schema version。
 
 ## 5. INF-03：事务与事件原语
 
@@ -291,8 +291,8 @@ Checkpoint 文件使用临时文件、fsync、rename 和 parent directory fsync�
 
 字段：id、workspaceId、parentTaskId、title、status、executionContextId、sortKey、archivedAt、createdAt、updatedAt、version。
 
-- Kooky Workbench 映射为 Task；
-- 同一 Workspace 名称约束按 PRD/Kooky 规则执行；
+- reference product Workbench 映射为 Task；
+- 同一 Workspace 名称约束按 PRD/reference product 规则执行；
 - Task 父子与 SessionRelation 分离；
 - Task archive 保留 Session Graph 和 Journal。
 
@@ -530,7 +530,7 @@ Task 运行信息使用独立模型，避免塞回 Session 或 Scene：
 - Registry 只管理产品声明的预置能力，不扫描或接管用户自行安装的插件；
 - 安装状态、版本漂移、抑制和修复动作进入 diagnostics，插件文件内容不进入 Domain Outbox。
 
-## 13. INF-21～INF-24：Kooky 三阶段迁移
+## 13. INF-21～INF-24：reference product 三阶段迁移
 
 ### 13.1 Legacy importer
 
@@ -547,8 +547,8 @@ Importer 必须幂等，生成：
 ### 13.2 阶段 0：影子写
 
 - UI 仍从 legacy 数据读取；
-- 在 Matou 仓库提供 `compat/kooky-bridge`；Kooky 的结构变更通过该窄适配器同时发送到 Matou Runtime；
-- bridge 只映射已定义的 legacy mutation/event，不导入 Kooky Store 对象，也不让 legacy snapshot 覆盖 SQLite；
+- 在 Matou 仓库提供 `compat/legacy-bridge`；reference product 的结构变更通过该窄适配器同时发送到 Matou Runtime；
+- bridge 只映射已定义的 legacy mutation/event，不导入 reference product Store 对象，也不让 legacy snapshot 覆盖 SQLite；
 - Runtime 独占 SQLite；
 - 初次导入 checkpoint，随后消费逐条 legacy metadata event；
 - 定期比较 legacy 与 SQLite 的规范化 projection；
@@ -598,7 +598,7 @@ Importer 必须幂等，生成：
 20. Runtime crash/restart；
 21. 单 Session 损坏隔离；
 22. provider resume 失败；
-23. Kooky importer fixtures；
+23. reference product importer fixtures；
 24. shadow-write diff 和 repair queue；
 25. packaged Electron SQLite/node-pty E2E；
 26. 多终端吞吐、credit、outbox latency；
@@ -612,7 +612,7 @@ Importer 必须幂等，生成：
 34. Task status/progress/log 当前运行代、订阅、清理和容量限制；
 35. feature campaign version/seen-state/restore reason；
 36. preset capability reconcile 幂等、锁、离线 seed、checksum、升级失败回滚和用户卸载抑制；
-37. `compat/kooky-bridge` contract、legacy mutation mapping 和 authority boundary。
+37. `compat/legacy-bridge` contract、legacy mutation mapping 和 authority boundary。
 
 ### 14.2 可进入功能开发阶段的准入条件
 
@@ -629,7 +629,7 @@ Importer 必须幂等，生成：
 - Host Control Plane 对受信任 Agent 零配置、对外部调用默认拒绝，且控制面故障不影响 PTY；
 - Task status/progress/log 可在当前运行代内回放并实时订阅；
 - feature campaign 和 preset capability registry 通过版本、幂等与失败恢复测试；
-- Kooky 阶段 0/1 的 importer、shadow write、diff、repair 和 read switch 经过 fixture 与 E2E 验证；
+- reference product 阶段 0/1 的 importer、shadow write、diff、repair 和 read switch 经过 fixture 与 E2E 验证；
 - legacy Renderer snapshot 已限制在 compatibility adapter；
 - 打包后的 Electron 应用通过 SQLite、PTY、replay 和 recovery E2E；
 - 全量测试、typecheck、build、boundary scan 通过；

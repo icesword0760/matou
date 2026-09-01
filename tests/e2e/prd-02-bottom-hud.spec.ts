@@ -11,7 +11,7 @@ import { launchMatou } from './matou-fixture'
 const execFileAsync = promisify(execFile)
 const evidenceDirectory = resolve(import.meta.dirname, '../../docs/acceptance/evidence/prd-02/matou')
 
-test('shows the live Shell environment with Kooky geometry and refreshes cwd and Git silently', async () => {
+test('shows the live Shell environment with reference product geometry and refreshes cwd and Git silently', async () => {
   const fixture = await launchMatou()
   try {
     const surface = activeSurface(fixture.page.locator('body'))

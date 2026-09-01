@@ -59,7 +59,7 @@ afterEach(async () => {
 })
 
 describe('ProviderHookServer', () => {
-  it('writes a private additive Claude settings file with Kooky-equivalent hook coverage', async () => {
+  it('writes a private additive Claude settings file with reference product-equivalent hook coverage', async () => {
     const registration = await hooks.registerClaudeSession({
       runId: 'run-1', sessionId: 'session-1', permissionMode: 'bypassPermissions'
     })

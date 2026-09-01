@@ -8,7 +8,7 @@ import { RuntimeDatabase } from '../../storage/database'
 import { DomainTransactionManager } from '../../storage/domain-transaction'
 import { MigrationRunner } from '../../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../../storage/migrations'
-import { KookyImporter, legacyIdFor } from './kooky-importer'
+import { LegacyImporter, legacyIdFor } from './legacy-importer'
 import { LegacyCompatibilityBackupWriter, ReadAuthorityController } from './read-switch'
 
 let root: string
@@ -25,7 +25,7 @@ beforeEach(async () => {
   database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
   const tx = new DomainTransactionManager(database)
-  await new KookyImporter(root, database, tx).importSource(source)
+  await new LegacyImporter(root, database, tx).importSource(source)
   authority = new ReadAuthorityController(database)
 })
 
@@ -65,7 +65,7 @@ describe('ReadAuthorityController', () => {
     expect(database.get<{ title: string }>('SELECT title FROM tasks WHERE id = ?', taskId)?.title).toBe('Still committed')
   })
 
-  it('writes Runtime-owned Kooky compatibility backups and tracks migration health telemetry', async () => {
+  it('writes Runtime-owned reference product compatibility backups and tracks migration health telemetry', async () => {
     const backupRoot = join(root, 'compat-backup')
     const writer = new LegacyCompatibilityBackupWriter(database, backupRoot)
     const path = await writer.write(10)

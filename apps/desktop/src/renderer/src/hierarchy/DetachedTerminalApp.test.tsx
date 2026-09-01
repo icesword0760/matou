@@ -27,7 +27,7 @@ afterEach(() => {
 })
 
 describe('PRD 02 detached HUD', () => {
-  it('uses the same default white skin and Kooky theme shortcut as the main terminal', () => {
+  it('uses the same default white skin and reference product theme shortcut as the main terminal', () => {
     Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
     window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')
     render(<DetachedTerminalApp />)

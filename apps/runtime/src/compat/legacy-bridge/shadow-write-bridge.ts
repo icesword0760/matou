@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { parseKookyMutation, type KookyMutationEnvelope } from '@matou/contracts'
+import { parseLegacyMutation, type LegacyMutationEnvelope } from '@matou/contracts'
 
 import type { RuntimeDatabase } from '../../storage/database'
 import type { DomainTransactionManager } from '../../storage/domain-transaction'
-import { KookyImporter, legacyIdFor, readKookySnapshot } from './kooky-importer'
+import { LegacyImporter, legacyIdFor, readLegacySnapshot } from './legacy-importer'
 
 interface MirrorResult {
   legacyWritten: true
@@ -18,15 +18,15 @@ interface MirrorResult {
 export class ShadowWriteBridge {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
-  readonly #importer: KookyImporter
+  readonly #importer: LegacyImporter
 
-  constructor(database: RuntimeDatabase, transactions: DomainTransactionManager, importer: KookyImporter) {
+  constructor(database: RuntimeDatabase, transactions: DomainTransactionManager, importer: LegacyImporter) {
     this.#database = database
     this.#transactions = transactions
     this.#importer = importer
   }
 
-  async bootstrap(sourceId: string, sourceRoot: string): Promise<ReturnType<KookyImporter['importSource']> extends Promise<infer T> ? T : never> {
+  async bootstrap(sourceId: string, sourceRoot: string): Promise<ReturnType<LegacyImporter['importSource']> extends Promise<infer T> ? T : never> {
     const result = await this.#importer.importSource(sourceRoot)
     const metadataPath = join(sourceRoot, 'journals', 'metadata.ndjson')
     const size = await fileSize(metadataPath)
@@ -43,11 +43,11 @@ export class ShadowWriteBridge {
   }
 
   async mirrorMutation(
-    raw: KookyMutationEnvelope,
-    legacyWriter: (mutation: KookyMutationEnvelope) => Promise<void>
+    raw: LegacyMutationEnvelope,
+    legacyWriter: (mutation: LegacyMutationEnvelope) => Promise<void>
   ): Promise<MirrorResult> {
     this.#assertNotRetired()
-    const mutation = parseKookyMutation(raw)
+    const mutation = parseLegacyMutation(raw)
     await legacyWriter(mutation)
     try {
       this.#apply(mutation)
@@ -88,7 +88,7 @@ export class ShadowWriteBridge {
       try {
         const event = JSON.parse(encodedLine) as { type?: unknown; ts?: unknown; payload?: unknown }
         const commandId = `legacy-tail-${createHash('sha256').update(`${sourceId}:${start + relativeOffset}:`).update(encodedLine).digest('hex')}`
-        const mutation = parseKookyMutation({
+        const mutation = parseLegacyMutation({
           schemaVersion: 1, commandId, type: event.type,
           timestamp: Number.isFinite(event.ts) ? event.ts : Date.now(), payload: event.payload
         })
@@ -115,7 +115,7 @@ export class ShadowWriteBridge {
   async compareProjection(sourceId: string, sourceRoot: string): Promise<{
     equal: boolean; legacyFingerprint: string; sqliteFingerprint: string; diff: string[]
   }> {
-    const legacy = canonicalLegacy(await readKookySnapshot(sourceRoot))
+    const legacy = canonicalLegacy(await readLegacySnapshot(sourceRoot))
     const sqlite = canonicalSqlite(this.#database)
     const legacyJson = stableJson(legacy)
     const sqliteJson = stableJson(sqlite)
@@ -142,7 +142,7 @@ export class ShadowWriteBridge {
     let failed = 0
     for (const row of rows) {
       try {
-        this.#apply(parseKookyMutation(JSON.parse(row.payload_json)))
+        this.#apply(parseLegacyMutation(JSON.parse(row.payload_json)))
         this.#database.run('UPDATE shadow_repair_queue SET completed_at = ?, last_error = NULL WHERE command_id = ?', now, row.command_id)
         completed += 1
       } catch (error) {
@@ -167,7 +167,7 @@ export class ShadowWriteBridge {
     })()
   }
 
-  #apply(mutation: KookyMutationEnvelope): void {
+  #apply(mutation: LegacyMutationEnvelope): void {
     const p = mutation.payload
     this.#transactions.execute({
       commandId: `legacy-shadow:${mutation.commandId}`,
@@ -319,7 +319,7 @@ export class ShadowWriteBridge {
     tx.run('INSERT OR IGNORE INTO session_mounts (id, scene_id, scene_node_id, session_id, created_at) VALUES (?, ?, ?, ?, ?)', legacyIdFor('mount-panel', `${sceneId}:${legacyPanel}`), sceneId, nodeId, sessionId, now)
   }
 
-  #queueRepair(mutation: KookyMutationEnvelope, error: string): void {
+  #queueRepair(mutation: LegacyMutationEnvelope, error: string): void {
     this.#database.run(
       `INSERT INTO shadow_repair_queue (
          command_id, mutation_type, payload_json, next_attempt_at, last_error, created_at
@@ -346,7 +346,7 @@ export class ShadowWriteBridge {
   }
 }
 
-function canonicalLegacy(snapshot: Awaited<ReturnType<typeof readKookySnapshot>>): unknown {
+function canonicalLegacy(snapshot: Awaited<ReturnType<typeof readLegacySnapshot>>): unknown {
   const workspaces = snapshot.projects.list.map((project) => ({
     id: legacyIdFor('workspace-project', string(project.id)), name: string(project.name), root: string(project.path)
   })).sort(byId)

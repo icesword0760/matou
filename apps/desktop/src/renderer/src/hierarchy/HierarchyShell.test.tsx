@@ -175,7 +175,7 @@ describe('PRD 05 hierarchy shell', () => {
       .toBe('error-child')
   })
 
-  it('starts with the requested white skin and cycles the whole CLI with Kooky Cmd+I', () => {
+  it('starts with the requested white skin and cycles the whole CLI with reference product Cmd+I', () => {
     render(<HierarchyShell fixture={fixture()} />)
 
     expect(screen.getByRole('main').getAttribute('data-theme')).toBe('light')
@@ -255,7 +255,7 @@ describe('PRD 05 hierarchy shell', () => {
     })
   })
 
-  it('opens the Kooky shortcut floating panel with Cmd+/ and double Option', () => {
+  it('opens the reference product shortcut floating panel with Cmd+/ and double Option', () => {
     render(<HierarchyShell fixture={fixture()} />)
 
     fireEvent.keyDown(document, { key: '/', metaKey: true })
@@ -270,7 +270,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('dialog', { name: '快捷键列表' })).toBeTruthy()
   })
 
-  it('maps Kooky tab, split, pane, search, and font shortcuts onto Matou Scenes and Sessions', () => {
+  it('maps reference product tab, split, pane, search, and font shortcuts onto Matou Scenes and Sessions', () => {
     const data = fixture()
     const first = data.sceneSnapshots![0]!
     first.scene.rootNodeId = 'split-a1'
@@ -328,7 +328,7 @@ describe('PRD 05 hierarchy shell', () => {
     )).toBe(true)
   })
 
-  it('keeps the Kooky Ctrl+Tab Scene switching behavior on Windows', () => {
+  it('keeps the reference product Ctrl+Tab Scene switching behavior on Windows', () => {
     Object.defineProperty(navigator, 'platform', { configurable: true, value: 'Win32' })
     render(<HierarchyShell fixture={fixture()} />)
 
@@ -339,7 +339,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('tab', { selected: true }).textContent).toContain('页签 A1')
   })
 
-  it('moves the active Scene and closes only the active split Session with Kooky shortcuts', () => {
+  it('moves the active Scene and closes only the active split Session with reference product shortcuts', () => {
     render(<HierarchyShell fixture={fixture()} />)
 
     fireEvent.keyDown(document, { key: 'ArrowRight', metaKey: true, shiftKey: true })
@@ -357,7 +357,7 @@ describe('PRD 05 hierarchy shell', () => {
       .toEqual(['xterm-session-a1'])
   })
 
-  it('keeps Kooky font boundaries while zooming by shortcut', () => {
+  it('keeps reference product font boundaries while zooming by shortcut', () => {
     render(<HierarchyShell fixture={fixture()} />)
 
     for (let index = 0; index < 5; index += 1) fireEvent.keyDown(document, { key: '-', metaKey: true })
@@ -367,7 +367,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('24')
   })
 
-  it('routes the Kooky search bar to the focused Session only', async () => {
+  it('routes the reference product search bar to the focused Session only', async () => {
     render(<HierarchyShell fixture={fixture()} />)
     fireEvent.keyDown(document, { key: 'f', metaKey: true })
 
@@ -378,7 +378,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByTestId('xterm-session-a2')).toBeNull()
   })
 
-  it('keeps Kooky search option shortcuts while the search field is open', () => {
+  it('keeps reference product search option shortcuts while the search field is open', () => {
     render(<HierarchyShell fixture={fixture()} />)
     fireEvent.keyDown(document, { key: 'f', metaKey: true })
     const search = screen.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' })
