@@ -93,6 +93,54 @@ button { -webkit-app-region: no-drag; }
 .toolbar-btn img { display: block; width: 16px; height: 16px; object-fit: contain; }
 .toolbar-btn:hover { color: rgba(255,255,255,.95); background: rgba(255,255,255,.1); }
 .toolbar-btn:disabled, .tab-add-btn:disabled, .workbench-sidebar__add-btn:disabled { cursor: not-allowed; opacity: .5; }
+.app-update-control { position: relative; flex: 0 0 auto; -webkit-app-region: no-drag; }
+.app-update-trigger { position: relative; display: grid; width: 30px; height: 30px; padding: 0; place-items: center; border: 0; border-radius: 8px; color: #747b88; background: transparent; cursor: pointer; transition: color 150ms ease-out,background 150ms ease-out,transform 150ms ease-out; }
+.app-update-trigger:hover,.app-update-trigger[aria-expanded="true"] { color: #e9eef5; background: rgba(255,255,255,.08); }
+.app-update-trigger:active { transform: scale(.94); }
+.app-update-trigger.is-available,.app-update-trigger.is-downloading,.app-update-trigger.is-downloaded { color: #69adff; background: rgba(58,142,241,.11); }
+.app-update-trigger__dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border: 2px solid var(--kooky-chrome); border-radius: 50%; background: #3d98ff; box-shadow: 0 0 0 2px rgba(61,152,255,.14); }
+.app-update-trigger__progress { --update-progress: 0deg; position: relative; display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; }
+.app-update-trigger__progress::before { position: absolute; content: ''; inset: 0; border-radius: inherit; background: conic-gradient(#4aa1ff var(--update-progress),rgba(100,120,150,.16) 0); -webkit-mask: radial-gradient(farthest-side,transparent calc(100% - 2px),#000 0); mask: radial-gradient(farthest-side,transparent calc(100% - 2px),#000 0); }
+.app-update-popover { position: absolute; z-index: 1000; top: 37px; right: 0; width: 350px; overflow: hidden; border: 1px solid rgba(255,255,255,.1); border-radius: 16px; color: #e3e7ee; background: rgba(31,35,42,.9); box-shadow: 0 24px 60px rgba(0,0,0,.32),0 3px 10px rgba(0,0,0,.16),inset 0 1px rgba(255,255,255,.08); backdrop-filter: blur(28px) saturate(125%); transform-origin: 92% 0; animation: app-update-popover-in 210ms cubic-bezier(.2,.84,.22,1); -webkit-app-region: no-drag; }
+.app-update-popover__header { display: flex; min-height: 66px; align-items: flex-start; gap: 12px; padding: 14px 16px 11px; }
+.app-update-release-icon { display: grid; flex: 0 0 38px; width: 38px; height: 38px; place-items: center; border-radius: 12px; color: #fff; background: linear-gradient(145deg,#68b7ff,#2b82f0); box-shadow: 0 7px 18px rgba(40,129,239,.25); }
+.app-update-popover__header > span:nth-child(2) { display: flex; min-width: 0; padding-top: 1px; flex: 1; flex-direction: column; }
+.app-update-popover__header strong { color: inherit; font-size: 13px; font-weight: 700; line-height: 20px; }
+.app-update-popover__header small { overflow: hidden; color: #878f9e; font-size: 10px; line-height: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.app-update-popover__header > button { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 7px; color: #7f8795; background: transparent; cursor: pointer; font-size: 18px; line-height: 1; }
+.app-update-popover__header > button:hover { color: #e9eef5; background: rgba(255,255,255,.07); }
+.app-update-popover__body { padding: 0 16px 14px; color: #9ba3b0; font-size: 11px; line-height: 1.5; }
+.app-update-popover__body p { margin: 5px 0 0; }
+.app-update-notes { display: grid; gap: 4px; margin: 3px 0 0; padding: 0; list-style: none; }
+.app-update-notes li { position: relative; padding-left: 13px; }
+.app-update-notes li::before { position: absolute; content: ''; top: 7px; left: 0; width: 4px; height: 4px; border-radius: 50%; background: #62aaff; }
+.app-update-download > div { display: flex; justify-content: space-between; color: #a7afbc; font-size: 10px; }
+.app-update-download__track { display: block; height: 6px; margin: 8px 0 6px; overflow: hidden; border-radius: 99px; background: rgba(120,137,160,.15); }
+.app-update-download__track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#378df4,#6bbaff); box-shadow: 0 0 12px rgba(55,141,244,.3); transition: width 240ms ease-out; }
+.app-update-download small { color: #7f8794; font-size: 9px; }
+.app-update-session-warning { display: flex; gap: 9px; padding: 10px; border-radius: 10px; color: #d6b16d; background: rgba(206,150,51,.12); }
+.app-update-session-warning > i { flex: 0 0 auto; width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: #c4943e; }
+.app-update-session-warning span { display: flex; flex-direction: column; }
+.app-update-session-warning strong { color: inherit; font-size: 11px; }
+.app-update-session-warning small { margin-top: 2px; color: #a98d5c; font-size: 9px; line-height: 1.45; }
+.app-update-error { display: flex; padding: 10px; flex-direction: column; border-radius: 10px; color: #ff9b91; background: rgba(227,75,63,.1); }
+.app-update-error span { margin-top: 3px; color: #bd8b87; font-size: 9px; }
+.app-update-waiting { margin-top: 8px; color: #69adff; text-align: center; }
+.app-update-popover__actions { display: flex; gap: 7px; padding: 12px 16px 15px; flex-direction: column; border-top: 1px solid rgba(255,255,255,.07); }
+.app-update-popover__actions button { height: 34px; padding: 0 12px; border: 0; border-radius: 9px; color: #d8dde6; background: rgba(255,255,255,.07); cursor: pointer; font-size: 11px; font-weight: 650; transition: filter 140ms ease-out,transform 140ms ease-out,background 140ms ease-out; }
+.app-update-popover__actions button:hover { background: rgba(255,255,255,.1); }
+.app-update-popover__actions button:active { transform: scale(.985); }
+.app-update-popover__actions button:disabled { cursor: default; opacity: .55; }
+.app-update-popover__actions button.is-primary { color: #fff; background: linear-gradient(#3c97fa,#287fe9); box-shadow: 0 6px 16px rgba(39,126,234,.2); }
+.app-update-popover__actions button.is-primary:hover { filter: brightness(1.04); }
+.app-update-popover__actions button.is-quiet { height: 26px; color: #8992a0; background: transparent; font-weight: 550; }
+.app-update-action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.app-update-toast { position: fixed; z-index: 1100; right: 22px; bottom: 58px; display: flex; min-width: 280px; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.1); border-radius: 13px; color: #e3e7ee; background: rgba(31,35,42,.9); box-shadow: 0 20px 50px rgba(0,0,0,.3); backdrop-filter: blur(24px); animation: app-update-toast-in 220ms cubic-bezier(.2,.84,.22,1); }
+.app-update-toast > span { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 50%; color: #fff; background: #2ca56d; }
+.app-update-toast > div { display: flex; flex-direction: column; }
+.app-update-toast strong { font-size: 11px; }.app-update-toast small { margin-top: 2px; color: #8d96a5; font-size: 9px; }
+@keyframes app-update-popover-in { from { opacity: 0; transform: translateY(-7px) scale(.975); } }
+@keyframes app-update-toast-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
 @media (max-width: 700px) {
   .tab-bar-right .split-horizontal-icon { display: none; }
 }
@@ -570,6 +618,27 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .toolbar-btn:hover,
 .hierarchy-shell[data-theme="light"] .pane-close:hover { color: #2f3547; background: rgba(0,0,0,.08); }
 .hierarchy-shell[data-theme="light"] .toolbar-btn img { filter: brightness(0) saturate(100%) opacity(.58); }
+.hierarchy-shell[data-theme="light"] .app-update-trigger { color: #687387; }
+.hierarchy-shell[data-theme="light"] .app-update-trigger:hover,
+.hierarchy-shell[data-theme="light"] .app-update-trigger[aria-expanded="true"] { color: #354156; background: rgba(62,76,101,.08); }
+.hierarchy-shell[data-theme="light"] .app-update-trigger.is-available,
+.hierarchy-shell[data-theme="light"] .app-update-trigger.is-downloading,
+.hierarchy-shell[data-theme="light"] .app-update-trigger.is-downloaded { color: #2686f6; background: rgba(43,137,247,.1); }
+.hierarchy-shell[data-theme="light"] .app-update-trigger__dot { border-color: #fff; }
+.hierarchy-shell[data-theme="light"] .app-update-popover { border-color: rgba(255,255,255,.9); color: #283142; background: rgba(252,253,255,.88); box-shadow: 0 24px 64px rgba(43,59,81,.18),0 3px 10px rgba(43,59,81,.08),inset 0 1px #fff; }
+.hierarchy-shell[data-theme="light"] .app-update-popover__header small,
+.hierarchy-shell[data-theme="light"] .app-update-popover__body { color: #778196; }
+.hierarchy-shell[data-theme="light"] .app-update-popover__header > button { color: #8790a0; }
+.hierarchy-shell[data-theme="light"] .app-update-popover__header > button:hover { color: #354156; background: rgba(62,76,101,.07); }
+.hierarchy-shell[data-theme="light"] .app-update-popover__actions { border-top-color: rgba(62,76,101,.08); }
+.hierarchy-shell[data-theme="light"] .app-update-popover__actions button { color: #4e5a6e; background: rgba(92,108,134,.08); }
+.hierarchy-shell[data-theme="light"] .app-update-popover__actions button.is-primary { color: #fff; background: linear-gradient(#3994fa,#257eea); }
+.hierarchy-shell[data-theme="light"] .app-update-popover__actions button.is-quiet { color: #718096; background: transparent; }
+.hierarchy-shell[data-theme="light"] .app-update-session-warning { color: #73572f; background: rgba(255,184,68,.12); }
+.hierarchy-shell[data-theme="light"] .app-update-session-warning small { color: #8c7149; }
+.hierarchy-shell[data-theme="light"] .app-update-error { color: #b1433a; background: rgba(223,75,63,.09); }
+.hierarchy-shell[data-theme="light"] .app-update-error span { color: #9d6d68; }
+.hierarchy-shell[data-theme="light"] .app-update-toast { border-color: rgba(255,255,255,.9); color: #283142; background: rgba(252,253,255,.9); box-shadow: 0 20px 54px rgba(43,59,81,.18); }
 .hierarchy-shell[data-theme="light"] .pane-title { color: rgba(0,0,0,.6); }
 .hierarchy-shell[data-theme="light"] .pane-cwd { color: rgba(37,47,61,.42); }
 .hierarchy-shell[data-theme="light"] .pane-environment-badge { color: #596577; background: #edf0f4; }
@@ -588,6 +657,10 @@ button { -webkit-app-region: no-drag; }
 .fork-failure-actions { display: flex; justify-content: center; gap: 8px; }
 .fork-failure-actions button { height: 30px; padding: 0 13px; border: 1px solid #434955; border-radius: 7px; color: #d9dce2; background: #282b31; cursor: pointer; }
 .hierarchy-shell[data-theme="light"] .fork-failure-card { color: #333b48; background: #f7f8fa; }
+@media (prefers-reduced-motion: reduce) {
+  .app-update-popover,.app-update-toast { animation: none; }
+  .app-update-trigger,.app-update-download__track i,.app-update-popover__actions button { transition: none; }
+}
 .hierarchy-shell[data-theme="light"] .fork-failure-actions button { border-color: #cbd1da; color: #333b48; background: #fff; }
 .hierarchy-shell[data-theme="light"] .terminal-pane.active-pane { outline-color: rgba(64,120,242,.35); }
 .hierarchy-shell[data-theme="light"] .terminal-pane > .provider-restore-banner { color: #8a4d10; background: #fff7eb; border-color: #efcfaa; }

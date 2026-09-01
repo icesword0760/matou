@@ -36,6 +36,8 @@ import { SessionLoaderDialog } from '../session-canvas/SessionLoaderDialog'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
+import { AppUpdateControl } from '../updates/AppUpdateControl'
+import { activeAppSessionCount } from '../updates/active-app-sessions'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
@@ -194,6 +196,7 @@ function HierarchyProduct({ projection, commands }: {
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
   const [boardActive, setBoardActive] = useState(false)
   const [settingsActive, setSettingsActive] = useState(false)
+  const appUpdateControl = <AppUpdateControl activeSessionCount={activeAppSessionCount(projection.sessionGraphs)} />
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
@@ -491,8 +494,9 @@ function HierarchyProduct({ projection, commands }: {
                 <button className="tab-close" aria-label="关闭设置页签" onClick={() => setSettingsActive(false)}>✕</button>
               </div>
             </div>
+            <div className="tab-bar-right">{appUpdateControl}</div>
           </div> : <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
-            onOpenDag={openDag} />}
+            onOpenDag={openDag} trailingControl={appUpdateControl} />}
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)

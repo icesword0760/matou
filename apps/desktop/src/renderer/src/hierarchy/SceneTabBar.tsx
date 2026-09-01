@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
@@ -19,11 +19,12 @@ export interface SceneCommands {
   createShellSibling?(sceneId: string, sessionId: string): unknown
 }
 
-export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag }: {
+export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag, trailingControl }: {
   projection: HierarchyProjection
   commands: SceneCommands
   pathValid?: boolean
   onOpenDag?(): void
+  trailingControl?: ReactNode
 }) {
   const workspaceId = projection.navigation.activeWorkspaceId
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
@@ -195,6 +196,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
       }}>
       <img src={splitRightIcon} alt="" aria-hidden="true" />
     </button>
+    {trailingControl}
     </div>
     {sceneMenu && createPortal(<div ref={sceneMenuRef} role="menu" className="scene-tab-menu"
       style={{ left: sceneMenu.x, top: sceneMenu.y }}>
