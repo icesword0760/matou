@@ -905,7 +905,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   const { sceneId, sourceSessionId, relationMode } = branchDialog
                   if (relationMode === 'child') {
                     const result = await Promise.resolve(commands.createForkChild(
-                      sceneId, sourceSessionId, input.name, input.worktreeMode
+                      sceneId, sourceSessionId, input.name, input.worktreeMode,
+                      input.submissionKey
                     ))
                     const createdSessionId = mutationSessionId(result)
                     if (createdSessionId) {
@@ -920,7 +921,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                     }))
                   } else {
                     await Promise.resolve(commands.createForkSibling(
-                      sceneId, sourceSessionId, input.name, input.worktreeMode
+                      sceneId, sourceSessionId, input.name, input.worktreeMode,
+                      input.submissionKey
                     ))
                   }
                   setBranchDialog(null)

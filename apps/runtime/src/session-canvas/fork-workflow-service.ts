@@ -1,11 +1,10 @@
-import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
-import { join } from 'node:path'
-import { promisify } from 'node:util'
+import { realpathSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 
 import type {
   DomainCommandMetadata,
+  ForkProgress,
   SceneSessionGraph,
   Session,
   Worktree
@@ -15,6 +14,7 @@ import {
   activateSessionInTransaction,
   assertWorkspacePathAvailable,
   readHierarchyResult,
+  readHierarchyResultForSession,
   registerWindow,
   type WorkspaceHierarchyResult
 } from '../hierarchy/hierarchy-application-service'
@@ -22,12 +22,14 @@ import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainMutationContext, DomainTransactionManager } from '../storage/domain-transaction'
 import { SessionEnvironmentRepository } from '../session/session-environment-repository'
+import {
+  SessionForkIntentRepository,
+  type ForkLease
+} from '../session/session-fork-intent-repository'
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import { WorktreeService, type WorktreeSetupStep } from '../worktrees/worktree-service'
 import { createGitBranchName, validateDisplayName } from './branch-name'
 import { projectSceneGraphFrom } from './session-graph-repository'
-
-const exec = promisify(execFile)
 
 export type ForkWorktreeMode = 'current' | 'new'
 export type ForkWorkflowErrorCode =
@@ -52,18 +54,27 @@ export class ForkWorkflowError extends Error {
   }
 }
 
+class StaleForkLeaseError extends Error {
+  constructor() {
+    super('stale Fork lease')
+    this.name = 'StaleForkLeaseError'
+  }
+}
+
 export interface CreateForkInput {
   windowId: string
   sceneId: string
   sourceSessionId: string
   name: string
   worktreeMode: ForkWorktreeMode
+  submissionKey?: string
   now: number
 }
 
 export interface ForkWorkflowResult extends WorkspaceHierarchyResult {
   graph: SceneSessionGraph
   forkState: 'pending' | 'starting' | 'succeeded' | 'failed'
+  forkProgress?: ForkProgress
   worktree?: Worktree
   error?: string
 }
@@ -76,6 +87,11 @@ export interface RetryForkInput {
 }
 
 export interface RemoveFailedForkInput extends RetryForkInput {}
+
+export interface ExecuteForkInput extends MutationLocation {
+  operationId: string
+  lease: ForkLease
+}
 
 type MutationLocation = Pick<RetryForkInput, 'windowId' | 'sceneId' | 'now'>
 
@@ -140,6 +156,7 @@ interface ForkIntentRow {
   state: 'pending' | 'starting' | 'succeeded' | 'failed'
   worktree_mode: ForkWorktreeMode
   worktree_id: string | null
+  operation_id: string
 }
 
 export class ForkWorkflowService {
@@ -149,6 +166,7 @@ export class ForkWorkflowService {
   readonly #worktrees: WorktreeService
   readonly #environments: SessionEnvironmentRepository
   readonly #gitStates: SessionGitStateRepository
+  readonly #forkIntents: SessionForkIntentRepository
   readonly #setupPolicyForWorkspace: (workspaceId: string) => WorktreeSetupStep[]
 
   constructor(
@@ -160,21 +178,159 @@ export class ForkWorkflowService {
       setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
     }
   ) {
-    this.#dataRoot = dataRoot
+    try {
+      this.#dataRoot = realpathSync(dataRoot)
+    } catch {
+      this.#dataRoot = resolve(dataRoot)
+    }
     this.#database = database
     this.#transactions = transactions
     this.#worktrees = new WorktreeService(database, transactions, dependencies)
     this.#environments = new SessionEnvironmentRepository(database)
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#forkIntents = new SessionForkIntentRepository(database)
     this.#setupPolicyForWorkspace = dependencies.setupPolicyForWorkspace ?? (() => [])
   }
 
   createForkChild(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
-    return this.#create(command, input, 'child')
+    return this.#accept(command, input, 'child')
   }
 
   createForkSibling(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
-    return this.#create(command, input, 'sibling')
+    return this.#accept(command, input, 'sibling')
+  }
+
+  async executeFork(command: DomainCommandMetadata, input: ExecuteForkInput): Promise<ForkWorkflowResult> {
+    const intent = requireRow(this.#database.get<ForkIntentRow & {
+      target_execution_context_id: string | null
+      worktree_path: string | null
+      branch_name: string | null
+    }>('SELECT * FROM session_fork_intents WHERE operation_id = ?', input.operationId), 'Fork intent')
+    const session = requireRow(this.#database.get<{ task_id: string }>(
+      'SELECT task_id FROM sessions WHERE id = ?', intent.session_id
+    ), 'Fork Session')
+    const owner = requireRow(this.#database.get<{ workspace_id: string }>(
+      'SELECT workspace_id FROM tasks WHERE id = ?', session.task_id
+    ), 'Fork owner')
+    const focusedSessionId = projectSceneGraphFrom(
+      this.#database, input.sceneId, input.windowId
+    ).focusedSessionId
+    const preserveFocus = focusedSessionId && focusedSessionId !== intent.session_id
+      ? focusedSessionId
+      : undefined
+    return this.#withLeaseHeartbeat(input, async (renew, now) => {
+      if (intent.worktree_mode === 'current') {
+        const advanced = this.#forkIntents.advanceStage({
+          operationId: input.operationId, lease: input.lease,
+          stage: 'restoring-provider', now: renew()
+        })
+        if (advanced.kind === 'stale') throw new Error('stale Fork lease')
+        return this.#readAcceptedResult(
+          input.windowId, input.sceneId, intent.session_id, input.now,
+          preserveFocus, advanced.progress
+        )
+      }
+      const worktree = requireRow(
+        intent.worktree_id ? this.#worktrees.get(intent.worktree_id) : undefined,
+        'Fork Worktree intent'
+      )
+      try {
+        let progress = this.#forkIntents.progressByOperation(input.operationId)!
+        if (progress.stage === 'queued') {
+          const advanced = this.#forkIntents.advanceStage({
+            operationId: input.operationId, lease: input.lease,
+            stage: 'creating-worktree', now: renew()
+          })
+          if (advanced.kind === 'stale') throw new Error('stale Fork lease')
+          progress = advanced.progress
+        }
+        renew()
+        const ready = worktree.state === 'ready'
+          ? worktree
+          : await this.#worktrees.create(derivedCommand(command, 'worktree'), {
+              id: worktree.id,
+              executionContextId: worktree.executionContextId,
+              workspaceId: owner.workspace_id,
+              repositoryRoot: worktree.repositoryRoot,
+              path: worktree.path,
+              branch: worktree.branch,
+              baseRef: worktree.baseRevision ?? 'HEAD',
+              setupPolicy: worktree.setupPolicy as WorktreeSetupStep[],
+              now: input.now
+            })
+        renew()
+        if (progress.stage === 'creating-worktree') {
+          const advanced = this.#forkIntents.advanceStage({
+            operationId: input.operationId, lease: input.lease,
+            stage: 'applying-setup', now: renew()
+          })
+          if (advanced.kind === 'stale') throw new Error('stale Fork lease')
+          progress = advanced.progress
+        }
+        if (progress.stage === 'applying-setup') {
+          const advanced = this.#forkIntents.advanceStage({
+            operationId: input.operationId, lease: input.lease,
+            stage: 'binding-session', now: renew()
+          })
+          if (advanced.kind === 'stale') throw new Error('stale Fork lease')
+          progress = advanced.progress
+        }
+        renew()
+        await this.#gitStates.refresh(ready.executionContextId, now())
+        renew()
+        return this.#bindReadyWorktree(
+          derivedCommand(command, 'bind-worktree'), input, intent.session_id, ready,
+          input.operationId, input.lease, now(), preserveFocus
+        )
+      } catch (error) {
+        const failed = this.#markFailed(
+          derivedCommand(command, 'failed'), input, intent.session_id, input.operationId,
+          input.lease, errorMessage(error), now(), preserveFocus
+        )
+        if (!failed) throw error
+        return failed
+      }
+    })
+  }
+
+  async #withLeaseHeartbeat<T>(
+    input: ExecuteForkInput,
+    operation: (renew: () => number, now: () => number) => Promise<T>
+  ): Promise<T> {
+    const wallStartedAt = Date.now()
+    const now = () => input.now + Math.max(0, Date.now() - wallStartedAt)
+    const ttlMs = Math.max(1, input.lease.expiresAt - input.now)
+    let leaseLost = false
+    const renew = () => {
+      if (leaseLost) throw new StaleForkLeaseError()
+      const heartbeatAt = now()
+      const heartbeat = this.#forkIntents.heartbeat({
+        operationId: input.operationId,
+        lease: input.lease,
+        now: heartbeatAt,
+        ttlMs
+      })
+      if (heartbeat.kind === 'stale') {
+        leaseLost = true
+        throw new StaleForkLeaseError()
+      }
+      return heartbeatAt
+    }
+    renew()
+    const heartbeatIntervalMs = Math.min(2_000, Math.max(10, Math.floor(ttlMs / 3)))
+    const timer = setInterval(() => {
+      try {
+        renew()
+      } catch {
+        leaseLost = true
+      }
+    }, heartbeatIntervalMs)
+    timer.unref?.()
+    try {
+      return await operation(renew, now)
+    } finally {
+      clearInterval(timer)
+    }
   }
 
   async retryFork(command: DomainCommandMetadata, input: RetryForkInput): Promise<ForkWorkflowResult> {
@@ -189,17 +345,8 @@ export class ForkWorkflowService {
        JOIN tasks ON tasks.id = sessions.task_id WHERE sessions.id = ?`,
       input.sessionId
     ), 'Fork owner')
-    const sourceContext = requireRow(this.#database.get<{ execution_context_id: string }>(
-      'SELECT execution_context_id FROM sessions WHERE id = ?', intent.source_session_id
-    ), 'Fork source')
-    await this.#gitStates.refresh(sourceContext.execution_context_id, input.now)
     const prepared = this.#transactions.execute(command, ({ tx, emit }) => {
-      tx.run(
-        `UPDATE session_fork_intents SET state = 'pending', error_message = NULL,
-           completed_at = NULL, attempt_count = attempt_count + 1, updated_at = ?
-         WHERE session_id = ?`,
-        input.now, input.sessionId
-      )
+      const forkProgress = this.#forkIntents.retry(intent.operation_id, input.now, tx)
       tx.run(
         `UPDATE sessions SET status = 'starting', updated_at = ?, version = version + 1
          WHERE id = ? AND archived_at IS NULL`,
@@ -215,44 +362,9 @@ export class ForkWorkflowService {
         sessionId: input.sessionId,
         payload: { graph: result.graph }, occurredAt: input.now
       })
-      return { ...result, forkState: 'pending' as const }
+      return { ...result, forkState: 'pending' as const, forkProgress }
     }).result
-    if (intent.worktree_mode === 'current') return prepared
-
-    const worktree = intent.worktree_id ? this.#worktrees.get(intent.worktree_id) : undefined
-    if (!worktree) {
-      return this.#markFailed(
-        derivedCommand(command, 'missing-worktree'), input, input.sessionId,
-        '分支工作树记录缺失'
-      )
-    }
-    if (worktree.state === 'ready') {
-      await this.#gitStates.refresh(worktree.executionContextId, input.now)
-      return this.#bindReadyWorktree(
-        derivedCommand(command, 'bind-existing-worktree'), input, input.sessionId, worktree
-      )
-    }
-    try {
-      const ready = await this.#worktrees.create(derivedCommand(command, 'worktree'), {
-        id: worktree.id,
-        executionContextId: worktree.executionContextId,
-        workspaceId: owner.workspace_id,
-        repositoryRoot: worktree.repositoryRoot,
-        path: worktree.path,
-        branch: worktree.branch,
-        baseRef: worktree.baseRevision ?? 'HEAD',
-        setupPolicy: worktree.setupPolicy as WorktreeSetupStep[],
-        now: input.now
-      })
-      await this.#gitStates.refresh(ready.executionContextId, input.now)
-      return this.#bindReadyWorktree(
-        derivedCommand(command, 'bind-worktree'), input, input.sessionId, ready
-      )
-    } catch (error) {
-      return this.#markFailed(
-        derivedCommand(command, 'worktree-failed'), input, input.sessionId, errorMessage(error)
-      )
-    }
+    return prepared
   }
 
   removeFailedFork(
@@ -324,52 +436,59 @@ export class ForkWorkflowService {
     }).result
   }
 
-  async #create(
+  async #accept(
     command: DomainCommandMetadata,
     input: CreateForkInput,
     placement: 'child' | 'sibling'
   ): Promise<ForkWorkflowResult> {
+    const submissionKey = input.submissionKey ?? command.commandId
+    const accepted = this.#forkIntents.findBySubmissionKey(submissionKey)
+    if (accepted) {
+      const result = readAcceptedForkResult(
+        this.#database, input.windowId, accepted.identity.sessionId
+      )
+      return {
+        ...result,
+        forkState: legacyForkState(accepted.progress.stage),
+        forkProgress: accepted.progress
+      }
+    }
     const ids = createHierarchyIds()
     const relationId = randomUUID()
+    const operationId = randomUUID()
     const source = this.#resolveSource(input, placement)
     const activeNames = this.#activeChildNames(source.forkSource.id)
     const name = validateDisplayName(input.name, activeNames)
     if (!name.ok) throw displayNameError(name.code, name.message, name.input)
 
-    await this.#gitStates.refresh(source.forkSource.execution_context_id, input.now)
-
     const gitPlan = input.worktreeMode === 'new'
-      ? await this.#resolveGitPlan(source, name.displayName, ids.sessionId)
+      ? this.#resolveGitPlan(source, name.displayName, ids.sessionId)
       : undefined
     const initial = this.#createPreparingNode(
-      command, input, source, name.displayName, ids, relationId, gitPlan,
+      command, input, source, name.displayName, ids, relationId, operationId, submissionKey, gitPlan,
       placement === 'sibling' ? source.selected.id : undefined
     )
-    if (!gitPlan) return initial
+    return initial
+  }
 
-    try {
-      const worktree = await this.#worktrees.create(derivedCommand(command, 'worktree'), {
-        id: gitPlan.worktreeId,
-        executionContextId: gitPlan.executionContextId,
-        workspaceId: source.task.workspace_id,
-        repositoryRoot: gitPlan.repositoryRoot,
-        path: gitPlan.path,
-        branch: gitPlan.branch,
-        baseRef: gitPlan.baseRef,
-        setupPolicy: this.#setupPolicyForWorkspace(source.task.workspace_id),
-        now: input.now
-      })
-      await this.#gitStates.refresh(worktree.executionContextId, input.now)
-      return this.#bindReadyWorktree(
-        derivedCommand(command, 'bind-worktree'), input, ids.sessionId, worktree,
-        placement === 'sibling' ? source.selected.id : undefined
+  #readAcceptedResult(
+    windowId: string,
+    sceneId: string,
+    sessionId: string,
+    now: number,
+    preserveFocusedSessionId: string | undefined,
+    forkProgress: ForkProgress
+  ): ForkWorkflowResult {
+    return this.#database.transaction((tx) => {
+      const result = readCreatedForkResult(
+        tx, windowId, sceneId, sessionId, now, preserveFocusedSessionId
       )
-    } catch (error) {
-      return this.#markFailed(
-        derivedCommand(command, 'worktree-failed'), input, ids.sessionId, errorMessage(error),
-        placement === 'sibling' ? source.selected.id : undefined
-      )
-    }
+      return {
+        ...result,
+        forkState: legacyForkState(forkProgress.stage),
+        forkProgress
+      }
+    })
   }
 
   #resolveSource(input: CreateForkInput, placement: 'child' | 'sibling'): SourceContext {
@@ -452,27 +571,25 @@ export class ForkWorkflowService {
     ).map(({ title }) => title)
   }
 
-  async #resolveGitPlan(
+  #resolveGitPlan(
     source: SourceContext,
     displayName: string,
     sessionId: string
-  ): Promise<GitPlan> {
-    try {
-      const repositoryRoot = (await exec(
-        'git', ['-C', source.forkSource.cwd, 'rev-parse', '--show-toplevel']
-      )).stdout.trim()
-      const baseRef = (await exec('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'])).stdout.trim()
-      const canonicalDataRoot = await realpath(this.#dataRoot).catch(() => this.#dataRoot)
-      return {
-        repositoryRoot,
-        baseRef,
-        path: join(canonicalDataRoot, 'worktrees', source.task.workspace_id, sessionId),
-        branch: createGitBranchName(displayName, sessionId),
-        worktreeId: randomUUID(),
-        executionContextId: randomUUID()
-      }
-    } catch {
-      throw new ForkWorkflowError('GIT_REPOSITORY_REQUIRED', '新工作树需要 Git 仓库')
+  ): GitPlan {
+    const git = this.#database.get<{ repository_root: string }>(
+      `SELECT repository_root FROM execution_context_git_states
+       WHERE execution_context_id = ? AND state = 'ready' AND repository_root IS NOT NULL`,
+      source.forkSource.execution_context_id
+    )
+    if (!git) throw new ForkWorkflowError('GIT_REPOSITORY_REQUIRED', '新工作树需要 Git 仓库')
+    const canonicalDataRoot = this.#dataRoot
+    return {
+      repositoryRoot: git.repository_root,
+      baseRef: 'HEAD',
+      path: join(canonicalDataRoot, 'worktrees', source.task.workspace_id, sessionId),
+      branch: createGitBranchName(displayName, sessionId),
+      worktreeId: randomUUID(),
+      executionContextId: randomUUID()
     }
   }
 
@@ -483,16 +600,55 @@ export class ForkWorkflowService {
     displayName: string,
     ids: ReturnType<typeof createHierarchyIds>,
     relationId: string,
+    operationId: string,
+    submissionKey: string,
     gitPlan: GitPlan | undefined,
     preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
+      const duplicate = this.#forkIntents.findBySubmissionKey(submissionKey, tx)
+      if (duplicate) {
+        const result = readAcceptedForkResult(
+          tx, input.windowId, duplicate.identity.sessionId
+        )
+        return {
+          ...result,
+          forkState: legacyForkState(duplicate.progress.stage),
+          forkProgress: duplicate.progress
+        }
+      }
       registerWindow(tx, input.windowId, input.now)
+      const acceptedName = validateDisplayName(
+        displayName,
+        activeChildNamesFrom(tx, source.forkSource.id)
+      )
+      if (!acceptedName.ok) {
+        throw displayNameError(acceptedName.code, acceptedName.message, acceptedName.input)
+      }
       const sourceNode = requireRow(tx.get<SceneNodeRow>(
         'SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?',
         source.selectedMount.scene_node_id!
       ), 'SceneNode')
       insertHorizontalMount(tx, input.sceneId, sourceNode, ids, input.now)
+      if (gitPlan) {
+        tx.run(
+          `INSERT INTO execution_contexts (
+             id, workspace_id, kind, cwd, created_at
+           ) VALUES (?, ?, 'git-worktree', ?, ?)`,
+          gitPlan.executionContextId, source.task.workspace_id, gitPlan.path, input.now
+        )
+        tx.run(
+          `INSERT INTO worktrees (
+             id, execution_context_id, repository_root, worktree_path, branch_name,
+             base_ref, state, setup_policy_json, setup_result_json, cleanup_policy,
+             created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
+          gitPlan.worktreeId, gitPlan.executionContextId, gitPlan.repositoryRoot,
+          gitPlan.path, gitPlan.branch, gitPlan.baseRef,
+          JSON.stringify(this.#setupPolicyForWorkspace(source.task.workspace_id)),
+          input.now, input.now
+        )
+      }
       tx.run(
         `INSERT INTO sessions (
            id, task_id, execution_context_id, kind, status, title, cwd,
@@ -512,18 +668,31 @@ export class ForkWorkflowService {
            layout_revision = layout_revision + 1, updated_at = ? WHERE id = ?`,
         sourceNode.id, ids.secondaryNodeId, input.now, input.sceneId
       )
-      tx.run(
-        `INSERT INTO session_fork_intents (
-           session_id, source_session_id, source_provider, source_provider_session_id,
-           state, error_message, created_at, display_name, worktree_mode,
-           worktree_id, target_execution_context_id, worktree_path, branch_name,
-           attempt_count, updated_at
-         ) VALUES (?, ?, 'claude-code', ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-        ids.sessionId, source.forkSource.id, source.binding.provider_session_id,
-        input.now, displayName, input.worktreeMode,
-        gitPlan?.worktreeId ?? null, gitPlan?.executionContextId ?? null,
-        gitPlan?.path ?? null, gitPlan?.branch ?? null, input.now
-      )
+      const acceptance = this.#forkIntents.accept({
+        operationId,
+        submissionKey,
+        sessionId: ids.sessionId,
+        sourceSessionId: source.forkSource.id,
+        sourceProviderSessionId: source.binding.provider_session_id,
+        displayName,
+        worktreeMode: input.worktreeMode,
+        totalSteps: gitPlan ? 5 : 2,
+        now: input.now,
+        ...(gitPlan ? {
+          worktreeId: gitPlan.worktreeId,
+          executionContextId: gitPlan.executionContextId,
+          worktreePath: gitPlan.path,
+          branchName: gitPlan.branch
+        } : {})
+      }, tx)
+      if (gitPlan) {
+        tx.run(
+          `UPDATE session_environment_bindings
+           SET managed_worktree_id = ?, active_target = 'worktree', state = 'recovering',
+               error_message = NULL, updated_at = ? WHERE session_id = ?`,
+          gitPlan.worktreeId, input.now, ids.sessionId
+        )
+      }
       const relationInsertion = tx.run(
         `INSERT INTO session_relation_events (
            event_id, relation_id, operation, task_id, from_session_id, to_session_id,
@@ -546,7 +715,11 @@ export class ForkWorkflowService {
         tx, input.windowId, input.sceneId, ids.sessionId, input.now, preserveFocusedSessionId
       )
       emitForkEvents(emit, command.commandId, source, result, relationId, input.now)
-      return { ...result, forkState: 'pending' as const }
+      return {
+        ...result,
+        forkState: 'pending' as const,
+        forkProgress: acceptance.progress
+      }
     }).result
   }
 
@@ -555,23 +728,30 @@ export class ForkWorkflowService {
     input: MutationLocation,
     sessionId: string,
     worktree: Worktree,
+    operationId: string,
+    lease: Pick<ForkLease, 'token' | 'fence'>,
+    now: number,
     preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
+      const advanced = this.#forkIntents.advanceStage({
+        operationId, lease, stage: 'restoring-provider', now
+      }, tx)
+      if (advanced.kind === 'stale') throw new StaleForkLeaseError()
       this.#environments.bindOwnedWorktree({
         sessionId,
         worktreeId: worktree.id,
         activate: true,
-        now: input.now
+        now
       }, tx)
       tx.run(
         `UPDATE session_fork_intents SET worktree_id = ?, target_execution_context_id = ?,
            worktree_path = ?, branch_name = ?, updated_at = ? WHERE session_id = ?`,
         worktree.id, worktree.executionContextId, worktree.path, worktree.branch,
-        input.now, sessionId
+        now, sessionId
       )
       const result = readCreatedForkResult(
-        tx, input.windowId, input.sceneId, sessionId, input.now, preserveFocusedSessionId
+        tx, input.windowId, input.sceneId, sessionId, now, preserveFocusedSessionId
       )
       emit({
         eventId: `${command.commandId}:worktree-ready`,
@@ -579,9 +759,14 @@ export class ForkWorkflowService {
         aggregateType: 'session', aggregateId: sessionId,
         taskId: result.session!.taskId, sessionId,
         payload: { session: result.session, worktree, graph: result.graph },
-        occurredAt: input.now
+        occurredAt: now
       })
-      return { ...result, forkState: 'pending' as const, worktree }
+      return {
+        ...result,
+        forkState: 'starting' as const,
+        forkProgress: advanced.progress,
+        worktree
+      }
     }).result
   }
 
@@ -589,31 +774,41 @@ export class ForkWorkflowService {
     command: DomainCommandMetadata,
     input: MutationLocation,
     sessionId: string,
+    operationId: string,
+    lease: Pick<ForkLease, 'token' | 'fence'>,
     reason: string,
+    now: number,
     preserveFocusedSessionId?: string
-  ): ForkWorkflowResult {
-    return this.#transactions.execute(command, ({ tx, emit }) => {
-      tx.run(
-        `UPDATE session_fork_intents SET state = 'failed', error_message = ?,
-           completed_at = ?, updated_at = ? WHERE session_id = ?`,
-        reason, input.now, input.now, sessionId
-      )
-      tx.run(
-        `UPDATE sessions SET status = 'interrupted', updated_at = ?,
-           version = version + 1 WHERE id = ?`,
-        input.now, sessionId
-      )
-      const result = readCreatedForkResult(
-        tx, input.windowId, input.sceneId, sessionId, input.now, preserveFocusedSessionId
-      )
-      emit({
-        eventId: `${command.commandId}:fork-failed`, eventType: 'session.fork-failed',
-        aggregateType: 'session', aggregateId: sessionId,
-        taskId: result.session!.taskId, sessionId,
-        payload: { error: reason, graph: result.graph }, occurredAt: input.now
-      })
-      return { ...result, forkState: 'failed' as const, error: reason }
-    }).result
+  ): ForkWorkflowResult | undefined {
+    try {
+      return this.#transactions.execute(command, ({ tx, emit }) => {
+        const failed = this.#forkIntents.failOperation({
+          operationId, lease, error: reason, now
+        }, tx)
+        if (failed.kind === 'stale') throw new StaleForkLeaseError()
+        tx.run(
+          `UPDATE sessions SET status = 'interrupted', updated_at = ?,
+             version = version + 1 WHERE id = ?`,
+          now, sessionId
+        )
+        const result = readCreatedForkResult(
+          tx, input.windowId, input.sceneId, sessionId, now, preserveFocusedSessionId
+        )
+        emit({
+          eventId: `${command.commandId}:fork-failed`, eventType: 'session.fork-failed',
+          aggregateType: 'session', aggregateId: sessionId,
+          taskId: result.session!.taskId, sessionId,
+          payload: { error: reason, graph: result.graph }, occurredAt: now
+        })
+        return {
+          ...result, forkState: 'failed' as const, error: reason,
+          forkProgress: failed.progress
+        }
+      }).result
+    } catch (error) {
+      if (error instanceof StaleForkLeaseError) return undefined
+      throw error
+    }
   }
 }
 
@@ -683,6 +878,18 @@ function readResult(
   const hierarchy = readHierarchyResult(tx, windowId)
   if (hierarchy.session?.id !== sessionId) throw new Error('Fork Session did not become active')
   return { ...hierarchy, graph: projectSceneGraphFrom(tx, sceneId, windowId) }
+}
+
+function readAcceptedForkResult(
+  tx: DatabaseTransaction,
+  windowId: string,
+  sessionId: string
+): WorkspaceHierarchyResult & { graph: SceneSessionGraph } {
+  const hierarchy = readHierarchyResultForSession(tx, windowId, sessionId)
+  return {
+    ...hierarchy,
+    graph: projectSceneGraphFrom(tx, hierarchy.scene!.id, windowId)
+  }
 }
 
 function readCreatedForkResult(
@@ -760,6 +967,25 @@ function metadata(value: string): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function activeChildNamesFrom(tx: DatabaseTransaction, parentSessionId: string): string[] {
+  return tx.all<{ title: string }>(
+    `SELECT sessions.title
+     FROM session_relations_current AS relation
+     JOIN sessions ON sessions.id = relation.from_session_id
+     WHERE relation.to_session_id = ?
+       AND relation.relation_kind IN ('derived-from', 'forked-from')
+       AND sessions.archived_at IS NULL`,
+    parentSessionId
+  ).map(({ title }) => title)
+}
+
+function legacyForkState(stage: ForkProgress['stage']): ForkWorkflowResult['forkState'] {
+  if (stage === 'succeeded') return 'succeeded'
+  if (stage === 'failed') return 'failed'
+  if (stage === 'queued') return 'pending'
+  return 'starting'
 }
 
 function derivedCommand(command: DomainCommandMetadata, suffix: string): DomainCommandMetadata {

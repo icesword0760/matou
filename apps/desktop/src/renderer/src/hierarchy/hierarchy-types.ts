@@ -170,8 +170,14 @@ export interface HierarchyCommands {
   forkSession(sceneId: string, sessionId: string): unknown
   createCanvas(taskId: string): unknown
   createShellSibling(sceneId: string, sessionId: string, parentSessionId?: string): unknown
-  createForkChild(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
-  createForkSibling(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
+  createForkChild(
+    sceneId: string, sessionId: string, name: string,
+    worktreeMode: 'current' | 'new', submissionKey: string
+  ): unknown
+  createForkSibling(
+    sceneId: string, sessionId: string, name: string,
+    worktreeMode: 'current' | 'new', submissionKey: string
+  ): unknown
   retryFork(sceneId: string, sessionId: string): unknown
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown

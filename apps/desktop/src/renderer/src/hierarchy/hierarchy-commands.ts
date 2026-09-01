@@ -89,11 +89,11 @@ export function createHierarchyCommands(
       }
       return result
     },
-    createForkChild: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-child', {
-      sceneId, sourceSessionId, name, worktreeMode
+    createForkChild: (sceneId, sourceSessionId, name, worktreeMode, submissionKey) => command('hierarchy.create-fork-child', {
+      sceneId, sourceSessionId, name, worktreeMode, submissionKey
     }),
-    createForkSibling: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-sibling', {
-      sceneId, sourceSessionId, name, worktreeMode
+    createForkSibling: (sceneId, sourceSessionId, name, worktreeMode, submissionKey) => command('hierarchy.create-fork-sibling', {
+      sceneId, sourceSessionId, name, worktreeMode, submissionKey
     }),
     retryFork: (sceneId, sessionId) => command('hierarchy.retry-fork', { sceneId, sessionId }),
     removeFailedFork: (sceneId, sessionId) => command('hierarchy.remove-failed-fork', {

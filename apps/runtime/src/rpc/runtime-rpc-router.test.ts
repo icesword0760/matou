@@ -469,14 +469,22 @@ describe('RuntimeRpcRouter', () => {
 
     const child = await router.handle('hierarchy.create-fork-child', payload('fork-child', {
       windowId: 'window-fork', sceneId: initial.scene.id,
-      sourceSessionId: initial.session.id, name: '第一分支', worktreeMode: 'current', now: 4
+      sourceSessionId: initial.session.id, name: '第一分支', worktreeMode: 'current', now: 4,
+      submissionKey: 'router-child-submission'
     })) as { session: { id: string; title: string }; graph: { nodes: Array<{ title: string }> } }
+    const duplicate = await router.handle('hierarchy.create-fork-child', payload('fork-child-retry', {
+      windowId: 'window-fork', sceneId: initial.scene.id,
+      sourceSessionId: initial.session.id, name: '超时重发', worktreeMode: 'current', now: 5,
+      submissionKey: 'router-child-submission'
+    })) as { session: { id: string } }
     const sibling = await router.handle('hierarchy.create-fork-sibling', payload('fork-sibling', {
       windowId: 'window-fork', sceneId: initial.scene.id,
-      sourceSessionId: child.session.id, name: '第二分支', worktreeMode: 'current', now: 5
+      sourceSessionId: child.session.id, name: '第二分支', worktreeMode: 'current', now: 6,
+      submissionKey: 'router-sibling-submission'
     })) as { session: { id: string }; graph: { nodes: Array<{ title: string }> } }
 
     expect(child.session.title).toBe('第一分支')
+    expect(duplicate.session.id).toBe(child.session.id)
     expect(sibling.graph.nodes.map(({ title }) => title)).toEqual(['Claude', '第一分支', '第二分支'])
     expect(database.get(
       'SELECT source_session_id FROM session_fork_intents WHERE session_id = ?', sibling.session.id
@@ -487,6 +495,10 @@ describe('RuntimeRpcRouter', () => {
     await expect(router.handle('workspace.create', { command: {}, input: { name: '' } })).rejects.toMatchObject({
       code: 'INVALID_REQUEST'
     })
+    await expect(router.handle('hierarchy.create-fork-child', payload('missing-submission', {
+      windowId: 'window-1', sceneId: 'scene-1', sourceSessionId: 'session-1',
+      name: 'Fork', worktreeMode: 'current', now: 1
+    }))).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 
   it('projects Task unread counts and clears only the newly visible focused panel', async () => {

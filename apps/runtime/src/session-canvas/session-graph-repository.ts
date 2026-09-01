@@ -1,6 +1,7 @@
 import type {
   DomainCommandMetadata,
   DomainCommit,
+  ForkStage,
   ProviderRestoreState,
   SceneSessionGraph,
   SessionCanvasMembership,
@@ -46,6 +47,12 @@ interface GraphRow extends MembershipRow {
   fork_state: 'pending' | 'starting' | 'succeeded' | 'failed' | null
   fork_error: string | null
   fork_attempt: number | null
+  fork_operation_id: string | null
+  fork_submission_key: string | null
+  fork_stage: ForkStage | null
+  fork_completed_steps: number | null
+  fork_total_steps: number | null
+  fork_operation_attempt: number | null
   worktree_path: string | null
   branch_name: string | null
   actual_worktree_base_revision: string | null
@@ -235,6 +242,22 @@ export function projectSceneGraphFrom(
     ? `LEFT JOIN execution_context_git_states AS context_git
          ON context_git.execution_context_id = sessions.execution_context_id`
     : ''
+  const hasForkProgress = source.all<{ name: string }>(
+    'PRAGMA table_info(session_fork_intents)'
+  ).some(({ name }) => name === 'operation_id')
+  const forkProgressProjection = hasForkProgress
+    ? `fork.operation_id AS fork_operation_id,
+         fork.submission_key AS fork_submission_key,
+         fork.stage AS fork_stage,
+         fork.completed_steps AS fork_completed_steps,
+         fork.total_steps AS fork_total_steps,
+         fork.attempt AS fork_operation_attempt,`
+    : `NULL AS fork_operation_id,
+         NULL AS fork_submission_key,
+         NULL AS fork_stage,
+         NULL AS fork_completed_steps,
+         NULL AS fork_total_steps,
+         NULL AS fork_operation_attempt,`
 
   const rows = source.all<GraphRow>(
       `SELECT
@@ -259,6 +282,7 @@ export function projectSceneGraphFrom(
          fork.state AS fork_state,
          fork.error_message AS fork_error,
          fork.attempt_count AS fork_attempt,
+         ${forkProgressProjection}
          worktrees.worktree_path,
          worktrees.branch_name,
          worktrees.base_revision AS actual_worktree_base_revision,
@@ -335,22 +359,41 @@ export function projectSceneGraphFrom(
       const counts = childCounts.get(row.session_id)
       const environment = mapEnvironment(row)
       const git = mapGitState(row)
+      const forkProjection = row.fork_operation_id && row.fork_submission_key && row.fork_stage &&
+        row.fork_completed_steps !== null && row.fork_total_steps !== null &&
+        row.fork_operation_attempt !== null
+        ? {
+            forkProgress: {
+              operationId: row.fork_operation_id,
+              sessionId: row.session_id,
+              submissionKey: row.fork_submission_key,
+              stage: row.fork_stage,
+              completedSteps: row.fork_completed_steps,
+              totalSteps: row.fork_total_steps,
+              attempt: row.fork_operation_attempt,
+              ...(row.fork_error === null ? {} : { error: row.fork_error })
+            }
+          }
+        : {
+            ...(row.fork_state === null ? {} : { forkState: row.fork_state }),
+            ...(row.fork_error === null ? {} : { forkError: row.fork_error }),
+            ...(row.fork_attempt === null ? {} : { forkAttempt: row.fork_attempt })
+          }
       return {
         sessionId: row.session_id,
         sceneId: row.scene_id,
         ...(row.parent_session_id === null ? {} : { parentSessionId: row.parent_session_id }),
         ...(row.relation_kind === null ? {} : { relationKind: row.relation_kind }),
         currentMode: row.kind,
-        workStatus: row.fork_state === 'failed' || row.restore_state === 'failed'
+        workStatus: row.fork_stage === 'failed' || row.fork_state === 'failed' || row.restore_state === 'failed'
           ? 'error'
-          : row.fork_state === 'pending' || row.fork_state === 'starting'
+          : ((row.fork_stage !== null && row.fork_stage !== 'succeeded') ||
+              row.fork_state === 'pending' || row.fork_state === 'starting')
             ? 'starting'
             : row.work_status,
         providerRestoreState: row.restore_state ?? 'none',
         ...(row.restore_error === null ? {} : { providerRestoreError: row.restore_error }),
-        ...(row.fork_state === null ? {} : { forkState: row.fork_state }),
-        ...(row.fork_error === null ? {} : { forkError: row.fork_error }),
-        ...(row.fork_attempt === null ? {} : { forkAttempt: row.fork_attempt }),
+        ...forkProjection,
         ...(providerSpawnRevision(row.provider_metadata_json) === undefined ? {} : {
           providerSpawnRevision: providerSpawnRevision(row.provider_metadata_json)!
         }),

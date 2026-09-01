@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 export interface BranchDialogSubmit {
   name: string
   worktreeMode: 'current' | 'new'
+  submissionKey: string
 }
 
 export function BranchDialog(props: {
@@ -17,12 +18,17 @@ export function BranchDialog(props: {
   const [worktreeMode, setWorktreeMode] = useState<'current' | 'new'>('current')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+  const submissionKeyRef = useRef<string | null>(null)
+  const submissionKey = submissionKeyRef.current ?? crypto.randomUUID()
+  submissionKeyRef.current = submissionKey
   const inputRef = useRef<HTMLInputElement>(null)
   const title = relationMode === 'child' ? '创建子会话分支' : '创建同级分支'
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
   const submit = async () => {
+    if (submittingRef.current) return
     const displayName = name.trim()
     if (!displayName) {
       setError('请输入分支名称')
@@ -34,12 +40,18 @@ export function BranchDialog(props: {
       inputRef.current?.focus()
       return
     }
+    submittingRef.current = true
     setSubmitting(true)
     setError('')
     try {
-      await onConfirm({ name: displayName, worktreeMode })
+      await onConfirm({
+        name: displayName,
+        worktreeMode,
+        submissionKey
+      })
     } catch (cause) {
       setError(errorMessage(cause))
+      submittingRef.current = false
       setSubmitting(false)
       inputRef.current?.focus()
     }

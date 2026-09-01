@@ -358,10 +358,15 @@ export class SessionRepository {
       if (!input.provisional) {
         tx.run(
           `UPDATE session_fork_intents
-           SET state = 'succeeded', error_message = NULL, completed_at = ?
-           WHERE session_id = ? AND state IN ('pending', 'starting')`,
+           SET state = 'succeeded', stage = 'succeeded',
+               completed_steps = total_steps, error_message = NULL, completed_at = ?, updated_at = ?
+           WHERE session_id = ? AND state IN ('pending', 'starting')
+             AND (operation_id = '' OR operation_id LIKE 'legacy-operation:%')
+             AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
           input.now,
-          input.sessionId
+          input.now,
+          input.sessionId,
+          input.now
         )
       }
       emitSessionEvent(

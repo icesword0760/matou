@@ -540,6 +540,7 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          submissionKey: text(input.submissionKey, 'submissionKey'),
           name: text(input.name, 'name'),
           worktreeMode: enumeration(input.worktreeMode, ['current', 'new'] as const, 'worktreeMode'),
           now: integer(input.now, 'now', 0)
@@ -549,6 +550,7 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          submissionKey: text(input.submissionKey, 'submissionKey'),
           name: text(input.name, 'name'),
           worktreeMode: enumeration(input.worktreeMode, ['current', 'new'] as const, 'worktreeMode'),
           now: integer(input.now, 'now', 0)

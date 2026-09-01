@@ -41,6 +41,27 @@ describe('PRD 02 HUD commands', () => {
     ])
   })
 
+  it('forwards the BranchDialog submission identity instead of replacing it per RPC attempt', async () => {
+    const request = vi.fn().mockResolvedValue({})
+    const commands = createHierarchyCommands({ request } as never, 'window-1')
+
+    await commands.createForkChild(
+      'scene-1', 'source-1', '子分支', 'current', 'stable-child-submission'
+    )
+    await commands.createForkSibling(
+      'scene-1', 'source-1', '同级分支', 'new', 'stable-sibling-submission'
+    )
+
+    expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
+      ['hierarchy.create-fork-child', expect.objectContaining({
+        submissionKey: 'stable-child-submission'
+      })],
+      ['hierarchy.create-fork-sibling', expect.objectContaining({
+        submissionKey: 'stable-sibling-submission'
+      })]
+    ])
+  })
+
   it('reasserts focus on a newly created Shell after its authoritative mutation', async () => {
     const request = vi.fn()
       .mockResolvedValueOnce({ session: { id: 'new-shell' } })

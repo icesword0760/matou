@@ -1148,5 +1148,52 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         CHECK (kind = 'locate' OR candidate_path IS NULL)
       ) STRICT;
     `
+  },
+  {
+    version: 25,
+    name: 'durable-fork-operations',
+    sql: `
+      ALTER TABLE session_fork_intents ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE session_fork_intents ADD COLUMN submission_key TEXT NOT NULL DEFAULT '';
+      ALTER TABLE session_fork_intents ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'
+        CHECK (stage IN (
+          'queued', 'creating-worktree', 'applying-setup', 'binding-session',
+          'restoring-provider', 'starting-window', 'succeeded', 'failed'
+        ));
+      ALTER TABLE session_fork_intents ADD COLUMN completed_steps INTEGER NOT NULL DEFAULT 0
+        CHECK (completed_steps >= 0);
+      ALTER TABLE session_fork_intents ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 5
+        CHECK (total_steps > 0 AND completed_steps <= total_steps);
+      ALTER TABLE session_fork_intents ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0
+        CHECK (attempt >= 0);
+      ALTER TABLE session_fork_intents ADD COLUMN lease_owner TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN lease_token TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN lease_expires_at INTEGER;
+      ALTER TABLE session_fork_intents ADD COLUMN lease_fence INTEGER NOT NULL DEFAULT 0
+        CHECK (lease_fence >= 0);
+      ALTER TABLE session_fork_intents ADD COLUMN last_heartbeat_at INTEGER;
+
+      UPDATE session_fork_intents
+      SET operation_id = 'legacy-operation:' || session_id,
+          submission_key = 'legacy-submission:' || session_id,
+          stage = CASE state
+            WHEN 'succeeded' THEN 'succeeded'
+            WHEN 'failed' THEN 'failed'
+            ELSE 'queued'
+          END,
+          total_steps = CASE worktree_mode WHEN 'current' THEN 2 ELSE 5 END,
+          completed_steps = CASE state
+            WHEN 'succeeded' THEN CASE worktree_mode WHEN 'current' THEN 2 ELSE 5 END
+            ELSE 0
+          END,
+          attempt = attempt_count;
+
+      CREATE UNIQUE INDEX session_fork_intents_operation_idx
+      ON session_fork_intents(operation_id);
+      CREATE UNIQUE INDEX session_fork_intents_submission_idx
+      ON session_fork_intents(submission_key);
+      CREATE INDEX session_fork_intents_lease_idx
+      ON session_fork_intents(stage, lease_expires_at, created_at);
+    `
   }
 ]

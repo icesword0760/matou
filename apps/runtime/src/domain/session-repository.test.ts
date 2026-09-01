@@ -180,6 +180,69 @@ describe('SessionRepository', () => {
     )).toEqual({ state: 'succeeded', completed_at: 4 })
   })
 
+  it('does not let an unfenced provider identity settle a durable Fork operation', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-durable'), {
+      id: 'source-durable', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at, operation_id, submission_key,
+         stage, completed_steps, total_steps
+       ) VALUES ('session-1', 'source-durable', 'claude-code', 'provider-source',
+                 'starting', 2, 3, 3, 'operation-durable', 'submission-durable',
+                 'restoring-provider', 3, 5)`
+    )
+
+    sessions.recordResumableProviderIdentity(command('fork-durable-identity'), {
+      id: 'binding-forked-durable', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 4
+    })
+
+    expect(database.get(
+      `SELECT state, stage, completed_steps, completed_at
+       FROM session_fork_intents WHERE session_id = ?`, 'session-1'
+    )).toEqual({
+      state: 'starting', stage: 'restoring-provider', completed_steps: 3, completed_at: null
+    })
+  })
+
+  it('settles a legacy Fork from provider identity only after its active lease expires', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-leased-legacy'), {
+      id: 'source-leased-legacy', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at, operation_id, submission_key,
+         stage, lease_owner, lease_token, lease_expires_at, lease_fence
+       ) VALUES ('session-1', 'source-leased-legacy', 'claude-code', 'provider-source',
+                 'starting', 2, 3, 3,
+                 'legacy-operation:leased', 'legacy-submission:leased',
+                 'restoring-provider', 'runtime-a', 'legacy-token', 5, 1)`
+    )
+
+    sessions.recordResumableProviderIdentity(command('legacy-identity-before-expiry'), {
+      id: 'binding-legacy-leased', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 4
+    })
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'starting', stage: 'restoring-provider' })
+
+    sessions.recordResumableProviderIdentity(command('legacy-identity-after-expiry'), {
+      id: 'binding-unused', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 5
+    })
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'succeeded', stage: 'succeeded' })
+  })
+
   it('does not settle a Fork intent from a provisional statusline identity', () => {
     seedSession()
     sessions.createSession(command('fork-source-provisional'), {
