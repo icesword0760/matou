@@ -96,7 +96,7 @@ async function runPackagedSmoke(
     const page = await app.firstWindow()
     await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
-    await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 2)
+    await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 3)
     await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
     await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
     await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
@@ -133,15 +133,27 @@ async function runPackagedSmoke(
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid', pid!)
       await detached.close()
       await expect(page.getByTestId('detached-placeholder')).toHaveCount(0)
-      await expect(page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)).toHaveCount(0)
-      await expect(page.locator('.stopped-session-card')).toContainText('已停止')
+      const returned = page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)
+      await expect(returned).toBeVisible()
+      await expect(returned).toHaveAttribute('data-pid', pid!)
+      await expect(page.locator('.stopped-session-card')).toHaveCount(0)
       await expect(page.getByRole('button', { name: '重新启动' })).toHaveCount(0)
 
+      const sessionsBeforeAdd = await page.locator(
+        '.scene-stage:not([hidden]) .terminal-surface[data-session-id]'
+      ).evaluateAll((elements) => elements.map((element) =>
+        (element as HTMLElement).dataset.sessionId
+      ))
       await page.getByRole('button', { name: '横向新增 Shell' }).click()
-      const continued = page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
-      await expect(continued).toHaveAttribute('data-session-id', /.+/)
-      await expect(continued).not.toHaveAttribute('data-session-id', detachedSessionId!)
-      await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
+      await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(3)
+      const sessionsAfterAdd = await page.locator(
+        '.scene-stage:not([hidden]) .terminal-surface[data-session-id]'
+      ).evaluateAll((elements) => elements.map((element) =>
+        (element as HTMLElement).dataset.sessionId
+      ))
+      expect(sessionsAfterAdd.filter((sessionId) => !sessionsBeforeAdd.includes(sessionId)))
+        .toHaveLength(1)
+      expect(sessionsAfterAdd).toContain(detachedSessionId)
 
       const workspace = join(dataDirectory, 'matou_workspace')
       const moved = `${workspace}-moved`
@@ -172,7 +184,7 @@ async function runPackagedSmoke(
       await expect.poll(() => app.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()[0]?.isVisible()
       )).toBe(true)
-      await expect(page.getByTestId('terminal-pane')).toHaveCount(2)
+      await expect(page.getByTestId('terminal-pane')).toHaveCount(3)
     }
   } finally {
     await app.close()
