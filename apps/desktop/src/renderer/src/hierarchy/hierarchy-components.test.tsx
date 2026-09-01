@@ -208,7 +208,7 @@ describe('Workspace and Task navigation', () => {
     expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', false)
   })
 
-  it('lists closed canvases in the owning Task menu and reopens the selected canvas', async () => {
+  it('keeps closed canvases out of the Task menu', async () => {
     const user = userEvent.setup()
     const target = commands()
     const data = fixture()
@@ -218,10 +218,9 @@ describe('Workspace and Task navigation', () => {
     render(<TaskSidebar projection={data} commands={target} />)
 
     await user.click(screen.getByRole('button', { name: '事项菜单：事项 A' }))
-    await user.click(screen.getByRole('menuitem', { name: '已关闭画布 1' }))
-    await user.click(screen.getByRole('menuitem', { name: '重新打开画布：接口排查' }))
-
-    expect(target.reopenScene).toHaveBeenCalledWith('scene-closed')
+    expect(screen.queryByText(/已关闭画布/)).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '重新打开画布：接口排查' })).toBeNull()
+    expect(target.reopenScene).not.toHaveBeenCalled()
   })
 
   it('rejects a Task drop from another Workspace without issuing a reorder', () => {
