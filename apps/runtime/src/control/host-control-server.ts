@@ -4,6 +4,7 @@ import { createServer, type Server, type Socket } from 'node:net'
 import { dirname, resolve } from 'node:path'
 
 import {
+  HostControlTargetNotFoundError,
   HostControlTargetNotReadyError,
   type AllowedControlKey,
   type HostCallerIdentity,
@@ -240,6 +241,8 @@ export class HostControlServer {
     } catch (error) {
       const fault = error instanceof ControlFault
         ? error
+        : error instanceof HostControlTargetNotFoundError
+          ? new ControlFault('TARGET_NOT_FOUND', error.message)
         : error instanceof HostControlTargetNotReadyError
           ? new ControlFault('TARGET_NOT_READY', error.message)
         : new ControlFault('INTERNAL_ERROR', errorMessage(error))

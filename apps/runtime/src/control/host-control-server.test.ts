@@ -191,8 +191,8 @@ describe('HostControlServer', () => {
 
 class TestBackend implements HostControlBackend {
   targets: HostTarget[] = [
-    { ref: 'surface:1', workspaceId: 'workspace-1', taskId: 'task-1', sessionId: 'session-1', mountId: 'mount-1', title: 'One' },
-    { ref: 'surface:2', workspaceId: 'workspace-1', taskId: 'task-1', sessionId: 'session-2', mountId: 'mount-2', title: 'Two' }
+    targetFixture(1, 'One'),
+    targetFixture(2, 'Two')
   ]
   readCurrent = vi.fn(async () => ({ text: 'current' }))
   readHistory = vi.fn(async () => ({ text: 'history' }))
@@ -216,6 +216,20 @@ class TestBackend implements HostControlBackend {
     return targets[0]!.sessionId
   })
   listTargets(): HostTarget[] { return this.targets.map((target) => ({ ...target })) }
+}
+
+function targetFixture(ordinal: number, title: string): HostTarget {
+  const sessionId = `session-${ordinal}`
+  return {
+    ref: `surface:${ordinal}`, workspaceId: 'workspace-1', taskId: 'task-1', sessionId,
+    mountId: `mount-${ordinal}`, title, profile: 'shell', cwd: '/fixture', workStatus: 'idle',
+    window: { id: 'window-1', kind: 'main', ordinal: 1 },
+    workspace: { id: 'workspace-1', name: 'Workspace', ordinal: 1 },
+    task: { id: 'task-1', name: 'Task', ordinal: 1 },
+    canvas: { id: 'scene-1', name: 'Canvas', ordinal: 1 },
+    session: { id: sessionId, ordinal, detached: false },
+    dag: { depth: 0, childRefs: [], siblingRefs: ['surface:1', 'surface:2'] }
+  }
 }
 
 function controlRequest(requestId: string, token: string, method: string, params: unknown) {

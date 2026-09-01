@@ -1,10 +1,10 @@
 import {
-  resolveTargetFromProjection,
   type HostCallerIdentity,
   type HostControlBackend,
   type HostTarget,
   type HostTargetSelector
 } from './host-control-server'
+import { HostTopologyProjector } from './host-topology-projector'
 import { CommandBoundaryRepository } from '../anchors/anchor-resolver'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { readSessionFrames } from '../journal/segment-journal'
@@ -22,6 +22,7 @@ export class RuntimeControlBackend implements HostControlBackend {
   readonly #notifications: NotificationProjection | undefined
   readonly #active = new Map<string, PtySession>()
   readonly #taskMigrations: TaskWindowMigrationService
+  readonly #topology: HostTopologyProjector
 
   constructor(
     database: RuntimeDatabase,
@@ -34,6 +35,7 @@ export class RuntimeControlBackend implements HostControlBackend {
     this.#telemetry = telemetry
     this.#notifications = notifications
     this.#commands = new CommandBoundaryRepository(database)
+    this.#topology = new HostTopologyProjector(database)
     this.#taskMigrations = new TaskWindowMigrationService(
       database, new DomainTransactionManager(database)
     )
@@ -48,43 +50,20 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   identify(caller: HostCallerIdentity): unknown {
-    const target = this.listTargets(caller, 'all').find(({ sessionId }) => sessionId === caller.sessionId)
-    if (!target) throw new Error(`Session ${caller.sessionId} is not available`)
-    return { caller, target }
+    return this.#topology.identify(caller)
   }
 
   resolveTarget(
     caller: HostCallerIdentity,
     selector: HostTargetSelector,
-    targets: HostTarget[]
+    _targets: HostTarget[]
   ): string {
-    if (selector.kind === 'self') return caller.sessionId
-    return resolveTargetFromProjection(selector, targets)
+    return this.#topology.resolve(caller, selector)
   }
 
-  listTargets(_caller?: HostCallerIdentity, _scope?: 'current-level' | 'all'): HostTarget[] {
-    return this.#database.all<{
-      workspace_id: string; task_id: string; session_id: string; mount_id: string; title: string
-    }>(
-      `SELECT workspaces.id AS workspace_id, tasks.id AS task_id,
-              sessions.id AS session_id, session_mounts.id AS mount_id, sessions.title
-       FROM session_mounts
-       JOIN scenes ON scenes.id = session_mounts.scene_id
-       JOIN tasks ON tasks.id = scenes.task_id
-       JOIN workspaces ON workspaces.id = tasks.workspace_id
-       JOIN sessions ON sessions.id = session_mounts.session_id
-       WHERE scenes.archived_at IS NULL AND tasks.archived_at IS NULL
-         AND workspaces.archived_at IS NULL AND sessions.archived_at IS NULL
-       ORDER BY workspaces.created_at, tasks.created_at, scenes.created_at,
-                session_mounts.created_at, session_mounts.id`
-    ).map((row, index) => ({
-      ref: `surface:${index + 1}`,
-      workspaceId: row.workspace_id,
-      taskId: row.task_id,
-      sessionId: row.session_id,
-      mountId: row.mount_id,
-      title: row.title
-    }))
+  listTargets(caller?: HostCallerIdentity, scope: 'current-level' | 'all' = 'all'): HostTarget[] {
+    if (!caller) return []
+    return this.#topology.list(caller, scope)
   }
 
   async readCurrent(sessionId: string, limits: { maxLines: number; maxBytes: number }): Promise<unknown> {

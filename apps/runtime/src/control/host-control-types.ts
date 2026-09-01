@@ -33,6 +33,19 @@ export interface HostTarget {
   sessionId: string
   mountId?: string
   title: string
+  profile: 'shell' | 'claude-code' | 'codex'
+  cwd: string
+  workStatus: string
+  window: {
+    id: string
+    kind: 'main' | 'detached-terminal'
+    ordinal: number
+  }
+  workspace: { id: string; name: string; ordinal: number }
+  task: { id: string; name: string; ordinal: number }
+  canvas: { id: string; name: string; ordinal: number }
+  session: { id: string; ordinal: number; detached: boolean }
+  dag: { depth: number; parentRef?: string; childRefs: string[]; siblingRefs: string[] }
 }
 
 export type AllowedControlKey =
@@ -56,3 +69,4 @@ export type AllowedControlKey =
   | 'CtrlZ'
 
 export class HostControlTargetNotReadyError extends Error {}
+export class HostControlTargetNotFoundError extends Error {}
