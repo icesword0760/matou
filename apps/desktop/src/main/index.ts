@@ -2,7 +2,9 @@ import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
+import electronUpdater from 'electron-updater'
 
+import { AppUpdateManager } from './app-update-manager'
 import { RuntimeHost } from './runtime-host'
 import { resolveDefaultWorkspacePath } from './default-workspace-policy'
 import { claimSingleInstance } from './single-instance-policy'
@@ -25,6 +27,9 @@ let quitting = false
 let runtimeShutdownComplete = false
 let runtimeShutdownPromise: Promise<void> | undefined
 let mainWindowSequence = 0
+let updateManager: AppUpdateManager | undefined
+
+const { autoUpdater } = electronUpdater
 
 if (process.env.ELECTRON_USER_DATA_DIR) {
   mkdirSync(process.env.ELECTRON_USER_DATA_DIR, { recursive: true })
@@ -264,6 +269,28 @@ if (primaryInstance) app.whenReady().then(async () => {
   runtimeHost = new RuntimeHost(resolveRuntimeEntry())
   await runtimeHost.start()
   await createWindow()
+  autoUpdater.channel = process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
+  if (process.env.MATOU_UPDATE_BASE_URL) {
+    autoUpdater.setFeedURL({
+      provider: 'generic', url: process.env.MATOU_UPDATE_BASE_URL,
+      channel: process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
+    })
+  }
+  updateManager = new AppUpdateManager({
+    updater: autoUpdater,
+    enabled: app.isPackaged && process.env.MATOU_DISABLE_AUTO_UPDATE !== '1',
+    currentVersion: app.getVersion(),
+    publish: (state) => {
+      for (const window of browserWindows.values()) {
+        if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.appUpdateState, state)
+      }
+    },
+    prepareInstall: async () => {
+      quitting = true
+      await shutdownRuntime()
+    }
+  })
+  updateManager.start()
   tray = new Tray(nativeImage.createEmpty())
   tray.setToolTip('Matou')
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -320,19 +347,23 @@ ipcMain.handle(DESKTOP_CHANNELS.updateDagNotifications, (
 ) => {
   dagWindows.updateNotifications(mainWindowId, sessionIds)
 })
+ipcMain.handle(DESKTOP_CHANNELS.getAppUpdateState, () => updateManager?.state() ?? ({
+  status: 'idle', currentVersion: app.getVersion()
+}))
+ipcMain.handle(DESKTOP_CHANNELS.checkForAppUpdates, () => updateManager?.check())
+ipcMain.handle(DESKTOP_CHANNELS.downloadAppUpdate, () => updateManager?.download())
+ipcMain.handle(DESKTOP_CHANNELS.installAppUpdate, () => updateManager?.install())
 
 app.on('before-quit', () => {
   quitting = true
+  updateManager?.dispose()
   tray?.destroy()
 })
 
 app.on('will-quit', (event) => {
   if (runtimeShutdownComplete || !runtimeHost) return
   event.preventDefault()
-  runtimeShutdownPromise ??= runtimeHost.stop().then(() => {
-    runtimeShutdownComplete = true
-    app.quit()
-  })
+  void shutdownRuntime().then(() => app.quit())
 })
 
 app.on('window-all-closed', () => {
@@ -340,3 +371,11 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+async function shutdownRuntime(): Promise<void> {
+  if (runtimeShutdownComplete || !runtimeHost) return
+  runtimeShutdownPromise ??= runtimeHost.stop().then(() => {
+    runtimeShutdownComplete = true
+  })
+  await runtimeShutdownPromise
+}

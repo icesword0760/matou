@@ -88,6 +88,15 @@ const desktopApi: MatouDesktopApi = {
     runtimeConnectionListeners.add(listener)
     listener(runtimeConnectionState)
     return () => runtimeConnectionListeners.delete(listener)
+  },
+  getAppUpdateState: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getAppUpdateState),
+  checkForAppUpdates: () => ipcRenderer.invoke(DESKTOP_CHANNELS.checkForAppUpdates),
+  downloadAppUpdate: () => ipcRenderer.invoke(DESKTOP_CHANNELS.downloadAppUpdate),
+  installAppUpdate: () => ipcRenderer.invoke(DESKTOP_CHANNELS.installAppUpdate),
+  onAppUpdateState: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) => listener(state)
+    ipcRenderer.on(DESKTOP_CHANNELS.appUpdateState, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.appUpdateState, handler)
   }
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)

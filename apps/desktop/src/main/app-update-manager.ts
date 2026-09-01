@@ -1,35 +1,17 @@
+import type {
+  AppUpdateProgress, AppUpdateReleaseState, AppUpdateState
+} from '../shared/desktop-api'
+
 export interface AppUpdaterAdapter {
   autoDownload: boolean
   autoInstallOnAppQuit: boolean
-  channel?: string
+  channel?: string | null
   on(event: string, listener: (...args: any[]) => void): unknown
   checkForUpdates(): Promise<unknown>
   downloadUpdate(): Promise<unknown>
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void
   setFeedURL?(options: { provider: 'generic'; url: string; channel?: string }): void
 }
-
-export interface AppUpdateProgress {
-  percent: number
-  transferredBytes: number
-  totalBytes: number
-  bytesPerSecond: number
-  remainingSeconds?: number
-}
-
-export interface AppUpdateReleaseState {
-  currentVersion: string
-  version: string
-  releaseDate?: string
-  releaseNotes: string[]
-  sizeBytes?: number
-}
-
-export type AppUpdateState =
-  | { status: 'idle' | 'checking' | 'not-available'; currentVersion: string }
-  | ({ status: 'available' | 'downloaded' } & AppUpdateReleaseState)
-  | ({ status: 'downloading'; progress: AppUpdateProgress } & AppUpdateReleaseState)
-  | { status: 'error'; currentVersion: string; errorMessage: string }
 
 export interface AppUpdateManagerOptions {
   updater: AppUpdaterAdapter
@@ -43,8 +25,8 @@ export interface AppUpdateManagerOptions {
 
 export class AppUpdateManager {
   private current: AppUpdateState
-  private initialTimer?: ReturnType<typeof setTimeout>
-  private intervalTimer?: ReturnType<typeof setInterval>
+  private initialTimer: ReturnType<typeof setTimeout> | undefined
+  private intervalTimer: ReturnType<typeof setInterval> | undefined
   private installPromise?: Promise<void>
   private started = false
 

@@ -17,9 +17,36 @@ export interface MatouDesktopApi {
   onDagShortcut(listener: (kind: 'short' | 'long') => void): () => void
   onScrollGesture(listener: (phase: 'begin' | 'end') => void): () => void
   onRuntimeConnectionState(listener: (state: RuntimeConnectionState) => void): () => void
+  getAppUpdateState(): Promise<AppUpdateState>
+  checkForAppUpdates(): Promise<void>
+  downloadAppUpdate(): Promise<void>
+  installAppUpdate(): Promise<void>
+  onAppUpdateState(listener: (state: AppUpdateState) => void): () => void
 }
 
 export type RuntimeConnectionState = 'reconnecting' | 'ready'
+
+export interface AppUpdateProgress {
+  percent: number
+  transferredBytes: number
+  totalBytes: number
+  bytesPerSecond: number
+  remainingSeconds?: number
+}
+
+export interface AppUpdateReleaseState {
+  currentVersion: string
+  version: string
+  releaseDate?: string
+  releaseNotes: string[]
+  sizeBytes?: number
+}
+
+export type AppUpdateState =
+  | { status: 'idle' | 'checking' | 'not-available'; currentVersion: string }
+  | ({ status: 'available' | 'downloaded' } & AppUpdateReleaseState)
+  | ({ status: 'downloading'; progress: AppUpdateProgress } & AppUpdateReleaseState)
+  | { status: 'error'; currentVersion: string; errorMessage: string }
 
 export interface DetachedTerminalWindowInput {
   windowId: string
@@ -69,5 +96,10 @@ export const DESKTOP_CHANNELS = {
   dagNodeSelected: 'matou:dag-node-selected',
   dagShortcut: 'matou:dag-shortcut',
   scrollGesture: 'matou:scroll-gesture',
-  runtimeConnectionState: 'matou:runtime-connection-state'
+  runtimeConnectionState: 'matou:runtime-connection-state',
+  getAppUpdateState: 'matou:app-update:get-state',
+  checkForAppUpdates: 'matou:app-update:check',
+  downloadAppUpdate: 'matou:app-update:download',
+  installAppUpdate: 'matou:app-update:install',
+  appUpdateState: 'matou:app-update:state'
 } as const
