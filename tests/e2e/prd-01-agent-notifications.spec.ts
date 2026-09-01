@@ -102,6 +102,61 @@ test('closes outside or with Escape and remembers the sound preference', async (
   }
 })
 
+test('bounds two Workspace notification queues, navigates, and clears the retained center', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    const pane = page.locator('[data-testid="terminal-pane"]:visible').first()
+    const ids = await hierarchyIds(page, pane)
+
+    await page.evaluate(({ ids }) => {
+      if (!window.matouE2e) throw new Error('Matou E2E bridge is missing')
+      for (let index = 0; index < 1_000; index += 1) {
+        const eventId = `active-capacity-${index}`
+        window.matouE2e.pushNotification({
+          eventId, eventType: 'completed', title: '容量验收', body: eventId,
+          workspaceId: ids.workspaceId, taskId: ids.taskId, sceneId: ids.sceneId,
+          sessionId: `active-capacity-session-${index}`, cooldownKey: eventId, sound: false
+        })
+      }
+      window.matouE2e.pushNotification({
+        eventId: 'active-capacity-target', eventType: 'completed', title: '容量验收',
+        body: 'active-capacity-target', ...ids, cooldownKey: 'active-capacity-target', sound: false
+      })
+      for (let index = 0; index < 1_001; index += 1) {
+        const eventId = `other-capacity-${index}`
+        window.matouE2e.pushNotification({
+          eventId, eventType: 'completed', title: '另一工作空间', body: eventId,
+          workspaceId: 'workspace-capacity-other', taskId: 'task-capacity-other',
+          sceneId: 'scene-capacity-other', sessionId: `other-capacity-session-${index}`,
+          cooldownKey: eventId, sound: false
+        })
+      }
+    }, { ids })
+
+    await expect(page.locator('.workbench-item__badge')).toHaveText('99+')
+    await page.getByRole('button', { name: '通知中心' }).click()
+    const center = page.getByRole('region', { name: '通知中心' })
+    await expect(center).toContainText('通知 (2000)')
+    await expect(center.getByRole('button', { name: '打开通知：active-capacity-0' })).toHaveCount(0)
+    await expect(center.getByRole('button', { name: '打开通知：other-capacity-0' })).toHaveCount(0)
+
+    await center.getByRole('button', { name: '打开通知：active-capacity-target' }).click()
+    await expect(center).toHaveCount(0)
+    await expect(pane).toHaveAttribute('data-active', 'true')
+
+    await page.getByRole('button', { name: '通知中心' }).click()
+    const reopened = page.getByRole('region', { name: '通知中心' })
+    await expect(reopened).toContainText('通知 (1999)')
+    await reopened.getByRole('button', { name: '清空通知' }).click()
+    await expect(reopened).toContainText('通知 (0)')
+    await expect(reopened).toContainText('暂无通知')
+    await expect(page.locator('.workbench-item__badge')).toHaveCount(0)
+  } finally {
+    await fixture.close()
+  }
+})
+
 async function hierarchyIds(page: Page, pane: ReturnType<Page['locator']>) {
   const workspaceId = await page.locator('.workspace-group.is-active').getAttribute('data-workspace-id')
   const taskTestId = await page.locator('.workbench-item.is-active').getAttribute('data-testid')

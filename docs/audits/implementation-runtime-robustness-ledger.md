@@ -10,7 +10,7 @@
 | 2 拖入路径 | 普通/空格路径保持既有可见形式；复杂文件名只形成单个 argv，拖入不执行 | **已闭合** | `runtime-task-2-dropped-paths-report.md` |
 | 3 Resize 合并 | 每帧最多一次且尺寸去重 | 待实施 | Task 3 |
 | 4 App 回焦 | 恢复离开前的真实焦点 | 待实施 | Task 4 |
-| 5 通知容量与 TTL | 工作空间通知有界且保留期可预测 | 待实施 | Task 5 |
+| 5 通知容量与 TTL | 每个工作空间独立保留最新 1,000 条；未读持续保留，已读 30 天后清理 | **已闭合** | `runtime-task-5-notification-capacity-report.md` |
 | 6 Journal 策略 | 16 MiB segment / 256 MiB raw 热窗口 | 待实施 | Task 6 |
 | 7 Checkpoint / tail index | 最近 10,000 行即时恢复 | 待实施 | Task 7 |
 | 8 压缩历史读取 | raw 与压缩历史统一读取 | 待实施 | Task 8 |
@@ -44,3 +44,15 @@ Task 1 只在 Renderer → Runtime 输入边界分块；PTY、协议语义、bra
 | GREEN：真实 Electron / PTY | `terminal-channel.spec.ts` drop 场景 | 通过；8 个真实文件名，副作用文件不存在 |
 
 Task 2 只改变路径拖入解析和引用。普通键入与 paste 仍走原输入链路，未加入确认、自动提交或错误提示。
+
+## Task 5 RED → GREEN 记录
+
+| 阶段 | 证据 | 结果 |
+|---|---|---|
+| RED：容量、TTL 与 cooldown | `AgentNotificationStore.test.ts` 首次运行 | 6 个目标场景按预期失败：工作空间超量、确定性淘汰、已读 TTL、容量触发 cooldown 清理均未实现 |
+| GREEN：Store 规则 | 定向 Vitest 22 tests | 每工作空间与未分配 bucket 各自限制 1,000；未读不因 30 天过期；已读超过 30 天在 push/snapshot 清理 |
+| GREEN：通知 UI 集成 | 定向 Vitest 4 files / 41 tests | replacement、cooldown、badge、通知中心和导航既有场景保持通过 |
+| GREEN：10k 基准 | Node 22 真实 Store 进程 | 10 个工作空间共 10,000 条后，单次 overflow push/prune 为 0.71 ms，最终仍为 10,000 条 |
+| GREEN：真实 Electron | `prd-01-agent-notifications.spec.ts` 双 bucket 容量场景 | 注入 2,002 条后通知中心保留 2,000；两个 bucket 各淘汰最旧一条；导航后 1,999；清空后 0 |
+
+Task 5 只限制每个工作空间的通知历史，并清理已读旧记录；未读提醒、通知导航、声音偏好及当前会话提示规则保持原产品行为。
