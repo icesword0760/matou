@@ -113,7 +113,7 @@ describe('ProviderModeService', () => {
     }))
   })
 
-  it('keeps restore failure as a retryable Shell state on the same graph node', () => {
+  it('keeps restore failure as a retryable card state without creating a global notification', () => {
     const initial = bootstrapClaudeTree()
 
     const failed = providerModes.markRestoreFailed(command('restore-failed'), {
@@ -134,12 +134,7 @@ describe('ProviderModeService', () => {
         currentMode: 'shell', workStatus: 'error',
         providerRestoreState: 'failed', activeChildCount: 1
       })
-    expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
-      eventType: 'error',
-      title: 'Claude Code 恢复失败',
-      body: 'provider session not found',
-      replacementKey: `provider-restore:${initial.parentSessionId}`
-    })
+    expect(latestRecoveryNotification(initial.parentSessionId)).toBeUndefined()
 
     const retrying = providerModes.retryRestore(command('restore-retry'), {
       sessionId: initial.parentSessionId, now: 31
@@ -151,9 +146,7 @@ describe('ProviderModeService', () => {
     })
     expect(retrying.graph.edges).toEqual(failed.graph.edges)
     expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
-      eventType: 'attention',
-      title: '正在恢复 Claude Code',
-      sound: false,
+      operation: 'dismiss',
       replacementKey: `provider-restore:${initial.parentSessionId}`
     })
 
