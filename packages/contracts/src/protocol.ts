@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import type { RuntimeErrorCode, StorageFaultCode } from './runtime-lifecycle'
+
 export const PROTOCOL_VERSION = 1 as const
 
 const protocolVersion = z.literal(PROTOCOL_VERSION)
@@ -216,6 +218,24 @@ export type RuntimeCapability =
   | 'projection-v1'
   | 'hud-v1'
 
+type ProtocolErrorCode =
+  | 'VERSION_MISMATCH'
+  | 'INVALID_MESSAGE'
+  | 'SESSION_FORBIDDEN'
+  | 'WORKSPACE_PATH_INVALID'
+  | 'INTERNAL_ERROR'
+  | RuntimeErrorCode
+
+type RpcErrorCode =
+  | 'INVALID_REQUEST'
+  | 'NOT_FOUND'
+  | 'CONFLICT'
+  | 'TIMEOUT'
+  | 'CANCELLED'
+  | 'CAPABILITY_DENIED'
+  | 'INTERNAL_ERROR'
+  | RuntimeErrorCode
+
 export type RuntimeMessage =
   | {
       type: 'protocol.ready'
@@ -226,14 +246,24 @@ export type RuntimeMessage =
   | {
       type: 'protocol.error'
       protocolVersion: typeof PROTOCOL_VERSION
-      code:
-        | 'VERSION_MISMATCH'
-        | 'INVALID_MESSAGE'
-        | 'SESSION_FORBIDDEN'
-        | 'WORKSPACE_PATH_INVALID'
-        | 'INTERNAL_ERROR'
+      code: ProtocolErrorCode
       message: string
       sessionId?: string
+    }
+  | {
+      type: 'terminal.storage-fault'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
+      code: StorageFaultCode
+      message: string
+      retainedBytes: number
+    }
+  | {
+      type: 'terminal.storage-recovered'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
     }
   | {
       type: 'terminal.hud'
@@ -326,14 +356,7 @@ export type RuntimeMessage =
       protocolVersion: typeof PROTOCOL_VERSION
       requestId: string
       runtimeGeneration: string
-      code:
-        | 'INVALID_REQUEST'
-        | 'NOT_FOUND'
-        | 'CONFLICT'
-        | 'TIMEOUT'
-        | 'CANCELLED'
-        | 'CAPABILITY_DENIED'
-        | 'INTERNAL_ERROR'
+      code: RpcErrorCode
       message: string
       retryable: boolean
     }

@@ -133,6 +133,45 @@ export type SessionWorkStatus =
 export type ProviderRestoreState = 'none' | 'restoring' | 'failed'
 export type SessionForkState = 'pending' | 'starting' | 'succeeded' | 'failed'
 
+export interface SessionEnvironment {
+  kind: 'local' | 'worktree'
+  state: 'ready' | 'missing' | 'recovering' | 'handoff' | 'failed'
+  path: string
+  localExecutionContextId: ExecutionContextId
+  worktreeId?: WorktreeId
+  worktreeExecutionContextId?: ExecutionContextId
+  error?: string
+}
+
+export interface SessionGitState {
+  state: 'ready' | 'unavailable'
+  branch?: string
+  detachedHead?: string
+  dirty: boolean
+}
+
+export type ForkStage =
+  | 'queued'
+  | 'creating-worktree'
+  | 'applying-setup'
+  | 'binding-session'
+  | 'restoring-provider'
+  | 'starting-window'
+  | 'succeeded'
+  | 'failed'
+
+export interface ForkProgress {
+  operationId: string
+  sessionId: SessionId
+  submissionKey: string
+  stage: ForkStage
+  completedSteps: number
+  totalSteps: number
+  attempt: number
+  error?: string
+}
+
+
 export interface Session {
   id: SessionId
   taskId: TaskId
@@ -223,14 +262,13 @@ export interface SessionGraphNode {
   forkState?: SessionForkState
   forkError?: string
   forkAttempt?: number
+  forkProgress?: ForkProgress
   providerSpawnRevision?: number
   canFork: boolean
   title: string
   cwd: string
-  git?: {
-    branch: string
-    dirty: boolean
-  }
+  environment?: SessionEnvironment
+  git?: SessionGitState
   sharedWorkingDirectory?: boolean
   worktree?: {
     branch: string

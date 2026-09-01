@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import type {
   SceneSessionGraph,
   SessionCanvasMembership,
+  SessionEnvironment,
+  SessionGitState,
   SessionGraphNode,
   TaskPlacement,
   WindowNavigation,
@@ -85,5 +87,69 @@ describe('session canvas graph models', () => {
       providerRestoreState: 'failed'
     })
     expect(graph.edges[0]).toMatchObject({ relationKind: 'forked-from' })
+  })
+})
+
+
+describe('recovery graph models', () => {
+  it('keeps a missing-worktree session asset complete when Git state is unavailable', () => {
+    const environment = {
+      kind: 'worktree',
+      state: 'missing',
+      path: '/tmp/missing-worktree',
+      localExecutionContextId: 'context-local',
+      worktreeId: 'worktree-1',
+      worktreeExecutionContextId: 'context-worktree',
+      error: 'path-missing'
+    } satisfies SessionEnvironment
+    const node = {
+      sessionId: 'session-missing-worktree',
+      sceneId: 'scene-1',
+      currentMode: 'claude-code',
+      workStatus: 'interrupted',
+      providerRestoreState: 'none',
+      canFork: false,
+      title: '保留的会话资产',
+      cwd: '/tmp/missing-worktree',
+      environment,
+      activeChildCount: 0,
+      stoppedChildCount: 0,
+      childModeCounts: { shell: 0, claudeCode: 0 },
+      latestLines: ['last durable terminal output'],
+      lastUserInteractionSeq: 0
+    } satisfies SessionGraphNode
+
+    expect(node).toMatchObject({
+      sessionId: 'session-missing-worktree',
+      title: '保留的会话资产',
+      latestLines: ['last durable terminal output'],
+      environment: { state: 'missing' }
+    })
+  })
+
+  it('allows Git state to remain available without an environment projection', () => {
+    const git = {
+      state: 'ready',
+      branch: 'feature/recovery',
+      dirty: true
+    } satisfies SessionGitState
+    const node = {
+      sessionId: 'session-git-only',
+      sceneId: 'scene-1',
+      currentMode: 'shell',
+      workStatus: 'idle',
+      providerRestoreState: 'none',
+      canFork: false,
+      title: 'Git 状态独立展示',
+      cwd: '/tmp/local',
+      git,
+      activeChildCount: 0,
+      stoppedChildCount: 0,
+      childModeCounts: { shell: 0, claudeCode: 0 },
+      latestLines: [],
+      lastUserInteractionSeq: 0
+    } satisfies SessionGraphNode
+
+    expect(node).toMatchObject({ git: { branch: 'feature/recovery', dirty: true } })
   })
 })

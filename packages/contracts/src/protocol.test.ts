@@ -221,3 +221,28 @@ describe('parseRendererMessage', () => {
     })).toThrow()
   })
 })
+
+describe('runtime storage fault messages', () => {
+  it('exposes scoped storage fault and recovery messages', () => {
+    const fault = {
+      type: 'terminal.storage-fault',
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1',
+      sequence: 42,
+      code: 'STORAGE_WRITE_FAILED',
+      message: 'journal is not writable',
+      retainedBytes: 1024
+    } satisfies import('./protocol').RuntimeMessage
+    const recovered = {
+      type: 'terminal.storage-recovered',
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1',
+      sequence: 42
+    } satisfies import('./protocol').RuntimeMessage
+
+    expect({ fault, recovered }).toMatchObject({
+      fault: { retainedBytes: 1024, sequence: 42 },
+      recovered: { sessionId: 'session-1' }
+    })
+  })
+})
