@@ -269,8 +269,9 @@ button { -webkit-app-region: no-drag; }
 
 .workbench-action-popover { position: fixed; z-index: 10000; display: grid; min-width: 120px; padding: 6px; transform: translateY(-50%); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: #3b3b3b; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
 .workbench-action-popover button { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 0; border-radius: 6px; color: #e6edf3; background: transparent; font-size: 13px; text-align: left; white-space: nowrap; cursor: pointer; }
-.workbench-action-popover button:hover, .workbench-action-popover .is-delete:hover { color: #e6edf3; background: rgba(255,255,255,.08); }
-.workbench-action-popover .is-delete { color: #e6edf3; }
+.workbench-action-popover button:hover { color: #e6edf3; background: rgba(255,255,255,.08); }
+.workbench-action-popover .is-delete { margin-top: 4px; border-top: 1px solid rgba(255,255,255,.08); border-radius: 0 0 6px 6px; color: #ef7770; }
+.workbench-action-popover .is-delete:hover { color: #ff9b94; background: rgba(239,119,112,.1); }
 .kooky-toast { position: fixed; z-index: 11000; top: 20px; left: 50%; padding: 9px 15px; transform: translateX(-50%); border: 1px solid rgba(103,194,58,.35); border-radius: 6px; color: #b3e19d; background: #1c2518; box-shadow: 0 6px 18px rgba(0,0,0,.3); font-size: 13px; }
 .kooky-toast.is-error { border-color: rgba(248,81,73,.35); color: #ffa198; background: #2b1718; }
 
@@ -619,11 +620,13 @@ button { -webkit-app-region: no-drag; }
 .light-theme .tab-overflow-title,
 .light-theme .workbench-action-popover button,
 .light-theme .perm-menu button.perm-menu__item { color: #2f3547; }
+.light-theme .workbench-action-popover .is-delete { border-top-color: #eceef2; color: #c5443e; }
 .light-theme .detach-menu-item:hover,
 .light-theme .scene-tab-menu button:hover,
 .light-theme .tab-overflow-item:hover,
 .light-theme .workbench-action-popover button:hover,
 .light-theme .perm-menu button.perm-menu__item:hover { background: #eceef3; }
+.light-theme .workbench-action-popover .is-delete:hover { color: #a8322e; background: #fff1f0; }
 .light-theme .kooky-rename-dialog,
 .light-theme [role="alertdialog"] { color: #2f3547; background: #fff; }
 .light-theme .kooky-rename-dialog h2,
