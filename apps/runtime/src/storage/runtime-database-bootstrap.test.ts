@@ -299,6 +299,33 @@ describe('openRecoverableRuntimeDatabase', () => {
     expect(await readFile(markerPath, 'utf8')).toBe(malformed)
   })
 
+  it.each([
+    ['required without recoveryId', { state: 'required' }],
+    ['resolved without recoveryId', { state: 'resolved' }],
+    ['unknown state', { state: 'unknown', recoveryId: 'existing-recovery-id' }],
+    ['wrong state type', { state: 1, recoveryId: 'existing-recovery-id' }],
+    ['wrong recoveryId type', { recoveryId: 1 }]
+  ] as const)('keeps an impossible legacy half-shape fail-closed: %s', async (_name, fields) => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-impossible-legacy-marker-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const markerPath = `${databasePath}.recovery.json`
+    const bytes = JSON.stringify({
+      version: 1,
+      reason: 'physical-corruption',
+      durableDatabasePath: databasePath,
+      quarantinedPath: `${databasePath}.corrupt-1`,
+      markerPath,
+      createdAt: 1,
+      ...fields
+    })
+    await writeFile(markerPath, bytes)
+
+    await expect(openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS))
+      .rejects.toThrow('database recovery marker is invalid')
+    expect(await readFile(markerPath, 'utf8')).toBe(bytes)
+    await expect(readFile(databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('publishes a durable marker under the owner fence before moving the corrupt bundle', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-recovery-marker-barrier-'))
     const databasePath = join(root, 'matou.sqlite')

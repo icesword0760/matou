@@ -30,7 +30,10 @@ describe('database recovery controller', () => {
     result.bootstrap.database.close()
     expect(JSON.parse(await readFile(
       join(fixture.root, 'matou.sqlite.recovery.json'), 'utf8'
-    ))).toMatchObject({ state: 'resolved', recoveryId: fixture.recovery.recoveryId })
+    ))).toMatchObject({ state: 'required', recoveryId: fixture.recovery.recoveryId })
+    expect(JSON.parse(await readFile(
+      `${fixture.recovery.markerPath}.resolved-${fixture.recovery.recoveryId}`, 'utf8'
+    ))).toMatchObject({ recoveryId: fixture.recovery.recoveryId })
     const reopened = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
     expect(reopened.kind).toBe('writable')
     if (reopened.kind === 'writable') reopened.database.close()
@@ -131,10 +134,44 @@ describe('database recovery controller', () => {
     }
   )
 
+  it('keeps a committed tombstone successful when later durability reporting fails', async () => {
+    const fixture = await corruptFixture()
+    const backup = fixture.recovery.backups[0]!
+    await writeFile(join(fixture.root, 'matou.sqlite'), await readFile(backup.path))
+    const controller = new DatabaseRecoveryController(
+      fixture.root,
+      FOUNDATION_MIGRATIONS,
+      {},
+      {
+        markerFinalizationObserver: {
+          afterPublish: () => { throw new Error('persistent post-publish failure') },
+          beforeDirectorySync: () => { throw new Error('persistent directory fsync failure') }
+        }
+      }
+    )
+
+    const completed = await controller.execute(fixture.recovery, {
+      type: 'runtime.recovery-command', requestId: 'post-publish-success',
+      action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+    })
+
+    expect(completed.bootstrap?.kind).toBe('writable')
+    if (completed.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+    expect(JSON.parse(await readFile(fixture.recovery.markerPath, 'utf8')))
+      .toMatchObject({ state: 'required', recoveryId: fixture.recovery.recoveryId })
+    expect(JSON.parse(await readFile(
+      `${fixture.recovery.markerPath}.resolved-${fixture.recovery.recoveryId}`,
+      'utf8'
+    ))).toMatchObject({ recoveryId: fixture.recovery.recoveryId })
+    completed.bootstrap.database.close()
+    const restarted = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
+    expect(restarted.kind).toBe('writable')
+    if (restarted.kind === 'writable') restarted.database.close()
+  })
+
   it.each([
-    'marker-rewrite',
-    'namespace-transition',
-    'directory-sync',
+    'file-sync',
+    'namespace-publish',
     'database-close',
     'owner-unlink',
     'namespace-and-owner-unlink'
@@ -155,24 +192,17 @@ describe('database recovery controller', () => {
         { onDatabaseOpened: (database) => { openedDatabases.push(database) } },
         {
           markerFinalizationObserver: {
-            beforeRewrite: () => {
-              if (markerFailures > 0 && (
-                failure === 'marker-rewrite' || failure === 'database-close' || failure === 'owner-unlink'
-              )) {
+            beforeFileSync: () => {
+              if (markerFailures > 0 && failure === 'file-sync') {
                 markerFailures -= 1
                 throw injected
               }
             },
-            afterNamespaceTransition: () => {
+            beforePublish: () => {
               if (markerFailures > 0 && (
-                failure === 'namespace-transition' || failure === 'namespace-and-owner-unlink'
+                failure === 'namespace-publish' || failure === 'database-close' ||
+                failure === 'owner-unlink' || failure === 'namespace-and-owner-unlink'
               )) {
-                markerFailures -= 1
-                throw injected
-              }
-            },
-            afterDirectorySync: () => {
-              if (markerFailures > 0 && failure === 'directory-sync') {
                 markerFailures -= 1
                 throw injected
               }

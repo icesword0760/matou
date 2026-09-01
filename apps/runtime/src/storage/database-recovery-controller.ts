@@ -13,6 +13,7 @@ import {
 import type { Migration } from './migration-runner'
 import {
   openRecoverableRuntimeDatabaseWithOwnership,
+  isRuntimeDatabaseRecoveryResolved,
   resolveRuntimeDatabaseRecoveryMarker,
   type RuntimeRecoveryMarkerFinalizationObserver,
   type RuntimeDatabaseBootstrapObserver,
@@ -226,6 +227,9 @@ export class DatabaseRecoveryController {
 }
 
 async function assertRecoveryStillActive(recovery: RecoveryRequired): Promise<void> {
+  if (await isRuntimeDatabaseRecoveryResolved(recovery.markerPath, recovery.recoveryId)) {
+    throw new Error('数据库恢复已由其他 Runtime 完成，本次操作已停止')
+  }
   let marker: Partial<RecoveryRequired> & { state?: unknown }
   try {
     marker = JSON.parse(await readFile(recovery.markerPath, 'utf8')) as Partial<RecoveryRequired>

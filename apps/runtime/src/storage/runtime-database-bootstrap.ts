@@ -4,13 +4,9 @@ import {
   closeSync,
   constants,
   existsSync,
-  fsyncSync,
   openSync,
   readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync
+  statSync
 } from 'node:fs'
 import { link, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
@@ -21,6 +17,7 @@ import {
 } from './database'
 import {
   isDatabaseOwnershipRecoveryError,
+  withDatabaseRecoveryActionFence,
   type DatabaseOwnershipRecoveryIssue
 } from './database-owner'
 import {
@@ -70,9 +67,10 @@ interface RuntimeDatabaseRecoveryMarker {
 }
 
 export interface RuntimeRecoveryMarkerFinalizationObserver {
-  beforeRewrite?(): void
-  afterNamespaceTransition?(): void
-  afterDirectorySync?(): void
+  beforeFileSync?(): void
+  beforePublish?(): void
+  afterPublish?(): void
+  beforeDirectorySync?(): void
 }
 
 export interface RuntimeDatabaseBootstrapObserver {
@@ -119,7 +117,10 @@ export async function openRecoverableRuntimeDatabase(
 ): Promise<RuntimeDatabaseBootstrapResult> {
   const databasePath = join(dataRoot, 'matou.sqlite')
   const backups = new DatabaseBackupService(dataRoot)
-  const persistedRecovery = readRecoveryMarker(databasePath)
+  const initialRecoveryShape = readRecoveryMarkerShape(databasePath)
+  const persistedRecovery = initialRecoveryShape?.kind === 'legacy'
+    ? activeRecoveryMarker(await upgradeLegacyRecoveryMarker(databasePath))
+    : activeRecoveryMarker(initialRecoveryShape?.marker)
   if (persistedRecovery) return recoveryResult(persistedRecovery, backups)
 
   let database: RuntimeDatabase | undefined
@@ -177,7 +178,10 @@ export async function openRecoverableRuntimeDatabase(
       ownership = undefined
     } else {
       ownership = RuntimeDatabase.acquireOwnership(databasePath)
-      const recoveryAfterFence = readRecoveryMarker(databasePath)
+      const recoveryAfterFenceShape = readRecoveryMarkerShape(databasePath)
+      const recoveryAfterFence = recoveryAfterFenceShape?.kind === 'legacy'
+        ? activeRecoveryMarker(await upgradeLegacyRecoveryMarker(databasePath))
+        : activeRecoveryMarker(recoveryAfterFenceShape?.marker)
       if (recoveryAfterFence) {
         ownership.release()
         ownership = undefined
@@ -354,34 +358,17 @@ function newRecoveryMarker(
 async function publishRecoveryMarker(
   marker: RuntimeDatabaseRecoveryMarker
 ): Promise<RuntimeDatabaseRecoveryMarker> {
-  const existing = readRecoveryMarker(marker.durableDatabasePath)
-  if (existing) return existing
-  const persisted = readRecoveryMarkerRecord(marker.durableDatabasePath)
-  if (persisted?.state === 'resolved') {
+  return withMarkerPublicationFence(marker.durableDatabasePath, async () => {
+    const persisted = await readCanonicalRecoveryMarkerLocked(marker.durableDatabasePath)
+    if (
+      persisted?.state === 'required' &&
+      !hasMatchingResolvedTombstone(persisted)
+    ) {
+      return persisted
+    }
     await replaceRecoveryMarker(marker.markerPath, marker)
     return marker
-  }
-  const partialPath = `${marker.markerPath}.partial-${randomUUID()}`
-  const handle = await open(partialPath, 'wx', 0o600)
-  try {
-    await handle.writeFile(JSON.stringify(marker), 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
-  try {
-    await link(partialPath, marker.markerPath)
-    syncDirectory(dirname(marker.markerPath))
-    return marker
-  } catch (error) {
-    if (errorCode(error) === 'EEXIST') {
-      const competing = readRecoveryMarker(marker.durableDatabasePath)
-      if (competing) return competing
-    }
-    throw error
-  } finally {
-    await rm(partialPath, { force: true }).catch(() => undefined)
-  }
+  })
 }
 
 export async function resolveRuntimeDatabaseRecoveryMarker(
@@ -392,29 +379,66 @@ export async function resolveRuntimeDatabaseRecoveryMarker(
   const databasePath = markerPath.endsWith('.recovery.json')
     ? markerPath.slice(0, -'.recovery.json'.length)
     : ''
-  const required = readRecoveryMarkerRecord(databasePath)
-  if (!required || required.state !== 'required' || required.recoveryId !== recoveryId) {
+  const required = await readCanonicalRecoveryMarker(databasePath)
+  if (
+    !required ||
+    required.state !== 'required' ||
+    required.recoveryId !== recoveryId ||
+    hasMatchingResolvedTombstone(required)
+  ) {
     throw new Error('数据库恢复状态已更新，请使用最新恢复页面重试')
   }
+  const tombstonePath = resolvedTombstonePath(required)
+  const tombstone = {
+    version: 1,
+    state: 'resolved',
+    recoveryId,
+    markerPath,
+    resolvedAt: Date.now()
+  } as const
+  const partialPath = `${tombstonePath}.partial-${randomUUID()}`
+  const handle = await open(partialPath, 'wx', 0o600)
   try {
-    await replaceRecoveryMarker(markerPath, { ...required, state: 'resolved' }, observer)
-  } catch (error) {
     try {
-      await replaceRecoveryMarker(markerPath, required)
-    } catch (compensationError) {
-      throw new AggregateError(
-        [error, compensationError],
-        '数据库恢复状态持久化失败，required marker 补偿也未完成'
-      )
+      await handle.writeFile(JSON.stringify(tombstone), 'utf8')
+      observer.beforeFileSync?.()
+      await handle.sync()
+    } finally {
+      await handle.close()
     }
-    throw error
+
+    let committed = false
+    observer.beforePublish?.()
+    try {
+      await link(partialPath, tombstonePath)
+      committed = true
+    } catch (error) {
+      if (errorCode(error) === 'EEXIST' && hasMatchingResolvedTombstone(required)) {
+        committed = true
+      } else {
+        throw error
+      }
+    }
+    // The atomic namespace publication above is the success commit point.
+    // A later durability error can only make a crash fall back to the still-
+    // immutable required marker, so it must not turn a committed action into a
+    // user-visible failure.
+    try { observer.afterPublish?.() } catch { /* committed: required remains the safe fallback */ }
+    try {
+      observer.beforeDirectorySync?.()
+      syncDirectory(dirname(tombstonePath))
+    } catch {
+      // Best effort after commit; losing the tombstone re-opens the same recovery generation.
+    }
+    if (!committed) throw new Error('database recovery resolution was not published')
+  } finally {
+    await rm(partialPath, { force: true }).catch(() => undefined)
   }
 }
 
 async function replaceRecoveryMarker(
   markerPath: string,
-  marker: RuntimeDatabaseRecoveryMarker,
-  observer: RuntimeRecoveryMarkerFinalizationObserver = {}
+  marker: RuntimeDatabaseRecoveryMarker
 ): Promise<void> {
   const partialPath = `${markerPath}.partial-${randomUUID()}`
   const handle = await open(partialPath, 'wx', 0o600)
@@ -425,11 +449,8 @@ async function replaceRecoveryMarker(
     await handle.close()
   }
   try {
-    observer.beforeRewrite?.()
     await rename(partialPath, markerPath)
-    observer.afterNamespaceTransition?.()
     syncDirectory(dirname(markerPath))
-    observer.afterDirectorySync?.()
   } finally {
     await rm(partialPath, { force: true }).catch(() => undefined)
   }
@@ -446,12 +467,54 @@ function syncDirectory(path: string): void {
   }
 }
 
-function readRecoveryMarker(databasePath: string): RuntimeDatabaseRecoveryMarker | undefined {
-  const marker = readRecoveryMarkerRecord(databasePath)
-  return marker?.state === 'required' ? marker : undefined
+async function readRecoveryMarker(
+  databasePath: string
+): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
+  const marker = await readCanonicalRecoveryMarker(databasePath)
+  return activeRecoveryMarker(marker)
 }
 
-function readRecoveryMarkerRecord(databasePath: string): RuntimeDatabaseRecoveryMarker | undefined {
+type LegacyRecoveryMarker = Omit<RuntimeDatabaseRecoveryMarker, 'recoveryId' | 'state'> & {
+  recoveryId?: string
+}
+
+type RecoveryMarkerShape =
+  | { kind: 'modern'; marker: RuntimeDatabaseRecoveryMarker }
+  | { kind: 'legacy'; marker: LegacyRecoveryMarker }
+
+async function readCanonicalRecoveryMarker(
+  databasePath: string
+): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
+  const shape = readRecoveryMarkerShape(databasePath)
+  if (!shape) return undefined
+  if (shape.kind === 'modern') return shape.marker
+  return upgradeLegacyRecoveryMarker(databasePath)
+}
+
+async function upgradeLegacyRecoveryMarker(
+  databasePath: string
+): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
+  return withMarkerPublicationFence(databasePath, () => (
+    readCanonicalRecoveryMarkerLocked(databasePath)
+  ))
+}
+
+async function readCanonicalRecoveryMarkerLocked(
+  databasePath: string
+): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
+  const shape = readRecoveryMarkerShape(databasePath)
+  if (!shape) return undefined
+  if (shape.kind === 'modern') return shape.marker
+  const upgraded: RuntimeDatabaseRecoveryMarker = {
+    ...shape.marker,
+    recoveryId: shape.marker.recoveryId ?? randomUUID(),
+    state: 'required'
+  }
+  await replaceRecoveryMarker(upgraded.markerPath, upgraded)
+  return upgraded
+}
+
+function readRecoveryMarkerShape(databasePath: string): RecoveryMarkerShape | undefined {
   const markerPath = `${databasePath}.recovery.json`
   let value: unknown
   try {
@@ -464,14 +527,17 @@ function readRecoveryMarkerRecord(databasePath: string): RuntimeDatabaseRecovery
     throw new Error('database recovery marker is invalid')
   }
   const marker = value as Partial<RuntimeDatabaseRecoveryMarker>
+  const hasRecoveryId = Object.prototype.hasOwnProperty.call(marker, 'recoveryId')
+  const hasState = Object.prototype.hasOwnProperty.call(marker, 'state')
   const durablePath = resolve(databasePath)
   if (
     marker.version !== 1 ||
-    (marker.recoveryId !== undefined && (
+    (hasRecoveryId && (
       typeof marker.recoveryId !== 'string' ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(marker.recoveryId)
     )) ||
-    (marker.state !== undefined && !['required', 'resolved'].includes(marker.state)) ||
+    (hasState && !['required', 'resolved'].includes(String(marker.state))) ||
+    (hasState && !hasRecoveryId) ||
     ![
       'physical-corruption',
       'wal-recovery-required',
@@ -492,36 +558,77 @@ function readRecoveryMarkerRecord(databasePath: string): RuntimeDatabaseRecovery
   ) {
     throw new Error('database recovery marker is invalid')
   }
-  if (marker.recoveryId === undefined || marker.state === undefined) {
-    const upgraded: RuntimeDatabaseRecoveryMarker = {
-      ...(marker as Omit<RuntimeDatabaseRecoveryMarker, 'recoveryId' | 'state'>),
-      recoveryId: marker.recoveryId ?? randomUUID(),
-      state: marker.state ?? 'required'
+  if (!hasState) {
+    return {
+      kind: 'legacy',
+      marker: marker as LegacyRecoveryMarker
     }
-    replaceRecoveryMarkerSync(markerPath, upgraded)
-    return upgraded
   }
-  return marker as RuntimeDatabaseRecoveryMarker
+  return { kind: 'modern', marker: marker as RuntimeDatabaseRecoveryMarker }
 }
 
-function replaceRecoveryMarkerSync(
-  markerPath: string,
-  marker: RuntimeDatabaseRecoveryMarker
-): void {
-  const partialPath = `${markerPath}.partial-${randomUUID()}`
-  let descriptor: number | undefined
-  try {
-    descriptor = openSync(partialPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)
-    writeFileSync(descriptor, JSON.stringify(marker), 'utf8')
-    fsyncSync(descriptor)
-    closeSync(descriptor)
-    descriptor = undefined
-    renameSync(partialPath, markerPath)
-    syncDirectory(dirname(markerPath))
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor)
-    rmSync(partialPath, { force: true })
+function resolvedTombstonePath(marker: RuntimeDatabaseRecoveryMarker): string {
+  return `${marker.markerPath}.resolved-${marker.recoveryId}`
+}
+
+function activeRecoveryMarker(
+  marker: RuntimeDatabaseRecoveryMarker | undefined
+): RuntimeDatabaseRecoveryMarker | undefined {
+  if (!marker || marker.state === 'resolved' || hasMatchingResolvedTombstone(marker)) {
+    return undefined
   }
+  return marker
+}
+
+const markerPublicationQueues = new Map<string, Promise<void>>()
+
+async function withMarkerPublicationFence<T>(
+  databasePath: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const previous = markerPublicationQueues.get(databasePath) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolveQueue) => { release = resolveQueue })
+  markerPublicationQueues.set(databasePath, current)
+  await previous
+  try {
+    return await withDatabaseRecoveryActionFence(databasePath, operation)
+  } finally {
+    release()
+    if (markerPublicationQueues.get(databasePath) === current) {
+      markerPublicationQueues.delete(databasePath)
+    }
+  }
+}
+
+function hasMatchingResolvedTombstone(marker: RuntimeDatabaseRecoveryMarker): boolean {
+  let value: unknown
+  try {
+    value = JSON.parse(readFileSync(resolvedTombstonePath(marker), 'utf8')) as unknown
+  } catch (error) {
+    return false
+  }
+  if (typeof value !== 'object' || value === null) return false
+  const tombstone = value as Record<string, unknown>
+  return tombstone.version === 1 &&
+    tombstone.state === 'resolved' &&
+    tombstone.recoveryId === marker.recoveryId &&
+    tombstone.markerPath === marker.markerPath &&
+    Number.isSafeInteger(tombstone.resolvedAt)
+}
+
+export async function isRuntimeDatabaseRecoveryResolved(
+  markerPath: string,
+  recoveryId: string
+): Promise<boolean> {
+  const databasePath = markerPath.endsWith('.recovery.json')
+    ? markerPath.slice(0, -'.recovery.json'.length)
+    : ''
+  const marker = await readCanonicalRecoveryMarker(databasePath)
+  return Boolean(
+    marker && marker.recoveryId === recoveryId &&
+    (marker.state === 'resolved' || hasMatchingResolvedTombstone(marker))
+  )
 }
 
 async function waitForRecoveryMarker(
@@ -530,7 +637,7 @@ async function waitForRecoveryMarker(
 ): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
   const deadline = Date.now() + timeoutMs
   do {
-    const marker = readRecoveryMarker(databasePath)
+    const marker = await readRecoveryMarker(databasePath)
     if (marker) return marker
     await new Promise((resolve) => setTimeout(resolve, 10))
   } while (Date.now() < deadline)
