@@ -1,4 +1,4 @@
-import { gzipSync, gunzipSync } from 'node:zlib'
+import { gunzipSync } from 'node:zlib'
 import {
   chmod,
   mkdir,
@@ -6,12 +6,17 @@ import {
   readFile,
   readdir,
   rename,
+  stat,
   truncate,
-  unlink,
-  writeFile
 } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
+
+import {
+  SEGMENT_BYTES,
+  selectCompressionCandidates,
+  type SegmentDescriptor
+} from './journal-policy'
 
 const MAGIC = Buffer.from('MTJRNL2\n', 'ascii')
 const FRAME_PREFIX_BYTES = 8
@@ -42,7 +47,6 @@ export interface SegmentJournalOptions {
 
 type NormalizedSegmentJournalOptions = {
   maxSegmentBytes: number
-  compressSealed: boolean
   writeFrame: (handle: FileHandle, encoded: Buffer) => Promise<void>
 }
 
@@ -66,8 +70,8 @@ export class JournalCorruptionError extends Error {
 export class SegmentJournal {
   readonly directory: string
   readonly #maxSegmentBytes: number
-  readonly #compressSealed: boolean
   readonly #writeFrame: NormalizedSegmentJournalOptions['writeFrame']
+  readonly #sealedSegments: SegmentDescriptor[]
   #handle: FileHandle
   #segmentIndex: number
   #path: string
@@ -82,6 +86,7 @@ export class SegmentJournal {
     path: string,
     size: number,
     lastSequence: number,
+    sealedSegments: SegmentDescriptor[],
     options: NormalizedSegmentJournalOptions
   ) {
     this.directory = directory
@@ -91,8 +96,8 @@ export class SegmentJournal {
     this.#size = size
     this.#lastSequence = lastSequence
     this.#maxSegmentBytes = options.maxSegmentBytes
-    this.#compressSealed = options.compressSealed
     this.#writeFrame = options.writeFrame
+    this.#sealedSegments = sealedSegments
   }
 
   get path(): string {
@@ -109,8 +114,7 @@ export class SegmentJournal {
     options: SegmentJournalOptions = {}
   ): Promise<SegmentJournal> {
     const normalizedOptions: NormalizedSegmentJournalOptions = {
-      maxSegmentBytes: options.maxSegmentBytes ?? 16 * 1024 * 1024,
-      compressSealed: options.compressSealed ?? true,
+      maxSegmentBytes: options.maxSegmentBytes ?? SEGMENT_BYTES,
       writeFrame: options.writeFrame ?? (async (handle, encoded) => {
         await handle.write(encoded)
       })
@@ -123,22 +127,15 @@ export class SegmentJournal {
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
     const entries = await readdir(directory)
-    const active = entries
-      .map(parseActiveSegmentIndex)
-      .filter((value): value is number => value !== undefined)
-      .sort((left, right) => left - right)
-      .at(-1)
-    const sealedMaximum = entries
-      .map(parseSealedSegmentIndex)
-      .filter((value): value is number => value !== undefined)
-      .sort((left, right) => left - right)
-      .at(-1)
-    const segmentIndex = active ?? (sealedMaximum === undefined ? 1 : sealedMaximum + 1)
-    const path = segmentPath(directory, segmentIndex)
+    const existingSegments = await describeExistingSegments(directory, entries)
+    const activeSegment = chooseActiveRawSegment(existingSegments)
+    const maximumIndex = existingSegments.map(({ index }) => index).sort((left, right) => left - right).at(-1)
+    const segmentIndex = activeSegment?.index ?? (maximumIndex === undefined ? 1 : maximumIndex + 1)
+    const path = activeSegment?.path ?? segmentPath(directory, segmentIndex)
 
     let size = 0
     let lastSequence = 0
-    if (active !== undefined) {
+    if (activeSegment !== undefined) {
       const repair = await repairSegmentTail(path)
       size = (await readFile(path)).byteLength
       lastSequence = repair.lastSequence
@@ -157,6 +154,11 @@ export class SegmentJournal {
       path,
       size,
       Math.max(lastSequence, await lastSequenceAcrossSealed(directory)),
+      existingSegments
+        .filter((segment) => segment !== activeSegment)
+        .map((segment) => segment.state === 'active'
+          ? { ...segment, state: 'sealed-raw' as const }
+          : segment),
       normalizedOptions
     )
   }
@@ -208,6 +210,24 @@ export class SegmentJournal {
     await this.#handle.close()
   }
 
+  compressionCandidates(
+    checkpointProtectedIndexes: ReadonlySet<number> = new Set()
+  ): SegmentDescriptor[] {
+    const descriptors: SegmentDescriptor[] = [
+      ...this.#sealedSegments.map((segment) => ({
+        ...segment,
+        ...(checkpointProtectedIndexes.has(segment.index) ? { checkpointProtected: true } : {})
+      })),
+      {
+        index: this.#segmentIndex,
+        path: this.#path,
+        bytes: this.#size,
+        state: 'active'
+      }
+    ]
+    return selectCompressionCandidates(descriptors)
+  }
+
   async #append(
     header: StoredHeader,
     data: Uint8Array<ArrayBufferLike> = new Uint8Array()
@@ -228,16 +248,12 @@ export class SegmentJournal {
   async #rotate(): Promise<void> {
     await this.#handle.sync()
     await this.#handle.close()
-    if (this.#compressSealed) {
-      const compressedPath = `${this.#path}.gz`
-      const temporaryPath = `${compressedPath}.tmp`
-      await writeFile(temporaryPath, gzipSync(await readFile(this.#path)), { mode: 0o600 })
-      const temporaryHandle = await open(temporaryPath, 'r')
-      await temporaryHandle.sync()
-      await temporaryHandle.close()
-      await rename(temporaryPath, compressedPath)
-      await unlink(this.#path)
-    }
+    this.#sealedSegments.push({
+      index: this.#segmentIndex,
+      path: this.#path,
+      bytes: this.#size,
+      state: 'sealed-raw'
+    })
 
     this.#segmentIndex += 1
     this.#path = segmentPath(this.directory, this.#segmentIndex)
@@ -278,10 +294,8 @@ export async function repairSegmentTail(path: string): Promise<TailRepairResult>
 }
 
 async function readSessionFramesFromDirectory(directory: string): Promise<DecodedJournalFrame[]> {
-  const paths = (await readdir(directory))
-    .filter((entry) => /^segment-\d{6}\.bin(?:\.gz)?$/.test(entry))
-    .sort()
-    .map((entry) => join(directory, entry))
+  const descriptors = await describeExistingSegments(directory, await readdir(directory))
+  const paths = selectReadableSegments(descriptors).map(({ path }) => path)
   const frames: DecodedJournalFrame[] = []
   let previousSequence = 0
   for (const path of paths) {
@@ -387,17 +401,78 @@ function decodeFrame(header: StoredHeader, data: Buffer): DecodedJournalFrame {
 }
 
 function segmentPath(directory: string, index: number): string {
-  return join(directory, `segment-${String(index).padStart(6, '0')}.bin`)
+  return join(directory, `segment-${String(index).padStart(6, '0')}.mtj`)
 }
 
-function parseActiveSegmentIndex(name: string): number | undefined {
-  const match = /^segment-(\d{6})\.bin$/.exec(name)
-  return match ? Number(match[1]) : undefined
+interface StoredSegmentDescriptor extends SegmentDescriptor {
+  format: 'mtj' | 'legacy-bin'
 }
 
-function parseSealedSegmentIndex(name: string): number | undefined {
-  const match = /^segment-(\d{6})\.bin\.gz$/.exec(name)
-  return match ? Number(match[1]) : undefined
+async function describeExistingSegments(
+  directory: string,
+  entries: string[]
+): Promise<StoredSegmentDescriptor[]> {
+  const descriptors = await Promise.all(entries.map(async (
+    entry
+  ): Promise<StoredSegmentDescriptor | undefined> => {
+    const parsed = parseSegmentName(entry)
+    if (!parsed) return undefined
+    const path = join(directory, entry)
+    return {
+      index: parsed.index,
+      path,
+      bytes: (await stat(path)).size,
+      state: parsed.compressed ? 'compressed' as const : 'active' as const,
+      format: parsed.format
+    }
+  }))
+  return descriptors.filter((item): item is StoredSegmentDescriptor => item !== undefined)
+}
+
+function parseSegmentName(name: string): {
+  index: number
+  compressed: boolean
+  format: StoredSegmentDescriptor['format']
+} | undefined {
+  const match = /^segment-(\d{6})\.(mtj|bin)(\.gz)?$/.exec(name)
+  if (!match) return undefined
+  return {
+    index: Number(match[1]),
+    format: match[2] === 'mtj' ? 'mtj' : 'legacy-bin',
+    compressed: match[3] === '.gz'
+  }
+}
+
+function chooseActiveRawSegment(
+  descriptors: StoredSegmentDescriptor[]
+): StoredSegmentDescriptor | undefined {
+  return descriptors
+    .filter(({ state }) => state !== 'compressed')
+    .sort((left, right) => right.index - left.index || formatPriority(left) - formatPriority(right))[0]
+}
+
+function selectReadableSegments(
+  descriptors: StoredSegmentDescriptor[]
+): StoredSegmentDescriptor[] {
+  const byIndex = new Map<number, StoredSegmentDescriptor>()
+  for (const descriptor of descriptors) {
+    const current = byIndex.get(descriptor.index)
+    if (!current || readPriority(descriptor) < readPriority(current)) {
+      byIndex.set(descriptor.index, descriptor)
+    }
+  }
+  return [...byIndex.values()].sort((left, right) => left.index - right.index)
+}
+
+function readPriority(segment: StoredSegmentDescriptor): number {
+  if (segment.state !== 'compressed' && segment.format === 'mtj') return 0
+  if (segment.state !== 'compressed') return 1
+  if (segment.format === 'mtj') return 2
+  return 3
+}
+
+function formatPriority(segment: StoredSegmentDescriptor): number {
+  return segment.format === 'mtj' ? 0 : 1
 }
 
 function crc32(buffer: Buffer): number {

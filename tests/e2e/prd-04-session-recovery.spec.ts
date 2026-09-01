@@ -199,7 +199,9 @@ test('keeps one corrupt terminal journal isolated while the remaining work scene
     await fixture.app.evaluate(({ app }) => app.quit())
     await fixture.app.close().catch(() => undefined)
     const journalDirectory = join(fixture.dataDirectory, 'journal', corruptSessionId)
-    const segmentName = (await readdir(journalDirectory)).find((name) => name.endsWith('.bin'))
+    const segmentName = (await readdir(journalDirectory)).find(
+      (name) => name.endsWith('.mtj') || name.endsWith('.bin')
+    )
     if (!segmentName) throw new Error('Expected an active terminal journal segment')
     const segmentPath = join(journalDirectory, segmentName)
     const bytes = await readFile(segmentPath)

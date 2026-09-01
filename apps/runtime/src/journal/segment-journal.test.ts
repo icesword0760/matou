@@ -1,6 +1,7 @@
-import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -151,7 +152,7 @@ describe('SegmentJournal', () => {
     await expect(readSessionFrames(writable, 'healthy-session')).resolves.toHaveLength(1)
   })
 
-  it('rotates and compresses sealed segments while replaying the whole session', async () => {
+  it('rotates by sealing raw segments without synchronously compressing the PTY write path', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
     temporaryDirectories.push(directory)
     const journal = await SegmentJournal.open(directory, 'session-rotate', {
@@ -161,12 +162,57 @@ describe('SegmentJournal', () => {
     for (let sequence = 1; sequence <= 6; sequence += 1) {
       await journal.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
     }
+    expect(journal.compressionCandidates()).toEqual([])
     await journal.close()
 
     const files = await readdir(join(directory, 'journal', 'session-rotate'))
-    expect(files.some((file) => file.endsWith('.bin.gz'))).toBe(true)
+    expect(files.some((file) => file.endsWith('.mtj'))).toBe(true)
+    expect(files.some((file) => file.endsWith('.gz'))).toBe(false)
     expect((await readSessionFrames(directory, 'session-rotate')).map(({ sequence }) => sequence)).toEqual([
       1, 2, 3, 4, 5, 6
+    ])
+  })
+
+  it('reads a segment index only once while raw and gzip copies overlap during compression commit', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const journal = await SegmentJournal.open(directory, 'session-overlap', {
+      maxSegmentBytes: 150
+    })
+    for (let sequence = 1; sequence <= 4; sequence += 1) {
+      await journal.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
+    }
+    await journal.close()
+    const sessionDirectory = join(directory, 'journal', 'session-overlap')
+    const firstRaw = (await readdir(sessionDirectory)).filter((file) => file.endsWith('.mtj')).sort()[0]!
+    await writeFile(
+      join(sessionDirectory, `${firstRaw}.gz`),
+      gzipSync(await readFile(join(sessionDirectory, firstRaw)))
+    )
+
+    expect((await readSessionFrames(directory, 'session-overlap')).map(({ sequence }) => sequence)).toEqual([
+      1, 2, 3, 4
+    ])
+  })
+
+  it('reopens and appends to a legacy raw bin segment without losing its sequence', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const original = await SegmentJournal.open(directory, 'session-legacy')
+    await original.appendOutput(1, Uint8Array.from([65]))
+    const modernPath = original.path
+    await original.close()
+    const legacyPath = modernPath.replace(/\.mtj$/, '.bin')
+    await rename(modernPath, legacyPath)
+
+    const reopened = await SegmentJournal.open(directory, 'session-legacy')
+    expect(reopened.lastSequence).toBe(1)
+    await reopened.appendOutput(2, Uint8Array.from([66]))
+    await reopened.close()
+
+    await expect(readSessionFrames(directory, 'session-legacy')).resolves.toEqual([
+      { kind: 'output', sequence: 1, data: Uint8Array.from([65]) },
+      { kind: 'output', sequence: 2, data: Uint8Array.from([66]) }
     ])
   })
 })

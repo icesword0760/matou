@@ -34,7 +34,10 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
     database.close()
 
     const journalDirectory = join(dataDirectory, 'journal', 'foundation-shell')
-    const activeName = (await readdir(journalDirectory)).filter((name) => name.endsWith('.bin')).sort().at(-1)!
+    const activeName = (await readdir(journalDirectory))
+      .filter((name) => name.endsWith('.mtj') || name.endsWith('.bin'))
+      .sort()
+      .at(-1)!
     const activePath = join(journalDirectory, activeName)
     const before = await readFile(activePath)
     expect(before.byteLength).toBeGreaterThan(16)
