@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务实施。每项必须走 RED → GREEN → REFACTOR，并以复选框跟踪。
 
-**Goal:** 在不改变 Kooky 动画和核心导航语义的前提下，让 Matou 在大量会话、深层关系和大 Journal 下仍能优先恢复当前工作现场、持续流畅交互，并以真实 Electron 基准阻止性能回退。
+**Goal:** 在不改变 reference product 动画和核心导航语义的前提下，让 Matou 在大量会话、深层关系和大 Journal 下仍能优先恢复当前工作现场、持续流畅交互，并以真实 Electron 基准阻止性能回退。
 
 **Architecture:** Runtime 保持 SQLite、Journal、PTY 和恢复顺序的权威；Renderer 通过增量投影消费权威状态。当前活动横向列表的全部 Session 都属于前台，即使滑出视野也保持 xterm；非活动 Scene 解除 xterm 视图绑定，但 PTY 与 Journal 继续运行。恢复使用活动 Scene 优先的有界队列；DAG 只渲染视口内节点和按分支/层聚合的远层摘要。
 
@@ -18,7 +18,7 @@
 4. 恢复中的卡片使用整卡 loading，不在可交互终端上叠加局部小提示。
 5. DAG 远层节点按分支和层级自动聚合；进入视口或聚焦分支后自动展开。
 6. Session 删除入口只保留文案 `移除节点…`；确认弹窗内选择“仅移除当前节点”或“移除当前节点及后代”。
-7. 动画时长、轨迹和悬停交接保持 Kooky；所有 resize 观察回调最多按 60Hz 合并一次。
+7. 动画时长、轨迹和悬停交接保持 reference product；所有 resize 观察回调最多按 60Hz 合并一次。
 8. 必须建立 50、200、1000 Session，5000 深链和 10000 DAG 节点的真实基准。
 
 ## 全局约束
@@ -649,7 +649,7 @@ Scene/tab 数据和轻量卡片摘要可保留；只有 activeSceneId 的 Sessio
 
 - [ ] **Step 5: 实现整卡 loading**
 
-loading 覆盖整个卡片内容区，阻止输入、搜索、resize 和 hover 内部焦点；卡片外形、宽度、关系徽章位置保持 Kooky。失败时退出 loading，显示单节点错误，不遮挡其他卡片。
+loading 覆盖整个卡片内容区，阻止输入、搜索、resize 和 hover 内部焦点；卡片外形、宽度、关系徽章位置保持 reference product。失败时退出 loading，显示单节点错误，不遮挡其他卡片。
 
 - [ ] **Step 6: 验证 GREEN**
 
@@ -767,7 +767,7 @@ export function createFrameCoalescer<T>(options: {
 
 同一帧触发 20 次 ResizeObserver，只用最后尺寸执行一次 `fit`/resize RPC；下一帧尺寸相同不发送；卸载取消 pending frame。
 
-- [ ] **Step 2: 固化 Kooky 动画合同 tests**
+- [ ] **Step 2: 固化 reference product 动画合同 tests**
 
 保留当前 transition duration/easing、活动卡最大宽度、悬停交接、pointer leave 回位和父级右拉轨迹。增加 stationary pointer 横向滚动 100ms 重定向和 leave 300ms 收起测试。
 
@@ -800,7 +800,7 @@ pnpm exec playwright test tests/e2e/session-canvas-lifecycle.spec.ts tests/e2e/s
 pnpm test:scale --grep "50 sessions|200 sessions"
 ```
 
-Expected: 100ms retarget、300ms 收起、500ms persistence；50 p95 frame≤16.7ms，200≤33.3ms；动画截图/轨迹与 Kooky 基线不变。
+Expected: 100ms retarget、300ms 收起、500ms persistence；50 p95 frame≤16.7ms，200≤33.3ms；动画截图/轨迹与 reference product 基线不变。
 
 - [ ] **Step 8: Commit**
 
@@ -869,7 +869,7 @@ layout 阶段建立 `nodeById`、depth bucket 和 branch root。视口 full node
 
 - [ ] **Step 5: 实现 rAF transform**
 
-手势期间只更新 `dag-world.style.transform` 和 ref；每动画帧重算一次 render model；pointerup/wheel settle 后写 React transform 与 geometry。保留 40%–200%、聚焦和 Kooky 动画。
+手势期间只更新 `dag-world.style.transform` 和 ref；每动画帧重算一次 render model；pointerup/wheel settle 后写 React transform 与 geometry。保留 40%–200%、聚焦和 reference product 动画。
 
 - [ ] **Step 6: 删除 500ms 全图轮询**
 
@@ -979,7 +979,7 @@ Task 1–11 ──────────────────────�
 
 ## 自审结果
 
-- 已覆盖：投影 N+1、正常路径全量刷新、结构共享、深链恢复、非活动 Scene xterm 解绑、PTY 保活、有界恢复、活动 Scene 优先、整卡 loading、删除范围、Kooky 动画、60Hz resize、DAG 聚合和五档真实基准。
+- 已覆盖：投影 N+1、正常路径全量刷新、结构共享、深链恢复、非活动 Scene xterm 解绑、PTY 保活、有界恢复、活动 Scene 优先、整卡 loading、删除范围、reference product 动画、60Hz resize、DAG 聚合和五档真实基准。
 - 产品决策无缺口：当前横向列表未采用 viewport xterm windowing；非活动 Scene 与当前 Scene 的资源语义明确分离。
 - 类型一致：`RecoveryState`、`RemoveNodeScope`、`TerminalSpawnViewMode` 和 `DagRenderModel` 仅定义一次，后续任务沿用同名接口。
 - 测试边界明确：每个生产任务先有预期失败，再最小实现并跑局部回归；最终由 Task 12 执行全矩阵。

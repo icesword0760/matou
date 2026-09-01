@@ -1750,9 +1750,9 @@ On branch main
     }
 
     const branches = [
-      { id: 'notification', name: '通知中心', mode: 'claude', edgeType: 'fork', git: 'feat/notification', status: 'running', running: true, nested: 2, nestedRunning: 1, lines: ['分析 Kooky 通知触发条件…', '✓ 已识别 4 类用户状态', '› 正在实现通知聚合视图'] },
+      { id: 'notification', name: '通知中心', mode: 'claude', edgeType: 'fork', git: 'feat/notification', status: 'running', running: true, nested: 2, nestedRunning: 1, lines: ['分析 reference product 通知触发条件…', '✓ 已识别 4 类用户状态', '› 正在实现通知聚合视图'] },
       { id: 'theme', name: '白色主题', mode: 'claude', edgeType: 'fork', git: 'fix/light-theme', status: 'needs-input', running: false, nested: 0, nestedRunning: 0, lines: ['✓ 完成列表层级对比', '✓ 校准终端背景与分割线', '等待你的验收选择'] },
-      { id: 'shortcut', name: '快捷键浮框', mode: 'claude', edgeType: 'fork', git: 'feat/shortcuts', status: 'running', running: true, nested: 1, nestedRunning: 1, lines: ['读取 Kooky 快捷键映射…', '✓ 完成全局唤起', '› 正在验证焦点恢复'] },
+      { id: 'shortcut', name: '快捷键浮框', mode: 'claude', edgeType: 'fork', git: 'feat/shortcuts', status: 'running', running: true, nested: 1, nestedRunning: 1, lines: ['读取 reference product 快捷键映射…', '✓ 完成全局唤起', '› 正在验证焦点恢复'] },
       { id: 'persist', name: '持久化恢复', mode: 'shell', previousMode: 'claude', edgeType: 'fork', restoreState: 'failed', git: 'fix/persistence', status: 'restore-failed', running: false, nested: 0, nestedRunning: 0, lines: ['✓ 工作空间与节点关系已恢复', '原 Claude Code 对话恢复异常', '当前已回到 Shell，可继续使用'] },
       { id: 'sidebar', name: '侧栏排序', mode: 'claude', edgeType: 'fork', git: 'feat/sidebar-order', status: 'idle', running: false, nested: 0, nestedRunning: 0, lines: ['✓ 置顶优先级已验证', '✓ 活跃时间排序已验证', '当前会话空闲'] }
     ];
@@ -1760,7 +1760,7 @@ On branch main
     const dagNodes = {
       product: { id: 'product', parent: null, depth: -2, mode: 'claude', edgeType: 'fork', name: 'Claude Code · 产品方案讨论', git: 'task/product-design', running: false, lines: ['✓ 明确工作区与事项层级', '✓ 确认会话分支产品方向', '当前会话空闲'] },
       main: { id: 'main', parent: 'product', depth: -1, mode: 'claude', edgeType: 'fork', name: 'Claude Code · 主线会话', git: 'main', running: false, lines: ['✓ 创建 5 个并行子会话', '✓ 当前回答已完成', '主线会话空闲，可继续输入'] },
-      notification: { id: 'notification', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '通知中心', git: 'feat/notification', running: true, lines: ['✓ 识别 Kooky 通知触发条件', '› 正在实现通知聚合视图', '读取事件流 seq 1842…'] },
+      notification: { id: 'notification', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '通知中心', git: 'feat/notification', running: true, lines: ['✓ 识别 reference product 通知触发条件', '› 正在实现通知聚合视图', '读取事件流 seq 1842…'] },
       theme: { id: 'theme', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '白色主题', git: 'fix/light-theme', running: false, status: 'needs-input', lines: ['✓ 校准列表层级对比', '✓ 完成终端背景调整', '会话等待验收'] },
       shortcut: { id: 'shortcut', parent: 'main', depth: 0, mode: 'claude', edgeType: 'fork', name: '快捷键浮框', git: 'feat/shortcuts', running: true, lines: ['✓ 完成全局唤起', '› 正在验证焦点恢复', '检查 CommandOrControl…'] },
       persist: { id: 'persist', parent: 'main', depth: 0, mode: 'shell', previousMode: 'claude', edgeType: 'fork', restoreState: 'failed', status: 'restore-failed', name: '持久化恢复', git: 'fix/persistence', running: false, lines: ['✓ 工作空间与节点关系已恢复', '原 Claude Code 对话恢复异常', '当前已回到 Shell，可继续使用'] },

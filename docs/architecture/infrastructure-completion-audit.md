@@ -32,10 +32,10 @@ INF-01～INF-25 已落地，并有自动化测试、边界扫描、构建产物�
 | INF-18 | 通过 | `product/experience-foundation.ts`；preferences allowlist、notification dedup/navigation、campaign version/seen/restore/debug 测试。 |
 | INF-19 | 通过 | `retention/retention-manager.ts`；quota dry-run、两阶段 trash、rollback、anchor degradation、archive/purge、权限测试。 |
 | INF-20 | 通过 | `observability/diagnostics.ts`、`presets/preset-capability-registry.ts`；脱敏诊断、metrics、lock/idempotency/offline seed/checksum/upgrade rollback/drift repair 测试。 |
-| INF-21 | 通过 | `compat/kooky-bridge/kooky-importer.ts`；Kooky snapshot/checkpoint/metadata/journal fixture、确定性映射、provider/team 恢复与坏记录隔离。 |
-| INF-22 | 通过 | `compat/kooky-bridge/shadow-write-bridge.ts`；legacy-first shadow write、byte cursor、partial line、diff/lag、repair queue 测试。 |
-| INF-23 | 通过 | `compat/kooky-bridge/read-switch.ts`；SQLite read authority、projection equality、SQLite-first compatibility backup、rollback 与迁移 telemetry 测试。 |
-| INF-24 | 通过 | `compat/kooky-bridge/legacy-retirement.ts`、`kooky-migration.md`；退役窗口、authority scan、Renderer snapshot export scan。 |
+| INF-21 | 通过 | `compat/legacy-bridge/legacy-importer.ts`；reference product snapshot/checkpoint/metadata/journal fixture、确定性映射、provider/team 恢复与坏记录隔离。 |
+| INF-22 | 通过 | `compat/legacy-bridge/shadow-write-bridge.ts`；legacy-first shadow write、byte cursor、partial line、diff/lag、repair queue 测试。 |
+| INF-23 | 通过 | `compat/legacy-bridge/read-switch.ts`；SQLite read authority、projection equality、SQLite-first compatibility backup、rollback 与迁移 telemetry 测试。 |
+| INF-24 | 通过 | `compat/legacy-bridge/legacy-retirement.ts`、`legacy-migration.md`；退役窗口、authority scan、Renderer snapshot export scan。 |
 | INF-25 | 通过 | 本文；`observability/infrastructure-load.test.ts`、`recovery/runtime-recovery-service.test.ts`、`tests/e2e/terminal-channel.spec.ts`、`tests/e2e/packaged-runtime.spec.ts` 以及全量命令。 |
 
 ## 3. 37 类测试矩阵闭合
@@ -64,21 +64,21 @@ INF-01～INF-25 已落地，并有自动化测试、边界扫描、构建产物�
 | 20 | Runtime crash/restart | `recovery/runtime-recovery-service.test.ts`；`main/runtime-host.test.ts` |
 | 21 | 单 Session 损坏隔离 | `recovery/runtime-recovery-service.test.ts` |
 | 22 | provider resume failure | `domain/session-repository.test.ts` |
-| 23 | Kooky importer fixtures | `compat/kooky-bridge/kooky-importer.test.ts` |
-| 24 | shadow diff/repair | `compat/kooky-bridge/shadow-write-bridge.test.ts` |
+| 23 | reference product importer fixtures | `compat/legacy-bridge/legacy-importer.test.ts` |
+| 24 | shadow diff/repair | `compat/legacy-bridge/shadow-write-bridge.test.ts` |
 | 25 | packaged Electron SQLite/node-pty | `tests/e2e/packaged-runtime.spec.ts` |
 | 26 | 多终端 throughput/credit/outbox latency | `observability/infrastructure-load.test.ts`、`flow-control/credit-window.test.ts`、large replay credit test |
 | 27 | disk full/read-only/partial write | `journal/segment-journal.test.ts` 注入 ENOSPC、partial write 修复、read-only isolation |
 | 28 | retention/purge | `retention/retention-manager.test.ts` |
 | 29 | dependency boundary | `storage/dependency-boundary.test.ts` |
-| 30 | Renderer authority | `compat/kooky-bridge/legacy-retirement.test.ts` |
+| 30 | Renderer authority | `compat/legacy-bridge/legacy-retirement.test.ts` |
 | 31 | Host Control same-user/token/default deny | `control/host-control-server.test.ts`；Unix 0700/0600 与 Windows Named Pipe endpoint |
 | 32 | ordinal revision/stale/stable ID | 同上 |
 | 33 | terminal read/send-key/errors | 同上及 `control/runtime-control-backend.ts` |
 | 34 | telemetry generation/subscription/capacity | `domain/product-foundation-repository.test.ts` |
 | 35 | campaigns | `product/experience-foundation.test.ts` |
 | 36 | presets | `observability/diagnostics-and-presets.test.ts` |
-| 37 | compat contract/mapping/authority | contracts `kooky-bridge.test.ts` 与 Runtime 三阶段测试 |
+| 37 | compat contract/mapping/authority | contracts `legacy-bridge.test.ts` 与 Runtime 三阶段测试 |
 
 ## 4. 准入条件核对
 
@@ -90,7 +90,7 @@ INF-01～INF-25 已落地，并有自动化测试、边界扫描、构建产物�
 - Renderer disconnect 不结束 PTY；Runtime crash 由 Main supervisor 重启并重建端口。
 - Runtime replay 返回 paired checkpoint + Journal tail；Renderer 重置并恢复 checkpoint 后消费 tail。
 - SessionRelation 只存事实边；兄弟关系派生，不存冗余 sibling edge。
-- Kooky 三阶段 migration authority、shadow repair、rollback、retirement 均有持久状态和测试。
+- reference product 三阶段 migration authority、shadow repair、rollback、retirement 均有持久状态和测试。
 - 打包产物包含 Runtime bundle 与 node-pty native prebuild；打包态测试实际启动 `Matou.app` 两次并验证 SQLite v7、PTY 输出、replay、torn-tail recovery。
 
 ## 5. 最终验证命令

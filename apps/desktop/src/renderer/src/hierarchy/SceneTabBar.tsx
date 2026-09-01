@@ -6,7 +6,7 @@ import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
-import splitRightIcon from '../assets/kooky/terminal/vertical.png'
+import splitRightIcon from '../assets/terminal-reference/terminal/vertical.png'
 
 export interface SceneCommands {
   activateScene(sceneId: string): unknown

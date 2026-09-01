@@ -1,9 +1,9 @@
 import { createPortal } from 'react-dom'
 
-import darkMac from '../assets/kooky/terminal/shortcuts/dark_mac.png'
-import darkWin from '../assets/kooky/terminal/shortcuts/dark_win.png'
-import whiteMac from '../assets/kooky/terminal/shortcuts/white_mac.png'
-import whiteWin from '../assets/kooky/terminal/shortcuts/white_win.png'
+import darkMac from '../assets/terminal-reference/terminal/shortcuts/dark_mac.png'
+import darkWin from '../assets/terminal-reference/terminal/shortcuts/dark_win.png'
+import whiteMac from '../assets/terminal-reference/terminal/shortcuts/white_mac.png'
+import whiteWin from '../assets/terminal-reference/terminal/shortcuts/white_win.png'
 import type { TerminalThemeKey } from '../terminal/terminal-themes'
 
 export function ShortcutPanel({ open, isMac, themeKey, onClose }: {

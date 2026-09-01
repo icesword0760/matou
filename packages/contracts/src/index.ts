@@ -1,5 +1,5 @@
 export * from './protocol'
-export * from './kooky-bridge'
+export * from './legacy-bridge'
 export * from './domain-events'
 export * from './hud'
 export * from './git'

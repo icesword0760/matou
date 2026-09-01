@@ -22,7 +22,7 @@ export function ConfirmDialog(props: {
     firstButton?.focus()
   }, [])
 
-  const overlay = <div className={`kooky-dialog-overlay${props.scope === 'session' ? ' is-session-scoped' : ''}`} onPointerDown={(event) => {
+  const overlay = <div className={`dialog-overlay${props.scope === 'session' ? ' is-session-scoped' : ''}`} onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onCancel()
   }}><div ref={dialogRef} role="alertdialog" aria-modal="true" aria-label={props.title}
     onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)}

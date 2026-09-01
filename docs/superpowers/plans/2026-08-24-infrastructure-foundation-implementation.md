@@ -130,9 +130,9 @@
 - Implement manifest/state/suppression, process locking, offline seed, checksum verification, atomic version switch, upgrade rollback, and user-uninstall suppression.
 - Test drift detection and concurrent reconciliation.
 
-## Task 21 — INF-21 Kooky importer
+## Task 21 — INF-21 reference product importer
 
-- Add `compat/kooky-bridge` contracts and fixture copies derived from Kooky snapshot/checkpoint/metadata/journal shapes.
+- Add `compat/legacy-bridge` contracts and fixture copies derived from reference product snapshot/checkpoint/metadata/journal shapes.
 - Implement idempotent import, source fingerprint, entity mapping, repair report, provider/team restoration, and consistency report.
 
 ## Task 22 — INF-22 shadow write

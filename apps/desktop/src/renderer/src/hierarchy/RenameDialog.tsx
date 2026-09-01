@@ -15,9 +15,9 @@ export function RenameDialog(props: {
     if (!trimmed) { setEmptySubmitted(true); return }
     if (!error) props.onConfirm(trimmed)
   }
-  return <div className="kooky-dialog-overlay" onPointerDown={(event) => {
+  return <div className="dialog-overlay" onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onCancel()
-  }}><div className="kooky-rename-dialog" role="dialog" aria-modal="true">
+  }}><div className="rename-dialog" role="dialog" aria-modal="true">
     <header><h2>{props.title ?? '重命名'}</h2><button className="dialog-close" aria-label="关闭" onClick={props.onCancel}>×</button></header>
     <div className="rename-dialog-body"><label>
       <span className="visually-hidden">{props.label}</span>

@@ -1,18 +1,18 @@
-# Kooky → Matou 分阶段迁移
+# reference product → Matou 分阶段迁移
 
 状态：基础设施定稿  
 日期：2026-08-24
 
 ## 1. 权威边界
 
-- Kooky 的 `snapshot.json`、`checkpoint.json`、`checkpoint.prev.json`、`metadata.ndjson`、terminal journals 与 scrollback 只允许由 `apps/runtime/src/compat/kooky-bridge/` 读取。
+- reference product 的 `snapshot.json`、`checkpoint.json`、`checkpoint.prev.json`、`metadata.ndjson`、terminal journals 与 scrollback 只允许由 `apps/runtime/src/compat/legacy-bridge/` 读取。
 - Runtime 独占 Matou SQLite；Renderer 和 Electron Main 不打开数据库，也不导出权威对象快照。
-- 初次导入后，legacy snapshot 只作为兼容输入，后续增量必须是版本化、白名单化的 `KookyMutationEnvelope`。
+- 初次导入后，legacy snapshot 只作为兼容输入，后续增量必须是版本化、白名单化的 `LegacyMutationEnvelope`。
 - 所有映射后的领域修改与 `legacy.mutation-applied` Outbox 事件在同一个 SQLite 事务提交。
 
 ## 2. 实体映射
 
-| Kooky | Matou |
+| reference product | Matou |
 |---|---|
 | Project | Workspace |
 | Workbench | Task |
@@ -29,9 +29,9 @@
 
 ### 阶段 0：影子写
 
-1. `KookyImporter` 从有效 snapshot 读取；snapshot 损坏时按 checkpoint、previous checkpoint 顺序回退。
+1. `LegacyImporter` 从有效 snapshot 读取；snapshot 损坏时按 checkpoint、previous checkpoint 顺序回退。
 2. 从 checkpoint 的 `recoveryOffsets.metadataJournalBytes` 继续应用完整 NDJSON 记录；撕裂尾行留给下次补齐。
-3. `ShadowWriteBridge` 先完成原 Kooky 写入，再尝试 Matou 映射；Matou 失败进入 `shadow_repair_queue`，不回滚 Kooky。
+3. `ShadowWriteBridge` 先完成原 reference product 写入，再尝试 Matou 映射；Matou 失败进入 `shadow_repair_queue`，不回滚 reference product。
 4. cursor 按字节持久化；projection diff、pending bytes 和 repair depth 进入迁移诊断。
 
 ### 阶段 1：SQLite 读取

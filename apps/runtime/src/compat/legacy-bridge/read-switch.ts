@@ -3,7 +3,7 @@ import { mkdir, open, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { RuntimeDatabase } from '../../storage/database'
-import { legacyIdFor, readKookySnapshot } from './kooky-importer'
+import { legacyIdFor, readLegacySnapshot } from './legacy-importer'
 
 export type ReadAuthority = 'legacy' | 'sqlite'
 
@@ -45,7 +45,7 @@ export class ReadAuthorityController {
   async readProjection(legacySourceRoot: string): Promise<MigrationProjection> {
     return this.getReadAuthority() === 'sqlite'
       ? sqliteProjection(this.#database)
-      : legacyProjection(await readKookySnapshot(legacySourceRoot))
+      : legacyProjection(await readLegacySnapshot(legacySourceRoot))
   }
 
   async executeSqliteFirst<T>(
@@ -92,7 +92,7 @@ export class LegacyCompatibilityBackupWriter {
   }
 
   async write(now = Date.now()): Promise<string> {
-    const snapshot = buildKookyBackup(this.#database, now)
+    const snapshot = buildLegacyBackup(this.#database, now)
     await mkdir(this.#backupRoot, { recursive: true, mode: 0o700 })
     const path = join(this.#backupRoot, 'snapshot.json')
     const temporary = `${path}.tmp-${randomUUID()}`
@@ -106,7 +106,7 @@ export class LegacyCompatibilityBackupWriter {
   }
 }
 
-function legacyProjection(snapshot: Awaited<ReturnType<typeof readKookySnapshot>>): MigrationProjection {
+function legacyProjection(snapshot: Awaited<ReturnType<typeof readLegacySnapshot>>): MigrationProjection {
   const panels = Object.values(snapshot.panels)
   const providerToPanel = new Map<string, string>()
   for (const panel of panels) {
@@ -190,7 +190,7 @@ function sqliteProjection(database: RuntimeDatabase): MigrationProjection {
   })
 }
 
-function buildKookyBackup(database: RuntimeDatabase, now: number): unknown {
+function buildLegacyBackup(database: RuntimeDatabase, now: number): unknown {
   const run = database.get<{ id: string }>(
     "SELECT id FROM legacy_import_runs WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1"
   )

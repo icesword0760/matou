@@ -31,7 +31,7 @@ describe('toProviderNotificationEvent', () => {
     })
   })
 
-  it('classifies errors, completion, waiting, and generic attention in Kooky order', () => {
+  it('classifies errors, completion, waiting, and generic attention in reference product order', () => {
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Tool failed' })?.eventType).toBe('error')
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Task done' })?.eventType).toBe('completed')
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Waiting for input' })?.eventType).toBe('waiting')

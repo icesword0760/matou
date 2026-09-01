@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 
 import { launchMatou, restartMatou } from './matou-fixture'
 
-test('keeps Kooky Task naming, validation, drag focus, and order across restart', async () => {
+test('keeps reference product Task naming, validation, drag focus, and order across restart', async () => {
   let fixture = await launchMatou()
   try {
     let { page } = fixture
@@ -37,7 +37,7 @@ test('keeps Kooky Task naming, validation, drag focus, and order across restart'
   }
 })
 
-test('matches Kooky Task context-menu close behavior', async () => {
+test('matches reference product Task context-menu close behavior', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture

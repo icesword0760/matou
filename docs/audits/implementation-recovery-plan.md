@@ -21,7 +21,7 @@
 - Fork RPC 只负责持久化受理并快速返回；Git、setup、provider 恢复和窗口启动在后台继续。
 - Fork 当前阶段不设置取消入口；同一 `submissionKey` 只生成一个 intent、Session、branch 和 Worktree。
 - 真实故障验收使用 Electron、真实 SQLite/WAL、真实 Git worktree、真实 PTY；单元测试中的 fake 只用于精确覆盖状态迁移。
-- Kooky CLI 黑色区域内既有视觉与交互继续作为截图和行为对照基线。
+- reference product CLI 黑色区域内既有视觉与交互继续作为截图和行为对照基线。
 
 ---
 
@@ -511,7 +511,7 @@ pnpm --filter @matou/desktop exec vitest run \
 ```
 
 - [ ] 从现有 TerminalHud 的 cwd/Git 混合展示中抽出 EnvironmentControlMenu；GitControlMenu 只负责 Git 状态和 Git 操作。
-- [ ] 进行 Kooky 黑色区域截图对照，确认新增状态位于右下快捷栏，卡片尺寸、滚动宽度和现有 HUD 优先级不跳动。
+- [ ] 进行 reference product 黑色区域截图对照，确认新增状态位于右下快捷栏，卡片尺寸、滚动宽度和现有 HUD 优先级不跳动。
 - [ ] 重跑 component tests、desktop typecheck/build。
 
 **Acceptance:** 用户一眼可以区分“运行在哪”和“Git 处于什么状态”；worktree 缺失不会只显示一个泛化路径错误；恢复期间整卡操作被锁定且阶段持续可见。
@@ -629,7 +629,7 @@ pnpm --filter @matou/desktop exec vitest run \
 
 - [ ] 用 `ForkProgress` 驱动整卡 overlay，移除基于 RPC Promise 和本地定时器推断完成的状态。
 - [ ] 清理残留调用 WorktreeService 的 clean-only removal；dirty worktree进入 retained 并提供 Finder 入口。
-- [ ] 重跑 component tests、typecheck、build，并补 Kooky 对照截图。
+- [ ] 重跑 component tests、typecheck、build，并补 reference product 对照截图。
 
 **Acceptance:** 长 Fork 没有 10 秒假失败；离开页面后继续；返回时从 projection 恢复准确阶段；当前版本 UI 没有取消入口；失败残留可安全清理。
 
@@ -830,7 +830,7 @@ pnpm exec playwright test \
 ### Batch B：会话环境与 Worktree
 
 - Tasks 6–9。
-- 评审门槛：missing worktree 绝不落回 workspace/HOME；restore/locate/Handoff 真实 Git E2E；右下角环境与 Git 双状态 Kooky 对照。
+- 评审门槛：missing worktree 绝不落回 workspace/HOME；restore/locate/Handoff 真实 Git E2E；右下角环境与 Git 双状态 reference product 对照。
 
 ### Batch C：Fork 长任务
 

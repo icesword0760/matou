@@ -9,27 +9,27 @@ import { RuntimeDatabase } from '../../storage/database'
 import { DomainTransactionManager } from '../../storage/domain-transaction'
 import { MigrationRunner } from '../../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../../storage/migrations'
-import { KookyImporter } from './kooky-importer'
+import { LegacyImporter } from './legacy-importer'
 
 let root: string
 let source: string
 let database: RuntimeDatabase
-let importer: KookyImporter
+let importer: LegacyImporter
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'matou-kooky-import-'))
+  root = await mkdtemp(join(tmpdir(), 'matou-legacy-import-'))
   source = join(root, 'legacy-session')
   await mkdir(join(source, 'journals', 'terminals'), { recursive: true })
   await mkdir(join(source, 'scrollback'), { recursive: true })
   database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-  importer = new KookyImporter(root, database, new DomainTransactionManager(database))
+  importer = new LegacyImporter(root, database, new DomainTransactionManager(database))
 })
 
 afterEach(() => database.close())
 
-describe('KookyImporter', () => {
-  it('imports Kooky Project/Workbench/Tab/Panel identities, provider bindings, teams, and terminal history', async () => {
+describe('LegacyImporter', () => {
+  it('imports reference product Project/Workbench/Tab/Panel identities, provider bindings, teams, and terminal history', async () => {
     await writeFixture(source)
 
     const result = await importer.importSource(source)

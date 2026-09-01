@@ -6,7 +6,7 @@
 
 事项侧栏已形成完整闭环：用户能在工作区内新建、切换、重命名、删除和排序事项；名称、顺序和上次所在事项跨重启保留；外部 AI / 自动化写入的状态、进度和日志不会打断当前工作，其中错误日志会在目标事项上形成未读反馈。
 
-视觉与交互对照范围仅为黑色 CLI 模块。Matou 窗口标题栏、Kooky Logo 和产品全局导航均不计入本项差异。
+视觉与交互对照范围仅为黑色 CLI 模块。Matou 窗口标题栏、reference product Logo 和产品全局导航均不计入本项差异。
 
 ## 用户场景验收
 
@@ -17,11 +17,11 @@
 | 切换事项 | 激活背景和右侧终端立即同步，只有一个事项处于激活态 | 通过 |
 | 拖拽排序 | 拖动项有提起反馈，目标项有浅蓝反馈；排序不切走当前事项 | 通过 |
 | 重启恢复 | 用户调整后的事项顺序、名称和每个工作区上次激活事项保持一致 | 通过 |
-| 重命名 | 菜单、420px 弹窗、20 字计数、空名 / 重名红字、Esc / 取消行为与 Kooky 一致 | 通过 |
+| 重命名 | 菜单、420px 弹窗、20 字计数、空名 / 重名红字、Esc / 取消行为与 reference product 一致 | 通过 |
 | 底层拒绝重命名 | 弹窗保留，原名称不变，用户可继续修改 | 通过 |
 | 删除事项 | 二次确认明确说明终端会话会丢失、本地目录保留 | 通过 |
 | 删除最后事项 | 自动补建并激活 `默认`，用户不进入无内容空态 | 通过 |
-| 未读反馈 | 目标事项显示 Kooky 当前红色数字徽标，超过 99 显示 `99+` | 通过 |
+| 未读反馈 | 目标事项显示 reference product 当前红色数字徽标，超过 99 显示 `99+` | 通过 |
 | 切回未读事项 | 只清除当前可见焦点终端的已有未读，隐藏终端的未读保留 | 通过 |
 | 外部写入状态 | 同 key 覆盖；空字符串清除；侧栏不出现手工入口或额外明细 | 通过 |
 | 外部写入进度 | 后写覆盖，越界自动钳制到 0 或 100，不影响其它事项 | 通过 |
@@ -30,17 +30,17 @@
 | 长名称 / 极多事项 | 名称单行省略、右侧槽位不被挤压；列表滚动且条目高度固定 | 通过 |
 | 菜单关闭 | Esc、点击空白、打开另一个事项菜单都会关闭当前菜单 | 通过 |
 
-## 与 Kooky 当前版本保持一致的取舍
+## 与 reference product 当前版本保持一致的取舍
 
-原 PRD 文本与当前 Kooky 存在少量历史差异。本次按用户指定的“现存 Kooky 1:1”口径验收：
+原 PRD 文本与当前 reference product 存在少量历史差异。本次按用户指定的“现存 reference product 1:1”口径验收：
 
 - 新建入口显示 `+ 事项`，不是 PRD 文本中的 `+ 新事项`。
-- 激活态使用 Kooky 当前圆角深灰背景，不增加 PRD 文本中的左侧蓝色强调线。
-- 未读徽标采用 Kooky 当前 `#F54C46` 红色，不替换为 PRD 草案中的蓝色。
-- Kooky 当前模板已注释面板计数，因此本轮侧栏不额外显示面板数；计数所需的层级数据仍由权威投影保留。
-- Kooky 当前长名称仅做省略，不额外出现悬停浮层；本轮保持一致。
+- 激活态使用 reference product 当前圆角深灰背景，不增加 PRD 文本中的左侧蓝色强调线。
+- 未读徽标采用 reference product 当前 `#F54C46` 红色，不替换为 PRD 草案中的蓝色。
+- reference product 当前模板已注释面板计数，因此本轮侧栏不额外显示面板数；计数所需的层级数据仍由权威投影保留。
+- reference product 当前长名称仅做省略，不额外出现悬停浮层；本轮保持一致。
 
-完整差异和源码锚点见 `docs/parity/prd-03-kooky-parity.md`。
+完整差异和源码锚点见 `docs/parity/prd-03-reference-parity.md`。
 
 ## 验证证据
 
@@ -63,8 +63,8 @@ Electron 回放覆盖：
 
 ### 视觉证据
 
-- Kooky CLI 基线：`docs/acceptance/evidence/prd-03/kooky/cli-module-baseline.png`
-- Kooky 关键 computed styles：`docs/acceptance/evidence/prd-03/kooky/cli-module-computed-styles.json`
+- reference product CLI 基线：`docs/acceptance/evidence/prd-03/reference/cli-module-baseline.png`
+- reference product 关键 computed styles：`docs/acceptance/evidence/prd-03/reference/cli-module-computed-styles.json`
 - Matou CLI 当前态：`docs/acceptance/evidence/prd-03/matou/cli-module-default.jpeg`
 - Matou 重命名弹窗：`docs/acceptance/evidence/prd-03/matou/rename-dialog.jpeg`
 

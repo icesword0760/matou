@@ -1,16 +1,16 @@
-# PRD 02 Agent HUD / 终端 HUD：Kooky CLI 模块对照矩阵
+# PRD 02 Agent HUD / 终端 HUD：reference product CLI 模块对照矩阵
 
 ## 对照边界与产品决策
 
 - 只对照黑色 CLI 模块内、紧贴终端底部的快捷栏与 HUD；白色产品导航、Logo 和窗口外壳不参加验收。
-- 需求完整性以 `02-agent-hud-和-终端-hud.md` 为清单；同范围视觉与交互以当前 Kooky 源码和可运行程序共同为基线。
-- 当前可运行 Kooky 仍装载旧版 `src/modules/terminal/components/shortcut-bar/ShortcutBar.vue`：底栏高 50px、左右 12px，只显示快捷命令，没有 HUD。这属于 PRD 要补齐的缺口，不复制为 Matou 的最终状态。
-- Kooky 仓库中完整 HUD 实现位于 `src/modules/terminal/components/shortcut-bar/shortcut-bar/ShortcutBar.vue`。2026-08-25 产品确认采用方案 A：该实现已有的可见文案、顺序、颜色和交互优先，PRD 补齐尚未落地的运行能力。
-- 因此，Matou 的最终顺序采用 Kooky：Agent 环境区为“目录 → Git → 时长”，模型折叠态显示 `Opus Plan / Opus / Sonnet`，Bypass 文案保留 `resume` 和 `sessionId`，窄宽阈值逐级采用 560 / 500 / 440 / 380 / 330 / 290 / 250 / 210px。
+- 需求完整性以 `02-agent-hud-和-终端-hud.md` 为清单；同范围视觉与交互以当前 reference product 源码和可运行程序共同为基线。
+- 当前可运行 reference product 仍装载旧版 `src/modules/terminal/components/shortcut-bar/ShortcutBar.vue`：底栏高 50px、左右 12px，只显示快捷命令，没有 HUD。这属于 PRD 要补齐的缺口，不复制为 Matou 的最终状态。
+- reference product 仓库中完整 HUD 实现位于 `src/modules/terminal/components/shortcut-bar/shortcut-bar/ShortcutBar.vue`。2026-08-25 产品确认采用方案 A：该实现已有的可见文案、顺序、颜色和交互优先，PRD 补齐尚未落地的运行能力。
+- 因此，Matou 的最终顺序采用 reference product：Agent 环境区为“目录 → Git → 时长”，模型折叠态显示 `Opus Plan / Opus / Sonnet`，Bypass 文案保留 `resume` 和 `sessionId`，窄宽阈值逐级采用 560 / 500 / 440 / 380 / 330 / 290 / 250 / 210px。
 
 ## 双基线结论
 
-| 用户场景 | 可运行 Kooky | Kooky 完整 HUD 源码 | Matou 实际结果 | 差异结论 |
+| 用户场景 | 可运行 reference product | reference product 完整 HUD 源码 | Matou 实际结果 | 差异结论 |
 |---|---|---|---|---|
 | Shell 底部信息 | 旧栏仅有快捷命令，没有 HUD | `Shell → ~/目录 → Git* → ⏱时长` | 同完整 HUD 字段与顺序，数据来自当前 Shell | 补齐缺口 |
 | Agent 底部信息 | 旧栏没有 HUD | 权限 → 模型 → 上下文 → 任务 → 次级 AI → 团队角色 → 工具 → 待办 → 环境区 | 同字段、同条件显隐、同顺序 | 一致 |
@@ -24,7 +24,7 @@
 | 权限菜单 | 不适用 | 四项；选择 / Esc / 外部点击关闭；与模型菜单互斥 | 同行为 | 一致 |
 | 普通权限切换 | 不适用 | Default / Accept Edits / Plan 通过 Shift+Tab 循环，不清屏 | 同一 PTY 内切换，徽章即时更新 | 一致 |
 | Bypass 边界 | 不适用 | 二次确认；中断进程并以原 Session 身份 resume；成功清屏 | 同一 Matou Session 重建进程；有身份续接、无身份新开；成功清屏 | 一致 |
-| Bypass 文案 | 不适用 | 使用 `Claude`、`resume`、`sessionId` 的当前产品文案 | 标题、正文、取消 / 确认按钮逐字采用 Kooky | 按方案 A 一致 |
+| Bypass 文案 | 不适用 | 使用 `Claude`、`resume`、`sessionId` 的当前产品文案 | 标题、正文、取消 / 确认按钮逐字采用 reference product | 按方案 A 一致 |
 | Bypass 失败 | 不适用 | 保持旧徽章并提示 `切换失败：...` | RPC 报错；不把瞬时 Shell 回退误报为成功；提示同文案 | 一致并补强 |
 | 模型入口 | 不适用 | 三档；菜单全名，折叠态 `Opus Plan / Opus / Sonnet` | 同菜单、同选中态、同折叠名 | 一致 |
 | 模型切换 | 不适用 | 写入 `/model STRATEGY`，乐观更新，不清屏、失败静默 | 同命令与乐观更新；运行进程不重启 | 一致 |
@@ -39,7 +39,7 @@
 | 极窄底线 | 不适用 | 当前源码在 440px 后隐藏环境区、210px 后隐藏模型 | Matou 同当前源码，不采用 PRD 旧版“始终保留目录 / 模型”的冲突描述 | 按方案 A 一致 |
 | 独立窗口 | 旧栏没有 HUD | 同一组件；轻交互一致，宿主型 Bypass 不做强承诺 | 复用同一 HUD；模型、普通权限、Bypass 均连接同一 Runtime 命令 | 达到并超过 PRD 本期承诺 |
 
-## 当前 Kooky 代码基线
+## 当前 reference product 代码基线
 
 - 当前运行入口与旧快捷栏：`src/modules/terminal/components/ClaudeCodeView.vue`、`src/modules/terminal/components/shortcut-bar/ShortcutBar.vue`。
 - 完整 HUD 字段、菜单、文案、顺序、时长和让位策略：`src/modules/terminal/components/shortcut-bar/shortcut-bar/ShortcutBar.vue`。
@@ -49,10 +49,10 @@
 
 ## 双应用运行证据
 
-- Kooky 当前黑色 CLI 运行基线：`docs/acceptance/evidence/prd-02/kooky/cli-runtime-baseline.png`。
-- Kooky 当前加载组件的几何采样：`docs/acceptance/evidence/prd-02/kooky/runtime-baseline.json`。
+- reference product 当前黑色 CLI 运行基线：`docs/acceptance/evidence/prd-02/reference/cli-runtime-baseline.png`。
+- reference product 当前加载组件的几何采样：`docs/acceptance/evidence/prd-02/reference/runtime-baseline.json`。
 - Matou Shell HUD：`docs/acceptance/evidence/prd-02/matou/shell-hud.png` 与 `shell-hud.json`。
 - Matou Agent HUD：`docs/acceptance/evidence/prd-02/matou/agent-hud.png` 与 `agent-hud.json`。
 - Matou Bypass 确认：`docs/acceptance/evidence/prd-02/matou/bypass-confirmation.png`。
 
-Kooky 采样来自当前运行程序并只截取黑色 CLI 模块；登录遮罩仅在采样页面中移除，没有修改 Kooky 源码或 CLI 内部样式。运行采样明确证实旧栏尚未装载 HUD，因此 Matou 的新增字段以 PRD 与 Kooky 完整 HUD 源码共同闭合。
+reference product 采样来自当前运行程序并只截取黑色 CLI 模块；登录遮罩仅在采样页面中移除，没有修改 reference product 源码或 CLI 内部样式。运行采样明确证实旧栏尚未装载 HUD，因此 Matou 的新增字段以 PRD 与 reference product 完整 HUD 源码共同闭合。

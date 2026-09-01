@@ -17,7 +17,7 @@
 .session-carousel.is-narrow .session-card-virtual-spacer { flex-basis: calc(var(--virtual-count) * (clamp(112px,28%,176px) + 12px) - 12px); }
 .session-carousel.is-narrow .session-card-slot.is-focused { flex: 0 0 clamp(260px,68%,560px); }
 .session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-card > :not(.session-compact-summary) { display: none; }
-.session-carousel.is-narrow .session-card-slot:not(.is-focused) .session-compact-summary { display: grid; height: 100%; box-sizing: border-box; align-content: start; gap: 9px; padding: 14px 12px; overflow: hidden; border: 0; color: rgba(255,255,255,.56); background: var(--kooky-chrome); box-shadow: 0 2px 8px rgba(0,0,0,.18),0 12px 28px rgba(0,0,0,.12); }
+.session-carousel.is-narrow .session-card-slot:not(.is-focused) .session-compact-summary { display: grid; height: 100%; box-sizing: border-box; align-content: start; gap: 9px; padding: 14px 12px; overflow: hidden; border: 0; color: rgba(255,255,255,.56); background: var(--terminal-chrome-bg); box-shadow: 0 2px 8px rgba(0,0,0,.18),0 12px 28px rgba(0,0,0,.12); }
 .session-compact-summary strong { overflow: hidden; color: rgba(255,255,255,.82); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .session-compact-summary span { justify-self: start; padding: 2px 6px; border-radius: 8px; background: rgba(255,255,255,.06); font-size: 9px; }
 .session-compact-summary__priority { display: flex; min-width: 0; flex-wrap: wrap; gap: 5px; color: #e8ae48; font-size: 9px; }

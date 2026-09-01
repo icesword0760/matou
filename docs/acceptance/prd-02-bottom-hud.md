@@ -8,19 +8,19 @@
 - 用户在 Shell 中运行 `claude` 后，同一面板立即进入 Agent HUD；权限、模型、上下文、任务、工具、待办和环境信息集中在一行内，退出 AI 后原位回到可继续输入的 Shell。
 - 用户可以直接在底部切模型或切 Default / Accept Edits / Plan Mode。跨越 Bypass 边界时会先看到明确确认，再中断并重建当前 AI 进程；有可恢复身份时继续原话题，没有身份时明确新开。
 - 多个面板各自保有独立 HUD，焦点切换不会串状态；独立窗口复用同一组件和 Runtime 命令。
-- 窗口变窄时字段按 Kooky 当前优先级逐级让位，始终保持单行，不显示 `--`、`N/A` 等噪音。
+- 窗口变窄时字段按 reference product 当前优先级逐级让位，始终保持单行，不显示 `--`、`N/A` 等噪音。
 
 ## 2. 已确认的产品基线
 
-2026-08-25 产品确认采用方案 A：Kooky 已实现的视觉与交互优先，PRD 补齐未落地能力。
+2026-08-25 产品确认采用方案 A：reference product 已实现的视觉与交互优先，PRD 补齐未落地能力。
 
-1. 可运行 Kooky 当前仍是 50px 旧快捷栏且没有 HUD；这是需求缺口。Matou 采用 Kooky 仓库内完整 HUD 的 38px 形态，而不是复制“没有 HUD”。
-2. Agent 环境区顺序采用 Kooky 当前完整实现：目录 → Git → 时长。
+1. 可运行 reference product 当前仍是 50px 旧快捷栏且没有 HUD；这是需求缺口。Matou 采用 reference product 仓库内完整 HUD 的 38px 形态，而不是复制“没有 HUD”。
+2. Agent 环境区顺序采用 reference product 当前完整实现：目录 → Git → 时长。
 3. 折叠模型名采用 `Opus Plan / Opus / Sonnet`，菜单使用完整模型名。
-4. Bypass 确认沿用 Kooky 的 `Claude / resume / sessionId` 文案。
-5. 极窄窗口按 Kooky 的八级阈值隐藏，不采用 PRD 旧描述中的永久底线字段。
+4. Bypass 确认沿用 reference product 的 `Claude / resume / sessionId` 文案。
+5. 极窄窗口按 reference product 的八级阈值隐藏，不采用 PRD 旧描述中的永久底线字段。
 
-详细双基线矩阵：`docs/parity/prd-02-kooky-parity.md`。
+详细双基线矩阵：`docs/parity/prd-02-reference-parity.md`。
 
 ## 3. 30 项 PRD 验收台账
 
@@ -35,11 +35,11 @@
 | 7 | `cd` 到新目录 | 回到提示符后目录末级名刷新 | Electron 场景 1 + Runtime chained-cd test | 通过 |
 | 8 | Git 分支 / 改动变化 | 分支与 `*` 随命令 / Hook 刷新 | Electron 场景 1 | 通过 |
 | 9 | 离开 Git 仓库 | Git 字段安静消失 | Electron 场景 1 | 通过 |
-| 10 | Git 视觉 | 使用 Kooky 橙红 `#ff6b35` | Electron CSS 断言 + `shell-hud.png` | 通过 |
+| 10 | Git 视觉 | 使用 reference product 橙红 `#ff6b35` | Electron CSS 断言 + `shell-hud.png` | 通过 |
 | 11 | 前台态 / 终端尺寸 | HUD 不展示这两类字段 | component field tests | 通过 |
 | 12 | 点击权限徽章 | 四档菜单完整出现 | component + Electron 场景 2 | 通过 |
 | 13 | 三档之间切换 | Shift+Tab 循环，同一 PID，不清屏 | Runtime live-permission test | 通过 |
-| 14 | 选中 Bypass | 有身份 / 无身份显示各自 Kooky 确认文案 | component tests + Electron 场景 2 | 通过（方案 A 文案） |
+| 14 | 选中 Bypass | 有身份 / 无身份显示各自 reference product 确认文案 | component tests + Electron 场景 2 | 通过（方案 A 文案） |
 | 15 | Bypass 取消 | 徽章、进程和模式均保持不变 | component test | 通过 |
 | 16 | Bypass 确认 | AI 进程更换、带高权限参数、清屏；有身份 resume | Electron 场景 2 + Runtime respawn test | 通过 |
 | 17 | 从 Bypass 切回 | 复用同一跨边界确认与重建路径 | component / Runtime 双向逻辑 | 通过 |
@@ -50,7 +50,7 @@
 | 22 | 任务状态 | 任务中 / 待输入 / 错误按状态出现，idle 隐藏 | component task-label tests | 通过 |
 | 23 | 工具 / 待办 | 有数据才显示；工具取最近两项并过滤 Bash / Skill；待办显示进行项与进度 | HUD component + registry tests | 通过 |
 | 24 | 窗口从宽到窄 | 八级优先级逐级隐藏，始终单行 | CSS container queries + Electron 场景 2 | 通过 |
-| 25 | 极端窄窗口 | 严格沿用 Kooky 当前阈值，而非 PRD 旧底线描述 | parity matrix + CSS | 通过（方案 A） |
+| 25 | 极端窄窗口 | 严格沿用 reference product 当前阈值，而非 PRD 旧底线描述 | parity matrix + CSS | 通过（方案 A） |
 | 26 | 字段数据缺失 | 当前字段消失，其他字段继续展示，无占位符 | component Shell / Agent tests | 通过 |
 | 27 | 不常驻指标 | 配置计数、累计工具、速度、费用、尺寸和 Shell 前台态均不可见 | component negative assertions | 通过 |
 | 28 | 会话指标整体缺失 | 保留权限徽章与默认模型入口 | detached / component minimum tests | 通过 |
@@ -59,14 +59,14 @@
 
 ## 4. 当前运行与自动化证据
 
-- Kooky 当前运行程序和 Kooky 完整 HUD 源码已双重对照；可运行程序仍装载旧栏这一缺口已单独记录，没有被误写成最终标准。
+- reference product 当前运行程序和 reference product 完整 HUD 源码已双重对照；可运行程序仍装载旧栏这一缺口已单独记录，没有被误写成最终标准。
 - Matou 已覆盖 Shell 环境刷新、Shell → Agent → Shell、权限菜单、模型切换、Bypass 有身份重建、清屏、窄窗口和独立窗口。
 - 完整工作区自动化：Contracts 15 项、Domain 3 项、Desktop 98 项、Runtime 239 项，共 355 项单元 / 集成测试通过。
 - 全量 Electron 回归 32 个用户场景通过；最终 HUD 修正后，PRD 02 两个 Electron 场景再次单独通过。
 - 类型检查与生产构建通过。
 - 运行证据：
-  - `docs/acceptance/evidence/prd-02/kooky/cli-runtime-baseline.png`
-  - `docs/acceptance/evidence/prd-02/kooky/runtime-baseline.json`
+  - `docs/acceptance/evidence/prd-02/reference/cli-runtime-baseline.png`
+  - `docs/acceptance/evidence/prd-02/reference/runtime-baseline.json`
   - `docs/acceptance/evidence/prd-02/matou/shell-hud.png`
   - `docs/acceptance/evidence/prd-02/matou/shell-hud.json`
   - `docs/acceptance/evidence/prd-02/matou/agent-hud.png`
@@ -82,4 +82,4 @@
 3. **就地控制**：切 Plan Mode、切 Sonnet，再跨到 Bypass，确认普通切换无中断、Bypass 有确认且清屏续话。
 4. **多面板与窄窗口**：切换不同面板、拖出独立窗口、缩窄窗口，确认状态不串扰且始终单行。
 
-PRD 02 的需求台账与 Kooky 双基线已经闭合，等待产品验收。
+PRD 02 的需求台账与 reference product 双基线已经闭合，等待产品验收。

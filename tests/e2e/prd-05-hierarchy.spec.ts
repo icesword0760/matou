@@ -199,7 +199,7 @@ test('separates Session cards without outlines and lifts the active card under v
   } finally { await fixture.close() }
 })
 
-test('matches Kooky when deleting a Task from its sidebar menu', async () => {
+test('matches reference product when deleting a Task from its sidebar menu', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
@@ -212,7 +212,7 @@ test('matches Kooky when deleting a Task from its sidebar menu', async () => {
   } finally { await fixture.close() }
 })
 
-test('matches Kooky terminal shortcuts, real search, focus, zoom, and white skin end to end', async () => {
+test('matches reference product terminal shortcuts, real search, focus, zoom, and white skin end to end', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture

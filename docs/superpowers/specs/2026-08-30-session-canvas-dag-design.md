@@ -29,7 +29,7 @@
 3. `docs/prd/mockups/Matou-会话画布与DAG分支交互.html` 的视觉与手势演示。
 4. `docs/test/E2E-Matou-会话画布与DAG分支交互.md` 的完整用户旅程与异常验收。
 5. 已交付的 PRD 01–06 行为，尤其是通知、状态 HUD、持久化、四级层级与 Claude Fork。
-6. Kooky 的终端创建、聚焦、持久化和 Claude 会话身份行为；当新 PRD 明确升级了交互时，以新 PRD 为准。
+6. reference product 的终端创建、聚焦、持久化和 Claude 会话身份行为；当新 PRD 明确升级了交互时，以新 PRD 为准。
 
 测试追踪矩阵位于：
 
@@ -636,7 +636,7 @@ dag-node-layout:<scene-id>:<session-id>
 
 ### 14.3 主题
 
-主界面和 DAG 共享明暗主题 token。浅色主题继续对照 Kooky 保持列表层级、选中态和边界对比度；DAG 连线与历史虚影在两种主题下均达到清晰可辨。
+主界面和 DAG 共享明暗主题 token。浅色主题继续对照 reference product 保持列表层级、选中态和边界对比度；DAG 连线与历史虚影在两种主题下均达到清晰可辨。
 
 ## 15. 应用生命周期
 

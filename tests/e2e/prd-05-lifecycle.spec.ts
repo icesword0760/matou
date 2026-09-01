@@ -60,7 +60,7 @@ test('closes only one non-final Scene and selects its deterministic successor', 
   } finally { await fixture.close() }
 })
 
-test('matches Kooky by protecting the last work scene and keeping the terminal live', async () => {
+test('matches reference product by protecting the last work scene and keeping the terminal live', async () => {
   const fixture = await launchMatou()
   try {
     const surface = fixture.page.getByTestId('terminal-pane').first().locator('.terminal-surface')

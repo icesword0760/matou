@@ -38,7 +38,7 @@ describe('Scene tabs and split actions', () => {
     expect(screen.queryByRole('button', { name: '垂直分屏' })).toBeNull()
   })
 
-  it('keeps the add-tab control beside the last visible tab like Kooky', () => {
+  it('keeps the add-tab control beside the last visible tab like reference product', () => {
     render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
 
     const add = screen.getByRole('button', { name: '新建页签' })
@@ -53,7 +53,7 @@ describe('Scene tabs and split actions', () => {
     expect(screen.queryByRole('button', { name: '文件' })).toBeNull()
   })
 
-  it('pins the overflow and add controls when canvases exceed the visible tab strip like Kooky', () => {
+  it('pins the overflow and add controls when canvases exceed the visible tab strip like reference product', () => {
     const commands = sceneCommands()
     const { container } = render(<SceneTabBar projection={fixture(8)} commands={commands} />)
     const strip = container.querySelector<HTMLElement>('.scene-tabs')!

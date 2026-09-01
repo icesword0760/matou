@@ -25,10 +25,10 @@ The implementation uses the following precedence:
 
 1. This approved design and the already approved infrastructure design.
 2. `05-四级层级管理.md`, especially sections 4.2 through 4.14 and section 9.
-3. Kooky behavior and data flow where the PRD is silent or internally inconsistent.
+3. reference product behavior and data flow where the PRD is silent or internally inconsistent.
 4. Existing Matou infrastructure constraints.
 
-Primary Kooky evidence:
+Primary reference product evidence:
 
 - `src/modules/terminal/stores/project.js`
 - `src/modules/terminal/stores/workbench.js`
@@ -44,7 +44,7 @@ Primary Kooky evidence:
 
 Existing Matou mapping, already fixed by the infrastructure design:
 
-| Kooky | Matou authority | User-facing term |
+| reference product | Matou authority | User-facing term |
 |---|---|---|
 | Project | Workspace | 工作区 |
 | Workbench | Task | 事项 |
@@ -112,14 +112,14 @@ useful for single aggregates, but UI code does not orchestrate sequences such as
 "create Workspace, then Task, then Scene, then Session". This prevents partially
 created hierarchies after crashes or rejected commands.
 
-## 5. Resolved PRD/Kooky Semantics
+## 5. Resolved PRD/reference product Semantics
 
 The source PRD contains a few statements that describe different revisions of
 the same behavior. The approved product behavior is fixed here.
 
 ### 5.1 Default names
 
-- User-created Task names follow Kooky and PRD acceptance item 28:
+- User-created Task names follow reference product and PRD acceptance item 28:
   `新事项`, `新事项 2`, `新事项 3`, selecting the lowest available suffix.
 - System-created Task name is `默认`.
 - The initial Scene has an automatic title. A manually pinned Scene title is
@@ -170,7 +170,7 @@ They are separate commands and separate confirmation flows.
 
 ### 5.3 Path-invalid presentation
 
-Follow PRD 4.3.5 and current Kooky behavior:
+Follow PRD 4.3.5 and current reference product behavior:
 
 - Workspace dropdown shows `路径失效` and a reason tooltip.
 - Existing hierarchy and terminal history remain visible.
@@ -229,7 +229,7 @@ Add to `scenes`:
 
 Create a partial uniqueness index for active pinned Scene titles within a Task.
 Task title uniqueness is enforced for active Tasks within a Workspace. Values are
-trimmed before reaching SQLite and comparison matches Kooky's case-sensitive rule.
+trimmed before reaching SQLite and comparison matches reference product's case-sensitive rule.
 
 ### 6.3 Per-window navigation state
 
