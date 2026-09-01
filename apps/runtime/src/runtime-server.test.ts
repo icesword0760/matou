@@ -422,6 +422,83 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('keeps a managed Worktree Session inert when its owned directory disappears', async () => {
+    const repositoryRoot = join(root, 'managed-repository')
+    const worktreePath = join(root, 'managed-worktree')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'baseline\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'baseline'])
+    await execFileAsync('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/missing', worktreePath, 'HEAD'
+    ])
+    database.transaction((tx) => {
+      tx.run(
+        `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+         VALUES ('managed-context', 'replay-workspace', 'git-worktree', ?, 1)`,
+        worktreePath
+      )
+      tx.run(
+        `INSERT INTO worktrees (
+           id, execution_context_id, repository_root, worktree_path, branch_name,
+           base_ref, state, setup_policy_json, setup_result_json,
+           cleanup_policy, created_at, updated_at
+         ) VALUES (
+           'managed-worktree', 'managed-context', ?, ?, 'feature/missing',
+           'HEAD', 'ready', '[]', '[]', 'retain-dirty', 1, 1
+         )`,
+        repositoryRoot, worktreePath
+      )
+    })
+    registerSession(database, 'managed-missing-session')
+    database.transaction((tx) => {
+      tx.run(
+        `UPDATE session_environment_bindings
+         SET managed_worktree_id = 'managed-worktree', active_target = 'worktree',
+             state = 'ready', updated_at = 1
+         WHERE session_id = 'managed-missing-session'`
+      )
+      tx.run(
+        `UPDATE sessions SET execution_context_id = 'managed-context', cwd = ?
+         WHERE id = 'managed-missing-session'`,
+        worktreePath
+      )
+    })
+    await rm(worktreePath, { recursive: true, force: true })
+
+    server.close()
+    const sessions = new RuntimeSessionRegistry()
+    port = new MockPort()
+    server = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    port.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'managed-missing'
+    })
+    await settle()
+
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'managed-missing-session', executionContextId: 'managed-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('protocol.error') !== undefined)
+
+    expect(port.last('protocol.error')).toMatchObject({
+      code: 'SESSION_ENVIRONMENT_UNAVAILABLE',
+      sessionId: 'managed-missing-session'
+    })
+    expect(sessions.has('managed-missing-session')).toBe(false)
+    expect(database.get<{ cwd: string }>(
+      'SELECT cwd FROM sessions WHERE id = ?', 'managed-missing-session'
+    )).toEqual({ cwd: worktreePath })
+    expect(database.get<{ state: string }>(
+      `SELECT state FROM session_environment_bindings
+       WHERE session_id = 'managed-missing-session'`
+    )).toEqual({ state: 'missing' })
+  })
+
   it('keeps saved Shell Blocks private when restoration is disabled and stops recording new ones', async () => {
     registerSession(database, 'history-disabled-session')
     const history = new ShellHistoryRepository(database)

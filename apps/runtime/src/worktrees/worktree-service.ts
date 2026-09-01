@@ -27,6 +27,7 @@ interface WorktreeRow {
   repository_root: string
   worktree_path: string
   branch_name: string
+  base_ref: string | null
   base_revision: string | null
   state: WorktreeState
   setup_policy_json: string
@@ -83,13 +84,14 @@ export class WorktreeService {
         tx.run(
           `INSERT INTO worktrees (
              id, execution_context_id, repository_root, worktree_path, branch_name,
-             state, setup_policy_json, setup_result_json, cleanup_policy, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
+             base_ref, state, setup_policy_json, setup_result_json, cleanup_policy, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
           input.id,
           input.executionContextId,
           input.repositoryRoot,
           input.path,
           input.branch,
+          input.baseRef,
           JSON.stringify(input.setupPolicy),
           input.now,
           input.now
@@ -159,6 +161,10 @@ export class WorktreeService {
     const worktree = this.get(worktreeId)
     if (!worktree) throw new Error(`Worktree ${worktreeId} does not exist`)
     if (worktree.state === 'removed') return worktree
+    if (!(await pathExists(worktree.path))) {
+      await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'prune'])
+      return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
+    }
     const status = await exec('git', ['-C', worktree.path, 'status', '--porcelain'])
     if (status.stdout.trim() !== '') {
       return this.#transactions.execute(command, ({ tx, emit }) => {
@@ -193,13 +199,7 @@ export class WorktreeService {
     })
     try {
       await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'remove', worktree.path])
-      return this.#transactions.execute(derivedCommand(command, 'removed'), ({ tx, emit }) => {
-        tx.run("UPDATE worktrees SET state = 'removed', updated_at = ? WHERE id = ?", now, worktreeId)
-        tx.run('UPDATE execution_contexts SET archived_at = ? WHERE id = ?', now, worktree.executionContextId)
-        const removed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
-        emitWorktree(emit, `${command.commandId}:removed`, 'worktree.removed', removed, undefined, now)
-        return mapWorktree(removed)
-      }).result
+      return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
     } catch (error) {
       this.#transactions.execute(derivedCommand(command, 'remove-failed'), ({ tx, emit }) => {
         tx.run("UPDATE worktrees SET state = 'failed', updated_at = ? WHERE id = ?", now, worktreeId)
@@ -269,6 +269,21 @@ export class WorktreeService {
     )
     return row ? mapWorktree(row) : undefined
   }
+
+  #completeRemoval(
+    command: DomainCommandMetadata,
+    worktreeId: string,
+    executionContextId: string,
+    now: number
+  ): Worktree {
+    return this.#transactions.execute(derivedCommand(command, 'removed'), ({ tx, emit }) => {
+      tx.run("UPDATE worktrees SET state = 'removed', updated_at = ? WHERE id = ?", now, worktreeId)
+      tx.run('UPDATE execution_contexts SET archived_at = ? WHERE id = ?', now, executionContextId)
+      const removed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
+      emitWorktree(emit, `${command.commandId}:removed`, 'worktree.removed', removed, undefined, now)
+      return mapWorktree(removed)
+    }).result
+  }
 }
 
 function emitWorktree(
@@ -323,6 +338,15 @@ async function pathIsGitWorktree(path: string): Promise<boolean> {
   try {
     await access(path)
     await exec('git', ['-C', path, 'rev-parse', '--is-inside-work-tree'])
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
     return true
   } catch {
     return false

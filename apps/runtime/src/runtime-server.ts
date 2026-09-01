@@ -32,6 +32,7 @@ import type {
   ProviderHookServer
 } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
+import { SessionEnvironmentRepository } from './session/session-environment-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
 import { StorageReadOnlyError } from './storage/database'
@@ -48,6 +49,7 @@ import { SessionInteractionService } from './session-canvas/session-interaction-
 import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { PreferenceRepository } from './product/experience-foundation'
+import { WorktreeHealthService } from './worktrees/worktree-health-service'
 import {
   ShellCommandBlockCollector,
   ShellHistoryRepository,
@@ -116,9 +118,12 @@ export class RuntimeServer {
   readonly #database: RuntimeDatabase
   readonly #router: RuntimeRpcRouter
   readonly #eventStore: DomainEventStore
+  readonly #transactions: DomainTransactionManager
   readonly #sessionRepository: SessionRepository
   readonly #forkIntents: SessionForkIntentRepository
   readonly #gitStates: SessionGitStateRepository
+  readonly #environments: SessionEnvironmentRepository
+  readonly #worktreeHealth: WorktreeHealthService
   readonly #workspacePaths: WorkspacePathService
   readonly #hierarchy: HierarchyApplicationService
   readonly #sessionInteractions: SessionInteractionService
@@ -173,6 +178,7 @@ export class RuntimeServer {
     this.#router = router
     this.#eventStore = new DomainEventStore(database)
     const transactions = new DomainTransactionManager(database)
+    this.#transactions = transactions
     this.#hierarchy = new HierarchyApplicationService(database, transactions)
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#providerModes = new ProviderModeService(database, transactions)
@@ -182,6 +188,8 @@ export class RuntimeServer {
     this.#sessionRepository = new SessionRepository(database, new DomainTransactionManager(database))
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#gitStates = new SessionGitStateRepository(database)
+    this.#environments = new SessionEnvironmentRepository(database)
+    this.#worktreeHealth = new WorktreeHealthService()
     this.#control = control
     this.#sessions = sessions
     this.#providerHooks = providerHooks
@@ -911,6 +919,7 @@ export class RuntimeServer {
       )
       return
     }
+    if (!(await this.#sessionEnvironmentAvailable(message.sessionId))) return
     const contextCwd = message.executionContextId === 'local-default'
       ? undefined
       : this.#database.get<{ cwd: string }>(
@@ -1480,6 +1489,100 @@ export class RuntimeServer {
         return false
       }
     }
+  }
+
+  async #sessionEnvironmentAvailable(sessionId: string): Promise<boolean> {
+    const binding = this.#environments.get(sessionId)
+    if (!binding) return true
+    if (binding.state !== 'ready') {
+      this.#sendError(
+        'SESSION_ENVIRONMENT_UNAVAILABLE',
+        '该会话的运行目录正在恢复或需要重新定位，请先处理运行环境后继续',
+        sessionId
+      )
+      return false
+    }
+    if (binding.activeTarget === 'local') return true
+
+    const worktreeId = binding.managedWorktreeId
+    const worktree = worktreeId === undefined
+      ? undefined
+      : this.#database.get<{
+          repository_root: string
+          worktree_path: string
+          branch_name: string
+          state: string
+        }>(
+          `SELECT repository_root, worktree_path, branch_name, state
+           FROM worktrees WHERE id = ?`,
+          worktreeId
+        )
+    if (!worktree || !['ready', 'dirty', 'retained'].includes(worktree.state)) {
+      this.#markEnvironmentUnavailable(
+        sessionId,
+        worktreeId,
+        'failed',
+        `worktree-state:${worktree?.state ?? 'missing'}`
+      )
+      this.#sendError(
+        'SESSION_ENVIRONMENT_UNAVAILABLE',
+        '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续',
+        sessionId
+      )
+      return false
+    }
+
+    const health = await this.#worktreeHealth.check({
+      repositoryRoot: worktree.repository_root,
+      path: worktree.worktree_path,
+      expectedBranch: worktree.branch_name
+    })
+    if (health.kind === 'ready') return true
+
+    this.#markEnvironmentUnavailable(
+      sessionId,
+      worktreeId,
+      health.kind === 'missing' ? 'missing' : 'failed',
+      `${health.kind}:${health.reason}`
+    )
+    this.#sendError(
+      'SESSION_ENVIRONMENT_UNAVAILABLE',
+      '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续',
+      sessionId
+    )
+    return false
+  }
+
+  #markEnvironmentUnavailable(
+    sessionId: string,
+    worktreeId: string | undefined,
+    state: 'missing' | 'failed',
+    reason: string
+  ): void {
+    const now = Date.now()
+    const operationId = randomUUID()
+    this.#transactions.execute({
+      commandId: `runtime-worktree-health-${sessionId}-${operationId}`,
+      commandType: 'session.environment-health-degraded',
+      requestHash: `${sessionId}:${worktreeId ?? 'none'}:${state}:${reason}`
+    }, ({ tx, emit }) => {
+      if (worktreeId !== undefined) {
+        tx.run("UPDATE worktrees SET state = 'failed', updated_at = ? WHERE id = ?", now, worktreeId)
+      }
+      if (state === 'missing') this.#environments.markMissing(sessionId, reason, now, tx)
+      else this.#environments.markFailed(sessionId, reason, now, tx)
+      emit({
+        eventId: `runtime-worktree-health-${sessionId}-${operationId}`,
+        eventType: 'session.environment-degraded',
+        aggregateType: 'session',
+        aggregateId: sessionId,
+        sessionId,
+        payload: { sessionId, worktreeId, state, reason },
+        occurredAt: now
+      })
+      return null
+    })
+    this.flushSemanticEvents()
   }
 
   async #spawnShellFallback(

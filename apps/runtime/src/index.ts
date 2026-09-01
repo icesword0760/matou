@@ -50,6 +50,9 @@ import { RuntimeProcessOrchestrator } from './runtime-process-orchestrator'
 import { RuntimeLifecyclePublisher } from './runtime-lifecycle-publisher'
 import { DatabaseRecoveryController } from './storage/database-recovery-controller'
 import { exportReadOnlyDatabaseBundle } from './storage/read-only-database-export'
+import { WorktreeHealthService } from './worktrees/worktree-health-service'
+import { WorktreeReconciler } from './worktrees/worktree-reconciler'
+import { WorktreeService } from './worktrees/worktree-service'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -160,6 +163,32 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
   const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
+  const worktreeService = new WorktreeService(database, transactions, {
+    stopRuns: async (runIds) => {
+      for (const runId of runIds) {
+        const sessionId = database.get<{ session_id: string }>(
+          'SELECT session_id FROM session_runs WHERE id = ?', runId
+        )?.session_id
+        if (!sessionId) continue
+        const live = sessions.get(sessionId)
+        if (!live) continue
+        live.dispose({ notifyExit: false })
+        await live.whenClosed()
+        sessions.delete(sessionId, live)
+      }
+    }
+  })
+  const worktreeReconciliation = await new WorktreeReconciler(
+    database,
+    transactions,
+    worktreeService,
+    new WorktreeHealthService()
+  ).reconcileAll(Date.now())
+  if (worktreeReconciliation.degraded > 0) {
+    console.error(
+      `[runtime.worktree-reconciliation] ${worktreeReconciliation.degraded} environment(s) need attention`
+    )
+  }
   const sessionRepository = new SessionRepository(database, transactions)
   const providerModes = new ProviderModeService(database, transactions)
   const workStatuses = new SessionWorkStatusService(database, transactions)
