@@ -20,6 +20,8 @@ import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
+import { DatabaseBackupService } from './storage/database-backup-service'
+import { DatabaseLifecycleService } from './storage/database-lifecycle-service'
 import { openRecoverableRuntimeDatabase } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
@@ -53,6 +55,7 @@ interface RuntimeState {
   rpcRouter: RuntimeRpcRouter
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
+  databaseLifecycle: DatabaseLifecycleService
 }
 
 let runtimeState: RuntimeState | undefined
@@ -66,6 +69,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const database = opened.database
   const runtimeDataRoot = opened.effectiveDataRoot
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
+  const databaseLifecycle = new DatabaseLifecycleService(
+    database,
+    new DatabaseBackupService(runtimeDataRoot)
+  )
   if (opened.recoveredFromCorruption) {
     console.error(`[runtime.storage] corrupt database quarantined at ${opened.quarantinedPath}`)
   }
@@ -177,7 +184,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     controlBackend,
     rpcRouter,
     hostControl,
-    providerHooks
+    providerHooks,
+    databaseLifecycle
   }
 }
 
@@ -192,7 +200,7 @@ function shutdown(): Promise<void> {
     await sessions.shutdownAll()
     await runtimeState?.providerHooks.stop()
     await runtimeState?.hostControl.stop()
-    runtimeState?.database.close()
+    await runtimeState?.databaseLifecycle.closeCleanly()
   })()
   return shutdownPromise
 }

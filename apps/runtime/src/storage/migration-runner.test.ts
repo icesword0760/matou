@@ -1,4 +1,4 @@
-import { access, mkdtemp } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -418,8 +418,8 @@ describe('MigrationRunner', () => {
     expect(database.all('SELECT * FROM schema_migrations')).toEqual([])
   })
 
-  it('creates a consistent backup before applying an upgrade', async () => {
-    const { database, path } = await createDatabase()
+  it('waits for the pre-migration backup before applying the first pending migration', async () => {
+    const { database } = await createDatabase()
     const first: Migration = {
       version: 1,
       name: 'first',
@@ -432,14 +432,32 @@ describe('MigrationRunner', () => {
       sql: 'CREATE TABLE second_table (id TEXT PRIMARY KEY) STRICT;'
     }
 
-    const result = await new MigrationRunner(database, [first, second]).migrate()
+    let completeBackup!: () => void
+    const backupComplete = new Promise<void>((resolve) => { completeBackup = resolve })
+    const events: string[] = []
+    const backupService = {
+      async create(_database: RuntimeDatabase, reason: 'pre-migration') {
+        events.push(`backup:${reason}`)
+        await backupComplete
+        return {
+          id: 'pre-migration', path: '/backups/pre-migration.sqlite', createdAt: 1,
+          reason, schemaVersion: 1, size: 1, sha256: 'a'.repeat(64)
+        }
+      },
+      async rotate() { events.push('rotate') }
+    }
+    const migrating = new MigrationRunner(database, [first, second], backupService).migrate()
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(events).toEqual(['backup:pre-migration'])
+    expect(database.get(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'second_table'"
+    )).toBeUndefined()
+    completeBackup()
+    const result = await migrating
 
     expect(result.appliedVersions).toEqual([2])
-    expect(result.backupPath).toMatch(new RegExp(`${escapeRegExp(path)}\\.pre-v2-\\d+\\.sqlite$`))
-    await expect(access(result.backupPath!)).resolves.toBeUndefined()
+    expect(result.backupPath).toBe('/backups/pre-migration.sqlite')
+    expect(events).toEqual(['backup:pre-migration', 'rotate'])
   })
 })
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}

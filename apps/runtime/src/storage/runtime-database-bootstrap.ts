@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { RuntimeDatabase } from './database'
+import { DatabaseBackupService } from './database-backup-service'
 import { MigrationRunner, type Migration } from './migration-runner'
 
 export interface RuntimeDatabaseBootstrapResult {
@@ -21,7 +22,11 @@ export async function openRecoverableRuntimeDatabase(
   let database: RuntimeDatabase | undefined
   try {
     database = RuntimeDatabase.open(databasePath)
-    await new MigrationRunner(database, migrations).migrate()
+    await new MigrationRunner(
+      database,
+      migrations,
+      new DatabaseBackupService(dataRoot)
+    ).migrate()
     return {
       database,
       recoveredFromCorruption: false,
@@ -43,7 +48,11 @@ export async function openRecoverableRuntimeDatabase(
     await rename(`${databasePath}-shm`, `${quarantinedPath}-shm`).catch(() => undefined)
     const clean = RuntimeDatabase.open(databasePath)
     try {
-      await new MigrationRunner(clean, migrations).migrate()
+      await new MigrationRunner(
+        clean,
+        migrations,
+        new DatabaseBackupService(dataRoot)
+      ).migrate()
       return {
         database: clean,
         recoveredFromCorruption: true,
@@ -71,7 +80,13 @@ async function openEphemeralCopy(
   await copyFile(`${durableDatabasePath}-shm`, `${ephemeralDatabasePath}-shm`).catch(() => undefined)
   const database = RuntimeDatabase.open(ephemeralDatabasePath)
   try {
-    if (migrate) await new MigrationRunner(database, migrations).migrate()
+    if (migrate) {
+      await new MigrationRunner(
+        database,
+        migrations,
+        new DatabaseBackupService(effectiveDataRoot)
+      ).migrate()
+    }
     return {
       database,
       recoveredFromCorruption: false,

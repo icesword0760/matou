@@ -7,9 +7,35 @@ import { describe, expect, it } from 'vitest'
 import { FOUNDATION_MIGRATIONS } from './migrations'
 import { openRecoverableRuntimeDatabase } from './runtime-database-bootstrap'
 import { RuntimeDatabase } from './database'
+import { DatabaseBackupService } from './database-backup-service'
 import { MigrationRunner } from './migration-runner'
 
+const { DatabaseSync } = process.getBuiltinModule(
+  'node:sqlite'
+) as typeof import('node:sqlite')
+
 describe('openRecoverableRuntimeDatabase', () => {
+  it('creates a retained pre-migration snapshot when initializing a durable database', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-initial-backup-'))
+
+    const result = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
+    try {
+      const backups = await new DatabaseBackupService(root).listValid()
+      expect(backups).toHaveLength(1)
+      expect(backups[0]).toMatchObject({ reason: 'pre-migration', schemaVersion: 0 })
+      const snapshot = new DatabaseSync(backups[0]!.path, { readOnly: true })
+      try {
+        expect(snapshot.prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+        ).get()).toBeUndefined()
+      } finally {
+        snapshot.close()
+      }
+    } finally {
+      result.database.close()
+    }
+  })
+
   it('quarantines a physically corrupt database and starts with a clean durable store', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-corrupt-database-'))
     const databasePath = join(root, 'matou.sqlite')
