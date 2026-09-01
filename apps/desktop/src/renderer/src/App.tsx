@@ -30,10 +30,12 @@ export function App() {
   if (!lifecycle || lifecycle.snapshot.stage !== 'ready') {
     if (lifecycle?.recovery || lifecycle?.snapshot.mode === 'recovery-required') {
       return <DatabaseRecoveryPage state={lifecycle} actions={{
-        restore: (backupId) => window.matouDesktop.restoreDatabaseBackup(backupId),
+        restore: (backupId, expectedRecoveryId) =>
+          window.matouDesktop.restoreDatabaseBackup(backupId, expectedRecoveryId),
         exportBundle: () => window.matouDesktop.exportDatabaseRecoveryBundle(),
-        retry: () => window.matouDesktop.retryDatabaseOpen(),
-        startEmpty: () => window.matouDesktop.startWithEmptyDatabase()
+        retry: (expectedRecoveryId) => window.matouDesktop.retryDatabaseOpen(expectedRecoveryId),
+        startEmpty: (expectedRecoveryId) =>
+          window.matouDesktop.startWithEmptyDatabase(expectedRecoveryId)
       }} />
     }
     return <main className="database-recovery-page" aria-label="正在打开 Matou 数据库">

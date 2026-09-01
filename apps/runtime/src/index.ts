@@ -391,6 +391,16 @@ async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): 
     })
     return
   }
+  if (
+    command.action !== 'export-recovery-bundle' &&
+    command.expectedRecoveryId !== recovery.recoveryId
+  ) {
+    parentPort?.postMessage({
+      type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
+      error: '数据库恢复周期已更新，本次操作已停止'
+    })
+    return
+  }
   if (command.action !== 'export-recovery-bundle') lifecyclePublisher.openingNewAttempt()
   try {
     const result = await databaseRecovery.execute(recovery, command)

@@ -69,6 +69,7 @@ describe('RuntimeHost', () => {
     child.emit('message', {
       type: 'runtime.recovery-details',
       recovery: {
+        recoveryId: 'durable-recovery-host',
         reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
         quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
       }
@@ -143,14 +144,24 @@ describe('RuntimeHost', () => {
     const child = electron.children[0] as MockUtilityProcess
     child.emit('spawn')
     await starting
+    child.emit('message', {
+      type: 'runtime.recovery-details',
+      recovery: {
+        recoveryId: 'durable-recovery-host',
+        reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
+        quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
+      }
+    })
 
     const pending = host.recover({
       type: 'runtime.recovery-command', requestId: 'restore-1',
-      action: 'restore-backup', backupId: 'backup-1'
+      action: 'restore-backup', backupId: 'backup-1',
+      expectedRecoveryId: 'durable-recovery-host'
     })
     expect(child.postMessage).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'restore-1' }))
     await expect(host.recover({
-      type: 'runtime.recovery-command', requestId: 'retry-while-restoring', action: 'retry-open'
+      type: 'runtime.recovery-command', requestId: 'retry-while-restoring', action: 'retry-open',
+      expectedRecoveryId: 'durable-recovery-host'
     })).rejects.toThrow('already running')
     expect(child.postMessage).toHaveBeenCalledTimes(1)
     child.emit('message', {
@@ -159,6 +170,37 @@ describe('RuntimeHost', () => {
     })
     await expect(pending).rejects.toThrow('校验失败')
     expect(host.getLifecycle().operation).toMatchObject({ error: '校验失败' })
+  })
+
+  it('rejects a stale recovery generation before publishing operation state or messaging Runtime', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn')
+    await starting
+    child.emit('message', {
+      type: 'runtime.recovery-details',
+      recovery: {
+        recoveryId: 'durable-recovery-current',
+        reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
+        quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
+      }
+    })
+    child.emit('message', recoveryRequired)
+    const presentationBefore = structuredClone(host.getLifecycle())
+
+    const attempt = host.recover({
+      type: 'runtime.recovery-command', requestId: 'stale-generation',
+      action: 'retry-open', expectedRecoveryId: 'durable-recovery-previous'
+    })
+    child.emit('message', {
+      type: 'runtime.recovery-result', requestId: 'stale-generation', ok: false,
+      error: '数据库恢复周期已更新'
+    })
+    await expect(attempt).rejects.toThrow('数据库恢复周期已更新')
+
+    expect(child.postMessage).not.toHaveBeenCalled()
+    expect(host.getLifecycle()).toEqual(presentationBefore)
   })
 
   it('keeps recovery details and the interrupted operation error while the Runtime reconnects', async () => {
@@ -170,6 +212,7 @@ describe('RuntimeHost', () => {
     first.emit('message', {
       type: 'runtime.recovery-details',
       recovery: {
+        recoveryId: 'durable-recovery-crash-1',
         reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
         quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
       }
@@ -178,7 +221,8 @@ describe('RuntimeHost', () => {
 
     const pending = host.recover({
       type: 'runtime.recovery-command', requestId: 'restore-crash',
-      action: 'restore-backup', backupId: 'backup-1'
+      action: 'restore-backup', backupId: 'backup-1',
+      expectedRecoveryId: 'durable-recovery-crash-1'
     })
     first.emit('exit', 9)
 
@@ -199,6 +243,7 @@ describe('RuntimeHost', () => {
     second.emit('message', {
       type: 'runtime.recovery-details',
       recovery: {
+        recoveryId: 'durable-recovery-crash-2',
         reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
         quarantinedPath: '/data/matou.sqlite.corrupt-2', backups: []
       }

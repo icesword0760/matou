@@ -34,6 +34,7 @@ export class RuntimeLifecyclePublisher {
     this.#parentPort.postMessage({
       type: 'runtime.recovery-details',
       recovery: {
+        recoveryId: recovery.recoveryId,
         reason: recovery.reason,
         durableDatabasePath: recovery.durableDatabasePath,
         quarantinedPath: recovery.quarantinedPath,

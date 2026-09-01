@@ -86,15 +86,31 @@ describe('runtime lifecycle contract', () => {
       type: 'runtime.recovery-command',
       requestId: 'restore-1',
       action: 'restore-backup',
-      backupId: 'backup-1'
-    })).toMatchObject({ action: 'restore-backup', backupId: 'backup-1' })
+      backupId: 'backup-1',
+      expectedRecoveryId: 'durable-recovery-1'
+    })).toMatchObject({
+      action: 'restore-backup', backupId: 'backup-1',
+      expectedRecoveryId: 'durable-recovery-1'
+    })
 
     expect(() => parseRuntimeRecoveryCommand({
       type: 'runtime.recovery-command',
       requestId: 'restore-1',
-      action: 'restore-backup'
+      action: 'restore-backup',
+      expectedRecoveryId: 'durable-recovery-1'
     })).toThrow(/backupId/)
   })
+
+  it.each(['restore-backup', 'retry-open', 'start-empty-database'] as const)(
+    'requires %s commands to identify the durable recovery generation',
+    (action) => {
+      const command = {
+        type: 'runtime.recovery-command', requestId: `missing-generation-${action}`, action,
+        ...(action === 'restore-backup' ? { backupId: 'backup-1' } : {})
+      }
+      expect(() => parseRuntimeRecoveryCommand(command)).toThrow(/expectedRecoveryId/)
+    }
+  )
 
   it('fails closed for an unknown recovery command action', () => {
     expect(() => parseRuntimeRecoveryCommand({

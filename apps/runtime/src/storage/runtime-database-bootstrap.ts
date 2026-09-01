@@ -41,6 +41,7 @@ export type RuntimeDatabaseBootstrapResult =
     }
   | {
       kind: 'recovery-required'
+      recoveryId: string
       reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
       durableDatabasePath: string
       quarantinedPath: string
@@ -54,6 +55,7 @@ export type RuntimeDatabaseBootstrapResult =
 
 interface RuntimeDatabaseRecoveryMarker {
   version: 1
+  recoveryId: string
   reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
   durableDatabasePath: string
   quarantinedPath: string
@@ -325,6 +327,7 @@ function newRecoveryMarker(
   const createdAt = Date.now()
   return {
     version: 1,
+    recoveryId: randomUUID(),
     reason,
     durableDatabasePath: databasePath,
     quarantinedPath: reason === 'ownership-recovery-required'
@@ -391,6 +394,8 @@ function readRecoveryMarker(databasePath: string): RuntimeDatabaseRecoveryMarker
   const durablePath = resolve(databasePath)
   if (
     marker.version !== 1 ||
+    typeof marker.recoveryId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(marker.recoveryId) ||
     ![
       'physical-corruption',
       'wal-recovery-required',
@@ -445,6 +450,7 @@ async function recoveryResult(
   }
   return {
     kind: 'recovery-required',
+    recoveryId: marker.recoveryId,
     reason: marker.reason,
     durableDatabasePath: marker.durableDatabasePath,
     quarantinedPath: overrides.quarantinedPath ?? marker.quarantinedPath,

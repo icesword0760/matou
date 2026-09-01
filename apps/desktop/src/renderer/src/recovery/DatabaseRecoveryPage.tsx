@@ -7,10 +7,10 @@ import type {
 import './recovery.css'
 
 export interface DatabaseRecoveryActions {
-  restore(backupId: string): Promise<unknown>
+  restore(backupId: string, expectedRecoveryId: string): Promise<unknown>
   exportBundle(): Promise<RuntimeRecoveryCommandResult>
-  retry(): Promise<unknown>
-  startEmpty(): Promise<unknown>
+  retry(expectedRecoveryId: string): Promise<unknown>
+  startEmpty(expectedRecoveryId: string): Promise<unknown>
 }
 
 interface Props {
@@ -67,6 +67,7 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
   }
 
   const recovery = state.recovery
+  const recoveryId = recovery?.recoveryId ?? ''
   const ownershipRecovery = recovery?.reason === 'ownership-recovery-required'
   const title = ownershipRecovery ? '数据库占用状态需要处理' : '数据库需要恢复'
   const description = ownershipRecovery
@@ -119,10 +120,11 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
       <div className="database-recovery-primary-actions">
         <button
           className="primary"
-          disabled={busy || !selectedBackupId}
-          onClick={() => void perform('restore', () => actions.restore(selectedBackupId))}
+          disabled={busy || !selectedBackupId || !recoveryId}
+          onClick={() => void perform('restore', () => actions.restore(selectedBackupId, recoveryId))}
         >{pending === 'restore' ? '正在恢复…' : '恢复所选备份'}</button>
-        <button disabled={busy} onClick={() => void perform('retry', actions.retry)}>
+        <button disabled={busy || !recoveryId}
+          onClick={() => void perform('retry', () => actions.retry(recoveryId))}>
           {pending === 'retry' ? '正在检查…' : '重新检查数据库'}
         </button>
         <button disabled={busy} onClick={() => void perform('export', actions.exportBundle)}>
@@ -162,7 +164,7 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
           <button ref={dialogBackRef} onClick={closeEmptyConfirmation}>返回</button>
           <button ref={dialogConfirmRef} className="danger" onClick={() => {
             setConfirmEmpty(false)
-            void perform('empty', actions.startEmpty)
+            void perform('empty', () => actions.startEmpty(recoveryId))
           }}>确认创建空数据库</button>
         </div>
       </section>

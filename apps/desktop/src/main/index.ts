@@ -326,23 +326,29 @@ ipcMain.handle(DESKTOP_CHANNELS.updateDagNotifications, (
   dagWindows.updateNotifications(mainWindowId, sessionIds)
 })
 ipcMain.handle(DESKTOP_CHANNELS.getRuntimeLifecycle, () => runtimeHost?.getLifecycle())
-ipcMain.handle(DESKTOP_CHANNELS.restoreDatabaseBackup, (_event, backupId: string) =>
+ipcMain.handle(DESKTOP_CHANNELS.restoreDatabaseBackup, (
+  _event,
+  backupId: string,
+  expectedRecoveryId: string
+) =>
   runtimeHost?.recover({
     type: 'runtime.recovery-command', requestId: randomUUID(),
-    action: 'restore-backup', backupId
+    action: 'restore-backup', backupId, expectedRecoveryId
   }))
 ipcMain.handle(DESKTOP_CHANNELS.exportDatabaseRecoveryBundle, () =>
   runtimeHost?.recover({
     type: 'runtime.recovery-command', requestId: randomUUID(),
     action: 'export-recovery-bundle'
   }))
-ipcMain.handle(DESKTOP_CHANNELS.retryDatabaseOpen, () =>
+ipcMain.handle(DESKTOP_CHANNELS.retryDatabaseOpen, (_event, expectedRecoveryId: string) =>
   runtimeHost?.recover({
-    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'retry-open'
+    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'retry-open',
+    expectedRecoveryId
   }))
-ipcMain.handle(DESKTOP_CHANNELS.startWithEmptyDatabase, () =>
+ipcMain.handle(DESKTOP_CHANNELS.startWithEmptyDatabase, (_event, expectedRecoveryId: string) =>
   runtimeHost?.recover({
-    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'start-empty-database'
+    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'start-empty-database',
+    expectedRecoveryId
   }))
 
 app.on('before-quit', () => {

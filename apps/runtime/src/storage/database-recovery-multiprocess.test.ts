@@ -56,10 +56,12 @@ describe('database recovery multi-process handoff', () => {
       const execution = await controller.execute(fixture.recovery, action === 'restore-backup'
         ? {
             type: 'runtime.recovery-command', requestId: `multiprocess-${action}`,
-            action, backupId: fixture.backupId
+            action, backupId: fixture.backupId,
+            expectedRecoveryId: fixture.recovery.recoveryId
           }
         : {
-            type: 'runtime.recovery-command', requestId: `multiprocess-${action}`, action
+            type: 'runtime.recovery-command', requestId: `multiprocess-${action}`, action,
+            expectedRecoveryId: fixture.recovery.recoveryId
           })
 
       expect(execution.bootstrap?.kind).toBe('writable')

@@ -123,6 +123,7 @@ function recoveryState(): RuntimeLifecyclePresentation {
       stage: 'opening-database', completed: 0, total: 1, failures: []
     },
     recovery: {
+      recoveryId: 'durable-recovery-app',
       reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
       quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
     }

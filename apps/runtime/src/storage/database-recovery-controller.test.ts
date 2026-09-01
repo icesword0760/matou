@@ -18,7 +18,8 @@ describe('database recovery controller', () => {
 
     const result = await controller.execute(fixture.recovery, {
       type: 'runtime.recovery-command', requestId: 'restore-1',
-      action: 'restore-backup', backupId: fixture.backupId
+      action: 'restore-backup', backupId: fixture.backupId,
+      expectedRecoveryId: fixture.recovery.recoveryId
     })
 
     expect(result.bootstrap?.kind).toBe('writable')
@@ -58,10 +59,12 @@ describe('database recovery controller', () => {
       const result = await controller.execute(fixture.recovery, action === 'restore-backup'
         ? {
             type: 'runtime.recovery-command', requestId: `fence-${action}`,
-            action, backupId: fixture.backupId
+            action, backupId: fixture.backupId,
+            expectedRecoveryId: fixture.recovery.recoveryId
           }
         : {
-            type: 'runtime.recovery-command', requestId: `fence-${action}`, action
+            type: 'runtime.recovery-command', requestId: `fence-${action}`, action,
+            expectedRecoveryId: fixture.recovery.recoveryId
           })
 
       expect(fenced).toBe(true)
@@ -76,7 +79,8 @@ describe('database recovery controller', () => {
 
     await expect(controller.execute(fixture.recovery, {
       type: 'runtime.recovery-command', requestId: 'restore-bad',
-      action: 'restore-backup', backupId: 'missing-backup'
+      action: 'restore-backup', backupId: 'missing-backup',
+      expectedRecoveryId: fixture.recovery.recoveryId
     })).rejects.toThrow('missing-backup')
 
     expect((await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)).kind)
@@ -87,19 +91,58 @@ describe('database recovery controller', () => {
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it.each(['commit', 'close', 'marker-unlink'] as const)(
+    'compensates an action fence %s finalization failure before publishing success',
+    async (failure) => {
+      const fixture = await corruptFixture()
+      const backup = fixture.recovery.backups[0]!
+      await writeFile(join(fixture.root, 'matou.sqlite'), await readFile(backup.path))
+      let openedDatabase: RuntimeDatabase | undefined
+      const injected = new Error(`injected ${failure} failure`)
+      const controller = new DatabaseRecoveryController(
+        fixture.root,
+        FOUNDATION_MIGRATIONS,
+        { onDatabaseOpened: (database) => { openedDatabase = database } },
+        failure === 'marker-unlink'
+          ? { removeRecoveryMarker: async () => { throw injected } }
+          : {
+              actionFenceObserver: failure === 'commit'
+                ? { beforeCommit: () => { throw injected } }
+                : { beforeClose: () => { throw injected } }
+            }
+      )
+
+      await expect(controller.execute(fixture.recovery, {
+        type: 'runtime.recovery-command', requestId: `failure-${failure}`,
+        action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+      })).rejects.toThrow(injected.message)
+
+      expect((await stat(fixture.recovery.markerPath)).isFile()).toBe(true)
+      await expect(stat(join(fixture.root, 'matou.sqlite.owner')))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+      expect(() => openedDatabase?.get('SELECT 1')).toThrow('database is closed')
+      const next = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
+      expect(next).toMatchObject({
+        kind: 'recovery-required', recoveryId: fixture.recovery.recoveryId
+      })
+    }
+  )
+
   it('rejects a stale recovery command after another Runtime completed the recovery', async () => {
     const fixture = await corruptFixture()
     const backup = fixture.recovery.backups[0]!
     await writeFile(join(fixture.root, 'matou.sqlite'), await readFile(backup.path))
     const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
     const recovered = await controller.execute(fixture.recovery, {
-      type: 'runtime.recovery-command', requestId: 'winner', action: 'retry-open'
+      type: 'runtime.recovery-command', requestId: 'winner', action: 'retry-open',
+      expectedRecoveryId: fixture.recovery.recoveryId
     })
     if (recovered.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
     recovered.bootstrap.database.close()
 
     await expect(controller.execute(fixture.recovery, {
-      type: 'runtime.recovery-command', requestId: 'stale-empty', action: 'start-empty-database'
+      type: 'runtime.recovery-command', requestId: 'stale-empty', action: 'start-empty-database',
+      expectedRecoveryId: fixture.recovery.recoveryId
     })).rejects.toThrow('已由其他 Runtime 完成')
 
     const database = RuntimeDatabase.open(join(fixture.root, 'matou.sqlite'))
@@ -108,6 +151,54 @@ describe('database recovery controller', () => {
     )).toEqual({ name: 'Preserved Workspace' })
     database.close()
   })
+
+  it.each(['restore-backup', 'retry-open', 'start-empty-database'] as const)(
+    'rejects a %s command replayed from an earlier same-shape recovery cycle',
+    async (action) => {
+      const fixture = await ownershipRecoveryFixture()
+      const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
+      const firstResult = await controller.execute(fixture.first, {
+        type: 'runtime.recovery-command', requestId: `complete-first-${action}`,
+        action: 'retry-open', expectedRecoveryId: fixture.first.recoveryId
+      })
+      if (firstResult.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+      firstResult.bootstrap.database.close()
+
+      await writeFile(`${fixture.databasePath}.owner`, '{"pid":')
+      const second = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
+      if (second.kind !== 'recovery-required') throw new Error('expected second recovery cycle')
+      expect(second.recoveryId).not.toBe(fixture.first.recoveryId)
+      const markerBefore = await readFile(second.markerPath)
+      const databaseBefore = await readFile(fixture.databasePath)
+      const command = action === 'restore-backup'
+        ? {
+            type: 'runtime.recovery-command' as const,
+            requestId: `replay-${action}`, action,
+            backupId: fixture.backupId,
+            expectedRecoveryId: fixture.first.recoveryId
+          }
+        : {
+            type: 'runtime.recovery-command' as const,
+            requestId: `replay-${action}`, action,
+            expectedRecoveryId: fixture.first.recoveryId
+          }
+      const outcome = await controller.execute(second, command).then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error })
+      )
+      if ('value' in outcome && outcome.value.bootstrap?.kind === 'writable') {
+        outcome.value.bootstrap.database.close()
+      }
+
+      expect(outcome).toMatchObject({ error: expect.objectContaining({
+        message: expect.stringContaining('恢复周期已更新')
+      }) })
+      expect(await readFile(second.markerPath)).toEqual(markerBefore)
+      expect(await readFile(fixture.databasePath)).toEqual(databaseBefore)
+      expect(await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS))
+        .toMatchObject({ kind: 'recovery-required', recoveryId: second.recoveryId })
+    }
+  )
 
   it('exports retained recovery evidence without changing recovery state', async () => {
     const fixture = await corruptFixture()
@@ -141,7 +232,10 @@ describe('database recovery controller', () => {
 
     const result = await new DatabaseRecoveryController(root, FOUNDATION_MIGRATIONS).execute(
       recovery,
-      { type: 'runtime.recovery-command', requestId: 'ownership-retry', action: 'retry-open' }
+      {
+        type: 'runtime.recovery-command', requestId: 'ownership-retry', action: 'retry-open',
+        expectedRecoveryId: recovery.recoveryId
+      }
     )
 
     expect(result.bootstrap?.kind).toBe('writable')
@@ -161,7 +255,8 @@ describe('database recovery controller', () => {
     await writeFile(join(repaired.root, 'matou.sqlite'), await readFile(repairedBackup.path))
     const controller = new DatabaseRecoveryController(repaired.root, FOUNDATION_MIGRATIONS)
     const retried = await controller.execute(repaired.recovery, {
-      type: 'runtime.recovery-command', requestId: 'retry-1', action: 'retry-open'
+      type: 'runtime.recovery-command', requestId: 'retry-1', action: 'retry-open',
+      expectedRecoveryId: repaired.recovery.recoveryId
     })
     expect(retried.bootstrap?.kind).toBe('writable')
     if (retried.bootstrap?.kind === 'writable') retried.bootstrap.database.close()
@@ -169,7 +264,10 @@ describe('database recovery controller', () => {
     const empty = await corruptFixture()
     const emptied = await new DatabaseRecoveryController(empty.root, FOUNDATION_MIGRATIONS).execute(
       empty.recovery,
-      { type: 'runtime.recovery-command', requestId: 'empty-1', action: 'start-empty-database' }
+      {
+        type: 'runtime.recovery-command', requestId: 'empty-1', action: 'start-empty-database',
+        expectedRecoveryId: empty.recovery.recoveryId
+      }
     )
     expect(emptied.bootstrap?.kind).toBe('writable')
     if (emptied.bootstrap?.kind !== 'writable') throw new Error('expected writable empty database')
@@ -197,4 +295,21 @@ async function corruptFixture() {
   const recovery = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
   if (recovery.kind !== 'recovery-required') throw new Error('expected recovery fixture')
   return { root, recovery, backupId: backup.id }
+}
+
+async function ownershipRecoveryFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'matou-recovery-replay-'))
+  const databasePath = join(root, 'matou.sqlite')
+  const database = RuntimeDatabase.open(databasePath)
+  await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+  database.run(
+    'INSERT INTO workspaces (id, name, root_directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+    'replay-preserved', 'Replay Preserved', root, 1, 1
+  )
+  const backup = await new DatabaseBackupService(root).create(database, 'clean-exit')
+  database.close()
+  await writeFile(`${databasePath}.owner`, '{"pid":')
+  const first = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
+  if (first.kind !== 'recovery-required') throw new Error('expected first recovery cycle')
+  return { root, databasePath, first, backupId: backup.id }
 }

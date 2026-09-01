@@ -28,6 +28,7 @@ describe('database recovery page', () => {
     await userEvent.setup().click(button)
     await userEvent.setup().click(button)
     expect(restore).toHaveBeenCalledTimes(1)
+    expect(restore).toHaveBeenCalledWith('backup-2', 'durable-recovery-ui')
     expect(button.hasAttribute('disabled')).toBe(true)
     finish()
   })
@@ -40,6 +41,7 @@ describe('database recovery page', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '导出恢复资料' }))
     expect(await screen.findByText(/\/exports\/recovery-1/)).toBeTruthy()
     await userEvent.setup().click(screen.getByRole('button', { name: '重新检查数据库' }))
+    expect(retry).toHaveBeenCalledWith('durable-recovery-ui')
     expect((await screen.findByRole('alert')).textContent).toContain('重新检查仍发现损坏')
   })
 
@@ -51,7 +53,7 @@ describe('database recovery page', () => {
     expect(startEmpty).not.toHaveBeenCalled()
     const dialog = screen.getByRole('dialog', { name: '确认创建全新空数据库' })
     await userEvent.setup().click(within(dialog).getByRole('button', { name: '确认创建空数据库' }))
-    expect(startEmpty).toHaveBeenCalledOnce()
+    expect(startEmpty).toHaveBeenCalledWith('durable-recovery-ui')
   })
 
   it('moves focus into the empty-database dialog, traps Tab, and restores focus on Escape', async () => {
@@ -91,6 +93,7 @@ function state(count: number): RuntimeLifecyclePresentation {
       stage: 'opening-database', completed: 0, total: 1, failures: []
     },
     recovery: {
+      recoveryId: 'durable-recovery-ui',
       reason: 'physical-corruption',
       durableDatabasePath: '/data/matou.sqlite',
       quarantinedPath: '/data/matou.sqlite.corrupt-1',

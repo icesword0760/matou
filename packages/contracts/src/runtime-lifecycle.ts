@@ -87,9 +87,14 @@ const recoveryCommandBase = {
   requestId: identifier
 }
 
+const mutatingRecoveryCommandBase = {
+  ...recoveryCommandBase,
+  expectedRecoveryId: identifier
+}
+
 export const runtimeRecoveryCommandSchema = z.discriminatedUnion('action', [
   z.object({
-    ...recoveryCommandBase,
+    ...mutatingRecoveryCommandBase,
     action: z.literal('restore-backup'),
     backupId: identifier
   }).strict(),
@@ -98,11 +103,11 @@ export const runtimeRecoveryCommandSchema = z.discriminatedUnion('action', [
     action: z.literal('export-recovery-bundle')
   }).strict(),
   z.object({
-    ...recoveryCommandBase,
+    ...mutatingRecoveryCommandBase,
     action: z.literal('retry-open')
   }).strict(),
   z.object({
-    ...recoveryCommandBase,
+    ...mutatingRecoveryCommandBase,
     action: z.literal('start-empty-database')
   }).strict()
 ])

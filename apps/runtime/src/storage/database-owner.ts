@@ -109,24 +109,35 @@ export function readDatabaseOwner(ownerPath: string): DatabaseOwnerRecord | unde
   return inspection.state === 'valid' ? inspection.record : undefined
 }
 
+export interface DatabaseRecoveryActionFenceObserver {
+  beforeCommit?(): void
+  beforeClose?(): void
+}
+
 export async function withDatabaseRecoveryActionFence<T>(
   databasePath: string,
-  operation: () => Promise<T>
+  operation: () => Promise<T>,
+  observer: DatabaseRecoveryActionFenceObserver = {}
 ): Promise<T> {
   const path = `${databasePath}.recovery-action.sqlite`
   prepareTakeoverSidecar(path)
   let lock: DatabaseSyncType | undefined
   let transactionOpen = false
+  let outcome!: T
+  let completed = false
+  let failure: unknown
   try {
     lock = new DatabaseSync(path) as DatabaseSyncType
     repairSameUserMode(path, lstatSync(path), 0o600)
     lock.exec('PRAGMA busy_timeout = 5000; BEGIN EXCLUSIVE;')
     transactionOpen = true
-    const result = await operation()
+    outcome = await operation()
+    observer.beforeCommit?.()
     lock.exec('COMMIT')
     transactionOpen = false
-    return result
+    completed = true
   } catch (error) {
+    failure = error
     if (transactionOpen) {
       try {
         lock?.exec('ROLLBACK')
@@ -134,10 +145,20 @@ export async function withDatabaseRecoveryActionFence<T>(
         // Closing the SQLite handle releases the OS lock after a failed rollback.
       }
     }
-    throw error
-  } finally {
-    lock?.close()
   }
+  try {
+    observer.beforeClose?.()
+  } catch (error) {
+    failure ??= error
+  }
+  try {
+    lock?.close()
+  } catch (error) {
+    failure ??= error
+  }
+  if (failure !== undefined) throw failure
+  if (!completed) throw new Error('database recovery action fence did not complete')
+  return outcome
 }
 
 /**

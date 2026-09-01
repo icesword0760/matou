@@ -23,10 +23,13 @@ export interface MatouDesktopApi {
   onRuntimeConnectionState(listener: (state: RuntimeConnectionState) => void): () => void
   getRuntimeLifecycle(): Promise<RuntimeLifecyclePresentation>
   onRuntimeLifecycle(listener: (state: RuntimeLifecyclePresentation) => void): () => void
-  restoreDatabaseBackup(backupId: string): Promise<RuntimeRecoveryCommandResult>
+  restoreDatabaseBackup(
+    backupId: string,
+    expectedRecoveryId: string
+  ): Promise<RuntimeRecoveryCommandResult>
   exportDatabaseRecoveryBundle(): Promise<RuntimeRecoveryCommandResult>
-  retryDatabaseOpen(): Promise<RuntimeRecoveryCommandResult>
-  startWithEmptyDatabase(): Promise<RuntimeRecoveryCommandResult>
+  retryDatabaseOpen(expectedRecoveryId: string): Promise<RuntimeRecoveryCommandResult>
+  startWithEmptyDatabase(expectedRecoveryId: string): Promise<RuntimeRecoveryCommandResult>
 }
 
 export type RuntimeConnectionState = 'reconnecting' | 'ready'
@@ -41,6 +44,7 @@ export interface RuntimeRecoveryBackup {
 }
 
 export interface RuntimeRecoveryDetails {
+  recoveryId: string
   reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
   durableDatabasePath: string
   quarantinedPath: string

@@ -6,7 +6,10 @@ import type { RuntimeRecoveryCommand } from '@matou/contracts'
 
 import { DatabaseBackupService } from './database-backup-service'
 import { RuntimeDatabase } from './database'
-import { withDatabaseRecoveryActionFence } from './database-owner'
+import {
+  withDatabaseRecoveryActionFence,
+  type DatabaseRecoveryActionFenceObserver
+} from './database-owner'
 import type { Migration } from './migration-runner'
 import {
   openRecoverableRuntimeDatabaseWithOwnership,
@@ -21,25 +24,39 @@ export interface DatabaseRecoveryExecution {
   value: { exportedPath?: string }
 }
 
+export interface DatabaseRecoveryControllerDependencies {
+  actionFenceObserver?: DatabaseRecoveryActionFenceObserver
+  removeRecoveryMarker?(path: string): Promise<void>
+}
+
 export class DatabaseRecoveryController {
   readonly #dataRoot: string
   readonly #migrations: readonly Migration[]
   readonly #observer: RuntimeDatabaseBootstrapObserver
+  readonly #dependencies: DatabaseRecoveryControllerDependencies
 
   constructor(
     dataRoot: string,
     migrations: readonly Migration[],
-    observer: RuntimeDatabaseBootstrapObserver = {}
+    observer: RuntimeDatabaseBootstrapObserver = {},
+    dependencies: DatabaseRecoveryControllerDependencies = {}
   ) {
     this.#dataRoot = dataRoot
     this.#migrations = migrations
     this.#observer = observer
+    this.#dependencies = dependencies
   }
 
   async execute(
     recovery: RecoveryRequired,
     command: RuntimeRecoveryCommand
   ): Promise<DatabaseRecoveryExecution> {
+    if (
+      command.action !== 'export-recovery-bundle' &&
+      command.expectedRecoveryId !== recovery.recoveryId
+    ) {
+      throw new Error('数据库恢复周期已更新，本次操作已停止')
+    }
     switch (command.action) {
       case 'export-recovery-bundle':
         return { value: { exportedPath: await this.#export(recovery) } }
@@ -68,33 +85,38 @@ export class DatabaseRecoveryController {
     requestId: string,
     mutate: () => Promise<void>
   ): Promise<DatabaseRecoveryExecution> {
-    return withDatabaseRecoveryActionFence(recovery.durableDatabasePath, async () => {
-      await assertRecoveryStillActive(recovery)
-      await this.#archiveOwnershipState(recovery, requestId)
-      const ownership = RuntimeDatabase.acquireOwnership(recovery.durableDatabasePath)
-      let database: RuntimeDatabase | undefined
-      try {
-        await this.#observer.onRecoveryActionFenced?.()
-        await mutate()
-        const bootstrap = await openRecoverableRuntimeDatabaseWithOwnership(
-          this.#dataRoot,
-          this.#migrations,
-          ownership,
-          this.#observer
-        )
-        database = bootstrap.database
-        await rm(recovery.markerPath)
-        return { value: {}, bootstrap }
-      } catch (error) {
-        if (database) {
-          database.close()
-          this.#observer.onDatabaseClosed?.(database)
-        } else {
-          ownership.release()
-        }
-        throw error
-      }
-    })
+    let bootstrap: Extract<RuntimeDatabaseBootstrapResult, { kind: 'writable' }> | undefined
+    try {
+      await withDatabaseRecoveryActionFence(
+        recovery.durableDatabasePath,
+        async () => {
+          await assertRecoveryStillActive(recovery)
+          await this.#archiveOwnershipState(recovery, requestId)
+          const ownership = RuntimeDatabase.acquireOwnership(recovery.durableDatabasePath)
+          try {
+            await this.#observer.onRecoveryActionFenced?.()
+            await mutate()
+            bootstrap = await openRecoverableRuntimeDatabaseWithOwnership(
+              this.#dataRoot,
+              this.#migrations,
+              ownership,
+              this.#observer
+            )
+          } catch (error) {
+            ownership.release()
+            throw error
+          }
+        },
+        this.#dependencies.actionFenceObserver
+      )
+      await (this.#dependencies.removeRecoveryMarker ?? removeRecoveryMarker)(
+        recovery.markerPath
+      )
+      return { value: {}, bootstrap: bootstrap! }
+    } catch (error) {
+      if (bootstrap) closeObservedDatabase(bootstrap.database, this.#observer)
+      throw error
+    }
   }
 
   async #export(recovery: RecoveryRequired): Promise<string> {
@@ -160,6 +182,18 @@ export class DatabaseRecoveryController {
   }
 }
 
+async function removeRecoveryMarker(path: string): Promise<void> {
+  await rm(path)
+}
+
+function closeObservedDatabase(
+  database: RuntimeDatabase,
+  observer: RuntimeDatabaseBootstrapObserver
+): void {
+  database.close()
+  observer.onDatabaseClosed?.(database)
+}
+
 async function assertRecoveryStillActive(recovery: RecoveryRequired): Promise<void> {
   let marker: Partial<RecoveryRequired>
   try {
@@ -171,6 +205,7 @@ async function assertRecoveryStillActive(recovery: RecoveryRequired): Promise<vo
     throw error
   }
   if (
+    marker.recoveryId !== recovery.recoveryId ||
     marker.reason !== recovery.reason ||
     marker.durableDatabasePath !== recovery.durableDatabasePath ||
     marker.quarantinedPath !== recovery.quarantinedPath ||

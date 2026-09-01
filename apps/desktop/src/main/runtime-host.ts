@@ -81,6 +81,12 @@ export class RuntimeHost {
   recover(command: RuntimeRecoveryCommand): Promise<RuntimeRecoveryCommandResult> {
     const child = this.#child
     if (!child) return Promise.reject(new Error('Runtime is not running'))
+    if (
+      command.action !== 'export-recovery-bundle' &&
+      command.expectedRecoveryId !== this.#lifecycle.recovery?.recoveryId
+    ) {
+      return Promise.reject(new Error('数据库恢复周期已更新，本次操作已停止'))
+    }
     if (this.#pendingRecoveryCommands.size > 0) {
       return Promise.reject(new Error('Recovery command is already running'))
     }

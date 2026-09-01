@@ -9,7 +9,8 @@ describe('runtime lifecycle publisher', () => {
 
     publisher.opening()
     publisher.recoveryRequired({
-      kind: 'recovery-required', reason: 'ownership-recovery-required',
+      kind: 'recovery-required', recoveryId: 'durable-recovery-1',
+      reason: 'ownership-recovery-required',
       durableDatabasePath: '/data/matou.sqlite', quarantinedPath: '/data/matou.sqlite',
       markerPath: '/data/matou.sqlite.recovery.json', ownershipIssue: 'owner-record-malformed',
       backups: []
@@ -22,7 +23,8 @@ describe('runtime lifecycle publisher', () => {
       'runtime.lifecycle', 'runtime.lifecycle'
     ])
     expect(postMessage.mock.calls[1]![0].recovery).toMatchObject({
-      reason: 'ownership-recovery-required', ownershipIssue: 'owner-record-malformed'
+      recoveryId: 'durable-recovery-1', reason: 'ownership-recovery-required',
+      ownershipIssue: 'owner-record-malformed'
     })
     expect(postMessage.mock.calls[0]![0].snapshot).toMatchObject({
       recoveryId: 'recovery-1', revision: 1, stage: 'opening-database'

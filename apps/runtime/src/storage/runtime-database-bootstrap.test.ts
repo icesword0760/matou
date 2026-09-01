@@ -218,6 +218,7 @@ describe('openRecoverableRuntimeDatabase', () => {
     if (result.kind !== 'recovery-required') throw new Error('expected database recovery')
     expect(result).toMatchObject({
       reason: 'physical-corruption',
+      recoveryId: expect.stringMatching(/^[A-Za-z0-9._-]+$/),
       durableDatabasePath: databasePath,
       backups: [expect.objectContaining({ id: backup.id, path: backup.path })]
     })
@@ -236,6 +237,7 @@ describe('openRecoverableRuntimeDatabase', () => {
     const repeated = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
     expect(repeated).toMatchObject({
       kind: 'recovery-required',
+      recoveryId: result.recoveryId,
       markerPath: join(root, 'matou.sqlite.recovery.json'),
       quarantinedPath: result.quarantinedPath
     })

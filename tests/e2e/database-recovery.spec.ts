@@ -27,6 +27,29 @@ test('real Electron shows only recovery UI after SQLite header corruption and re
     await expect(fixture.page.getByRole('radio').first()).toBeChecked()
     expect(await fixture.page.getByRole('radio').count()).toBeLessThanOrEqual(7)
 
+    const recoveryBeforeReplay = await fixture.page.evaluate(() => (
+      window.matouDesktop.getRuntimeLifecycle()
+    ))
+    const markerPath = `${databasePath}.recovery.json`
+    const markerBeforeReplay = await readFile(markerPath)
+    const quarantinedBeforeReplay = await readFile(
+      recoveryBeforeReplay.recovery!.quarantinedPath
+    )
+    const staleReplayError = await fixture.page.evaluate(async (expectedRecoveryId) => {
+      try {
+        await window.matouDesktop.retryDatabaseOpen(expectedRecoveryId)
+        return ''
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    }, `stale-${recoveryBeforeReplay.recovery!.recoveryId}`)
+    expect(staleReplayError).toContain('恢复周期已更新')
+    expect(await readFile(markerPath)).toEqual(markerBeforeReplay)
+    expect(await readFile(recoveryBeforeReplay.recovery!.quarantinedPath))
+      .toEqual(quarantinedBeforeReplay)
+    expect(await fixture.page.evaluate(() => window.matouDesktop.getRuntimeLifecycle()))
+      .toEqual(recoveryBeforeReplay)
+
     await fixture.page.getByRole('button', { name: '恢复所选备份' }).click()
     await expect(fixture.page.locator('.workspace-group').first()).toBeVisible()
     await expect(fixture.page.locator('.workspace-group__name').first()).toHaveText(workspaceName ?? '')

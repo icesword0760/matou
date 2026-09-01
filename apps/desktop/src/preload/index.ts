@@ -90,11 +90,17 @@ const desktopApi: MatouDesktopApi = {
     ipcRenderer.on(DESKTOP_CHANNELS.runtimeLifecycle, handler)
     return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.runtimeLifecycle, handler)
   },
-  restoreDatabaseBackup: (backupId) =>
-    ipcRenderer.invoke(DESKTOP_CHANNELS.restoreDatabaseBackup, backupId),
+  restoreDatabaseBackup: (backupId, expectedRecoveryId) =>
+    ipcRenderer.invoke(
+      DESKTOP_CHANNELS.restoreDatabaseBackup,
+      backupId,
+      expectedRecoveryId
+    ),
   exportDatabaseRecoveryBundle: () =>
     ipcRenderer.invoke(DESKTOP_CHANNELS.exportDatabaseRecoveryBundle),
-  retryDatabaseOpen: () => ipcRenderer.invoke(DESKTOP_CHANNELS.retryDatabaseOpen),
-  startWithEmptyDatabase: () => ipcRenderer.invoke(DESKTOP_CHANNELS.startWithEmptyDatabase)
+  retryDatabaseOpen: (expectedRecoveryId) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.retryDatabaseOpen, expectedRecoveryId),
+  startWithEmptyDatabase: (expectedRecoveryId) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.startWithEmptyDatabase, expectedRecoveryId)
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)
