@@ -1,3 +1,8 @@
+import type {
+  RuntimeRecoveryCommandAction,
+  RuntimeRecoverySnapshot
+} from '@matou/contracts'
+
 export interface MatouDesktopApi {
   getPathForFile(file: File): string
   selectWorkspaceDirectory(): Promise<string | null>
@@ -16,9 +21,50 @@ export interface MatouDesktopApi {
   onDagNodeSelected(listener: (selection: DagNodeSelection) => void): () => void
   onDagShortcut(listener: (kind: 'short' | 'long') => void): () => void
   onRuntimeConnectionState(listener: (state: RuntimeConnectionState) => void): () => void
+  getRuntimeLifecycle(): Promise<RuntimeLifecyclePresentation>
+  onRuntimeLifecycle(listener: (state: RuntimeLifecyclePresentation) => void): () => void
+  restoreDatabaseBackup(backupId: string): Promise<RuntimeRecoveryCommandResult>
+  exportDatabaseRecoveryBundle(): Promise<RuntimeRecoveryCommandResult>
+  retryDatabaseOpen(): Promise<RuntimeRecoveryCommandResult>
+  startWithEmptyDatabase(): Promise<RuntimeRecoveryCommandResult>
 }
 
 export type RuntimeConnectionState = 'reconnecting' | 'ready'
+
+export interface RuntimeRecoveryBackup {
+  id: string
+  createdAt: number
+  reason: 'pre-migration' | 'clean-exit'
+  schemaVersion: number
+  size: number
+  sha256: string
+}
+
+export interface RuntimeRecoveryDetails {
+  reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
+  durableDatabasePath: string
+  quarantinedPath: string
+  ownershipIssue?: 'owner-record-malformed' | 'takeover-sidecar-unusable'
+  backups: RuntimeRecoveryBackup[]
+  error?: string
+}
+
+export interface RuntimeRecoveryOperation {
+  requestId: string
+  action: RuntimeRecoveryCommandAction
+  pending: boolean
+  error?: string
+}
+
+export interface RuntimeLifecyclePresentation {
+  snapshot: RuntimeRecoverySnapshot
+  recovery?: RuntimeRecoveryDetails
+  operation?: RuntimeRecoveryOperation
+}
+
+export interface RuntimeRecoveryCommandResult {
+  exportedPath?: string
+}
 
 export interface DetachedTerminalWindowInput {
   windowId: string
@@ -67,5 +113,11 @@ export const DESKTOP_CHANNELS = {
   dagNotifications: 'matou:dag-notifications',
   dagNodeSelected: 'matou:dag-node-selected',
   dagShortcut: 'matou:dag-shortcut',
-  runtimeConnectionState: 'matou:runtime-connection-state'
+  runtimeConnectionState: 'matou:runtime-connection-state',
+  runtimeLifecycle: 'matou:runtime-lifecycle',
+  getRuntimeLifecycle: 'matou:get-runtime-lifecycle',
+  restoreDatabaseBackup: 'matou:restore-database-backup',
+  exportDatabaseRecoveryBundle: 'matou:export-database-recovery-bundle',
+  retryDatabaseOpen: 'matou:retry-database-open',
+  startWithEmptyDatabase: 'matou:start-with-empty-database'
 } as const

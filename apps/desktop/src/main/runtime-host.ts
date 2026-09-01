@@ -1,32 +1,102 @@
+import { randomUUID } from 'node:crypto'
+
 import { MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron'
 
-import { PROTOCOL_VERSION, type RuntimeConnectRequest } from '@matou/contracts'
-import { DESKTOP_CHANNELS, type RuntimeConnectionState } from '../shared/desktop-api'
+import {
+  PROTOCOL_VERSION,
+  parseRuntimeLifecycleEvent,
+  type RuntimeConnectRequest,
+  type RuntimeLifecycleEvent,
+  type RuntimeRecoveryCommand
+} from '@matou/contracts'
+import {
+  DESKTOP_CHANNELS,
+  type RuntimeConnectionState,
+  type RuntimeLifecyclePresentation,
+  type RuntimeRecoveryCommandResult,
+  type RuntimeRecoveryDetails
+} from '../shared/desktop-api'
+
+const RESTART_DELAYS = [100, 500, 1_000, 2_000, 5_000] as const
+
+type RuntimeChildMessage = RuntimeLifecycleEvent | {
+  type: 'runtime.recovery-details'
+  recovery: RuntimeRecoveryDetails
+} | {
+  type: 'runtime.recovery-result'
+  requestId: string
+  ok: boolean
+  value?: RuntimeRecoveryCommandResult
+  error?: string
+}
+
+interface PendingRecoveryCommand {
+  resolve(value: RuntimeRecoveryCommandResult): void
+  reject(error: Error): void
+}
 
 export class RuntimeHost {
   readonly #runtimeEntry: string
   readonly #renderers = new Set<WebContents>()
+  readonly #connectedRenderers = new Set<WebContents>()
+  readonly #pendingRecoveryCommands = new Map<string, PendingRecoveryCommand>()
   #child: UtilityProcess | undefined
   #restartTimer: ReturnType<typeof setTimeout> | undefined
-  #recoveryReadyTimer: ReturnType<typeof setTimeout> | undefined
+  #restartAttempt = 0
   #stopping = false
   #stopPromise: Promise<void> | undefined
-  #connectionState: RuntimeConnectionState = 'ready'
+  #connectionState: RuntimeConnectionState = 'reconnecting'
+  #lifecycle: RuntimeLifecyclePresentation = {
+    snapshot: {
+      recoveryId: `desktop-${randomUUID()}`,
+      revision: 0,
+      mode: 'normal',
+      stage: 'opening-database',
+      completed: 0,
+      total: 1,
+      failures: []
+    }
+  }
 
   constructor(runtimeEntry: string) {
     this.#runtimeEntry = runtimeEntry
   }
 
   async start(): Promise<void> {
-    if (this.#child) {
-      return
-    }
+    if (this.#child) return
     this.#stopping = false
-    await this.#launch()
+    try {
+      await this.#launch()
+    } catch (error) {
+      console.error('Matou Runtime failed to start', error)
+      this.#markReconnecting()
+      this.#scheduleRestart()
+    }
+  }
+
+  getLifecycle(): RuntimeLifecyclePresentation {
+    return this.#lifecycle
+  }
+
+  recover(command: RuntimeRecoveryCommand): Promise<RuntimeRecoveryCommandResult> {
+    const child = this.#child
+    if (!child) return Promise.reject(new Error('Runtime is not running'))
+    if (this.#pendingRecoveryCommands.size > 0) {
+      return Promise.reject(new Error('Recovery command is already running'))
+    }
+    this.#lifecycle = {
+      ...this.#lifecycle,
+      operation: { requestId: command.requestId, action: command.action, pending: true }
+    }
+    this.#publishLifecycle()
+    const result = new Promise<RuntimeRecoveryCommandResult>((resolve, reject) => {
+      this.#pendingRecoveryCommands.set(command.requestId, { resolve, reject })
+    })
+    child.postMessage(command)
+    return result
   }
 
   async #launch(): Promise<void> {
-
     const child = utilityProcess.fork(this.#runtimeEntry, [], {
       serviceName: 'Matou Terminal Runtime',
       stdio: 'pipe',
@@ -35,6 +105,8 @@ export class RuntimeHost {
     child.stdout?.pipe(process.stdout)
     child.stderr?.pipe(process.stderr)
     this.#child = child
+    this.#connectedRenderers.clear()
+    child.on('message', (message: unknown) => this.#receive(message))
 
     await new Promise<void>((resolve, reject) => {
       child.once('spawn', resolve)
@@ -43,12 +115,11 @@ export class RuntimeHost {
         reject(new Error(`Runtime failed to start: ${error}`))
       })
       child.once('exit', (code) => {
-        if (this.#child === child) {
-          this.#child = undefined
-        }
-        if (code !== 0) {
-          console.error(`Matou Runtime exited with code ${code}`)
-        }
+        if (this.#child !== child) return
+        this.#child = undefined
+        this.#connectedRenderers.clear()
+        if (code !== 0) console.error(`Matou Runtime exited with code ${code}`)
+        this.#rejectPending(new Error('Runtime exited during database recovery'))
         if (!this.#stopping) {
           this.#markReconnecting()
           this.#scheduleRestart()
@@ -60,16 +131,13 @@ export class RuntimeHost {
   connect(webContents: WebContents): void {
     this.#renderers.add(webContents)
     this.#sendConnectionState(webContents)
-    if (!this.#child) return
-    this.#connectRenderer(webContents)
+    this.#sendLifecycle(webContents)
+    if (this.#isRuntimeReady()) this.#connectRenderer(webContents)
   }
 
   #connectRenderer(webContents: WebContents): void {
     const child = this.#child
-    if (!child) {
-      throw new Error('Runtime is not running')
-    }
-
+    if (!child || webContents.isDestroyed() || this.#connectedRenderers.has(webContents)) return
     const { port1, port2 } = new MessageChannelMain()
     const request: RuntimeConnectRequest = {
       type: 'runtime.connect',
@@ -77,15 +145,15 @@ export class RuntimeHost {
     }
     child.postMessage(request, [port1])
     webContents.postMessage('matou:terminal-port', { protocolVersion: PROTOCOL_VERSION }, [port2])
+    this.#connectedRenderers.add(webContents)
   }
 
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise
     this.#stopping = true
     if (this.#restartTimer) clearTimeout(this.#restartTimer)
-    if (this.#recoveryReadyTimer) clearTimeout(this.#recoveryReadyTimer)
     this.#restartTimer = undefined
-    this.#recoveryReadyTimer = undefined
+    this.#rejectPending(new Error('Runtime stopped during database recovery'))
     const child = this.#child
     if (!child) return Promise.resolve()
     this.#stopPromise = new Promise<void>((resolve) => {
@@ -97,47 +165,130 @@ export class RuntimeHost {
     return this.#stopPromise
   }
 
-  #scheduleRestart(): void {
-    if (this.#restartTimer || this.#stopping) return
-    this.#restartTimer = setTimeout(() => {
-      this.#restartTimer = undefined
-      void this.#restartAndReconnect()
-    }, 100)
+  #receive(message: unknown): void {
+    if (!message || typeof message !== 'object' || !('type' in message)) return
+    const candidate = message as RuntimeChildMessage
+    if (candidate.type === 'runtime.lifecycle') {
+      let event: RuntimeLifecycleEvent
+      try {
+        event = parseRuntimeLifecycleEvent(candidate, this.#lifecycle.snapshot)
+      } catch {
+        return
+      }
+      if (event.snapshot.mode !== 'recovery-required' && event.snapshot.stage === 'ready') {
+        const { recovery: _recovery, ...current } = this.#lifecycle
+        this.#lifecycle = { ...current, snapshot: event.snapshot }
+      } else {
+        this.#lifecycle = { ...this.#lifecycle, snapshot: event.snapshot }
+      }
+      this.#publishLifecycle()
+      if (event.snapshot.stage === 'ready') {
+        this.#restartAttempt = 0
+        this.#setConnectionState('ready')
+        for (const renderer of this.#liveRenderers()) this.#connectRenderer(renderer)
+      }
+      return
+    }
+    if (candidate.type === 'runtime.recovery-details') {
+      this.#lifecycle = { ...this.#lifecycle, recovery: candidate.recovery }
+      this.#publishLifecycle()
+      return
+    }
+    if (candidate.type !== 'runtime.recovery-result') return
+    const pending = this.#pendingRecoveryCommands.get(candidate.requestId)
+    if (!pending) return
+    this.#pendingRecoveryCommands.delete(candidate.requestId)
+    if (candidate.ok) {
+      const value = candidate.value ?? {}
+      const { operation: _operation, ...current } = this.#lifecycle
+      this.#lifecycle = current
+      this.#publishLifecycle()
+      pending.resolve(value)
+    } else {
+      const error = candidate.error || '数据库恢复操作失败'
+      this.#lifecycle = {
+        ...this.#lifecycle,
+        operation: { ...this.#lifecycle.operation!, pending: false, error }
+      }
+      this.#publishLifecycle()
+      pending.reject(new Error(error))
+    }
   }
 
-  async #restartAndReconnect(): Promise<void> {
+  #scheduleRestart(): void {
+    if (this.#restartTimer || this.#stopping) return
+    const delay = RESTART_DELAYS[Math.min(this.#restartAttempt, RESTART_DELAYS.length - 1)]!
+    this.#restartAttempt += 1
+    this.#restartTimer = setTimeout(() => {
+      this.#restartTimer = undefined
+      void this.#restart()
+    }, delay)
+  }
+
+  async #restart(): Promise<void> {
     try {
       await this.#launch()
-      for (const renderer of this.#renderers) {
-        if (renderer.isDestroyed()) {
-          this.#renderers.delete(renderer)
-          continue
-        }
-        this.#connectRenderer(renderer)
-      }
-      this.#recoveryReadyTimer = setTimeout(() => {
-        this.#recoveryReadyTimer = undefined
-        this.#setConnectionState('ready')
-      }, 1_000)
     } catch (error) {
       console.error('Matou Runtime restart failed', error)
+      this.#markReconnecting()
       this.#scheduleRestart()
     }
   }
 
   #markReconnecting(): void {
-    if (this.#recoveryReadyTimer) clearTimeout(this.#recoveryReadyTimer)
-    this.#recoveryReadyTimer = undefined
     this.#setConnectionState('reconnecting')
+    this.#lifecycle = {
+      snapshot: {
+        recoveryId: `desktop-${randomUUID()}`,
+        revision: 0,
+        mode: 'normal',
+        stage: 'opening-database',
+        completed: 0,
+        total: 1,
+        failures: []
+      }
+    }
+    this.#publishLifecycle()
+  }
+
+  #isRuntimeReady(): boolean {
+    return Boolean(this.#child && this.#lifecycle.snapshot.stage === 'ready')
   }
 
   #setConnectionState(state: RuntimeConnectionState): void {
     this.#connectionState = state
-    for (const renderer of this.#renderers) this.#sendConnectionState(renderer)
+    for (const renderer of this.#liveRenderers()) this.#sendConnectionState(renderer)
+  }
+
+  #publishLifecycle(): void {
+    for (const renderer of this.#liveRenderers()) this.#sendLifecycle(renderer)
   }
 
   #sendConnectionState(webContents: WebContents): void {
-    if (webContents.isDestroyed()) return
-    webContents.send(DESKTOP_CHANNELS.runtimeConnectionState, this.#connectionState)
+    if (!webContents.isDestroyed()) {
+      webContents.send(DESKTOP_CHANNELS.runtimeConnectionState, this.#connectionState)
+    }
+  }
+
+  #sendLifecycle(webContents: WebContents): void {
+    if (!webContents.isDestroyed()) {
+      webContents.send(DESKTOP_CHANNELS.runtimeLifecycle, this.#lifecycle)
+    }
+  }
+
+  *#liveRenderers(): Generator<WebContents> {
+    for (const renderer of this.#renderers) {
+      if (renderer.isDestroyed()) {
+        this.#renderers.delete(renderer)
+        this.#connectedRenderers.delete(renderer)
+      } else {
+        yield renderer
+      }
+    }
+  }
+
+  #rejectPending(error: Error): void {
+    for (const pending of this.#pendingRecoveryCommands.values()) pending.reject(error)
+    this.#pendingRecoveryCommands.clear()
   }
 }

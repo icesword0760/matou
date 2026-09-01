@@ -83,6 +83,18 @@ const desktopApi: MatouDesktopApi = {
     runtimeConnectionListeners.add(listener)
     listener(runtimeConnectionState)
     return () => runtimeConnectionListeners.delete(listener)
-  }
+  },
+  getRuntimeLifecycle: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getRuntimeLifecycle),
+  onRuntimeLifecycle: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.runtimeLifecycle, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.runtimeLifecycle, handler)
+  },
+  restoreDatabaseBackup: (backupId) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.restoreDatabaseBackup, backupId),
+  exportDatabaseRecoveryBundle: () =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.exportDatabaseRecoveryBundle),
+  retryDatabaseOpen: () => ipcRenderer.invoke(DESKTOP_CHANNELS.retryDatabaseOpen),
+  startWithEmptyDatabase: () => ipcRenderer.invoke(DESKTOP_CHANNELS.startWithEmptyDatabase)
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)

@@ -1,4 +1,5 @@
 import { mkdirSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join, resolve } from 'node:path'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
@@ -324,6 +325,25 @@ ipcMain.handle(DESKTOP_CHANNELS.updateDagNotifications, (
 ) => {
   dagWindows.updateNotifications(mainWindowId, sessionIds)
 })
+ipcMain.handle(DESKTOP_CHANNELS.getRuntimeLifecycle, () => runtimeHost?.getLifecycle())
+ipcMain.handle(DESKTOP_CHANNELS.restoreDatabaseBackup, (_event, backupId: string) =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(),
+    action: 'restore-backup', backupId
+  }))
+ipcMain.handle(DESKTOP_CHANNELS.exportDatabaseRecoveryBundle, () =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(),
+    action: 'export-recovery-bundle'
+  }))
+ipcMain.handle(DESKTOP_CHANNELS.retryDatabaseOpen, () =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'retry-open'
+  }))
+ipcMain.handle(DESKTOP_CHANNELS.startWithEmptyDatabase, () =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'start-empty-database'
+  }))
 
 app.on('before-quit', () => {
   quitting = true

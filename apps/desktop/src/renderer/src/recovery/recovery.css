@@ -1,0 +1,51 @@
+.database-recovery-page {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  padding: 48px 24px;
+  color: #20242d;
+  background: #f4f6f9;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.database-recovery-card {
+  width: min(720px, 100%);
+  box-sizing: border-box;
+  border: 1px solid #dce1e8;
+  border-radius: 20px;
+  padding: 30px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(25 34 49 / 10%);
+}
+
+.database-recovery-card h1 { margin: 4px 0 10px; font-size: 26px; }
+.database-recovery-card header > p:last-child { margin: 0; color: #606a78; line-height: 1.6; }
+.database-recovery-eyebrow { margin: 0; color: #3478f6; font-size: 13px; font-weight: 700; }
+.database-recovery-error, .database-recovery-success, .database-recovery-progress { padding: 10px 12px; border-radius: 10px; }
+.database-recovery-error { color: #a12525; background: #fff0ef; }
+.database-recovery-success { color: #17653a; background: #edf9f1; }
+.database-recovery-progress { color: #275da8; background: #edf4ff; }
+.database-recovery-backups { margin-top: 26px; }
+.database-recovery-section-title { display: flex; align-items: center; justify-content: space-between; }
+.database-recovery-section-title h2 { font-size: 15px; }
+.database-recovery-section-title span { color: #7a8492; font-size: 13px; }
+.database-recovery-list { display: grid; gap: 8px; }
+.database-recovery-list label { display: flex; gap: 12px; align-items: center; padding: 12px; border: 1px solid #e2e6ec; border-radius: 11px; cursor: pointer; }
+.database-recovery-list label:has(input:checked) { border-color: #78a5ff; background: #f2f6ff; }
+.database-recovery-list span { min-width: 0; display: grid; gap: 3px; }
+.database-recovery-list strong { overflow: hidden; text-overflow: ellipsis; }
+.database-recovery-list small, .database-recovery-empty, .database-recovery-card footer p { color: #737d8b; }
+.database-recovery-primary-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.database-recovery-card button { min-height: 38px; padding: 0 14px; border: 1px solid #d4d9e1; border-radius: 9px; background: #fff; color: inherit; font: inherit; cursor: pointer; }
+.database-recovery-card button.primary { color: #fff; border-color: #3478f6; background: #3478f6; }
+.database-recovery-card button:disabled { opacity: .48; cursor: default; }
+.database-recovery-card footer { margin-top: 24px; padding-top: 18px; border-top: 1px solid #eceff3; }
+.database-recovery-card footer p { margin: 7px 0 0; font-size: 12px; }
+.database-recovery-card button.danger-link { padding: 0; min-height: auto; border: 0; color: #ad3434; }
+.database-recovery-dialog-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: rgb(22 27 35 / 38%); }
+.database-recovery-dialog { width: min(430px, 100%); box-sizing: border-box; padding: 22px; border-radius: 16px; background: #fff; box-shadow: 0 20px 80px rgb(0 0 0 / 24%); }
+.database-recovery-dialog h2 { margin-top: 0; font-size: 19px; }
+.database-recovery-dialog p { color: #606a78; line-height: 1.55; }
+.database-recovery-dialog > div { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.database-recovery-dialog button.danger { color: #fff; border-color: #b63838; background: #b63838; }

@@ -3,7 +3,12 @@ import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import { resolve } from 'node:path'
 
-import { PROTOCOL_VERSION, type RuntimeConnectRequest } from '@matou/contracts'
+import {
+  PROTOCOL_VERSION,
+  parseRuntimeRecoveryCommand,
+  type RuntimeConnectRequest,
+  type RuntimeRecoveryCommand
+} from '@matou/contracts'
 
 import { RuntimeServer } from './runtime-server'
 import {
@@ -21,8 +26,10 @@ import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 import { DatabaseLifecycleService } from './storage/database-lifecycle-service'
+import type { DatabaseBackupService } from './storage/database-backup-service'
 import {
   openRecoverableRuntimeDatabase,
+  type RuntimeDatabaseBootstrapObserver,
   type RuntimeDatabaseBootstrapResult
 } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
@@ -35,8 +42,13 @@ import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { nextProviderWorkStatus } from './session/provider-work-status'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
-import { RuntimeLifecycleCoordinator } from './runtime-lifecycle-coordinator'
+import {
+  RuntimeLifecycleCoordinator,
+  RuntimeShutdownRequestedError
+} from './runtime-lifecycle-coordinator'
 import { RuntimeProcessOrchestrator } from './runtime-process-orchestrator'
+import { RuntimeLifecyclePublisher } from './runtime-lifecycle-publisher'
+import { DatabaseRecoveryController } from './storage/database-recovery-controller'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -77,30 +89,55 @@ type RuntimeState = WritableRuntimeState | ReadOnlyRuntimeState
 let runtimeState: RuntimeState | undefined
 let readOnlyDatabase: RuntimeDatabase | undefined
 const lifecycleCoordinator = new RuntimeLifecycleCoordinator()
+const lifecyclePublisher = new RuntimeLifecyclePublisher(parentPort)
+const bootstrapObserver: RuntimeDatabaseBootstrapObserver = {
+  onDatabaseOpened: (
+    database: RuntimeDatabase,
+    _effectiveDataRoot: string,
+    backups: DatabaseBackupService
+  ) => {
+    if (database.readOnly) {
+      readOnlyDatabase = database
+      return
+    }
+    lifecycleCoordinator.registerDatabaseLifecycle(
+      database,
+      new DatabaseLifecycleService(database, backups)
+    )
+  },
+  onDatabaseClosed: (database: RuntimeDatabase) => {
+    if (readOnlyDatabase === database) readOnlyDatabase = undefined
+    lifecycleCoordinator.releaseDatabaseLifecycle(database)
+  },
+  isShutdownRequested: () => lifecycleCoordinator.shutdownRequested
+}
+const databaseRecovery = new DatabaseRecoveryController(
+  dataRoot,
+  FOUNDATION_MIGRATIONS,
+  bootstrapObserver
+)
+let pendingDatabaseRecovery: Extract<RuntimeDatabaseBootstrapResult, { kind: 'recovery-required' }> | undefined
+let settleDatabaseRecovery: {
+  resolve(result: RuntimeDatabaseBootstrapResult): void
+  reject(error: unknown): void
+} | undefined
+lifecyclePublisher.opening()
 const runtimeReady = lifecycleCoordinator.startInitialization(initializeRuntime).then((state) => {
   runtimeState = state
+  lifecyclePublisher.ready(state.mode)
   return state
 })
 
 async function initializeRuntime(): Promise<RuntimeState> {
-  const opened = await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS, {
-    onDatabaseOpened: (database, _effectiveDataRoot, backups) => {
-      if (database.readOnly) {
-        readOnlyDatabase = database
-        return
-      }
-      lifecycleCoordinator.registerDatabaseLifecycle(
-        database,
-        new DatabaseLifecycleService(database, backups)
-      )
-    },
-    onDatabaseClosed: (database) => {
-      if (readOnlyDatabase === database) readOnlyDatabase = undefined
-      lifecycleCoordinator.releaseDatabaseLifecycle(database)
-    },
-    isShutdownRequested: () => lifecycleCoordinator.shutdownRequested
-  })
-  if (opened.kind === 'recovery-required') return waitForDatabaseRecovery(opened)
+  let opened = await openRecoverableRuntimeDatabase(
+    dataRoot,
+    FOUNDATION_MIGRATIONS,
+    bootstrapObserver
+  )
+  while (opened.kind === 'recovery-required') {
+    lifecyclePublisher.recoveryRequired(opened)
+    opened = await waitForDatabaseRecovery(opened)
+  }
   lifecycleCoordinator.assertStartupActive()
   const database = opened.database
   const runtimeDataRoot = opened.dataRoot
@@ -238,6 +275,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
 }
 
 function shutdown(): Promise<void> {
+  settleDatabaseRecovery?.reject(new RuntimeShutdownRequestedError())
+  settleDatabaseRecovery = undefined
+  pendingDatabaseRecovery = undefined
   return lifecycleCoordinator.shutdown(runtimeReady, {
     closeIncoming: () => {
       for (const server of servers) server.close()
@@ -261,6 +301,22 @@ process.once('SIGTERM', () => {
 })
 
 parentPort.on('message', async (event) => {
+  if (event.data && typeof event.data === 'object' && event.data.type === 'runtime.recovery-command') {
+    let command: RuntimeRecoveryCommand
+    try {
+      command = parseRuntimeRecoveryCommand(event.data)
+    } catch (error) {
+      parentPort.postMessage({
+        type: 'runtime.recovery-result',
+        requestId: String((event.data as { requestId?: unknown }).requestId ?? 'invalid'),
+        ok: false,
+        error: errorMessage(error)
+      })
+      return
+    }
+    void executeDatabaseRecoveryCommand(command)
+    return
+  }
   const request = event.data as Partial<RuntimeConnectRequest>
   const port = event.ports[0] as MessagePortMain | undefined
   if (
@@ -313,14 +369,49 @@ function errorMessage(error: unknown): string {
 
 async function waitForDatabaseRecovery(
   recovery: Extract<RuntimeDatabaseBootstrapResult, { kind: 'recovery-required' }>
-): Promise<never> {
+): Promise<RuntimeDatabaseBootstrapResult> {
   console.error(
     `[runtime.storage] database recovery required; quarantined=${recovery.quarantinedPath}; ` +
     `backups=${recovery.backups.length}`
   )
-  while (!lifecycleCoordinator.shutdownRequested) {
-    await new Promise((resolve) => setTimeout(resolve, 250))
+  pendingDatabaseRecovery = recovery
+  return new Promise<RuntimeDatabaseBootstrapResult>((resolve, reject) => {
+    settleDatabaseRecovery = { resolve, reject }
+  }).finally(() => {
+    settleDatabaseRecovery = undefined
+  })
+}
+
+async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): Promise<void> {
+  const recovery = pendingDatabaseRecovery
+  if (!recovery || !settleDatabaseRecovery) {
+    parentPort.postMessage({
+      type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
+      error: '当前没有待处理的数据库恢复操作'
+    })
+    return
   }
-  lifecycleCoordinator.assertStartupActive()
-  throw new Error('database recovery loop ended unexpectedly')
+  if (command.action !== 'export-recovery-bundle') lifecyclePublisher.openingNewAttempt()
+  try {
+    const result = await databaseRecovery.execute(recovery, command)
+    if (result.bootstrap) {
+      if (result.bootstrap.kind === 'recovery-required') {
+        pendingDatabaseRecovery = result.bootstrap
+        lifecyclePublisher.recoveryRequired(result.bootstrap)
+        throw new Error('重新检查后数据库仍需要恢复')
+      }
+      pendingDatabaseRecovery = undefined
+      settleDatabaseRecovery.resolve(result.bootstrap)
+    }
+    parentPort.postMessage({
+      type: 'runtime.recovery-result', requestId: command.requestId, ok: true,
+      value: result.value
+    })
+  } catch (error) {
+    lifecyclePublisher.recoveryRequired(pendingDatabaseRecovery ?? recovery)
+    parentPort.postMessage({
+      type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
+      error: errorMessage(error)
+    })
+  }
 }
