@@ -512,6 +512,27 @@ describe('RuntimeServer domain RPC', () => {
     expect(port.last('terminal.replay-complete')).toMatchObject({ throughSequence: 7 })
   })
 
+  it('accepts a delayed cumulative ACK after persisted replay has completed', async () => {
+    const journal = await SegmentJournal.open(root, 'completed-replay-ack')
+    registerSession(database, 'completed-replay-ack')
+    await journal.appendOutput(1, new TextEncoder().encode('history'))
+    await journal.close()
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'completed-replay-ack', fromSequence: 0
+    })
+    await waitUntil(() => port.last('terminal.replay-complete') !== undefined)
+    const errorsBefore = port.sent.filter(({ type }) => type === 'protocol.error').length
+
+    port.receive({
+      type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'completed-replay-ack', throughSequence: 1
+    })
+    await settle()
+
+    expect(port.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(errorsBefore)
+  })
+
   it('applies cumulative ACK backpressure while replaying a large persisted journal', async () => {
     const journal = await SegmentJournal.open(root, 'large-replay')
     registerSession(database, 'large-replay')

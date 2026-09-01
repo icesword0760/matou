@@ -146,6 +146,21 @@ describe('Terminal pane', () => {
     expect(onRemoveBranch).toHaveBeenCalledWith('session-1', true)
   })
 
+  it('closes a pending structural removal when read-only recovery starts', async () => {
+    const user = userEvent.setup()
+    const onRemoveBranch = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} />)
+
+    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+
+    view.rerender(<TerminalPane {...props} readOnly onRemoveBranch={onRemoveBranch} />)
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+  })
+
   it('opens the pane actions when the user right-clicks the terminal content area', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)

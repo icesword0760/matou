@@ -154,6 +154,71 @@ describe('RuntimeClient', () => {
     expect(port.sent.some(({ type }) => type === 'terminal.spawn')).toBe(false)
   })
 
+  it('downgrades existing terminal consumers before a read-only Runtime port becomes ready', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    first.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1',
+      profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+
+    client.setRuntimeMode('read-only')
+    const second = new FakePort()
+    client.replacePort(second)
+    second.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2', capabilities: ['replay-v1']
+    })
+
+    expect(second.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.replay-request', sessionId: 'session-1'
+    }))
+    expect(second.sent.some(({ type }) => type === 'terminal.spawn')).toBe(false)
+  })
+
+  it('drops terminal mutations immediately after Runtime enters read-only recovery', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    client.setRuntimeMode('read-only')
+    const before = port.sent.length
+
+    client.sendTerminalInput('session-1', 'blocked')
+    client.resizeTerminal('session-1', 100, 30)
+    client.retryLastTerminalInput('session-1')
+    client.recordTerminalInteraction('session-1', 'submit')
+    client.disposeDeletedTerminal('session-1')
+
+    expect(port.sent).toHaveLength(before)
+  })
+
+  it('replays a terminal attached after Runtime has already entered read-only recovery', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['replay-v1']
+    })
+    client.setRuntimeMode('read-only')
+
+    client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1',
+      profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.replay-request', sessionId: 'session-1'
+    }))
+    expect(port.sent.some(({ type }) => type === 'terminal.spawn')).toBe(false)
+  })
+
   it('routes a Session-scoped startup error only to that terminal card', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })

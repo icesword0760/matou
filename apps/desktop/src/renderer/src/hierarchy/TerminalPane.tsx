@@ -125,6 +125,13 @@ export function TerminalPane(props: {
     if (canFork) setForkReadinessHint(false)
   }, [canFork])
   useEffect(() => {
+    if (!readOnly) return
+    setConfirmationOpen(false)
+    setRemovalOpen(false)
+    setContextMenu(null)
+    setForkReadinessHint(false)
+  }, [readOnly])
+  useEffect(() => {
     if (!contextMenu) return
     const closeOutside = (event: Event) => {
       const target = event.target
@@ -163,6 +170,7 @@ export function TerminalPane(props: {
     ? claudeWorkFailureReason(latestLines)
     : undefined
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
+    if (readOnly) return
     if ((event.target as HTMLElement).closest('button')) return
     event.preventDefault()
     event.stopPropagation()
@@ -324,24 +332,24 @@ export function TerminalPane(props: {
           isFocusedSession: active && visible
         })
       }} />}
-    {confirmationOpen && flow.action === 'hide-window' && <ConfirmDialog title="提示"
+    {confirmationOpen && !readOnly && flow.action === 'hide-window' && <ConfirmDialog title="提示"
       body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
       confirmLabel="我知道了" showCancel={false} onCancel={() => setConfirmationOpen(false)}
       onConfirm={() => setConfirmationOpen(false)} />}
-    {confirmationOpen && flow.action !== 'hide-window' && <ConfirmationSequence steps={flow.steps}
+    {confirmationOpen && !readOnly && flow.action !== 'hide-window' && <ConfirmationSequence steps={flow.steps}
       onCancel={() => setConfirmationOpen(false)} onComplete={() => remove(true)} />}
-    {removalOpen && <ConfirmDialog title={`移除“${session.title}”及其整个分支？`}
+    {removalOpen && !readOnly && <ConfirmDialog title={`移除“${session.title}”及其整个分支？`}
       body={removalBody(session.title, childNodes.length, descendantCount, descendantImpact)}
       confirmLabel={removalConfirmLabel(descendantImpact)} cancelLabel="取消" scope="session"
       onCancel={() => setRemovalOpen(false)} onConfirm={() => {
         setRemovalOpen(false)
         void Promise.resolve(onRemoveBranch?.(session.id, descendantCount > 0)).catch(NOOP)
       }} />}
-    {forkReadinessHint && createPortal(<div className="fork-readiness-toast" role="status"
+    {forkReadinessHint && !readOnly && createPortal(<div className="fork-readiness-toast" role="status"
       aria-label="创建子分支条件说明">
       在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建子分支
     </div>, document.body)}
-    {contextMenu && createPortal(<>
+    {contextMenu && !readOnly && createPortal(<>
       <div className="detach-context-overlay" onClick={() => setContextMenu(null)}
         onContextMenu={(event) => { event.preventDefault(); setContextMenu(null) }} />
       <div ref={contextMenuRef} className="detach-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}

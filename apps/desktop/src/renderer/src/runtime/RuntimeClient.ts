@@ -1,7 +1,8 @@
 import {
   PROTOCOL_VERSION,
   type RpcMethod,
-  type RuntimeMessage
+  type RuntimeMessage,
+  type RuntimeMode
 } from '@matou/contracts'
 
 export interface RuntimeClientPort {
@@ -29,6 +30,7 @@ interface PendingRequest {
 
 interface TerminalConsumer {
   config: TerminalAttachment
+  requestedReadOnly: boolean
   listeners: Set<(message: RuntimeMessage) => void>
 }
 
@@ -41,6 +43,7 @@ export class RuntimeClient {
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
+  #readOnly = false
   #projectionAfterSequence: number | undefined
 
   constructor(
@@ -63,6 +66,16 @@ export class RuntimeClient {
       this.#requests.delete(requestId)
     }
     this.#bindPort(port)
+  }
+
+  setRuntimeMode(mode: RuntimeMode): void {
+    this.#readOnly = mode === 'read-only'
+    for (const consumer of this.#terminals.values()) {
+      consumer.config = effectiveTerminalConfig(
+        consumer.config,
+        consumer.requestedReadOnly || this.#readOnly
+      )
+    }
   }
 
   async request<T = unknown>(
@@ -111,14 +124,17 @@ export class RuntimeClient {
     config: TerminalAttachment,
     listener: (message: RuntimeMessage) => void
   ): () => void {
+    const requestedReadOnly = config.readOnly === true
     const consumer = this.#terminals.get(config.sessionId) ?? {
-      config,
+      config: effectiveTerminalConfig(config, requestedReadOnly || this.#readOnly),
+      requestedReadOnly,
       listeners: new Set<(message: RuntimeMessage) => void>()
     }
-    consumer.config = config
+    consumer.requestedReadOnly = requestedReadOnly
+    consumer.config = effectiveTerminalConfig(config, requestedReadOnly || this.#readOnly)
     consumer.listeners.add(listener)
     this.#terminals.set(config.sessionId, consumer)
-    if (this.#ready && consumer.listeners.size === 1) this.#spawn(config)
+    if (this.#ready && consumer.listeners.size === 1) this.#spawn(consumer.config)
     return () => {
       consumer.listeners.delete(listener)
       if (consumer.listeners.size === 0) this.#terminals.delete(config.sessionId)
@@ -135,10 +151,12 @@ export class RuntimeClient {
   }
 
   sendTerminalInput(sessionId: string, data: string): void {
+    if (this.#readOnly) return
     this.#post({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data })
   }
 
   retryLastTerminalInput(sessionId: string): void {
+    if (this.#readOnly) return
     this.#post({
       type: 'terminal.retry-last-input', protocolVersion: PROTOCOL_VERSION, sessionId
     })
@@ -149,6 +167,7 @@ export class RuntimeClient {
     interactionKind: 'submit' | 'control' | 'provider-action',
     deferOrdering = false
   ): void {
+    if (this.#readOnly) return
     this.#post({
       type: 'terminal.user-interaction', protocolVersion: PROTOCOL_VERSION,
       sessionId, interactionKind, deferOrdering
@@ -156,6 +175,7 @@ export class RuntimeClient {
   }
 
   resizeTerminal(sessionId: string, cols: number, rows: number): void {
+    if (this.#readOnly) return
     this.#post({ type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION, sessionId, cols, rows })
   }
 
@@ -175,6 +195,7 @@ export class RuntimeClient {
 
   disposeDeletedTerminal(sessionId: string): void {
     this.#terminals.delete(sessionId)
+    if (this.#readOnly) return
     this.#post({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
   }
 
@@ -234,4 +255,12 @@ export class RuntimeClient {
   #post(message: unknown): void {
     this.#port.postMessage(message)
   }
+}
+
+function effectiveTerminalConfig(
+  config: TerminalAttachment,
+  readOnly: boolean
+): TerminalAttachment {
+  const { readOnly: _readOnly, ...base } = config
+  return readOnly ? { ...base, readOnly: true } : base
 }

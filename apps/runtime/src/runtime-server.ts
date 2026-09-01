@@ -697,15 +697,15 @@ export class RuntimeServer {
     const wasAttached = this.#attachedSessionIds.has(sessionId)
     const session = wasAttached ? this.#sessions.get(sessionId) : undefined
     const replay = this.#replays.get(sessionId)
+    if (
+      !replay &&
+      throughSequence <= (this.#completedReplayThrough.get(sessionId) ?? -1)
+    ) return
     if (!session && !replay) {
       if (wasAttached || this.#endedSessionIds.has(sessionId)) return
       this.#sendError('SESSION_FORBIDDEN', `session ${sessionId} is not attached to this connection`)
       return
     }
-    if (
-      !replay &&
-      throughSequence <= (this.#completedReplayThrough.get(sessionId) ?? -1)
-    ) return
     if (session && !replay) {
       try {
         session.acknowledge(throughSequence)

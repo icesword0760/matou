@@ -98,8 +98,25 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     const unsubscribe = client.subscribeProjection(onProjection)
     const now = Date.now()
     if (readOnly) {
-      void refresh().catch((error: unknown) => alive && setLoadError(errorMessage(error)))
-      return () => { alive = false; unsubscribe() }
+      let retryTimer: number | undefined
+      const loadReadOnlyProjection = () => {
+        void refresh().then(() => {
+          if (alive) setLoadError('')
+        }).catch((error: unknown) => {
+          if (!alive) return
+          const message = errorMessage(error)
+          setLoadError(message)
+          if (message === 'Runtime channel replaced before the request completed') {
+            retryTimer = window.setTimeout(loadReadOnlyProjection, 50)
+          }
+        })
+      }
+      loadReadOnlyProjection()
+      return () => {
+        alive = false
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+        unsubscribe()
+      }
     }
     void client.request('hierarchy.bootstrap-window', {
       command: {
@@ -201,6 +218,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const projectionRef = useRef(projection)
   useEffect(() => { projectionRef.current = projection }, [projection])
   const detachedWindowIds = useMemo(() => Array.from(new Set(
@@ -212,8 +231,10 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   )).sort(), [projection.sceneSnapshots])
   const detachedWindowSignature = detachedWindowIds.join(':')
   const [liveDetachedWindowIds, setLiveDetachedWindowIds] = useState<Set<string> | null>(null)
+  const closedDetachedWindowIds = useRef(new Set<string>())
   useEffect(() => {
     if (!readOnly) {
+      closedDetachedWindowIds.current.clear()
       setLiveDetachedWindowIds(null)
       return
     }
@@ -229,7 +250,9 @@ function HierarchyProduct({ projection, commands, readOnly }: {
       }
     })).then((results) => {
       if (alive) setLiveDetachedWindowIds(new Set(
-        results.filter(([, present]) => present).map(([windowId]) => windowId)
+        results.filter(([windowId, present]) =>
+          present && !closedDetachedWindowIds.current.has(windowId)
+        ).map(([windowId]) => windowId)
       ))
     })
     return () => { alive = false }
@@ -308,8 +331,24 @@ function HierarchyProduct({ projection, commands, readOnly }: {
     ratioTimers.current.clear()
   }, [])
   useEffect(() => {
+    if (!readOnly) return
+    for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
+    ratioTimers.current.clear()
+    setSessionLoader(null)
+    setBranchDialog(null)
+  }, [readOnly])
+  useEffect(() => {
     const unsubscribe = window.matouDesktop?.onDetachedWindowClosed((event) => {
       if (event.mainWindowId === projection.windowId) {
+        if (readOnlyRef.current) {
+          closedDetachedWindowIds.current.add(event.windowId)
+          setLiveDetachedWindowIds((current) => {
+            const next = new Set(current ?? [])
+            next.delete(event.windowId)
+            return next
+          })
+          return
+        }
         // Closing the independent window only closes that presentation. The
         // same Session returns to its canvas instead of becoming a dead card.
         void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
@@ -711,10 +750,12 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   ? <SplitTree root={layout} ratios={ratios} onRatio={(nodeId, ratio) => {
                       const key = `${scene.id}:${nodeId}`
                       setLiveRatios((current) => ({ ...current, [key]: ratio }))
+                      if (readOnlyRef.current) return
                       const pending = ratioTimers.current.get(key)
                       if (pending !== undefined) window.clearTimeout(pending)
                       ratioTimers.current.set(key, window.setTimeout(() => {
                         ratioTimers.current.delete(key)
+                        if (readOnlyRef.current) return
                         void Promise.resolve(commands.putGeometry(
                           scene.id, `node:${nodeId}`, scene.layoutRevision ?? 0, { ratio }
                         )).catch(() => {})
@@ -762,7 +803,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   setShortcutPanelOpen(false)
                   setTerminalFocusRequest((value) => value + 1)
                 }} />
-              {sessionLoader && <SessionLoaderDialog
+              {sessionLoader && !readOnly && <SessionLoaderDialog
                 targetTitle={sessionLoader.title}
                 targetRunning={sessionLoader.running}
                 {...(workspaceStageRef.current ? { portalTarget: workspaceStageRef.current } : {})}
@@ -770,13 +811,14 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                 loadDetail={loadLoaderDetail}
                 onCancel={cancelSessionLoader}
                 onLoad={loadIntoCurrentCard} />}
-              {branchDialog && <BranchDialog relationMode={branchDialog.relationMode}
+              {branchDialog && !readOnly && <BranchDialog relationMode={branchDialog.relationMode}
                 sourceTitle={branchDialog.sourceTitle} gitAvailable={branchDialog.gitAvailable}
                 onCancel={() => {
                   setBranchDialog(null)
                   setTerminalFocusRequest((value) => value + 1)
                 }}
                 onConfirm={async (input: BranchDialogSubmit) => {
+                  if (readOnlyRef.current) return
                   const { sceneId, sourceSessionId, relationMode } = branchDialog
                   if (relationMode === 'child') {
                     const result = await Promise.resolve(commands.createForkChild(
