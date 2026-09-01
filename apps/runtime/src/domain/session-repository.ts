@@ -6,7 +6,8 @@ import type {
   SessionKind,
   SessionRun,
   SessionRunStatus,
-  SessionStatus
+  SessionStatus,
+  SessionTitleSource
 } from '@matou/domain'
 
 import type { RuntimeDatabase } from '../storage/database'
@@ -19,6 +20,8 @@ interface SessionRow {
   kind: SessionKind
   status: SessionStatus
   title: string
+  title_source: SessionTitleSource
+  provider_title: string | null
   cwd: string
   created_at: number
   updated_at: number
@@ -82,6 +85,7 @@ export class SessionRepository {
       executionContextId: string
       kind: SessionKind
       title: string
+      titleSource?: SessionTitleSource
       now: number
     }
   ): DomainCommit<Session> {
@@ -100,16 +104,18 @@ export class SessionRepository {
       if (!context || context.workspace_id !== task.workspace_id) {
         throw new Error('Session execution context must belong to the Task Workspace')
       }
+      const titleSource = input.titleSource ?? inferredTitleSource(input.kind, title)
       tx.run(
         `INSERT INTO sessions (
-           id, task_id, execution_context_id, kind, status, title,
+           id, task_id, execution_context_id, kind, status, title, title_source,
            created_at, updated_at, last_activity_at, version
-         ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, 1)`,
+         ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, 1)`,
         input.id,
         input.taskId,
         input.executionContextId,
         input.kind,
         title,
+        titleSource,
         input.now,
         input.now,
         input.now
@@ -438,6 +444,7 @@ export class SessionRepository {
     input: {
       id: string
       title?: string
+      titleSource?: SessionTitleSource
       status?: Exclude<SessionStatus, 'archived'>
       now: number
     }
@@ -447,15 +454,100 @@ export class SessionRepository {
       if (before.archived_at !== null) throw new Error('archived Session cannot be modified')
       const title = input.title === undefined ? before.title : input.title.trim()
       if (!title) throw new Error('Session title must not be empty')
+      const titleSource = input.titleSource ?? (
+        input.title === undefined ? before.title_source : 'manual'
+      )
       const status = input.status ?? before.status
       tx.run(
-        `UPDATE sessions SET title = ?, status = ?, updated_at = ?,
+        `UPDATE sessions SET title = ?, title_source = ?, status = ?, updated_at = ?,
          last_activity_at = ?, version = version + 1 WHERE id = ?`,
-        title, status, input.now, input.now, input.id
+        title, titleSource, status, input.now, input.now, input.id
       )
       const session = mapSession({
-        ...before, title, status, updated_at: input.now,
+        ...before, title, title_source: titleSource, status, updated_at: input.now,
         last_activity_at: input.now, version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.updated', before, input.now, { session })
+      return session
+    })
+  }
+
+  renameSession(
+    command: DomainCommandMetadata,
+    input: { sessionId: string; title: string; now: number }
+  ): DomainCommit<Session> {
+    const title = input.title.trim()
+    if (!title) throw new Error('Session title must not be empty')
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(tx.get<SessionRow>(
+        'SELECT * FROM sessions WHERE id = ?', input.sessionId
+      ), 'Session')
+      if (before.archived_at !== null) throw new Error('archived Session cannot be renamed')
+      tx.run(
+        `UPDATE sessions SET title = ?, title_source = 'manual', updated_at = ?,
+         version = version + 1 WHERE id = ?`,
+        title, input.now, input.sessionId
+      )
+      const session = mapSession({
+        ...before, title, title_source: 'manual', updated_at: input.now,
+        version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.updated', before, input.now, { session })
+      return session
+    })
+  }
+
+  observeProviderTitle(
+    command: DomainCommandMetadata,
+    input: { sessionId: string; title: string; now: number }
+  ): DomainCommit<Session> {
+    const providerTitle = input.title.trim()
+    if (!providerTitle) throw new Error('Provider title must not be empty')
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(tx.get<SessionRow>(
+        'SELECT * FROM sessions WHERE id = ?', input.sessionId
+      ), 'Session')
+      if (before.archived_at !== null) throw new Error('archived Session title cannot be observed')
+      const visibleTitle = before.title_source === 'manual' ? before.title : providerTitle
+      const titleSource: SessionTitleSource = before.title_source === 'manual' ? 'manual' : 'auto'
+      if (before.provider_title === providerTitle && before.title === visibleTitle &&
+        before.title_source === titleSource) return mapSession(before)
+      tx.run(
+        `UPDATE sessions SET title = ?, title_source = ?, provider_title = ?,
+         updated_at = ?, version = version + 1 WHERE id = ?`,
+        visibleTitle, titleSource, providerTitle, input.now, input.sessionId
+      )
+      const session = mapSession({
+        ...before, title: visibleTitle, title_source: titleSource,
+        provider_title: providerTitle, updated_at: input.now, version: before.version + 1
+      })
+      emitSessionEvent(emit, command.commandId, 'session.updated', before, input.now, { session })
+      return session
+    })
+  }
+
+  restoreProviderTitle(
+    command: DomainCommandMetadata,
+    input: { sessionId: string; title?: string; now: number }
+  ): DomainCommit<Session> {
+    const observed = input.title?.trim()
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const before = requireRow(tx.get<SessionRow>(
+        'SELECT * FROM sessions WHERE id = ?', input.sessionId
+      ), 'Session')
+      if (before.archived_at !== null) throw new Error('archived Session title cannot be restored')
+      const providerTitle = observed || before.provider_title
+      if (!providerTitle) return mapSession(before)
+      const title = providerTitle
+      const titleSource: SessionTitleSource = 'auto'
+      tx.run(
+        `UPDATE sessions SET title = ?, title_source = ?, provider_title = ?,
+         updated_at = ?, version = version + 1 WHERE id = ?`,
+        title, titleSource, providerTitle, input.now, input.sessionId
+      )
+      const session = mapSession({
+        ...before, title, title_source: titleSource, provider_title: providerTitle,
+        updated_at: input.now, version: before.version + 1
       })
       emitSessionEvent(emit, command.commandId, 'session.updated', before, input.now, { session })
       return session
@@ -774,6 +866,8 @@ function mapSession(row: SessionRow): Session {
     kind: row.kind,
     status: row.status,
     title: row.title,
+    titleSource: row.title_source,
+    ...(row.provider_title === null ? {} : { providerTitle: row.provider_title }),
     cwd: row.cwd,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -781,6 +875,16 @@ function mapSession(row: SessionRow): Session {
     ...(row.archived_at === null ? {} : { archivedAt: row.archived_at }),
     version: row.version
   }
+}
+
+function inferredTitleSource(kind: SessionKind, title: string): SessionTitleSource {
+  return title === defaultSessionTitle(kind) ? 'default' : 'manual'
+}
+
+function defaultSessionTitle(kind: SessionKind): string {
+  if (kind === 'claude-code') return 'Claude'
+  if (kind === 'codex') return 'Codex'
+  return 'Shell'
 }
 
 function genericShellTitle(title: string, sessionId: string): string {

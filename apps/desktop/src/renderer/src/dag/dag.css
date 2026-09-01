@@ -1,10 +1,6 @@
 html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .dag-window { display: flex; width: 100%; height: 100%; flex-direction: column; color: #dce0e7; background: #17191d; font-family: -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; }
-.dag-window-title { position: relative; z-index: 20; display: flex; flex: 0 0 38px; align-items: center; justify-content: center; border-bottom: 1px solid #2d3138; background: rgba(24,26,30,.94); -webkit-app-region: drag; }
-.dag-window-title span { font-size: 12px; font-weight: 600; }
-.dag-window-title button { position: absolute; top: 8px; right: 10px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 5px; color: #8d949f; background: transparent; font-size: 17px; cursor: pointer; -webkit-app-region: no-drag; }
-.dag-window-title button:hover { color: #fff; background: rgba(255,255,255,.08); }
-.dag-runtime-notice { position: absolute; z-index: 50; top: 50px; left: 50%; display: flex; max-width: min(680px,calc(100vw - 48px)); align-items: center; gap: 10px; box-sizing: border-box; padding: 8px 12px; border: 1px solid #8a6a2d; border-radius: 9px; color: #e5c985; background: rgba(53,43,24,.96); box-shadow: 0 10px 30px rgba(0,0,0,.28); transform: translateX(-50%); }
+.dag-runtime-notice { position: absolute; z-index: 50; top: 64px; left: 50%; display: flex; max-width: min(680px,calc(100vw - 48px)); align-items: center; gap: 10px; box-sizing: border-box; padding: 8px 12px; border: 1px solid #8a6a2d; border-radius: 9px; color: #e5c985; background: rgba(53,43,24,.96); box-shadow: 0 10px 30px rgba(0,0,0,.28); transform: translateX(-50%); }
 .dag-runtime-notice strong { flex: none; font-size: 11px; }.dag-runtime-notice span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .dag-runtime-notice button { flex: none; padding: 4px 8px; border: 1px solid currentColor; border-radius: 6px; color: inherit; background: transparent; cursor: pointer; }
 .dag-window-state { align-items: center; justify-content: center; gap: 10px; color: #9ba3ae; }
@@ -14,10 +10,13 @@ html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%
 .dag-canvas:active { cursor: grabbing; }
 .dag-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
 .dag-canvas.is-animating .dag-world { transition: transform 240ms cubic-bezier(.2,.8,.2,1); }
-.dag-toolbar { position: absolute; z-index: 30; top: 14px; right: 16px; left: 80px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; pointer-events: none; }
-.dag-toolbar > * { pointer-events: auto; }
-.dag-toolbar__zoom { display: flex; padding: 4px; border: 1px solid #363c45; border-radius: 9px; background: rgba(30,33,38,.92); box-shadow: 0 9px 28px rgba(0,0,0,.25); }
-.dag-toolbar__zoom button { min-width: 30px; height: 28px; padding: 0 8px; border: 0; border-radius: 6px; color: #b8bec8; background: transparent; cursor: pointer; }
+.dag-toolbar { position: absolute; z-index: 30; top: 14px; right: 16px; left: 80px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; pointer-events: auto; -webkit-app-region: drag; }
+.dag-toolbar > * { pointer-events: auto; -webkit-app-region: no-drag; }
+.dag-toolbar__zoom { display: flex; padding: 4px; border: 1px solid #363c45; border-radius: 9px; background: rgba(30,33,38,.92); box-shadow: 0 9px 28px rgba(0,0,0,.25); -webkit-app-region: drag; }
+.dag-toolbar__drag-handle { display: grid; width: 18px; height: 28px; box-sizing: border-box; grid-template-columns: repeat(2,3px); grid-auto-rows: 3px; align-content: center; justify-content: center; gap: 2px; border-radius: 5px; cursor: grab; -webkit-app-region: drag; }
+.dag-toolbar__drag-handle:active { cursor: grabbing; }
+.dag-toolbar__drag-handle i { width: 3px; height: 3px; border-radius: 50%; background: #737c88; }
+.dag-toolbar__zoom button { min-width: 30px; height: 28px; padding: 0 8px; border: 0; border-radius: 6px; color: #b8bec8; background: transparent; cursor: pointer; -webkit-app-region: no-drag; }
 .dag-toolbar__zoom button:hover { color: #fff; background: rgba(255,255,255,.08); }
 .dag-relation-legend { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid #363c45; border-radius: 9px; color: #929aa6; background: rgba(30,33,38,.92); font-size: 9px; }
 .dag-relation-legend span::before { display: inline-block; width: 18px; margin-right: 5px; border-top: 2px solid #5c91cf; content: ''; vertical-align: middle; }
@@ -34,7 +33,7 @@ html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%
 .dag-edge.relation-derived-from { stroke-dasharray: 6 4; }
 .dag-arrow-head { fill: #57708b; }.dag-root-guide { fill: none; stroke: rgba(91,126,164,.32); stroke-width: 1.5; stroke-dasharray: 4 4; }
 .dag-edge.relation-forked-from { stroke: #5c91cf; }
-.dag-node-card { position: absolute; display: grid; box-sizing: border-box; align-content: start; gap: 7px; overflow: hidden; padding: 13px; border: 1px solid #3a4049; border-radius: 12px; color: #ccd1d9; background: #22252a; box-shadow: 0 10px 28px rgba(0,0,0,.24); text-align: left; cursor: pointer; }
+.dag-node-card { position: absolute; display: grid; box-sizing: border-box; align-content: start; gap: 5px; overflow: hidden; padding: 12px; border: 1px solid #3a4049; border-radius: 12px; color: #ccd1d9; background: #22252a; box-shadow: 0 10px 28px rgba(0,0,0,.24); text-align: left; cursor: pointer; }
 .dag-node-card:hover { border-color: #596575; transform: translateY(-2px); }
 .dag-node-card.is-focused { border-color: #5b9de9; box-shadow: 0 0 0 2px rgba(91,157,233,.2),0 14px 34px rgba(0,0,0,.3); }
 .dag-node-card.has-notification::after { position: absolute; z-index: 3; content: ''; inset: 0; border: 1px solid #5090e0; border-radius: 11px; pointer-events: none; animation: dag-notification-pulse-ring 2s ease-in-out infinite; }
@@ -52,10 +51,10 @@ html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%
 .dag-node-card.is-stopped strong { color: #aab0b8; }
 .dag-node-card.is-stopped pre { color: #7b838e; background: rgba(0,0,0,.1); }
 .dag-node-card__top em { margin-left: auto; font-style: normal; }
-.dag-node-card strong { overflow: hidden; color: #f0f2f5; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.dag-node-card__title { overflow: visible; color: #f0f2f5; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; white-space: normal; }
 .dag-node-card__path { overflow: hidden; color: #858e9b; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .dag-node-card__cwd { overflow: hidden; margin-top: -5px; color: #6f7885; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-.dag-node-card pre { height: 54px; overflow: hidden; margin: 0; padding: 7px; border-radius: 6px; color: #aeb5bf; background: rgba(0,0,0,.15); font: 9px/1.5 "SF Mono",monospace; white-space: pre-wrap; }
+.dag-node-card pre { height: 48px; box-sizing: border-box; overflow: hidden; margin: 0; padding: 6px; border-radius: 6px; color: #aeb5bf; background: rgba(0,0,0,.15); font: 9px/1.5 "SF Mono",monospace; white-space: pre-wrap; }
 .dag-node-card__meta { color: #717985; font-size: 9px; }
 .dag-node-card__shared { position: absolute; right: 11px; bottom: 10px; padding: 2px 5px; border-radius: 7px; color: #e2b35d; background: rgba(226,179,93,.11); font-size: 8px; }
 .dag-node-card.is-ghost { opacity: .28; border-style: dashed; filter: saturate(.55) blur(.2px); }
@@ -65,7 +64,6 @@ html:has(.dag-window),body:has(.dag-window),#root:has(.dag-window) { width: 100%
 .dag-ghost-layer { position: absolute; display: grid; width: 220px; height: 120px; box-sizing: border-box; place-content: center; gap: 6px; border: 1px dashed rgba(126,148,174,.3); border-radius: 12px; color: rgba(179,192,207,.42); background: rgba(67,79,93,.08); text-align: center; filter: blur(.2px); }
 .dag-ghost-layer strong { font-size: 12px; }.dag-ghost-layer span { font-size: 9px; }
 .light-theme .dag-window { color: #303744; background: #f7f8fa; }
-.light-theme .dag-window-title { border-color: #dfe2e7; background: rgba(250,251,252,.95); }
 .light-theme .dag-runtime-notice { border-color: #d9ad54; color: #73520d; background: rgba(255,248,226,.98); box-shadow: 0 10px 30px rgba(46,57,73,.14); }
 .light-theme .dag-canvas { background-color: #f7f8fa; background-image: radial-gradient(circle at 1px 1px,rgba(44,56,72,.11) 1px,transparent 0); }
 .light-theme .dag-node-card { border-color: #d5dae2; color: #505966; background: #fff; box-shadow: 0 10px 28px rgba(46,57,73,.1); }

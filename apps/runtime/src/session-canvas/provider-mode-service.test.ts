@@ -90,6 +90,27 @@ describe('ProviderModeService', () => {
     ].sort())
   })
 
+  it('records a loaded Claude title without replacing a card the user renamed', () => {
+    const initial = bootstrapClaudeTree()
+    database.run(
+      `UPDATE sessions SET title = '我的排查窗口', title_source = 'manual' WHERE id = ?`,
+      initial.childSessionId
+    )
+
+    const result = providerModes.loadClaudeSession(command('load-with-manual-title'), {
+      sessionId: initial.childSessionId,
+      bindingId: 'binding-manual-title',
+      providerSessionId: 'provider-loaded-title',
+      title: 'Claude 自动生成标题',
+      permissionMode: 'default',
+      now: 30
+    })
+
+    expect(result.session).toMatchObject({
+      title: '我的排查窗口', titleSource: 'manual', providerTitle: 'Claude 自动生成标题'
+    })
+  })
+
   it('returns a manually exited Claude node to ordinary Shell and preserves its children', () => {
     const initial = bootstrapClaudeTree()
 

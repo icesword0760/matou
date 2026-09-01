@@ -5,7 +5,7 @@ import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { GitControlMenu, type GitControlContext, type GitRequestClient } from './GitControlMenu'
 import type {
-  HudModelStrategy, HudPermissionMode, SessionHudView
+  HudPermissionMode, SessionHudView
 } from '../hierarchy/hierarchy-types'
 
 const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
@@ -14,16 +14,10 @@ const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
   { value: 'plan', label: 'Plan Mode' },
   { value: 'bypassPermissions', label: 'Bypass Permissions' }
 ]
-const MODEL_OPTIONS: Array<{ id: HudModelStrategy; label: string }> = [
-  { id: 'opusplan', label: 'Opus Plan (默认)' },
-  { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' }
-]
-
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
   onPermissionMode(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
-  onModel(sessionId: string, strategy: HudModelStrategy): unknown
+  onModel?(sessionId: string, strategy: string): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
 }) {
@@ -31,8 +25,7 @@ export function TerminalHud(props: {
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
   const [permissionMode, setPermissionMode] = useState<HudPermissionMode>(hud?.permissionMode ?? 'default')
-  const [modelStrategy, setModelStrategy] = useState<HudModelStrategy>(hud?.modelStrategy ?? 'opusplan')
-  const [menu, setMenu] = useState<'permission' | 'model' | null>(null)
+  const [menu, setMenu] = useState<'permission' | null>(null)
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({})
   const [confirmTarget, setConfirmTarget] = useState<HudPermissionMode | null>(null)
   const [switching, setSwitching] = useState(false)
@@ -42,7 +35,6 @@ export function TerminalHud(props: {
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => setPermissionMode(hud?.permissionMode ?? 'default'), [hud?.sessionId, hud?.permissionMode])
-  useEffect(() => setModelStrategy(hud?.modelStrategy ?? 'opusplan'), [hud?.sessionId, hud?.modelStrategy])
   useEffect(() => {
     setElapsed(formatElapsed(hud?.startedAt))
     const timer = window.setInterval(() => setElapsed(formatElapsed(hud?.startedAt)), 10_000)
@@ -73,12 +65,12 @@ export function TerminalHud(props: {
   if (!hud) return null
   const shortCwd = cwdShortName(hud.cwd)
   const gitDisplay = hud.gitBranch ? `${hud.gitBranch}${hud.gitDirty ? '*' : ''}` : ''
-  const openMenu = (target: 'permission' | 'model', event: React.MouseEvent<HTMLElement>) => {
+  const openMenu = (event: React.MouseEvent<HTMLElement>) => {
     if (switching) return
-    if (menu === target) { setMenu(null); return }
+    if (menu === 'permission') { setMenu(null); return }
     const rect = event.currentTarget.getBoundingClientRect()
     setMenuStyle({ left: rect.left, top: rect.top - 8, transform: 'translateY(-100%)' })
-    setMenu(target)
+    setMenu('permission')
   }
 
   return <div className="status-info" data-hud-mode={hud.mode} data-session-id={hud.sessionId} ref={rootRef}>
@@ -86,10 +78,7 @@ export function TerminalHud(props: {
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
         disabled={switching} title={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         aria-label={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
-        onClick={(event) => openMenu('permission', event)}>{permissionLabel(permissionMode)}</button>
-      <button type="button" className="status-field status-model status-priority-8 is-clickable"
-        title="点击切换模型" aria-label="点击切换模型"
-        onClick={(event) => openMenu('model', event)}>{modelShortName(modelStrategy, hud.model)}</button>
+        onClick={openMenu}>{permissionLabel(permissionMode)}</button>
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
       {taskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus)}</span>}
       {(hud.subagentCount ?? 0) > 0 && <span className="status-field status-priority-5">Agent:{hud.subagentCount}</span>}
@@ -119,9 +108,9 @@ export function TerminalHud(props: {
     </>}
     {menu && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
-    }}><div className="perm-menu" style={menuStyle} role="menu" aria-label={menu === 'permission' ? '权限模式' : '模型'}>
-      <div className="perm-menu__title">{menu === 'permission' ? '权限模式' : '模型'}</div>
-      {menu === 'permission' ? PERMISSION_MODES.map((option) => <button type="button" role="menuitem"
+    }}><div className="perm-menu" style={menuStyle} role="menu" aria-label="权限模式">
+      <div className="perm-menu__title">权限模式</div>
+      {PERMISSION_MODES.map((option) => <button type="button" role="menuitem"
         className={`perm-menu__item${permissionMode === option.value ? ' is-active' : ''}`} key={option.value}
         onClick={() => {
           setMenu(null)
@@ -133,15 +122,6 @@ export function TerminalHud(props: {
         }}><span className={`perm-menu__dot perm-${option.value}`} />
         <span className="perm-menu__label">{option.label}</span>
         {permissionMode === option.value && <span className="perm-menu__check">✓</span>}
-      </button>) : MODEL_OPTIONS.map((option) => <button type="button" role="menuitem"
-        className={`perm-menu__item${modelStrategy === option.id ? ' is-active' : ''}`} key={option.id}
-        onClick={() => {
-          setMenu(null)
-          if (option.id === modelStrategy) return
-          setModelStrategy(option.id)
-          void Promise.resolve(props.onModel(hud.sessionId, option.id)).catch(() => {})
-        }}><span className="perm-menu__label">{option.label}</span>
-        {modelStrategy === option.id && <span className="perm-menu__check">✓</span>}
       </button>)}
     </div></div>, document.body)}
     {confirmTarget && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
@@ -192,12 +172,6 @@ function cwdShortName(cwd: string | undefined): string {
 }
 function permissionLabel(mode: HudPermissionMode): string {
   return PERMISSION_MODES.find(({ value }) => value === mode)?.label ?? 'Default'
-}
-function modelShortName(strategy: HudModelStrategy, model: string | undefined): string {
-  if (strategy === 'opusplan') return 'Opus Plan'
-  if (strategy === 'claude-opus-4-6') return 'Opus'
-  if (strategy === 'claude-sonnet-4-6') return 'Sonnet'
-  return model?.match(/Claude\s+(\w+)/i)?.[1] ?? model ?? ''
 }
 function taskStatusLabel(status: SessionHudView['taskStatus']): string {
   if (status === 'running') return '任务中'

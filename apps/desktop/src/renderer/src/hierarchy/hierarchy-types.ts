@@ -4,7 +4,9 @@ export interface WorkspaceView {
 }
 export interface TaskView {
   id: string; workspaceId: string; title: string; sortKey?: string
+  status?: 'planned' | 'active' | 'blocked' | 'completed' | 'archived'
   isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number; createdAt?: number
+  updatedAt?: number
 }
 export interface SceneView {
   id: string
@@ -20,6 +22,8 @@ export interface SessionView {
   id: string
   taskId: string
   title: string
+  titleSource?: 'default' | 'auto' | 'manual'
+  providerTitle?: string
   kind?: 'shell' | 'claude-code' | 'codex' | string
   status?: string
   executionContextId?: string
@@ -154,7 +158,10 @@ export interface HierarchyCommands {
   activateTask(taskId: string): unknown
   createTask(workspaceId: string): unknown
   renameTask(taskId: string, title: string): unknown
+  renameSession?(sessionId: string, title: string): unknown
+  restoreSessionAutoTitle?(sessionId: string): unknown
   reorderTask(workspaceId: string, taskId: string, beforeTaskId?: string): unknown
+  moveTaskOnBoard?(workspaceId: string, taskId: string, status: 'planned' | 'active' | 'blocked' | 'completed', beforeTaskId?: string): unknown
   deleteTask(taskId: string): unknown
   setTaskPinned(taskId: string, pinned: boolean): unknown
   reorderPinnedTask(workspaceId: string, taskId: string, beforeTaskId?: string): unknown

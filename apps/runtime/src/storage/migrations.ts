@@ -942,5 +942,31 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
 
       DROP TABLE provider_bindings_single_card;
     `
+  },
+  {
+    version: 22,
+    name: 'session-provider-title-ownership',
+    sql: `
+      ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT 'default'
+        CHECK (title_source IN ('default', 'auto', 'manual'));
+      ALTER TABLE sessions ADD COLUMN provider_title TEXT;
+
+      UPDATE sessions
+      SET title_source = 'manual'
+      WHERE title <> CASE kind
+        WHEN 'claude-code' THEN 'Claude'
+        WHEN 'codex' THEN 'Codex'
+        ELSE 'Shell'
+      END;
+    `
+  },
+  {
+    version: 23,
+    name: 'manual-workspace-board-status',
+    sql: `
+      UPDATE tasks
+      SET status = 'planned'
+      WHERE status = 'active';
+    `
   }
 ]

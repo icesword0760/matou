@@ -5,6 +5,7 @@ export interface PtyCommandInput {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  model?: string
 }
 
 export interface PtyCommand {
@@ -18,6 +19,7 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
   if (input.profile === 'claude-code') {
     const settingsPath = input.settingsPath?.trim()
     const args = settingsPath ? ['--settings', settingsPath] : []
+    if (input.model?.trim()) args.push('--model', input.model.trim())
     if (identity) args.push('--resume', identity)
     if (identity && input.forkSession) args.push('--fork-session')
     if (input.permissionMode === 'bypassPermissions') {
@@ -26,7 +28,8 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
   if (input.profile === 'codex') {
-    const args = identity ? ['resume', identity] : []
+    const args = input.model?.trim() ? ['--model', input.model.trim()] : []
+    if (identity) args.push('resume', identity)
     if (input.permissionMode === 'bypassPermissions') {
       args.push('--dangerously-bypass-approvals-and-sandbox')
     }

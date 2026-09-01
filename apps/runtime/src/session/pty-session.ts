@@ -21,6 +21,7 @@ interface PtySessionOptions {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  model?: string
   env?: Record<string, string>
   send: (message: RuntimeMessage) => void
   onExit?: (
@@ -102,7 +103,8 @@ export class PtySession {
       }),
       ...(options.settingsPath === undefined ? {} : {
         settingsPath: options.settingsPath
-      })
+      }),
+      ...(options.model === undefined ? {} : { model: options.model })
     })
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)

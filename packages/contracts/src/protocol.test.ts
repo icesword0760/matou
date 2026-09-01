@@ -147,7 +147,10 @@ describe('parseRendererMessage', () => {
       'hierarchy.validate-workspace-path',
       'hierarchy.create-task',
       'hierarchy.rename-task',
+      'hierarchy.rename-session',
+      'hierarchy.restore-session-auto-title',
       'hierarchy.reorder-task',
+      'hierarchy.move-task-on-board',
       'hierarchy.delete-task',
       'hierarchy.activate-task',
       'hierarchy.create-scene',
@@ -204,6 +207,15 @@ describe('parseRendererMessage', () => {
       method: 'session.set-permission-mode', capability: 'renderer',
       deadlineAt: Date.now() + 1000, payload: {}
     })).toMatchObject({ type: 'rpc.request', method: 'session.set-permission-mode' })
+  })
+
+  it('allowlists global provider configuration and switching', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'provider-config.snapshot',
+      'provider-config.upsert',
+      'provider-config.delete',
+      'provider-config.activate'
+    ]))
   })
 
   it('rejects RPC methods outside the explicit allowlist', () => {

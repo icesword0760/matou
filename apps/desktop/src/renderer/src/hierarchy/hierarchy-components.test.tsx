@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -28,12 +28,24 @@ describe('Workspace and Task navigation', () => {
     const target = commands()
     render(<TaskSidebar projection={data} commands={target} />)
 
+    expect(document.querySelector('.flat-sidebar__glass-material')).toBeTruthy()
     expect(screen.getByRole('button', { name: '新增工作空间' })).toBeTruthy()
     expect(screen.getByRole('group', { name: 'icesword 工作空间' })).toBeTruthy()
     expect(screen.getByRole('group', { name: 'Frontend 工作空间' })).toBeTruthy()
     expect(screen.getAllByText('默认')).toHaveLength(2)
     await user.click(screen.getByRole('button', { name: '在 icesword 中新增事项' }))
     expect(target.createTask).toHaveBeenCalledWith('workspace-home')
+  })
+
+  it('keeps settings at the bottom of the sidebar beside the board entry', async () => {
+    const onSettingsActiveChange = vi.fn()
+    render(<TaskSidebar projection={fixture()} commands={commands()}
+      settingsActive={false} onSettingsActiveChange={onSettingsActiveChange} />)
+
+    const toolbar = screen.getByRole('contentinfo', { name: '工作空间视图' })
+    expect(within(toolbar).getByRole('button', { name: '看板' })).toBeTruthy()
+    await userEvent.setup().click(within(toolbar).getByRole('button', { name: '设置' }))
+    expect(onSettingsActiveChange).toHaveBeenCalledWith(true)
   })
 
   it('shows pin actions and protects the default Workspace menu', async () => {

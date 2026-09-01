@@ -35,6 +35,8 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
+import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import type { ProviderCli, ProviderConfigInput } from '@matou/contracts'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -76,11 +78,12 @@ export class RuntimeRpcRouter {
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
   readonly #claudeSessions: ClaudeSessionCatalog
+  readonly #providerConfigs: ProviderConfigStore
 
   constructor(
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
-    options: { projectsRoot?: string } = {}
+    options: { projectsRoot?: string; providerConfigs?: ProviderConfigStore } = {}
   ) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
@@ -109,6 +112,7 @@ export class RuntimeRpcRouter {
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
     )
+    this.#providerConfigs = options.providerConfigs ?? new ProviderConfigStore(dirname(database.path))
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -130,6 +134,24 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
+    if (method === 'provider-config.snapshot') return this.#providerConfigs.snapshot()
+    if (method === 'provider-config.upsert') {
+      const input = record(payload)
+      const provider = record(input.provider) as unknown as ProviderConfigInput
+      return { provider: await this.#providerConfigs.upsert(provider) }
+    }
+    if (method === 'provider-config.delete') {
+      const input = record(payload)
+      return this.#providerConfigs.delete(
+        providerCli(input.cli), text(input.providerId, 'providerId')
+      )
+    }
+    if (method === 'provider-config.activate') {
+      const input = record(payload)
+      return this.#providerConfigs.activate(
+        providerCli(input.cli), text(input.providerId, 'providerId')
+      )
+    }
     if (method === 'projection.snapshot') return this.#snapshot(payload)
     if (method === 'hierarchy.get-scene-session-graph') {
       const input = record(payload)
@@ -367,11 +389,47 @@ export class RuntimeRpcRouter {
           title: text(input.title, 'title'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.rename-session':
+        return this.#sessions.renameSession(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          title: text(input.title, 'title'),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.restore-session-auto-title': {
+        const sessionId = text(input.sessionId, 'sessionId')
+        const binding = this.#database.get<{ provider_session_id: string }>(
+          `SELECT provider_session_id FROM provider_bindings
+           WHERE session_id = ? AND provider = 'claude-code'
+           ORDER BY updated_at DESC, id DESC LIMIT 1`,
+          sessionId
+        )
+        const title = binding
+          ? await this.#claudeSessions.autoTitle({
+              cwd: this.#sessionCwd(sessionId),
+              providerSessionId: binding.provider_session_id
+            })
+          : undefined
+        return this.#sessions.restoreProviderTitle(command, {
+          sessionId,
+          ...(title ? { title } : {}),
+          now: integer(input.now, 'now', 0)
+        })
+      }
       case 'hierarchy.reorder-task':
         return this.#hierarchy.reorderTask(command, {
           windowId: text(input.windowId, 'windowId'),
           workspaceId: text(input.workspaceId, 'workspaceId'),
           taskId: text(input.taskId, 'taskId'),
+          ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
+            ? {}
+            : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
+          now: integer(input.now, 'now', 0)
+        })
+      case 'hierarchy.move-task-on-board':
+        return this.#hierarchy.moveTaskOnBoard(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          taskId: text(input.taskId, 'taskId'),
+          status: enumeration(input.status, ['planned', 'active', 'blocked', 'completed'] as const, 'status'),
           ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
             ? {}
             : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
@@ -962,6 +1020,9 @@ function integer(value: unknown, label: string, minimum: number): number {
 function flag(value: unknown, label: string): boolean {
   if (typeof value !== 'boolean') throw new RpcFault('INVALID_REQUEST', `${label} must be a boolean`)
   return value
+}
+function providerCli(value: unknown): ProviderCli {
+  return enumeration(value, ['claude-code', 'codex'] as const, 'cli')
 }
 function enumeration<const T extends readonly string[]>(value: unknown, values: T, label: string): T[number] {
   if (typeof value !== 'string' || !values.includes(value)) {

@@ -45,24 +45,18 @@ describe('PRD 02 detached HUD', () => {
     expect(screen.getByTestId('terminal-agent-1')).toBeTruthy()
     expect(screen.getByLabelText('快捷指令栏').querySelector('[data-hud-mode="agent"]')).toBeTruthy()
     expect(screen.getByRole('button', { name: /当前权限模式：Default/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '点击切换模型' }).textContent).toBe('Opus Plan')
+    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
   })
 
-  it('keeps the detached model control connected to the same Session command path', async () => {
-    const user = userEvent.setup()
+  it('keeps the removed session model control out of detached windows', () => {
     window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')
     render(<DetachedTerminalApp />)
 
-    await user.click(screen.getByRole('button', { name: '点击切换模型' }))
-    await user.click(screen.getByRole('menuitem', { name: 'Claude Sonnet 4.6' }))
-
-    expect(runtime.request).toHaveBeenCalledWith('session.set-model', expect.objectContaining({
-      input: expect.objectContaining({ sessionId: 'agent-1', modelStrategy: 'claude-sonnet-4-6' })
-    }))
+    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
+    expect(runtime.request).not.toHaveBeenCalledWith('session.set-model', expect.anything())
   })
 
-  it('opens the same scene DAG after a long Option Tab hold from a detached session', () => {
-    vi.useFakeTimers()
+  it('opens the same scene DAG immediately on Option Tab from a detached session', () => {
     const openDagWindow = vi.fn(async () => undefined)
     window.matouDesktop = { openDagWindow } as unknown as typeof window.matouDesktop
     window.history.replaceState({}, '',
@@ -70,7 +64,6 @@ describe('PRD 02 detached HUD', () => {
     render(<DetachedTerminalApp />)
 
     fireEvent.keyDown(window, { key: 'Tab', altKey: true })
-    vi.advanceTimersByTime(450)
 
     expect(openDagWindow).toHaveBeenCalledWith({
       mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'agent-1', theme: 'light'

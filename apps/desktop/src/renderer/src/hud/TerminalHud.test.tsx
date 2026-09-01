@@ -84,7 +84,7 @@ describe('PRD 02 bottom HUD', () => {
     const { container } = render(<TerminalHud hud={hud} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
     const text = container.querySelector('.status-info')?.textContent ?? ''
-    expect(text).toContain('Accept EditsOpus86%任务中Agent:2Leader')
+    expect(text).toContain('Accept Edits86%任务中Agent:2Leader')
     expect(text).toContain('Read')
     expect(text).toContain('Edit')
     expect(text).not.toContain('Bash')
@@ -110,24 +110,22 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByText(label)).toBeTruthy()
   })
 
-  it('keeps only one Kooky menu open and closes it by Escape or outside click', async () => {
+  it('removes the session model entry and closes the permission menu by Escape or outside click', async () => {
     const user = userEvent.setup()
     render(<TerminalHud hud={agent()} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
     await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
     expect(screen.getByRole('menu', { name: '权限模式' })).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '点击切换模型' }))
-    expect(screen.queryByRole('menu', { name: '权限模式' })).toBeNull()
-    expect(screen.getByRole('menu', { name: '模型' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
     await user.keyboard('{Escape}')
-    expect(screen.queryByRole('menu', { name: '模型' })).toBeNull()
+    expect(screen.queryByRole('menu', { name: '权限模式' })).toBeNull()
 
     await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
     fireEvent.pointerDown(document.body)
     expect(screen.queryByRole('menu', { name: '权限模式' })).toBeNull()
   })
 
-  it('switches ordinary permission modes immediately and optimistically switches models', async () => {
+  it('switches ordinary permission modes immediately without a session model command', async () => {
     const user = userEvent.setup()
     const onPermissionMode = vi.fn()
     const onModel = vi.fn()
@@ -138,10 +136,8 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeTruthy()
     expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'plan', false)
 
-    await user.click(screen.getByRole('button', { name: '点击切换模型' }))
-    await user.click(screen.getByRole('menuitem', { name: 'Claude Sonnet 4.6' }))
-    expect(screen.getByRole('button', { name: '点击切换模型' }).textContent).toBe('Sonnet')
-    expect(onModel).toHaveBeenCalledWith('session-1', 'claude-sonnet-4-6')
+    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
+    expect(onModel).not.toHaveBeenCalled()
   })
 
   it('uses Kooky confirmation copy across the Bypass boundary and keeps the old mode on cancel', async () => {

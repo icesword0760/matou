@@ -168,6 +168,14 @@ export interface ReorderTaskWorkflowInput {
   now: number
 }
 
+export interface MoveTaskOnBoardInput {
+  workspaceId: string
+  taskId: string
+  status: Exclude<Task['status'], 'archived'>
+  beforeTaskId?: string
+  now: number
+}
+
 export interface DeleteTaskWorkflowInput {
   windowId: string
   taskId: string
@@ -695,6 +703,69 @@ export class HierarchyApplicationService {
         ...readHierarchyResult(tx, input.windowId),
         taskOrder: order
       }
+    }).result
+  }
+
+  moveTaskOnBoard(
+    command: DomainCommandMetadata,
+    input: MoveTaskOnBoardInput
+  ): Task[] {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      requireRow<WorkspaceRow>(tx.get(
+        'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL',
+        input.workspaceId
+      ), 'Workspace')
+      const rows = tx.all<TaskRow>(
+        `SELECT * FROM tasks
+         WHERE workspace_id = ? AND archived_at IS NULL
+         ORDER BY sort_key, created_at, id`,
+        input.workspaceId
+      )
+      const source = requireRow(rows.find(({ id }) => id === input.taskId), 'Task')
+      const targetIds = rows
+        .filter(({ id, status }) => id !== input.taskId && status === input.status)
+        .map(({ id }) => id)
+      if (input.beforeTaskId !== undefined && !targetIds.includes(input.beforeTaskId)) {
+        throw new Error('Board destination must belong to the target column')
+      }
+      const targetIndex = input.beforeTaskId === undefined
+        ? targetIds.length
+        : targetIds.indexOf(input.beforeTaskId)
+      targetIds.splice(targetIndex, 0, input.taskId)
+
+      const orders = new Map<Task['status'], string[]>()
+      if (source.status !== input.status) {
+        orders.set(source.status, rows
+          .filter(({ id, status }) => id !== input.taskId && status === source.status)
+          .map(({ id }) => id))
+      }
+      orders.set(input.status, targetIds)
+
+      const updated: Task[] = []
+      for (const [status, taskIds] of orders) {
+        for (const [index, taskId] of taskIds.entries()) {
+          tx.run(
+            `UPDATE tasks SET status = ?, sort_key = ?, updated_at = ?, version = version + 1
+             WHERE id = ?`,
+            status, sortKey(index), input.now, taskId
+          )
+          const task = mapTask(requireRow<TaskRow>(
+            tx.get('SELECT * FROM tasks WHERE id = ?', taskId), 'Task'
+          ))
+          updated.push(task)
+          emit({
+            eventId: `${command.commandId}:task-board:${taskId}`,
+            eventType: 'task.updated',
+            aggregateType: 'task',
+            aggregateId: taskId,
+            workspaceId: input.workspaceId,
+            taskId,
+            payload: task,
+            occurredAt: input.now
+          })
+        }
+      }
+      return updated
     }).result
   }
 
@@ -1653,7 +1724,7 @@ export class HierarchyApplicationService {
       `INSERT INTO tasks (
          id, workspace_id, execution_context_id, title, status, sort_key,
          created_at, updated_at, version, last_opened_at
-       ) VALUES (?, ?, ?, ?, 'active', 'a0', ?, ?, 1, ?)`,
+       ) VALUES (?, ?, ?, ?, 'planned', 'a0', ?, ?, 1, ?)`,
       ids.taskId,
       ids.workspaceId,
       ids.executionContextId,
@@ -1778,7 +1849,7 @@ export class HierarchyApplicationService {
       `INSERT INTO tasks (
          id, workspace_id, execution_context_id, title, status, sort_key,
          created_at, updated_at, version, last_opened_at
-       ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 1, ?)`,
+       ) VALUES (?, ?, ?, ?, 'planned', ?, ?, ?, 1, ?)`,
       ids.taskId,
       input.workspace.id,
       ids.executionContextId,

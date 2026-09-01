@@ -1,10 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto'
+import { watch, type FSWatcher } from 'node:fs'
 import { chmod, mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 
 import type { SessionRepository } from '../domain/session-repository'
+import { latestClaudeAutoTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
 const MAX_HOOK_BYTES = 1024 * 1024
@@ -19,6 +21,14 @@ interface HookRegistrationRecord {
   settingsPath: string
   statusScriptPath: string
   retirementTimer?: ReturnType<typeof setTimeout>
+  observedTitle?: string
+  titleWatch?: {
+    providerSessionId: string
+    transcriptPath: string
+    watcher: FSWatcher
+    timeout: ReturnType<typeof setTimeout>
+    debounce?: ReturnType<typeof setTimeout>
+  }
 }
 
 
@@ -54,6 +64,13 @@ export interface ProviderHookServerOptions {
     providerSessionId: string
     eventName: string
   }) => void
+  onTitleObserved?: (event: {
+    runId: string
+    sessionId: string
+    provider: 'claude-code'
+    providerSessionId: string
+    title: string
+  }) => void | Promise<void>
   onTeamObservations?: (observations: AgentTeamObservation[]) => void | Promise<void>
 }
 
@@ -65,6 +82,8 @@ export interface ProviderHookRegistration {
 }
 
 const DEFAULT_RETIREMENT_GRACE_MS = 2_000
+const TITLE_WATCH_WINDOW_MS = 10_000
+const TITLE_WATCH_DEBOUNCE_MS = 25
 
 export class ProviderHookServer {
   readonly #dataRoot: string
@@ -73,6 +92,7 @@ export class ProviderHookServer {
   readonly #onNotification: (notification: ProviderHookNotification) => void
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
+  readonly #onTitleObserved: NonNullable<ProviderHookServerOptions['onTitleObserved']>
   readonly #onTeamObservations: NonNullable<ProviderHookServerOptions['onTeamObservations']>
   #server: Server | undefined
   #port: number | undefined
@@ -83,6 +103,7 @@ export class ProviderHookServer {
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
+    this.#onTitleObserved = options.onTitleObserved ?? (() => {})
     this.#onTeamObservations = options.onTeamObservations ?? (() => {})
   }
 
@@ -108,7 +129,10 @@ export class ProviderHookServer {
     this.#port = undefined
     const records = [...this.#registrations.values()]
     this.#registrations.clear()
-    for (const record of records) clearTimeout(record.retirementTimer)
+    for (const record of records) {
+      clearTimeout(record.retirementTimer)
+      this.#stopTitleWatch(record)
+    }
     await Promise.all(records.flatMap(({ settingsPath, statusScriptPath }) => [
       rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
     ]))
@@ -156,6 +180,7 @@ export class ProviderHookServer {
       if (disposed) return
       disposed = true
       clearTimeout(record.retirementTimer)
+      this.#stopTitleWatch(record)
       this.#registrations.delete(token)
       await Promise.all([
         rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
@@ -206,6 +231,14 @@ export class ProviderHookServer {
       }
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
+      if (transcriptPath && providerSessionId && eventName !== 'unknown') {
+        const titleObserved = await this.#observeTitle(
+          registration, providerSessionId, transcriptPath
+        ).catch(() => false)
+        if (eventName === 'Stop' && !titleObserved) {
+          await this.#startTitleWatch(registration, providerSessionId, transcriptPath)
+        }
+      }
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
@@ -264,6 +297,73 @@ export class ProviderHookServer {
     } catch (error) {
       sendJson(response, 409, { error: errorMessage(error) })
     }
+  }
+
+  async #observeTitle(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    transcriptPath: string
+  ): Promise<boolean> {
+    const transcript = await readTranscriptTail(transcriptPath).catch(() => '')
+    const title = latestClaudeAutoTitle(transcript, providerSessionId)
+    if (!title) return false
+    if (registration.observedTitle === title) {
+      this.#stopTitleWatch(registration)
+      return true
+    }
+    await this.#onTitleObserved({
+      runId: registration.runId,
+      sessionId: registration.sessionId,
+      provider: 'claude-code',
+      providerSessionId,
+      title
+    })
+    registration.observedTitle = title
+    this.#stopTitleWatch(registration)
+    return true
+  }
+
+  async #startTitleWatch(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    transcriptPath: string
+  ): Promise<void> {
+    const current = registration.titleWatch
+    if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) return
+    this.#stopTitleWatch(registration)
+
+    let watcher: FSWatcher
+    try {
+      watcher = watch(transcriptPath, { persistent: false }, () => {
+        const active = registration.titleWatch
+        if (!active || active.debounce) return
+        active.debounce = setTimeout(() => {
+          const latest = registration.titleWatch
+          if (!latest) return
+          delete latest.debounce
+          void this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => {})
+        }, TITLE_WATCH_DEBOUNCE_MS)
+        active.debounce.unref?.()
+      })
+    } catch {
+      return
+    }
+    watcher.on('error', () => this.#stopTitleWatch(registration))
+    const timeout = setTimeout(() => this.#stopTitleWatch(registration), TITLE_WATCH_WINDOW_MS)
+    timeout.unref?.()
+    registration.titleWatch = { providerSessionId, transcriptPath, watcher, timeout }
+
+    // Close the gap between the first read and installing the file watcher.
+    await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)
+  }
+
+  #stopTitleWatch(registration: HookRegistrationRecord): void {
+    const active = registration.titleWatch
+    if (!active) return
+    delete registration.titleWatch
+    clearTimeout(active.timeout)
+    clearTimeout(active.debounce)
+    active.watcher.close()
   }
 }
 

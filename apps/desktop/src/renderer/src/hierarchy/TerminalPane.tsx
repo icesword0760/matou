@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 
 import { TerminalSurface, type RuntimeStatus, type TerminalSearchRequest } from '../terminal/TerminalSurface'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
+import { RenameDialog } from './RenameDialog'
 import type { SessionView } from './hierarchy-types'
 import { sessionDeleteFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
@@ -55,6 +56,8 @@ export function TerminalPane(props: {
   descendantCount?: number
   descendantImpact?: { running: number; needsInput: number }
   onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
+  onRename?(sessionId: string, title: string): unknown
+  onRestoreAutoTitle?(sessionId: string): unknown
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
@@ -67,12 +70,14 @@ export function TerminalPane(props: {
     searchRequest, onSearchResults, focusRequest = 0,
     onActivate, onDelete, onFork, onForkSibling, onDetach,
     descendantCount = 0, descendantImpact = { running: 0, needsInput: 0 },
-    onRemoveBranch
+    onRemoveBranch, onRename, onRestoreAutoTitle
   } = props
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const [removalOpen, setRemovalOpen] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [renameFailure, setRenameFailure] = useState<{ title: string; message: string } | null>(null)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('waiting-for-port')
   const [runtimeError, setRuntimeError] = useState('')
   const [startupRetry, setStartupRetry] = useState(0)
@@ -161,19 +166,19 @@ export function TerminalPane(props: {
     ? claudeWorkFailureReason(latestLines)
     : undefined
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
-    if ((event.target as HTMLElement).closest('button')) return
     event.preventDefault()
     event.stopPropagation()
     setContextMenu({ x: event.clientX, y: event.clientY })
   }
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible} onContextMenu={openPaneMenu}
+    data-active={active} hidden={!visible}
     onPointerDown={(event) => {
       if ((event.target as HTMLElement).closest('button,[role="menuitem"]')) return
       notificationStore.dismissSessionIndicator(session.id)
       if (!active) onActivate(session.id)
     }}>
     <header className="terminal-pane-header split-pane-header" draggable={canDetach}
+      onContextMenu={openPaneMenu}
       onDragEnd={(event) => {
         const outside = event.screenX <= window.screenX || event.screenY <= window.screenY ||
           event.screenX >= window.screenX + window.outerWidth ||
@@ -335,6 +340,18 @@ export function TerminalPane(props: {
         onContextMenu={(event) => { event.preventDefault(); setContextMenu(null) }} />
       <div ref={contextMenuRef} className="detach-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}
         onClick={(event) => event.stopPropagation()}>
+        {onRename && <button className="detach-menu-item" role="menuitem" onClick={() => {
+          setContextMenu(null)
+          setRenameFailure(null)
+          setRenaming(true)
+        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>重命名…</button>}
+        {session.kind === 'claude-code' && session.titleSource === 'manual' && onRestoreAutoTitle &&
+          <button className="detach-menu-item" role="menuitem" onClick={() => {
+            setContextMenu(null)
+            void Promise.resolve(onRestoreAutoTitle(session.id)).catch(NOOP)
+          }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>
+            恢复 Claude 自动标题
+          </button>}
         {canFork && <button className="detach-menu-item" role="menuitem" onClick={() => {
           setContextMenu(null)
           void onFork?.(session.id)
@@ -353,6 +370,13 @@ export function TerminalPane(props: {
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>移除节点…</button>}
       </div>
     </>, document.body)}
+    {renaming && <RenameDialog scope="session" title="重命名会话" label="会话名称"
+      placeholder="请输入会话名称" emptyError="会话名称不能为空" initialValue={session.title}
+      error={(value) => renameFailure?.title === value ? renameFailure.message : undefined}
+      onCancel={() => setRenaming(false)} onConfirm={(title) => {
+        void Promise.resolve(onRename?.(session.id, title)).then(() => setRenaming(false))
+          .catch(() => setRenameFailure({ title, message: '重命名失败，请稍后重试' }))
+      }} />}
   </section>
 }
 

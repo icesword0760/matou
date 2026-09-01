@@ -114,6 +114,19 @@ describe('Scene tabs and split actions', () => {
     expect(screen.getByRole('button', { name: '确定' })).toHaveProperty('disabled', true)
   })
 
+  it('opens the compact canvas menu at the right-click position', () => {
+    render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
+    const tab = screen.getByRole('tab', { name: '页签 1' })
+
+    fireEvent.contextMenu(tab, { clientX: 236, clientY: 74 })
+
+    const menu = screen.getByRole('menu')
+    expect(menu.classList.contains('scene-tab-menu')).toBe(true)
+    expect(menu.getAttribute('style')).toContain('left: 236px')
+    expect(menu.getAttribute('style')).toContain('top: 74px')
+    expect(menu.parentElement).toBe(document.body)
+  })
+
   it('opens canvas rename on a discoverable tab double-click and pins the chosen name', async () => {
     const user = userEvent.setup()
     const commands = sceneCommands()

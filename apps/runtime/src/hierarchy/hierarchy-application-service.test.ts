@@ -300,6 +300,50 @@ describe('HierarchyApplicationService Task workflows', () => {
     expect(reordered.navigation.taskByWorkspace[initial.workspace!.id]).toBe(created.task!.id)
   })
 
+  it('creates every user Task in the ready column until the user moves it', async () => {
+    const initial = await bootstrap('task-ready-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const created = await service.createTask(command('task-ready-create'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 20
+    })
+
+    expect(initial.task?.status).toBe('planned')
+    expect(created.task?.status).toBe('planned')
+  })
+
+  it('persists a board move and the target-column order in the Task records', async () => {
+    const initial = await bootstrap('board-bootstrap')
+    markPathValid(initial.workspace!.id)
+    const first = await service.createTask(command('board-first'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 20
+    })
+    const second = await service.createTask(command('board-second'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id, now: 21
+    })
+
+    service.moveTaskOnBoard(command('board-first-ready'), {
+      workspaceId: initial.workspace!.id, taskId: first.task!.id,
+      status: 'planned', now: 30
+    })
+    service.moveTaskOnBoard(command('board-second-ready'), {
+      workspaceId: initial.workspace!.id, taskId: second.task!.id,
+      status: 'planned', beforeTaskId: first.task!.id, now: 31
+    })
+
+    const dataPath = join(testRoot, 'data', 'matou.sqlite')
+    database.close()
+    database = RuntimeDatabase.open(dataPath)
+    expect(database.all<{ id: string; status: string }>(
+      `SELECT id, status FROM tasks
+       WHERE workspace_id = ? AND status = 'planned' ORDER BY sort_key, id`,
+      initial.workspace!.id
+    )).toEqual([
+      { id: initial.task!.id, status: 'planned' },
+      { id: second.task!.id, status: 'planned' },
+      { id: first.task!.id, status: 'planned' }
+    ])
+  })
+
   it('deletes a confirmed final Task and atomically replaces it with 默认', async () => {
     const initial = await bootstrap('delete-bootstrap')
     markPathValid(initial.workspace!.id)

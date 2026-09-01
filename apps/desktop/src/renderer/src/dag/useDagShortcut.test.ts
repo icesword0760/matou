@@ -1,68 +1,38 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { DagShortcutController, clampDagHoldDuration } from './useDagShortcut'
-
-afterEach(() => vi.useRealTimers())
+import { DagShortcutController } from './useDagShortcut'
 
 describe('DagShortcutController', () => {
-  it('forwards one terminal Tab when released at 449ms', () => {
-    vi.useFakeTimers()
-    const shortPress = vi.fn()
-    const longPress = vi.fn()
-    const controller = new DagShortcutController({ shortPress, longPress, holdDuration: 450 })
+  it('opens the DAG immediately on the first Option Tab keydown', () => {
+    const open = vi.fn()
+    const controller = new DagShortcutController({ open })
 
-    controller.keyDown(key('Tab', true))
-    vi.advanceTimersByTime(449)
-    controller.keyUp(key('Tab', true))
+    expect(controller.keyDown(key('Tab', true))).toBe(true)
 
-    expect(shortPress).toHaveBeenCalledTimes(1)
-    expect(longPress).not.toHaveBeenCalled()
+    expect(open).toHaveBeenCalledTimes(1)
   })
 
-  it('opens once at 450ms, consumes Tab and ignores repeats', () => {
-    vi.useFakeTimers()
-    const shortPress = vi.fn()
-    const longPress = vi.fn()
-    const controller = new DagShortcutController({ shortPress, longPress, holdDuration: 450 })
+  it('consumes keyup and ignores automatic key repeats', () => {
+    const open = vi.fn()
+    const controller = new DagShortcutController({ open })
 
     expect(controller.keyDown(key('Tab', true))).toBe(true)
     controller.keyDown({ ...key('Tab', true), repeat: true })
-    vi.advanceTimersByTime(450)
-    controller.keyUp(key('Tab', true))
+    expect(controller.keyUp(key('Tab', true))).toBe(true)
 
-    expect(longPress).toHaveBeenCalledTimes(1)
-    expect(shortPress).not.toHaveBeenCalled()
+    expect(open).toHaveBeenCalledTimes(1)
   })
 
-  it('opens from a real key repeat when a backgrounded renderer timer is delayed', () => {
-    vi.useFakeTimers()
-    const longPress = vi.fn()
-    const controller = new DagShortcutController({ shortPress: vi.fn(), longPress, holdDuration: 450 })
+  it('leaves ordinary Tab and unrelated shortcuts untouched', () => {
+    const open = vi.fn()
+    const controller = new DagShortcutController({ open })
 
-    controller.keyDown(key('Tab', true))
-    vi.setSystemTime(Date.now() + 500)
-    controller.keyDown({ ...key('Tab', true), repeat: true })
+    expect(controller.keyDown(key('Tab', false))).toBe(false)
+    expect(controller.keyDown(key('Enter', true))).toBe(false)
 
-    expect(longPress).toHaveBeenCalledTimes(1)
-  })
-
-  it('clamps settings and clears pending state on blur or cancel', () => {
-    expect(clampDagHoldDuration(100)).toBe(350)
-    expect(clampDagHoldDuration(900)).toBe(800)
-    vi.useFakeTimers()
-    const shortPress = vi.fn()
-    const longPress = vi.fn()
-    const controller = new DagShortcutController({ shortPress, longPress, holdDuration: 500 })
-
-    controller.keyDown(key('Tab', true))
-    controller.cancel()
-    vi.runAllTimers()
-    controller.keyUp(key('Tab', true))
-
-    expect(shortPress).not.toHaveBeenCalled()
-    expect(longPress).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
   })
 })
 

@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:," />
+  <title>Matou Workspace Kanban Mockup</title>
+  <style>
+    :root { color:#2f3746; background:#dce5ed; font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Segoe UI",sans-serif; font-synthesis:none; }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; }
+    button { color:inherit; font:inherit; }
+    svg { display:block; }
+    .stage { display:grid; width:100%; height:100%; min-width:1040px; min-height:680px; place-items:center; overflow:hidden; background:radial-gradient(circle at 8% 16%,rgba(90,210,230,.5),transparent 31%),radial-gradient(circle at 88% 84%,rgba(95,126,245,.38),transparent 36%),linear-gradient(135deg,#d3e2ea,#eef1f0 52%,#d7dce9); }
+    .app { display:grid; width:min(96vw,1580px); height:min(92vh,960px); grid-template-columns:310px minmax(0,1fr); overflow:hidden; border-radius:20px; background:rgba(243,247,250,.76); box-shadow:0 32px 82px rgba(41,55,76,.24),inset 0 1px rgba(255,255,255,.94); }
+
+    /* Flat frosted sidebar: one glass plane, rows sit directly on it. */
+    .sidebar { position:relative; z-index:3; display:grid; min-width:0; grid-template-rows:68px minmax(0,1fr) 58px; overflow:hidden; background:radial-gradient(270px 220px at 12% 12%,rgba(255,255,255,.56),transparent 72%),linear-gradient(105deg,rgba(249,252,254,.72),rgba(234,242,247,.54)); box-shadow:12px 0 35px rgba(52,73,97,.09),inset -1px 0 rgba(255,255,255,.58); backdrop-filter:blur(34px) saturate(110%); -webkit-backdrop-filter:blur(34px) saturate(110%); }
+    .sidebar::after { position:absolute; content:""; inset:0; pointer-events:none; opacity:.08; mix-blend-mode:soft-light; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 120 120' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' seed='8'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.7'/%3E%3C/svg%3E"); }
+    .titlebar,.sidebar-toolbar,.workspace-list { position:relative; z-index:1; }
+    .titlebar { display:flex; align-items:center; gap:14px; padding:0 18px; box-shadow:0 1px rgba(255,255,255,.56); }
+    .lights { display:flex; gap:9px; }
+    .lights i { width:13px; height:13px; border-radius:50%; box-shadow:inset 0 0 0 1px rgba(0,0,0,.08),inset 0 1px rgba(255,255,255,.5); }
+    .lights i:nth-child(1) { background:#ff6059; } .lights i:nth-child(2) { background:#ffbd2e; } .lights i:nth-child(3) { background:#28c941; }
+    .app-title { display:flex; min-width:0; align-items:center; gap:9px; font-size:16px; font-weight:680; }
+    .app-title svg { width:20px; color:#354052; } .app-title span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .app-mark { width:28px; height:28px; margin-left:auto; color:#7b8492; opacity:.8; }
+
+    .workspace-list { padding:12px 10px 22px; overflow:auto; scrollbar-width:none; }
+    .workspace-list::-webkit-scrollbar { display:none; }
+    .workspace { position:relative; margin-bottom:13px; }
+    .workspace.current::before { position:absolute; content:""; top:7px; bottom:8px; left:0; width:3px; border-radius:9px; background:#4d98ff; box-shadow:0 0 10px rgba(66,144,255,.3); }
+    .workspace-head { display:flex; height:42px; padding:0 7px; align-items:center; gap:8px; color:#5e6978; }
+    .workspace-head strong { min-width:0; overflow:hidden; color:#344052; font-size:14px; font-weight:680; text-overflow:ellipsis; white-space:nowrap; }
+    .workspace-head .folder { width:18px; height:18px; color:#4c8ddd; } .workspace-head .chevron { width:12px; height:12px; color:#727c89; }
+    .workspace-actions { display:flex; margin-left:auto; align-items:center; gap:11px; color:#6c7583; font-size:17px; }
+    .badge { padding:2px 6px; border-radius:6px; background:rgba(255,255,255,.38); color:#8a93a0; font-size:10px; font-weight:650; }
+    .tasks { display:grid; padding-left:22px; gap:2px; }
+    .task { display:flex; width:100%; height:39px; padding:0 10px; align-items:center; gap:9px; border:0; border-radius:9px; background:transparent; color:#606b7b; cursor:pointer; text-align:left; transition:background 130ms ease,color 130ms ease,transform 130ms ease; }
+    .task:hover { color:#333d4c; background:rgba(77,91,111,.055); } .task.active { color:#303a49; background:rgba(77,91,111,.09); }
+    .task svg { width:17px; height:17px; flex:none; } .task span { overflow:hidden; font-size:14px; font-weight:570; text-overflow:ellipsis; white-space:nowrap; }
+    .task b { margin-left:auto; letter-spacing:-2px; opacity:0; } .task:hover b,.task.active b { opacity:.75; }
+
+    .sidebar-toolbar { display:flex; padding:8px 11px; align-items:center; background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(244,248,251,.28)); box-shadow:0 -10px 28px rgba(70,89,112,.055),inset 0 1px rgba(255,255,255,.54); }
+    .board-toggle { display:flex; height:40px; padding:0 13px; align-items:center; gap:9px; border:0; border-radius:10px; background:transparent; color:#596676; cursor:pointer; font-size:14px; font-weight:620; transition:color 150ms ease,background 150ms ease,box-shadow 150ms ease,transform 150ms ease; }
+    .board-toggle:hover { background:rgba(255,255,255,.3); color:#334154; } .board-toggle:active { transform:scale(.97); }
+    .board-toggle.active { color:#2567bf; background:rgba(82,153,255,.14); box-shadow:inset 0 1px rgba(255,255,255,.72),0 6px 18px rgba(44,111,205,.12); }
+    .board-toggle svg { width:18px; height:18px; } .board-toggle .active-dot { width:6px; height:6px; margin-left:2px; border-radius:50%; background:#3c8cff; opacity:0; transform:scale(.3); transition:inherit; }
+    .board-toggle.active .active-dot { opacity:1; transform:scale(1); }
+
+    .main { position:relative; display:grid; min-width:0; grid-template-rows:68px minmax(0,1fr); background:rgba(237,241,245,.88); }
+    .tabs { display:flex; min-width:0; padding:0 12px; align-items:center; gap:7px; background:rgba(255,255,255,.72); box-shadow:0 1px rgba(133,145,160,.18); }
+    .tab { height:36px; padding:0 15px; border:0; border-radius:9px; background:transparent; color:#8b9098; font-size:13px; }
+    .tab.active { max-width:240px; overflow:hidden; background:rgba(228,233,240,.86); color:#3f4858; text-overflow:ellipsis; white-space:nowrap; }
+    .tab-add { display:grid; width:34px; height:34px; margin-left:3px; padding:0; place-items:center; border:0; border-radius:9px; background:#eff2f6; color:#556070; font-size:20px; }
+    .top-actions { display:flex; margin-left:auto; color:#6f7885; gap:15px; }
+
+    .views { position:relative; min-width:0; min-height:0; overflow:hidden; }
+    .view { position:absolute; inset:0; transition:opacity 180ms ease,transform 220ms cubic-bezier(.2,.8,.2,1); }
+    .view[hidden] { display:block; visibility:hidden; opacity:0; pointer-events:none; transform:translateY(7px) scale(.995); }
+    .view:not([hidden]) { visibility:visible; opacity:1; transform:none; }
+    .session-view { display:grid; grid-template-rows:minmax(0,1fr) 47px; background:#e8edf2; }
+    .terminal-strip { display:flex; min-width:0; padding:13px 0 11px 13px; overflow-x:auto; gap:12px; scrollbar-width:thin; }
+    .terminal-card { display:flex; min-width:395px; flex:0 0 44%; flex-direction:column; border-radius:14px; background:rgba(249,250,252,.93); box-shadow:0 5px 18px rgba(48,64,84,.09),inset 0 1px rgba(255,255,255,.86); }
+    .terminal-card.focused { transform:translateY(-2px); box-shadow:0 12px 28px rgba(57,82,115,.15),0 -5px 22px rgba(255,255,255,.72); }
+    .terminal-card header { display:flex; height:55px; padding:0 15px; align-items:center; justify-content:space-between; box-shadow:inset 0 -1px rgba(120,132,149,.17); }
+    .terminal-card header strong { font-size:14px; } .terminal-card header span { color:#6a83a4; letter-spacing:9px; }
+    .terminal-body { padding:26px 20px; color:#31394a; font:14px/1.42 "SF Mono",Menlo,monospace; }
+    .terminal-body .path { color:#45aabf; font-weight:650; } .terminal-body .arrow { color:#86b85e; } .terminal-body pre { margin:25px 0 0; white-space:pre-wrap; }
+    .session-status { display:flex; padding:0 25px; align-items:center; justify-content:space-between; background:rgba(255,255,255,.76); color:#858c96; font-size:12px; box-shadow:inset 0 1px rgba(125,137,151,.13); }
+    .session-status strong { color:#485161; }
+
+    .board-view { display:grid; min-width:0; min-height:0; grid-template-rows:64px minmax(0,1fr); background:linear-gradient(180deg,rgba(249,250,252,.97),rgba(239,242,246,.96)); }
+    .board-head { display:flex; padding:0 16px; align-items:center; justify-content:space-between; }
+    .board-title { display:flex; align-items:baseline; gap:10px; } .board-title h1 { margin:0; color:#2e3746; font-size:17px; font-weight:700; letter-spacing:-.2px; } .board-title span { color:#87909d; font-size:11px; }
+    .board-guide { display:flex; align-items:center; gap:9px; color:#7a8492; font-size:12px; } .board-guide i { width:7px; height:7px; border-radius:50%; background:#4b91ed; box-shadow:0 0 0 5px rgba(75,145,237,.1); }
+    .board-scroll { min-width:0; min-height:0; padding:0 12px 12px; overflow:auto; }
+    .board { display:grid; min-width:760px; min-height:100%; grid-template-columns:repeat(4,minmax(170px,1fr)); gap:12px; }
+    .column { display:grid; min-height:0; grid-template-rows:38px minmax(150px,1fr); padding:8px; border-radius:8px; background:#f5f6fa; transition:background 140ms ease,box-shadow 140ms ease; }
+    .column.drag-over { background:#edf4fd; box-shadow:inset 0 0 0 1px rgba(75,143,235,.24); }
+    .column-head { display:flex; padding:0 2px 8px; align-items:center; gap:7px; color:#424b58; }
+    .status-dot { width:8px; height:8px; border-radius:50%; background:var(--tone); box-shadow:0 0 0 4px color-mix(in srgb,var(--tone) 12%,transparent); }
+    .column-head strong { font-size:13px; font-weight:700; } .count { color:#737c88; font-size:11px; font-variant-numeric:tabular-nums; }
+    .cards { min-height:150px; padding:0 0 20px; }
+    .kanban-card { position:relative; margin-bottom:8px; padding:10px; border-radius:6px; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.06); cursor:grab; user-select:none; transition:transform 140ms ease,box-shadow 140ms ease,opacity 140ms ease; }
+    .kanban-card:hover { transform:translateY(-1px); box-shadow:0 5px 14px rgba(48,69,96,.11); } .kanban-card:active { cursor:grabbing; } .kanban-card.dragging { opacity:.35; transform:scale(.97); }
+    .kanban-card h3 { margin:0 0 7px; color:#354051; font-size:13px; font-weight:600; line-height:1.42; }
+    .card-meta { display:flex; align-items:center; justify-content:space-between; color:#888; font-size:11px; } .card-meta span:first-child { display:flex; align-items:center; gap:5px; }
+    .priority { width:5px; height:5px; border-radius:50%; background:#95a0ad; } .priority.high { background:#f06d63; } .priority.medium { background:#e1a343; }
+    .assignee { display:grid; width:20px; height:20px; place-items:center; border-radius:50%; background:#e8edf3; color:#5e6b7d; font-size:9px; font-weight:700; }
+    .drop-marker { height:3px; margin:-2px 3px 7px; border-radius:4px; background:#4e96f6; box-shadow:0 0 10px rgba(78,150,246,.45); }
+    .column.blocked .kanban-card { background:#fffafa; }
+    .blocked-note { display:inline-flex; margin-top:8px; padding:3px 6px; border-radius:5px; background:rgba(231,91,83,.09); color:#c4524c; font-size:9px; font-weight:650; }
+    .empty { display:none; padding:24px 10px; color:#a0a8b2; font-size:11px; text-align:center; } .cards:empty + .empty { display:block; }
+    .toast { position:fixed; z-index:20; right:32px; bottom:28px; padding:10px 14px; border-radius:10px; background:rgba(41,49,62,.9); color:white; box-shadow:0 12px 32px rgba(25,35,49,.24); font-size:12px; opacity:0; transform:translateY(8px); pointer-events:none; transition:180ms ease; } .toast.show { opacity:1; transform:none; }
+    @media (max-width:1250px) { .app { grid-template-columns:270px minmax(0,1fr); } .terminal-card { min-width:360px; flex-basis:56%; } .board { min-width:940px; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
+  </style>
+</head>
+<body>
+<main class="stage"><section class="app" aria-label="Matou 看板 Mockup">
+  <aside class="sidebar">
+    <header class="titlebar"><div class="lights" aria-hidden="true"><i></i><i></i><i></i></div><div class="app-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 18 2.6-8.2L16.5 1l2.2 2.2-8.8 8.8L5 18Zm3-1 3.2 3H4.5"/></svg><span>新增工作空间</span></div><svg class="app-mark" viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="7" r="2"/><circle cx="15" cy="11" r="2"/><path d="M20 10v10h-9v-6h5v-4"/></svg></header>
+    <nav class="workspace-list">
+      <section class="workspace current"><div class="workspace-head"><svg class="chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m2 4 4 4 4-4"/></svg><svg class="folder" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4.5h5l1.5 1.7H16v8H2z"/></svg><strong>matou_workspace</strong><div class="workspace-actions"><span>⌖</span><span>＋</span><span>•••</span></div></div>
+        <div class="tasks"><button class="task active" data-task="新事项 3"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h12M4.5 9h9M6 13h6"/></svg><span>新事项 3</span><b>•••</b></button><button class="task" data-task="新事项 2"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h12M4.5 9h9M6 13h6"/></svg><span>新事项 2</span><b>•••</b></button><button class="task" data-task="新事项"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h12M4.5 9h9M6 13h6"/></svg><span>新事项</span><b>•••</b></button><button class="task" data-task="默认"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h12M4.5 9h9M6 13h6"/></svg><span>默认</span><b>•••</b></button></div>
+      </section>
+      <section class="workspace"><div class="workspace-head"><svg class="chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m2 4 4 4 4-4"/></svg><svg class="folder" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m2.5 8 6.5-5 6.5 5v7H11v-4H7v4H2.5z"/></svg><strong>icesword</strong><span class="badge">默认</span><div class="workspace-actions"><span>⌖</span></div></div><div class="tasks"><button class="task" data-task="默认"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h12M4.5 9h9M6 13h6"/></svg><span>默认</span></button></div></section>
+      <section class="workspace"><div class="workspace-head"><svg class="chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m2 4 4 4 4-4"/></svg><svg class="folder" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4.5h5l1.5 1.7H16v8H2z"/></svg><strong>AIWriteX</strong></div><div class="tasks"><button class="task" data-task="默认"><svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h12M4.5 9h9M6 13h6"/></svg><span>默认</span></button></div></section>
+    </nav>
+    <footer class="sidebar-toolbar"><button id="board-toggle" class="board-toggle" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.55"><rect x="2.5" y="3" width="15" height="14" rx="2.5"/><path d="M7.5 3v14M12.5 3v14"/></svg><span>看板</span><i class="active-dot"></i></button></footer>
+  </aside>
+
+  <section class="main"><header class="tabs"><button class="tab active">Shell · /Users/icesword/matou…</button><button class="tab">新画布 2</button><button class="tab">新画布 3</button><button class="tab">新画布 4</button><button class="tab-add">＋</button><div class="top-actions"><span>⌘</span><span>◧</span></div></header>
+    <div class="views">
+      <section id="session-view" class="view session-view"><div id="terminal-strip" class="terminal-strip"><article class="terminal-card"><header><strong>Shell</strong><span>▣ ⊖</span></header><div class="terminal-body"><span>(base)</span> <span class="arrow">➜</span> <span class="path">matou_workspace</span><pre>icesword@MacBook-Pro matou_workspace %
+
+等待输入…</pre></div></article><article class="terminal-card focused"><header><strong>Claude</strong><span>⑂ ⊖</span></header><div class="terminal-body"><pre>Claude Code v2.1.251
+Opus 5 · xhigh effort
+~/matou_workspace
+
+› 优化会话看板交互
+● 正在整理事项状态…</pre></div></article><article class="terminal-card"><header><strong>Shell</strong><span>▣ ⊖</span></header><div class="terminal-body"><span>(base)</span> <span class="arrow">➜</span> <span class="path">matou_workspace</span></div></article></div><footer class="session-status"><strong>根会话 · 9 个会话</strong><span>DEFAULT　 Opus Plan　 ~/matou_workspace</span></footer></section>
+
+      <section id="board-view" class="view board-view" hidden><header class="board-head"><div class="board-title"><h1>matou_workspace 看板</h1><span>10 个事项</span></div><div class="board-guide"><i></i><span>拖动事项以更新状态</span></div></header><div class="board-scroll"><div class="board">
+        <section class="column" data-status="就绪" style="--tone:#8a96a5"><header class="column-head"><i class="status-dot"></i><strong>就绪</strong><span class="count">（3）</span></header><div class="cards"><article class="kanban-card" draggable="true"><h3>完善工作空间创建流程</h3><div class="card-meta"><span><i class="priority medium"></i>新事项 2</span><b class="assignee">冰</b></div></article><article class="kanban-card" draggable="true"><h3>补充终端快捷键说明</h3><div class="card-meta"><span><i class="priority"></i>默认</span><b class="assignee">冰</b></div></article><article class="kanban-card" draggable="true"><h3>看板筛选交互调研</h3><div class="card-meta"><span><i class="priority"></i>新事项</span><b class="assignee">冰</b></div></article></div><div class="empty">拖动事项到这里</div></section>
+        <section class="column" data-status="运行中" style="--tone:#4c91ee"><header class="column-head"><i class="status-dot"></i><strong>运行中</strong><span class="count">（3）</span></header><div class="cards"><article class="kanban-card" draggable="true"><h3>卡片自动生成 Claude 标题</h3><div class="card-meta"><span><i class="priority high"></i>新事项 3</span><b class="assignee">冰</b></div></article><article class="kanban-card" draggable="true"><h3>横向卡片滚动与边缘反馈</h3><div class="card-meta"><span><i class="priority high"></i>新事项 3</span><b class="assignee">冰</b></div></article><article class="kanban-card" draggable="true"><h3>磨砂玻璃侧栏视觉调整</h3><div class="card-meta"><span><i class="priority medium"></i>新事项 3</span><b class="assignee">冰</b></div></article></div><div class="empty">拖动事项到这里</div></section>
+        <section class="column blocked" data-status="阻塞" style="--tone:#e3655d"><header class="column-head"><i class="status-dot"></i><strong>阻塞</strong><span class="count">（2）</span></header><div class="cards"><article class="kanban-card" draggable="true"><h3>接入 macOS 原生玻璃 API</h3><div class="card-meta"><span><i class="priority high"></i>新事项 3</span><b class="assignee">冰</b></div><span class="blocked-note">等待原生容器方案</span></article><article class="kanban-card" draggable="true"><h3>远程控制会话恢复</h3><div class="card-meta"><span><i class="priority medium"></i>默认</span><b class="assignee">冰</b></div><span class="blocked-note">provider session 缺失</span></article></div><div class="empty">拖动事项到这里</div></section>
+        <section class="column" data-status="完成" style="--tone:#63a879"><header class="column-head"><i class="status-dot"></i><strong>完成</strong><span class="count">（2）</span></header><div class="cards"><article class="kanban-card" draggable="true"><h3>卡片右键菜单位置修正</h3><div class="card-meta"><span><i class="priority"></i>新事项 3</span><b class="assignee">冰</b></div></article><article class="kanban-card" draggable="true"><h3>移除通知空状态插画</h3><div class="card-meta"><span><i class="priority"></i>默认</span><b class="assignee">冰</b></div></article></div><div class="empty">拖动事项到这里</div></section>
+      </div></div></section>
+    </div>
+  </section>
+</section></main>
+<div id="toast" class="toast" role="status"></div>
+<script>
+  const toggle=document.querySelector('#board-toggle'); const boardView=document.querySelector('#board-view'); const sessionView=document.querySelector('#session-view'); const terminalStrip=document.querySelector('#terminal-strip'); const toast=document.querySelector('#toast');
+  let boardActive=false,savedScrollLeft=0,draggedCard=null,marker=null,toastTimer=0;
+  function setBoardActive(active){ if(active===boardActive)return; boardActive=active; if(active)savedScrollLeft=terminalStrip.scrollLeft; toggle.classList.toggle('active',active); toggle.setAttribute('aria-pressed',String(active)); boardView.hidden=!active; sessionView.hidden=active; if(!active)requestAnimationFrame(()=>{terminalStrip.scrollLeft=savedScrollLeft}); }
+  toggle.addEventListener('click',()=>setBoardActive(!boardActive));
+  document.querySelectorAll('.task').forEach(task=>task.addEventListener('click',()=>{document.querySelectorAll('.task').forEach(item=>item.classList.remove('active')); task.classList.add('active'); setBoardActive(false);}));
+  function updateCounts(){document.querySelectorAll('.column').forEach(column=>{column.querySelector('.count').textContent=`（${column.querySelectorAll('.kanban-card').length}）`;});}
+  function showToast(message){clearTimeout(toastTimer);toast.textContent=message;toast.classList.add('show');toastTimer=setTimeout(()=>toast.classList.remove('show'),1500);}
+  function removeMarker(){marker?.remove();marker=null;}
+  function cardAfterPointer(container,y){return [...container.querySelectorAll('.kanban-card:not(.dragging)')].find(card=>{const rect=card.getBoundingClientRect();return y<rect.top+rect.height/2;});}
+  document.querySelectorAll('.kanban-card').forEach(card=>{card.addEventListener('dragstart',event=>{draggedCard=card;event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('text/plain',card.querySelector('h3').textContent);requestAnimationFrame(()=>card.classList.add('dragging'));});card.addEventListener('dragend',()=>{card.classList.remove('dragging');document.querySelectorAll('.column').forEach(column=>column.classList.remove('drag-over'));removeMarker();draggedCard=null;});});
+  document.querySelectorAll('.column').forEach(column=>{const cards=column.querySelector('.cards');column.addEventListener('dragenter',event=>{event.preventDefault();column.classList.add('drag-over');});column.addEventListener('dragleave',event=>{if(!column.contains(event.relatedTarget))column.classList.remove('drag-over');});column.addEventListener('dragover',event=>{event.preventDefault();event.dataTransfer.dropEffect='move';removeMarker();marker=document.createElement('div');marker.className='drop-marker';const after=cardAfterPointer(cards,event.clientY);cards.insertBefore(marker,after||null);});column.addEventListener('drop',event=>{event.preventDefault();if(!draggedCard)return;const oldStatus=draggedCard.closest('.column').dataset.status;const nextStatus=column.dataset.status;const after=marker?.nextSibling||null;cards.insertBefore(draggedCard,after);if(nextStatus==='阻塞'&&!draggedCard.querySelector('.blocked-note')){const note=document.createElement('span');note.className='blocked-note';note.textContent='手动标记为阻塞';draggedCard.append(note);}if(oldStatus==='阻塞'&&nextStatus!=='阻塞')draggedCard.querySelector('.blocked-note')?.remove();removeMarker();column.classList.remove('drag-over');updateCounts();showToast(oldStatus===nextStatus?`已调整「${nextStatus}」中的顺序`:`事项已移至「${nextStatus}」`);});});
+</script>
+</body>
+</html>

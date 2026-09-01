@@ -111,21 +111,33 @@ test.describe('native session DAG window', () => {
     }
   })
 
-  test('opens on a long Option Tab hold while a short hold remains terminal input', async () => {
+  test('opens immediately on Option Tab keydown', async () => {
     const fixture = await launchSessionCanvas()
     try {
+      await expect(fixture.page.getByRole('button', { name: '打开会话 DAG' })).toBeVisible()
       await fixture.app.evaluate(({ BrowserWindow }) => {
         BrowserWindow.getAllWindows()[0]!.webContents.sendInputEvent({
           type: 'keyDown', keyCode: 'Tab', modifiers: ['alt']
         })
       })
-      await fixture.page.waitForTimeout(520)
+      await expect.poll(async () => (await fixture.app.windows()).length, {
+        timeout: 1_000,
+        intervals: [20, 40, 80]
+      }).toBe(2)
+      const resized = await fixture.app.evaluate(({ BrowserWindow }) => {
+        const dag = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().includes('kind=dag'))!
+        const before = dag.getBounds()
+        dag.setSize(Math.max(680, before.width - 60), before.height)
+        return { before, after: dag.getBounds(), resizable: dag.isResizable() }
+      })
+      expect(resized.resizable).toBe(true)
+      expect(resized.after.width).toBeLessThan(resized.before.width)
       await fixture.app.evaluate(({ BrowserWindow }) => {
-        BrowserWindow.getAllWindows()[0]!.webContents.sendInputEvent({
+        BrowserWindow.getAllWindows().find((window) => !window.webContents.getURL().includes('kind=dag'))
+          ?.webContents.sendInputEvent({
           type: 'keyUp', keyCode: 'Tab', modifiers: ['alt']
         })
       })
-      await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
     } finally {
       await fixture.close()
     }
@@ -220,7 +232,7 @@ test.describe('native session DAG window', () => {
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
       let dag = (await fixture.app.windows()).find((page) => page !== fixture.page)!
       await expect(dag.locator('.dag-node-card.status-needs-input')).toContainText('等待输入')
-      await dag.getByRole('button', { name: '关闭 DAG' }).click().catch(() => {})
+      await dag.keyboard.press('Escape').catch(() => {})
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)
 
       const textarea = surface.locator('.xterm-helper-textarea')

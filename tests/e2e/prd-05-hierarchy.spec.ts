@@ -35,6 +35,11 @@ test('integrates the existing top controls into the macOS window chrome', async 
         const window = BrowserWindow.getAllWindows()[0]!
         return window.getBounds().height - window.getContentBounds().height
       })).toBe(0)
+      expect(await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]!.getBackgroundColor()
+      // Electron's getter normalizes the fully transparent constructor color
+      // to black while the window's `transparent` option retains the alpha.
+      )).toBe('#000000')
     }
   } finally { await fixture.close() }
 })
@@ -93,7 +98,7 @@ test('keeps navigation order stable on clicks, then promotes the Task after real
   } finally { await fixture.close() }
 })
 
-test('uses the Kooky light palette to separate the sidebar, active Workspace, and active Task levels', async () => {
+test('uses one frosted sidebar material with flat Workspace groups and a single Task selection layer', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
@@ -106,10 +111,32 @@ test('uses the Kooky light palette to separate the sidebar, active Workspace, an
       getComputedStyle(node).backgroundColor
     )))
     expect(colors).toEqual([
-      'rgb(255, 255, 255)',
-      'rgb(247, 248, 250)',
-      'rgb(236, 238, 243)'
+      'rgba(0, 0, 0, 0)',
+      'rgba(0, 0, 0, 0)',
+      'rgba(87, 101, 127, 0.094)'
     ])
+    const glassMaterial = page.locator('.flat-sidebar__glass-material')
+    await expect(glassMaterial).toBeVisible()
+    expect(await glassMaterial.evaluate((node) => {
+      const style = getComputedStyle(node)
+      return [style.position, style.backdropFilter, style.backgroundImage]
+    })).toEqual(expect.arrayContaining([
+      'absolute',
+      expect.stringContaining('blur(18px)'),
+      expect.stringContaining('linear-gradient')
+    ]))
+    expect(await page.locator('.flat-sidebar__topbar').evaluate((node) =>
+      getComputedStyle(node).borderBottomWidth
+    )).toBe('0px')
+    expect(await page.locator('.hierarchy-shell').evaluate((node) =>
+      getComputedStyle(node).backgroundColor
+    )).toBe('rgba(0, 0, 0, 0)')
+    expect(await page.locator('body').evaluate((node) =>
+      getComputedStyle(node).backgroundColor
+    )).toBe('rgba(0, 0, 0, 0)')
+    expect(await glassMaterial.evaluate((node) =>
+      getComputedStyle(node).backgroundImage
+    )).toContain('rgba(251, 253, 255, 0.09)')
     const badge = workspace.locator('.workspace-group__badge')
     expect(await badge.evaluate((node) => {
       const style = getComputedStyle(node)
@@ -149,6 +176,29 @@ test('uses the Kooky light palette to separate the sidebar, active Workspace, an
   } finally { await fixture.close() }
 })
 
+test('separates Session cards without outlines and lifts the active card under vertical light', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    const focusedCard = page.locator('.session-card.is-focused').first()
+    await expect(focusedCard).toBeVisible()
+    const styles = await focusedCard.evaluate((node) => {
+      const style = getComputedStyle(node)
+      const light = getComputedStyle(node, '::before')
+      return {
+        borderWidth: style.borderTopWidth,
+        transform: style.transform,
+        shadow: style.boxShadow,
+        lightImage: light.backgroundImage
+      }
+    })
+    expect(styles.borderWidth).toBe('0px')
+    expect(styles.transform).not.toBe('none')
+    expect(styles.shadow).not.toBe('none')
+    expect(styles.lightImage).toContain('linear-gradient')
+  } finally { await fixture.close() }
+})
+
 test('matches Kooky when deleting a Task from its sidebar menu', async () => {
   const fixture = await launchMatou()
   try {
@@ -170,7 +220,10 @@ test('matches Kooky terminal shortcuts, real search, focus, zoom, and white skin
     const shell = page.locator('.hierarchy-shell')
     const activeStage = page.locator('.scene-stage:not([hidden])')
     await expect(shell).toHaveAttribute('data-theme', 'light')
-    expect(await shell.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe('rgb(247, 248, 250)')
+    expect(await shell.evaluate((node) => {
+      const style = getComputedStyle(node)
+      return [style.backgroundColor, style.backgroundImage]
+    })).toEqual(['rgba(0, 0, 0, 0)', 'none'])
 
     await page.keyboard.press(`${mod}+/`)
     await expect(page.getByRole('dialog', { name: '快捷键列表' })).toBeVisible()

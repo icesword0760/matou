@@ -16,7 +16,10 @@ test.describe('session canvas lifecycle', () => {
     try {
       const original = activeSurface(fixture.page)
       const sessionId = await original.getAttribute('data-session-id')
-      await original.click({ button: 'right', position: { x: 20, y: 60 } })
+      const originalPane = original.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]')
+      await originalPane.locator('.terminal-pane-header').click({
+        button: 'right', position: { x: 72, y: 20 }
+      })
       const detachItem = fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' })
       await detachItem.focus()
       await fixture.page.keyboard.press('Enter')

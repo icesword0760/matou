@@ -10,15 +10,18 @@ afterEach(cleanup)
 
 describe('ParentProjection', () => {
   it('reveals the parent summary gradually and confirms only at the threshold', () => {
-    const { rerender } = render(<ParentProjection parent={parent()} pullDistance={54} progress={0.4} />)
+    const { rerender } = render(<ParentProjection parent={parent()} pullDistance={54} progress={0.4} effectIntensity={0.25} />)
 
     expect(screen.getByText('父会话')).toBeTruthy()
     expect(screen.getByText('等待输入')).toBeTruthy()
     expect(screen.getByText(/最近一行/)).toBeTruthy()
-    expect(screen.getByText('继续右拉返回')).toBeTruthy()
+    expect(screen.getByText('右拉至目标，松手返回父会话')).toBeTruthy()
+    expect(screen.getByRole('progressbar', { name: '返回父会话进度' }).getAttribute('aria-valuenow')).toBe('40')
+    expect(screen.getByTestId('parent-projection').getAttribute('style')).toContain('--parent-pull-speed: 0.25')
 
-    rerender(<ParentProjection parent={parent()} pullDistance={140} progress={1} />)
-    expect(screen.getByText('松手返回父会话')).toBeTruthy()
+    rerender(<ParentProjection parent={parent()} pullDistance={140} progress={1} effectIntensity={0.8} />)
+    expect(screen.getByText('已到达 · 松手返回父会话')).toBeTruthy()
+    expect(screen.getByText('100%')).toBeTruthy()
     expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
   })
 })

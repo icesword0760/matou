@@ -58,4 +58,21 @@ describe('PRD 02 HUD commands', () => {
       })]
     ])
   })
+
+  it('routes manual rename and Claude title restore through authoritative session commands', async () => {
+    const request = vi.fn().mockResolvedValue({})
+    const commands = createHierarchyCommands({ request } as never, 'window-1')
+
+    await commands.renameSession?.('session-1', '发布问题排查')
+    await commands.restoreSessionAutoTitle?.('session-1')
+
+    expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
+      ['hierarchy.rename-session', expect.objectContaining({
+        sessionId: 'session-1', title: '发布问题排查'
+      })],
+      ['hierarchy.restore-session-auto-title', expect.objectContaining({
+        sessionId: 'session-1'
+      })]
+    ])
+  })
 })

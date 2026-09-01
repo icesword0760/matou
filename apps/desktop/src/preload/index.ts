@@ -79,6 +79,11 @@ const desktopApi: MatouDesktopApi = {
     ipcRenderer.on(DESKTOP_CHANNELS.dagShortcut, handler)
     return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.dagShortcut, handler)
   },
+  onScrollGesture: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, phase: 'begin' | 'end') => listener(phase)
+    ipcRenderer.on(DESKTOP_CHANNELS.scrollGesture, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.scrollGesture, handler)
+  },
   onRuntimeConnectionState: (listener) => {
     runtimeConnectionListeners.add(listener)
     listener(runtimeConnectionState)

@@ -24,6 +24,8 @@ import type {
 import { SceneTabBar } from './SceneTabBar'
 import { SplitTree } from './SplitTree'
 import { TaskSidebar } from './TaskSidebar'
+import { WorkspaceKanbanBoard } from './WorkspaceKanbanBoard'
+import { ModelSwitchSettings } from './ModelSwitchSettings'
 import { TerminalPane } from './TerminalPane'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
@@ -190,6 +192,8 @@ function HierarchyProduct({ projection, commands }: {
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [dagOpenError, setDagOpenError] = useState(false)
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  const [boardActive, setBoardActive] = useState(false)
+  const [settingsActive, setSettingsActive] = useState(false)
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
@@ -284,6 +288,10 @@ function HierarchyProduct({ projection, commands }: {
     ).map(({ id }) => id)
   )
   const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
+  const workspaceTasks = projection.tasks.filter(({ workspaceId: owner }) => owner === workspaceId)
+  const sessionCountByTask = Object.fromEntries(workspaceTasks.map(({ id }) => [
+    id, projection.sessions.filter(({ taskId: owner }) => owner === id).length
+  ]))
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
@@ -400,12 +408,10 @@ function HierarchyProduct({ projection, commands }: {
   }
   useDagShortcut({
     enabled: Boolean(activeSceneId && dagFocusSessionId),
-    onShortPress: () => window.dispatchEvent(new Event('matou:forward-terminal-tab')),
-    onLongPress: openDag
+    onPress: openDag
   })
-  useEffect(() => window.matouDesktop?.onDagShortcut?.((kind) => {
-    if (kind === 'long') openDag()
-    else window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+  useEffect(() => window.matouDesktop?.onDagShortcut?.(() => {
+    openDag()
   }), [activeSceneId, dagFocusSessionId, projection.windowId, themeKey])
   useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
     const currentProjection = projectionRef.current
@@ -452,6 +458,8 @@ function HierarchyProduct({ projection, commands }: {
   return <main className="hierarchy-shell cli-module" data-theme={themeKey}>
               <div className="claude-code-view hierarchy-body">
                 <TaskSidebar projection={projection} commands={commands} pathValid={pathValid}
+                  boardActive={boardActive} onBoardActiveChange={setBoardActive}
+                  settingsActive={settingsActive} onSettingsActiveChange={setSettingsActive}
                   onRevealSession={(sceneId, sessionId) => {
                     const node = projection.sessionGraphs?.[sceneId]?.nodes.find((candidate) =>
                       candidate.sessionId === sessionId)
@@ -476,8 +484,15 @@ function HierarchyProduct({ projection, commands }: {
           <button type="button" aria-label="关闭 DAG 异常提示" onClick={() => setDagOpenError(false)}>×</button>
         </div>}
         {task && <>
-          <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
-            onOpenDag={openDag} />
+          {settingsActive ? <div className="scene-bar tab-bar" role="tablist">
+            <div className="scene-tabs tab-bar-left">
+              <div className="tab-item active">
+                <button role="tab" className="tab-title" aria-selected="true">设置 · 模型切换</button>
+                <button className="tab-close" aria-label="关闭设置页签" onClick={() => setSettingsActive(false)}>✕</button>
+              </div>
+            </div>
+          </div> : <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
+            onOpenDag={openDag} />}
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
               const snapshot = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === scene.id)
@@ -543,6 +558,12 @@ function HierarchyProduct({ projection, commands }: {
                       graphNode?.workStatus === 'starting'
                   })}
                   onDelete={commands.deleteSession}
+                  {...(commands.renameSession ? {
+                    onRename: (sessionId: string, title: string) => commands.renameSession?.(sessionId, title)
+                  } : {})}
+                  {...(commands.restoreSessionAutoTitle ? {
+                    onRestoreAutoTitle: (sessionId: string) => commands.restoreSessionAutoTitle?.(sessionId)
+                  } : {})}
                   descendantCount={descendantNodes.length}
                   descendantImpact={{
                     running: descendantNodes.filter(({ workStatus }) =>
@@ -678,6 +699,17 @@ function HierarchyProduct({ projection, commands }: {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />
                   </div>
+                  {boardActive && workspace && <WorkspaceKanbanBoard workspace={workspace}
+                    tasks={workspaceTasks} {...(task ? { activeTaskId: task.id } : {})}
+                    sessionCountByTask={sessionCountByTask}
+                    onMoveTask={(taskId, status, beforeTaskId) => {
+                      if (!commands.moveTaskOnBoard) throw new Error('Board persistence command is unavailable')
+                      return commands.moveTaskOnBoard(workspace.id, taskId, status, beforeTaskId)
+                    }} />}
+                  {settingsActive && <ModelSwitchSettings client={client} onClose={() => {
+                    setSettingsActive(false)
+                    setTerminalFocusRequest((value) => value + 1)
+                  }} />}
                 </section>
               </div>
               <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}
@@ -974,6 +1006,20 @@ function createFixtureCommands(
     createWorkspace: NOOP, renameWorkspace: NOOP, relinkWorkspace: NOOP, removeWorkspace: NOOP,
     setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
+    moveTaskOnBoard: (workspaceId, taskId, status, beforeTaskId) => updateNavigation((value) => {
+      const source = value.tasks.find(({ id, workspaceId: owner }) => id === taskId && owner === workspaceId)
+      if (!source) return
+      const target = value.tasks
+        .filter(({ id, workspaceId: owner, status: ownerStatus }) =>
+          owner === workspaceId && id !== taskId && (ownerStatus ?? 'active') === status)
+        .sort((left, right) => (left.sortKey ?? '').localeCompare(right.sortKey ?? '') || left.id.localeCompare(right.id))
+      const index = beforeTaskId ? target.findIndex(({ id }) => id === beforeTaskId) : target.length
+      target.splice(index < 0 ? target.length : index, 0, source)
+      target.forEach((candidate, ordinal) => {
+        candidate.status = status
+        candidate.sortKey = `a${ordinal.toString().padStart(8, '0')}`
+      })
+    }),
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
     createCanvas: createFixtureCanvas,
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),

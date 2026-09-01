@@ -19,6 +19,7 @@ interface CatalogQuery {
 interface ParsedTranscript {
   providerSessionId: string
   title: string
+  autoTitle?: string
   cwd: string
   updatedAt: number
   model?: string
@@ -58,6 +59,13 @@ export class ClaudeSessionCatalog {
         matched: Boolean(query && searchableEventText(event).includes(query))
       }))
     }
+  }
+
+  async autoTitle(input: { cwd: string; providerSessionId: string }): Promise<string | undefined> {
+    requireProviderSessionId(input.providerSessionId)
+    return (await this.#readWorkspace(input.cwd))
+      .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
+      ?.autoTitle
   }
 
   async #readWorkspace(cwd: string): Promise<ParsedTranscript[]> {
@@ -106,6 +114,7 @@ export function encodeClaudeProjectPath(cwd: string): string {
 function parseTranscript(providerSessionId: string, source: string): ParsedTranscript | undefined {
   let cwd = ''
   let title = ''
+  let autoTitle = ''
   let updatedAt = 0
   let model: string | undefined
   let permissionMode: ClaudeSessionPermissionMode = 'default'
@@ -121,6 +130,9 @@ function parseTranscript(providerSessionId: string, source: string): ParsedTrans
       continue
     }
     if (typeof row.cwd === 'string' && row.cwd.trim()) cwd = row.cwd
+    if (row.type === 'ai-title' && typeof row.aiTitle === 'string' && row.aiTitle.trim()) {
+      autoTitle = row.aiTitle.trim()
+    }
     const timestamp = parseTimestamp(row.timestamp)
     if (timestamp !== undefined) updatedAt = Math.max(updatedAt, timestamp)
     if (isPermissionMode(row.permissionMode)) permissionMode = row.permissionMode
@@ -135,7 +147,8 @@ function parseTranscript(providerSessionId: string, source: string): ParsedTrans
   if (!cwd || events.length === 0) return undefined
   return {
     providerSessionId,
-    title: title || '未命名 Claude 会话',
+    title: autoTitle || title || '未命名 Claude 会话',
+    ...(autoTitle ? { autoTitle } : {}),
     cwd,
     updatedAt,
     ...(model ? { model } : {}),
@@ -243,6 +256,23 @@ function compactTitle(value: string): string {
 
 function normalizeQuery(value: string): string {
   return value.trim().toLocaleLowerCase()
+}
+
+export function latestClaudeAutoTitle(source: string, providerSessionId?: string): string | undefined {
+  let latest: string | undefined
+  for (const line of source.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line) as unknown
+      if (!isRecord(parsed) || parsed.type !== 'ai-title') continue
+      if (providerSessionId && typeof parsed.sessionId === 'string' &&
+        parsed.sessionId !== providerSessionId) continue
+      if (typeof parsed.aiTitle === 'string' && parsed.aiTitle.trim()) latest = parsed.aiTitle.trim()
+    } catch {
+      continue
+    }
+  }
+  return latest
 }
 
 function parseTimestamp(value: unknown): number | undefined {

@@ -23,6 +23,8 @@ interface SessionRow {
   status: SessionStatus
   work_status: SessionWorkStatus
   title: string
+  title_source: 'default' | 'auto' | 'manual'
+  provider_title: string | null
   cwd: string
   created_at: number
   updated_at: number
@@ -131,10 +133,13 @@ export class ProviderModeService {
         )
       }
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = ?, status = 'starting',
+        `UPDATE sessions SET kind = 'claude-code',
+           title = CASE WHEN title_source = 'manual' THEN title ELSE ? END,
+           title_source = CASE WHEN title_source = 'manual' THEN 'manual' ELSE 'auto' END,
+           provider_title = ?, status = 'starting',
            work_status = 'starting', updated_at = ?, last_activity_at = ?, version = version + 1
          WHERE id = ?`,
-        title, input.now, input.now, session.id
+        title, title, input.now, input.now, session.id
       )
       const binding = existing
         ? requireBinding(tx, existing.id)
@@ -539,6 +544,8 @@ function mapSession(row: SessionRow): Session {
     kind: row.kind,
     status: row.status,
     title: row.title,
+    titleSource: row.title_source,
+    ...(row.provider_title === null ? {} : { providerTitle: row.provider_title }),
     cwd: row.cwd,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

@@ -189,4 +189,33 @@ describe('RuntimeProjectionStore', () => {
       expect.objectContaining({ sessionId: 'session-1', cwd: '/deep/new/path' })
     ])
   })
+
+  it('updates the card list and DAG node when a session title changes', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], relations: [], scenes: [],
+      sessions: [{ id: 'session-1', title: 'Claude', titleSource: 'default' }],
+      sessionGraphs: {
+        'scene-1': {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'session-1', title: 'Claude' }], edges: []
+        }
+      }
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'title-2', eventType: 'session.updated',
+      aggregateType: 'session', aggregateId: 'session-1',
+      payload: {
+        session: { id: 'session-1', title: '修复卡片标题同步', titleSource: 'auto' }
+      },
+      schemaVersion: 1, commandId: 'title-command', occurredAt: 2
+    }])
+
+    expect(store.view().sessions).toEqual([
+      expect.objectContaining({ title: '修复卡片标题同步', titleSource: 'auto' })
+    ])
+    expect(store.view().sessionGraphs['scene-1']?.nodes).toEqual([
+      expect.objectContaining({ sessionId: 'session-1', title: '修复卡片标题同步' })
+    ])
+  })
 })
