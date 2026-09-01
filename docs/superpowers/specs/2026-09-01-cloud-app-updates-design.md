@@ -45,7 +45,7 @@
 
 ## 发布与服务器
 
-- 第一阶段平台为 macOS arm64/x64，产物包括 DMG、ZIP、blockmap 和 `latest-mac.yml`。
+- 第一阶段平台为 macOS arm64/x64，产物包括 DMG、ZIP、blockmap 和 `stable-mac.yml`。
 - 更新源采用通用 HTTPS 静态目录；地址由构建环境变量 `MATOU_UPDATE_BASE_URL` 提供，默认占位 `https://UPDATE_HOST/matou/stable`。
 - stable 为第一阶段唯一通道；`MATOU_UPDATE_CHANNEL` 保留为构建/运行配置，默认 `stable`。
 - macOS 自动更新发行包必须使用 Developer ID Application 签名并完成 notarization。CI 从密钥环境读取证书和公证凭据。
@@ -67,4 +67,3 @@
 4. 点击“立即重启并更新”先完成 Runtime 关闭，再调用更新器。
 5. 打包配置生成更新清单并接受外部 HTTPS 更新地址。
 6. 主进程状态机、IPC、渲染器交互均有自动化测试；全量 typecheck、unit tests 和 package build 通过。
-

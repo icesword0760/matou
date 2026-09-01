@@ -17,7 +17,8 @@
     "test": "pnpm build:packages && pnpm -r --if-present run test",
     "typecheck": "pnpm -r --if-present run typecheck",
     "test:e2e": "pnpm build && playwright test tests/e2e/ai-host-control-cli.spec.ts tests/e2e/terminal-channel.spec.ts tests/e2e/prd-05-hierarchy.spec.ts tests/e2e/prd-05-lifecycle.spec.ts tests/e2e/prd-05-detached-window.spec.ts tests/e2e/prd-05-path-recovery.spec.ts tests/e2e/prd-05-multi-window.spec.ts tests/e2e/prd-03-workbench-information.spec.ts tests/e2e/prd-04-session-recovery.spec.ts tests/e2e/prd-01-agent-notifications.spec.ts tests/e2e/prd-02-bottom-hud.spec.ts tests/e2e/prd-06-session-fork.spec.ts tests/e2e/session-canvas-basics.spec.ts tests/e2e/session-canvas-navigation.spec.ts tests/e2e/session-dag-window.spec.ts tests/e2e/session-canvas-recovery.spec.ts tests/e2e/session-canvas-lifecycle.spec.ts tests/e2e/session-canvas-fork-worktree.spec.ts tests/e2e/session-shell-start-failure.spec.ts tests/e2e/session-load-existing-claude.spec.ts",
-    "package:dir": "pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir",
+    "package:dir": "MATOU_UPDATE_BASE_URL=${MATOU_UPDATE_BASE_URL:-https://updates.example.invalid/matou/stable} pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir",
+    "package:mac": "test -n \"$MATOU_UPDATE_BASE_URL\" && pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --mac dmg zip --${MATOU_MAC_ARCH:-arm64} --publish never",
     "test:packaged": "pnpm package:dir && playwright test tests/e2e/packaged-runtime.spec.ts",
     "clean": "pnpm -r --if-present run clean"
   },

@@ -91,7 +91,7 @@
 - [ ] Add `electron-updater` as a runtime dependency.
 - [ ] Configure macOS DMG and ZIP targets, hardened runtime, entitlements and generic HTTPS publish metadata.
 - [ ] Document artifact upload order, required server headers, signing variables and rollback procedure using exact commands.
-- [ ] Run package build with signing discovery disabled and verify `latest-mac.yml`, ZIP, DMG and blockmap files.
+- [ ] Run package build with signing discovery disabled and verify `stable-mac.yml`, ZIP, DMG and blockmap files.
 - [ ] Commit release configuration.
 
 ### Task 5: End-to-end verification
@@ -109,4 +109,3 @@
 - [ ] Run a packaged app with a local generic update feed or injected fixture and capture the four approved UI states.
 - [ ] Compare the screenshots with the approved Mockup for placement, density, state copy and activity protection.
 - [ ] Commit final verification fixes and report the remaining server/signing inputs required for the first real release.
-
