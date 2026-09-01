@@ -72,14 +72,17 @@ describe('Terminal pane', () => {
       childNode('child-2')
     ]
     render(<TerminalPane {...fixture()} resumable git={{ branch: 'feat/notification', dirty: false }}
-      childNodes={children} onOpenChildren={vi.fn()} onFork={onFork} onForkSibling={onForkSibling} />)
+      childNodes={children} onOpenChildren={vi.fn()} onLoadSession={vi.fn()}
+      onFork={onFork} onForkSibling={onForkSibling} />)
 
     const header = screen.getByRole('banner')
     expect(header.textContent).toContain('Claude 主会话')
     expect(header.textContent).toContain('feat/notification')
     expect(header.textContent).toContain('2 分支 · 1 运行中')
     expect(header.querySelector('.pane-header-content .child-session-badge')).toBeNull()
-    expect(header.querySelector('.terminal-pane-actions .child-session-badge')).not.toBeNull()
+    const actions = header.querySelector('.terminal-pane-actions')
+    expect(actions?.querySelector('.child-session-badge')).not.toBeNull()
+    expect(actions?.firstElementChild?.classList.contains('child-session-badge-wrap')).toBe(true)
     expect(screen.queryByRole('button', { name: '删除终端：Claude 主会话' })).toBeNull()
 
     const user = userEvent.setup()

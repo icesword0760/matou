@@ -185,6 +185,8 @@ export function TerminalPane(props: {
         {cwd && <span className="pane-cwd" title={cwd}>{cwd}</span>}
       </div>
       <div className="terminal-pane-actions">
+        {onOpenChildren && <ChildSessionBadge children={childNodes}
+          onOpen={() => void onOpenChildren(session.id)} />}
         {onLoadSession && <button className="pane-fork pane-load-session" type="button" draggable={false}
           aria-label={`载入 Claude Code 会话到“${session.title}”`} title="载入 Claude Code 会话"
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
@@ -192,8 +194,6 @@ export function TerminalPane(props: {
             event.stopPropagation()
             void onLoadSession(session.id)
           }}><LoadSessionIcon /></button>}
-        {onOpenChildren && <ChildSessionBadge children={childNodes}
-          onOpen={() => void onOpenChildren(session.id)} />}
         {showFork && <button className="pane-fork" type="button" draggable={false}
           aria-label={`从“${session.title}”创建子分支`} aria-disabled={!canFork}
           title={canFork ? '创建子分支' : '完成首轮对话后可创建分支'}
