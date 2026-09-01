@@ -190,6 +190,16 @@ export type SessionEnvironment =
       error?: string
     }
 
+export interface SessionEnvironmentBinding {
+  sessionId: SessionId
+  localExecutionContextId: ExecutionContextId
+  managedWorktreeId?: WorktreeId
+  activeTarget: 'local' | 'worktree'
+  state: 'ready' | 'missing' | 'recovering' | 'handoff' | 'failed'
+  updatedAt: number
+  environment: SessionEnvironment
+}
+
 export type SessionGitState =
   | {
       state: 'ready'

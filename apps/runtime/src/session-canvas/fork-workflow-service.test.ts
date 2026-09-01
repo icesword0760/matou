@@ -68,6 +68,15 @@ describe('ForkWorkflowService', () => {
       state: 'pending',
       worktree_mode: 'current'
     })
+    expect(database.get(
+      `SELECT local_execution_context_id, managed_worktree_id, active_target, state
+       FROM session_environment_bindings WHERE session_id = ?`, result.session!.id
+    )).toEqual({
+      local_execution_context_id: source.executionContextId,
+      managed_worktree_id: null,
+      active_target: 'local',
+      state: 'ready'
+    })
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
   })
 
@@ -156,6 +165,15 @@ describe('ForkWorkflowService', () => {
     await expect(exec('git', ['-C', workspaceRoot, 'status', '--porcelain']))
       .resolves.toMatchObject({ stdout: expect.stringContaining('source-only.txt') })
     expect(result.worktree!.branch).toMatch(/^matou\/隔离修复-api-[a-f0-9]{8}$/)
+    expect(database.get(
+      `SELECT local_execution_context_id, managed_worktree_id, active_target, state
+       FROM session_environment_bindings WHERE session_id = ?`, result.session!.id
+    )).toEqual({
+      local_execution_context_id: source.executionContextId,
+      managed_worktree_id: result.worktree!.id,
+      active_target: 'worktree',
+      state: 'ready'
+    })
   })
 
   it('reports that the new-worktree choice needs a Git repository before creating a node', async () => {

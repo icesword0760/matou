@@ -942,5 +942,118 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
 
       DROP TABLE provider_bindings_single_card;
     `
+  },
+  {
+    version: 22,
+    name: 'session-environment-bindings',
+    sql: `
+      CREATE TABLE session_environment_bindings (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        local_execution_context_id TEXT NOT NULL REFERENCES execution_contexts(id),
+        managed_worktree_id TEXT UNIQUE REFERENCES worktrees(id),
+        active_target TEXT NOT NULL CHECK (active_target IN ('local', 'worktree')),
+        state TEXT NOT NULL CHECK (
+          state IN ('ready', 'missing', 'recovering', 'handoff', 'failed')
+        ),
+        error_message TEXT,
+        updated_at INTEGER NOT NULL,
+        CHECK (active_target <> 'worktree' OR managed_worktree_id IS NOT NULL),
+        CHECK (active_target <> 'local' OR state <> 'missing')
+      ) STRICT;
+
+      WITH worktree_sessions AS (
+        SELECT
+          sessions.id AS session_id,
+          sessions.created_at,
+          worktrees.id AS worktree_id,
+          CASE WHEN EXISTS (
+            SELECT 1
+            FROM session_fork_intents AS fork
+            WHERE fork.session_id = sessions.id
+              AND fork.worktree_mode = 'new'
+              AND fork.worktree_id = worktrees.id
+          ) THEN 1 ELSE 0 END AS explicit_owner,
+          COUNT(*) OVER (PARTITION BY worktrees.id) AS context_session_count,
+          ROW_NUMBER() OVER (
+            PARTITION BY worktrees.id
+            ORDER BY
+              CASE WHEN EXISTS (
+                SELECT 1
+                FROM session_fork_intents AS fork
+                WHERE fork.session_id = sessions.id
+                  AND fork.worktree_mode = 'new'
+                  AND fork.worktree_id = worktrees.id
+              ) THEN 0 ELSE 1 END,
+              sessions.created_at,
+              sessions.id
+          ) AS ownership_rank
+        FROM sessions
+        JOIN execution_contexts
+          ON execution_contexts.id = sessions.execution_context_id
+         AND execution_contexts.kind = 'git-worktree'
+        JOIN worktrees
+          ON worktrees.execution_context_id = sessions.execution_context_id
+      ),
+      owned_worktrees AS (
+        SELECT session_id, worktree_id
+        FROM worktree_sessions
+        WHERE ownership_rank = 1
+          AND (explicit_owner = 1 OR context_session_count = 1)
+      )
+      INSERT INTO session_environment_bindings (
+        session_id, local_execution_context_id, managed_worktree_id,
+        active_target, state, error_message, updated_at
+      )
+      SELECT
+        sessions.id,
+        CASE WHEN owned_worktrees.worktree_id IS NULL
+          THEN sessions.execution_context_id
+          ELSE COALESCE(
+            (
+              SELECT source.execution_context_id
+              FROM session_fork_intents AS fork
+              JOIN sessions AS source ON source.id = fork.source_session_id
+              WHERE fork.session_id = sessions.id
+              LIMIT 1
+            ),
+            tasks.execution_context_id,
+            sessions.execution_context_id
+          )
+        END,
+        owned_worktrees.worktree_id,
+        CASE WHEN owned_worktrees.worktree_id IS NULL THEN 'local' ELSE 'worktree' END,
+        CASE
+          WHEN owned_worktrees.worktree_id IS NULL THEN 'ready'
+          WHEN worktrees.state IN ('ready', 'dirty', 'retained') THEN 'ready'
+          WHEN worktrees.state = 'creating' THEN 'recovering'
+          WHEN worktrees.state IN ('removed', 'removing') THEN 'missing'
+          ELSE 'failed'
+        END,
+        CASE
+          WHEN worktrees.state IN ('removed', 'removing') THEN 'managed Worktree is unavailable'
+          WHEN worktrees.state = 'failed' THEN 'managed Worktree failed before migration'
+          ELSE NULL
+        END,
+        sessions.updated_at
+      FROM sessions
+      JOIN tasks ON tasks.id = sessions.task_id
+      LEFT JOIN owned_worktrees ON owned_worktrees.session_id = sessions.id
+      LEFT JOIN worktrees ON worktrees.id = owned_worktrees.worktree_id;
+
+      CREATE INDEX session_environment_local_context_idx
+      ON session_environment_bindings(local_execution_context_id);
+
+      CREATE TRIGGER session_environment_binding_after_session_insert
+      AFTER INSERT ON sessions
+      BEGIN
+        INSERT INTO session_environment_bindings (
+          session_id, local_execution_context_id, managed_worktree_id,
+          active_target, state, error_message, updated_at
+        ) VALUES (
+          NEW.id, NEW.execution_context_id, NULL,
+          'local', 'ready', NULL, NEW.updated_at
+        );
+      END;
+    `
   }
 ]

@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21])
-    expect(result.currentVersion).toBe(21)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22])
+    expect(result.currentVersion).toBe(22)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -44,6 +44,7 @@ describe('MigrationRunner', () => {
         'session_runs',
         'provider_bindings',
         'session_fork_intents',
+        'session_environment_bindings',
         'session_canvas_memberships',
         'session_graph_summaries',
         'shell_history_blocks',
@@ -106,7 +107,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 21,
+      currentVersion: 22,
       backupPath: undefined
     })
   })
@@ -146,7 +147,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([21])
+    expect(result.appliedVersions).toEqual([21, 22])
     expect(() => database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state,
@@ -161,6 +162,162 @@ describe('MigrationRunner', () => {
        ) VALUES ('binding-a-duplicate', 'card-a', 'claude-code', 'provider-shared',
                  'available', '{}', 3, 3)`
     )).toThrow()
+  })
+
+  it('upgrades a real v21 database with independent local and owned Worktree bindings', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 21)).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('local-context', 'workspace', 'plain-directory', '/tmp/workspace', 1),
+              ('worktree-context', 'workspace', 'git-worktree', '/tmp/worktree', 2)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES ('worktree', 'worktree-context', '/tmp/workspace', '/tmp/worktree',
+                 'codex/task-6', 'ready', 2, 2)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at
+       ) VALUES ('task', 'workspace', 'local-context', 'Task', 'active', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO scenes (id, task_id, name, mode, created_at, updated_at)
+       VALUES ('scene', 'task', 'Scene', 'tile', 1, 1)`
+    )
+    for (const [id, context, cwd, createdAt] of [
+      ['local-session', 'local-context', '/tmp/workspace', 3],
+      ['worktree-session', 'worktree-context', '/tmp/worktree', 4]
+    ] as const) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', ?, 'shell', 'created', ?, ?, ?, ?, ?)`,
+        id, context, id, cwd, createdAt, createdAt, createdAt
+      )
+      database.run(
+        `INSERT INTO session_mounts (id, scene_id, session_id, created_at)
+         VALUES (?, 'scene', ?, ?)`,
+        `mount-${id}`, id, createdAt
+      )
+    }
+    const relationEvent = database.run(
+      `INSERT INTO session_relation_events (
+         event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+         relation_kind, metadata_json, command_id, occurred_at
+       ) VALUES ('event', 'relation', 'created', 'task', 'worktree-session',
+                 'local-session', 'derived-from', '{}', 'command', 5)`
+    )
+    database.run(
+      `INSERT INTO session_relations_current (
+         relation_id, task_id, from_session_id, to_session_id, relation_kind,
+         metadata_json, created_at, updated_at, source_event_sequence
+       ) VALUES ('relation', 'task', 'worktree-session', 'local-session',
+                 'derived-from', '{}', 5, 5, ?)`,
+      Number(relationEvent.lastInsertRowid)
+    )
+    const before = {
+      sessions: database.get<{ count: number }>('SELECT COUNT(*) AS count FROM sessions')!.count,
+      relations: database.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM session_relations_current'
+      )!.count
+    }
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.appliedVersions).toEqual([22])
+    expect(result.currentVersion).toBe(22)
+    expect(database.all(
+      `SELECT session_id, local_execution_context_id, managed_worktree_id,
+              active_target, state, error_message, updated_at
+       FROM session_environment_bindings ORDER BY session_id`
+    )).toEqual([
+      {
+        session_id: 'local-session', local_execution_context_id: 'local-context',
+        managed_worktree_id: null, active_target: 'local', state: 'ready',
+        error_message: null, updated_at: 3
+      },
+      {
+        session_id: 'worktree-session', local_execution_context_id: 'local-context',
+        managed_worktree_id: 'worktree', active_target: 'worktree', state: 'ready',
+        error_message: null, updated_at: 4
+      }
+    ])
+    expect(database.get<{ count: number }>('SELECT COUNT(*) AS count FROM sessions')!.count)
+      .toBe(before.sessions)
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM session_relations_current'
+    )!.count).toBe(before.relations)
+  })
+
+  it('enforces v22 ownership, state, foreign-key, and cascade constraints', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('local', 'workspace', 'plain-directory', '/tmp/workspace', 1),
+              ('worktree-context', 'workspace', 'git-worktree', '/tmp/worktree', 1)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES ('worktree', 'worktree-context', '/tmp/workspace', '/tmp/worktree',
+                 'codex/task-6', 'ready', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at
+       ) VALUES ('task', 'workspace', 'local', 'Task', 'active', 1, 1)`
+    )
+    for (const id of ['first', 'second']) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', 'local', 'shell', 'created', ?, 1, 1, 1)`,
+        id, id
+      )
+    }
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'worktree', active_target = 'worktree'
+       WHERE session_id = 'first'`
+    )
+
+    expect(() => database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'worktree', active_target = 'worktree'
+       WHERE session_id = 'second'`
+    )).toThrow()
+    expect(() => database.run(
+      `UPDATE session_environment_bindings
+       SET active_target = 'invalid' WHERE session_id = 'second'`
+    )).toThrow()
+    expect(() => database.run(
+      `UPDATE session_environment_bindings
+       SET active_target = 'local', state = 'missing' WHERE session_id = 'second'`
+    )).toThrow()
+    expect(() => database.run("DELETE FROM worktrees WHERE id = 'worktree'")).toThrow()
+
+    database.run("DELETE FROM sessions WHERE id = 'first'")
+    expect(database.get(
+      "SELECT session_id FROM session_environment_bindings WHERE session_id = 'first'"
+    )).toBeUndefined()
+    expect(() => database.run("DELETE FROM worktrees WHERE id = 'worktree'"))
+      .not.toThrow()
   })
 
   it('rejects an edited migration whose stored checksum differs', async () => {
@@ -187,7 +344,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[17]!,
       FOUNDATION_MIGRATIONS[18]!,
       FOUNDATION_MIGRATIONS[19]!,
-      FOUNDATION_MIGRATIONS[20]!
+      FOUNDATION_MIGRATIONS[20]!,
+      FOUNDATION_MIGRATIONS[21]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -208,7 +366,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 21')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 22')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -243,7 +401,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21])
+    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
@@ -307,7 +465,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21])
+    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22])
     expect(database.all(
       `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
        FROM session_canvas_memberships ORDER BY sibling_created_seq`
@@ -386,7 +544,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([19, 20, 21])
+    expect(result.appliedVersions).toEqual([19, 20, 21, 22])
     expect(database.get<{ state: string }>(
       `SELECT state FROM session_fork_intents WHERE session_id = 'child'`
     )).toEqual({ state: 'succeeded' })

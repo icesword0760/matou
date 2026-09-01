@@ -21,6 +21,7 @@ import {
 import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainMutationContext, DomainTransactionManager } from '../storage/domain-transaction'
+import { SessionEnvironmentRepository } from '../session/session-environment-repository'
 import { WorktreeService, type WorktreeSetupStep } from '../worktrees/worktree-service'
 import { createGitBranchName, validateDisplayName } from './branch-name'
 import { projectSceneGraphFrom } from './session-graph-repository'
@@ -145,6 +146,7 @@ export class ForkWorkflowService {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
   readonly #worktrees: WorktreeService
+  readonly #environments: SessionEnvironmentRepository
   readonly #setupPolicyForWorkspace: (workspaceId: string) => WorktreeSetupStep[]
 
   constructor(
@@ -160,6 +162,7 @@ export class ForkWorkflowService {
     this.#database = database
     this.#transactions = transactions
     this.#worktrees = new WorktreeService(database, transactions, dependencies)
+    this.#environments = new SessionEnvironmentRepository(database)
     this.#setupPolicyForWorkspace = dependencies.setupPolicyForWorkspace ?? (() => [])
   }
 
@@ -543,11 +546,12 @@ export class ForkWorkflowService {
     preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     return this.#transactions.execute(command, ({ tx, emit }) => {
-      tx.run(
-        `UPDATE sessions SET execution_context_id = ?, cwd = ?, updated_at = ?,
-           version = version + 1 WHERE id = ?`,
-        worktree.executionContextId, worktree.path, input.now, sessionId
-      )
+      this.#environments.bindOwnedWorktree({
+        sessionId,
+        worktreeId: worktree.id,
+        activate: true,
+        now: input.now
+      }, tx)
       tx.run(
         `UPDATE session_fork_intents SET worktree_id = ?, target_execution_context_id = ?,
            worktree_path = ?, branch_name = ?, updated_at = ? WHERE session_id = ?`,

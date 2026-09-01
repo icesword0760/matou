@@ -4,6 +4,8 @@ import type {
   ProviderRestoreState,
   SceneSessionGraph,
   SessionCanvasMembership,
+  SessionEnvironment,
+  SessionGitState,
   SessionGraphEdge,
   SessionGraphNode,
   SessionKind,
@@ -48,6 +50,16 @@ interface GraphRow extends MembershipRow {
   branch_name: string | null
   detached_window_id: string | null
   latest_lines_json: string | null
+  environment_active_target: 'local' | 'worktree' | null
+  environment_state: 'ready' | 'missing' | 'recovering' | 'handoff' | 'failed' | null
+  environment_error: string | null
+  local_execution_context_id: string | null
+  local_environment_path: string | null
+  managed_worktree_id: string | null
+  managed_worktree_execution_context_id: string | null
+  managed_worktree_path: string | null
+  managed_worktree_branch: string | null
+  managed_worktree_state: string | null
 }
 
 interface EdgeRow {
@@ -162,9 +174,43 @@ export function projectSceneGraphFrom(
       'SELECT id, layout_revision FROM scenes WHERE id = ?',
       sceneId
     )
-    if (!scene) throw new Error(`Scene ${sceneId} does not exist`)
+  if (!scene) throw new Error(`Scene ${sceneId} does not exist`)
 
-    const rows = source.all<GraphRow>(
+  const hasEnvironmentBindings = source.get<{ present: number }>(
+    `SELECT 1 AS present FROM sqlite_master
+     WHERE type = 'table' AND name = 'session_environment_bindings'`
+  ) !== undefined
+  const environmentProjection = hasEnvironmentBindings
+    ? `environment.active_target AS environment_active_target,
+         environment.state AS environment_state,
+         environment.error_message AS environment_error,
+         environment.local_execution_context_id,
+         local_environment.cwd AS local_environment_path,
+         environment.managed_worktree_id,
+         managed_worktree.execution_context_id AS managed_worktree_execution_context_id,
+         managed_worktree.worktree_path AS managed_worktree_path,
+         managed_worktree.branch_name AS managed_worktree_branch,
+         managed_worktree.state AS managed_worktree_state,`
+    : `NULL AS environment_active_target,
+         NULL AS environment_state,
+         NULL AS environment_error,
+         NULL AS local_execution_context_id,
+         NULL AS local_environment_path,
+         NULL AS managed_worktree_id,
+         NULL AS managed_worktree_execution_context_id,
+         NULL AS managed_worktree_path,
+         NULL AS managed_worktree_branch,
+         NULL AS managed_worktree_state,`
+  const environmentJoins = hasEnvironmentBindings
+    ? `LEFT JOIN session_environment_bindings AS environment
+         ON environment.session_id = sessions.id
+       LEFT JOIN execution_contexts AS local_environment
+         ON local_environment.id = environment.local_execution_context_id
+       LEFT JOIN worktrees AS managed_worktree
+         ON managed_worktree.id = environment.managed_worktree_id`
+    : ''
+
+  const rows = source.all<GraphRow>(
       `SELECT
          membership.*,
          sessions.task_id,
@@ -189,6 +235,7 @@ export function projectSceneGraphFrom(
          fork.attempt_count AS fork_attempt,
          worktrees.worktree_path,
          worktrees.branch_name,
+         ${environmentProjection}
          detached.native_window_key AS detached_window_id
          , summary.latest_lines_json
        FROM session_canvas_memberships AS membership
@@ -204,6 +251,7 @@ export function projectSceneGraphFrom(
          )
        LEFT JOIN session_fork_intents AS fork ON fork.session_id = sessions.id
        LEFT JOIN worktrees ON worktrees.execution_context_id = sessions.execution_context_id
+       ${environmentJoins}
        LEFT JOIN scene_windows AS detached
          ON detached.scene_id = membership.scene_id
         AND detached.state = 'detached'
@@ -255,6 +303,8 @@ export function projectSceneGraphFrom(
 
     const nodes: SessionGraphNode[] = rows.map((row) => {
       const counts = childCounts.get(row.session_id)
+      const environment = mapEnvironment(row)
+      const git = mapGitState(row)
       return {
         sessionId: row.session_id,
         sceneId: row.scene_id,
@@ -279,6 +329,8 @@ export function projectSceneGraphFrom(
           providerCanFork(row.provider_metadata_json),
         title: row.title,
         cwd: row.cwd,
+        ...(environment === undefined ? {} : { environment }),
+        ...(git === undefined ? {} : { git }),
         sharedWorkingDirectory: (cwdUseCounts.get(row.cwd) ?? 0) > 1,
         ...(row.worktree_path === null || row.branch_name === null ? {} : {
           worktree: {
@@ -331,6 +383,79 @@ export function projectSceneGraphFrom(
       edges,
       ...(focusedSessionId === undefined ? {} : { focusedSessionId })
     }
+}
+
+function mapEnvironment(row: GraphRow): SessionEnvironment | undefined {
+  if (
+    row.environment_active_target === null ||
+    row.environment_state === null ||
+    row.local_execution_context_id === null ||
+    row.local_environment_path === null
+  ) return undefined
+
+  if (row.environment_active_target === 'local') {
+    if (row.environment_state === 'missing') return undefined
+    if (row.environment_state === 'failed') {
+      return {
+        kind: 'local', state: 'failed', path: row.local_environment_path,
+        localExecutionContextId: row.local_execution_context_id,
+        error: row.environment_error ?? 'Local environment failed'
+      }
+    }
+    if (row.environment_state === 'ready') {
+      return {
+        kind: 'local', state: 'ready', path: row.local_environment_path,
+        localExecutionContextId: row.local_execution_context_id
+      }
+    }
+    return {
+      kind: 'local', state: row.environment_state, path: row.local_environment_path,
+      localExecutionContextId: row.local_execution_context_id,
+      ...(row.environment_error === null ? {} : { error: row.environment_error })
+    }
+  }
+
+  if (
+    row.managed_worktree_id === null ||
+    row.managed_worktree_execution_context_id === null ||
+    row.managed_worktree_path === null
+  ) return undefined
+  const base = {
+    kind: 'worktree' as const,
+    path: row.managed_worktree_path,
+    localExecutionContextId: row.local_execution_context_id,
+    worktreeId: row.managed_worktree_id,
+    worktreeExecutionContextId: row.managed_worktree_execution_context_id
+  }
+  if (row.environment_state === 'missing' || row.environment_state === 'failed') {
+    return {
+      ...base,
+      state: row.environment_state,
+      error: row.environment_error ?? `Worktree environment is ${row.environment_state}`
+    }
+  }
+  if (row.environment_state === 'ready') return { ...base, state: 'ready' }
+  return {
+    ...base,
+    state: row.environment_state,
+    ...(row.environment_error === null ? {} : { error: row.environment_error })
+  }
+}
+
+function mapGitState(row: GraphRow): SessionGitState | undefined {
+  if (row.environment_active_target !== 'worktree') return undefined
+  if (
+    row.environment_state !== 'ready' ||
+    row.managed_worktree_branch === null ||
+    !['ready', 'dirty', 'retained'].includes(row.managed_worktree_state ?? '')
+  ) {
+    return { state: 'unavailable', dirty: false }
+  }
+  return {
+    state: 'ready',
+    branch: row.managed_worktree_branch,
+    dirty: row.managed_worktree_state === 'dirty' || row.managed_worktree_state === 'retained'
+  }
 }
 
 function mapMembership(row: MembershipRow): SessionCanvasMembership {
