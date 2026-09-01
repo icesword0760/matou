@@ -719,6 +719,12 @@ test.describe('horizontal sibling navigation', () => {
       await expect.poll(async () => foregroundSurfaces.evaluateAll((surfaces) =>
         surfaces.every((surface) => /^[1-9][0-9]*$/.test(surface.getAttribute('data-pid') ?? ''))
       )).toBe(true)
+      const identities = await foregroundSurfaces.evaluateAll((surfaces) => surfaces.map((surface) => ({
+        sessionId: surface.getAttribute('data-session-id'),
+        pid: surface.getAttribute('data-pid')
+      })))
+      expect(new Set(identities.map(({ sessionId }) => sessionId)).size).toBe(16)
+      expect(new Set(identities.map(({ pid }) => pid)).size).toBe(16)
 
       await fixture.page.evaluate(() => {
         type ResizeProbe = {
@@ -791,14 +797,37 @@ test.describe('horizontal sibling navigation', () => {
         expect(maximumMessagesInOneSecond(sessionEntries.map(({ at }) => at))).toBeLessThanOrEqual(60)
       }
 
+      const finalActive = activeSurface(fixture.page)
+      const finalActiveSessionId = await finalActive.getAttribute('data-session-id')
+      expect(finalActiveSessionId).toBeTruthy()
+      const finalTextarea = finalActive.locator('.xterm-helper-textarea')
       const marker = `__FINAL_STTY_${Date.now()}__`
       const sttyResultPath = `${fixture.rootDirectory}/final-stty-size.txt`
-      await terminalCommand(active, `stty size > '${sttyResultPath}'; printf '${marker}\\n'`)
+      await finalTextarea.focus()
+      await finalTextarea.pressSequentially(
+        `stty size > '${sttyResultPath}'; printf '${marker}\\n'`,
+        { delay: 2 }
+      )
+      await fixture.page.evaluate(() => {
+        const scope = window as typeof window & {
+          __matouResizeProbe?: { entries: unknown[] }
+        }
+        if (scope.__matouResizeProbe) scope.__matouResizeProbe.entries = []
+      })
+      await fixture.app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.setSize(1200, 650)
+      )
+      await expect.poll(async () => (await readResizeEntries(fixture.page))
+        .filter(({ sessionId }) => sessionId === finalActiveSessionId).length).toBeGreaterThan(0)
+      await waitForResizeProbeToSettle(fixture.page, finalActiveSessionId!)
+      await finalTextarea.press('Enter')
       await expect.poll(async () => readText(sttyResultPath).catch(() => '')).toMatch(/^\d+ \d+\n$/)
-      await expect(active.locator('.xterm-rows')).toContainText(marker)
+      await expect(finalActive.locator('.xterm-rows')).toContainText(marker)
       const size = (await readText(sttyResultPath)).trim().match(/^(\d+) (\d+)$/)
       expect(size).not.toBeNull()
-      const finalResize = entries.filter(({ sessionId }) => sessionId === activeSessionId).at(-1)
+      await waitForResizeProbeToSettle(fixture.page, finalActiveSessionId!)
+      const finalEntries = await readResizeEntries(fixture.page)
+      const finalResize = finalEntries.filter(({ sessionId }) => sessionId === finalActiveSessionId).at(-1)
       expect(finalResize).toBeDefined()
       expect({ rows: Number(size![1]), cols: Number(size![2]) }).toEqual({
         rows: finalResize!.rows, cols: finalResize!.cols
@@ -832,4 +861,39 @@ function maximumMessagesInOneSecond(timestamps: number[]): number {
     maximum = Math.max(maximum, right - left + 1)
   }
   return maximum
+}
+
+type ResizeProbeEntry = { sessionId: string; cols: number; rows: number; at: number }
+
+async function readResizeEntries(page: import('@playwright/test').Page): Promise<ResizeProbeEntry[]> {
+  return page.evaluate(() => (
+    window as typeof window & {
+      __matouResizeProbe?: { entries: ResizeProbeEntry[] }
+    }
+  ).__matouResizeProbe?.entries ?? [])
+}
+
+async function waitForResizeProbeToSettle(
+  page: import('@playwright/test').Page,
+  sessionId: string
+): Promise<void> {
+  await page.evaluate(async (targetSessionId) => {
+    const scope = window as typeof window & {
+      __matouResizeProbe?: { entries: ResizeProbeEntry[] }
+    }
+    await new Promise<void>((resolve) => {
+      let previous = ''
+      let stableFrames = 0
+      const observe = () => {
+        const entries = scope.__matouResizeProbe?.entries ?? []
+        const last = entries.filter(({ sessionId }) => sessionId === targetSessionId).at(-1)
+        const current = last ? `${last.cols}x${last.rows}:${entries.length}` : ''
+        stableFrames = current !== '' && current === previous ? stableFrames + 1 : 0
+        previous = current
+        if (stableFrames >= 4) resolve()
+        else requestAnimationFrame(observe)
+      }
+      requestAnimationFrame(observe)
+    })
+  }, sessionId)
 }

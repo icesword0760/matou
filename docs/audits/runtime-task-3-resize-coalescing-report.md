@@ -18,8 +18,8 @@
 | GREEN：fake-rAF 单测 | `pnpm --filter @matou/desktop exec vitest run src/renderer/src/terminal/resize-coalescer.test.ts` | 1 file / 5 tests 通过；覆盖单帧 100 次 offer、跨帧去重、60Hz 节流、flush、dispose |
 | RED：Runtime 二次去重 | `pnpm --filter @matou/runtime exec vitest run src/session/pty-session.test.ts` | 收到 2 个相同 resize Journal frame，预期 1 个；目标失败成立 |
 | GREEN：Runtime + Journal | 同一命令复跑 | 1 file / 2 tests 通过；重复尺寸仅保留 1 个 frame |
-| 组件回归 | `pnpm --filter @matou/desktop exec vitest run ...resize-coalescer.test.ts ...TerminalSurface.test.tsx` | 2 files / 26 tests 通过 |
-| 真实 Electron / PTY | `playwright ...session-canvas-navigation.spec.ts --grep "coalesces real window dragging"` | 16 个真实前台 Shell、2.1 秒真实窗口尺寸变化、真实 MessagePort、真实 PTY 全部通过 |
+| 组件回归 | `pnpm --filter @matou/desktop exec vitest run ...resize-coalescer.test.ts ...TerminalSurface.test.tsx` | 2 files / 27 tests 通过 |
+| 真实 Electron / PTY | `playwright ...session-canvas-navigation.spec.ts --grep "coalesces real window dragging" --repeat-each=3` | 16 个唯一 Session / PTY PID、2.1 秒真实窗口尺寸变化、最终独立尺寸落点，连续 3 次全部通过 |
 | 构建 | `pnpm build:packages && pnpm build:runtime && pnpm build:desktop` | packages、Runtime、Electron main/preload/renderer 全部构建成功 |
 
 ## 真实验收场景
@@ -28,7 +28,7 @@
 2. 在 Renderer 的真实 `MessagePort.postMessage` 边界做只读计数，消息仍原样进入 Runtime。
 3. 以 8ms 间隔连续改变真实 `BrowserWindow` 尺寸 2.1 秒，同时在活动终端键入并执行输出命令。
 4. 对每个产生尺寸变化的会话计算任意连续 1 秒窗口内的 `terminal.resize` 数量，均不超过 60。
-5. 通过活动终端执行真实 `stty size` 并写入临时文件，结果与该 xterm 发出的最终 rows/cols 完全一致。
+5. 先输入但不提交 `stty size`，再移动到独立最终窗口尺寸；等待活动会话的 resize 流连续 4 个动画帧保持稳定后提交，随后重新读取 probe。真实 PTY 结果与当前最终 rows/cols 完全一致。
 6. 终端画面出现输入回显 marker，证明窗口拖动期间输入链路没有中断。
 
 ## 边界说明
