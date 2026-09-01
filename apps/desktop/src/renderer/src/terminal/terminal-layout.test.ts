@@ -25,6 +25,14 @@ describe('terminal grid layout', () => {
     expect(hierarchyCss).toMatch(/\.tab-item\s*\{[^}]*-webkit-app-region:\s*no-drag;/)
     expect(hierarchyCss).toContain('button { -webkit-app-region: no-drag; }')
   })
+
+  it('keeps the Task delete action visually destructive in dark and light menus', () => {
+    const hierarchyCss = css('hierarchy/hierarchy.css')
+
+    expect(hierarchyCss).toMatch(/\.workbench-action-popover \.is-delete\s*\{[^}]*border-top:[^}]*color:\s*#ef7770;/)
+    expect(hierarchyCss).toMatch(/\.light-theme \.workbench-action-popover \.is-delete\s*\{[^}]*color:\s*#c5443e;/)
+    expect(hierarchyCss).toMatch(/\.light-theme \.workbench-action-popover \.is-delete:hover\s*\{[^}]*background:\s*#fff1f0;/)
+  })
 })
 
 function css(relativePath: string): string {
