@@ -324,9 +324,10 @@ export function TerminalPane(props: {
       onConfirm={() => setConfirmationOpen(false)} />}
     {confirmationOpen && flow.action !== 'hide-window' && <ConfirmationSequence steps={flow.steps}
       onCancel={() => setConfirmationOpen(false)} onComplete={() => remove(true)} />}
-    {removalOpen && <ConfirmDialog title={`移除“${session.title}”及其整个分支？`}
+    {removalOpen && <ConfirmDialog title={removalTitle(session.title, descendantCount)}
       body={removalBody(session.title, childNodes.length, descendantCount, descendantImpact)}
-      confirmLabel={removalConfirmLabel(descendantImpact)} cancelLabel="取消" scope="session"
+      confirmLabel={removalConfirmLabel(descendantImpact, descendantCount)} confirmTone="danger"
+      cancelLabel="取消" scope="session"
       onCancel={() => setRemovalOpen(false)} onConfirm={() => {
         setRemovalOpen(false)
         void Promise.resolve(onRemoveBranch?.(session.id, descendantCount > 0)).catch(NOOP)
@@ -399,16 +400,25 @@ export function removalBody(
     impact.running > 0 ? `${impact.running} 个运行中` : '',
     impact.needsInput > 0 ? `${impact.needsInput} 个待输入` : ''
   ].filter(Boolean).join('、')
-  const scope = descendantCount > 0
-    ? `该节点包含 ${directChildCount} 个直接子节点，共 ${descendantCount} 个后代节点。`
-    : '该节点没有子节点。'
+  if (descendantCount === 0) {
+    return `该节点没有子节点。移除后，“${title}”会从会话列表和 DAG 中消失。项目文件和工作树不会被删除。`
+  }
+  const scope = `该节点包含 ${directChildCount} 个直接子节点，共 ${descendantCount} 个后代节点。`
   const process = activity ? `其中 ${activity}的会话将先停止。` : ''
   return `${scope}${process}移除后，“${title}”及受影响节点会同时从会话列表和 DAG 中消失。项目文件和工作树不会被删除。`
 }
 
-export function removalConfirmLabel(impact: { running: number; needsInput: number }): string {
+export function removalTitle(title: string, descendantCount: number): string {
+  return descendantCount > 0 ? `移除“${title}”及其整个分支？` : `移除“${title}”？`
+}
+
+export function removalConfirmLabel(
+  impact: { running: number; needsInput: number },
+  descendantCount: number
+): string {
   const count = impact.running + impact.needsInput
-  return count > 0 ? `停止 ${count} 个会话并移除` : '移除整个分支'
+  if (count > 0) return `停止 ${count} 个会话并移除`
+  return descendantCount > 0 ? '移除整个分支' : '移除'
 }
 
 function BranchChildIcon() {

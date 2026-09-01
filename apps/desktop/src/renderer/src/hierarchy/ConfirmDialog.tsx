@@ -7,6 +7,7 @@ export function ConfirmDialog(props: {
   title: string
   body: string
   confirmLabel: string
+  confirmTone?: 'default' | 'danger'
   cancelLabel?: string
   showCancel?: boolean
   scope?: 'viewport' | 'session'
@@ -42,7 +43,8 @@ export function ConfirmDialog(props: {
     <p>{props.body}</p>
     <footer>
       {props.showCancel !== false && <button onClick={props.onCancel}>{props.cancelLabel ?? '取消'}</button>}
-      <button className="dialog-primary" onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
+      <button className={`dialog-primary${props.confirmTone === 'danger' ? ' is-danger' : ''}`}
+        onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
     </footer>
   </div></div>
   if (props.scope !== 'session') return overlay

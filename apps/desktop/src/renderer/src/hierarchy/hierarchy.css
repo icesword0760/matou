@@ -406,7 +406,10 @@ button { -webkit-app-region: no-drag; }
 .rename-dialog footer, [role="alertdialog"] footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 24px; }
 .rename-dialog footer button, [role="alertdialog"] footer button { min-width: 80px; height: 32px; padding: 0 16px; border: 1px solid #383838; border-radius: 8px; color: #f2f2f2; background: transparent; cursor: pointer; font-size: 14px; }
 .rename-dialog footer button:hover, [role="alertdialog"] footer button:hover { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.04); }
-.rename-dialog footer .dialog-primary, [role="alertdialog"] footer .dialog-primary { border: 0; color: #fff; background: #4e525e; }
+.rename-dialog footer .dialog-primary, [role="alertdialog"] footer .dialog-primary { border: 0; color: #fff; background: #347fd6; }
+.rename-dialog footer .dialog-primary:hover, [role="alertdialog"] footer .dialog-primary:hover { border-color: transparent; color: #fff; background: #2f72c1; }
+.dialog-primary.is-danger { border-color: transparent; color: #fff; background: #c5443e; }
+.dialog-primary.is-danger:hover { border-color: transparent; color: #fff; background: #ad3733; }
 .rename-dialog footer button:disabled { opacity: .45; cursor: not-allowed; }
 [role="alertdialog"] > p { margin: 0; padding: 8px 24px 24px; color: rgba(255,255,255,.7); font-size: 14px; line-height: 1.6; white-space: pre-line; }
 
@@ -745,6 +748,10 @@ button { -webkit-app-region: no-drag; }
 .light-theme [role="alertdialog"] > p { color: rgba(0,0,0,.65); }
 .light-theme .rename-dialog footer button,
 .light-theme [role="alertdialog"] footer button { border-color: rgba(0,0,0,.12); color: rgba(0,0,0,.7); }
+.light-theme .rename-dialog footer .dialog-primary,
+.light-theme [role="alertdialog"] footer .dialog-primary { border-color: transparent; color: #fff; background: #347fd6; }
+.light-theme .dialog-primary.is-danger { border-color: transparent; color: #fff; background: #c5443e; }
+.light-theme .dialog-primary.is-danger:hover { border-color: transparent; color: #fff; background: #ad3733; }
 .light-theme .notification-center { color: #2f3547; background: #fff; box-shadow: 0 4px 20px rgba(0,0,0,.1); }
 .light-theme .notification-center__title,
 .light-theme .notification-item__title,

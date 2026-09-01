@@ -33,6 +33,14 @@ describe('terminal grid layout', () => {
     expect(hierarchyCss).toMatch(/\.light-theme \.workbench-action-popover \.is-delete\s*\{[^}]*color:\s*#c5443e;/)
     expect(hierarchyCss).toMatch(/\.light-theme \.workbench-action-popover \.is-delete:hover\s*\{[^}]*background:\s*#fff1f0;/)
   })
+
+  it('keeps confirmation actions readable and removal actions destructive', () => {
+    const hierarchyCss = css('hierarchy/hierarchy.css')
+
+    expect(hierarchyCss).toMatch(/\[role="alertdialog"\] footer \.dialog-primary\s*\{[^}]*color:\s*#fff;[^}]*background:\s*#347fd6;/)
+    expect(hierarchyCss).toMatch(/\.dialog-primary\.is-danger\s*\{[^}]*color:\s*#fff;[^}]*background:\s*#c5443e;/)
+    expect(hierarchyCss).toMatch(/\.light-theme \[role="alertdialog"\] footer \.dialog-primary\s*\{[^}]*color:\s*#fff;/)
+  })
 })
 
 function css(relativePath: string): string {
