@@ -1,6 +1,6 @@
 # Matou AI 宿主控制与 `mt` CLI Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 让每个 Matou 托管的 Shell、Claude Code、Codex 会话自动获得 `mt` CLI 和受限宿主控制身份，使用户或 AI 能在不改变界面焦点、滚动位置与通知状态的前提下识别、查看和输入其他终端。
 
@@ -62,13 +62,13 @@ export type AllowedControlKey =
 
 **Steps:**
 
-- [ ] 在 `host-control-server.test.ts` 写失败测试：token 能识别 caller、`host.identify` 返回 caller、自身 token 只含首期 scopes。
-- [ ] 写失败测试：相对/父子/同级序号 selector 被原样交给 backend；过期 revision 返回 `CONFLICT`。
-- [ ] 写失败测试：`send-text` 把 `text + submit` 作为一个 backend 动作；新键位全通过、任意宏仍返回 `UNSUPPORTED`。
-- [ ] 运行 `pnpm --filter @matou/runtime test -- host-control-server.test.ts`，确认因新协议缺失而失败。
-- [ ] 提取 `host-control-types.ts`，更新 token 与 server dispatch；删除 Host Control 对 task 写入/移动 scopes 的首期 token依赖，但保留内部 server 代码兼容既有调用。
-- [ ] 重跑目标测试并运行 `pnpm --filter @matou/runtime typecheck`。
-- [ ] 提交：`git add apps/runtime/src/control/host-control-{types,server}.ts apps/runtime/src/control/host-control-server.test.ts && git commit -m "feat(control): define caller-aware terminal protocol"`。
+- [x] 在 `host-control-server.test.ts` 写失败测试：token 能识别 caller、`host.identify` 返回 caller、自身 token 只含首期 scopes。
+- [x] 写失败测试：相对/父子/同级序号 selector 被原样交给 backend；过期 revision 返回 `CONFLICT`。
+- [x] 写失败测试：`send-text` 把 `text + submit` 作为一个 backend 动作；新键位全通过、任意宏仍返回 `UNSUPPORTED`。
+- [x] 运行 `pnpm --filter @matou/runtime test -- host-control-server.test.ts`，确认因新协议缺失而失败。
+- [x] 提取 `host-control-types.ts`，更新 token 与 server dispatch；删除 Host Control 对 task 写入/移动 scopes 的首期 token依赖，但保留内部 server 代码兼容既有调用。
+- [x] 重跑目标测试并运行 `pnpm --filter @matou/runtime typecheck`。
+- [x] 提交：`git add apps/runtime/src/control/host-control-{types,server}.ts apps/runtime/src/control/host-control-server.test.ts && git commit -m "feat(control): define caller-aware terminal protocol"`。
 
 ## Task 2: 建立 Matou 窗口/画布/DAG 权威拓扑投影
 
@@ -108,14 +108,14 @@ export interface HostTarget {
 
 **Steps:**
 
-- [ ] 用内存数据库写失败测试，构造两个窗口、同名工作空间/事项、两个画布、父子两层、屏外 sibling、归档节点和 detached 节点。
-- [ ] 断言 `identify(caller)` 返回完整层级；`listCurrentLevel` 只含同层；`listAll` 可跨窗口；父节点不混入 ordinal。
-- [ ] 断言 left/right、parent、child:N、sibling:N 的解析结果；边界返回 `TARGET_NOT_FOUND`；同名搜索由 CLI 层保留多候选而非静默取首个。
-- [ ] 断言排序变化导致 `projectionRevision` 改变，旧 ordinal 请求返回 `CONFLICT`。
-- [ ] 运行 `pnpm --filter @matou/runtime test -- host-topology-projector.test.ts runtime-control-backend.test.ts`，确认失败。
-- [ ] 实现 projector，并让 backend 的 `identify/listTargets/resolveTarget` 全部依赖该 projector；移除旧的全局 `surface:N` 平面排序。
-- [ ] 重跑测试与 runtime typecheck。
-- [ ] 提交：`git add apps/runtime/src/control/host-topology-projector* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): project Matou window and DAG topology"`。
+- [x] 用内存数据库写失败测试，构造两个窗口、同名工作空间/事项、两个画布、父子两层、屏外 sibling、归档节点和 detached 节点。
+- [x] 断言 `identify(caller)` 返回完整层级；`listCurrentLevel` 只含同层；`listAll` 可跨窗口；父节点不混入 ordinal。
+- [x] 断言 left/right、parent、child:N、sibling:N 的解析结果；边界返回 `TARGET_NOT_FOUND`；同名搜索由 CLI 层保留多候选而非静默取首个。
+- [x] 断言排序变化导致 `projectionRevision` 改变，旧 ordinal 请求返回 `CONFLICT`。
+- [x] 运行 `pnpm --filter @matou/runtime test -- host-topology-projector.test.ts runtime-control-backend.test.ts`，确认失败。
+- [x] 实现 projector，并让 backend 的 `identify/listTargets/resolveTarget` 全部依赖该 projector；移除旧的全局 `surface:N` 平面排序。
+- [x] 重跑测试与 runtime typecheck。
+- [x] 提交：`git add apps/runtime/src/control/host-topology-projector* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): project Matou window and DAG topology"`。
 
 ## Task 3: 将“当前屏幕”与 Journal 历史拆开
 
@@ -140,14 +140,14 @@ export interface HostTarget {
 
 **Steps:**
 
-- [ ] 添加 `@xterm/headless@6.0.0`，锁定 lockfile。
-- [ ] 写失败测试覆盖：回车覆盖、清屏、光标移动、resize、宽字符、长输出滚屏、ANSI 颜色不污染文本。
-- [ ] 写 backend 失败测试：active 读取 screen；inactive journal replay 得到相同 screen；history 与 current 返回不同 source/内容。
-- [ ] 运行 `pnpm --filter @matou/runtime test -- terminal-screen-projector.test.ts runtime-control-backend.test.ts`，确认失败。
-- [ ] 实现 projector 与 `PtySession.snapshotScreen()`；确保 projector 写入异步完成后 snapshot 才返回。
-- [ ] 实现有界历史元数据，UTF-8 截断从完整 code point 起始，避免首字符变成替换符。
-- [ ] 重跑相关测试、runtime typecheck。
-- [ ] 提交：`git add apps/runtime/package.json pnpm-lock.yaml apps/runtime/src/control/terminal-screen-projector* apps/runtime/src/session/pty-session* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): project the latest terminal screen"`。
+- [x] 添加 `@xterm/headless@6.0.0`，锁定 lockfile。
+- [x] 写失败测试覆盖：回车覆盖、清屏、光标移动、resize、宽字符、长输出滚屏、ANSI 颜色不污染文本。
+- [x] 写 backend 失败测试：active 读取 screen；inactive journal replay 得到相同 screen；history 与 current 返回不同 source/内容。
+- [x] 运行 `pnpm --filter @matou/runtime test -- terminal-screen-projector.test.ts runtime-control-backend.test.ts`，确认失败。
+- [x] 实现 projector 与 `PtySession.snapshotScreen()`；确保 projector 写入异步完成后 snapshot 才返回。
+- [x] 实现有界历史元数据，UTF-8 截断从完整 code point 起始，避免首字符变成替换符。
+- [x] 重跑相关测试、runtime typecheck。
+- [x] 提交：`git add apps/runtime/package.json pnpm-lock.yaml apps/runtime/src/control/terminal-screen-projector* apps/runtime/src/session/pty-session* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): project the latest terminal screen"`。
 
 ## Task 4: 串行化远程输入并对齐 Kooky 键位
 
@@ -168,13 +168,13 @@ CtrlC='\x03' CtrlD='\x04' CtrlL='\x0c' CtrlU='\x15' CtrlZ='\x1a'
 
 **Steps:**
 
-- [ ] 写失败测试：同一 session 的两个并发 `sendText(..., submit:true)` 产生 `first\r` 后 `second\r`，中间不穿插；不同 session 可独立执行。
-- [ ] 写失败测试：session 在排队期间退出时，当前/后续动作返回 `TARGET_NOT_READY`，队列可被清理。
-- [ ] 写失败测试：完整 Kooky allowlist 映射精确；`return/esc/up` 等 CLI alias 在 CLI parser 归一化，server 只接收 canonical key。
-- [ ] 运行目标测试确认失败，实现 per-session promise queue 和 queue cleanup。
-- [ ] backend `sendText(sessionId,text,submit)` 每次只调用一次 `write(text + (submit?'\r':''))`；`sendKey` 走同一动作队列。
-- [ ] 重跑测试与 runtime typecheck。
-- [ ] 提交：`git add apps/runtime/src/control/terminal-input-queue* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): serialize terminal input actions"`。
+- [x] 写失败测试：同一 session 的两个并发 `sendText(..., submit:true)` 产生 `first\r` 后 `second\r`，中间不穿插；不同 session 可独立执行。
+- [x] 写失败测试：session 在排队期间退出时，当前/后续动作返回 `TARGET_NOT_READY`，队列可被清理。
+- [x] 写失败测试：完整 Kooky allowlist 映射精确；`return/esc/up` 等 CLI alias 在 CLI parser 归一化，server 只接收 canonical key。
+- [x] 运行目标测试确认失败，实现 per-session promise queue 和 queue cleanup。
+- [x] backend `sendText(sessionId,text,submit)` 每次只调用一次 `write(text + (submit?'\r':''))`；`sendKey` 走同一动作队列。
+- [x] 重跑测试与 runtime typecheck。
+- [x] 提交：`git add apps/runtime/src/control/terminal-input-queue* apps/runtime/src/control/runtime-control-backend* && git commit -m "feat(control): serialize terminal input actions"`。
 
 ## Task 5: 实现可独立运行的 `mt` CLI 客户端
 
@@ -204,14 +204,14 @@ mt key TARGET KEY [--json]
 
 **Steps:**
 
-- [ ] 写 client 失败测试：长度前缀帧、requestId、deadline、单请求单连接、半帧响应、服务错误、连接超时。
-- [ ] 写 CLI 失败测试：七个命令、target parser、键位 alias、`--enter`、JSON 输出、纯文本输出、错误码和 stderr。
-- [ ] 断言输出使用标题/序号/层级等人类字段；默认文本不展示 token、socket、runId 或原始内部 ID。
-- [ ] 运行 `pnpm --filter @matou/runtime test -- host-control-client.test.ts mt-cli.test.ts`，确认失败。
-- [ ] 实现无第三方依赖的 client/parser/formatter；环境缺少 `MATOU_CONTROL_ENDPOINT/TOKEN/CALLER_SESSION_ID` 时给出“仅能在 Matou 托管终端中使用”的明确错误。
-- [ ] tsup 增加 `src/cli/mt-cli.ts -> dist/mt-cli.cjs`，保留 runtime entry。
-- [ ] 重跑测试、runtime build，并执行 `node apps/runtime/dist/mt-cli.cjs --help`。
-- [ ] 提交：`git add apps/runtime/src/control/host-control-client* apps/runtime/src/cli apps/runtime/tsup.config.ts apps/runtime/package.json && git commit -m "feat(cli): add the mt host control client"`。
+- [x] 写 client 失败测试：长度前缀帧、requestId、deadline、单请求单连接、半帧响应、服务错误、连接超时。
+- [x] 写 CLI 失败测试：七个命令、target parser、键位 alias、`--enter`、JSON 输出、纯文本输出、错误码和 stderr。
+- [x] 断言输出使用标题/序号/层级等人类字段；默认文本不展示 token、socket、runId 或原始内部 ID。
+- [x] 运行 `pnpm --filter @matou/runtime test -- host-control-client.test.ts mt-cli.test.ts`，确认失败。
+- [x] 实现无第三方依赖的 client/parser/formatter；环境缺少 `MATOU_CONTROL_ENDPOINT/TOKEN/CALLER_SESSION_ID` 时给出“仅能在 Matou 托管终端中使用”的明确错误。
+- [x] tsup 增加 `src/cli/mt-cli.ts -> dist/mt-cli.cjs`，保留 runtime entry。
+- [x] 重跑测试、runtime build，并执行 `node apps/runtime/dist/mt-cli.cjs --help`。
+- [x] 提交：`git add apps/runtime/src/control/host-control-client* apps/runtime/src/cli apps/runtime/tsup.config.ts apps/runtime/package.json && git commit -m "feat(cli): add the mt host control client"`。
 
 ## Task 6: 在每个 SessionRun 注入 CLI、身份与最小权限
 
@@ -246,14 +246,14 @@ PATH=<MATOU_CONTROL_ASSET_ROOT/bin>:<inherited PATH>
 
 **Steps:**
 
-- [ ] 写 RuntimeServer 失败测试：三种 profile 都注入 CLI/identity；token caller 与 session/run 匹配；无 task write/move scope。
-- [ ] 写失败测试覆盖新建、resume、load、fork、retry、runtime restart；每次 run token 不同，旧 token 失效。
-- [ ] 写 RuntimeHost 失败测试：开发与 packaged resource root 传入 utility process env。
-- [ ] 运行 `pnpm --filter @matou/runtime test -- runtime-server.test.ts pty-session.test.ts && pnpm --filter @matou/desktop test -- runtime-host.test.ts`，确认失败。
-- [ ] 实现所有 profile 的统一 runId、token 和 PATH 注入；Windows PATH key 使用大小写兼容查找，wrapper 路径用平台分隔符。
-- [ ] 在所有退出/替换分支验证 revoke；把重复清理收敛为一个私有 helper，避免漏掉 retry/fallback。
-- [ ] 重跑相关测试和两包 typecheck。
-- [ ] 提交：`git add apps/runtime/src/runtime-server* apps/runtime/src/session/pty-session* apps/desktop/src/main/runtime-host* apps/desktop/src/main/index.ts && git commit -m "feat(runtime): inject mt into every managed session"`。
+- [x] 写 RuntimeServer 失败测试：三种 profile 都注入 CLI/identity；token caller 与 session/run 匹配；无 task write/move scope。
+- [x] 写失败测试覆盖新建、resume、load、fork、retry、runtime restart；每次 run token 不同，旧 token 失效。
+- [x] 写 RuntimeHost 失败测试：开发与 packaged resource root 传入 utility process env。
+- [x] 运行 `pnpm --filter @matou/runtime test -- runtime-server.test.ts pty-session.test.ts && pnpm --filter @matou/desktop test -- runtime-host.test.ts`，确认失败。
+- [x] 实现所有 profile 的统一 runId、token 和 PATH 注入；Windows PATH key 使用大小写兼容查找，wrapper 路径用平台分隔符。
+- [x] 在所有退出/替换分支验证 revoke；把重复清理收敛为一个私有 helper，避免漏掉 retry/fallback。
+- [x] 重跑相关测试和两包 typecheck。
+- [x] 提交：`git add apps/runtime/src/runtime-server* apps/runtime/src/session/pty-session* apps/desktop/src/main/runtime-host* apps/desktop/src/main/index.ts && git commit -m "feat(runtime): inject mt into every managed session"`。
 
 ## Task 7: 打包跨平台 wrapper 与自然语言规则资产
 
@@ -282,14 +282,14 @@ PATH=<MATOU_CONTROL_ASSET_ROOT/bin>:<inherited PATH>
 
 **Steps:**
 
-- [ ] 参考 Kooky `kc-terminal` 完整 skill 和 references，先写资源测试：所有命令、目标解析、歧义、连续指代、错误映射、非目标均出现。
-- [ ] wrapper 使用 `MATOU_CONTROL_NODE_EXECUTABLE` 并设置 `ELECTRON_RUN_AS_NODE=1` 执行 `mt-cli.cjs`，不调用用户 PATH 中的 node；Unix/Windows 都从 wrapper 自身目录解析 `../../mt-cli.cjs`。
-- [ ] Claude plugin manifest 和 skill 使用 `mt` 命令；Codex developer instructions 与 Claude 规则语义一致。
-- [ ] `prepare-runtime-control-assets.mjs` 在每次 runtime build 后把源资产复制到 `dist/control-assets` 并 chmod Unix wrapper 0755；`apps/runtime/package.json` 的 build 串接该脚本，保证开发与安装包使用同一资产树。
-- [ ] `prepare-package-resources.mjs` 继续复制整个 runtime dist，并新增最终产物断言，避免 CLI 或 provider 资产漏包。
-- [ ] 运行 `node --test tooling/prepare-runtime-control-assets.test.mjs`、`pnpm --filter @matou/runtime build` 和 `node tooling/prepare-package-resources.mjs`，核对输出树。
-- [ ] 在干净临时 HOME/PATH 下调用 packaged wrapper `mt --help`，确认不依赖全局 Node/npm。
-- [ ] 提交：`git add apps/runtime/control-assets apps/runtime/package.json tooling/prepare-runtime-control-assets* tooling/prepare-package-resources.mjs && git commit -m "feat(package): bundle mt and provider guidance"`。
+- [x] 参考 Kooky `kc-terminal` 完整 skill 和 references，先写资源测试：所有命令、目标解析、歧义、连续指代、错误映射、非目标均出现。
+- [x] wrapper 使用 `MATOU_CONTROL_NODE_EXECUTABLE` 并设置 `ELECTRON_RUN_AS_NODE=1` 执行 `mt-cli.cjs`，不调用用户 PATH 中的 node；Unix/Windows 都从 wrapper 自身目录解析 `../../mt-cli.cjs`。
+- [x] Claude plugin manifest 和 skill 使用 `mt` 命令；Codex developer instructions 与 Claude 规则语义一致。
+- [x] `prepare-runtime-control-assets.mjs` 在每次 runtime build 后把源资产复制到 `dist/control-assets` 并 chmod Unix wrapper 0755；`apps/runtime/package.json` 的 build 串接该脚本，保证开发与安装包使用同一资产树。
+- [x] `prepare-package-resources.mjs` 继续复制整个 runtime dist，并新增最终产物断言，避免 CLI 或 provider 资产漏包。
+- [x] 运行 `node --test tooling/prepare-runtime-control-assets.test.mjs`、`pnpm --filter @matou/runtime build` 和 `node tooling/prepare-package-resources.mjs`，核对输出树。
+- [x] 在干净临时 HOME/PATH 下调用 packaged wrapper `mt --help`，确认不依赖全局 Node/npm。
+- [x] 提交：`git add apps/runtime/control-assets apps/runtime/package.json tooling/prepare-runtime-control-assets* tooling/prepare-package-resources.mjs && git commit -m "feat(package): bundle mt and provider guidance"`。
 
 ## Task 8: 将 Claude Code 与 Codex 会话级规则接入启动参数
 
@@ -310,13 +310,13 @@ PATH=<MATOU_CONTROL_ASSET_ROOT/bin>:<inherited PATH>
 
 **Steps:**
 
-- [ ] 写 provider launch 失败测试：Claude new/resume/fork 和 Codex new/resume 均包含正确会话级规则；Shell 参数完全不变。
-- [ ] 写失败测试：路径含空格/Unicode 时仍作为单个 argv；规则文本含换行/引号时 Codex `-c` 值是合法 TOML 字符串。
-- [ ] 写 RuntimeServer 失败测试：只给 Claude/Codex 传 provider instruction options；恢复权限参数不受影响。
-- [ ] 运行相关测试确认失败。
-- [ ] 扩展 `PtyCommandInput`，实现 provider-specific argv builder；Codex 使用官方支持的 `developer_instructions` config override，不替换内建 model instructions。
-- [ ] 重跑 provider/runtime/pty 测试和 typecheck。
-- [ ] 提交：`git add apps/runtime/src/session/provider-launch-plan* apps/runtime/src/session/pty-session* apps/runtime/src/runtime-server* && git commit -m "feat(provider): teach Claude and Codex to use mt"`。
+- [x] 写 provider launch 失败测试：Claude new/resume/fork 和 Codex new/resume 均包含正确会话级规则；Shell 参数完全不变。
+- [x] 写失败测试：路径含空格/Unicode 时仍作为单个 argv；规则文本含换行/引号时 Codex `-c` 值是合法 TOML 字符串。
+- [x] 写 RuntimeServer 失败测试：只给 Claude/Codex 传 provider instruction options；恢复权限参数不受影响。
+- [x] 运行相关测试确认失败。
+- [x] 扩展 `PtyCommandInput`，实现 provider-specific argv builder；Codex 使用官方支持的 `developer_instructions` config override，不替换内建 model instructions。
+- [x] 重跑 provider/runtime/pty 测试和 typecheck。
+- [x] 提交：`git add apps/runtime/src/session/provider-launch-plan* apps/runtime/src/session/pty-session* apps/runtime/src/runtime-server* && git commit -m "feat(provider): teach Claude and Codex to use mt"`。
 
 ## Task 9: 增加真实终端与跨窗口产品验收
 
@@ -370,3 +370,11 @@ PATH=<MATOU_CONTROL_ASSET_ROOT/bin>:<inherited PATH>
 - [ ] Shell/Claude/Codex token 全部绑定到独立 SessionRun，退出与 Runtime 重启后失效。
 - [ ] App 安装包包含跨平台 wrapper 与 provider 规则，干净环境 smoke test 通过。
 - [ ] 首期协议中不存在 create/fork/remove/close/focus/view capability。
+
+## 实施记录（2026-09-01）
+
+- Tasks 1–8 已完成并按任务拆分提交；Runtime、Desktop 全量单测通过（Runtime 66 文件 / 422 项，Desktop 38 文件 / 297 项）。
+- 新增真实 App 验收已通过：Shell 内 `mt identify`、向右侧同级发送文本、读取右侧最新屏幕，并确认焦点、横向位置和通知计数保持不变。
+- `pnpm typecheck`、`pnpm build` 以及 `ai-host-control-cli + terminal-channel + session-canvas-navigation` 共 16 项 E2E 已通过。
+- runtime 产物和安装包资源已核对包含 `mt-cli.cjs`、两套 wrapper、Claude plugin、Codex instructions；Unix wrapper 在干净 HOME/PATH 下可直接显示帮助。
+- packaged App 已通过资源存在性检查和真实 Shell 内的 `mt identify --json`。完整 packaged 回归继续执行到独立窗口关闭场景时，既有断言期望会话停止，但实测主窗口仍保留该终端；Host Control 验收在此之前已通过，保留确切失败位置 `tests/e2e/packaged-runtime.spec.ts:136` 供后续定位。
