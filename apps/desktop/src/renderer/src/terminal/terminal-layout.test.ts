@@ -15,6 +15,16 @@ describe('terminal grid layout', () => {
     expect(hierarchyCss).toContain('--terminal-padding-block: 4px;')
     expect(canvasCss).toContain('--terminal-padding-block: 12px;')
   })
+
+  it('uses the full top bar as a window drag surface outside interactive controls', () => {
+    const hierarchyCss = css('hierarchy/hierarchy.css')
+
+    expect(hierarchyCss).toMatch(/\.scene-tabs\.tab-bar-left\s*\{[^}]*-webkit-app-region:\s*drag;/)
+    expect(hierarchyCss).toMatch(/\.tab-bar-overflow-actions\s*\{[^}]*-webkit-app-region:\s*drag;/)
+    expect(hierarchyCss).toMatch(/\.tab-bar-right\s*\{[^}]*-webkit-app-region:\s*drag;/)
+    expect(hierarchyCss).toMatch(/\.tab-item\s*\{[^}]*-webkit-app-region:\s*no-drag;/)
+    expect(hierarchyCss).toContain('button { -webkit-app-region: no-drag; }')
+  })
 })
 
 function css(relativePath: string): string {
