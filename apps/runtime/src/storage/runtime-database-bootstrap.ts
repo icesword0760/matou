@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   accessSync,
   closeSync,
@@ -287,7 +287,9 @@ async function preserveDatabaseForOwnershipRecovery(
     await observer.onRecoveryMarkerPublished?.(published)
     return recoveryResult(published, backups)
   } catch (error) {
-    return recoveryResult(marker, backups, {
+    const durable = durableMarkerAfterPublicationFailure(databasePath, error)
+    if (!durable) throw error
+    return recoveryResult(durable, backups, {
       markerError: recoveryError('RECOVERY_MARKER_FAILED', error),
       quarantinedPath: databasePath
     })
@@ -308,7 +310,9 @@ async function quarantineDatabaseBundle(
     await observer.onRecoveryMarkerPublished?.(published)
   } catch (error) {
     ownership?.release()
-    return recoveryResult(marker, backups, {
+    const durable = durableMarkerAfterPublicationFailure(databasePath, error)
+    if (!durable) throw error
+    return recoveryResult(durable, backups, {
       markerError: recoveryError('RECOVERY_MARKER_FAILED', error),
       quarantinedPath: databasePath
     })
@@ -358,17 +362,133 @@ function newRecoveryMarker(
 async function publishRecoveryMarker(
   marker: RuntimeDatabaseRecoveryMarker
 ): Promise<RuntimeDatabaseRecoveryMarker> {
-  return withMarkerPublicationFence(marker.durableDatabasePath, async () => {
-    const persisted = await readCanonicalRecoveryMarkerLocked(marker.durableDatabasePath)
-    if (
-      persisted?.state === 'required' &&
-      !hasMatchingResolvedTombstone(persisted)
-    ) {
-      return persisted
+  try {
+    return await withMarkerPublicationFence(marker.durableDatabasePath, async () => {
+      const persisted = await readCanonicalRecoveryMarkerLocked(marker.durableDatabasePath)
+      if (
+        persisted?.state === 'required' &&
+        !hasMatchingResolvedTombstone(persisted)
+      ) {
+        return persisted
+      }
+      await replaceRecoveryMarker(marker.markerPath, marker)
+      return requireCanonicalRecoveryGeneration(marker)
+    })
+  } catch (error) {
+    return publishRecoveryMarkerWithoutActionFence(marker, error)
+  }
+}
+
+async function publishRecoveryMarkerWithoutActionFence(
+  proposed: RuntimeDatabaseRecoveryMarker,
+  fenceError: unknown
+): Promise<RuntimeDatabaseRecoveryMarker> {
+  const shape = readRecoveryMarkerShape(proposed.durableDatabasePath)
+  if (shape?.kind === 'modern') {
+    const active = activeRecoveryMarker(shape.marker)
+    if (active) return active
+  }
+  if (shape?.kind === 'legacy') {
+    const upgraded: RuntimeDatabaseRecoveryMarker = {
+      ...shape.marker,
+      recoveryId: shape.marker.recoveryId ?? randomUUID(),
+      state: 'required'
     }
-    await replaceRecoveryMarker(marker.markerPath, marker)
-    return marker
-  })
+    return publishClaimedRecoveryGeneration(upgraded, shape.sourceKey, fenceError)
+  }
+  const sourceKey = shape?.kind === 'modern'
+    ? `resolved-${shape.marker.recoveryId}`
+    : 'initial-generation'
+  return publishClaimedRecoveryGeneration(proposed, sourceKey, fenceError)
+}
+
+async function publishClaimedRecoveryGeneration(
+  proposed: RuntimeDatabaseRecoveryMarker,
+  sourceKey: string,
+  fenceError: unknown
+): Promise<RuntimeDatabaseRecoveryMarker> {
+  const claimPath = recoveryGenerationClaimPath(proposed.markerPath, sourceKey)
+  const partialPath = `${claimPath}.partial-${randomUUID()}`
+  const handle = await open(partialPath, 'wx', 0o600)
+  try {
+    await handle.writeFile(JSON.stringify(proposed), 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+
+  try {
+    try {
+      await link(partialPath, claimPath)
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST') throw error
+    }
+    // Whether this process won or observed the winning hard-link, syncing the
+    // parent establishes the claim as durable before it is used as authority.
+    syncDirectory(dirname(claimPath))
+  } finally {
+    await rm(partialPath, { force: true }).catch(() => undefined)
+  }
+
+  const claimed = readRecoveryGenerationClaim(claimPath, proposed.durableDatabasePath)
+  try {
+    await replaceRecoveryMarker(claimed.markerPath, claimed)
+  } catch (error) {
+    const canonical = matchingCanonicalRecoveryGeneration(claimed)
+    if (canonical) return canonical
+    throw new RecoveryMarkerPublicationError(
+      `database recovery generation is durable but canonical publication failed: ${errorMessage(error)}`,
+      readRecoveryGenerationClaim(claimPath, proposed.durableDatabasePath),
+      new AggregateError([fenceError, error])
+    )
+  }
+  return requireCanonicalRecoveryGeneration(claimed)
+}
+
+function recoveryGenerationClaimPath(markerPath: string, sourceKey: string): string {
+  const digest = createHash('sha256').update(sourceKey).digest('hex')
+  return `${markerPath}.generation-${digest}.claim`
+}
+
+function readRecoveryGenerationClaim(
+  claimPath: string,
+  databasePath: string
+): RuntimeDatabaseRecoveryMarker {
+  const shape = parseRecoveryMarkerShape(readFileSync(claimPath, 'utf8'), databasePath)
+  if (shape.kind !== 'modern' || shape.marker.state !== 'required') {
+    throw new Error('database recovery generation claim is invalid')
+  }
+  return shape.marker
+}
+
+function matchingCanonicalRecoveryGeneration(
+  expected: RuntimeDatabaseRecoveryMarker
+): RuntimeDatabaseRecoveryMarker | undefined {
+  const shape = readRecoveryMarkerShape(expected.durableDatabasePath)
+  if (shape?.kind !== 'modern') return undefined
+  return shape.marker.recoveryId === expected.recoveryId ? shape.marker : undefined
+}
+
+function requireCanonicalRecoveryGeneration(
+  expected: RuntimeDatabaseRecoveryMarker
+): RuntimeDatabaseRecoveryMarker {
+  const canonical = matchingCanonicalRecoveryGeneration(expected)
+  if (!canonical) {
+    throw new Error('database recovery generation was not durably published')
+  }
+  return canonical
+}
+
+function durableMarkerAfterPublicationFailure(
+  databasePath: string,
+  error: unknown
+): RuntimeDatabaseRecoveryMarker | undefined {
+  const shape = readRecoveryMarkerShape(databasePath)
+  if (shape?.kind === 'modern') {
+    const active = activeRecoveryMarker(shape.marker)
+    if (active) return active
+  }
+  return error instanceof RecoveryMarkerPublicationError ? error.durableMarker : undefined
 }
 
 export async function resolveRuntimeDatabaseRecoveryMarker(
@@ -480,7 +600,17 @@ type LegacyRecoveryMarker = Omit<RuntimeDatabaseRecoveryMarker, 'recoveryId' | '
 
 type RecoveryMarkerShape =
   | { kind: 'modern'; marker: RuntimeDatabaseRecoveryMarker }
-  | { kind: 'legacy'; marker: LegacyRecoveryMarker }
+  | { kind: 'legacy'; marker: LegacyRecoveryMarker; sourceKey: string }
+
+class RecoveryMarkerPublicationError extends Error {
+  readonly durableMarker: RuntimeDatabaseRecoveryMarker
+
+  constructor(message: string, durableMarker: RuntimeDatabaseRecoveryMarker, cause: unknown) {
+    super(message, { cause })
+    this.name = 'RecoveryMarkerPublicationError'
+    this.durableMarker = durableMarker
+  }
+}
 
 async function readCanonicalRecoveryMarker(
   databasePath: string
@@ -494,9 +624,28 @@ async function readCanonicalRecoveryMarker(
 async function upgradeLegacyRecoveryMarker(
   databasePath: string
 ): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
-  return withMarkerPublicationFence(databasePath, () => (
-    readCanonicalRecoveryMarkerLocked(databasePath)
-  ))
+  try {
+    return await withMarkerPublicationFence(databasePath, () => (
+      readCanonicalRecoveryMarkerLocked(databasePath)
+    ))
+  } catch (error) {
+    const shape = readRecoveryMarkerShape(databasePath)
+    if (!shape) return undefined
+    if (shape.kind === 'modern') return shape.marker
+    const candidate: RuntimeDatabaseRecoveryMarker = {
+      ...shape.marker,
+      recoveryId: shape.marker.recoveryId ?? randomUUID(),
+      state: 'required'
+    }
+    try {
+      return await publishClaimedRecoveryGeneration(candidate, shape.sourceKey, error)
+    } catch (publicationError) {
+      if (publicationError instanceof RecoveryMarkerPublicationError) {
+        return publicationError.durableMarker
+      }
+      throw publicationError
+    }
+  }
 }
 
 async function readCanonicalRecoveryMarkerLocked(
@@ -511,17 +660,30 @@ async function readCanonicalRecoveryMarkerLocked(
     state: 'required'
   }
   await replaceRecoveryMarker(upgraded.markerPath, upgraded)
-  return upgraded
+  return requireCanonicalRecoveryGeneration(upgraded)
 }
 
 function readRecoveryMarkerShape(databasePath: string): RecoveryMarkerShape | undefined {
   const markerPath = `${databasePath}.recovery.json`
-  let value: unknown
+  let bytes: string
   try {
-    value = JSON.parse(readFileSync(markerPath, 'utf8')) as unknown
+    bytes = readFileSync(markerPath, 'utf8')
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return undefined
     throw error
+  }
+  return parseRecoveryMarkerShape(bytes, databasePath)
+}
+
+function parseRecoveryMarkerShape(
+  bytes: string,
+  databasePath: string
+): RecoveryMarkerShape {
+  let value: unknown
+  try {
+    value = JSON.parse(bytes) as unknown
+  } catch {
+    throw new Error('database recovery marker is invalid')
   }
   if (typeof value !== 'object' || value === null) {
     throw new Error('database recovery marker is invalid')
@@ -530,6 +692,7 @@ function readRecoveryMarkerShape(databasePath: string): RecoveryMarkerShape | un
   const hasRecoveryId = Object.prototype.hasOwnProperty.call(marker, 'recoveryId')
   const hasState = Object.prototype.hasOwnProperty.call(marker, 'state')
   const durablePath = resolve(databasePath)
+  const markerPath = `${databasePath}.recovery.json`
   if (
     marker.version !== 1 ||
     (hasRecoveryId && (
@@ -561,7 +724,8 @@ function readRecoveryMarkerShape(databasePath: string): RecoveryMarkerShape | un
   if (!hasState) {
     return {
       kind: 'legacy',
-      marker: marker as LegacyRecoveryMarker
+      marker: marker as LegacyRecoveryMarker,
+      sourceKey: `legacy-${createHash('sha256').update(bytes).digest('hex')}`
     }
   }
   return { kind: 'modern', marker: marker as RuntimeDatabaseRecoveryMarker }

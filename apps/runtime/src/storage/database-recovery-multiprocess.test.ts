@@ -77,6 +77,29 @@ describe('database recovery multi-process handoff', () => {
       .toMatchObject({ recoveryId: results[0]!.recoveryId, state: 'required' })
   })
 
+  it('publishes one durable recoveryId when eight Runtime processes upgrade legacy evidence with a damaged action fence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-damaged-fence-legacy-barrier-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const markerPath = `${databasePath}.recovery.json`
+    await writeFile(markerPath, JSON.stringify({
+      version: 1,
+      reason: 'physical-corruption',
+      durableDatabasePath: databasePath,
+      quarantinedPath: `${databasePath}.corrupt-1`,
+      markerPath,
+      createdAt: 1
+    }))
+    await writeFile(`${databasePath}.recovery-action.sqlite`, 'not a sqlite database')
+
+    const results = await probeTogether(root, 8)
+    expect(results.every(({ kind }) => kind === 'recovery-required')).toBe(true)
+    expect(new Set(results.map(({ recoveryId }) => recoveryId))).toEqual(
+      new Set([results[0]!.recoveryId])
+    )
+    expect(JSON.parse(await readFile(markerPath, 'utf8')))
+      .toMatchObject({ recoveryId: results[0]!.recoveryId, state: 'required' })
+  })
+
   it('publishes one new recoveryId when eight Runtime processes re-arm a resolved generation', async () => {
     const fixture = await ownershipRecoveryFixture()
     const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
@@ -87,6 +110,28 @@ describe('database recovery multi-process handoff', () => {
     if (completed.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
     completed.bootstrap.database.close()
     await writeFile(`${fixture.databasePath}.owner`, '{"pid":')
+
+    const results = await probeTogether(fixture.root, 8)
+    expect(results.every(({ kind }) => kind === 'recovery-required')).toBe(true)
+    expect(new Set(results.map(({ recoveryId }) => recoveryId))).toEqual(
+      new Set([results[0]!.recoveryId])
+    )
+    expect(results[0]!.recoveryId).not.toBe(fixture.recovery.recoveryId)
+    expect(JSON.parse(await readFile(fixture.recovery.markerPath, 'utf8')))
+      .toMatchObject({ recoveryId: results[0]!.recoveryId, state: 'required' })
+  })
+
+  it('publishes one durable recoveryId when eight Runtime processes re-arm resolved evidence with a damaged action fence', async () => {
+    const fixture = await ownershipRecoveryFixture()
+    const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
+    const completed = await controller.execute(fixture.recovery, {
+      type: 'runtime.recovery-command', requestId: 'resolve-before-damaged-fence',
+      action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+    })
+    if (completed.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+    completed.bootstrap.database.close()
+    await writeFile(`${fixture.databasePath}.owner`, '{"pid":')
+    await writeFile(`${fixture.databasePath}.recovery-action.sqlite`, 'not a sqlite database')
 
     const results = await probeTogether(fixture.root, 8)
     expect(results.every(({ kind }) => kind === 'recovery-required')).toBe(true)
