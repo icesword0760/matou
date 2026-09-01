@@ -269,7 +269,7 @@ describe('SessionRepository', () => {
     expect(sessions.listProviderBindings('session-1')).toEqual([])
   })
 
-  it('does not let another panel claim an already-bound provider conversation', () => {
+  it('keeps a provider conversation associated with every panel that loads it', () => {
     seedSession()
     sessions.createSession(command('session-2'), {
       id: 'session-2', taskId: 'task-1', executionContextId: 'context-1',
@@ -280,14 +280,20 @@ describe('SessionRepository', () => {
       providerSessionId: 'provider-hook-1', metadata: {}, now: 3
     })
 
-    expect(() => sessions.recordResumableProviderIdentity(command('hook-wrong-panel'), {
+    sessions.recordResumableProviderIdentity(command('hook-second-panel'), {
       id: 'binding-other', sessionId: 'session-2', provider: 'claude-code',
       providerSessionId: 'provider-hook-1', metadata: {}, now: 4
-    })).toThrow('Provider conversation is already bound to another Session')
+    })
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
       providerSessionId: 'provider-hook-1'
     })
-    expect(sessions.getResumeBinding('session-2', 'claude-code')).toBeUndefined()
+    expect(sessions.getResumeBinding('session-2', 'claude-code')).toMatchObject({
+      id: 'binding-other', providerSessionId: 'provider-hook-1'
+    })
+    expect(database.all<{ session_id: string }>(
+      'SELECT session_id FROM provider_bindings WHERE provider = ? AND provider_session_id = ? ORDER BY session_id',
+      'claude-code', 'provider-hook-1'
+    )).toEqual([{ session_id: 'session-1' }, { session_id: 'session-2' }])
   })
 
   it('isolates provider resume failure to its owning Session', () => {

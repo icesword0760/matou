@@ -78,7 +78,7 @@ describe('SessionLoaderDialog', () => {
     expect(screen.getByRole('dialog', { name: '载入 Claude Code 会话' })).toBeTruthy()
   })
 
-  it('shows a session loaded by another card while preventing a duplicate load', async () => {
+  it('warns before loading a session already present in another card and proceeds on confirmation', async () => {
     const onLoad = vi.fn(async () => undefined)
     const occupied = {
       ...summary(),
@@ -92,10 +92,13 @@ describe('SessionLoaderDialog', () => {
       onLoad={onLoad} onCancel={() => undefined} />)
 
     expect(await screen.findByText('已载入“Claude 主会话”')).toBeTruthy()
-    const loadButton = screen.getByRole('button', { name: '已在其他卡片中' })
-    expect((loadButton as HTMLButtonElement).disabled).toBe(true)
-    await userEvent.setup().click(loadButton)
+    await userEvent.setup().click(screen.getByRole('button', { name: '载入到当前卡片' }))
+    const warning = await screen.findByRole('alertdialog', { name: '会话已在当前工作空间载入' })
+    expect(warning.textContent).toContain('Claude 主会话')
     expect(onLoad).not.toHaveBeenCalled()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '仍然载入' }))
+    await waitFor(() => expect(onLoad).toHaveBeenCalledWith('provider-1'))
   })
 })
 

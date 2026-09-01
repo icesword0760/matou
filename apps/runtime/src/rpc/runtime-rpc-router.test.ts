@@ -92,6 +92,7 @@ describe('RuntimeRpcRouter', () => {
       defaultName: 'occupied-workspace', now: 1
     })) as {
       session: { id: string; taskId: string; executionContextId: string }
+      scene: { id: string; rootNodeId: string }
     }
     await router.handle('claude-sessions.load', payload('occupy-provider', {
       sessionId: initial.session.id, providerSessionId: 'provider-occupied', now: 2
@@ -100,6 +101,10 @@ describe('RuntimeRpcRouter', () => {
       id: 'loader-target', taskId: initial.session.taskId,
       executionContextId: initial.session.executionContextId,
       kind: 'shell', title: '目标 Shell', now: 3
+    }))
+    await router.handle('scene.mount-session', payload('loader-target-mount', {
+      id: 'loader-target-mount', sceneId: initial.scene.id,
+      sceneNodeId: initial.scene.rootNodeId, sessionId: 'loader-target', now: 3
     }))
 
     const list = await router.handle('claude-sessions.list', {
@@ -120,6 +125,15 @@ describe('RuntimeRpcRouter', () => {
     await expect(router.handle('claude-sessions.detail', {
       sessionId: 'loader-target', providerSessionId: 'provider-occupied', query: ''
     })).resolves.toMatchObject({ providerSessionId: 'provider-occupied' })
+    await expect(router.handle('claude-sessions.load', payload('duplicate-load', {
+      sessionId: 'loader-target', providerSessionId: 'provider-occupied', now: 4
+    }))).resolves.toMatchObject({
+      load: { sessionId: 'loader-target', providerSessionId: 'provider-occupied' }
+    })
+    expect(database.get<{ total: number }>(
+      `SELECT COUNT(*) AS total FROM provider_bindings
+       WHERE provider = 'claude-code' AND provider_session_id = 'provider-occupied'`
+    )?.total).toBe(2)
   })
 
   it('routes Git status and branch mutations for the active repository', async () => {

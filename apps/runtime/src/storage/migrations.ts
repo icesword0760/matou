@@ -902,5 +902,45 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       ALTER TABLE session_canvas_memberships
       ADD COLUMN pending_user_interaction_seq INTEGER NOT NULL DEFAULT 0;
     `
+  },
+  {
+    version: 21,
+    name: 'provider-session-multi-card-associations',
+    sql: `
+      ALTER TABLE provider_bindings RENAME TO provider_bindings_single_card;
+
+      CREATE TABLE provider_bindings (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        provider TEXT NOT NULL CHECK (provider IN ('claude-code', 'codex', 'generic')),
+        provider_session_id TEXT NOT NULL,
+        resume_state TEXT NOT NULL CHECK (
+          resume_state IN ('unknown', 'available', 'resuming', 'resumed', 'failed', 'expired')
+        ),
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        validated_at INTEGER,
+        invalidated_at INTEGER,
+        restore_state TEXT NOT NULL DEFAULT 'none'
+          CHECK (restore_state IN ('none', 'restoring', 'failed')),
+        restore_error TEXT,
+        user_exited_at INTEGER,
+        UNIQUE(session_id, provider, provider_session_id)
+      ) STRICT;
+
+      INSERT INTO provider_bindings (
+        id, session_id, provider, provider_session_id, resume_state,
+        metadata_json, created_at, updated_at, validated_at, invalidated_at,
+        restore_state, restore_error, user_exited_at
+      )
+      SELECT
+        id, session_id, provider, provider_session_id, resume_state,
+        metadata_json, created_at, updated_at, validated_at, invalidated_at,
+        restore_state, restore_error, user_exited_at
+      FROM provider_bindings_single_card;
+
+      DROP TABLE provider_bindings_single_card;
+    `
   }
 ]

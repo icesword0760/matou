@@ -205,9 +205,6 @@ export class RuntimeRpcRouter {
       case 'claude-sessions.load': {
         const sessionId = text(input.sessionId, 'sessionId')
         const providerSessionId = text(input.providerSessionId, 'providerSessionId')
-        if (this.#providerConversationUsage(providerSessionId, sessionId).availability === 'loaded-elsewhere') {
-          throw new RpcFault('CONFLICT', '该 Claude Code 会话正在另一张卡片中使用')
-        }
         const detail = await this.#claudeSessions.detail({
           cwd: this.#sessionCwd(sessionId), providerSessionId, query: ''
         })
@@ -785,26 +782,30 @@ export class RuntimeRpcRouter {
     loadedSessionId?: string
     loadedSessionTitle?: string
   } {
-    const binding = this.#database.get<{
+    const { workspaceId } = this.#sessionOwner(targetSessionId)
+    const bindings = this.#database.all<{
       session_id: string
       title: string
       kind: SessionKind
       archived_at: number | null
+      task_archived_at: number | null
       resume_state: string
       invalidated_at: number | null
     }>(
       `SELECT binding.session_id, owner.title, owner.kind, owner.archived_at,
+              tasks.archived_at AS task_archived_at,
               binding.resume_state, binding.invalidated_at
        FROM provider_bindings AS binding
        JOIN sessions AS owner ON owner.id = binding.session_id
-       WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?`,
-      providerSessionId
-    )
-    if (!binding || binding.archived_at !== null || binding.kind !== 'claude-code' ||
-      binding.invalidated_at !== null ||
-      !['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state)) {
-      return { availability: 'available' }
-    }
+       JOIN tasks ON tasks.id = owner.task_id
+       WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?
+         AND tasks.workspace_id = ?`,
+      providerSessionId, workspaceId
+    ).filter((binding) => binding.archived_at === null && binding.task_archived_at === null &&
+      binding.kind === 'claude-code' && binding.invalidated_at === null &&
+      ['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state))
+    const binding = bindings.find(({ session_id }) => session_id !== targetSessionId) ?? bindings[0]
+    if (!binding) return { availability: 'available' }
     return {
       availability: binding.session_id === targetSessionId ? 'loaded-here' : 'loaded-elsewhere',
       loadedSessionId: binding.session_id,

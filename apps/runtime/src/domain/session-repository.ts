@@ -298,13 +298,12 @@ export class SessionRepository {
         throw new Error('archived Session cannot record a provider identity')
       }
       const existing = tx.get<BindingRow>(
-        'SELECT * FROM provider_bindings WHERE provider = ? AND provider_session_id = ?',
+        `SELECT * FROM provider_bindings
+         WHERE session_id = ? AND provider = ? AND provider_session_id = ?`,
+        input.sessionId,
         input.provider,
         providerSessionId
       )
-      if (existing && existing.session_id !== input.sessionId) {
-        throw new Error('Provider conversation is already bound to another Session')
-      }
       if (existing) {
         const previousMetadata = parseMetadata(existing.metadata_json)
         const metadata = {
@@ -348,7 +347,9 @@ export class SessionRepository {
       }
       const binding = mapBinding(requireRow(
         tx.get<BindingRow>(
-          'SELECT * FROM provider_bindings WHERE provider = ? AND provider_session_id = ?',
+          `SELECT * FROM provider_bindings
+           WHERE session_id = ? AND provider = ? AND provider_session_id = ?`,
+          input.sessionId,
           input.provider,
           providerSessionId
         ),

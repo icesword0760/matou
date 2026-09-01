@@ -9,6 +9,7 @@ import type {
   ClaudeSessionListResult,
   ClaudeSessionSummary
 } from '@matou/contracts'
+import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 
 export function SessionLoaderDialog(props: {
   targetTitle: string
@@ -29,6 +30,7 @@ export function SessionLoaderDialog(props: {
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [loadingSession, setLoadingSession] = useState(false)
   const [confirmRunning, setConfirmRunning] = useState(false)
+  const [confirmDuplicate, setConfirmDuplicate] = useState(false)
   const [error, setError] = useState('')
   const [activeMatch, setActiveMatch] = useState(0)
   const [scope, setScope] = useState<'all' | 'current'>('all')
@@ -44,7 +46,8 @@ export function SessionLoaderDialog(props: {
   useEffect(() => {
     searchRef.current?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel()
+      if (event.key === 'Escape' && !confirmDuplicate) onCancel()
+      if (confirmDuplicate) return
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
         if (selectedId) {
@@ -56,7 +59,7 @@ export function SessionLoaderDialog(props: {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [onCancel, selectedId])
+  }, [confirmDuplicate, onCancel, selectedId])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setEffectiveQuery(query), 180)
@@ -106,7 +109,6 @@ export function SessionLoaderDialog(props: {
   )
   const selectedSession = sessions.find(({ providerSessionId }) => providerSessionId === selectedId)
   const selectedAvailability = selectedSession?.availability ?? detail?.availability ?? 'available'
-  const selectedLoadBlocked = selectedAvailability !== 'available'
   const jumpTo = (eventIndex: number) => {
     const matchIndex = matchedEvents.findIndex(({ index }) => index === eventIndex)
     if (matchIndex >= 0) setActiveMatch(matchIndex)
@@ -123,8 +125,12 @@ export function SessionLoaderDialog(props: {
     setActiveMatch(next)
     jumpTo(matchedEvents[next]!.index)
   }
-  const submitLoad = async () => {
-    if (!selectedId || loadingSession || selectedLoadBlocked) return
+  const submitLoad = async (duplicateConfirmed = false) => {
+    if (!selectedId || loadingSession) return
+    if (selectedAvailability === 'loaded-elsewhere' && !duplicateConfirmed) {
+      setConfirmDuplicate(true)
+      return
+    }
     if (targetRunning && !confirmRunning) {
       setConfirmRunning(true)
       return
@@ -239,17 +245,22 @@ export function SessionLoaderDialog(props: {
         </div>
         <button type="button" onClick={onCancel}>取消</button>
         <button type="button" className="primary"
-          disabled={!selectedId || loadingSession || selectedLoadBlocked}
+          disabled={!selectedId || loadingSession}
           onClick={() => void submitLoad()}>
           {loadingSession
             ? '正在载入…'
-            : selectedAvailability === 'loaded-here'
-              ? '已载入当前卡片'
-              : selectedAvailability === 'loaded-elsewhere'
-                ? '已在其他卡片中'
-                : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
+            : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
         </button>
       </footer>
+      {confirmDuplicate && <ConfirmDialog
+        title="会话已在当前工作空间载入"
+        body={`“${selectedSession?.title ?? '该会话'}”已载入到“${selectedSession?.loadedSessionTitle ?? '其他卡片'}”。仍然可以载入到当前卡片，两张卡片将关联同一个 Claude Code 会话。`}
+        confirmLabel="仍然载入"
+        onCancel={() => setConfirmDuplicate(false)}
+        onConfirm={() => {
+          setConfirmDuplicate(false)
+          void submitLoad(true)
+        }} />}
     </section>
   </div>, portalTarget ?? document.body)
 }

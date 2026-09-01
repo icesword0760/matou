@@ -194,16 +194,20 @@ export class KookyImporter {
       const providerSessionId = text(panel.claudeSessionId)
       if (providerSessionId) {
         const provider = providerFor(panel)
+        const providerBindingId = legacyIdFor(
+          'provider-binding', `${sessionId}:${provider}:${providerSessionId}`
+        )
         try {
           tx.run(
             `INSERT INTO provider_bindings (
                id, session_id, provider, provider_session_id, resume_state,
                metadata_json, created_at, updated_at
              ) VALUES (?, ?, ?, ?, 'available', ?, ?, ?)`,
-            legacyIdFor('provider-binding', `${provider}:${providerSessionId}`), sessionId, provider,
+            providerBindingId, sessionId, provider,
             providerSessionId, JSON.stringify(providerMetadata(panel)), now, now
           )
-          mapEntity(tx, importRunId, 'provider-session', providerSessionId, 'provider-binding', legacyIdFor('provider-binding', `${provider}:${providerSessionId}`))
+          mapEntity(tx, importRunId, 'provider-session', `${sessionId}:${providerSessionId}`,
+            'provider-binding', providerBindingId)
           report.counts.providerBindings += 1
         } catch (error) {
           report.ignored.push({ legacyType: 'provider-session', legacyId: providerSessionId, reason: `duplicate or invalid: ${errorMessage(error)}` })

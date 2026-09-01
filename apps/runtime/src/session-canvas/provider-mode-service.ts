@@ -86,20 +86,11 @@ export class ProviderModeService {
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const owner = requireOwner(tx, input.sessionId)
       const session = requireSession(tx, input.sessionId)
-      const existing = tx.get<BindingRow & { owner_kind: SessionKind; owner_archived_at: number | null }>(
-        `SELECT binding.*, owner.kind AS owner_kind, owner.archived_at AS owner_archived_at
-         FROM provider_bindings AS binding
-         JOIN sessions AS owner ON owner.id = binding.session_id
-         WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?`,
-        providerSessionId
+      const existing = tx.get<BindingRow>(
+        `SELECT * FROM provider_bindings
+         WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?`,
+        session.id, providerSessionId
       )
-      if (
-        existing && existing.session_id !== session.id && existing.owner_archived_at === null &&
-        existing.owner_kind === 'claude-code' && existing.invalidated_at === null &&
-        ['unknown', 'available', 'resuming', 'resumed'].includes(existing.resume_state)
-      ) {
-        throw new Error('该 Claude Code 会话正在另一张卡片中使用')
-      }
 
       tx.run(
         `UPDATE provider_bindings

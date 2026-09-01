@@ -299,12 +299,12 @@ export class ShadowWriteBridge {
   #bindProvider(tx: Parameters<Parameters<DomainTransactionManager['execute']>[1]>[0]['tx'], sessionId: string, payload: Record<string, unknown>, now: number): void {
     const providerSession = string(payload.claudeSessionId)
     if (!providerSession) return
-    const id = legacyIdFor('provider-binding', `claude-code:${providerSession}`)
+    const id = legacyIdFor('provider-binding', `${sessionId}:claude-code:${providerSession}`)
     tx.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state, metadata_json, created_at, updated_at
        ) VALUES (?, ?, 'claude-code', ?, 'available', ?, ?, ?)
-       ON CONFLICT(provider, provider_session_id) DO UPDATE SET resume_state = 'available',
+       ON CONFLICT(session_id, provider, provider_session_id) DO UPDATE SET resume_state = 'available',
          metadata_json = excluded.metadata_json, updated_at = excluded.updated_at`,
       id, sessionId, providerSession, JSON.stringify({ permissionMode: string(payload.aiPermissionMode) || 'default' }), now, now
     )

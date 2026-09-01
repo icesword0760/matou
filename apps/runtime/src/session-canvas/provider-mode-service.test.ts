@@ -68,24 +68,26 @@ describe('ProviderModeService', () => {
     )).toEqual(focusedBefore)
   })
 
-  it('rejects a conversation already active in another Claude card without changing the target', () => {
+  it('loads a conversation already active in another Claude card while preserving both cards', () => {
     const initial = bootstrapClaudeTree()
-    const targetBefore = database.get('SELECT * FROM sessions WHERE id = ?', initial.childSessionId)
 
-    expect(() => providerModes.loadClaudeSession(command('load-conflict'), {
+    const result = providerModes.loadClaudeSession(command('load-duplicate'), {
       sessionId: initial.childSessionId,
-      bindingId: 'binding-unused',
+      bindingId: 'binding-duplicate',
       providerSessionId: 'provider-parent',
-      title: '不应写入',
+      title: '共享会话',
       permissionMode: 'default',
       now: 30
-    })).toThrow('该 Claude Code 会话正在另一张卡片中使用')
+    })
 
-    expect(database.get('SELECT * FROM sessions WHERE id = ?', initial.childSessionId))
-      .toEqual(targetBefore)
-    expect(database.get<{ session_id: string }>(
-      'SELECT session_id FROM provider_bindings WHERE provider_session_id = ?', 'provider-parent'
-    )?.session_id).toBe(initial.parentSessionId)
+    expect(result.session).toMatchObject({ id: initial.childSessionId, title: '共享会话' })
+    expect(database.all<{ session_id: string }>(
+      `SELECT session_id FROM provider_bindings
+       WHERE provider = 'claude-code' AND provider_session_id = ? ORDER BY session_id`,
+      'provider-parent'
+    ).map(({ session_id }) => session_id).sort()).toEqual([
+      initial.childSessionId, initial.parentSessionId
+    ].sort())
   })
 
   it('returns a manually exited Claude node to ordinary Shell and preserves its children', () => {
