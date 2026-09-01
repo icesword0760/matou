@@ -45,7 +45,7 @@ export function sceneCloseFlow(input: {
     action: 'confirm',
     steps: [{
       title: '关闭画布',
-      body: `这张画布中有 ${affected}。关闭后这些会话将停止，画布和关系会进入“已关闭画布”，本地目录和工作树保持原样。`,
+      body: `这张画布中有 ${affected}。关闭后这些会话将停止，画布会从标签栏移除，本地目录和工作树保持原样。`,
       confirmLabel: '确认关闭',
       cancelLabel: '取消'
     }]

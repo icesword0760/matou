@@ -50,5 +50,9 @@ describe('destructive hierarchy copy', () => {
         body: expect.stringContaining('2 个运行中会话和 1 个待输入会话')
       }]
     })
+    expect(sceneCloseFlow({
+      isLastScene: false, isLastTask: true, taskName: '事项',
+      runningCount: 2, needsInputCount: 1
+    }).steps[0]?.body).not.toContain('已关闭画布')
   })
 })
