@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -7,6 +7,12 @@ const retiredIdentifiers = [
   ['c', 'm', 'u', 'x'].join(''),
   ['k', 'o', 'o', 'k', 'y'].join('')
 ]
+
+export function isGeneratedArtifactPath(path) {
+  return path.startsWith('.playwright-cli/')
+    || path.startsWith('output/')
+    || /^apps\/desktop\/release(?:-|\/)/.test(path)
+}
 
 export async function scanProjectPaths(root, paths) {
   const violations = []
@@ -17,6 +23,7 @@ export async function scanProjectPaths(root, paths) {
       continue
     }
 
+    if (!(await stat(resolve(root, path))).isFile()) continue
     const content = (await readFile(resolve(root, path))).toString('latin1').toLowerCase()
     if (retiredIdentifiers.some((identifier) => content.includes(identifier))) {
       violations.push({ location: path, kind: 'content' })
@@ -31,7 +38,10 @@ async function main() {
     'git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'],
     { cwd: root }
   ).toString('utf8').split('\0').filter(Boolean)
-  const violations = await scanProjectPaths(root, paths)
+  const violations = await scanProjectPaths(
+    root,
+    paths.filter((path) => !isGeneratedArtifactPath(path))
+  )
   if (violations.length === 0) return
 
   process.stderr.write('Retired external product identifiers found:\n')

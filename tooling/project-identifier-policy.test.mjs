@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { scanProjectPaths } from './project-identifier-policy.mjs'
+import { isGeneratedArtifactPath, scanProjectPaths } from './project-identifier-policy.mjs'
 
 const retiredTerminalHost = ['c', 'm', 'u', 'x'].join('')
 const retiredReferenceBrand = ['k', 'o', 'o', 'k', 'y'].join('')
@@ -31,4 +31,18 @@ test('accepts neutral Matou names', async () => {
   await writeFile(join(root, 'terminal-control.ts'), 'export const product = "Matou"\n')
 
   assert.deepEqual(await scanProjectPaths(root, ['terminal-control.ts']), [])
+})
+
+test('skips directory entries from nested untracked work areas', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-identifier-policy-'))
+  await mkdir(join(root, 'nested-work-area'))
+
+  assert.deepEqual(await scanProjectPaths(root, ['nested-work-area']), [])
+})
+
+test('classifies local build and browser evidence as generated artifacts', () => {
+  assert.equal(isGeneratedArtifactPath('apps/desktop/release-preview/mac-arm64/Matou.app'), true)
+  assert.equal(isGeneratedArtifactPath('output/playwright/reference.png'), true)
+  assert.equal(isGeneratedArtifactPath('.playwright-cli/session.json'), true)
+  assert.equal(isGeneratedArtifactPath('apps/desktop/src/main/index.ts'), false)
 })
