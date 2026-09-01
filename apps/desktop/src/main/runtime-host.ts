@@ -119,7 +119,10 @@ export class RuntimeHost {
         this.#child = undefined
         this.#connectedRenderers.clear()
         if (code !== 0) console.error(`Matou Runtime exited with code ${code}`)
-        this.#rejectPending(new Error('Runtime exited during database recovery'))
+        this.#rejectPending(
+          new Error('数据库恢复操作未完成：Runtime 在恢复操作期间退出'),
+          true
+        )
         if (!this.#stopping) {
           this.#markReconnecting()
           this.#scheduleRestart()
@@ -176,7 +179,7 @@ export class RuntimeHost {
         return
       }
       if (event.snapshot.mode !== 'recovery-required' && event.snapshot.stage === 'ready') {
-        const { recovery: _recovery, ...current } = this.#lifecycle
+        const { recovery: _recovery, operation: _operation, ...current } = this.#lifecycle
         this.#lifecycle = { ...current, snapshot: event.snapshot }
       } else {
         this.#lifecycle = { ...this.#lifecycle, snapshot: event.snapshot }
@@ -238,6 +241,7 @@ export class RuntimeHost {
   #markReconnecting(): void {
     this.#setConnectionState('reconnecting')
     this.#lifecycle = {
+      ...this.#lifecycle,
       snapshot: {
         recoveryId: `desktop-${randomUUID()}`,
         revision: 0,
@@ -287,7 +291,13 @@ export class RuntimeHost {
     }
   }
 
-  #rejectPending(error: Error): void {
+  #rejectPending(error: Error, retainFailure = false): void {
+    if (retainFailure && this.#lifecycle.recovery && this.#lifecycle.operation?.pending) {
+      this.#lifecycle = {
+        ...this.#lifecycle,
+        operation: { ...this.#lifecycle.operation, pending: false, error: error.message }
+      }
+    }
     for (const pending of this.#pendingRecoveryCommands.values()) pending.reject(error)
     this.#pendingRecoveryCommands.clear()
   }

@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto'
-import { cp, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
 import type { RuntimeRecoveryCommand } from '@matou/contracts'
 
 import { DatabaseBackupService } from './database-backup-service'
+import { RuntimeDatabase } from './database'
+import { withDatabaseRecoveryActionFence } from './database-owner'
 import type { Migration } from './migration-runner'
 import {
-  openRecoverableRuntimeDatabase,
+  openRecoverableRuntimeDatabaseWithOwnership,
   type RuntimeDatabaseBootstrapObserver,
   type RuntimeDatabaseBootstrapResult
 } from './runtime-database-bootstrap'
@@ -42,42 +44,57 @@ export class DatabaseRecoveryController {
       case 'export-recovery-bundle':
         return { value: { exportedPath: await this.#export(recovery) } }
       case 'restore-backup':
-        await new DatabaseBackupService(this.#dataRoot).restore(
-          command.backupId,
-          recovery.durableDatabasePath
-        )
-        await this.#archiveOwnershipState(recovery, command.requestId)
-        return { value: {}, bootstrap: await this.#openAfterAction(recovery, command.requestId) }
+        return this.#executeOpeningAction(recovery, command.requestId, async () => {
+          await new DatabaseBackupService(this.#dataRoot).restore(
+            command.backupId,
+            recovery.durableDatabasePath
+          )
+        })
       case 'retry-open':
-        if (!await isFile(recovery.durableDatabasePath)) {
-          throw new Error('原数据库尚未回到可检查的位置，请先恢复备份或导出恢复资料')
-        }
-        return { value: {}, bootstrap: await this.#openAfterAction(recovery, command.requestId) }
+        return this.#executeOpeningAction(recovery, command.requestId, async () => {
+          if (!await isFile(recovery.durableDatabasePath)) {
+            throw new Error('原数据库尚未回到可检查的位置，请先恢复备份或导出恢复资料')
+          }
+        })
       case 'start-empty-database':
-        await this.#preserveBeforeEmpty(recovery, command.requestId)
-        return { value: {}, bootstrap: await this.#openAfterAction(recovery, command.requestId) }
+        return this.#executeOpeningAction(recovery, command.requestId, () => (
+          this.#preserveBeforeEmpty(recovery, command.requestId)
+        ))
     }
   }
 
-  async #openAfterAction(
+  async #executeOpeningAction(
     recovery: RecoveryRequired,
-    requestId: string
-  ): Promise<RuntimeDatabaseBootstrapResult> {
-    const stagedMarker = `${recovery.markerPath}.action-${requestId}`
-    await rm(stagedMarker, { force: true })
-    await rename(recovery.markerPath, stagedMarker)
-    try {
-      const result = await openRecoverableRuntimeDatabase(
-        this.#dataRoot,
-        this.#migrations,
-        this.#observer
-      )
-      await rm(stagedMarker, { force: true })
-      return result
-    } catch (error) {
-      await rename(stagedMarker, recovery.markerPath).catch(() => undefined)
-      throw error
-    }
+    requestId: string,
+    mutate: () => Promise<void>
+  ): Promise<DatabaseRecoveryExecution> {
+    return withDatabaseRecoveryActionFence(recovery.durableDatabasePath, async () => {
+      await assertRecoveryStillActive(recovery)
+      await this.#archiveOwnershipState(recovery, requestId)
+      const ownership = RuntimeDatabase.acquireOwnership(recovery.durableDatabasePath)
+      let database: RuntimeDatabase | undefined
+      try {
+        await this.#observer.onRecoveryActionFenced?.()
+        await mutate()
+        const bootstrap = await openRecoverableRuntimeDatabaseWithOwnership(
+          this.#dataRoot,
+          this.#migrations,
+          ownership,
+          this.#observer
+        )
+        database = bootstrap.database
+        await rm(recovery.markerPath)
+        return { value: {}, bootstrap }
+      } catch (error) {
+        if (database) {
+          database.close()
+          this.#observer.onDatabaseClosed?.(database)
+        } else {
+          ownership.release()
+        }
+        throw error
+      }
+    })
   }
 
   async #export(recovery: RecoveryRequired): Promise<string> {
@@ -135,13 +152,31 @@ export class DatabaseRecoveryController {
     const paths = [
       recovery.durableDatabasePath,
       `${recovery.durableDatabasePath}-wal`,
-      `${recovery.durableDatabasePath}-shm`,
-      `${recovery.durableDatabasePath}.owner`,
-      `${recovery.durableDatabasePath}.owner.takeover.sqlite`
+      `${recovery.durableDatabasePath}-shm`
     ]
     for (const path of paths) {
       await moveIfPresent(path, join(evidence, basename(path)))
     }
+  }
+}
+
+async function assertRecoveryStillActive(recovery: RecoveryRequired): Promise<void> {
+  let marker: Partial<RecoveryRequired>
+  try {
+    marker = JSON.parse(await readFile(recovery.markerPath, 'utf8')) as Partial<RecoveryRequired>
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') {
+      throw new Error('数据库恢复已由其他 Runtime 完成，本次操作已停止')
+    }
+    throw error
+  }
+  if (
+    marker.reason !== recovery.reason ||
+    marker.durableDatabasePath !== recovery.durableDatabasePath ||
+    marker.quarantinedPath !== recovery.quarantinedPath ||
+    marker.markerPath !== recovery.markerPath
+  ) {
+    throw new Error('数据库恢复状态已更新，请使用最新恢复页面重试')
   }
 }
 

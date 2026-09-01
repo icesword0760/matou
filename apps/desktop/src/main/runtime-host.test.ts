@@ -161,6 +161,55 @@ describe('RuntimeHost', () => {
     expect(host.getLifecycle().operation).toMatchObject({ error: '校验失败' })
   })
 
+  it('keeps recovery details and the interrupted operation error while the Runtime reconnects', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const first = electron.children[0] as MockUtilityProcess
+    first.emit('spawn')
+    await starting
+    first.emit('message', {
+      type: 'runtime.recovery-details',
+      recovery: {
+        reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
+        quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
+      }
+    })
+    first.emit('message', recoveryRequired)
+
+    const pending = host.recover({
+      type: 'runtime.recovery-command', requestId: 'restore-crash',
+      action: 'restore-backup', backupId: 'backup-1'
+    })
+    first.emit('exit', 9)
+
+    await expect(pending).rejects.toThrow('恢复操作期间退出')
+    expect(host.getLifecycle()).toMatchObject({
+      snapshot: { stage: 'opening-database' },
+      recovery: { quarantinedPath: '/data/matou.sqlite.corrupt-1' },
+      operation: {
+        requestId: 'restore-crash', pending: false,
+        error: '数据库恢复操作未完成：Runtime 在恢复操作期间退出'
+      }
+    })
+
+    await vi.advanceTimersByTimeAsync(100)
+    const second = electron.children[1] as MockUtilityProcess
+    second.emit('spawn')
+    await Promise.resolve()
+    second.emit('message', {
+      type: 'runtime.recovery-details',
+      recovery: {
+        reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
+        quarantinedPath: '/data/matou.sqlite.corrupt-2', backups: []
+      }
+    })
+    second.emit('message', recoveryRequired)
+    expect(host.getLifecycle()).toMatchObject({
+      recovery: { quarantinedPath: '/data/matou.sqlite.corrupt-2' },
+      operation: { pending: false, error: expect.stringContaining('Runtime') }
+    })
+  })
+
   it('does not report shutdown complete until the Runtime has flushed and exited', async () => {
     const host = new RuntimeHost('/runtime/index.cjs')
     const starting = host.start()

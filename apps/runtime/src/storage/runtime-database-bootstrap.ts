@@ -72,7 +72,31 @@ export interface RuntimeDatabaseBootstrapObserver {
   onRecoveryMarkerPublished?(
     marker: RuntimeDatabaseRecoveryMarker
   ): void | Promise<void>
+  onRecoveryActionFenced?(): void | Promise<void>
   isShutdownRequested?(): boolean
+}
+
+export async function openRecoverableRuntimeDatabaseWithOwnership(
+  dataRoot: string,
+  migrations: readonly Migration[],
+  ownership: RuntimeDatabaseOwnership,
+  observer: RuntimeDatabaseBootstrapObserver = {}
+): Promise<Extract<RuntimeDatabaseBootstrapResult, { kind: 'writable' }>> {
+  const databasePath = join(dataRoot, 'matou.sqlite')
+  const backups = new DatabaseBackupService(dataRoot)
+  let database: RuntimeDatabase | undefined
+  try {
+    assertWalBundleReady(databasePath)
+    database = ownership.openWritable()
+    observer.onDatabaseOpened?.(database, dataRoot, backups)
+    assertFullIntegrity(database)
+    await new MigrationRunner(database, migrations, backups).migrate()
+    return { kind: 'writable', database, dataRoot }
+  } catch (error) {
+    ownership.release()
+    if (database) closeObservedDatabase(database, observer)
+    throw error
+  }
 }
 
 export async function openRecoverableRuntimeDatabase(

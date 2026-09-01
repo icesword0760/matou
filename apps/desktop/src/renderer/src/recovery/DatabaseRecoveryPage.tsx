@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type {
   RuntimeLifecyclePresentation,
@@ -30,12 +30,24 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
   const [error, setError] = useState<string>()
   const [message, setMessage] = useState<string>()
   const [confirmEmpty, setConfirmEmpty] = useState(false)
+  const emptyTriggerRef = useRef<HTMLButtonElement>(null)
+  const dialogBackRef = useRef<HTMLButtonElement>(null)
+  const dialogConfirmRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!backups.some(({ id }) => id === selectedBackupId)) {
       setSelectedBackupId(backups[0]?.id ?? '')
     }
   }, [backups, selectedBackupId])
+
+  useEffect(() => {
+    if (confirmEmpty) dialogBackRef.current?.focus()
+  }, [confirmEmpty])
+
+  const closeEmptyConfirmation = () => {
+    setConfirmEmpty(false)
+    queueMicrotask(() => emptyTriggerRef.current?.focus())
+  }
 
   const reopening = state.snapshot.mode !== 'recovery-required'
   const busy = Boolean(pending || state.operation?.pending || reopening)
@@ -119,7 +131,8 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
       </div>
 
       <footer>
-        <button className="danger-link" disabled={busy} onClick={() => setConfirmEmpty(true)}>
+        <button ref={emptyTriggerRef} className="danger-link" disabled={busy}
+          onClick={() => setConfirmEmpty(true)}>
           创建全新空数据库
         </button>
         <p>此入口只在你明确确认后执行；现有隔离文件和备份继续保留。</p>
@@ -127,12 +140,27 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
     </section>
 
     {confirmEmpty && <div className="database-recovery-dialog-backdrop">
-      <section role="dialog" aria-modal="true" aria-label="确认创建全新空数据库" className="database-recovery-dialog">
+      <section role="dialog" aria-modal="true" aria-label="确认创建全新空数据库"
+        className="database-recovery-dialog" onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            closeEmptyConfirmation()
+            return
+          }
+          if (event.key !== 'Tab') return
+          if (event.shiftKey && document.activeElement === dialogBackRef.current) {
+            event.preventDefault()
+            dialogConfirmRef.current?.focus()
+          } else if (!event.shiftKey && document.activeElement === dialogConfirmRef.current) {
+            event.preventDefault()
+            dialogBackRef.current?.focus()
+          }
+        }}>
         <h2>确认创建全新空数据库？</h2>
         <p>Matou 将显示一个全新的空工作区。当前损坏或异常文件和备份仍会保留，便于后续导出与排查。</p>
         <div>
-          <button onClick={() => setConfirmEmpty(false)}>返回</button>
-          <button className="danger" onClick={() => {
+          <button ref={dialogBackRef} onClick={closeEmptyConfirmation}>返回</button>
+          <button ref={dialogConfirmRef} className="danger" onClick={() => {
             setConfirmEmpty(false)
             void perform('empty', actions.startEmpty)
           }}>确认创建空数据库</button>

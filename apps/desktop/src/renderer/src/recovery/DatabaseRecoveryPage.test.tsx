@@ -54,6 +54,26 @@ describe('database recovery page', () => {
     expect(startEmpty).toHaveBeenCalledOnce()
   })
 
+  it('moves focus into the empty-database dialog, traps Tab, and restores focus on Escape', async () => {
+    const user = userEvent.setup()
+    render(<DatabaseRecoveryPage state={state(0)} actions={actions()} />)
+    const opener = screen.getByRole('button', { name: '创建全新空数据库' })
+
+    await user.click(opener)
+    const dialog = screen.getByRole('dialog', { name: '确认创建全新空数据库' })
+    const back = within(dialog).getByRole('button', { name: '返回' })
+    const confirm = within(dialog).getByRole('button', { name: '确认创建空数据库' })
+    expect(document.activeElement).toBe(back)
+
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(document.activeElement).toBe(confirm)
+    await user.keyboard('{Tab}')
+    expect(document.activeElement).toBe(back)
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(opener)
+  })
+
   it('states that ownership recovery preserves the original database', () => {
     const value = state(0)
     value.recovery!.reason = 'ownership-recovery-required'

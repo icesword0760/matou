@@ -49,6 +49,27 @@ describe('App database lifecycle gate', () => {
     expect(screen.queryByText('正在打开工作区…')).toBeNull()
     expect(screen.getByRole('button', { name: '重新检查数据库' }).hasAttribute('disabled')).toBe(true)
   })
+
+  it('keeps the recovery page and interrupted operation error visible through reconnect', async () => {
+    const initial = recoveryState()
+    const api = installDynamicApi(initial)
+    render(<App />)
+    expect(await screen.findByRole('heading', { name: '数据库需要恢复' })).toBeTruthy()
+
+    api.publish({
+      ...initial,
+      snapshot: { ...initial.snapshot, mode: 'normal', stage: 'opening-database', revision: 3 },
+      operation: {
+        requestId: 'restore-crash', action: 'restore-backup', pending: false,
+        error: '数据库恢复操作未完成：Runtime 在恢复操作期间退出'
+      }
+    })
+
+    expect(await screen.findByRole('heading', { name: '数据库需要恢复' })).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toContain('Runtime 在恢复操作期间退出')
+    expect(screen.queryByText('正在打开工作区…')).toBeNull()
+    expect(screen.queryByTestId('workspace')).toBeNull()
+  })
 })
 
 function installApi(initial: RuntimeLifecyclePresentation): void {
@@ -63,6 +84,27 @@ function installApi(initial: RuntimeLifecyclePresentation): void {
       startWithEmptyDatabase: vi.fn()
     }
   })
+}
+
+function installDynamicApi(initial: RuntimeLifecyclePresentation): {
+  publish(value: RuntimeLifecyclePresentation): void
+} {
+  let listener: ((value: RuntimeLifecyclePresentation) => void) | undefined
+  Object.defineProperty(window, 'matouDesktop', {
+    configurable: true,
+    value: {
+      getRuntimeLifecycle: vi.fn().mockResolvedValue(initial),
+      onRuntimeLifecycle: vi.fn((next: (value: RuntimeLifecyclePresentation) => void) => {
+        listener = next
+        return () => { listener = undefined }
+      }),
+      restoreDatabaseBackup: vi.fn(),
+      exportDatabaseRecoveryBundle: vi.fn(),
+      retryDatabaseOpen: vi.fn(),
+      startWithEmptyDatabase: vi.fn()
+    }
+  })
+  return { publish: (value) => listener?.(value) }
 }
 
 function readyState(): RuntimeLifecyclePresentation {

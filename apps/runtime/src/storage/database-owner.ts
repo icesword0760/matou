@@ -109,6 +109,37 @@ export function readDatabaseOwner(ownerPath: string): DatabaseOwnerRecord | unde
   return inspection.state === 'valid' ? inspection.record : undefined
 }
 
+export async function withDatabaseRecoveryActionFence<T>(
+  databasePath: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const path = `${databasePath}.recovery-action.sqlite`
+  prepareTakeoverSidecar(path)
+  let lock: DatabaseSyncType | undefined
+  let transactionOpen = false
+  try {
+    lock = new DatabaseSync(path) as DatabaseSyncType
+    repairSameUserMode(path, lstatSync(path), 0o600)
+    lock.exec('PRAGMA busy_timeout = 5000; BEGIN EXCLUSIVE;')
+    transactionOpen = true
+    const result = await operation()
+    lock.exec('COMMIT')
+    transactionOpen = false
+    return result
+  } catch (error) {
+    if (transactionOpen) {
+      try {
+        lock?.exec('ROLLBACK')
+      } catch {
+        // Closing the SQLite handle releases the OS lock after a failed rollback.
+      }
+    }
+    throw error
+  } finally {
+    lock?.close()
+  }
+}
+
 /**
  * Publishes a complete owner payload with one atomic namespace operation.
  * A crash before link leaves only a non-canonical temporary inode; a crash

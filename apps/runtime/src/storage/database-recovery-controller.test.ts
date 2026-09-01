@@ -30,6 +30,46 @@ describe('database recovery controller', () => {
     await expect(stat(join(fixture.root, 'matou.sqlite.recovery.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it.each(['restore-backup', 'retry-open', 'start-empty-database'] as const)(
+    'keeps the recovery marker visible behind the owner fence during %s',
+    async (action) => {
+      const fixture = await corruptFixture()
+      if (action === 'retry-open') {
+        const backup = fixture.recovery.backups[0]!
+        await writeFile(join(fixture.root, 'matou.sqlite'), await readFile(backup.path))
+      }
+      let fenced = false
+      const controller = new DatabaseRecoveryController(
+        fixture.root,
+        FOUNDATION_MIGRATIONS,
+        {
+          async onRecoveryActionFenced() {
+            fenced = true
+            expect((await stat(fixture.recovery.markerPath)).isFile()).toBe(true)
+            const contender = await openRecoverableRuntimeDatabase(
+              fixture.root,
+              FOUNDATION_MIGRATIONS
+            )
+            expect(contender.kind).toBe('recovery-required')
+          }
+        }
+      )
+
+      const result = await controller.execute(fixture.recovery, action === 'restore-backup'
+        ? {
+            type: 'runtime.recovery-command', requestId: `fence-${action}`,
+            action, backupId: fixture.backupId
+          }
+        : {
+            type: 'runtime.recovery-command', requestId: `fence-${action}`, action
+          })
+
+      expect(fenced).toBe(true)
+      expect(result.bootstrap?.kind).toBe('writable')
+      if (result.bootstrap?.kind === 'writable') result.bootstrap.database.close()
+    }
+  )
+
   it('keeps recovery-required and its original error when restore fails', async () => {
     const fixture = await corruptFixture()
     const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
@@ -43,6 +83,30 @@ describe('database recovery controller', () => {
       .toBe('recovery-required')
     expect(await readFile(join(fixture.root, 'matou.sqlite.recovery.json'), 'utf8'))
       .toContain(fixture.recovery.quarantinedPath)
+    await expect(stat(join(fixture.root, 'matou.sqlite.owner')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects a stale recovery command after another Runtime completed the recovery', async () => {
+    const fixture = await corruptFixture()
+    const backup = fixture.recovery.backups[0]!
+    await writeFile(join(fixture.root, 'matou.sqlite'), await readFile(backup.path))
+    const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
+    const recovered = await controller.execute(fixture.recovery, {
+      type: 'runtime.recovery-command', requestId: 'winner', action: 'retry-open'
+    })
+    if (recovered.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+    recovered.bootstrap.database.close()
+
+    await expect(controller.execute(fixture.recovery, {
+      type: 'runtime.recovery-command', requestId: 'stale-empty', action: 'start-empty-database'
+    })).rejects.toThrow('已由其他 Runtime 完成')
+
+    const database = RuntimeDatabase.open(join(fixture.root, 'matou.sqlite'))
+    expect(database.get<{ name: string }>(
+      'SELECT name FROM workspaces WHERE id = ?', 'workspace-preserved'
+    )).toEqual({ name: 'Preserved Workspace' })
+    database.close()
   })
 
   it('exports retained recovery evidence without changing recovery state', async () => {
@@ -58,6 +122,37 @@ describe('database recovery controller', () => {
       .toMatchObject({ reason: 'physical-corruption', backupCount: 1 })
     expect((await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)).kind)
       .toBe('recovery-required')
+  })
+
+  it('repairs ownership recovery under the action fence without moving the canonical database', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-ownership-recovery-control-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const database = RuntimeDatabase.open(databasePath)
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    database.run(
+      'INSERT INTO workspaces (id, name, root_directory, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      'ownership-preserved', 'Ownership Preserved', root, 1, 1
+    )
+    database.close()
+    await writeFile(`${databasePath}.owner`, '{"pid":')
+    const recovery = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
+    if (recovery.kind !== 'recovery-required') throw new Error('expected ownership recovery')
+    expect(recovery.reason).toBe('ownership-recovery-required')
+
+    const result = await new DatabaseRecoveryController(root, FOUNDATION_MIGRATIONS).execute(
+      recovery,
+      { type: 'runtime.recovery-command', requestId: 'ownership-retry', action: 'retry-open' }
+    )
+
+    expect(result.bootstrap?.kind).toBe('writable')
+    if (result.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+    expect(result.bootstrap.database.get<{ name: string }>(
+      'SELECT name FROM workspaces WHERE id = ?', 'ownership-preserved'
+    )).toEqual({ name: 'Ownership Preserved' })
+    result.bootstrap.database.close()
+    expect(await readFile(join(
+      root, 'recovery-evidence', 'ownership-retry', 'matou.sqlite.owner'
+    ), 'utf8')).toBe('{"pid":')
   })
 
   it('rechecks a repaired canonical database and starts empty only after the explicit command', async () => {
