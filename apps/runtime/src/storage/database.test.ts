@@ -9,8 +9,9 @@ import { RuntimeDatabase } from './database'
 import { readDatabaseOwner } from './database-owner'
 
 const opened: RuntimeDatabase[] = []
-const OWNER_RACE_CONTENDERS = 2
-const OWNER_RACE_ITERATIONS = 2
+// Full Runtime runs include PTY timing suites in parallel; stress verification sets this to 8.
+const OWNER_RACE_CONTENDERS = Number(process.env.MATOU_OWNER_RACE_CONTENDERS ?? 2)
+const OWNER_RACE_ITERATIONS = Number(process.env.MATOU_OWNER_RACE_ITERATIONS ?? 2)
 
 afterEach(() => {
   for (const database of opened.splice(0)) {
@@ -180,8 +181,40 @@ describe('RuntimeDatabase', () => {
 
     expect(readDatabaseOwner(ownerPath)).toBeUndefined()
     expect(() => RuntimeDatabase.acquireOwnership(join(directory, 'matou.sqlite')))
-      .toThrow('database is already owned by a live Runtime')
+      .toThrow('database ownership state requires recovery')
   })
+
+  it.each(['prepared', 'published'] as const)(
+    'survives a publisher killed after the owner record is %s',
+    async (stage) => {
+      const root = await mkdtemp(join(tmpdir(), `matou-owner-publisher-${stage}-`))
+      const ownerPath = join(root, 'matou.sqlite.owner')
+      const publisher = spawnOwnerPublisherFixture(root, stage)
+      await waitForFiles(join(root, `publisher-${stage}`))
+
+      publisher.kill()
+      await publisher.completed
+
+      if (stage === 'prepared') {
+        await expect(readFile(ownerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      } else {
+        expect(JSON.parse(await readFile(ownerPath, 'utf8'))).toMatchObject({
+          pid: publisher.pid,
+          runtimeGeneration: 'publisher-generation'
+        })
+      }
+      const ownership = RuntimeDatabase.acquireOwnership(join(root, 'matou.sqlite'))
+      try {
+        expect(JSON.parse(await readFile(ownerPath, 'utf8'))).toMatchObject({
+          pid: process.pid,
+          runtimeGeneration: ownership.runtimeGeneration
+        })
+      } finally {
+        ownership.release()
+      }
+    },
+    20_000
+  )
 
   it('releases an owner file only when its generation token still matches', async () => {
     const { database, path } = await openDatabase()
@@ -368,6 +401,38 @@ function spawnTakeoverLockHolder(root: string): {
       child.once('exit', (code, signal) => {
         if (signal === 'SIGKILL') resolveExit()
         else reject(new Error(`takeover lock holder exited ${code ?? signal}:\n${output}`))
+      })
+    })
+  }
+}
+
+function spawnOwnerPublisherFixture(root: string, stage: 'prepared' | 'published'): {
+  pid: number
+  kill(): void
+  completed: Promise<void>
+} {
+  const fixturePath = resolve(
+    process.cwd(), 'src/storage/database-owner-publisher.fixture.mjs'
+  )
+  const child = spawn(process.execPath, [
+    '--experimental-sqlite', '--experimental-strip-types', fixturePath
+  ], {
+    cwd: process.cwd(),
+    env: { ...process.env, MATOU_OWNER_PUBLISH_ROOT: root, MATOU_OWNER_PUBLISH_STAGE: stage },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  let output = ''
+  child.stdout.on('data', (chunk) => { output += String(chunk) })
+  child.stderr.on('data', (chunk) => { output += String(chunk) })
+  if (child.pid === undefined) throw new Error('owner publisher did not start')
+  return {
+    pid: child.pid,
+    kill: () => { child.kill('SIGKILL') },
+    completed: new Promise((resolveExit, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => {
+        if (signal === 'SIGKILL') resolveExit()
+        else reject(new Error(`owner publisher exited ${code ?? signal}:\n${output}`))
       })
     })
   }

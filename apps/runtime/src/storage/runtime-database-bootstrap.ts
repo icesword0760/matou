@@ -8,13 +8,17 @@ import {
   readFileSync,
   statSync
 } from 'node:fs'
-import { open, readFile, rename, rm } from 'node:fs/promises'
+import { link, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import {
   RuntimeDatabase,
   type RuntimeDatabaseOwnership
 } from './database'
+import {
+  isDatabaseOwnershipRecoveryError,
+  type DatabaseOwnershipRecoveryIssue
+} from './database-owner'
 import {
   DatabaseBackupService,
   type DatabaseBackupDescriptor
@@ -37,11 +41,12 @@ export type RuntimeDatabaseBootstrapResult =
     }
   | {
       kind: 'recovery-required'
-      reason: 'physical-corruption' | 'wal-recovery-required'
+      reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
       durableDatabasePath: string
       quarantinedPath: string
       markerPath: string
       backups: DatabaseBackupDescriptor[]
+      ownershipIssue?: DatabaseOwnershipRecoveryIssue
       backupListError?: RuntimeDatabaseRecoveryError
       markerError?: RuntimeDatabaseRecoveryError
       moveError?: RuntimeDatabaseRecoveryError
@@ -49,11 +54,12 @@ export type RuntimeDatabaseBootstrapResult =
 
 interface RuntimeDatabaseRecoveryMarker {
   version: 1
-  reason: 'physical-corruption' | 'wal-recovery-required'
+  reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
   durableDatabasePath: string
   quarantinedPath: string
   markerPath: string
   createdAt: number
+  ownershipIssue?: DatabaseOwnershipRecoveryIssue
 }
 
 export interface RuntimeDatabaseBootstrapObserver {
@@ -156,6 +162,11 @@ export async function openRecoverableRuntimeDatabase(
   } catch (error) {
     if (database && observer.isShutdownRequested?.()) throw error
 
+    if (isDatabaseOwnershipRecoveryError(error)) {
+      ownership?.release()
+      return preserveDatabaseForOwnershipRecovery(databasePath, backups, error.issue, observer)
+    }
+
     const recoveryReason = recoveryReasonFor(error)
     if (database) {
       if (database.readOnly) {
@@ -219,6 +230,29 @@ export async function openRecoverableRuntimeDatabase(
   }
 }
 
+async function preserveDatabaseForOwnershipRecovery(
+  databasePath: string,
+  backups: DatabaseBackupService,
+  ownershipIssue: DatabaseOwnershipRecoveryIssue,
+  observer: RuntimeDatabaseBootstrapObserver
+): Promise<Extract<RuntimeDatabaseBootstrapResult, { kind: 'recovery-required' }>> {
+  const marker = newRecoveryMarker(
+    databasePath,
+    'ownership-recovery-required',
+    ownershipIssue
+  )
+  try {
+    const published = await publishRecoveryMarker(marker)
+    await observer.onRecoveryMarkerPublished?.(published)
+    return recoveryResult(published, backups)
+  } catch (error) {
+    return recoveryResult(marker, backups, {
+      markerError: recoveryError('RECOVERY_MARKER_FAILED', error),
+      quarantinedPath: databasePath
+    })
+  }
+}
+
 async function quarantineDatabaseBundle(
   databasePath: string,
   backups: DatabaseBackupService,
@@ -261,16 +295,20 @@ async function moveDatabaseBundle(databasePath: string, quarantinedPath: string)
 
 function newRecoveryMarker(
   databasePath: string,
-  reason: RuntimeDatabaseRecoveryMarker['reason']
+  reason: RuntimeDatabaseRecoveryMarker['reason'],
+  ownershipIssue?: DatabaseOwnershipRecoveryIssue
 ): RuntimeDatabaseRecoveryMarker {
   const createdAt = Date.now()
   return {
     version: 1,
     reason,
     durableDatabasePath: databasePath,
-    quarantinedPath: `${databasePath}.corrupt-${createdAt}`,
+    quarantinedPath: reason === 'ownership-recovery-required'
+      ? databasePath
+      : `${databasePath}.corrupt-${createdAt}`,
     markerPath: `${databasePath}.recovery.json`,
-    createdAt
+    createdAt,
+    ...(ownershipIssue ? { ownershipIssue } : {})
   }
 }
 
@@ -288,13 +326,18 @@ async function publishRecoveryMarker(
     await handle.close()
   }
   try {
-    await rename(partialPath, marker.markerPath)
+    await link(partialPath, marker.markerPath)
     syncDirectory(dirname(marker.markerPath))
+    return marker
   } catch (error) {
-    await rm(partialPath, { force: true }).catch(() => undefined)
+    if (errorCode(error) === 'EEXIST') {
+      const competing = readRecoveryMarker(marker.durableDatabasePath)
+      if (competing) return competing
+    }
     throw error
+  } finally {
+    await rm(partialPath, { force: true }).catch(() => undefined)
   }
-  return marker
 }
 
 function syncDirectory(path: string): void {
@@ -324,12 +367,22 @@ function readRecoveryMarker(databasePath: string): RuntimeDatabaseRecoveryMarker
   const durablePath = resolve(databasePath)
   if (
     marker.version !== 1 ||
-    !['physical-corruption', 'wal-recovery-required'].includes(String(marker.reason)) ||
+    ![
+      'physical-corruption',
+      'wal-recovery-required',
+      'ownership-recovery-required'
+    ].includes(String(marker.reason)) ||
     marker.durableDatabasePath !== durablePath ||
     marker.markerPath !== markerPath ||
     typeof marker.quarantinedPath !== 'string' ||
     dirname(marker.quarantinedPath) !== dirname(durablePath) ||
-    !marker.quarantinedPath.startsWith(`${durablePath}.corrupt-`) ||
+    (marker.reason === 'ownership-recovery-required'
+      ? marker.quarantinedPath !== durablePath ||
+        !['owner-record-malformed', 'takeover-sidecar-unusable'].includes(
+          String(marker.ownershipIssue)
+        )
+      : !marker.quarantinedPath.startsWith(`${durablePath}.corrupt-`) ||
+        marker.ownershipIssue !== undefined) ||
     !Number.isSafeInteger(marker.createdAt)
   ) {
     throw new Error('database recovery marker is invalid')
@@ -373,6 +426,7 @@ async function recoveryResult(
     quarantinedPath: overrides.quarantinedPath ?? marker.quarantinedPath,
     markerPath: marker.markerPath,
     backups: validBackups,
+    ...(marker.ownershipIssue ? { ownershipIssue: marker.ownershipIssue } : {}),
     ...(backupListError ? { backupListError } : {}),
     ...(overrides.markerError ? { markerError: overrides.markerError } : {}),
     ...(overrides.moveError ? { moveError: overrides.moveError } : {})

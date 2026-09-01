@@ -26,6 +26,131 @@ const { DatabaseSync } = process.getBuiltinModule(
 ) as typeof import('node:sqlite')
 
 describe('openRecoverableRuntimeDatabase', () => {
+  it.each([
+    ['empty owner', async (ownerPath: string) => writeFile(ownerPath, '')],
+    ['truncated owner', async (ownerPath: string) => writeFile(ownerPath, '{"pid":')],
+    ['wrong-type owner', async (ownerPath: string) => mkdir(ownerPath)]
+  ] as const)(
+    'preserves the canonical database and durably requires recovery for %s',
+    async (_scenario, breakOwner) => {
+      const { root, databasePath, originalBytes } = await createOwnedFaultFixture()
+      await breakOwner(`${databasePath}.owner`)
+
+      const first = await openRecoverableRuntimeDatabase(root, [])
+      const second = await openRecoverableRuntimeDatabase(root, [])
+
+      expect(first).toMatchObject({
+        kind: 'recovery-required',
+        reason: 'ownership-recovery-required',
+        ownershipIssue: 'owner-record-malformed',
+        durableDatabasePath: databasePath,
+        quarantinedPath: databasePath,
+        markerPath: `${databasePath}.recovery.json`
+      })
+      expect(second).toMatchObject(first)
+      expect(await readFile(databasePath)).toEqual(originalBytes)
+      expect((await readdir(root)).filter((name) => name.includes('.corrupt-'))).toEqual([])
+    }
+  )
+
+  it.each(['corrupt-bytes', 'directory'] as const)(
+    'preserves the canonical database when the takeover sidecar is %s',
+    async (scenario) => {
+      const { root, databasePath, originalBytes } = await createOwnedFaultFixture()
+      await writeFile(`${databasePath}.owner`, JSON.stringify({
+        pid: 2_147_483_647,
+        runtimeGeneration: 'stale-before-sidecar-fault'
+      }))
+      const sidecarPath = `${databasePath}.owner.takeover.sqlite`
+      if (scenario === 'directory') await mkdir(sidecarPath)
+      else await writeFile(sidecarPath, Buffer.from('not a sqlite database'))
+
+      const first = await openRecoverableRuntimeDatabase(root, [])
+      const second = await openRecoverableRuntimeDatabase(root, [])
+
+      expect(first).toMatchObject({
+        kind: 'recovery-required',
+        reason: 'ownership-recovery-required',
+        ownershipIssue: 'takeover-sidecar-unusable',
+        durableDatabasePath: databasePath,
+        quarantinedPath: databasePath
+      })
+      expect(second).toMatchObject(first)
+      expect(await readFile(databasePath)).toEqual(originalBytes)
+      expect((await readdir(root)).filter((name) => name.includes('.corrupt-'))).toEqual([])
+    }
+  )
+
+  it('makes concurrent malformed-owner bootstraps converge on one durable marker', async () => {
+    const { root, databasePath, originalBytes } = await createOwnedFaultFixture()
+    await writeFile(`${databasePath}.owner`, Buffer.from([0xff, 0x00, 0x7b, 0x01]))
+
+    const [first, second] = await Promise.all([
+      openRecoverableRuntimeDatabase(root, []),
+      openRecoverableRuntimeDatabase(root, [])
+    ])
+
+    expect(first).toMatchObject({
+      kind: 'recovery-required',
+      reason: 'ownership-recovery-required',
+      ownershipIssue: 'owner-record-malformed',
+      quarantinedPath: databasePath
+    })
+    expect(second).toMatchObject(first)
+    expect(await readFile(databasePath)).toEqual(originalBytes)
+    expect((await readdir(root)).filter((name) => name.includes('.corrupt-'))).toEqual([])
+  })
+
+  it.each([0o000, 0o200])(
+    'repairs same-user owner mode %s without weakening the owner fence',
+    async (mode) => {
+      const { root, databasePath } = await createOwnedFaultFixture()
+      await writeFile(`${databasePath}.owner`, JSON.stringify({
+        pid: 2_147_483_647,
+        runtimeGeneration: 'stale-owner-with-repairable-mode'
+      }))
+      await chmod(`${databasePath}.owner`, mode)
+
+      const result = await openRecoverableRuntimeDatabase(root, [])
+      expect(result.kind).toBe('writable')
+      if (result.kind !== 'writable') throw new Error('expected repaired writable database')
+      try {
+        expect((await stat(`${databasePath}.owner`)).mode & 0o777).toBe(0o600)
+        expect(result.database.get<{ value: string }>(
+          'SELECT value FROM fault_sentinel'
+        )).toEqual({ value: 'preserve-me' })
+      } finally {
+        result.database.close()
+      }
+    }
+  )
+
+  it.each([0o000, 0o200])(
+    'repairs same-user takeover sidecar mode %s and completes stale takeover',
+    async (mode) => {
+      const { root, databasePath } = await createOwnedFaultFixture()
+      await writeFile(`${databasePath}.owner`, JSON.stringify({
+        pid: 2_147_483_647,
+        runtimeGeneration: 'stale-owner-before-sidecar-mode-repair'
+      }))
+      const sidecarPath = `${databasePath}.owner.takeover.sqlite`
+      new DatabaseSync(sidecarPath).close()
+      await chmod(sidecarPath, mode)
+
+      const result = await openRecoverableRuntimeDatabase(root, [])
+      expect(result.kind).toBe('writable')
+      if (result.kind !== 'writable') throw new Error('expected repaired writable database')
+      try {
+        expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600)
+        expect(result.database.get<{ value: string }>(
+          'SELECT value FROM fault_sentinel'
+        )).toEqual({ value: 'preserve-me' })
+      } finally {
+        result.database.close()
+      }
+    }
+  )
+
   it('publishes database lifecycle ownership before pre-migration work starts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-bootstrap-ownership-'))
     const events: string[] = []
@@ -466,6 +591,20 @@ describe('openRecoverableRuntimeDatabase', () => {
     expect(await readFile(databasePath)).toEqual(originalBytes)
   })
 })
+
+async function createOwnedFaultFixture(): Promise<{
+  root: string
+  databasePath: string
+  originalBytes: Buffer
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'matou-ownership-fault-'))
+  const databasePath = join(root, 'matou.sqlite')
+  const database = RuntimeDatabase.open(databasePath)
+  database.exec('CREATE TABLE fault_sentinel (value TEXT NOT NULL)')
+  database.run('INSERT INTO fault_sentinel VALUES (?)', 'preserve-me')
+  database.close()
+  return { root, databasePath, originalBytes: await readFile(databasePath) }
+}
 
 function assertReadOnlyMutations(database: RuntimeDatabase, workspaceId: string): void {
   expect(() => database.run(
