@@ -1,13 +1,13 @@
 # Terminal Runtime Robustness 实施台账
 
-更新日期：2026-09-01
+更新日期：2026-09-02
 
 ## 总表
 
 | Task | 用户结果 | 状态 | 当前权威证据 |
 |---|---|---|---|
 | 1 大段 UTF-8 输入 | 大粘贴立即进入终端，透明分块且保持顺序 | **已闭合** | `runtime-task-1-utf8-input-chunking-report.md` |
-| 2 拖入路径 | 普通/空格路径保持既有可见形式；复杂文件名只形成单个 argv，拖入不执行 | **已闭合** | `runtime-task-2-dropped-paths-report.md` |
+| 2 拖入路径 | 普通/空格路径保持既有可见形式；native 文件/目录和复杂名称只形成精确 zsh argv，拖入不执行 | **已闭合** | `runtime-task-2-dropped-paths-report.md`；runtime fix `37f080f` |
 | 3 Resize 合并 | 卡片即时适配；Runtime 更新不超过 60Hz，最终 PTY 尺寸准确 | **已闭合** | `runtime-task-3-resize-coalescing-report.md` |
 | 4 App 回焦 | 恢复离开前的真实焦点 | 待实施 | Task 4 |
 | 5 通知容量与 TTL | 每个工作空间独立保留最新 1,000 条；未读持续保留，已读 30 天后清理 | **已闭合** | `runtime-task-5-notification-capacity-report.md` |
@@ -40,10 +40,13 @@ Task 1 只在 Renderer → Runtime 输入边界分块；PTY、协议语义、bra
 | RED：纯引用模块 | `pnpm --filter @matou/desktop test -- shell-path-quote.test.ts` | 模块不存在；目标失败成立 |
 | RED：结构化拖入优先 | 同次 component run | 旧实现透传恶意 `text/plain`；目标失败成立 |
 | RED：特殊 Finder 路径 | 同次 component run | 旧实现对 `$()` 使用双引号；目标失败成立 |
-| GREEN：真实 zsh + component | 定向 Vitest 24 tests | 通过 |
-| GREEN：真实 Electron / PTY | `terminal-channel.spec.ts` drop 场景 | 通过；8 个真实文件名，副作用文件不存在 |
+| 审查 RED：zsh leading `=` / NUL | `shell-path-quote.test.ts` + `TerminalSurface.test.tsx` | 3 项按预期失败：`=ls` 被 zsh 展开为 `/bin/ls`；NUL 未丢弃；结构化多路径包含无效 NUL 项 |
+| GREEN：真实 zsh + component | clean `37f080f` 定向 Vitest | 2 files / 27 tests 通过；leading `=`、CR、Unicode、multiple 精确 round-trip，NUL fail-closed |
+| GREEN：结构化 Electron / PTY | `terminal-channel.spec.ts` structured drop | 8 个真实文件名逐字回显；恶意 `text/plain` 被忽略；绝对副作用文件不存在 |
+| GREEN：native Electron / PTY | CDP native `files` → FileList → preload `webUtils.getPathForFile()` | 3 个真实文件 + 1 个空格目录同序成为精确 argv；URI-only `file://` 不进入终端 |
+| GREEN：clean 全量 | detached `37f080f` | Desktop 43/355、contracts 4/45、domain 2/7、Runtime 72/524、typecheck/build 通过；terminal-channel 4 passed |
 
-Task 2 只改变路径拖入解析和引用。普通键入与 paste 仍走原输入链路，未加入确认、自动提交或错误提示。
+Task 2 只改变路径拖入解析、引用和对应验收。普通键入与 paste 仍走原输入链路，未加入确认、自动提交或错误提示。native 主链已在 macOS 15.7.4 / Electron 43.4.1 / zsh 实跑；Windows/Linux host 与 PowerShell/cmd 不在本轮运行时结论内。
 
 ## Task 3 RED → GREEN 记录
 

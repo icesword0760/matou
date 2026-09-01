@@ -1,19 +1,43 @@
 {
-  "capturedAt": "2026-09-01T23:19:00+08:00",
-  "platform": "macOS",
-  "shell": "/bin/zsh",
+  "capturedAt": "2026-09-01T23:55:00+08:00",
+  "validatedCommit": "37f080f5b797225916d91ad1e55d914a65e0f79c",
+  "checkout": "clean detached worktree",
+  "platform": {
+    "os": "macOS 15.7.4",
+    "arch": "arm64",
+    "electron": "43.4.1",
+    "node": "22.16.0",
+    "shell": "/bin/zsh"
+  },
   "commands": [
+    "pnpm build",
     "pnpm --filter @matou/desktop exec vitest run src/renderer/src/terminal/shell-path-quote.test.ts src/renderer/src/terminal/TerminalSurface.test.tsx",
-    "pnpm exec playwright test tests/e2e/terminal-channel.spec.ts --grep \"drops reference-visible paths\" --workers=1"
+    "pnpm --filter @matou/desktop test",
+    "pnpm --filter @matou/contracts test",
+    "pnpm --filter @matou/domain test",
+    "pnpm --filter @matou/runtime test",
+    "pnpm typecheck",
+    "pnpm exec playwright test tests/e2e/terminal-channel.spec.ts --workers=1"
   ],
   "results": {
-    "unitAndComponent": "24 passed",
-    "electron": "1 passed",
-    "ordinaryVisible": "unquoted path with one leading separator space",
-    "spaceVisible": "double-quoted path with one leading separator space",
+    "unitAndComponent": "2 files / 27 passed",
+    "desktop": "43 files / 355 passed",
+    "contracts": "4 files / 45 passed",
+    "domain": "2 files / 7 passed",
+    "runtime": "72 files / 524 passed",
+    "typecheck": "5 workspace packages passed",
+    "electronTerminalChannel": "4 passed",
+    "task2ElectronScenarios": [
+      "structured file-tree drop with text/plain precedence and exact zsh argv",
+      "native Chromium Files/FileList drop through Electron webUtils with a real directory"
+    ],
+    "ordinaryVisible": "unquoted absolute path with one leading separator space",
+    "spaceVisible": "double-quoted absolute path with one leading separator space",
     "structuredMimePrecedence": true,
     "textPlainOnlyIgnored": true,
+    "uriOnlyFileUrlIgnored": true,
     "autoSubmit": false,
+    "nulStructuredPathDropped": true,
     "argvRoundTrip": [
       "single quote",
       "double quote",
@@ -25,9 +49,37 @@
       "semicolon",
       "pipe",
       "redirection and glob",
-      "Unicode and emoji"
+      "leading equals",
+      "Unicode and emoji",
+      "multiple files and a directory in source order"
     ],
     "sideEffectFilesCreated": false
+  },
+  "nativeDrop": {
+    "transport": "Chromium CDP Input.dispatchDragEvent native files field",
+    "rendererInput": "DataTransfer.files / FileList",
+    "pathAuthority": "Electron preload webUtils.getPathForFile(File)",
+    "fixtures": [
+      "ordinary file",
+      "space-containing directory",
+      "command-substitution file",
+      "Unicode and emoji file"
+    ],
+    "syntheticDataTransferUsedForNativeScenario": false
+  },
+  "platformBoundary": {
+    "runtimeVerified": [
+      "macOS native Chromium Files/FileList to zsh"
+    ],
+    "codePathWithoutOsBranch": [
+      "Renderer standard Files/FileList handling",
+      "Electron webUtils.getPathForFile"
+    ],
+    "notRuntimeVerified": [
+      "Windows Explorer MIME shape and PowerShell/cmd quoting",
+      "Linux file-manager MIME shape"
+    ],
+    "uriOnlyPolicy": "text/uri-list without FileList is ignored fail-closed"
   },
   "screenshots": [
     "ordinary-path-visible.png",
