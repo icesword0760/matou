@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -94,6 +94,8 @@ describe('WorktreeReconciler', () => {
       '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/already-removed', path, 'HEAD'
     ])
     seedWorktree({ id: 'already-removed', path, branch: 'feature/already-removed', state: 'removing' })
+    seedBoundSession('already-removed', 'context-already-removed')
+    const sessionBefore = database.get('SELECT * FROM sessions WHERE id = ?', 'session-1')
     await rm(path, { recursive: true, force: true })
 
     const result = await reconciler.reconcileAll(100)
@@ -105,6 +107,11 @@ describe('WorktreeReconciler', () => {
     )).toEqual({ archived_at: 100 })
     expect((await exec('git', ['-C', repositoryRoot, 'worktree', 'list', '--porcelain'])).stdout)
       .not.toContain(path)
+    expect(database.get(
+      `SELECT active_target, state FROM session_environment_bindings
+       WHERE session_id = 'session-1'`
+    )).toEqual({ active_target: 'worktree', state: 'missing' })
+    expect(database.get('SELECT * FROM sessions WHERE id = ?', 'session-1')).toEqual(sessionBefore)
   })
 
   it('retains a dirty worktree whose removing operation was interrupted', async () => {
@@ -163,13 +170,63 @@ describe('WorktreeReconciler', () => {
       `SELECT state FROM session_environment_bindings WHERE session_id = 'session-1'`
     )).toEqual({ state: 'failed' })
   })
+
+  it('isolates a real Git index failure and continues reconciling other worktrees', async () => {
+    const brokenPath = join(root, 'worktrees', 'broken-index')
+    const healthyPath = join(root, 'worktrees', 'healthy-after-broken')
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/broken-index', brokenPath, 'HEAD'
+    ])
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/healthy-after-broken', healthyPath, 'HEAD'
+    ])
+    seedWorktree({ id: 'broken-index', path: brokenPath, branch: 'feature/broken-index', state: 'ready' })
+    seedWorktree({
+      id: 'healthy-after-broken', path: healthyPath,
+      branch: 'feature/healthy-after-broken', state: 'ready'
+    })
+    const brokenGitDirectory = (await exec(
+      'git', ['-C', brokenPath, 'rev-parse', '--git-dir']
+    )).stdout.trim()
+    await rm(join(brokenGitDirectory, 'index'), { force: true })
+    await mkdir(join(brokenGitDirectory, 'index'))
+
+    const result = await reconciler.reconcileAll(100)
+
+    expect(result).toEqual({ checked: 2, repaired: 0, degraded: 1 })
+    expect(worktrees.get('broken-index')?.state).toBe('failed')
+    expect(worktrees.get('healthy-after-broken')?.state).toBe('ready')
+  })
+
+  it('keeps a retained dirty Worktree visible and degrades it only when its path disappears', async () => {
+    const path = join(root, 'worktrees', 'retained')
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/retained', path, 'HEAD'
+    ])
+    await writeFile(join(path, 'keep.txt'), 'keep me\n')
+    seedWorktree({ id: 'retained', path, branch: 'feature/retained', state: 'retained' })
+    seedBoundSession('retained', 'context-retained')
+
+    await expect(reconciler.reconcileAll(100)).resolves.toEqual({
+      checked: 1, repaired: 0, degraded: 0
+    })
+    expect(worktrees.get('retained')?.state).toBe('retained')
+
+    await rm(path, { recursive: true, force: true })
+    await expect(reconciler.reconcileAll(101)).resolves.toEqual({
+      checked: 1, repaired: 0, degraded: 1
+    })
+    expect(database.get(
+      `SELECT state FROM session_environment_bindings WHERE session_id = 'session-1'`
+    )).toEqual({ state: 'missing' })
+  })
 })
 
 function seedWorktree(input: {
   id: string
   path: string
   branch: string
-  state: 'creating' | 'ready' | 'removing'
+  state: 'creating' | 'ready' | 'retained' | 'removing'
   setupPolicy?: Array<{ command: string; args: string[] }>
 }): void {
   database.transaction((tx) => {

@@ -53,18 +53,28 @@ export class WorktreeReconciler {
       `SELECT worktrees.*, execution_contexts.workspace_id
        FROM worktrees
        JOIN execution_contexts ON execution_contexts.id = worktrees.execution_context_id
-       WHERE worktrees.state IN ('creating', 'ready', 'dirty', 'removing')
+       WHERE worktrees.state IN ('creating', 'ready', 'dirty', 'retained', 'removing')
        ORDER BY worktrees.created_at, worktrees.id`
     )
     const result: WorktreeReconcileResult = { checked: 0, repaired: 0, degraded: 0 }
     for (const row of rows) {
       result.checked += 1
-      if (row.state === 'creating') {
-        await this.#reconcileCreating(row, now, result)
-      } else if (row.state === 'removing') {
-        await this.#reconcileRemoving(row, now, result)
-      } else {
-        await this.#reconcileReady(row, now, result)
+      try {
+        if (row.state === 'creating') {
+          await this.#reconcileCreating(row, now, result)
+        } else if (row.state === 'removing') {
+          await this.#reconcileRemoving(row, now, result)
+        } else {
+          await this.#reconcileReady(row, now, result)
+        }
+      } catch (error) {
+        this.#degradeWithReason(
+          row,
+          'failed',
+          `health-check-failed:${errorMessage(error)}`,
+          now
+        )
+        result.degraded += 1
       }
     }
     return result
@@ -133,6 +143,7 @@ export class WorktreeReconciler {
       result.degraded += 1
       return
     }
+    if (row.state === 'retained') return
     const targetState: WorktreeState = health.dirty ? 'dirty' : 'ready'
     if (targetState === row.state) return
     this.#transactions.execute(command(row, `state-${targetState}`, now), ({ tx, emit }) => {

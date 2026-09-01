@@ -13,6 +13,7 @@ import type {
   DomainMutationContext,
   DomainTransactionManager
 } from '../storage/domain-transaction'
+import { SessionEnvironmentRepository } from '../session/session-environment-repository'
 
 const exec = promisify(execFile)
 
@@ -42,6 +43,7 @@ export class WorktreeService {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
   readonly #stopRuns: (runIds: string[]) => Promise<void>
+  readonly #environments: SessionEnvironmentRepository
 
   constructor(
     database: RuntimeDatabase,
@@ -51,6 +53,7 @@ export class WorktreeService {
     this.#database = database
     this.#transactions = transactions
     this.#stopRuns = dependencies.stopRuns
+    this.#environments = new SessionEnvironmentRepository(database)
   }
 
   async create(
@@ -279,6 +282,14 @@ export class WorktreeService {
     return this.#transactions.execute(derivedCommand(command, 'removed'), ({ tx, emit }) => {
       tx.run("UPDATE worktrees SET state = 'removed', updated_at = ? WHERE id = ?", now, worktreeId)
       tx.run('UPDATE execution_contexts SET archived_at = ? WHERE id = ?', now, executionContextId)
+      const sessions = tx.all<{ session_id: string }>(
+        `SELECT session_id FROM session_environment_bindings
+         WHERE managed_worktree_id = ? AND active_target = 'worktree'`,
+        worktreeId
+      )
+      for (const { session_id: sessionId } of sessions) {
+        this.#environments.markMissing(sessionId, 'worktree:removed', now, tx)
+      }
       const removed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
       emitWorktree(emit, `${command.commandId}:removed`, 'worktree.removed', removed, undefined, now)
       return mapWorktree(removed)

@@ -60,6 +60,9 @@ export class WorktreeHealthService {
     }
 
     const detachedHead = (await git(canonicalPath, ['rev-parse', 'HEAD'])).trim()
+    if (expectation.expectedBranch !== undefined) {
+      return { kind: 'mismatch', reason: 'wrong-head' }
+    }
     if (
       expectation.expectedDetachedHead !== undefined &&
       detachedHead !== expectation.expectedDetachedHead

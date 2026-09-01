@@ -100,14 +100,24 @@ describe('WorktreeHealthService', () => {
 
     await expect(service.check({
       repositoryRoot,
-      path: worktreePath,
-      expectedBranch: 'feature/health'
+      path: worktreePath
     })).resolves.toEqual({
       kind: 'ready',
       canonicalPath: await realpath(worktreePath),
       detachedHead: head,
       dirty: false
     })
+  })
+
+  it('rejects detached HEAD when the managed identity requires its recorded branch', async () => {
+    const head = (await exec('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).stdout.trim()
+    await exec('git', ['-C', worktreePath, 'checkout', '--detach', head])
+
+    await expect(service.check({
+      repositoryRoot,
+      path: worktreePath,
+      expectedBranch: 'feature/health'
+    })).resolves.toEqual({ kind: 'mismatch', reason: 'wrong-head' })
   })
 
   it('reports an unexpected detached HEAD as wrong-head when a detached identity is required', async () => {
