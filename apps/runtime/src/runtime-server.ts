@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
-import { basename } from 'node:path'
+import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
@@ -80,6 +80,8 @@ type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
   hudRegistry?: SessionHudRegistry
+  controlAssetRoot?: string
+  controlNodeExecutable?: string
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -138,6 +140,8 @@ export class RuntimeServer {
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerResumeTimeoutMs: number
   readonly #hud: SessionHudRegistry
+  readonly #controlAssetRoot: string | undefined
+  readonly #controlNodeExecutable: string
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
@@ -180,6 +184,9 @@ export class RuntimeServer {
       options.providerResumeTimeoutMs,
       DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
     )
+    this.#controlAssetRoot = options.controlAssetRoot ?? process.env.MATOU_CONTROL_ASSET_ROOT
+    this.#controlNodeExecutable = options.controlNodeExecutable ??
+      process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
     this.#workspacePaths = workspacePaths
     void configuredCcLaunch()
     for (const session of [...this.#sessions.values()]) {
@@ -947,7 +954,7 @@ export class RuntimeServer {
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
     try {
-      const runId = persistentAuthority ? randomUUID() : undefined
+      const runId = randomUUID()
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
         : undefined
@@ -976,21 +983,27 @@ export class RuntimeServer {
       let pendingResumeFailure: string | undefined
       let emittedTerminalOutput = false
       let controlEnvironment: Record<string, string> | undefined
-      if (message.profile !== 'shell' && this.#control) {
+      if (this.#control) {
         const token = this.#control.tokens.issue(
-          runId ?? message.sessionId,
+          { runId, sessionId: message.sessionId },
           [
-            'host.list', 'terminal.read-current', 'terminal.read-history',
-            'terminal.read-commands', 'terminal.send-text', 'terminal.send-key',
-            'task.status.write', 'task.progress.write', 'task.log.append',
-            'task.move-to-window'
+            'host.identify', 'host.list', 'terminal.read-current',
+            'terminal.read-history', 'terminal.read-commands',
+            'terminal.send-text', 'terminal.send-key'
           ],
           Date.now() + 24 * 60 * 60 * 1000
         )
         controlEnvironment = {
           MATOU_CONTROL_ENDPOINT: this.#control.endpoint,
           MATOU_CONTROL_TOKEN: token,
-          MATOU_CONTROL_PROTOCOL: '1'
+          MATOU_CONTROL_PROTOCOL: '1',
+          MATOU_CONTROL_CALLER_SESSION: message.sessionId,
+          MATOU_CONTROL_CALLER_RUN: runId,
+          MATOU_CONTROL_NODE_EXECUTABLE: this.#controlNodeExecutable,
+          ...(this.#controlAssetRoot === undefined ? {} : {
+            MATOU_CONTROL_ASSET_ROOT: this.#controlAssetRoot,
+            ...prependedPathEnvironment(join(this.#controlAssetRoot, 'bin'), process.env)
+          })
         }
       }
       if (message.profile === 'claude-code' && runId && this.#providerHooks) {
@@ -1021,6 +1034,9 @@ export class RuntimeServer {
         ...(permissionMode === undefined ? {} : { permissionMode }),
         ...(hookRegistration === undefined ? {} : {
           settingsPath: hookRegistration.settingsPath
+        }),
+        ...(this.#controlAssetRoot === undefined ? {} : {
+          controlAssetRoot: this.#controlAssetRoot
         }),
         ...(runId === undefined ? {} : { runId }),
         ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
@@ -1079,7 +1095,7 @@ export class RuntimeServer {
             )?.work_status
             const preserveInterruptedRun = exited.profile === 'shell' &&
               (workStatus === 'starting' || workStatus === 'running' || workStatus === 'needs-input')
-            if (exited.runId && !preserveInterruptedRun) {
+            if (exited.runId && persistentAuthority && !preserveInterruptedRun) {
               try {
                 this.#sessionRepository.finishRun(
                   {
@@ -1139,7 +1155,7 @@ export class RuntimeServer {
             this.#providerInputBuffers.delete(message.sessionId)
             this.#workStatusTrackers.delete(message.sessionId)
           }
-          if (exited.runId) {
+          if (exited.runId && persistentAuthority) {
             try {
               this.#sessionRepository.finishRun(
                 {
@@ -1203,7 +1219,7 @@ export class RuntimeServer {
         }
       })
       providerProcessStarted = message.profile !== 'shell'
-      if (runId) {
+      if (persistentAuthority) {
         try {
           this.#sessionRepository.startRun(
             {
@@ -1726,6 +1742,15 @@ function errorMessage(error: unknown): string {
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) && Number(value) > 0 ? Number(value) : fallback
+}
+
+function prependedPathEnvironment(
+  entry: string,
+  environment: NodeJS.ProcessEnv
+): Record<string, string> {
+  const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
+  const inherited = pathKey ? environment[pathKey] : undefined
+  return { [pathKey]: inherited ? `${entry}${delimiter}${inherited}` : entry }
 }
 
 function permissionModeFromMetadata(metadata: unknown): string | undefined {

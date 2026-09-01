@@ -3,36 +3,42 @@ import { chmod, mkdir, rm } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { dirname, resolve } from 'node:path'
 
+import {
+  HostControlTargetNotFoundError,
+  HostControlTargetNotReadyError,
+  type AllowedControlKey,
+  type HostCallerIdentity,
+  type HostControlScope,
+  type HostListScope,
+  type HostTarget,
+  type HostTargetSelector
+} from './host-control-types'
+
+export type {
+  AllowedControlKey,
+  HostCallerIdentity,
+  HostControlScope,
+  HostListScope,
+  HostTarget,
+  HostTargetSelector
+} from './host-control-types'
+
 const CONTROL_VERSION = 1
 const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
 
-export type HostControlScope =
-  | 'host.list'
-  | 'terminal.read-current'
-  | 'terminal.read-history'
-  | 'terminal.read-commands'
-  | 'terminal.send-text'
-  | 'terminal.send-key'
-  | 'task.status.write'
-  | 'task.progress.write'
-  | 'task.log.append'
-  | 'task.move-to-window'
-
-export interface HostTarget {
-  ref: string
-  workspaceId: string
-  taskId: string
-  sessionId: string
-  mountId?: string
-  title: string
-}
-
 export interface HostControlBackend {
-  listTargets(): HostTarget[] | Promise<HostTarget[]>
+  identify(caller: HostCallerIdentity): unknown | Promise<unknown>
+  listTargets(caller?: HostCallerIdentity, scope?: HostListScope): HostTarget[] | Promise<HostTarget[]>
+  resolveTarget(
+    caller: HostCallerIdentity,
+    selector: HostTargetSelector,
+    targets: HostTarget[],
+    projectionRevision: string
+  ): string | Promise<string>
   readCurrent(sessionId: string, limits: { maxLines: number; maxBytes: number }): Promise<unknown>
   readHistory(sessionId: string, limits: { maxLines: number; maxBytes: number }): Promise<unknown>
   readCommands(sessionId: string, limits: { limit: number }): Promise<unknown>
-  sendText(sessionId: string, text: string): Promise<void>
+  sendText(sessionId: string, text: string, submit: boolean): Promise<void>
   sendKey(sessionId: string, key: AllowedControlKey): Promise<void>
   writeTaskStatus(taskId: string, key: string, value: string | null): Promise<void>
   writeTaskProgress(taskId: string, progress: number, label?: string): Promise<void>
@@ -62,6 +68,7 @@ interface CapabilityRecord {
   scopes: Set<HostControlScope>
   expiresAt: number
   runtimeGeneration: string
+  caller: HostCallerIdentity
 }
 
 export class CapabilityTokenService {
@@ -72,15 +79,19 @@ export class CapabilityTokenService {
     this.#runtimeGeneration = runtimeGeneration
   }
 
-  issue(runId: string, scopes: HostControlScope[], expiresAt: number): string {
+  issue(callerOrRunId: HostCallerIdentity | string, scopes: HostControlScope[], expiresAt: number): string {
+    const caller = typeof callerOrRunId === 'string'
+      ? { runId: callerOrRunId, sessionId: callerOrRunId }
+      : callerOrRunId
     const token = randomBytes(32).toString('base64url')
     const tokenHash = hashToken(token)
     this.#records.set(tokenHash, {
       tokenHash,
-      runId,
+      runId: caller.runId,
       scopes: new Set(scopes),
       expiresAt,
-      runtimeGeneration: this.#runtimeGeneration
+      runtimeGeneration: this.#runtimeGeneration,
+      caller: { ...caller }
     })
     return token
   }
@@ -105,19 +116,6 @@ export class CapabilityTokenService {
   }
 }
 
-type AllowedControlKey =
-  | 'Enter'
-  | 'Tab'
-  | 'Escape'
-  | 'ArrowUp'
-  | 'ArrowDown'
-  | 'ArrowLeft'
-  | 'ArrowRight'
-  | 'CtrlC'
-  | 'CtrlD'
-  | 'CtrlL'
-  | 'CtrlZ'
-
 type TaskLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 interface ControlRequest {
@@ -132,6 +130,7 @@ interface ControlRequest {
 type ControlErrorCode =
   | 'INVALID_REQUEST'
   | 'TARGET_NOT_FOUND'
+  | 'TARGET_NOT_READY'
   | 'RUNTIME_NOT_READY'
   | 'AMBIGUOUS_TARGET'
   | 'TIMEOUT'
@@ -232,25 +231,39 @@ export class HostControlServer {
       const request = parseRequest(raw)
       requestId = request.requestId
       if (Date.now() > request.deadlineAt) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
-      if (!this.#tokens.validate(request.token, request.method)) {
+      const capability = this.#tokens.validate(request.token, request.method)
+      if (!capability) {
         throw new ControlFault('CAPABILITY_DENIED', 'capability token is missing, expired, or out of scope')
       }
-      const result = await this.#dispatch(request.method, request.params)
+      const result = await this.#dispatch(request.method, request.params, capability.caller)
       if (Date.now() > request.deadlineAt) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
       this.#write(socket, { version: CONTROL_VERSION, requestId, ok: true, result })
     } catch (error) {
       const fault = error instanceof ControlFault
         ? error
+        : error instanceof HostControlTargetNotFoundError
+          ? new ControlFault('TARGET_NOT_FOUND', error.message)
+        : error instanceof HostControlTargetNotReadyError
+          ? new ControlFault('TARGET_NOT_READY', error.message)
         : new ControlFault('INTERNAL_ERROR', errorMessage(error))
       this.#write(socket, errorResponse(requestId, fault.code, fault.message))
     }
   }
 
-  async #dispatch(method: HostControlScope, rawParams: unknown): Promise<unknown> {
+  async #dispatch(
+    method: HostControlScope,
+    rawParams: unknown,
+    caller: HostCallerIdentity
+  ): Promise<unknown> {
     const params = record(rawParams)
-    const targets = await this.#backend.listTargets()
+    if (method === 'host.identify') return this.#backend.identify(caller)
+
+    const listScope = method === 'host.list'
+      ? enumerationWithDefault(params.scope, ['current-level', 'all'] as const, 'scope', 'current-level')
+      : targetListScope(params.target)
+    const targets = await this.#backend.listTargets(caller, listScope)
     const projectionRevision = targetRevision(targets)
-    if (method === 'host.list') return { projectionRevision, targets }
+    if (method === 'host.list') return { projectionRevision, scope: listScope, targets }
 
     if (method === 'task.status.write') {
       const value = params.value === null ? null : text(params.value, 'value', 4096)
@@ -295,7 +308,14 @@ export class HostControlServer {
       }
     }
 
-    const sessionId = resolveTarget(params.target, targets, projectionRevision)
+    const selector = parseTargetSelector(params.target)
+    if (
+      (selector.kind === 'ref' || selector.kind === 'sibling') &&
+      selector.projectionRevision !== projectionRevision
+    ) {
+      throw new ControlFault('CONFLICT', 'target ordinal projection is stale; list targets again')
+    }
+    const sessionId = await this.#backend.resolveTarget(caller, selector, targets, projectionRevision)
     if (method === 'terminal.read-current' || method === 'terminal.read-history') {
       const limits = {
         maxLines: boundedInteger(params.maxLines, 'maxLines', 1, 5000),
@@ -311,7 +331,11 @@ export class HostControlServer {
       })
     }
     if (method === 'terminal.send-text') {
-      await this.#backend.sendText(sessionId, text(params.text, 'text', 64 * 1024))
+      await this.#backend.sendText(
+        sessionId,
+        text(params.text, 'text', 64 * 1024),
+        booleanWithDefault(params.submit, 'submit', false)
+      )
       return { sent: true }
     }
     if (method === 'terminal.send-key') {
@@ -351,22 +375,72 @@ function parseRequest(value: unknown): ControlRequest {
   }
 }
 
-function resolveTarget(raw: unknown, targets: HostTarget[], revision: string): string {
+export function resolveTargetFromProjection(
+  selector: HostTargetSelector,
+  targets: HostTarget[]
+): string {
+  if (selector.kind === 'session') {
+    if (!targets.some(({ sessionId }) => sessionId === selector.sessionId)) {
+      throw new ControlFault('TARGET_NOT_FOUND', `Session ${selector.sessionId} is not available`)
+    }
+    return selector.sessionId
+  }
+  if (selector.kind !== 'ref') {
+    throw new ControlFault('UNSUPPORTED', `target selector ${selector.kind} needs topology resolution`)
+  }
+  const matches = targets.filter((target) => target.ref === selector.ref)
+  if (matches.length === 0) throw new ControlFault('TARGET_NOT_FOUND', `target ${selector.ref} does not exist`)
+  if (matches.length > 1) throw new ControlFault('AMBIGUOUS_TARGET', `target ${selector.ref} is ambiguous`)
+  return matches[0]!.sessionId
+}
+
+function parseTargetSelector(raw: unknown): HostTargetSelector {
   const target = record(raw)
   if (typeof target.sessionId === 'string') {
-    if (!targets.some(({ sessionId }) => sessionId === target.sessionId)) {
-      throw new ControlFault('TARGET_NOT_FOUND', `Session ${target.sessionId} is not available`)
+    return { kind: 'session', sessionId: text(target.sessionId, 'target.sessionId', 160) }
+  }
+  if (target.kind === undefined && typeof target.ref === 'string') {
+    return {
+      kind: 'ref',
+      ref: text(target.ref, 'target.ref', 160),
+      projectionRevision: text(target.projectionRevision, 'target.projectionRevision', 160)
     }
-    return target.sessionId
   }
-  const ref = text(target.ref, 'target.ref', 160)
-  if (target.projectionRevision !== revision) {
-    throw new ControlFault('CONFLICT', 'target ordinal projection is stale; list targets again')
+  const kind = enumeration(target.kind, ['self', 'relative', 'relation', 'sibling', 'ref', 'session'] as const, 'target.kind')
+  if (kind === 'self') return { kind }
+  if (kind === 'relative') {
+    return { kind, direction: enumeration(target.direction, ['left', 'right'] as const, 'target.direction') }
   }
-  const matches = targets.filter((target) => target.ref === ref)
-  if (matches.length === 0) throw new ControlFault('TARGET_NOT_FOUND', `target ${ref} does not exist`)
-  if (matches.length > 1) throw new ControlFault('AMBIGUOUS_TARGET', `target ${ref} is ambiguous`)
-  return matches[0]!.sessionId
+  if (kind === 'relation') {
+    const relation = enumeration(target.relation, ['parent', 'child'] as const, 'target.relation')
+    const ordinal = target.ordinal === undefined
+      ? undefined
+      : boundedInteger(target.ordinal, 'target.ordinal', 1, 10_000)
+    return { kind, relation, ...(ordinal === undefined ? {} : { ordinal }) }
+  }
+  if (kind === 'sibling') {
+    return {
+      kind,
+      ordinal: boundedInteger(target.ordinal, 'target.ordinal', 1, 10_000),
+      projectionRevision: text(target.projectionRevision, 'target.projectionRevision', 160)
+    }
+  }
+  if (kind === 'ref') {
+    return {
+      kind,
+      ref: text(target.ref, 'target.ref', 160),
+      projectionRevision: text(target.projectionRevision, 'target.projectionRevision', 160)
+    }
+  }
+  return { kind, sessionId: text(target.sessionId, 'target.sessionId', 160) }
+}
+
+function targetListScope(raw: unknown): HostListScope {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return 'current-level'
+  const target = raw as Record<string, unknown>
+  return target.kind === 'session' || target.kind === 'ref' || typeof target.sessionId === 'string'
+    ? 'all'
+    : 'current-level'
 }
 
 function targetRevision(targets: HostTarget[]): string {
@@ -416,15 +490,30 @@ function enumeration<const T extends readonly string[]>(value: unknown, values: 
   }
   return value as T[number]
 }
+function enumerationWithDefault<const T extends readonly string[]>(
+  value: unknown,
+  values: T,
+  label: string,
+  fallback: T[number]
+): T[number] {
+  return value === undefined ? fallback : enumeration(value, values, label)
+}
+function booleanWithDefault(value: unknown, label: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback
+  if (typeof value !== 'boolean') throw new ControlFault('INVALID_REQUEST', `${label} must be a boolean`)
+  return value
+}
 function isAllowedKey(value: unknown): value is AllowedControlKey {
   return typeof value === 'string' && [
-    'Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-    'CtrlC', 'CtrlD', 'CtrlL', 'CtrlZ'
+    'Enter', 'Tab', 'Escape', 'Backspace', 'Delete',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'Home', 'End', 'PageUp', 'PageDown',
+    'CtrlC', 'CtrlD', 'CtrlL', 'CtrlU', 'CtrlZ'
   ].includes(value)
 }
 function isControlScope(value: unknown): value is HostControlScope {
   return typeof value === 'string' && [
-    'host.list', 'terminal.read-current', 'terminal.read-history', 'terminal.read-commands',
+    'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history', 'terminal.read-commands',
     'terminal.send-text', 'terminal.send-key', 'task.status.write',
     'task.progress.write', 'task.log.append', 'task.move-to-window'
   ].includes(value)

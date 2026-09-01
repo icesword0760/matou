@@ -1,7 +1,10 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: {
+    index: 'src/index.ts',
+    'mt-cli': 'src/cli/mt-cli.ts'
+  },
   format: ['cjs'],
   outExtension: () => ({ js: '.cjs' }),
   platform: 'node',
@@ -9,5 +12,5 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: ['node-pty'],
-  noExternal: ['@matou/contracts', '@matou/domain', 'zod']
+  noExternal: ['@matou/contracts', '@matou/domain', '@xterm/headless', 'zod']
 })

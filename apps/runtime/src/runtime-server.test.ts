@@ -25,6 +25,9 @@ import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ShellHistoryRepository } from './shell-history/shell-history'
 import { PreferenceRepository } from './product/experience-foundation'
+import { CapabilityTokenService } from './control/host-control-server'
+import { RuntimeControlBackend } from './control/runtime-control-backend'
+import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 
 let root: string
 let database: RuntimeDatabase
@@ -49,6 +52,82 @@ afterEach(() => {
 })
 
 describe('RuntimeServer domain RPC', () => {
+  it('injects a run-bound mt identity into an ordinary managed Shell', async () => {
+    // This case owns the runtime process it observes; stop the fixture server
+    // so its asynchronous replay cannot launch the same test shell.
+    server.close()
+    const executable = join(root, 'control-env-shell.sh')
+    const environmentFile = join(root, 'control-env.txt')
+    await writeFile(executable, `#!/bin/sh
+if [ -z "$MATOU_CONTROL_CALLER_SESSION" ]; then
+  sleep 30
+  exit 0
+fi
+/usr/bin/env > "${environmentFile}.tmp"
+mv "${environmentFile}.tmp" "${environmentFile}"
+sleep 30
+`)
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    const controlledPort = new MockPort()
+    const registry = new RuntimeSessionRegistry()
+    const tokens = new CapabilityTokenService(database.runtimeGeneration)
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+    const controlledServer = new RuntimeServer(
+      controlledPort, root, database, undefined,
+      { backend, tokens, endpoint: join(root, 'control.sock') },
+      registry, undefined, undefined,
+      { controlAssetRoot: '/private/matou/control-assets', controlNodeExecutable: '/Applications/Matou' }
+    )
+    try {
+      registerSession(database, 'control-shell-session')
+      controlledPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'control-renderer'
+      })
+      controlledPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'control-shell-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => (await readFile(environmentFile, 'utf8').catch(() => '')).length > 0)
+      const environment = Object.fromEntries(
+        (await readFile(environmentFile, 'utf8')).trim().split('\n').map((line) => {
+          const separator = line.indexOf('=')
+          return [line.slice(0, separator), line.slice(separator + 1)]
+        })
+      )
+      const endpoint = environment.MATOU_CONTROL_ENDPOINT
+      const token = environment.MATOU_CONTROL_TOKEN
+      const protocol = environment.MATOU_CONTROL_PROTOCOL
+      const sessionId = environment.MATOU_CONTROL_CALLER_SESSION
+      const runId = environment.MATOU_CONTROL_CALLER_RUN
+      const assetRoot = environment.MATOU_CONTROL_ASSET_ROOT
+      const executablePath = environment.MATOU_CONTROL_NODE_EXECUTABLE
+      const path = environment.PATH
+      expect({ endpoint, protocol, sessionId, assetRoot, executablePath }).toEqual({
+        endpoint: join(root, 'control.sock'), protocol: '1', sessionId: 'control-shell-session',
+        assetRoot: '/private/matou/control-assets', executablePath: '/Applications/Matou'
+      })
+      expect(path?.split(':')[0]).toBe('/private/matou/control-assets/bin')
+      expect(runId).toBeTruthy()
+      expect(tokens.validate(token!, 'host.identify')?.caller).toEqual({
+        runId, sessionId: 'control-shell-session'
+      })
+      expect(tokens.validate(token!, 'task.status.write')).toBeUndefined()
+    } finally {
+      controlledPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'control-shell-session'
+      })
+      await waitUntil(() => controlledPort.last('terminal.exited') !== undefined)
+      controlledServer.close()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('adds current cwd and Git information to a direct DAG graph response', () => {
     const result = withSessionRuntimeEnvironment({
       sceneId: 'scene-1',

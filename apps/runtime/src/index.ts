@@ -228,7 +228,15 @@ parentPort.on('message', async (event) => {
       backend: state.controlBackend,
       tokens: state.controlTokens,
       endpoint: state.controlEndpoint
-    }, sessions, state.providerHooks, undefined, { hudRegistry: sessionHuds })
+    }, sessions, state.providerHooks, undefined, {
+      hudRegistry: sessionHuds,
+      ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
+        controlAssetRoot: process.env.MATOU_CONTROL_ASSET_ROOT
+      }),
+      ...(process.env.MATOU_CONTROL_NODE_EXECUTABLE === undefined ? {} : {
+        controlNodeExecutable: process.env.MATOU_CONTROL_NODE_EXECUTABLE
+      })
+    })
     servers.add(server)
     port.once('close', () => servers.delete(server))
   } catch (error) {

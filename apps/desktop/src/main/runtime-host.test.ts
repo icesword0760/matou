@@ -31,6 +31,20 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('RuntimeHost', () => {
+  it('passes the private control asset root and bundled executable to the Runtime', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs', '/runtime/control-assets')
+    const starting = host.start()
+    ;(electron.children[0] as MockUtilityProcess).emit('spawn')
+    await starting
+
+    expect(electron.fork).toHaveBeenCalledWith('/runtime/index.cjs', [], expect.objectContaining({
+      env: expect.objectContaining({
+        MATOU_CONTROL_ASSET_ROOT: '/runtime/control-assets',
+        MATOU_CONTROL_NODE_EXECUTABLE: process.execPath
+      })
+    }))
+  })
+
   it('restarts a crashed Runtime and transfers a fresh port to every live Renderer', async () => {
     const host = new RuntimeHost('/runtime/index.cjs')
     const starting = host.start()

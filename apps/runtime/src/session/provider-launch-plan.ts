@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 export interface PtyCommandInput {
   profile: 'shell' | 'claude-code' | 'codex'
   executable: string
@@ -5,6 +7,8 @@ export interface PtyCommandInput {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  controlAssetRoot?: string
+  codexDeveloperInstructions?: string
 }
 
 export interface PtyCommand {
@@ -18,6 +22,10 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
   if (input.profile === 'claude-code') {
     const settingsPath = input.settingsPath?.trim()
     const args = settingsPath ? ['--settings', settingsPath] : []
+    const controlAssetRoot = input.controlAssetRoot?.trim()
+    if (controlAssetRoot) {
+      args.push('--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'))
+    }
     if (identity) args.push('--resume', identity)
     if (identity && input.forkSession) args.push('--fork-session')
     if (input.permissionMode === 'bypassPermissions') {
@@ -26,10 +34,17 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
   if (input.profile === 'codex') {
-    const args = identity ? ['resume', identity] : []
+    const args: string[] = []
+    if (input.codexDeveloperInstructions) {
+      args.push(
+        '-c',
+        `developer_instructions=${JSON.stringify(input.codexDeveloperInstructions)}`
+      )
+    }
     if (input.permissionMode === 'bypassPermissions') {
       args.push('--dangerously-bypass-approvals-and-sandbox')
     }
+    if (identity) args.push('resume', identity)
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
   return {

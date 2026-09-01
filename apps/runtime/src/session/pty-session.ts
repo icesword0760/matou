@@ -1,10 +1,13 @@
 import os from 'node:os'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import type { RuntimeMessage } from '@matou/contracts'
 import { PROTOCOL_VERSION } from '@matou/contracts'
 import * as pty from 'node-pty'
 
 import { CreditWindow } from '../flow-control/credit-window'
+import { TerminalScreenProjector, type TerminalScreenSnapshot } from '../control/terminal-screen-projector'
 import { SegmentJournal } from '../journal/segment-journal'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
@@ -21,6 +24,7 @@ interface PtySessionOptions {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  controlAssetRoot?: string
   env?: Record<string, string>
   send: (message: RuntimeMessage) => void
   onExit?: (
@@ -53,6 +57,7 @@ export class PtySession {
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
+  readonly #screen: TerminalScreenProjector
 
   #sequence: number
   #writeChain = Promise.resolve()
@@ -81,6 +86,7 @@ export class PtySession {
     this.#creditWindow = this.#newCreditWindow()
     this.#onExit = options.onExit
     this.#onOutput = options.onOutput
+    this.#screen = new TerminalScreenProjector(options.cols, options.rows)
     this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
 
     terminal.onData((data) => this.#enqueueOutput(data))
@@ -90,6 +96,9 @@ export class PtySession {
   static async create(options: PtySessionOptions): Promise<PtySession> {
     const journal = await SegmentJournal.open(options.dataRoot, options.sessionId)
     const profile = options.profile ?? 'shell'
+    const codexDeveloperInstructions = profile === 'codex' && options.controlAssetRoot
+      ? await readProviderInstructions(options.controlAssetRoot)
+      : undefined
     const command = resolvePtyCommand({
       profile,
       executable: resolveExecutable(profile),
@@ -102,7 +111,11 @@ export class PtySession {
       }),
       ...(options.settingsPath === undefined ? {} : {
         settingsPath: options.settingsPath
-      })
+      }),
+      ...(options.controlAssetRoot === undefined ? {} : {
+        controlAssetRoot: options.controlAssetRoot
+      }),
+      ...(codexDeveloperInstructions === undefined ? {} : { codexDeveloperInstructions })
     })
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)
@@ -139,6 +152,7 @@ export class PtySession {
       throw new Error('session is disposed')
     }
     this.#pty.resize(cols, rows)
+    void this.#screen.resize(cols, rows)
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(() => this.#journal.appendResize(sequence, cols, rows))
   }
@@ -149,6 +163,10 @@ export class PtySession {
 
   readFrames() {
     return this.#writeChain.then(() => this.#journal.readFrames())
+  }
+
+  snapshotScreen(): Promise<TerminalScreenSnapshot> {
+    return this.#screen.snapshot()
   }
 
   whenClosed(): Promise<void> { return this.#closed }
@@ -209,6 +227,7 @@ export class PtySession {
   #enqueueOutput(data: string): void {
     if (this.#forceFinalized) return
     this.#onOutput?.(data)
+    void this.#screen.write(data)
     const bytes = this.#encoder.encode(data)
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(async () => {
@@ -310,6 +329,22 @@ export class PtySession {
       }
     })
   }
+}
+
+async function readProviderInstructions(controlAssetRoot: string): Promise<string | undefined> {
+  try {
+    return await readFile(
+      join(controlAssetRoot, 'providers', 'codex-developer-instructions.md'),
+      'utf8'
+    )
+  } catch (error) {
+    console.error(`[host-control.instructions] ${errorMessage(error)}`)
+    return undefined
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {

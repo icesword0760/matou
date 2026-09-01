@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.cjs",
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && node ../../tooling/prepare-runtime-control-assets.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
@@ -13,6 +13,7 @@
   "dependencies": {
     "@matou/contracts": "workspace:*",
     "@matou/domain": "workspace:*",
+    "@xterm/headless": "6.0.0",
     "node-pty": "1.1.0"
   }
 }

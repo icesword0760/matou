@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, truncate } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, truncate } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -17,6 +17,7 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-packaged-e2e-'))
   const executablePath = await packagedExecutable()
   try {
+    await expectPackagedHostControlResources(executablePath)
     await runPackagedSmoke(executablePath, dataDirectory, true)
 
     const databasePath = join(dataDirectory, 'matou.sqlite')
@@ -95,13 +96,28 @@ async function runPackagedSmoke(
     const page = await app.firstWindow()
     await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
-    await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 2)
+    await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 3)
     await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
     await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
     await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
     await page.waitForTimeout(200)
     await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
     if (exerciseProduct) {
+      const packagedSurface = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
+      const packagedSessionId = await packagedSurface.getAttribute('data-session-id')
+      const identifyPath = join(dataDirectory, 'packaged-mt-identify.json')
+      await runTerminalCommand(packagedSurface, `mt identify --json > ${identifyPath}`)
+      await expect.poll(async () => {
+        try {
+          const result = JSON.parse(await readFile(identifyPath, 'utf8')) as {
+            target?: { session?: { id?: string } }
+          }
+          return result.target?.session?.id
+        } catch {
+          return undefined
+        }
+      }).toBe(packagedSessionId)
+
       await page.getByRole('button', { name: '横向新增 Shell' }).click()
       await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
 
@@ -117,15 +133,27 @@ async function runPackagedSmoke(
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid', pid!)
       await detached.close()
       await expect(page.getByTestId('detached-placeholder')).toHaveCount(0)
-      await expect(page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)).toHaveCount(0)
-      await expect(page.locator('.stopped-session-card')).toContainText('已停止')
+      const returned = page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)
+      await expect(returned).toBeVisible()
+      await expect(returned).toHaveAttribute('data-pid', pid!)
+      await expect(page.locator('.stopped-session-card')).toHaveCount(0)
       await expect(page.getByRole('button', { name: '重新启动' })).toHaveCount(0)
 
+      const sessionsBeforeAdd = await page.locator(
+        '.scene-stage:not([hidden]) .terminal-surface[data-session-id]'
+      ).evaluateAll((elements) => elements.map((element) =>
+        (element as HTMLElement).dataset.sessionId
+      ))
       await page.getByRole('button', { name: '横向新增 Shell' }).click()
-      const continued = page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
-      await expect(continued).toHaveAttribute('data-session-id', /.+/)
-      await expect(continued).not.toHaveAttribute('data-session-id', detachedSessionId!)
-      await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
+      await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(3)
+      const sessionsAfterAdd = await page.locator(
+        '.scene-stage:not([hidden]) .terminal-surface[data-session-id]'
+      ).evaluateAll((elements) => elements.map((element) =>
+        (element as HTMLElement).dataset.sessionId
+      ))
+      expect(sessionsAfterAdd.filter((sessionId) => !sessionsBeforeAdd.includes(sessionId)))
+        .toHaveLength(1)
+      expect(sessionsAfterAdd).toContain(detachedSessionId)
 
       const workspace = join(dataDirectory, 'matou_workspace')
       const moved = `${workspace}-moved`
@@ -156,10 +184,41 @@ async function runPackagedSmoke(
       await expect.poll(() => app.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows()[0]?.isVisible()
       )).toBe(true)
-      await expect(page.getByTestId('terminal-pane')).toHaveCount(2)
+      await expect(page.getByTestId('terminal-pane')).toHaveCount(3)
     }
   } finally {
     await app.close()
+  }
+}
+
+async function runTerminalCommand(
+  surface: import('@playwright/test').Locator,
+  command: string
+): Promise<void> {
+  await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
+  await surface.click({ position: { x: 12, y: 12 } })
+  const textarea = surface.locator('.xterm-helper-textarea')
+  await textarea.focus()
+  await textarea.pressSequentially(command, { delay: 1 })
+  await textarea.press('Enter')
+}
+
+async function expectPackagedHostControlResources(executablePath: string): Promise<void> {
+  const resources = process.platform === 'darwin'
+    ? resolve(executablePath, '../../Resources/runtime')
+    : resolve(executablePath, '../resources/runtime')
+  const required = [
+    'mt-cli.cjs',
+    'control-assets/bin/mt',
+    'control-assets/bin/mt.cmd',
+    'control-assets/providers/host-control.md',
+    'control-assets/providers/claude-plugin/.claude-plugin/plugin.json',
+    'control-assets/providers/claude-plugin/skills/mt-terminal/SKILL.md',
+    'control-assets/providers/codex-developer-instructions.md'
+  ]
+  await Promise.all(required.map((path) => access(join(resources, path))))
+  if (process.platform !== 'win32') {
+    expect((await stat(join(resources, 'control-assets/bin/mt'))).mode & 0o111).not.toBe(0)
   }
 }
 
