@@ -14,6 +14,10 @@ process.on('message', (message: unknown) => {
     )
     return
   }
+  if ('mode' in message && message.mode === 'claim-crash') {
+    void crashAfterClaim(dataRoot)
+    return
+  }
   const barrierPath = 'barrierPath' in message ? String(message.barrierPath) : undefined
   void contendOnce(dataRoot, barrierPath)
 })
@@ -39,6 +43,21 @@ async function contendOnce(dataRoot: string, barrierPath?: string): Promise<void
         : 'error',
       error: errorMessage(error)
     })
+  }
+}
+
+async function crashAfterClaim(dataRoot: string): Promise<void> {
+  try {
+    await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS, {
+      async onRecoveryGenerationClaimPublished(claim) {
+        await new Promise<void>(() => {
+          process.send?.({ kind: 'claim-published', ...claim }, () => process.exit(0))
+        })
+      }
+    })
+    sendAndExit({ kind: 'error', error: 'bootstrap did not stop after durable claim' })
+  } catch (error) {
+    sendAndExit({ kind: 'error', error: errorMessage(error) })
   }
 }
 

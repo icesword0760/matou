@@ -84,6 +84,10 @@ export interface RuntimeDatabaseBootstrapObserver {
     marker: RuntimeDatabaseRecoveryMarker
   ): void | Promise<void>
   onRecoveryActionFenced?(): void | Promise<void>
+  onRecoveryGenerationClaimPublished?(claim: {
+    claimPath: string
+    recoveryId: string
+  }): void | Promise<void>
   isShutdownRequested?(): boolean
 }
 
@@ -118,8 +122,19 @@ export async function openRecoverableRuntimeDatabase(
   const databasePath = join(dataRoot, 'matou.sqlite')
   const backups = new DatabaseBackupService(dataRoot)
   const initialRecoveryShape = readRecoveryMarkerShape(databasePath)
+  const pendingClaim = readRecoveryGenerationClaimForSource(databasePath, initialRecoveryShape)
+  if (pendingClaim) {
+    try {
+      await replaceRecoveryMarker(pendingClaim.marker.markerPath, pendingClaim.marker)
+      return recoveryResult(requireCanonicalRecoveryGeneration(pendingClaim.marker), backups)
+    } catch (error) {
+      return recoveryResult(pendingClaim.marker, backups, {
+        markerError: recoveryError('RECOVERY_MARKER_FAILED', error)
+      })
+    }
+  }
   const persistedRecovery = initialRecoveryShape?.kind === 'legacy'
-    ? activeRecoveryMarker(await upgradeLegacyRecoveryMarker(databasePath))
+    ? activeRecoveryMarker(await upgradeLegacyRecoveryMarker(databasePath, observer))
     : activeRecoveryMarker(initialRecoveryShape?.marker)
   if (persistedRecovery) return recoveryResult(persistedRecovery, backups)
 
@@ -180,7 +195,7 @@ export async function openRecoverableRuntimeDatabase(
       ownership = RuntimeDatabase.acquireOwnership(databasePath)
       const recoveryAfterFenceShape = readRecoveryMarkerShape(databasePath)
       const recoveryAfterFence = recoveryAfterFenceShape?.kind === 'legacy'
-        ? activeRecoveryMarker(await upgradeLegacyRecoveryMarker(databasePath))
+        ? activeRecoveryMarker(await upgradeLegacyRecoveryMarker(databasePath, observer))
         : activeRecoveryMarker(recoveryAfterFenceShape?.marker)
       if (recoveryAfterFence) {
         ownership.release()
@@ -283,7 +298,7 @@ async function preserveDatabaseForOwnershipRecovery(
     ownershipIssue
   )
   try {
-    const published = await publishRecoveryMarker(marker)
+    const published = await publishRecoveryMarker(marker, observer)
     await observer.onRecoveryMarkerPublished?.(published)
     return recoveryResult(published, backups)
   } catch (error) {
@@ -306,7 +321,7 @@ async function quarantineDatabaseBundle(
   const marker = newRecoveryMarker(databasePath, reason)
   let published: RuntimeDatabaseRecoveryMarker
   try {
-    published = await publishRecoveryMarker(marker)
+    published = await publishRecoveryMarker(marker, observer)
     await observer.onRecoveryMarkerPublished?.(published)
   } catch (error) {
     ownership?.release()
@@ -360,7 +375,8 @@ function newRecoveryMarker(
 }
 
 async function publishRecoveryMarker(
-  marker: RuntimeDatabaseRecoveryMarker
+  marker: RuntimeDatabaseRecoveryMarker,
+  observer: RuntimeDatabaseBootstrapObserver
 ): Promise<RuntimeDatabaseRecoveryMarker> {
   try {
     return await withMarkerPublicationFence(marker.durableDatabasePath, async () => {
@@ -375,13 +391,14 @@ async function publishRecoveryMarker(
       return requireCanonicalRecoveryGeneration(marker)
     })
   } catch (error) {
-    return publishRecoveryMarkerWithoutActionFence(marker, error)
+    return publishRecoveryMarkerWithoutActionFence(marker, error, observer)
   }
 }
 
 async function publishRecoveryMarkerWithoutActionFence(
   proposed: RuntimeDatabaseRecoveryMarker,
-  fenceError: unknown
+  fenceError: unknown,
+  observer: RuntimeDatabaseBootstrapObserver
 ): Promise<RuntimeDatabaseRecoveryMarker> {
   const shape = readRecoveryMarkerShape(proposed.durableDatabasePath)
   if (shape?.kind === 'modern') {
@@ -394,24 +411,31 @@ async function publishRecoveryMarkerWithoutActionFence(
       recoveryId: shape.marker.recoveryId ?? randomUUID(),
       state: 'required'
     }
-    return publishClaimedRecoveryGeneration(upgraded, shape.sourceKey, fenceError)
+    return publishClaimedRecoveryGeneration(upgraded, shape.source, fenceError, observer)
   }
-  const sourceKey = shape?.kind === 'modern'
-    ? `resolved-${shape.marker.recoveryId}`
-    : 'initial-generation'
-  return publishClaimedRecoveryGeneration(proposed, sourceKey, fenceError)
+  const source = recoveryGenerationSourceForShape(shape)
+  if (!source) return shape!.marker
+  return publishClaimedRecoveryGeneration(proposed, source, fenceError, observer)
 }
 
 async function publishClaimedRecoveryGeneration(
   proposed: RuntimeDatabaseRecoveryMarker,
-  sourceKey: string,
-  fenceError: unknown
+  source: RuntimeRecoveryGenerationSource,
+  fenceError: unknown,
+  observer: RuntimeDatabaseBootstrapObserver = {}
 ): Promise<RuntimeDatabaseRecoveryMarker> {
-  const claimPath = recoveryGenerationClaimPath(proposed.markerPath, sourceKey)
+  const claimPath = recoveryGenerationClaimPath(proposed.markerPath, source)
+  const claim: RuntimeRecoveryGenerationClaim = {
+    version: 1,
+    kind: 'recovery-generation-claim',
+    source,
+    markerDigest: recoveryMarkerDigest(proposed),
+    marker: proposed
+  }
   const partialPath = `${claimPath}.partial-${randomUUID()}`
   const handle = await open(partialPath, 'wx', 0o600)
   try {
-    await handle.writeFile(JSON.stringify(proposed), 'utf8')
+    await handle.writeFile(JSON.stringify(claim), 'utf8')
     await handle.sync()
   } finally {
     await handle.close()
@@ -426,11 +450,24 @@ async function publishClaimedRecoveryGeneration(
     // Whether this process won or observed the winning hard-link, syncing the
     // parent establishes the claim as durable before it is used as authority.
     syncDirectory(dirname(claimPath))
+    const durableClaim = readRecoveryGenerationClaim(
+      claimPath,
+      proposed.durableDatabasePath,
+      source
+    )
+    await observer.onRecoveryGenerationClaimPublished?.({
+      claimPath,
+      recoveryId: durableClaim.marker.recoveryId
+    })
   } finally {
     await rm(partialPath, { force: true }).catch(() => undefined)
   }
 
-  const claimed = readRecoveryGenerationClaim(claimPath, proposed.durableDatabasePath)
+  const claimed = readRecoveryGenerationClaim(
+    claimPath,
+    proposed.durableDatabasePath,
+    source
+  ).marker
   try {
     await replaceRecoveryMarker(claimed.markerPath, claimed)
   } catch (error) {
@@ -438,27 +475,138 @@ async function publishClaimedRecoveryGeneration(
     if (canonical) return canonical
     throw new RecoveryMarkerPublicationError(
       `database recovery generation is durable but canonical publication failed: ${errorMessage(error)}`,
-      readRecoveryGenerationClaim(claimPath, proposed.durableDatabasePath),
+      readRecoveryGenerationClaim(claimPath, proposed.durableDatabasePath, source).marker,
       new AggregateError([fenceError, error])
     )
   }
   return requireCanonicalRecoveryGeneration(claimed)
 }
 
-function recoveryGenerationClaimPath(markerPath: string, sourceKey: string): string {
-  const digest = createHash('sha256').update(sourceKey).digest('hex')
+function recoveryGenerationClaimPath(
+  markerPath: string,
+  source: RuntimeRecoveryGenerationSource
+): string {
+  const digest = createHash('sha256').update(JSON.stringify(source)).digest('hex')
   return `${markerPath}.generation-${digest}.claim`
 }
 
 function readRecoveryGenerationClaim(
   claimPath: string,
-  databasePath: string
-): RuntimeDatabaseRecoveryMarker {
-  const shape = parseRecoveryMarkerShape(readFileSync(claimPath, 'utf8'), databasePath)
+  databasePath: string,
+  expectedSource: RuntimeRecoveryGenerationSource
+): RuntimeRecoveryGenerationClaim {
+  let bytes: string
+  try {
+    bytes = readFileSync(claimPath, 'utf8')
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') throw error
+    throw new Error('database recovery generation claim is invalid')
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(bytes) as unknown
+  } catch {
+    throw new Error('database recovery generation claim is invalid')
+  }
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('database recovery generation claim is invalid')
+  }
+  const claim = value as Partial<RuntimeRecoveryGenerationClaim>
+  if (
+    claim.version !== 1 ||
+    claim.kind !== 'recovery-generation-claim' ||
+    JSON.stringify(claim.source) !== JSON.stringify(expectedSource) ||
+    typeof claim.marker !== 'object' || claim.marker === null
+  ) {
+    throw new Error('database recovery generation claim is invalid')
+  }
+  const shape = parseRecoveryMarkerShape(JSON.stringify(claim.marker), databasePath)
   if (shape.kind !== 'modern' || shape.marker.state !== 'required') {
     throw new Error('database recovery generation claim is invalid')
   }
-  return shape.marker
+  if (
+    claim.markerDigest !== recoveryMarkerDigest(shape.marker) ||
+    (expectedSource.kind === 'resolved' &&
+      shape.marker.recoveryId === expectedSource.recoveryId)
+  ) {
+    throw new Error('database recovery generation claim is invalid')
+  }
+  assertRecoveryGenerationSourceEvidence(expectedSource, shape.marker, databasePath)
+  return claim as RuntimeRecoveryGenerationClaim
+}
+
+function readRecoveryGenerationClaimForSource(
+  databasePath: string,
+  shape: RecoveryMarkerShape | undefined
+): RuntimeRecoveryGenerationClaim | undefined {
+  const source = recoveryGenerationSourceForShape(shape)
+  if (!source) return undefined
+  const markerPath = `${databasePath}.recovery.json`
+  const claimPath = recoveryGenerationClaimPath(markerPath, source)
+  try {
+    return readRecoveryGenerationClaim(claimPath, databasePath, source)
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function recoveryGenerationSourceForShape(
+  shape: RecoveryMarkerShape | undefined
+): RuntimeRecoveryGenerationSource | undefined {
+  if (!shape) return { kind: 'initial' }
+  if (shape.kind === 'legacy') return shape.source
+  if (activeRecoveryMarker(shape.marker)) return undefined
+  return {
+    kind: 'resolved',
+    recoveryId: shape.marker.recoveryId,
+    markerDigest: shape.markerDigest,
+    markerBytes: shape.markerBytes
+  }
+}
+
+function assertRecoveryGenerationSourceEvidence(
+  source: RuntimeRecoveryGenerationSource,
+  claimedMarker: RuntimeDatabaseRecoveryMarker,
+  databasePath: string
+): void {
+  if (source.kind === 'initial') return
+  if (createHash('sha256').update(source.markerBytes).digest('hex') !== source.markerDigest) {
+    throw new Error('database recovery generation claim is invalid')
+  }
+  const sourceShape = parseRecoveryMarkerShape(source.markerBytes, databasePath)
+  if (source.kind === 'legacy') {
+    if (sourceShape.kind !== 'legacy' || !sameRecoveryEvidence(sourceShape.marker, claimedMarker)) {
+      throw new Error('database recovery generation claim is invalid')
+    }
+    return
+  }
+  if (
+    sourceShape.kind !== 'modern' ||
+    sourceShape.marker.recoveryId !== source.recoveryId ||
+    (sourceShape.marker.state !== 'resolved' &&
+      !hasMatchingResolvedTombstone(sourceShape.marker))
+  ) {
+    throw new Error('database recovery generation claim is invalid')
+  }
+}
+
+function sameRecoveryEvidence(
+  legacy: LegacyRecoveryMarker,
+  claimed: RuntimeDatabaseRecoveryMarker
+): boolean {
+  return legacy.version === claimed.version &&
+    legacy.reason === claimed.reason &&
+    legacy.durableDatabasePath === claimed.durableDatabasePath &&
+    legacy.quarantinedPath === claimed.quarantinedPath &&
+    legacy.markerPath === claimed.markerPath &&
+    legacy.createdAt === claimed.createdAt &&
+    legacy.ownershipIssue === claimed.ownershipIssue &&
+    (legacy.recoveryId === undefined || legacy.recoveryId === claimed.recoveryId)
+}
+
+function recoveryMarkerDigest(marker: RuntimeDatabaseRecoveryMarker): string {
+  return createHash('sha256').update(JSON.stringify(marker)).digest('hex')
 }
 
 function matchingCanonicalRecoveryGeneration(
@@ -598,9 +746,38 @@ type LegacyRecoveryMarker = Omit<RuntimeDatabaseRecoveryMarker, 'recoveryId' | '
   recoveryId?: string
 }
 
+type RuntimeRecoveryGenerationSource =
+  | { kind: 'initial' }
+  | { kind: 'legacy'; markerDigest: string; markerBytes: string }
+  | {
+      kind: 'resolved'
+      recoveryId: string
+      markerDigest: string
+      markerBytes: string
+    }
+
+interface RuntimeRecoveryGenerationClaim {
+  version: 1
+  kind: 'recovery-generation-claim'
+  source: RuntimeRecoveryGenerationSource
+  markerDigest: string
+  marker: RuntimeDatabaseRecoveryMarker
+}
+
 type RecoveryMarkerShape =
-  | { kind: 'modern'; marker: RuntimeDatabaseRecoveryMarker }
-  | { kind: 'legacy'; marker: LegacyRecoveryMarker; sourceKey: string }
+  | {
+      kind: 'modern'
+      marker: RuntimeDatabaseRecoveryMarker
+      markerDigest: string
+      markerBytes: string
+    }
+  | {
+      kind: 'legacy'
+      marker: LegacyRecoveryMarker
+      markerDigest: string
+      markerBytes: string
+      source: Extract<RuntimeRecoveryGenerationSource, { kind: 'legacy' }>
+    }
 
 class RecoveryMarkerPublicationError extends Error {
   readonly durableMarker: RuntimeDatabaseRecoveryMarker
@@ -622,7 +799,8 @@ async function readCanonicalRecoveryMarker(
 }
 
 async function upgradeLegacyRecoveryMarker(
-  databasePath: string
+  databasePath: string,
+  observer: RuntimeDatabaseBootstrapObserver = {}
 ): Promise<RuntimeDatabaseRecoveryMarker | undefined> {
   try {
     return await withMarkerPublicationFence(databasePath, () => (
@@ -638,7 +816,7 @@ async function upgradeLegacyRecoveryMarker(
       state: 'required'
     }
     try {
-      return await publishClaimedRecoveryGeneration(candidate, shape.sourceKey, error)
+      return await publishClaimedRecoveryGeneration(candidate, shape.source, error, observer)
     } catch (publicationError) {
       if (publicationError instanceof RecoveryMarkerPublicationError) {
         return publicationError.durableMarker
@@ -722,13 +900,21 @@ function parseRecoveryMarkerShape(
     throw new Error('database recovery marker is invalid')
   }
   if (!hasState) {
+    const markerDigest = createHash('sha256').update(bytes).digest('hex')
     return {
       kind: 'legacy',
       marker: marker as LegacyRecoveryMarker,
-      sourceKey: `legacy-${createHash('sha256').update(bytes).digest('hex')}`
+      markerDigest,
+      markerBytes: bytes,
+      source: { kind: 'legacy', markerDigest, markerBytes: bytes }
     }
   }
-  return { kind: 'modern', marker: marker as RuntimeDatabaseRecoveryMarker }
+  return {
+    kind: 'modern',
+    marker: marker as RuntimeDatabaseRecoveryMarker,
+    markerDigest: createHash('sha256').update(bytes).digest('hex'),
+    markerBytes: bytes
+  }
 }
 
 function resolvedTombstonePath(marker: RuntimeDatabaseRecoveryMarker): string {

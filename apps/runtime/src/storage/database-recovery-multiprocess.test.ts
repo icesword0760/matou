@@ -1,4 +1,5 @@
 import { fork, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -142,6 +143,102 @@ describe('database recovery multi-process handoff', () => {
     expect(JSON.parse(await readFile(fixture.recovery.markerPath, 'utf8')))
       .toMatchObject({ recoveryId: results[0]!.recoveryId, state: 'required' })
   })
+
+  it('adopts a durable claim after its publisher exits and starts the next fault as a new generation', async () => {
+    const fixture = await ownershipRecoveryFixture()
+    const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
+    const firstCompleted = await controller.execute(fixture.recovery, {
+      type: 'runtime.recovery-command', requestId: 'resolve-before-claim-crash',
+      action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+    })
+    if (firstCompleted.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+    firstCompleted.bootstrap.database.close()
+
+    await writeFile(`${fixture.databasePath}.owner`, '{"pid":')
+    await writeFile(`${fixture.databasePath}.recovery-action.sqlite`, 'not a sqlite database')
+    const crashedClaim = await crashAfterGenerationClaim(fixture.root)
+    await rm(`${fixture.databasePath}.owner`, { force: true })
+
+    const adopted = await probeResult(fixture.root)
+    expect(adopted).toEqual({
+      kind: 'recovery-required', recoveryId: crashedClaim.recoveryId
+    })
+    expect(JSON.parse(await readFile(fixture.recovery.markerPath, 'utf8')))
+      .toMatchObject({ state: 'required', recoveryId: crashedClaim.recoveryId })
+
+    for (const suffix of ['', '-wal', '-shm']) {
+      await rm(`${fixture.databasePath}.recovery-action.sqlite${suffix}`, { force: true })
+    }
+    const adoptedRecovery = await openRecoverableRuntimeDatabase(
+      fixture.root,
+      FOUNDATION_MIGRATIONS
+    )
+    if (adoptedRecovery.kind !== 'recovery-required') {
+      throw new Error('expected adopted recovery generation')
+    }
+    const secondController = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
+    const secondCompleted = await secondController.execute(adoptedRecovery, {
+      type: 'runtime.recovery-command', requestId: 'complete-adopted-claim',
+      action: 'retry-open', expectedRecoveryId: adoptedRecovery.recoveryId
+    })
+    if (secondCompleted.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+    secondCompleted.bootstrap.database.close()
+
+    const bytes = await readFile(fixture.databasePath)
+    bytes.fill(0x7f, 0, 16)
+    await writeFile(fixture.databasePath, bytes)
+    const physical = await openRecoverableRuntimeDatabase(fixture.root, FOUNDATION_MIGRATIONS)
+    expect(physical).toMatchObject({
+      kind: 'recovery-required',
+      reason: 'physical-corruption',
+      quarantinedPath: expect.stringMatching(/\.corrupt-\d+$/)
+    })
+    if (physical.kind !== 'recovery-required') throw new Error('expected physical recovery')
+    expect(physical.recoveryId).not.toBe(crashedClaim.recoveryId)
+    expect(physical.ownershipIssue).toBeUndefined()
+    await expect(readFile(physical.quarantinedPath)).resolves.toBeDefined()
+    await expect(readFile(fixture.databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 20_000)
+
+  it.each(['wrong-source', 'wrong-shape'] as const)(
+    'keeps a durable generation claim fail-closed when it has %s evidence',
+    async (fault) => {
+      const fixture = await ownershipRecoveryFixture()
+      const controller = new DatabaseRecoveryController(fixture.root, FOUNDATION_MIGRATIONS)
+      const completed = await controller.execute(fixture.recovery, {
+        type: 'runtime.recovery-command', requestId: `resolve-before-${fault}`,
+        action: 'retry-open', expectedRecoveryId: fixture.recovery.recoveryId
+      })
+      if (completed.bootstrap?.kind !== 'writable') throw new Error('expected writable result')
+      completed.bootstrap.database.close()
+      const canonicalBefore = await readFile(fixture.recovery.markerPath, 'utf8')
+      const databaseBefore = await readFile(fixture.databasePath)
+
+      await writeFile(`${fixture.databasePath}.owner`, '{"pid":')
+      await writeFile(`${fixture.databasePath}.recovery-action.sqlite`, 'not a sqlite database')
+      const crashedClaim = await crashAfterGenerationClaim(fixture.root)
+      const claim = JSON.parse(await readFile(crashedClaim.claimPath, 'utf8')) as {
+        source: { recoveryId?: string }
+        marker: { state: string }
+        markerDigest: string
+      }
+      if (fault === 'wrong-source') {
+        claim.source.recoveryId = 'different-source-generation'
+      } else {
+        claim.marker.state = 'resolved'
+        claim.markerDigest = createHash('sha256')
+          .update(JSON.stringify(claim.marker))
+          .digest('hex')
+      }
+      await writeFile(crashedClaim.claimPath, JSON.stringify(claim))
+      await rm(`${fixture.databasePath}.owner`, { force: true })
+
+      expect(await probeResult(fixture.root)).toEqual({ kind: 'error' })
+      expect(await readFile(fixture.recovery.markerPath, 'utf8')).toBe(canonicalBefore)
+      expect(await readFile(fixture.databasePath)).toEqual(databaseBefore)
+    },
+    20_000
+  )
 
   it.each([
     ['file-sync', false, 'recovery-required'],
@@ -339,5 +436,32 @@ async function runFaultingRecovery(
       else resolveProbe(result)
     })
     contender.send({ dataRoot, mode: 'recover-fault', fault })
+  })
+}
+
+async function crashAfterGenerationClaim(
+  dataRoot: string
+): Promise<{ recoveryId: string; claimPath: string }> {
+  const contender = fork(contenderEntry, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
+  return new Promise((resolveClaim, reject) => {
+    const timeout = setTimeout(() => {
+      contender.kill()
+      reject(new Error('timed out waiting for durable generation claim'))
+    }, 10_000)
+    let claim: { recoveryId: string; claimPath: string } | undefined
+    contender.on('message', (message: unknown) => {
+      if (!message || typeof message !== 'object' || !('kind' in message)) return
+      if (message.kind !== 'claim-published' || !('recoveryId' in message) || !('claimPath' in message)) {
+        return
+      }
+      claim = { recoveryId: String(message.recoveryId), claimPath: String(message.claimPath) }
+    })
+    contender.once('error', reject)
+    contender.once('exit', () => {
+      clearTimeout(timeout)
+      if (!claim) reject(new Error('claim publisher exited without durable claim evidence'))
+      else resolveClaim(claim)
+    })
+    contender.send({ dataRoot, mode: 'claim-crash' })
   })
 }
