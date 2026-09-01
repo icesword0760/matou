@@ -164,6 +164,22 @@ describe('Terminal pane', () => {
     expect(onRemoveBranch).not.toHaveBeenCalled()
   })
 
+  it('presents a leaf Session as one direct removal instead of an entire branch', async () => {
+    const user = userEvent.setup()
+    const onRemoveBranch = vi.fn()
+    render(<TerminalPane {...fixture()} onRemoveBranch={onRemoveBranch} />)
+
+    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
+    const dialog = screen.getByRole('alertdialog', { name: '移除“Claude 主会话”？' })
+    expect(dialog.textContent).toContain('“Claude 主会话”会从会话列表和 DAG 中消失')
+    expect(dialog.textContent).not.toContain('整个分支')
+    const confirm = screen.getByRole('button', { name: '移除' })
+    expect(confirm.classList.contains('is-danger')).toBe(true)
+
+    await user.click(confirm)
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', false)
+  })
+
   it('opens pane actions only from the card header', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)

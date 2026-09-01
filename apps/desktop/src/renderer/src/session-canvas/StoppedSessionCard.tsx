@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
-import { RemoveNodeIcon, removalBody, removalConfirmLabel } from '../hierarchy/TerminalPane'
+import { RemoveNodeIcon, removalBody, removalConfirmLabel, removalTitle } from '../hierarchy/TerminalPane'
 
 export function StoppedSessionCard(props: {
   node: SessionGraphNodeView
@@ -35,9 +35,10 @@ export function StoppedSessionCard(props: {
         }}><RemoveNodeIcon /></button>}
     </div></header>
     {node.latestLines.length > 0 && <pre>{node.latestLines.slice(-8).join('\n')}</pre>}
-    {removalOpen && !disabled && <ConfirmDialog title={`移除“${node.title}”及其整个分支？`}
+    {removalOpen && !disabled && <ConfirmDialog title={removalTitle(node.title, descendantCount)}
       body={removalBody(node.title, directChildCount, descendantCount, descendantImpact)}
-      confirmLabel={removalConfirmLabel(descendantImpact)} cancelLabel="取消" scope="session"
+      confirmLabel={removalConfirmLabel(descendantImpact, descendantCount)} confirmTone="danger"
+      cancelLabel="取消" scope="session"
       onCancel={() => setRemovalOpen(false)} onConfirm={() => {
         setRemovalOpen(false)
         void Promise.resolve(onRemoveBranch?.(node.sessionId, descendantCount > 0)).catch(NOOP)
