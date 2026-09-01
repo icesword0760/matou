@@ -21,7 +21,10 @@ import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
 import { DatabaseLifecycleService } from './storage/database-lifecycle-service'
-import { openRecoverableRuntimeDatabase } from './storage/runtime-database-bootstrap'
+import {
+  openRecoverableRuntimeDatabase,
+  type RuntimeDatabaseBootstrapResult
+} from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { NotificationProjection } from './product/experience-foundation'
@@ -46,19 +49,31 @@ const servers = new Set<RuntimeServer>()
 const sessions = new RuntimeSessionRegistry()
 const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
-interface RuntimeState {
+interface RuntimeStateBase {
+  mode: 'normal' | 'read-only'
   dataRoot: string
-  controlEndpoint: string
   database: RuntimeDatabase
+  rpcRouter: RuntimeRpcRouter
+}
+
+interface WritableRuntimeState extends RuntimeStateBase {
+  mode: 'normal'
+  controlEndpoint: string
   telemetry: TaskTelemetryRepository
   controlTokens: CapabilityTokenService
   controlBackend: RuntimeControlBackend
-  rpcRouter: RuntimeRpcRouter
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
 }
 
+interface ReadOnlyRuntimeState extends RuntimeStateBase {
+  mode: 'read-only'
+}
+
+type RuntimeState = WritableRuntimeState | ReadOnlyRuntimeState
+
 let runtimeState: RuntimeState | undefined
+let readOnlyDatabase: RuntimeDatabase | undefined
 const lifecycleCoordinator = new RuntimeLifecycleCoordinator()
 const runtimeReady = lifecycleCoordinator.startInitialization(initializeRuntime).then((state) => {
   runtimeState = state
@@ -68,25 +83,38 @@ const runtimeReady = lifecycleCoordinator.startInitialization(initializeRuntime)
 async function initializeRuntime(): Promise<RuntimeState> {
   const opened = await openRecoverableRuntimeDatabase(dataRoot, FOUNDATION_MIGRATIONS, {
     onDatabaseOpened: (database, _effectiveDataRoot, backups) => {
+      if (database.readOnly) {
+        readOnlyDatabase = database
+        return
+      }
       lifecycleCoordinator.registerDatabaseLifecycle(
         database,
         new DatabaseLifecycleService(database, backups)
       )
     },
     onDatabaseClosed: (database) => {
+      if (readOnlyDatabase === database) readOnlyDatabase = undefined
       lifecycleCoordinator.releaseDatabaseLifecycle(database)
     },
     isShutdownRequested: () => lifecycleCoordinator.shutdownRequested
   })
+  if (opened.kind === 'recovery-required') return waitForDatabaseRecovery(opened)
   lifecycleCoordinator.assertStartupActive()
   const database = opened.database
-  const runtimeDataRoot = opened.effectiveDataRoot
-  const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
-  if (opened.recoveredFromCorruption) {
-    console.error(`[runtime.storage] corrupt database quarantined at ${opened.quarantinedPath}`)
-  }
-  const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
+  const runtimeDataRoot = opened.dataRoot
   const notifications = new NotificationProjection()
+  const rpcRouter = new RuntimeRpcRouter(database, notifications)
+  if (opened.kind === 'read-only') {
+    console.error(`[runtime.storage] database opened read-only: ${opened.reason}`)
+    return {
+      mode: 'read-only',
+      dataRoot: runtimeDataRoot,
+      database,
+      rpcRouter
+    }
+  }
+  const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
+  const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
   const sessionRepository = new SessionRepository(database, transactions)
   const providerModes = new ProviderModeService(database, transactions)
@@ -94,7 +122,6 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionCanvas = new SessionCanvasService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
-  const rpcRouter = new RuntimeRpcRouter(database, notifications)
   const hostControl = new HostControlServer({
     socketPath: controlEndpoint,
     tokenService: controlTokens,
@@ -190,6 +217,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   await providerHooks.start()
   lifecycleCoordinator.assertStartupActive()
   return {
+    mode: 'normal',
     dataRoot: runtimeDataRoot,
     controlEndpoint,
     database,
@@ -209,6 +237,9 @@ function shutdown(): Promise<void> {
       servers.clear()
     },
     shutdownSessions: () => sessions.shutdownAll()
+  }).finally(() => {
+    readOnlyDatabase?.close()
+    readOnlyDatabase = undefined
   })
 }
 const processOrchestrator = new RuntimeProcessOrchestrator({
@@ -240,11 +271,25 @@ parentPort.on('message', async (event) => {
       port.close()
       return
     }
-    const server = new RuntimeServer(port, state.dataRoot, state.database, state.rpcRouter, {
-      backend: state.controlBackend,
-      tokens: state.controlTokens,
-      endpoint: state.controlEndpoint
-    }, sessions, state.providerHooks, undefined, { hudRegistry: sessionHuds })
+    const control = state.mode === 'normal'
+      ? {
+          backend: state.controlBackend,
+          tokens: state.controlTokens,
+          endpoint: state.controlEndpoint
+        }
+      : undefined
+    const providerHooks = state.mode === 'normal' ? state.providerHooks : undefined
+    const server = new RuntimeServer(
+      port,
+      state.dataRoot,
+      state.database,
+      state.rpcRouter,
+      control,
+      sessions,
+      providerHooks,
+      undefined,
+      { hudRegistry: sessionHuds }
+    )
     servers.add(server)
     port.once('close', () => servers.delete(server))
   } catch (error) {
@@ -257,4 +302,18 @@ parentPort.on('message', async (event) => {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+async function waitForDatabaseRecovery(
+  recovery: Extract<RuntimeDatabaseBootstrapResult, { kind: 'recovery-required' }>
+): Promise<never> {
+  console.error(
+    `[runtime.storage] database recovery required; quarantined=${recovery.quarantinedPath}; ` +
+    `backups=${recovery.backups.length}`
+  )
+  while (!lifecycleCoordinator.shutdownRequested) {
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  lifecycleCoordinator.assertStartupActive()
+  throw new Error('database recovery loop ended unexpectedly')
 }

@@ -1,23 +1,34 @@
-import { chmod, copyFile, mkdtemp, rename } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { accessSync, constants, existsSync } from 'node:fs'
+import { rename } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { RuntimeDatabase } from './database'
-import { DatabaseBackupService } from './database-backup-service'
+import {
+  DatabaseBackupService,
+  type DatabaseBackupDescriptor
+} from './database-backup-service'
 import { MigrationRunner, type Migration } from './migration-runner'
 
-export interface RuntimeDatabaseBootstrapResult {
-  database: RuntimeDatabase
-  recoveredFromCorruption: boolean
-  effectiveDataRoot: string
-  ephemeral: boolean
-  quarantinedPath?: string
-}
+export type RuntimeDatabaseBootstrapResult =
+  | { kind: 'writable'; database: RuntimeDatabase; dataRoot: string }
+  | {
+      kind: 'read-only'
+      database: RuntimeDatabase
+      dataRoot: string
+      reason: 'filesystem-read-only' | 'newer-schema'
+    }
+  | {
+      kind: 'recovery-required'
+      reason: 'physical-corruption'
+      durableDatabasePath: string
+      quarantinedPath: string
+      backups: DatabaseBackupDescriptor[]
+    }
 
 export interface RuntimeDatabaseBootstrapObserver {
   onDatabaseOpened?(
     database: RuntimeDatabase,
-    effectiveDataRoot: string,
+    dataRoot: string,
     backups: DatabaseBackupService
   ): void
   onDatabaseClosed?(database: RuntimeDatabase): void
@@ -30,92 +41,119 @@ export async function openRecoverableRuntimeDatabase(
   observer: RuntimeDatabaseBootstrapObserver = {}
 ): Promise<RuntimeDatabaseBootstrapResult> {
   const databasePath = join(dataRoot, 'matou.sqlite')
+  const backups = new DatabaseBackupService(dataRoot)
   let database: RuntimeDatabase | undefined
+
   try {
-    database = RuntimeDatabase.open(databasePath)
-    const backups = new DatabaseBackupService(dataRoot)
-    observer.onDatabaseOpened?.(database, dataRoot, backups)
-    await new MigrationRunner(
-      database,
-      migrations,
-      backups
-    ).migrate()
-    return {
-      database,
-      recoveredFromCorruption: false,
-      effectiveDataRoot: dataRoot,
-      ephemeral: false
+    if (existsSync(databasePath)) {
+      if (!isWritable(dataRoot) || !isWritable(databasePath)) {
+        return openReadOnlyDatabase(
+          databasePath,
+          dataRoot,
+          backups,
+          'filesystem-read-only',
+          observer
+        )
+      }
+      const supportedVersion = migrations.reduce(
+        (highest, migration) => Math.max(highest, migration.version),
+        0
+      )
+      database = RuntimeDatabase.openWritableValidated(databasePath, (inspection) => {
+        assertFullIntegrity(inspection)
+        const currentVersion = readSchemaVersion(inspection)
+        if (currentVersion > supportedVersion) {
+          throw new Error(
+            `database schema version ${currentVersion} is newer than supported version ${supportedVersion}`
+          )
+        }
+      })
+    } else {
+      database = RuntimeDatabase.open(databasePath)
     }
+
+    observer.onDatabaseOpened?.(database, dataRoot, backups)
+    assertFullIntegrity(database)
+    await new MigrationRunner(database, migrations, backups).migrate()
+    return { kind: 'writable', database, dataRoot }
   } catch (error) {
     if (database && observer.isShutdownRequested?.()) throw error
     if (database) closeObservedDatabase(database, observer)
+
     if (isWriteDenied(error)) {
-      return openEphemeralCopy(databasePath, migrations, true, observer)
+      try {
+        return openReadOnlyDatabase(
+          databasePath,
+          dataRoot,
+          backups,
+          'filesystem-read-only',
+          observer
+        )
+      } catch (readOnlyError) {
+        if (!isPhysicalDatabaseCorruption(readOnlyError)) throw readOnlyError
+        return quarantineCorruptDatabase(databasePath, backups)
+      }
     }
     if (isNewerSchema(error)) {
-      return openEphemeralCopy(databasePath, migrations, false, observer)
+      return openReadOnlyDatabase(databasePath, dataRoot, backups, 'newer-schema', observer)
     }
     if (!isPhysicalDatabaseCorruption(error)) throw error
-    const quarantinedPath = `${databasePath}.corrupt-${Date.now()}`
-    await rename(databasePath, quarantinedPath)
-    await rename(`${databasePath}-wal`, `${quarantinedPath}-wal`).catch(() => undefined)
-    await rename(`${databasePath}-shm`, `${quarantinedPath}-shm`).catch(() => undefined)
-    const clean = RuntimeDatabase.open(databasePath)
-    const backups = new DatabaseBackupService(dataRoot)
-    observer.onDatabaseOpened?.(clean, dataRoot, backups)
-    try {
-      await new MigrationRunner(
-        clean,
-        migrations,
-        backups
-      ).migrate()
-      return {
-        database: clean,
-        recoveredFromCorruption: true,
-        effectiveDataRoot: dataRoot,
-        ephemeral: false,
-        quarantinedPath
-      }
-    } catch (migrationError) {
-      closeObservedDatabase(clean, observer)
-      throw migrationError
-    }
+    return quarantineCorruptDatabase(databasePath, backups)
   }
 }
 
-async function openEphemeralCopy(
-  durableDatabasePath: string,
-  migrations: readonly Migration[],
-  migrate = true,
-  observer: RuntimeDatabaseBootstrapObserver = {}
-): Promise<RuntimeDatabaseBootstrapResult> {
-  const effectiveDataRoot = await mkdtemp(join(tmpdir(), 'matou-ephemeral-'))
-  const ephemeralDatabasePath = join(effectiveDataRoot, 'matou.sqlite')
-  await copyFile(durableDatabasePath, ephemeralDatabasePath).catch(() => undefined)
-  await chmod(ephemeralDatabasePath, 0o600).catch(() => undefined)
-  await copyFile(`${durableDatabasePath}-wal`, `${ephemeralDatabasePath}-wal`).catch(() => undefined)
-  await copyFile(`${durableDatabasePath}-shm`, `${ephemeralDatabasePath}-shm`).catch(() => undefined)
-  const database = RuntimeDatabase.open(ephemeralDatabasePath)
-  const backups = new DatabaseBackupService(effectiveDataRoot)
-  observer.onDatabaseOpened?.(database, effectiveDataRoot, backups)
+function openReadOnlyDatabase(
+  databasePath: string,
+  dataRoot: string,
+  backups: DatabaseBackupService,
+  reason: 'filesystem-read-only' | 'newer-schema',
+  observer: RuntimeDatabaseBootstrapObserver
+): RuntimeDatabaseBootstrapResult {
+  const database = RuntimeDatabase.openReadOnly(databasePath)
   try {
-    if (migrate) {
-      await new MigrationRunner(
-        database,
-        migrations,
-        backups
-      ).migrate()
-    }
-    return {
-      database,
-      recoveredFromCorruption: false,
-      effectiveDataRoot,
-      ephemeral: true
-    }
+    assertFullIntegrity(database)
+    observer.onDatabaseOpened?.(database, dataRoot, backups)
+    return { kind: 'read-only', database, dataRoot, reason }
   } catch (error) {
     closeObservedDatabase(database, observer)
     throw error
   }
+}
+
+async function quarantineCorruptDatabase(
+  databasePath: string,
+  backups: DatabaseBackupService
+): Promise<RuntimeDatabaseBootstrapResult> {
+  const quarantinedPath = `${databasePath}.corrupt-${Date.now()}`
+  await rename(databasePath, quarantinedPath)
+  await rename(`${databasePath}-wal`, `${quarantinedPath}-wal`).catch(() => undefined)
+  await rename(`${databasePath}-shm`, `${quarantinedPath}-shm`).catch(() => undefined)
+  return {
+    kind: 'recovery-required',
+    reason: 'physical-corruption',
+    durableDatabasePath: databasePath,
+    quarantinedPath,
+    backups: await backups.listValid()
+  }
+}
+
+function assertFullIntegrity(database: RuntimeDatabase): void {
+  const rows = database.all<Record<string, unknown>>('PRAGMA integrity_check')
+  const result = rows.map((row) => String(Object.values(row)[0] ?? ''))
+  if (result.length !== 1 || result[0]?.toLowerCase() !== 'ok') {
+    throw new Error(`database corrupt: integrity_check failed: ${result.slice(0, 3).join('; ')}`)
+  }
+}
+
+function readSchemaVersion(database: RuntimeDatabase): number {
+  const historyExists = database.get<{ present: number }>(
+    `SELECT 1 AS present FROM sqlite_master
+     WHERE type = 'table' AND name = 'schema_migrations'`
+  ) !== undefined
+  if (!historyExists) return 0
+  return database.get<{ version: number | null }>(
+    'SELECT MAX(version) AS version FROM schema_migrations'
+  )?.version ?? 0
 }
 
 function closeObservedDatabase(
@@ -128,7 +166,9 @@ function closeObservedDatabase(
 
 function isPhysicalDatabaseCorruption(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  return /file is not a database|database disk image is malformed|database corrupt/i.test(message)
+  return /file is not a database|database disk image is malformed|database corrupt|integrity check failed/i.test(
+    message
+  )
 }
 
 function isWriteDenied(error: unknown): boolean {
@@ -137,6 +177,15 @@ function isWriteDenied(error: unknown): boolean {
     : ''
   const message = error instanceof Error ? error.message : String(error)
   return code === 'EACCES' || code === 'EPERM' || /readonly|read-only|permission denied/i.test(message)
+}
+
+function isWritable(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function isNewerSchema(error: unknown): boolean {

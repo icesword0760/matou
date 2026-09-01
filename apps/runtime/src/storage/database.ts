@@ -6,6 +6,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { dirname } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type {
   DatabaseSync as DatabaseSyncType,
   SQLInputValue,
@@ -36,6 +37,15 @@ export interface DatabaseTransaction {
   exec(sql: string): void
 }
 
+export class StorageReadOnlyError extends Error {
+  readonly code = 'STORAGE_READ_ONLY' as const
+
+  constructor() {
+    super('STORAGE_READ_ONLY: database is open in read-only recovery mode')
+    this.name = 'StorageReadOnlyError'
+  }
+}
+
 interface OwnerRecord {
   pid: number
   runtimeGeneration: string
@@ -44,18 +54,28 @@ interface OwnerRecord {
 export class RuntimeDatabase implements DatabaseTransaction {
   readonly runtimeGeneration: string
   readonly path: string
+  readonly readOnly: boolean
   readonly #connection: DatabaseSyncType
   readonly #queue = new StorageQueue()
-  readonly #ownerDirectory: string
+  readonly #ownerDirectory: string | undefined
   #closed = false
 
-  private constructor(path: string, generation: string, ownerDirectory: string) {
+  private constructor(
+    path: string,
+    generation: string,
+    ownerDirectory: string | undefined,
+    readOnly: boolean
+  ) {
     this.path = path
     this.runtimeGeneration = generation
     this.#ownerDirectory = ownerDirectory
-    this.#connection = new DatabaseSync(path)
+    this.readOnly = readOnly
+    this.#connection = readOnly ? openReadOnlyConnection(path) : new DatabaseSync(path)
 
     try {
+      if (readOnly) {
+        return
+      }
       this.#connection.exec(`
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
@@ -74,7 +94,7 @@ export class RuntimeDatabase implements DatabaseTransaction {
         .run('runtime_generation', generation)
     } catch (error) {
       this.#connection.close()
-      releaseOwner(ownerDirectory, generation)
+      if (ownerDirectory !== undefined) releaseOwner(ownerDirectory, generation)
       throw error
     }
   }
@@ -84,7 +104,33 @@ export class RuntimeDatabase implements DatabaseTransaction {
     const runtimeGeneration = randomUUID()
     const ownerDirectory = `${path}.owner`
     acquireOwner(ownerDirectory, runtimeGeneration)
-    return new RuntimeDatabase(path, runtimeGeneration, ownerDirectory)
+    return new RuntimeDatabase(path, runtimeGeneration, ownerDirectory, false)
+  }
+
+  static openWritableValidated(
+    path: string,
+    validate: (database: RuntimeDatabase) => void
+  ): RuntimeDatabase {
+    mkdirSync(dirname(path), { recursive: true })
+    const runtimeGeneration = randomUUID()
+    const ownerDirectory = `${path}.owner`
+    acquireOwner(ownerDirectory, runtimeGeneration)
+    let inspection: RuntimeDatabase | undefined
+    try {
+      inspection = new RuntimeDatabase(path, runtimeGeneration, undefined, true)
+      validate(inspection)
+      inspection.close()
+      inspection = undefined
+      return new RuntimeDatabase(path, runtimeGeneration, ownerDirectory, false)
+    } catch (error) {
+      inspection?.close()
+      releaseOwner(ownerDirectory, runtimeGeneration)
+      throw error
+    }
+  }
+
+  static openReadOnly(path: string): RuntimeDatabase {
+    return new RuntimeDatabase(path, randomUUID(), undefined, true)
   }
 
   pragmas(): DatabasePragmas {
@@ -99,11 +145,13 @@ export class RuntimeDatabase implements DatabaseTransaction {
 
   exec(sql: string): void {
     this.#assertOpen()
+    this.#assertWritable()
     this.#connection.exec(sql)
   }
 
   run(sql: string, ...params: SQLInputValue[]): StatementResultingChanges {
     this.#assertOpen()
+    this.#assertWritable()
     return this.#connection.prepare(sql).run(...params)
   }
 
@@ -119,6 +167,7 @@ export class RuntimeDatabase implements DatabaseTransaction {
 
   transaction<T>(callback: (transaction: DatabaseTransaction) => T): T {
     this.#assertOpen()
+    this.#assertWritable()
     this.#connection.exec('BEGIN IMMEDIATE')
     try {
       const result = callback(this)
@@ -135,6 +184,7 @@ export class RuntimeDatabase implements DatabaseTransaction {
 
   enqueueWrite<T>(operation: () => T | Promise<T>): Promise<T> {
     this.#assertOpen()
+    this.#assertWritable()
     return this.#queue.enqueue(operation)
   }
 
@@ -150,7 +200,9 @@ export class RuntimeDatabase implements DatabaseTransaction {
     this.#closed = true
     this.#queue.close()
     this.#connection.close()
-    releaseOwner(this.#ownerDirectory, this.runtimeGeneration)
+    if (this.#ownerDirectory !== undefined) {
+      releaseOwner(this.#ownerDirectory, this.runtimeGeneration)
+    }
   }
 
   #pragmaNumber(name: string): number {
@@ -167,6 +219,10 @@ export class RuntimeDatabase implements DatabaseTransaction {
     if (this.#closed) {
       throw new Error('database is closed')
     }
+  }
+
+  #assertWritable(): void {
+    if (this.readOnly) throw new StorageReadOnlyError()
   }
 }
 
@@ -225,4 +281,31 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
     'then' in value &&
     typeof (value as { then?: unknown }).then === 'function'
   )
+}
+
+function openReadOnlyConnection(path: string): DatabaseSyncType {
+  const connection = new DatabaseSync(path, { readOnly: true })
+  try {
+    connection.exec('PRAGMA query_only = ON;')
+    connection.prepare('PRAGMA schema_version').get()
+    return connection
+  } catch (error) {
+    connection.close()
+    if (!/attempt to write a readonly database/i.test(errorMessage(error))) throw error
+  }
+
+  const immutableUrl = pathToFileURL(path)
+  immutableUrl.searchParams.set('immutable', '1')
+  const immutable = new DatabaseSync(immutableUrl, { readOnly: true })
+  try {
+    immutable.exec('PRAGMA query_only = ON;')
+    return immutable
+  } catch (error) {
+    immutable.close()
+    throw error
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
