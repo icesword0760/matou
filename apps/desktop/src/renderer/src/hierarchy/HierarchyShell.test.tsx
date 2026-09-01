@@ -7,11 +7,11 @@ import { HierarchyShell, preferredActiveChild } from './HierarchyShell'
 import type { HierarchyProjection } from './hierarchy-types'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, inputDisabled, themeKey, fontSize, searchRequest, focusRequest }: {
-    sessionId: string; inputDisabled: boolean; themeKey?: string; fontSize?: number
+  TerminalSurface: ({ sessionId, inputDisabled, readOnly, themeKey, fontSize, searchRequest, focusRequest }: {
+    sessionId: string; inputDisabled: boolean; readOnly?: boolean; themeKey?: string; fontSize?: number
     searchRequest?: { query: string; direction: string; sequence: number }
     focusRequest?: number
-  }) => <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled}
+  }) => <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled} data-read-only={readOnly}
     data-theme={themeKey} data-font-size={fontSize} data-search-query={searchRequest?.query}
     data-search-direction={searchRequest?.direction} data-focus-request={focusRequest} />
 }))
@@ -28,6 +28,10 @@ vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.c
 beforeEach(() => {
   runtime.current = null
   Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn()
+  })
 })
 
 afterEach(() => {
@@ -621,6 +625,65 @@ describe('PRD 05 hierarchy shell', () => {
       'hierarchy.bootstrap-window', 'projection.snapshot'
     ])
     expect(runtime.current.startProjection).toHaveBeenCalledWith(17)
+  })
+
+  it('browses Workspace, Task, Scene, search and copy surfaces while every mutation is disabled in read-only recovery', async () => {
+    const data = fixture()
+    data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code' }
+    data.sessionHuds = [{
+      sessionId: 'session-a1', mode: 'agent', cwd: '/tmp/a', gitBranch: 'main',
+      startedAt: 1, resumable: true
+    }]
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+        nodes: [{ ...graphNode('session-a1', '终端 A1'), currentMode: 'claude-code', canFork: true }]
+      }
+    }
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      exportDatabaseRecoveryBundle: vi.fn().mockResolvedValue({ exportedPath: '/tmp/export' }),
+      onDetachedWindowClosed: vi.fn(() => () => {})
+    } })
+
+    render(<HierarchyShell fixture={data} runtimeMode="read-only" />)
+
+    expect(screen.getByRole('status').textContent).toContain('数据库处于只读恢复模式')
+    expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
+    expect(screen.getByTestId('xterm-session-a1').dataset.readOnly).toBe('true')
+    expect(screen.getByRole('button', { name: '新增工作空间' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '在 Workspace A 中新增事项' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '横向新增 Shell' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '从“终端 A1”创建子分支' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '打开 Git 与 Worktree' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '新增工作空间' }).getAttribute('title'))
+      .toBe('数据库处于只读恢复模式')
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Workspace B' }))
+    expect(screen.getByRole('region', { name: 'Workspace B 工作现场' })).toBeTruthy()
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Workspace A' }))
+    await userEvent.setup().click(screen.getByRole('tab', { name: '页签 A2' }))
+    expect(screen.getByRole('tab', { name: '页签 A2' }).getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    expect(screen.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' })).toBeTruthy()
+  })
+
+  it('skips the mutating window bootstrap when lifecycle already declares read-only', async () => {
+    const data = fixture()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell runtimeMode="read-only" />)
+
+    expect(await screen.findByRole('region', { name: 'Workspace A 工作现场' })).toBeTruthy()
+    expect(request.mock.calls.map(([method]) => method)).toEqual(['projection.snapshot'])
   })
 
   it('does not treat an ordinary bootstrap failure as storage read-only', async () => {

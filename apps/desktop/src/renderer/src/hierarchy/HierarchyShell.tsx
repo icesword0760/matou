@@ -4,7 +4,7 @@ import {
 } from 'react'
 
 import type { LayoutNode } from '@matou/domain'
-import type { RuntimeMessage } from '@matou/contracts'
+import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
 import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
@@ -15,7 +15,9 @@ import {
 } from '../notifications/NotificationProvider'
 import { ingestAgentNotification } from '../notifications/agent-event-ingestion'
 import { TerminalHud } from '../hud/TerminalHud'
-import { createHierarchyCommands } from './hierarchy-commands'
+import {
+  createHierarchyCommands, createReadOnlyHierarchyCommands
+} from './hierarchy-commands'
 import { DetachedPlaceholder } from './DetachedPlaceholder'
 import type {
   HierarchyCommands, HierarchyProjection, SceneNodeView, SceneSnapshotView,
@@ -37,15 +39,24 @@ import { useTerminalShortcuts } from './useTerminalShortcuts'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
-export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
+import { ReadOnlyRecoveryBanner } from '../recovery/ReadOnlyRecoveryBanner'
+
+export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
+  fixture?: HierarchyProjection
+  runtimeMode?: RuntimeMode
+}) {
   const client = useRuntimeClient()
   const windowId = fixture?.windowId ?? queryValue('windowId') ?? 'window-1'
   const [projection, setProjection] = useState<HierarchyProjection | null>(
     () => fixture ? structuredClone(fixture) : null
   )
   const [loadError, setLoadError] = useState('')
+  const [effectiveMode, setEffectiveMode] = useState<RuntimeMode>(runtimeMode)
   const storeRef = useRef(new RuntimeProjectionStore())
   const notificationStoreRef = useRef(createBrowserNotificationStore())
+  const readOnly = effectiveMode === 'read-only'
+
+  useEffect(() => setEffectiveMode(runtimeMode), [runtimeMode])
 
   const refresh = useCallback(async () => {
     if (!client) return
@@ -86,6 +97,10 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
     }
     const unsubscribe = client.subscribeProjection(onProjection)
     const now = Date.now()
+    if (readOnly) {
+      void refresh().catch((error: unknown) => alive && setLoadError(errorMessage(error)))
+      return () => { alive = false; unsubscribe() }
+    }
     void client.request('hierarchy.bootstrap-window', {
       command: {
         commandId: `hierarchy.bootstrap-window-${windowId}-${now}`,
@@ -102,21 +117,28 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
         setLoadError(errorMessage(error))
         return
       }
+      setEffectiveMode('read-only')
       void refresh().catch((refreshError: unknown) => {
         if (alive) setLoadError(errorMessage(refreshError))
       })
     })
     return () => { alive = false; unsubscribe() }
-  }, [client, fixture, refresh, windowId])
+  }, [client, fixture, readOnly, refresh, windowId])
 
   const fixtureCommands = useMemo(
     () => fixture ? createFixtureCommands(setProjection) : null,
     [fixture]
   )
-  const commands = useMemo(
-    () => fixtureCommands ?? (client ? createHierarchyCommands(client, windowId, refresh) : null),
-    [client, fixtureCommands, refresh, windowId]
-  )
+  const commands = useMemo(() => {
+    const base = fixtureCommands ?? (client ? createHierarchyCommands(client, windowId, refresh) : null)
+    if (!base || !readOnly) return base
+    return createReadOnlyHierarchyCommands(base, (update) => setProjection((current) => {
+      if (!current) return current
+      const next = structuredClone(current)
+      update(next)
+      return next
+    }))
+  }, [client, fixtureCommands, readOnly, refresh, windowId])
 
   useEffect(() => {
     if (queryValue('e2e') !== '1') return
@@ -138,7 +160,7 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   }, [client, refresh, windowId])
 
   useEffect(() => {
-    if (!client || fixture || !projection?.navigation.activeWorkspaceId) return
+    if (!client || fixture || readOnly || !projection?.navigation.activeWorkspaceId) return
     const workspaceId = projection.navigation.activeWorkspaceId
     let checking = false
     const checkPath = async () => {
@@ -161,19 +183,20 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
     void checkPath().catch(() => {})
     const timer = window.setInterval(() => { void checkPath().catch(() => {}) }, 400)
     return () => window.clearInterval(timer)
-  }, [client, fixture, projection?.navigation.activeWorkspaceId, refresh, windowId])
+  }, [client, fixture, projection?.navigation.activeWorkspaceId, readOnly, refresh, windowId])
 
   if (!projection || !commands) {
     return <main className="hierarchy-loading" aria-busy="true" data-load-error={loadError || undefined} />
   }
   return <NotificationProvider store={notificationStoreRef.current}>
-    <HierarchyProduct projection={projection} commands={commands} />
+    <HierarchyProduct projection={projection} commands={commands} readOnly={readOnly} />
   </NotificationProvider>
 }
 
-function HierarchyProduct({ projection, commands }: {
+function HierarchyProduct({ projection, commands, readOnly }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
+  readOnly: boolean
 }) {
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
@@ -277,7 +300,7 @@ function HierarchyProduct({ projection, commands }: {
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
   useEffect(() => {
-    if (!activeSceneId || !commands.restartStoppedSession) return
+    if (readOnly || !activeSceneId || !commands.restartStoppedSession) return
     const graph = projection.sessionGraphs?.[activeSceneId]
     for (const node of graph?.nodes ?? []) {
       if (node.archivedAt === undefined || restartingStoppedSessions.current.has(node.sessionId)) continue
@@ -286,7 +309,7 @@ function HierarchyProduct({ projection, commands }: {
         restartingStoppedSessions.current.delete(node.sessionId)
       })
     }
-  }, [activeSceneId, commands, projection.sessionGraphs])
+  }, [activeSceneId, commands, projection.sessionGraphs, readOnly])
   const workspaceTaskIds = new Set(
     projection.tasks.filter(({ id, workspaceId: owner }) =>
       owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
@@ -348,7 +371,7 @@ function HierarchyProduct({ projection, commands }: {
   }
   const shortcutHandlers = useMemo(() => ({
     splitHorizontal: () => {
-      if (pathValid && activeSceneId && focusedSessionId) run(commands.createShellSibling(activeSceneId, focusedSessionId))
+      if (!readOnly && pathValid && activeSceneId && focusedSessionId) run(commands.createShellSibling(activeSceneId, focusedSessionId))
     },
     splitVertical: () => {},
     nextPane: () => focusPane(1),
@@ -360,11 +383,11 @@ function HierarchyProduct({ projection, commands }: {
       if (target) run(commands.activateSession(target))
     },
     closePane: () => {
-      if (focusedSessionId) {
+      if (!readOnly && focusedSessionId) {
         setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
       }
     },
-    newTab: () => { if (pathValid && task) run(commands.createCanvas(task.id)) },
+    newTab: () => { if (!readOnly && pathValid && task) run(commands.createCanvas(task.id)) },
     nextTab: () => focusScene((scenes.findIndex(({ id }) => id === activeSceneId) + 1) % Math.max(1, scenes.length)),
     prevTab: () => {
       const index = scenes.findIndex(({ id }) => id === activeSceneId)
@@ -372,6 +395,7 @@ function HierarchyProduct({ projection, commands }: {
     },
     jumpToTab: focusScene,
     moveTabPosition: (direction: 'left' | 'right') => {
+      if (readOnly) return
       const index = scenes.findIndex(({ id }) => id === activeSceneId)
       if (!activeSceneId || index < 0) return
       if (direction === 'left' && index > 0) run(commands.reorderScene(activeSceneId, scenes[index - 1]!.id))
@@ -389,7 +413,7 @@ function HierarchyProduct({ projection, commands }: {
       if (shortcutPanelOpen) setTerminalFocusRequest((value) => value + 1)
       setShortcutPanelOpen(!shortcutPanelOpen)
     }
-  }), [activeRatios, activeSceneId, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, scenes, shortcutPanelOpen, task])
+  }), [activeRatios, activeSceneId, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
     if (!activeSceneId || !dagFocusSessionId) return
@@ -458,9 +482,13 @@ function HierarchyProduct({ projection, commands }: {
     }
   }, [themeKey])
 
-  return <main className="hierarchy-shell cli-module" data-theme={themeKey}>
+  return <main className="hierarchy-shell cli-module" data-theme={themeKey}
+    data-runtime-mode={readOnly ? 'read-only' : 'normal'}>
+              {readOnly && <ReadOnlyRecoveryBanner exportBundle={() =>
+                window.matouDesktop.exportDatabaseRecoveryBundle()} />}
               <div className="claude-code-view hierarchy-body">
                 <TaskSidebar projection={projection} commands={commands} pathValid={pathValid}
+                  readOnly={readOnly}
                   onRevealSession={(sceneId, sessionId) => {
                     const node = projection.sessionGraphs?.[sceneId]?.nodes.find((candidate) =>
                       candidate.sessionId === sessionId)
@@ -486,6 +514,7 @@ function HierarchyProduct({ projection, commands }: {
         </div>}
         {task && <>
           <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
+            readOnly={readOnly}
             onOpenDag={openDag} />
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
@@ -515,7 +544,7 @@ function HierarchyProduct({ projection, commands }: {
                 return <TerminalPane session={session}
                   active={isFocused} visible={scene.id === activeSceneId && cardVisible}
                   workspaceSessionCount={workspaceSessionCount}
-                  taskName={task.title} sceneId={scene.id} pathValid={pathValid}
+                  taskName={task.title} sceneId={scene.id} pathValid={pathValid} readOnly={readOnly}
                   themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
                   closeRequest={session.id === closeRequest.sessionId ? closeRequest.sequence : 0}
                   {...(searchOpen && scene.id === activeSceneId && isFocused ? { searchRequest } : {})}
@@ -609,7 +638,7 @@ function HierarchyProduct({ projection, commands }: {
               return <section className="scene-stage" key={scene.id} hidden={scene.id !== activeSceneId}
                 aria-label={`${scene.name} 终端布局`}>
                 {graph && snapshot
-                  ? <SessionCanvas graph={graph} disabled={!pathValid}
+                  ? <SessionCanvas graph={graph} disabled={!pathValid || readOnly}
                       {...(levelParentByScene[scene.id] !== undefined
                         ? { levelParentSessionId: levelParentByScene[scene.id]! }
                         : {})}
@@ -683,6 +712,7 @@ function HierarchyProduct({ projection, commands }: {
                       } : {})} />}
                     <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
                       onModel={commands.setModel}
+                      {...(readOnly ? { disabledReason: '数据库处于只读恢复模式' } : {})}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />

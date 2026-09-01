@@ -18,10 +18,11 @@ export interface SceneCommands {
   createShellSibling?(sceneId: string, sessionId: string): unknown
 }
 
-export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag }: {
+export function SceneTabBar({ projection, commands, pathValid = true, readOnly = false, onOpenDag }: {
   projection: HierarchyProjection
   commands: SceneCommands
   pathValid?: boolean
+  readOnly?: boolean
   onOpenDag?(): void
 }) {
   const workspaceId = projection.navigation.activeWorkspaceId
@@ -62,6 +63,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     })
   }
   const close = (sceneId: string) => {
+    if (readOnly) return
     const closeFlow = closeFlowFor(sceneId)
     if (closeFlow.action === 'hide-window') {
       setClosingSceneId(sceneId)
@@ -72,7 +74,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     }
   }
   return <div className="scene-bar tab-bar" role="tablist" onKeyDown={(event) => {
-    if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || !activeSceneId) return
+    if (readOnly || !(event.metaKey || event.ctrlKey) || !event.shiftKey || !activeSceneId) return
     const index = scenes.findIndex(({ id }) => id === activeSceneId)
     if (event.key === 'PageUp' && index > 0) void commands.reorderScene(activeSceneId, scenes[index - 1]!.id)
     if (event.key === 'PageDown' && index >= 0 && index < scenes.length - 1) {
@@ -82,16 +84,20 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     <div className="scene-tabs tab-bar-left">
       {scenes.map((scene) => <div key={scene.id} data-scene-id={scene.id}
         className={`tab-item${scene.id === activeSceneId ? ' active' : ''}`}
-        onContextMenu={(event) => { event.preventDefault(); setMenuSceneId(scene.id) }}>
+        onContextMenu={(event) => { event.preventDefault(); if (!readOnly) setMenuSceneId(scene.id) }}>
         <button role="tab" ref={scene.id === activeSceneId ? activeRef : undefined}
           className="tab-title" aria-selected={scene.id === activeSceneId}
-          title={`${scene.name}\n双击重命名画布`} onDoubleClick={() => setRenamingSceneId(scene.id)}
+          title={readOnly ? scene.name : `${scene.name}\n双击重命名画布`}
+          onDoubleClick={() => { if (!readOnly) setRenamingSceneId(scene.id) }}
           onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
-        <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
+        <button className="tab-close" aria-label={`关闭页签：${scene.name}`}
+          disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+          onClick={() => close(scene.id)}>✕</button>
       </div>)}
       <button className="tab-add-btn" aria-label="新建页签"
-        disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        disabled={readOnly || !pathValid}
+        title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
         onClick={() => {
           if (!taskId) return
           if (commands.createCanvas) commands.createCanvas(taskId)
@@ -101,8 +107,9 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     <div className="tab-bar-right">
     {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
       title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}
-    <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell" disabled={!pathValid || !activeSceneId || !activeSessionId}
-      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
+    <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell"
+      disabled={readOnly || !pathValid || !activeSceneId || !activeSessionId}
+      title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
       onClick={() => {
         if (!activeSceneId || !activeSessionId) return
         if (commands.createShellSibling) commands.createShellSibling(activeSceneId, activeSessionId)
@@ -112,7 +119,8 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
     </button>
     </div>
     {menuSceneId && <div role="menu" className="scene-tab-menu">
-      <button role="menuitem" onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>
+      <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+        onClick={() => { setRenamingSceneId(menuSceneId); setMenuSceneId(null) }}>重命名页签</button>
     </div>}
     {renamingSceneId && (() => {
       const scene = scenes.find(({ id }) => id === renamingSceneId)
@@ -140,6 +148,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag 
 }
 
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
+const READ_ONLY_REASON = '数据库处于只读恢复模式'
 function NOOP(): void {}
 
 export function sceneDisplayName(

@@ -135,6 +135,25 @@ describe('RuntimeClient', () => {
     })
   })
 
+  it('attaches a read-only terminal through replay without spawning a process', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['replay-v1']
+    })
+
+    client.attachTerminal({
+      sessionId: 'session-read-only', executionContextId: 'context-1',
+      profile: 'shell', cols: 80, rows: 24, readOnly: true
+    }, () => undefined)
+
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.replay-request', sessionId: 'session-read-only', fromSequence: 0
+    }))
+    expect(port.sent.some(({ type }) => type === 'terminal.spawn')).toBe(false)
+  })
+
   it('routes a Session-scoped startup error only to that terminal card', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })

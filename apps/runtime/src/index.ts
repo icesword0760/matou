@@ -49,6 +49,7 @@ import {
 import { RuntimeProcessOrchestrator } from './runtime-process-orchestrator'
 import { RuntimeLifecyclePublisher } from './runtime-lifecycle-publisher'
 import { DatabaseRecoveryController } from './storage/database-recovery-controller'
+import { exportReadOnlyDatabaseBundle } from './storage/read-only-database-export'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -385,6 +386,29 @@ async function waitForDatabaseRecovery(
 async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): Promise<void> {
   const recovery = pendingDatabaseRecovery
   if (!recovery || !settleDatabaseRecovery) {
+    if (command.action === 'export-recovery-bundle') {
+      try {
+        const state = await runtimeReady
+        if (state.mode !== 'read-only') throw new Error('当前数据库不在只读恢复模式')
+        const destinationRoot = resolve(
+          process.env.MATOU_RECOVERY_EXPORT_DIR ?? resolve(os.homedir(), 'Downloads', 'Matou-Recovery')
+        )
+        const exportedPath = await exportReadOnlyDatabaseBundle(
+          state.database.path,
+          destinationRoot
+        )
+        parentPort.postMessage({
+          type: 'runtime.recovery-result', requestId: command.requestId, ok: true,
+          value: { exportedPath }
+        })
+      } catch (error) {
+        parentPort.postMessage({
+          type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
+          error: errorMessage(error)
+        })
+      }
+      return
+    }
     parentPort.postMessage({
       type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
       error: '当前没有待处理的数据库恢复操作'

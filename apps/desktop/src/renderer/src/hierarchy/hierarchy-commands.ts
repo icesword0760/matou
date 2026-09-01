@@ -1,5 +1,6 @@
 import type { RuntimeClient } from '../runtime/RuntimeClient'
 import type { HierarchyCommands } from './hierarchy-types'
+import type { HierarchyProjection } from './hierarchy-types'
 import type {
   ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
 } from '@matou/contracts'
@@ -133,6 +134,104 @@ export function createHierarchyCommands(
     setModel: (sessionId, modelStrategy) => command('session.set-model', {
       sessionId, modelStrategy
     })
+  }
+}
+
+export const READ_ONLY_RECOVERY_REASON = '数据库处于只读恢复模式'
+
+export function createReadOnlyHierarchyCommands(
+  base: HierarchyCommands,
+  updateProjection: (update: (value: HierarchyProjection) => void) => void
+): HierarchyCommands {
+  const blocked = () => Promise.reject(Object.assign(
+    new Error(READ_ONLY_RECOVERY_REASON), { code: 'STORAGE_READ_ONLY' }
+  ))
+  const navigate = (update: (value: HierarchyProjection) => void) => {
+    updateProjection(update)
+    return Promise.resolve()
+  }
+  const activateWorkspace = (workspaceId: string) => navigate((value) => {
+    if (!value.workspaces.some(({ id }) => id === workspaceId)) return
+    value.navigation.activeWorkspaceId = workspaceId
+  })
+  const activateTask = (taskId: string) => navigate((value) => {
+    const task = value.tasks.find(({ id }) => id === taskId)
+    if (!task) return
+    value.navigation.activeWorkspaceId = task.workspaceId
+    value.navigation.taskByWorkspace[task.workspaceId] = task.id
+  })
+  const activateScene = (sceneId: string) => navigate((value) => {
+    const scene = value.scenes.find(({ id }) => id === sceneId)
+    const task = scene && value.tasks.find(({ id }) => id === scene.taskId)
+    if (!scene || !task) return
+    value.navigation.activeWorkspaceId = task.workspaceId
+    value.navigation.taskByWorkspace[task.workspaceId] = task.id
+    value.navigation.sceneByTask[task.id] = scene.id
+  })
+  const setFocusedSession = (sceneId: string, sessionId: string) => navigate((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
+    if (!snapshot?.mounts.some(({ sessionId: candidate }) => candidate === sessionId)) return
+    value.navigation.sessionByScene[sceneId] = sessionId
+    if (value.sessionGraphs?.[sceneId]) value.sessionGraphs[sceneId]!.focusedSessionId = sessionId
+  })
+  const activateSession = (sessionId: string) => navigate((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ mounts }) =>
+      mounts.some(({ sessionId: candidate }) => candidate === sessionId))
+    if (!snapshot) return
+    const scene = value.scenes.find(({ id }) => id === snapshot.scene.id)
+    const task = scene && value.tasks.find(({ id }) => id === scene.taskId)
+    if (!scene || !task) return
+    value.navigation.activeWorkspaceId = task.workspaceId
+    value.navigation.taskByWorkspace[task.workspaceId] = task.id
+    value.navigation.sceneByTask[task.id] = scene.id
+    value.navigation.sessionByScene[scene.id] = sessionId
+    if (value.sessionGraphs?.[scene.id]) value.sessionGraphs[scene.id]!.focusedSessionId = sessionId
+  })
+
+  return {
+    ...base,
+    activateWorkspace,
+    activateTask,
+    activateScene,
+    activateSession,
+    setFocusedSession,
+    createWorkspace: blocked,
+    renameWorkspace: blocked,
+    relinkWorkspace: blocked,
+    removeWorkspace: blocked,
+    setWorkspacePinned: blocked,
+    reorderPinnedWorkspace: blocked,
+    createTask: blocked,
+    renameTask: blocked,
+    reorderTask: blocked,
+    deleteTask: blocked,
+    setTaskPinned: blocked,
+    reorderPinnedTask: blocked,
+    createScene: blocked,
+    renameScene: blocked,
+    reorderScene: blocked,
+    closeScene: blocked,
+    reopenScene: blocked,
+    splitSession: blocked,
+    forkSession: blocked,
+    createCanvas: blocked,
+    createShellSibling: blocked,
+    createForkChild: blocked,
+    createForkSibling: blocked,
+    retryFork: blocked,
+    removeFailedFork: blocked,
+    retryProviderRestore: blocked,
+    loadClaudeSession: blocked,
+    restartStoppedSession: blocked,
+    removeSessionBranch: blocked,
+    recordSessionInteraction: blocked,
+    // Scrolling remains local and usable. Persistence resumes after storage is writable.
+    putGeometry: () => Promise.resolve(),
+    deleteSession: blocked,
+    detachSession: blocked,
+    returnSession: blocked,
+    setPermissionMode: blocked,
+    setModel: blocked
   }
 }
 

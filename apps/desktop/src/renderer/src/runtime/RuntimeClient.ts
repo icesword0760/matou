@@ -18,6 +18,7 @@ export interface TerminalAttachment {
   cols: number
   rows: number
   spawnRevision?: number
+  readOnly?: boolean
 }
 
 interface PendingRequest {
@@ -216,6 +217,10 @@ export class RuntimeClient {
   }
 
   #spawn(config: TerminalAttachment): void {
+    if (config.readOnly) {
+      this.requestTerminalReplay(config.sessionId)
+      return
+    }
     this.#post({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, ...config })
   }
 

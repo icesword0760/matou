@@ -33,6 +33,7 @@ interface TerminalSurfaceProps {
   visible?: boolean
   active?: boolean
   inputDisabled?: boolean
+  readOnly?: boolean
   themeKey?: TerminalThemeKey
   fontSize?: number
   onFontSizeChange?: (fontSize: number) => void
@@ -51,7 +52,7 @@ interface TerminalSurfaceProps {
 export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
-    profile = 'shell', visible = true, active = true, inputDisabled = false,
+    profile = 'shell', visible = true, active = true, inputDisabled = false, readOnly = false,
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onRuntimeError = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
@@ -227,7 +228,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         replaying = false
         terminal.write('', () => {
           fit.fit()
-          client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+          if (!readOnly) client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
           onReplayComplete(`replayed-through:${message.throughSequence}`)
         })
       }
@@ -238,7 +239,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       profile: profileRef.current,
       cols: terminal.cols,
       rows: terminal.rows,
-      spawnRevision
+      spawnRevision,
+      readOnly
     }, onMessage)
     const input = terminal.onData((data) => {
       if (inputDisabledRef.current) return
@@ -274,7 +276,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (!visibleRef.current) return
       fit.fit()
       if (terminal.cols >= 2 && terminal.cols <= 1000 && terminal.rows >= 1 && terminal.rows <= 500) {
-        client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+        if (!readOnly) client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
       }
     })
     observer.observe(container)
@@ -300,7 +302,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       sendInputRef.current = NOOP
       terminal.dispose()
     }
-  }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, sessionId, spawnRevision])
+  }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, readOnly, sessionId, spawnRevision])
 
   useEffect(() => {
     if (!active || !visible || focusRequest <= 0) return

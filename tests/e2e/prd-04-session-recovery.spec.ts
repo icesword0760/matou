@@ -266,25 +266,44 @@ test('does not resurrect an explicitly removed Task, Scene, or terminal panel', 
   }
 })
 
-test('opens a restored work scene from an ephemeral copy when durable storage is read-only', async () => {
+test('opens the real database in read-only recovery mode without spawning or mutating sessions', async () => {
   test.skip(process.platform === 'win32', 'POSIX permissions fixture')
   let fixture: MatouFixture = await launchMatou()
   let permissionsRestricted = false
+  const exportDirectory = join(fixture.rootDirectory, 'read-only-exports')
   try {
     await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
     await fixture.app.evaluate(({ app }) => app.quit())
     await fixture.app.close().catch(() => undefined)
+    const databasePath = join(fixture.dataDirectory, 'matou.sqlite')
+    const before = await readFile(databasePath)
     await chmod(fixture.dataDirectory, 0o500)
     permissionsRestricted = true
 
-    fixture = await restartMatou(fixture)
+    fixture = await restartMatou(fixture, {
+      env: { MATOU_RECOVERY_EXPORT_DIR: exportDirectory }
+    })
+    await expect(fixture.page.getByRole('status')).toContainText('数据库处于只读恢复模式')
     await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
-    const restored = visibleSurfaces(fixture).first()
-    await positivePid(restored)
-    await typeTerminalCommand(restored, "printf '%s\\n' \"$((900 + 9))\"")
-    await expect(restored.locator('.xterm-rows')).toContainText('909')
-    await expect(fixture.page.getByText(/持久化|只读|恢复失败/)).toHaveCount(0)
+    await expect(fixture.page.getByRole('button', { name: '新增工作空间' })).toBeDisabled()
+    await expect(fixture.page.getByRole('button', { name: '新建页签' })).toBeDisabled()
+    await expect(fixture.page.getByRole('button', { name: '横向新增 Shell' })).toBeDisabled()
+    await expect(visibleSurfaces(fixture).first()).not.toHaveAttribute('data-pid', /\d+/)
+
+    await fixture.page.getByRole('button', { name: '导出数据库资料' }).click()
+    await expect(fixture.page.getByText(/数据库资料已导出到/)).toBeVisible()
+    const bundles = await readdir(exportDirectory)
+    expect(bundles).toHaveLength(1)
+    expect(await readdir(join(exportDirectory, bundles[0]!))).toContain('matou.sqlite')
+    expect(await readFile(databasePath)).toEqual(before)
+
+    await chmod(fixture.dataDirectory, 0o700)
+    permissionsRestricted = false
+    fixture = await restartMatou(fixture)
+    await expect(fixture.page.getByRole('status')).toHaveCount(0)
+    await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
+    await positivePid(visibleSurfaces(fixture).first())
   } finally {
     if (permissionsRestricted) await chmod(fixture.dataDirectory, 0o700).catch(() => undefined)
     await fixture.close()

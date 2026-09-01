@@ -51,7 +51,7 @@ export function App() {
   if (dag) return <DagWindowApp />
 
   return <>
-    <HierarchyShell />
+    <HierarchyShell runtimeMode={lifecycle.snapshot.mode} />
     {e2e && <div className="e2e-diagnostics" aria-hidden="true">
       <TerminalSurface onStatusChange={setStatus}
         onSmokeMarker={setSmokeMarker} onReplayComplete={setReplayMarker} />

@@ -26,10 +26,12 @@ export function TerminalHud(props: {
   onModel(sessionId: string, strategy: HudModelStrategy): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
+  disabledReason?: string
 }) {
   const { hud } = props
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
+  const disabled = Boolean(props.disabledReason)
   const [permissionMode, setPermissionMode] = useState<HudPermissionMode>(hud?.permissionMode ?? 'default')
   const [modelStrategy, setModelStrategy] = useState<HudModelStrategy>(hud?.modelStrategy ?? 'opusplan')
   const [menu, setMenu] = useState<'permission' | 'model' | null>(null)
@@ -84,11 +86,12 @@ export function TerminalHud(props: {
   return <div className="status-info" data-hud-mode={hud.mode} data-session-id={hud.sessionId} ref={rootRef}>
     {hud.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
-        disabled={switching} title={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
+        disabled={disabled || switching}
+        title={props.disabledReason ?? `当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         aria-label={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         onClick={(event) => openMenu('permission', event)}>{permissionLabel(permissionMode)}</button>
       <button type="button" className="status-field status-model status-priority-8 is-clickable"
-        title="点击切换模型" aria-label="点击切换模型"
+        disabled={disabled} title={props.disabledReason ?? '点击切换模型'} aria-label="点击切换模型"
         onClick={(event) => openMenu('model', event)}>{modelShortName(modelStrategy, hud.model)}</button>
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
       {taskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus)}</span>}
@@ -106,14 +109,16 @@ export function TerminalHud(props: {
       {hasAgentInfo(hud) && (shortCwd || gitDisplay || elapsed) && <span className="status-divider status-priority-3" />}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
       {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={!gitClient} aria-label="打开 Git 与 Worktree" title="Git 与 Worktree"
+        disabled={disabled || !gitClient} aria-label="打开 Git 与 Worktree"
+        title={props.disabledReason ?? 'Git 与 Worktree'}
         onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </> : <>
       {hud.shell && <span className="status-field">{hud.shell}</span>}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
       {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={!gitClient} aria-label="打开 Git 与 Worktree" title="Git 与 Worktree"
+        disabled={disabled || !gitClient} aria-label="打开 Git 与 Worktree"
+        title={props.disabledReason ?? 'Git 与 Worktree'}
         onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </>}

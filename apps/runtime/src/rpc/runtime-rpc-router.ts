@@ -152,10 +152,13 @@ export class RuntimeRpcRouter {
     }
     if (method === 'events.ack') {
       const value = record(payload)
-      this.#events.acknowledge(
-        text(value.consumerId, 'consumerId'),
-        integer(value.throughSequence, 'throughSequence', 0)
-      )
+      const consumerId = text(value.consumerId, 'consumerId')
+      const throughSequence = integer(value.throughSequence, 'throughSequence', 0)
+      // A read-only renderer still needs flow-control acknowledgements, but
+      // persisting its cursor would violate the storage recovery fence.
+      if (!this.#accessPolicy.readOnly) {
+        this.#events.acknowledge(consumerId, throughSequence)
+      }
       return { acknowledged: true }
     }
     if (method === 'geometry.put') {

@@ -11,6 +11,7 @@ import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { encodeClaudeProjectPath } from '../session/claude-session-catalog'
+import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 
 let database: RuntimeDatabase
 let router: RuntimeRpcRouter
@@ -26,6 +27,20 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('accepts event acknowledgements without persisting a cursor in read-only recovery mode', async () => {
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), {
+      accessPolicy: new RuntimeAccessPolicy('read-only')
+    })
+
+    await expect(router.handle('events.ack', {
+      consumerId: 'read-only-renderer', throughSequence: 7
+    })).resolves.toEqual({ acknowledged: true })
+    expect(database.get(
+      'SELECT last_event_seq FROM consumer_cursors WHERE consumer_id = ?',
+      'read-only-renderer'
+    )).toBeUndefined()
+  })
+
   it('lists workspace Claude history and loads the selected permission into the same Session', async () => {
     const workspaceRoot = join(testRoot, 'load-workspace')
     const projectsRoot = join(testRoot, 'claude-projects')

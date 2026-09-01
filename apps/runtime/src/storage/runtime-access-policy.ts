@@ -35,7 +35,8 @@ const READ_ONLY_RPC_METHODS = new Set<RpcMethod>([
   'claude-sessions.list',
   'claude-sessions.detail',
   'geometry.list',
-  'events.replay'
+  'events.replay',
+  'events.ack'
 ])
 
 const READ_ONLY_TERMINAL_MESSAGES = new Set<TerminalMessageType>([
@@ -56,6 +57,10 @@ export class RuntimeAccessPolicy {
 
   get capabilities(): RuntimeCapability[] {
     return [...(this.mode === 'normal' ? NORMAL_CAPABILITIES : READ_ONLY_CAPABILITIES)]
+  }
+
+  get readOnly(): boolean {
+    return this.mode === 'read-only'
   }
 
   assertRpcAllowed(method: RpcMethod): void {

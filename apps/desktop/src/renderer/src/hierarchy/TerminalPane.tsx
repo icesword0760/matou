@@ -21,6 +21,7 @@ export function TerminalPane(props: {
   workspaceId?: string
   sceneId?: string
   pathValid?: boolean
+  readOnly?: boolean
   themeKey?: TerminalThemeKey
   fontSize?: number
   onFontSizeChange?(fontSize: number): void
@@ -58,7 +59,7 @@ export function TerminalPane(props: {
 }) {
   const {
     session, active, visible = true, workspaceSessionCount, taskName,
-    pathValid = true, workspaceId, sceneId, resumable = false, forkReady,
+    pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError, cwd, git,
     sharedWorkingDirectory = false,
     spawnRevision = 0, onRetryRestore, onRetryWork, onRetryFork, onRemoveFailedFork,
@@ -100,9 +101,10 @@ export function TerminalPane(props: {
     void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
   }, [onDelete, session.id])
   const requestRemove = useCallback(() => {
+    if (readOnly) return
     if (flow.action === 'silent') remove(false)
     else setConfirmationOpen(true)
-  }, [flow.action, remove])
+  }, [flow.action, readOnly, remove])
   useEffect(() => {
     if (closeRequest > 0) requestRemove()
   }, [closeRequest, requestRemove])
@@ -173,12 +175,12 @@ export function TerminalPane(props: {
       notificationStore.dismissSessionIndicator(session.id)
       if (!active) onActivate(session.id)
     }}>
-    <header className="terminal-pane-header split-pane-header" draggable={canDetach}
+    <header className="terminal-pane-header split-pane-header" draggable={!readOnly && canDetach}
       onDragEnd={(event) => {
         const outside = event.screenX <= window.screenX || event.screenY <= window.screenY ||
           event.screenX >= window.screenX + window.outerWidth ||
           event.screenY >= window.screenY + window.outerHeight
-        if (outside && canDetach) void onDetach?.(session.id)
+        if (outside && !readOnly && canDetach) void onDetach?.(session.id)
       }}>
       <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
         {git && <span className="pane-environment-badge" title={`Git 分支 ${git.branch}${git.dirty ? '，有未提交修改' : ''}`}>
@@ -193,15 +195,17 @@ export function TerminalPane(props: {
         {onOpenChildren && <ChildSessionBadge children={childNodes}
           onOpen={() => void onOpenChildren(session.id)} />}
         {onLoadSession && <button className="pane-fork pane-load-session" type="button" draggable={false}
-          aria-label={`载入 Claude Code 会话到“${session.title}”`} title="载入 Claude Code 会话"
+          aria-label={`载入 Claude Code 会话到“${session.title}”`} disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : '载入 Claude Code 会话'}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
             void onLoadSession(session.id)
           }}><LoadSessionIcon /></button>}
         {showFork && <button className="pane-fork" type="button" draggable={false}
-          aria-label={`从“${session.title}”创建子分支`} aria-disabled={!canFork}
-          title={canFork ? '创建子分支' : '完成首轮对话后可创建分支'}
+          aria-label={`从“${session.title}”创建子分支`} aria-disabled={readOnly || !canFork}
+          disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : canFork ? '创建子分支' : '完成首轮对话后可创建分支'}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
@@ -212,14 +216,16 @@ export function TerminalPane(props: {
             void onFork?.(session.id)
           }}><BranchChildIcon /></button>}
         {canForkSibling && <button className="pane-fork pane-fork-sibling" type="button" draggable={false}
-          aria-label={`从共同父会话创建“${session.title}”的兄弟分支`} title="从共同父会话 Fork 兄弟分支"
+          aria-label={`从共同父会话创建“${session.title}”的兄弟分支`} disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : '从共同父会话 Fork 兄弟分支'}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
             void onForkSibling?.(session.id)
           }}><BranchSiblingIcon /></button>}
         {onRemoveBranch && <button className="pane-fork pane-remove" type="button" draggable={false}
-          aria-label={`移出节点：${session.title}`} title="移出节点"
+          aria-label={`移出节点：${session.title}`} disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : '移出节点'}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
@@ -233,11 +239,13 @@ export function TerminalPane(props: {
         {forkFailure.reason && <span className="fork-failure-reason">{forkFailure.reason}</span>}
       </div>
       <div className="fork-failure-actions">
-        {onRetryFork && <button type="button" aria-label="重试创建分支" onClick={(event) => {
+        {onRetryFork && <button type="button" aria-label="重试创建分支" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={(event) => {
           event.stopPropagation()
           void onRetryFork(session.id)
         }}>重试</button>}
-        {onRemoveFailedFork && <button type="button" aria-label="移除失败分支" onClick={(event) => {
+        {onRemoveFailedFork && <button type="button" aria-label="移除失败分支" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={(event) => {
           event.stopPropagation()
           void onRemoveFailedFork(session.id)
         }}>移除</button>}
@@ -250,7 +258,8 @@ export function TerminalPane(props: {
           ? '当前已切换到 Shell，可继续使用终端'
           : restoreError}</span>
       </div>
-      {onRetryRestore && !restoreIdentityExpired && <button type="button" disabled={restoreRetryPending} onClick={(event) => {
+      {onRetryRestore && !restoreIdentityExpired && <button type="button"
+        disabled={readOnly || restoreRetryPending} title={readOnly ? READ_ONLY_REASON : undefined} onClick={(event) => {
         event.stopPropagation()
         if (restoreRetryPending) return
         setRestoreRetryPending(true)
@@ -265,7 +274,8 @@ export function TerminalPane(props: {
         <div><strong>Claude Code 任务失败</strong>
           <span className="provider-work-failure-reason">{providerWorkFailure}</span>
         </div>
-        {onRetryWork && <button type="button" aria-label="重试本轮任务" onClick={(event) => {
+        {onRetryWork && <button type="button" aria-label="重试本轮任务" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={(event) => {
           event.stopPropagation()
           void onRetryWork(session.id)
         }}>重试</button>}
@@ -276,13 +286,13 @@ export function TerminalPane(props: {
           <span className="session-start-failure-reason">{runtimeError || '终端进程未能启动'}</span>
         </div>
         <div className="session-start-failure-actions">
-          <button type="button" onClick={(event) => {
+          <button type="button" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined} onClick={(event) => {
             event.stopPropagation()
             setRuntimeError('')
             setRuntimeStatus('starting-session')
             setStartupRetry((value) => value + 1)
           }}>重试启动</button>
-          <button type="button" onClick={(event) => {
+          <button type="button" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined} onClick={(event) => {
             event.stopPropagation()
             void Promise.resolve(onDelete(session.id, true)).catch(NOOP)
           }}>移除失败会话</button>
@@ -292,7 +302,8 @@ export function TerminalPane(props: {
       workStatus={workStatus} latestLines={latestLines} />}
     {!isTeamMember && forkState !== 'failed' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
-      profile={profile} visible={visible} active={active} inputDisabled={!pathValid}
+      profile={profile} visible={visible} active={active} inputDisabled={readOnly || !pathValid}
+      readOnly={readOnly}
       themeKey={themeKey} fontSize={fontSize}
       {...(onFontSizeChange ? { onFontSizeChange } : {})}
       {...(searchRequest ? { searchRequest } : {})}
@@ -335,19 +346,23 @@ export function TerminalPane(props: {
         onContextMenu={(event) => { event.preventDefault(); setContextMenu(null) }} />
       <div ref={contextMenuRef} className="detach-context-menu" role="menu" style={{ left: contextMenu.x, top: contextMenu.y }}
         onClick={(event) => event.stopPropagation()}>
-        {canFork && <button className="detach-menu-item" role="menuitem" onClick={() => {
+        {canFork && <button className="detach-menu-item" role="menuitem" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
           setContextMenu(null)
           void onFork?.(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
-        {canForkSibling && <button className="detach-menu-item" role="menuitem" onClick={() => {
+        {canForkSibling && <button className="detach-menu-item" role="menuitem" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
           setContextMenu(null)
           void onForkSibling?.(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 兄弟分支</button>}
-        {canDetach && <button className="detach-menu-item" role="menuitem" onClick={() => {
+        {canDetach && <button className="detach-menu-item" role="menuitem" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
           setContextMenu(null)
           void onDetach(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>↗ 独立窗口</button>}
-        {onRemoveBranch && <button className="detach-menu-item is-danger" role="menuitem" onClick={() => {
+        {onRemoveBranch && <button className="detach-menu-item is-danger" role="menuitem" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
           setContextMenu(null)
           setRemovalOpen(true)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>移除节点…</button>}
@@ -364,6 +379,8 @@ function LoadSessionIcon() {
 }
 
 function NOOP(): void {}
+
+const READ_ONLY_REASON = '数据库处于只读恢复模式'
 
 export function removalBody(
   title: string,

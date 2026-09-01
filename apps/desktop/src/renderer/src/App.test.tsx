@@ -6,7 +6,8 @@ import type { RuntimeLifecyclePresentation } from '../../shared/desktop-api'
 import { App } from './App'
 
 vi.mock('./hierarchy/HierarchyShell', () => ({
-  HierarchyShell: () => <main data-testid="workspace">Workspace</main>
+  HierarchyShell: ({ runtimeMode }: { runtimeMode?: string }) =>
+    <main data-testid="workspace" data-runtime-mode={runtimeMode}>Workspace</main>
 }))
 vi.mock('./hierarchy/DetachedTerminalApp', () => ({ DetachedTerminalApp: () => <div>Detached</div> }))
 vi.mock('./dag/DagWindowApp', () => ({ DagWindowApp: () => <div>Dag</div> }))
@@ -33,6 +34,15 @@ describe('App database lifecycle gate', () => {
     render(<App />)
     expect(screen.queryByTestId('workspace')).toBeNull()
     expect(await screen.findByTestId('workspace')).toBeTruthy()
+  })
+
+  it('passes the read-only lifecycle mode into the ordinary browsing workspace', async () => {
+    const state = readyState()
+    state.snapshot.mode = 'read-only'
+    installApi(state)
+    render(<App />)
+
+    expect((await screen.findByTestId('workspace')).getAttribute('data-runtime-mode')).toBe('read-only')
   })
 
   it('keeps the recovery page visible while a restore reopens the database', async () => {

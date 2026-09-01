@@ -11,7 +11,8 @@ const READ_ONLY_RPC_METHODS = [
   'claude-sessions.list',
   'claude-sessions.detail',
   'geometry.list',
-  'events.replay'
+  'events.replay',
+  'events.ack'
 ] satisfies RpcMethod[]
 
 describe('RuntimeAccessPolicy', () => {
