@@ -58,4 +58,39 @@ describe('PRD 02 HUD commands', () => {
       })]
     ])
   })
+
+  it('keeps environment operations authoritative and activates an already-owned Worktree Session', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ sessionId: 'session-1', kind: 'local', path: '/tmp/local' })
+      .mockResolvedValueOnce({ kind: 'switch-session', sessionId: 'owner-session' })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        kind: 'environment', sessionId: 'session-1', activeTarget: 'local',
+        state: 'ready', path: '/tmp/local', restartRequired: true
+      })
+    const afterMutation = vi.fn()
+    const commands = createHierarchyCommands(
+      { request } as never, 'window-1', afterMutation
+    )
+
+    await expect(commands.openSessionEnvironment('session-1')).resolves.toEqual({
+      sessionId: 'session-1', kind: 'local', path: '/tmp/local'
+    })
+    await expect(commands.locateSessionEnvironment('session-1', '/tmp/owned')).resolves.toEqual({
+      kind: 'switch-session', sessionId: 'owner-session'
+    })
+    await commands.handoffSessionEnvironment('session-1', 'local')
+
+    expect(request.mock.calls.map(([method, payload]) => [method, payload.input ?? payload])).toEqual([
+      ['session.environment-open', { sessionId: 'session-1' }],
+      ['session.environment-locate', expect.objectContaining({
+        sessionId: 'session-1', path: '/tmp/owned'
+      })],
+      ['hierarchy.activate-session', expect.objectContaining({ sessionId: 'owner-session' })],
+      ['session.environment-handoff', expect.objectContaining({
+        sessionId: 'session-1', target: 'local'
+      })]
+    ])
+    expect(afterMutation).toHaveBeenCalledTimes(3)
+  })
 })

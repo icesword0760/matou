@@ -2,7 +2,9 @@ import type { RuntimeClient } from '../runtime/RuntimeClient'
 import type { HierarchyCommands } from './hierarchy-types'
 import type { HierarchyProjection } from './hierarchy-types'
 import type {
-  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult,
+  SessionEnvironmentActionResult, SessionEnvironmentOpenResult,
+  SessionEnvironmentTarget
 } from '@matou/contracts'
 
 export function createHierarchyCommands(
@@ -18,6 +20,16 @@ export function createHierarchyCommands(
       input: { ...input, windowId, now: Date.now() }
     })
     await afterMutation?.()
+    return result
+  }
+  const environmentCommand = async (
+    type: 'session.environment-restore' | 'session.environment-locate' | 'session.environment-handoff',
+    input: Record<string, unknown>
+  ): Promise<SessionEnvironmentActionResult> => {
+    const result = await command(type, input) as SessionEnvironmentActionResult
+    if (result.kind === 'switch-session') {
+      await command('hierarchy.activate-session', { sessionId: result.sessionId })
+    }
     return result
   }
   return {
@@ -119,6 +131,18 @@ export function createHierarchyCommands(
       sceneId, ownerKey, layoutRevision, geometry, now: Date.now()
     }),
     activateSession: (sessionId) => command('hierarchy.activate-session', { sessionId }),
+    openSessionEnvironment: (sessionId) => client.request<SessionEnvironmentOpenResult>(
+      'session.environment-open', { sessionId }
+    ),
+    restoreSessionEnvironment: (sessionId) => environmentCommand(
+      'session.environment-restore', { sessionId }
+    ),
+    locateSessionEnvironment: (sessionId, path) => environmentCommand(
+      'session.environment-locate', { sessionId, path }
+    ),
+    handoffSessionEnvironment: (sessionId, target: SessionEnvironmentTarget) => environmentCommand(
+      'session.environment-handoff', { sessionId, target }
+    ),
     deleteSession: (sessionId, confirmed = false, preserveSceneOnLastSession = false) => command('hierarchy.delete-session', {
       sessionId, ...(confirmed ? { confirmedIntent: `delete-session:${sessionId}` } : {}),
       ...(preserveSceneOnLastSession ? { preserveSceneOnLastSession: true } : {})
@@ -194,6 +218,10 @@ export function createReadOnlyHierarchyCommands(
     activateTask,
     activateScene,
     activateSession,
+    openSessionEnvironment: base.openSessionEnvironment,
+    restoreSessionEnvironment: blocked,
+    locateSessionEnvironment: blocked,
+    handoffSessionEnvironment: blocked,
     setFocusedSession,
     createWorkspace: blocked,
     renameWorkspace: blocked,

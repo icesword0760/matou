@@ -103,6 +103,29 @@ describe('SessionEnvironmentRepository', () => {
     })
   })
 
+  it('records an in-flight transition without switching the active target early', () => {
+    environments.bindOwnedWorktree({
+      sessionId: 'first', worktreeId: 'worktree', activate: true, now: 10
+    })
+
+    const transition = environments.beginTransition({
+      sessionId: 'first', target: 'local', state: 'handoff', now: 11
+    })
+
+    expect(transition).toMatchObject({
+      activeTarget: 'worktree',
+      state: 'handoff',
+      environment: {
+        kind: 'worktree',
+        path: '/tmp/worktree',
+        state: 'handoff'
+      }
+    })
+    expect(database.get(
+      "SELECT execution_context_id, cwd FROM sessions WHERE id = 'first'"
+    )).toEqual({ execution_context_id: 'worktree-context', cwd: '/tmp/worktree' })
+  })
+
   it('enforces exclusive Worktree ownership without stealing another Session binding', () => {
     environments.bindOwnedWorktree({
       sessionId: 'first', worktreeId: 'worktree', activate: true, now: 10
@@ -114,6 +137,60 @@ describe('SessionEnvironmentRepository', () => {
     expect(environments.get('second')).toMatchObject({
       activeTarget: 'local', state: 'ready'
     })
+  })
+
+  it('preserves the complete owned Worktree identity needed for restore', () => {
+    environments.bindOwnedWorktree({
+      sessionId: 'first', worktreeId: 'worktree', activate: true, now: 10
+    })
+
+    expect(environments.getOwnedWorktreeIdentity('first')).toEqual({
+      sessionId: 'first',
+      worktreeId: 'worktree',
+      executionContextId: 'worktree-context',
+      workspaceId: 'workspace',
+      repositoryRoot: '/tmp/workspace',
+      path: '/tmp/worktree',
+      branch: 'codex/task-6'
+    })
+  })
+
+  it('atomically records a relocated owned Worktree and completes recovery', () => {
+    environments.bindOwnedWorktree({
+      sessionId: 'first', worktreeId: 'worktree', activate: true, now: 10
+    })
+    environments.markMissing('first', 'path-missing', 11)
+    environments.beginTransition({
+      sessionId: 'first', target: 'worktree', state: 'recovering', now: 12
+    })
+
+    const recovered = environments.completeRelocation({
+      sessionId: 'first', path: '/tmp/moved-worktree', now: 13
+    })
+
+    expect(recovered).toMatchObject({
+      activeTarget: 'worktree',
+      state: 'ready',
+      environment: { kind: 'worktree', state: 'ready', path: '/tmp/moved-worktree' }
+    })
+    expect(database.get(
+      "SELECT worktree_path FROM worktrees WHERE id = 'worktree'"
+    )).toEqual({ worktree_path: '/tmp/moved-worktree' })
+    expect(database.get(
+      "SELECT cwd FROM execution_contexts WHERE id = 'worktree-context'"
+    )).toEqual({ cwd: '/tmp/moved-worktree' })
+    expect(database.get(
+      "SELECT execution_context_id, cwd FROM sessions WHERE id = 'first'"
+    )).toEqual({ execution_context_id: 'worktree-context', cwd: '/tmp/moved-worktree' })
+  })
+
+  it('finds the Session that owns a Worktree at a selected path', () => {
+    environments.bindOwnedWorktree({
+      sessionId: 'second', worktreeId: 'other-worktree', activate: true, now: 10
+    })
+
+    expect(environments.findOwningSessionByPath('/tmp/other')).toBe('second')
+    expect(environments.findOwningSessionByPath('/tmp/unknown')).toBeUndefined()
   })
 
   it('changes environment health without changing Session lifecycle or relationships', () => {
@@ -159,5 +236,28 @@ describe('SessionEnvironmentRepository', () => {
     expect(environments.get('first')).toMatchObject({
       state: 'failed', environment: { state: 'failed', error: 'identity-mismatch' }
     })
+  })
+
+  it('persists an environment transition with its previous target and clears it atomically', () => {
+    environments.bindOwnedWorktree({
+      sessionId: 'first', worktreeId: 'worktree', activate: true, now: 10
+    })
+    environments.beginTransition({
+      sessionId: 'first', target: 'local', state: 'handoff', now: 11,
+      operation: { operationId: 'handoff-1', kind: 'handoff' }
+    })
+
+    expect(environments.getTransition('first')).toEqual({
+      sessionId: 'first', operationId: 'handoff-1', kind: 'handoff',
+      previousActiveTarget: 'worktree', previousState: 'ready', target: 'local',
+      phase: 'accepted', createdAt: 11, updatedAt: 11
+    })
+    expect(environments.get('first')).toMatchObject({
+      activeTarget: 'worktree', state: 'handoff'
+    })
+
+    environments.completeTransition({ sessionId: 'first', target: 'local', now: 12 })
+    expect(environments.getTransition('first')).toBeUndefined()
+    expect(environments.get('first')).toMatchObject({ activeTarget: 'local', state: 'ready' })
   })
 })

@@ -51,7 +51,7 @@ describe('DagWindowApp', () => {
   it('shows Git branch, dirty state and shared-worktree impact on a node card', () => {
     const data = graph()
     data.nodes[1] = {
-      ...data.nodes[1]!, git: { branch: 'feature/dag', dirty: true },
+      ...data.nodes[1]!, git: { state: 'ready', branch: 'feature/dag', dirty: true },
       sharedWorkingDirectory: true
     }
     render(<DagWindowApp fixtureGraph={data} />)

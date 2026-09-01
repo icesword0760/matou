@@ -181,14 +181,6 @@ export function GitControlMenu(props: {
               </div>
               <div className="git-worktree-actions">
                 <button onClick={() => void window.matouDesktop?.revealDirectory(worktree.path)}>Finder</button>
-                {props.context && !worktree.current && <button disabled={Boolean(busy)} onClick={() => void run('正在进入 Worktree…', async () => {
-                  await request('git.worktree-open', {
-                    cwd: props.cwd, sessionId: props.sessionId,
-                    windowId: props.context!.windowId, sceneId: props.context!.sceneId,
-                    repositoryRoot: status.repositoryRoot, path: worktree.path, branch: worktree.branch
-                  })
-                  props.onClose()
-                })}>进入</button>}
                 {worktree.managed && !worktree.current && <button className="is-danger" disabled={worktree.sessionCount > 0 || Boolean(busy)}
                   title={worktree.sessionCount > 0 ? '先移出关联会话' : undefined}
                   onClick={() => void run('正在移除 Worktree…', async () => {

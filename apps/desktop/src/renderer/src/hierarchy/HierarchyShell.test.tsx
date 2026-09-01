@@ -637,6 +637,142 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByText(/恢复|加载/)).toBeNull()
   })
 
+  it('optimistically covers and locks the whole card while a ready Worktree handoff is pending', async () => {
+    const data = environmentFixture('ready')
+    data.sessionHuds = [{
+      sessionId: 'session-a1', mode: 'agent', cwd: '/tmp/stale-worktree',
+      permissionMode: 'default', modelStrategy: 'opusplan', startedAt: 1
+    }]
+    const pending = deferred<{
+      kind: 'environment'
+      sessionId: string
+      activeTarget: 'local'
+      state: 'ready'
+      path: string
+      restartRequired: boolean
+    }>()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'session.environment-handoff') return pending.promise
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '打开运行环境：Worktree' }))
+    await user.click(screen.getByRole('button', { name: '交接到 Local' }))
+
+    expect(await screen.findByRole('status', { name: '运行环境正在交接运行环境' })).toBeTruthy()
+    expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
+    expect(screen.getByRole('button', { name: /当前权限模式/ })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '点击切换模型' })).toHaveProperty('disabled', true)
+
+    fireEvent.keyDown(document, { key: 'd', metaKey: true })
+    fireEvent.keyDown(document, { key: 'w', metaKey: true })
+    expect(request.mock.calls.map(([method]) => method)).not.toContain('hierarchy.create-shell-sibling')
+    expect(request.mock.calls.map(([method]) => method)).not.toContain('hierarchy.delete-session')
+
+    await act(async () => pending.resolve({
+      kind: 'environment', sessionId: 'session-a1', activeTarget: 'local',
+      state: 'ready', path: '/tmp/a', restartRequired: false
+    }))
+  })
+
+  it('optimistically changes a missing Worktree card from recovery choices to a recovering lock', async () => {
+    const data = environmentFixture('missing')
+    const pending = deferred<{
+      kind: 'environment'
+      sessionId: string
+      activeTarget: 'worktree'
+      state: 'ready'
+      path: string
+      restartRequired: boolean
+    }>()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'session.environment-restore') return pending.promise
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '恢复 Worktree' }))
+
+    expect(await screen.findByRole('status', { name: '运行环境正在恢复运行环境' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '定位目录' })).toBeNull()
+    expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
+
+    await act(async () => pending.resolve({
+      kind: 'environment', sessionId: 'session-a1', activeTarget: 'worktree',
+      state: 'ready', path: '/tmp/worktree', restartRequired: true
+    }))
+  })
+
+  it('navigates the visible canvas to the owner Session when Locate selects another owned Worktree', async () => {
+    let current = environmentFixture('missing')
+    current.sessions.push({
+      id: 'owner-session', taskId: 'task-a1', title: '已有 Worktree 会话', executionContextId: 'owner-context'
+    })
+    current.sceneSnapshots![0]!.nodes.push({
+      id: 'owner-node', sceneId: 'scene-a1', kind: 'mount', ordinal: 1
+    })
+    current.sceneSnapshots![0]!.mounts.push({
+      id: 'owner-mount', sceneId: 'scene-a1', sceneNodeId: 'owner-node', sessionId: 'owner-session'
+    })
+    current.sessionGraphs!['scene-a1']!.nodes.push({
+      ...graphNode('owner-session', '已有 Worktree 会话'),
+      environment: {
+        kind: 'worktree', state: 'ready', path: '/tmp/owned-by-owner',
+        localExecutionContextId: 'owner-local', worktreeId: 'owner-worktree',
+        worktreeExecutionContextId: 'owner-context'
+      },
+      hasOwnedWorktree: true
+    })
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      selectSessionEnvironmentDirectory: vi.fn(async () => '/tmp/owned-by-owner'),
+      onDetachedWindowClosed: vi.fn(() => () => {})
+    } })
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(current)
+      if (method === 'session.environment-locate') {
+        return { kind: 'switch-session', sessionId: 'owner-session' }
+      }
+      if (method === 'hierarchy.activate-session') {
+        current = structuredClone(current)
+        current.navigation.sessionByScene['scene-a1'] = 'owner-session'
+        current.sessionGraphs!['scene-a1']!.focusedSessionId = 'owner-session'
+        return {}
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '定位目录' }))
+
+    await vi.waitFor(() => expect(
+      screen.getByRole('article', { name: '会话：已有 Worktree 会话' }).getAttribute('aria-current')
+    ).toBe('true'))
+    expect(request.mock.calls.map(([method]) => method)).toContain('hierarchy.activate-session')
+    expect(screen.getByRole('button', { name: '打开运行环境：Worktree' })).toBeTruthy()
+  })
+
   it('loads the existing projection when bootstrap is rejected specifically as storage read-only', async () => {
     const data = fixture()
     const request = vi.fn(async (method: string) => {
@@ -689,7 +825,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '横向新增 Shell' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '从“终端 A1”创建子分支' })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '打开 Git 与 Worktree' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '打开 Git' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '新增工作空间' }).getAttribute('title'))
       .toBe('数据库处于只读恢复模式')
 
@@ -1028,4 +1164,43 @@ function graphNode(sessionId: string, title: string) {
     stoppedChildCount: 0, childModeCounts: { shell: sessionId === 'session-a1' ? 1 : 0, claudeCode: 0 },
     latestLines: [], lastUserInteractionSeq: 0
   }
+}
+
+function environmentFixture(state: 'ready' | 'missing'): HierarchyProjection {
+  const data = fixture()
+  const environment = state === 'ready'
+    ? {
+        kind: 'worktree' as const, state: 'ready' as const, path: '/tmp/worktree',
+        localExecutionContextId: 'context-a', worktreeId: 'worktree-a',
+        worktreeExecutionContextId: 'worktree-context-a'
+      }
+    : {
+        kind: 'worktree' as const, state: 'missing' as const, path: '/tmp/worktree',
+        error: 'path-missing', localExecutionContextId: 'context-a', worktreeId: 'worktree-a',
+        worktreeExecutionContextId: 'worktree-context-a'
+      }
+  data.sessionGraphs = {
+    'scene-a1': {
+      sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+      nodes: [{
+        ...graphNode('session-a1', '终端 A1'),
+        environment,
+        hasOwnedWorktree: true,
+        git: state === 'ready'
+          ? { state: 'ready' as const, branch: 'feature/environment', dirty: false }
+          : { state: 'unavailable' as const, dirty: false }
+      }]
+    }
+  }
+  return data
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
 }

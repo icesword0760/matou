@@ -1122,5 +1122,31 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         updated_at
       FROM worktrees;
     `
+  },
+  {
+    version: 24,
+    name: 'session-environment-transitions',
+    sql: `
+      CREATE TABLE session_environment_transitions (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        operation_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('restore', 'locate', 'handoff')),
+        previous_active_target TEXT NOT NULL CHECK (
+          previous_active_target IN ('local', 'worktree')
+        ),
+        previous_state TEXT NOT NULL CHECK (
+          previous_state IN ('ready', 'missing', 'failed')
+        ),
+        target TEXT NOT NULL CHECK (target IN ('local', 'worktree')),
+        candidate_path TEXT,
+        phase TEXT NOT NULL CHECK (
+          phase IN ('accepted', 'external-ready', 'failed')
+        ),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (kind = 'locate' OR candidate_path IS NULL)
+      ) STRICT;
+    `
   }
 ]

@@ -334,6 +334,8 @@ interface SessionGraphNodeBase {
   title: string
   cwd: string
   environment?: SessionEnvironment
+  /** The Session keeps ownership of its managed Worktree while Local is active. */
+  hasOwnedWorktree?: boolean
   git?: SessionGitState
   sharedWorkingDirectory?: boolean
   worktree?: {

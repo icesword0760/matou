@@ -65,6 +65,28 @@ describe('WorktreeHealthService', () => {
     })).resolves.toEqual({ kind: 'missing', reason: 'not-listed-by-git' })
   })
 
+  it('repairs Git metadata for a moved worktree only after its repository and branch match', async () => {
+    const movedPath = join(root, 'moved-feature')
+    await rename(worktreePath, movedPath)
+
+    await expect(service.repairMoved({
+      repositoryRoot,
+      path: movedPath,
+      expectedBranch: 'feature/health'
+    })).resolves.toEqual({
+      kind: 'ready',
+      canonicalPath: await realpath(movedPath),
+      branch: 'feature/health',
+      dirty: false
+    })
+
+    const listed = (await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'list', '--porcelain'
+    ])).stdout
+    expect(listed).toContain(`worktree ${await realpath(movedPath)}`)
+    expect(listed).not.toContain(`worktree ${worktreePath}\n`)
+  })
+
   it('reports a path belonging to another repository as wrong-repository', async () => {
     const otherRepository = join(root, 'other-repository')
     await initializeRepository(otherRepository)

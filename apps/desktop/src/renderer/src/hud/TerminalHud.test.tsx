@@ -7,6 +7,7 @@ import type { RpcMethod } from '@matou/contracts'
 import { TerminalHud } from './TerminalHud'
 import type { GitRequestClient } from './GitControlMenu'
 import type { SessionHudView } from '../hierarchy/hierarchy-types'
+import type { SessionEnvironmentActions } from './EnvironmentControlMenu'
 
 afterEach(cleanup)
 
@@ -54,7 +55,7 @@ describe('PRD 02 bottom HUD', () => {
       gitBranch: 'main', gitDirty: false, startedAt: Date.now()
     }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: '打开 Git 与 Worktree' }))
+    await user.click(screen.getByRole('button', { name: '打开 Git' }))
     expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
     await user.click(await screen.findByRole('button', { name: /feature\/menu/ }))
     expect(request).toHaveBeenCalledWith(
@@ -210,14 +211,18 @@ describe('PRD 02 bottom HUD', () => {
 
   it('closes an open repository control immediately when read-only recovery starts', async () => {
     const user = userEvent.setup()
-    const request = vi.fn(async () => ({
+    const request = vi.fn(async (
+      _method: RpcMethod, _payload: unknown, _options?: { timeoutMs?: number }
+    ) => ({
       repositoryRoot: '/tmp/project', cwd: '/tmp/project', currentBranch: 'main',
       defaultBranch: 'main', dirty: false, stagedCount: 0, unstagedCount: 0,
       untrackedCount: 0, additions: 0, deletions: 0, ahead: 0, behind: 0,
       hasRemote: false, canPush: false, branches: [], worktrees: []
     }))
     const runtimeClient: GitRequestClient = {
-      request: async function<T>(): Promise<T> { return await request() as T }
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
     }
     const hud: SessionHudView = {
       sessionId: 'session-1', mode: 'shell', cwd: '/tmp/project', gitBranch: 'main', startedAt: Date.now()
@@ -225,7 +230,7 @@ describe('PRD 02 bottom HUD', () => {
     const view = render(<TerminalHud hud={hud} runtimeClient={runtimeClient}
       onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: '打开 Git 与 Worktree' }))
+    await user.click(screen.getByRole('button', { name: '打开 Git' }))
     expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
     request.mockClear()
 
@@ -234,8 +239,101 @@ describe('PRD 02 bottom HUD', () => {
       onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
     expect(screen.queryByRole('dialog', { name: 'Git 与 Worktree' })).toBeNull()
-    expect(screen.getByRole('button', { name: '打开 Git 与 Worktree' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: '打开 Git' }).hasAttribute('disabled')).toBe(true)
     expect(request).not.toHaveBeenCalled()
+  })
+
+  it('keeps Environment and detached Git as separate right-side controls without a live HUD', async () => {
+    const actions = environmentActions()
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      environment={{
+        kind: 'local', state: 'ready', path: '/repo', localExecutionContextId: 'local-context'
+      }}
+      git={{ state: 'ready', detachedHead: '1234567890abcdef', dirty: true }}
+      environmentActions={actions} runtimeClient={{ request: vi.fn() }}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('HEAD 1234567*')
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' }).textContent).toBe('Local')
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开运行环境：Local' }))
+    expect(screen.getByRole('dialog', { name: '运行环境' })).toBeTruthy()
+  })
+
+  it('shows unavailable Git independently instead of hiding it behind an environment error', () => {
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      environment={{
+        kind: 'worktree', state: 'missing', path: '/missing', error: 'path-missing',
+        localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+        worktreeExecutionContextId: 'worktree-context'
+      }}
+      git={{ state: 'unavailable', dirty: false }}
+      environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '打开 Git' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('Git 不可用')
+    expect(screen.getByRole('button', { name: '打开运行环境：待恢复' }).textContent).toBe('待恢复')
+  })
+
+  it('opens Git from the authoritative Environment path instead of a stale HUD cwd', async () => {
+    const request = vi.fn(async (
+      _method: RpcMethod, _payload: unknown, _options?: { timeoutMs?: number }
+    ) => ({
+      repositoryRoot: '/authoritative/worktree', cwd: '/authoritative/worktree',
+      currentBranch: 'main', defaultBranch: 'main', dirty: false,
+      stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+      additions: 0, deletions: 0, ahead: 0, behind: 0,
+      hasRemote: false, canPush: false, branches: [], worktrees: []
+    }))
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
+    }
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/stale/local',
+      gitBranch: 'main', startedAt: Date.now()
+    }} environment={{
+      kind: 'worktree', state: 'ready', path: '/authoritative/worktree',
+      localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+      worktreeExecutionContextId: 'worktree-context'
+    }} git={{ state: 'ready', branch: 'main', dirty: false }}
+      environmentActions={environmentActions()} runtimeClient={runtimeClient}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开 Git' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    expect(request).toHaveBeenCalledWith(
+      'git.status', expect.objectContaining({ input: expect.objectContaining({
+        cwd: '/authoritative/worktree'
+      }) }), { timeoutMs: 120_000 }
+    )
+    expect(request.mock.calls.some(([, payload]) =>
+      (payload as { input?: { cwd?: string } }).input?.cwd === '/stale/local'
+    )).toBe(false)
+  })
+
+  it('still renders an explicit unavailable Git projection when Environment has no Git state', () => {
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      environment={{
+        kind: 'local', state: 'ready', path: '/repo', localExecutionContextId: 'local-context'
+      }} environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    const git = screen.getByRole('button', { name: '打开 Git' })
+    expect(git.textContent).toBe('Git 不可用')
+    expect(git).toHaveProperty('disabled', true)
+  })
+
+  it('keeps Git outside narrow-width priority hiding', () => {
+    const { container } = render(<div style={{ width: 240 }}><TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/repo', gitBranch: 'main',
+      gitDirty: false, startedAt: Date.now()
+    }} onPermissionMode={vi.fn()} onModel={vi.fn()} /></div>)
+
+    const git = screen.getByRole('button', { name: '打开 Git' })
+    expect(git.className).not.toMatch(/status-priority-/)
+    expect(container.querySelector('.status-git')).toBe(git)
   })
 })
 
@@ -244,5 +342,23 @@ function agent(patch: Partial<SessionHudView> = {}): SessionHudView {
     sessionId: 'session-1', mode: 'agent', permissionMode: 'default',
     modelStrategy: 'opusplan', model: 'Claude Opus 4.6', startedAt: Date.now(),
     ...patch
+  }
+}
+
+function environmentActions(): SessionEnvironmentActions {
+  return {
+    open: vi.fn(async () => ({ sessionId: 'session-1', kind: 'local' as const, path: '/repo' })),
+    restore: vi.fn(async () => ({
+      kind: 'environment' as const, sessionId: 'session-1', activeTarget: 'worktree' as const,
+      state: 'ready' as const, path: '/worktree', restartRequired: true
+    })),
+    locate: vi.fn(async () => ({
+      kind: 'environment' as const, sessionId: 'session-1', activeTarget: 'worktree' as const,
+      state: 'ready' as const, path: '/worktree', restartRequired: true
+    })),
+    handoff: vi.fn(async (_sessionId, target) => ({
+      kind: 'environment' as const, sessionId: 'session-1', activeTarget: target,
+      state: 'ready' as const, path: target === 'local' ? '/repo' : '/worktree', restartRequired: true
+    }))
   }
 }

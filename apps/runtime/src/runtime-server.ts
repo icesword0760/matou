@@ -9,6 +9,7 @@ import {
   PROTOCOL_VERSION,
   parseRendererMessage,
   type RendererMessage,
+  type RpcMethod,
   type RuntimeMessage
 } from '@matou/contracts'
 
@@ -34,6 +35,7 @@ import type {
 } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
 import { SessionEnvironmentRepository } from './session/session-environment-repository'
+import { SessionEnvironmentService } from './session/session-environment-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
 import { StorageReadOnlyError } from './storage/database'
@@ -54,6 +56,7 @@ import {
   managedWorktreeIdentityExpectation,
   WorktreeHealthService
 } from './worktrees/worktree-health-service'
+import { WorktreeService, type WorktreeSetupStep } from './worktrees/worktree-service'
 import {
   ShellCommandBlockCollector,
   ShellHistoryRepository,
@@ -127,6 +130,7 @@ export class RuntimeServer {
   readonly #forkIntents: SessionForkIntentRepository
   readonly #gitStates: SessionGitStateRepository
   readonly #environments: SessionEnvironmentRepository
+  readonly #environmentService: SessionEnvironmentService
   readonly #worktreeHealth: WorktreeHealthService
   readonly #workspacePaths: WorkspacePathService
   readonly #hierarchy: HierarchyApplicationService
@@ -143,6 +147,7 @@ export class RuntimeServer {
   readonly #providerLaunchRunIds = new Map<string, string>()
   readonly #confirmedProviderRunIds = new Set<string>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
+  readonly #environmentResumeDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #permissionOverrides = new Map<string, HudPermissionMode>()
   readonly #shellInputBuffers = new Map<string, string>()
   readonly #providerInputBuffers = new Map<string, string>()
@@ -194,6 +199,49 @@ export class RuntimeServer {
     this.#gitStates = new SessionGitStateRepository(database)
     this.#environments = new SessionEnvironmentRepository(database)
     this.#worktreeHealth = new WorktreeHealthService()
+    const worktrees = new WorktreeService(database, transactions, {
+      stopRuns: async (runIds) => {
+        const sessionIds = runIds.flatMap((runId) => {
+          const row = this.#database.get<{ session_id: string }>(
+            'SELECT session_id FROM session_runs WHERE id = ?', runId
+          )
+          return row ? [row.session_id] : []
+        })
+        for (const sessionId of sessionIds) await this.#pauseForEnvironmentTransition(sessionId)
+      }
+    })
+    this.#environmentService = new SessionEnvironmentService(
+      this.#environments,
+      {
+        restoreOwnedWorktree: async (identity) => {
+          const row = this.#database.get<{ setup_policy_json: string }>(
+            'SELECT setup_policy_json FROM worktrees WHERE id = ?', identity.worktreeId
+          )
+          const setupPolicy = row
+            ? JSON.parse(row.setup_policy_json) as WorktreeSetupStep[]
+            : []
+          const operationId = randomUUID()
+          await worktrees.create({
+            commandId: `session-environment-restore-${identity.sessionId}-${operationId}`,
+            commandType: 'session.environment-restore',
+            requestHash: `${identity.sessionId}:${identity.worktreeId}:${identity.path}`
+          }, {
+            id: identity.worktreeId,
+            executionContextId: identity.executionContextId,
+            workspaceId: identity.workspaceId,
+            repositoryRoot: identity.repositoryRoot,
+            path: identity.path,
+            branch: identity.branch,
+            baseRef: identity.baseRef ?? identity.baseRevision ?? 'HEAD',
+            setupPolicy,
+            now: Date.now()
+          })
+        },
+        pauseSession: (sessionId) => this.#pauseForEnvironmentTransition(sessionId),
+        resumeSession: (sessionId) => this.#resumeAfterEnvironmentTransition(sessionId)
+      },
+      this.#worktreeHealth
+    )
     this.#control = control
     this.#sessions = sessions
     this.#providerHooks = providerHooks
@@ -280,6 +328,7 @@ export class RuntimeServer {
     this.#providerInputBuffers.clear()
     this.#lastProviderInputs.clear()
     this.#workStatusTrackers.clear()
+    this.#environmentResumeDescriptors.clear()
     this.#detachAll()
     this.#port.close()
   }
@@ -571,13 +620,16 @@ export class RuntimeServer {
       const ephemeralPermission = permissionSessionId !== undefined && permissionSession !== undefined &&
         permissionSession.profile !== 'shell' &&
         this.#sessionRepository.getResumeBinding(permissionSessionId, 'claude-code') === undefined
+      this.#accessPolicy.assertRpcAllowed(message.method)
       let result = ephemeralPermission
         ? {
             sessionId: permissionSessionId,
             permissionMode: textFromRpcInput(message.payload, 'permissionMode'),
             persisted: false
           }
-        : await this.#router.handle(message.method, message.payload)
+        : isSessionEnvironmentRpc(message.method)
+          ? await this.#handleSessionEnvironmentRpc(message.method, message.payload)
+          : await this.#router.handle(message.method, message.payload)
       if (isGitMutation(message.method)) {
         await Promise.all([...this.#attachedSessionIds].map((sessionId) =>
           this.refreshSessionHud(sessionId)
@@ -615,6 +667,39 @@ export class RuntimeServer {
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', errorMessage(error), false)
       }
     }
+  }
+
+  async #handleSessionEnvironmentRpc(method: RpcMethod, payload: unknown): Promise<unknown> {
+    const direct = isRecord(payload) ? payload : undefined
+    const input = rpcInput(payload) ?? direct
+    if (!input || typeof input.sessionId !== 'string' || !input.sessionId.trim()) {
+      throw new RpcFault('INVALID_REQUEST', 'sessionId is required')
+    }
+    const sessionId = input.sessionId
+    if (method === 'session.environment-open') {
+      return this.#environmentService.open(sessionId)
+    }
+    const now = typeof input.now === 'number' && Number.isInteger(input.now) && input.now > 0
+      ? input.now
+      : Date.now()
+    return this.#sessions.runExclusive(sessionId, async () => {
+      if (method === 'session.environment-restore') {
+        return this.#environmentService.restore({ sessionId, now })
+      }
+      if (method === 'session.environment-locate') {
+        if (typeof input.path !== 'string' || !input.path.trim()) {
+          throw new RpcFault('INVALID_REQUEST', 'path is required')
+        }
+        return this.#environmentService.locate({ sessionId, path: input.path, now })
+      }
+      if (method === 'session.environment-handoff') {
+        if (input.target !== 'local' && input.target !== 'worktree') {
+          throw new RpcFault('INVALID_REQUEST', 'target must be local or worktree')
+        }
+        return this.#environmentService.handoff({ sessionId, target: input.target, now })
+      }
+      throw new RpcFault('INVALID_REQUEST', `unsupported environment method ${method}`)
+    })
   }
 
   async #replay(message: Extract<RendererMessage, { type: 'terminal.replay-request' }>): Promise<void> {
@@ -1204,10 +1289,11 @@ export class RuntimeServer {
           this.#clearProviderResumeTimer(message.sessionId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
           hookRegistration?.retire()
-          if (exitReason === 'runtime-shutdown') {
+          if (exitReason === 'runtime-shutdown' || exitReason === 'environment-transition') {
             this.#sessions.delete(message.sessionId, exited)
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
+            if (exitReason === 'environment-transition') return false
             const workStatus = this.#database.get<{ work_status: string }>(
               'SELECT work_status FROM sessions WHERE id = ?',
               message.sessionId
@@ -1744,12 +1830,77 @@ export class RuntimeServer {
     this.#providerInputBuffers.delete(sessionId)
     this.#lastProviderInputs.delete(sessionId)
     this.#workStatusTrackers.delete(sessionId)
+    this.#environmentResumeDescriptors.delete(sessionId)
     this.#skipResumeSessionIds.delete(sessionId)
     this.#hud.delete(sessionId)
     this.publishSessionHud(sessionId)
     this.#attachedSessionIds.delete(sessionId)
     session.dispose()
     await session.whenClosed()
+  }
+
+  async #pauseForEnvironmentTransition(sessionId: string): Promise<void> {
+    this.#clearProviderResumeTimer(sessionId)
+    const cwdTimer = this.#cwdTimers.get(sessionId)
+    if (cwdTimer) clearTimeout(cwdTimer)
+    this.#cwdTimers.delete(sessionId)
+    const descriptor = this.#spawnDescriptors.get(sessionId)
+    if (descriptor) this.#environmentResumeDescriptors.set(sessionId, descriptor)
+    const session = this.#sessions.get(sessionId)
+    if (!session) return
+
+    if (session.runId) {
+      const run = this.#database.get<{ status: string }>(
+        'SELECT status FROM session_runs WHERE id = ?', session.runId
+      )
+      if (run?.status === 'starting' || run?.status === 'running') {
+        const now = Date.now()
+        this.#sessionRepository.interruptRun({
+          commandId: `session-environment-interrupt-${session.runId}-${now}`,
+          commandType: 'session.environment-run-interrupted',
+          requestHash: `${sessionId}:${session.runId}:${now}`
+        }, session.runId, now)
+      }
+    }
+
+    this.#sessions.delete(sessionId, session)
+    this.#control?.backend.unregister(sessionId, session)
+    this.#control?.tokens.revokeRun(session.runId ?? sessionId)
+    session.dispose({ notifyExit: false, reason: 'environment-transition' })
+    await session.whenClosed()
+
+    this.#attachedSessionIds.delete(sessionId)
+    this.#endedSessionIds.delete(sessionId)
+    this.#completedReplayThrough.delete(sessionId)
+    this.#spawnDescriptors.delete(sessionId)
+    this.#permissionOverrides.delete(sessionId)
+    this.#shellInputBuffers.delete(sessionId)
+    this.#providerInputBuffers.delete(sessionId)
+    this.#lastProviderInputs.delete(sessionId)
+    this.#workStatusTrackers.delete(sessionId)
+    this.#skipResumeSessionIds.delete(sessionId)
+    this.#hud.delete(sessionId)
+    this.publishSessionHud(sessionId)
+  }
+
+  async #resumeAfterEnvironmentTransition(sessionId: string): Promise<void> {
+    const descriptor = this.#environmentResumeDescriptors.get(sessionId)
+    if (!descriptor) return
+    const authority = this.#database.get<{
+      execution_context_id: string
+      kind: 'shell' | 'claude-code' | 'codex'
+    }>('SELECT execution_context_id, kind FROM sessions WHERE id = ? AND archived_at IS NULL', sessionId)
+    if (!authority) {
+      this.#environmentResumeDescriptors.delete(sessionId)
+      return
+    }
+    await this.#spawn({
+      ...descriptor,
+      executionContextId: authority.execution_context_id,
+      profile: authority.kind,
+      spawnRevision: (descriptor.spawnRevision ?? 0) + 1
+    })
+    this.#environmentResumeDescriptors.delete(sessionId)
   }
 
   #detachAll(): void {
@@ -2165,6 +2316,13 @@ function isGitMutation(method: string): boolean {
     method === 'git.commit' || method === 'git.push' ||
     method === 'git.worktree-create' || method === 'git.worktree-open' ||
     method === 'git.worktree-remove'
+}
+
+function isSessionEnvironmentRpc(method: RpcMethod): boolean {
+  return method === 'session.environment-open' ||
+    method === 'session.environment-restore' ||
+    method === 'session.environment-locate' ||
+    method === 'session.environment-handoff'
 }
 
 export function terminalSummaryLines(raw: string): string[] {

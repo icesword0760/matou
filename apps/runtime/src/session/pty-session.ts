@@ -27,7 +27,7 @@ interface PtySessionOptions {
     session: PtySession,
     exitCode: number,
     signal?: number,
-    reason?: 'runtime-shutdown'
+    reason?: 'runtime-shutdown' | 'environment-transition'
   ) => boolean | void
   onOutput?: (data: string) => void
   runId?: string
@@ -49,7 +49,7 @@ export class PtySession {
     session: PtySession,
     exitCode: number,
     signal?: number,
-    reason?: 'runtime-shutdown'
+    reason?: 'runtime-shutdown' | 'environment-transition'
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
@@ -58,7 +58,7 @@ export class PtySession {
   #writeChain = Promise.resolve()
   #disposed = false
   #notifyExit = true
-  #exitReason: 'runtime-shutdown' | undefined
+  #exitReason: 'runtime-shutdown' | 'environment-transition' | undefined
   #forceFinalized = false
   #closedResolved = false
   #pendingReplayFrom: number | undefined
@@ -206,7 +206,7 @@ export class PtySession {
 
   dispose(options: {
     notifyExit?: boolean
-    reason?: 'runtime-shutdown'
+    reason?: 'runtime-shutdown' | 'environment-transition'
   } = {}): void {
     if (this.#disposed) {
       return

@@ -360,6 +360,7 @@ export function projectSceneGraphFrom(
         title: row.title,
         cwd: row.cwd,
         ...(environment === undefined ? {} : { environment }),
+        hasOwnedWorktree: row.managed_worktree_id !== null,
         ...(git === undefined ? {} : { git }),
         sharedWorkingDirectory: (cwdUseCounts.get(row.cwd) ?? 0) > 1,
         ...(row.worktree_path === null || row.branch_name === null ? {} : {

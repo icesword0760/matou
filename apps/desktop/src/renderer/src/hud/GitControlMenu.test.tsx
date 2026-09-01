@@ -43,7 +43,7 @@ describe('GitControlMenu', () => {
     expect(screen.queryAllByRole('status')).toHaveLength(1)
   })
 
-  it('opens a Worktree in the current canvas and exposes Finder separately', async () => {
+  it('opens Worktrees in Finder but leaves Session switching to the environment control', async () => {
     const user = userEvent.setup()
     const revealDirectory = vi.fn()
     Object.defineProperty(window, 'matouDesktop', { configurable: true, value: { revealDirectory } })
@@ -55,22 +55,15 @@ describe('GitControlMenu', () => {
       ]
     })
     const { client, request } = clientFor(withWorktree)
-    const onClose = vi.fn()
     render(<GitControlMenu client={client} cwd="/repo" sessionId="session-1"
-      context={{ windowId: 'window-1', sceneId: 'scene-1' }} onClose={onClose} />)
+      context={{ windowId: 'window-1', sceneId: 'scene-1' }} onClose={vi.fn()} />)
 
     await screen.findByRole('dialog', { name: 'Git 与 Worktree' })
     await user.click(screen.getByRole('button', { name: /Worktree 2/ }))
     await user.click(screen.getAllByRole('button', { name: 'Finder' })[1]!)
     expect(revealDirectory).toHaveBeenCalledWith('/repo-worktrees/feature')
-    await user.click(screen.getByRole('button', { name: '进入' }))
-    expect(request).toHaveBeenCalledWith('git.worktree-open', expect.objectContaining({
-      input: expect.objectContaining({
-        sessionId: 'session-1', windowId: 'window-1', sceneId: 'scene-1',
-        path: '/repo-worktrees/feature', branch: 'feature/one'
-      })
-    }), { timeoutMs: 120_000 })
-    expect(onClose).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '进入' })).toBeNull()
+    expect(request.mock.calls.some(([method]) => method === 'git.worktree-open')).toBe(false)
   })
 })
 

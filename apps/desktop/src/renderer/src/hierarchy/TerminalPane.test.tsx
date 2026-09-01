@@ -2,17 +2,20 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SessionEnvironment } from '@matou/domain'
 
 import { TerminalPane } from './TerminalPane'
 
 vi.mock('../terminal/TerminalSurface', () => ({
   TerminalSurface: (props: {
     sessionId: string; visible: boolean; inputDisabled: boolean; spawnRevision?: number
+    readOnly?: boolean
     onStatusChange?(status: string): void; onRuntimeError?(message: string): void
     onUserInput?(): void
   }) =>
     <div data-testid={`surface-${props.sessionId}`} data-visible={props.visible}
-      data-input-disabled={props.inputDisabled} data-spawn-revision={props.spawnRevision}>
+      data-input-disabled={props.inputDisabled} data-read-only={props.readOnly}
+      data-spawn-revision={props.spawnRevision}>
       <textarea className="xterm-helper-textarea" aria-label="Terminal input"
         onInput={() => props.onUserInput?.()} />
       <button type="button" aria-label="触发启动失败" onClick={() => {
@@ -73,7 +76,7 @@ describe('Terminal pane', () => {
       { ...childNode('child-1'), workStatus: 'running' as const },
       childNode('child-2')
     ]
-    render(<TerminalPane {...fixture()} resumable git={{ branch: 'feat/notification', dirty: false }}
+    render(<TerminalPane {...fixture()} resumable git={{ state: 'ready', branch: 'feat/notification', dirty: false }}
       childNodes={children} onOpenChildren={vi.fn()} onLoadSession={vi.fn()}
       onFork={onFork} onForkSibling={onForkSibling} />)
 
@@ -161,11 +164,14 @@ describe('Terminal pane', () => {
     expect(onRemoveBranch).not.toHaveBeenCalled()
   })
 
-  it('opens the pane actions when the user right-clicks the terminal content area', async () => {
+  it('opens pane actions only from the card header', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
 
     await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
+    expect(screen.queryByRole('menu')).toBeNull()
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
 
     expect(screen.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeTruthy()
@@ -175,7 +181,7 @@ describe('Terminal pane', () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
 
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
     expect(screen.getByRole('menu')).toBeTruthy()
 
     fireEvent.pointerDown(document.body)
@@ -352,7 +358,7 @@ describe('Terminal pane', () => {
   it('keeps the full working path discoverable while prioritizing Git and shared-worktree status', () => {
     const longPath = `/repo/${'nested-directory/'.repeat(16)}project`
     render(<TerminalPane {...fixture()} cwd={longPath}
-      git={{ branch: 'feature/dag', dirty: true }} sharedWorkingDirectory />)
+      git={{ state: 'ready', branch: 'feature/dag', dirty: true }} sharedWorkingDirectory />)
 
     expect(screen.getByTitle(longPath).textContent).toBe(longPath)
     expect(screen.getByText('feature/dag*')).toBeTruthy()
@@ -391,6 +397,58 @@ describe('Terminal pane', () => {
       expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('1')
     })
   })
+
+  it.each([
+    ['missing', 'Worktree 需要恢复'],
+    ['recovering', '正在恢复运行环境'],
+    ['handoff', '正在交接运行环境'],
+    ['failed', '运行环境需要处理']
+  ] as const)('keeps history visible but locks the whole card while its Worktree is %s', (state, title) => {
+    render(<TerminalPane {...fixture()} environment={worktreeEnvironment(state)}
+      onLoadSession={vi.fn()}
+      onRestoreEnvironment={vi.fn()} onLocateEnvironment={vi.fn()}
+      onHandoffEnvironment={vi.fn()} />)
+
+    const surface = screen.getByTestId('surface-session-1')
+    expect(surface.dataset.readOnly).toBe('true')
+    expect(surface.dataset.inputDisabled).toBe('true')
+    expect(screen.getByRole('status', { name: `运行环境${title}` })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '载入 Claude Code 会话到“Claude 主会话”' }))
+      .toHaveProperty('disabled', true)
+  })
+
+  it('offers real recovery actions from a missing Worktree card', async () => {
+    const restore = vi.fn()
+    const locate = vi.fn()
+    const handoff = vi.fn()
+    render(<TerminalPane {...fixture()} environment={worktreeEnvironment('missing')}
+      onRestoreEnvironment={restore} onLocateEnvironment={locate}
+      onHandoffEnvironment={handoff} />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '恢复 Worktree' }))
+    expect(restore).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '定位目录' }))
+    expect(locate).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '交接到 Local' }))
+    expect(handoff).toHaveBeenCalledWith('session-1', 'local')
+  })
+
+  it('consumes a close shortcut while recovery blocks the card instead of replaying it after recovery', () => {
+    const onDelete = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} onDelete={onDelete} closeRequest={1}
+      environment={worktreeEnvironment('missing')} />)
+    expect(onDelete).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalPane {...props} onDelete={onDelete} closeRequest={1}
+      environment={worktreeEnvironment('ready')} />)
+    expect(onDelete).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalPane {...props} onDelete={onDelete} closeRequest={2}
+      environment={worktreeEnvironment('ready')} />)
+    expect(onDelete).toHaveBeenCalledWith('session-1', false)
+  })
 })
 
 function fixture() {
@@ -416,4 +474,19 @@ function childNode(sessionId: string) {
     cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
+}
+
+function worktreeEnvironment(
+  state: 'ready' | 'missing' | 'recovering' | 'handoff' | 'failed'
+): SessionEnvironment {
+  const base = {
+    kind: 'worktree' as const,
+    path: '/tmp/matou-worktree',
+    localExecutionContextId: 'context-1',
+    worktreeId: 'worktree-1',
+    worktreeExecutionContextId: 'worktree-context-1'
+  }
+  if (state === 'ready') return { ...base, state }
+  if (state === 'missing' || state === 'failed') return { ...base, state, error: 'path-missing' }
+  return { ...base, state }
 }

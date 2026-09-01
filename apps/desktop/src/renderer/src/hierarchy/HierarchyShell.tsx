@@ -3,7 +3,7 @@ import {
   type Dispatch, type SetStateAction
 } from 'react'
 
-import type { LayoutNode } from '@matou/domain'
+import type { LayoutNode, SessionEnvironment } from '@matou/domain'
 import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
 import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
@@ -277,6 +277,10 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [dagOpenError, setDagOpenError] = useState(false)
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  const [environmentRestartBySession, setEnvironmentRestartBySession] = useState<Record<string, number>>({})
+  const [environmentTransitionBySession, setEnvironmentTransitionBySession] = useState<
+    Record<string, 'recovering' | 'handoff' | undefined>
+  >({})
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
@@ -414,6 +418,61 @@ function HierarchyProduct({ projection, commands, readOnly }: {
     : activeSnapshot ? orderedSessionIds(activeSnapshot) : []
   const activeRatios = activeSnapshot ? layoutRatios(activeSnapshot, liveRatios) : {}
   const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
+  const applyEnvironmentResult = (result: Awaited<ReturnType<HierarchyCommands['restoreSessionEnvironment']>>) => {
+    if (result.kind === 'environment' && result.restartRequired) {
+      setEnvironmentRestartBySession((current) => ({
+        ...current,
+        [result.sessionId]: (current[result.sessionId] ?? 0) + 1
+      }))
+    }
+    return result
+  }
+  const withEnvironmentTransition = async <T,>(
+    sessionId: string,
+    state: 'recovering' | 'handoff',
+    action: () => Promise<T>
+  ): Promise<T> => {
+    setEnvironmentTransitionBySession((current) => ({ ...current, [sessionId]: state }))
+    try {
+      return await action()
+    } finally {
+      setEnvironmentTransitionBySession((current) => {
+        const next = { ...current }
+        delete next[sessionId]
+        return next
+      })
+    }
+  }
+  const environmentActions = {
+    open: (sessionId: string) => commands.openSessionEnvironment(sessionId),
+    restore: async (sessionId: string) => withEnvironmentTransition(
+      sessionId, 'recovering', async () => applyEnvironmentResult(
+        await commands.restoreSessionEnvironment(sessionId)
+      )
+    ),
+    locate: async (sessionId: string, path: string) => withEnvironmentTransition(
+      sessionId, 'recovering', async () => applyEnvironmentResult(
+        await commands.locateSessionEnvironment(sessionId, path)
+      )
+    ),
+    handoff: async (sessionId: string, target: 'local' | 'worktree') => withEnvironmentTransition(
+      sessionId, 'handoff', async () => applyEnvironmentResult(
+        await commands.handoffSessionEnvironment(sessionId, target)
+      )
+    )
+  }
+  const activeEnvironment = optimisticEnvironment(
+    activeGraphFocused?.environment,
+    focusedSessionId ? environmentTransitionBySession[focusedSessionId] : undefined
+  )
+  const activeSessionMutationBlocked = readOnly || (
+    activeEnvironment !== undefined && activeEnvironment.state !== 'ready'
+  )
+  const locateEnvironment = async (sessionId: string) => {
+    const path = await window.matouDesktop?.selectSessionEnvironmentDirectory()
+    if (!path) return
+    return environmentActions.locate(sessionId, path)
+  }
   const returnToLevelParent = (
     sceneId: string,
     parentSessionId: string,
@@ -442,7 +501,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   }
   const shortcutHandlers = useMemo(() => ({
     splitHorizontal: () => {
-      if (!readOnly && pathValid && activeSceneId && focusedSessionId) run(commands.createShellSibling(activeSceneId, focusedSessionId))
+      if (!activeSessionMutationBlocked && pathValid && activeSceneId && focusedSessionId) run(commands.createShellSibling(activeSceneId, focusedSessionId))
     },
     splitVertical: () => {},
     nextPane: () => focusPane(1),
@@ -454,7 +513,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
       if (target) run(commands.activateSession(target))
     },
     closePane: () => {
-      if (!readOnly && focusedSessionId) {
+      if (!activeSessionMutationBlocked && focusedSessionId) {
         setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
       }
     },
@@ -484,7 +543,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
       if (shortcutPanelOpen) setTerminalFocusRequest((value) => value + 1)
       setShortcutPanelOpen(!shortcutPanelOpen)
     }
-  }), [activeRatios, activeSceneId, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
+  }), [activeRatios, activeSceneId, activeSessionMutationBlocked, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
     if (!activeSceneId || !dagFocusSessionId) return
@@ -610,6 +669,10 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   }
                 }
                 const graphNode = graph?.nodes.find(({ sessionId: candidate }) => candidate === session.id)
+                const sessionEnvironment = optimisticEnvironment(
+                  graphNode?.environment,
+                  environmentTransitionBySession[session.id]
+                )
                 const parentGraphNode = graphNode?.parentSessionId
                   ? graph?.nodes.find(({ sessionId: candidate }) => candidate === graphNode.parentSessionId)
                   : undefined
@@ -635,7 +698,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                     providerRestoreState: graphNode.providerRestoreState,
                     forkState: graphNode.forkState,
                     spawnRevision: (graphNode.forkAttempt ?? 0) +
-                      (graphNode.providerSpawnRevision ?? 0),
+                      (graphNode.providerSpawnRevision ?? 0) +
+                      (environmentRestartBySession[session.id] ?? 0),
                     ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
                     ...(graphNode.providerRestoreError ? { restoreError: graphNode.providerRestoreError } : {})
                   } : {})}
@@ -644,10 +708,13 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                     : {})}
                   {...(sessionHud?.gitBranch || graphNode?.git ? {
                     git: graphNode?.git ?? {
+                      state: 'ready' as const,
                       branch: sessionHud!.gitBranch!, dirty: sessionHud?.gitDirty === true
                     }
                   } : {})}
                   sharedWorkingDirectory={graphNode?.sharedWorkingDirectory === true || graphNode?.worktree?.shared === true}
+                  {...(sessionEnvironment ? { environment: sessionEnvironment } : {})}
+                  hasOwnedWorktree={graphNode?.hasOwnedWorktree === true}
                   {...(workspace ? { workspaceId: workspace.id } : {})}
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
                   onLoadSession={() => setSessionLoader({
@@ -674,6 +741,9 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   } } : {})}
                   onRetryFork={() => commands.retryFork(scene.id, session.id)}
                   onRemoveFailedFork={() => commands.removeFailedFork(scene.id, session.id)}
+                  onRestoreEnvironment={(sessionId) => environmentActions.restore(sessionId)}
+                  onLocateEnvironment={(sessionId) => locateEnvironment(sessionId)}
+                  onHandoffEnvironment={(sessionId, target) => environmentActions.handoff(sessionId, target)}
                   childNodes={childNodes}
                   onOpenChildren={() => {
                     setLevelParentByScene((current) => ({ ...current, [scene.id]: session.id }))
@@ -790,9 +860,21 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                           activeSceneId, activeLevelParentId, activeGraph
                         )
                       } : {})} />}
-                    <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
+                    <TerminalHud hud={activeHud}
+                      {...(focusedSessionId ? { sessionId: focusedSessionId } : {})}
+                      {...(activeEnvironment
+                        ? { environment: activeEnvironment }
+                        : {})}
+                      hasOwnedWorktree={activeGraphFocused?.hasOwnedWorktree === true}
+                      {...(activeGraphFocused?.git ? { git: activeGraphFocused.git } : {})}
+                      environmentActions={environmentActions}
+                      onPermissionMode={commands.setPermissionMode}
                       onModel={commands.setModel}
-                      {...(readOnly ? { disabledReason: READ_ONLY_REASON } : {})}
+                      {...(activeSessionMutationBlocked ? {
+                        disabledReason: readOnly
+                          ? READ_ONLY_REASON
+                          : '当前运行环境需要先恢复或交接'
+                      } : {})}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />
@@ -1091,6 +1173,21 @@ function createFixtureCommands(
       const snapshot = value.sceneSnapshots?.find(({ mounts }) => mounts.some((mount) => mount.sessionId === sessionId))
       if (snapshot) value.navigation.sessionByScene[snapshot.scene.id] = sessionId
     }),
+    openSessionEnvironment: async (sessionId) => ({
+      sessionId, kind: 'local' as const, path: '/tmp'
+    }),
+    restoreSessionEnvironment: async (sessionId) => ({
+      kind: 'environment' as const, sessionId, activeTarget: 'local' as const,
+      state: 'ready' as const, path: '/tmp', restartRequired: false
+    }),
+    locateSessionEnvironment: async (sessionId) => ({
+      kind: 'environment' as const, sessionId, activeTarget: 'local' as const,
+      state: 'ready' as const, path: '/tmp', restartRequired: false
+    }),
+    handoffSessionEnvironment: async (sessionId, target) => ({
+      kind: 'environment' as const, sessionId, activeTarget: target,
+      state: 'ready' as const, path: '/tmp', restartRequired: true
+    }),
     createWorkspace: NOOP, renameWorkspace: NOOP, relinkWorkspace: NOOP, removeWorkspace: NOOP,
     setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
@@ -1168,6 +1265,14 @@ function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): S
 }
 function queryValue(name: string): string | null {
   return new URLSearchParams(window.location.search).get(name)
+}
+
+function optimisticEnvironment(
+  environment: SessionEnvironment | undefined,
+  state: 'recovering' | 'handoff' | undefined
+): SessionEnvironment | undefined {
+  if (!environment || !state) return environment
+  return { ...environment, state }
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

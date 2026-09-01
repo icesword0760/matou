@@ -212,6 +212,8 @@ function commands(): HierarchyCommands {
     getClaudeSessionDetail: vi.fn(), loadClaudeSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
+    openSessionEnvironment: vi.fn(), restoreSessionEnvironment: vi.fn(),
+    locateSessionEnvironment: vi.fn(), handoffSessionEnvironment: vi.fn(),
     detachSession: vi.fn(), returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()
   }
 }

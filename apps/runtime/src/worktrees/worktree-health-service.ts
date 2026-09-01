@@ -97,6 +97,52 @@ export class WorktreeHealthService {
       dirty: await isDirty(canonicalPath)
     }
   }
+
+  async repairMoved(expectation: WorktreeIdentityExpectation): Promise<WorktreeHealth> {
+    const canonicalPath = await realpath(expectation.path).catch(() => undefined)
+    if (!canonicalPath) return { kind: 'missing', reason: 'path-missing' }
+
+    const expectedRepository = await gitRepositoryIdentity(expectation.repositoryRoot).catch(() => undefined)
+    if (!expectedRepository) return { kind: 'mismatch', reason: 'wrong-repository' }
+    const actualRepository = await gitRepositoryIdentity(canonicalPath).catch(() => undefined)
+    if (!actualRepository || actualRepository.commonDirectory !== expectedRepository.commonDirectory) {
+      return { kind: 'mismatch', reason: 'wrong-repository' }
+    }
+
+    const identity = await checkHeadIdentity(canonicalPath, expectation)
+    if (identity) return identity
+
+    await git(expectedRepository.root, ['worktree', 'repair', canonicalPath])
+    return this.check({ ...expectation, path: canonicalPath })
+  }
+}
+
+async function checkHeadIdentity(
+  path: string,
+  expectation: WorktreeIdentityExpectation
+): Promise<Extract<WorktreeHealth, { kind: 'mismatch' }> | undefined> {
+  const branch = await symbolicBranch(path)
+  if (branch !== undefined) {
+    if (expectation.expectedDetachedHead !== undefined) {
+      return { kind: 'mismatch', reason: 'wrong-head' }
+    }
+    if (expectation.expectedBranch !== undefined && branch !== expectation.expectedBranch) {
+      return { kind: 'mismatch', reason: 'wrong-branch' }
+    }
+    return undefined
+  }
+
+  const detachedHead = (await git(path, ['rev-parse', 'HEAD'])).trim()
+  if (expectation.expectedBranch !== undefined) {
+    return { kind: 'mismatch', reason: 'wrong-head' }
+  }
+  if (
+    expectation.expectedDetachedHead !== undefined &&
+    detachedHead !== expectation.expectedDetachedHead
+  ) {
+    return { kind: 'mismatch', reason: 'wrong-head' }
+  }
+  return undefined
 }
 
 async function gitRepositoryIdentity(path: string): Promise<{

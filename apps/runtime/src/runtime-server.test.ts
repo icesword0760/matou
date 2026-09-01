@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -52,6 +52,120 @@ afterEach(() => {
 })
 
 describe('RuntimeServer domain RPC', () => {
+  it('hands one real PTY from Local to its owned Worktree and keeps the Session identity', async () => {
+    const repositoryRoot = join(root, 'handoff-repository')
+    const worktreePath = join(root, 'handoff-worktree')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'handoff\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'initial'])
+    await execFileAsync('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/handoff', worktreePath, 'HEAD'
+    ])
+    database.run(
+      "UPDATE workspaces SET root_directory = ? WHERE id = 'replay-workspace'",
+      repositoryRoot
+    )
+    database.run(
+      "UPDATE execution_contexts SET cwd = ? WHERE id = 'replay-context'",
+      repositoryRoot
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('handoff-worktree-context', 'replay-workspace', 'git-worktree', ?, 1)`,
+      worktreePath
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         base_ref, state, setup_policy_json, setup_result_json,
+         cleanup_policy, created_at, updated_at
+       ) VALUES (
+         'handoff-worktree', 'handoff-worktree-context', ?, ?, 'feature/handoff',
+         'HEAD', 'ready', '[]', '[]', 'retain-dirty', 1, 1
+       )`,
+      repositoryRoot, worktreePath
+    )
+    registerSession(database, 'environment-handoff-session')
+    database.run(
+      "UPDATE sessions SET cwd = ? WHERE id = 'environment-handoff-session'",
+      repositoryRoot
+    )
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'handoff-worktree', active_target = 'local',
+           state = 'ready', updated_at = 1
+       WHERE session_id = 'environment-handoff-session'`
+    )
+
+    const observedCwds = join(root, 'handoff-cwds.txt')
+    const executable = join(root, 'handoff-shell.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `pwd >> ${JSON.stringify(observedCwds)}`,
+      "printf 'ready\\n'",
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'environment-handoff-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned')?.sessionId === 'environment-handoff-session')
+      const firstPid = port.last('terminal.spawned')?.pid
+      const firstRun = database.get<{ id: string }>(
+        `SELECT id FROM session_runs
+         WHERE session_id = 'environment-handoff-session' ORDER BY ordinal DESC LIMIT 1`
+      )
+      expect(firstRun?.id).toEqual(expect.any(String))
+      if (!firstRun) throw new Error('first terminal run was not persisted')
+      await waitUntilAsync(async () => (await readFile(observedCwds, 'utf8').catch(() => '')).trim() === repositoryRoot)
+
+      port.receive(rpc('environment-handoff', 'session.environment-handoff', {
+        sessionId: 'environment-handoff-session', target: 'worktree', now: Date.now()
+      }))
+      await waitUntil(() => port.findRpcResponse('environment-handoff') !== undefined)
+      expect(port.findRpcResponse('environment-handoff')).toMatchObject({
+        result: {
+          kind: 'environment', sessionId: 'environment-handoff-session',
+          activeTarget: 'worktree', state: 'ready', path: worktreePath
+        }
+      })
+      expect(database.get(
+        `SELECT execution_context_id, cwd FROM sessions
+         WHERE id = 'environment-handoff-session'`
+      )).toEqual({ execution_context_id: 'handoff-worktree-context', cwd: worktreePath })
+      expect(database.get(
+        `SELECT status FROM session_runs WHERE id = ?`, firstRun.id
+      )).toEqual({ status: 'interrupted' })
+      await waitUntil(() => port.sent.filter((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === 'environment-handoff-session'
+      ).length === 2)
+      const spawned = port.sent.filter((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === 'environment-handoff-session'
+      )
+      expect(spawned[1]).toMatchObject({ pid: expect.any(Number) })
+      expect(spawned[1]).not.toHaveProperty('reattached', true)
+      expect((spawned[1] as { pid: number }).pid).not.toBe(firstPid)
+      expect(database.get(
+        `SELECT status FROM session_runs
+         WHERE session_id = 'environment-handoff-session' ORDER BY ordinal DESC LIMIT 1`
+      )).toEqual({ status: 'running' })
+      await waitUntilAsync(async () => (await readFile(observedCwds, 'utf8').catch(() => ''))
+        .trim().split('\n').at(-1) === worktreePath)
+    } finally {
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('publishes a read-only capability surface and gates RPC, Git, terminal, polling, and probes', async () => {
     const repositoryRoot = join(root, 'readonly-repository')
     await mkdir(repositoryRoot)
@@ -79,6 +193,7 @@ describe('RuntimeServer domain RPC', () => {
     process.env.SHELL = shell
     process.env.HOME = root
     process.env.ZDOTDIR = join(root, 'readonly-zdotdir')
+    registerSession(database, 'readonly-environment-session')
 
     server.close()
     const databasePath = database.path
@@ -120,6 +235,19 @@ describe('RuntimeServer domain RPC', () => {
       await settle()
       expect(port.findRpcResponse('readonly-projection')).toMatchObject({
         result: { hierarchy: { workspaces: [expect.objectContaining({ id: 'replay-workspace' })] } }
+      })
+
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'readonly-environment-open', method: 'session.environment-open',
+        capability: 'renderer', deadlineAt: Date.now() + 1000,
+        payload: { sessionId: 'readonly-environment-session' }
+      })
+      await settle()
+      expect(port.findRpcResponse('readonly-environment-open')).toMatchObject({
+        result: {
+          sessionId: 'readonly-environment-session', kind: 'local', path: await realpath(root)
+        }
       })
 
       port.receive(rpc('readonly-bootstrap', 'hierarchy.bootstrap-window', {

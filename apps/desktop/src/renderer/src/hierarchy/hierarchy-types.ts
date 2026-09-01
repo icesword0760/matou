@@ -40,9 +40,11 @@ export interface SessionGraphNodeView {
   canFork: boolean
   title: string
   cwd: string
-  git?: { branch: string; dirty: boolean }
+  git?: SessionGitState
   sharedWorkingDirectory?: boolean
   worktree?: { branch: string; path: string; shared: boolean }
+  environment?: SessionEnvironment
+  hasOwnedWorktree?: boolean
   activeChildCount: number
   stoppedChildCount: number
   childModeCounts: { shell: number; claudeCode: number }
@@ -183,12 +185,22 @@ export interface HierarchyCommands {
   setFocusedSession(sceneId: string, sessionId: string): unknown
   putGeometry(sceneId: string, ownerKey: string, layoutRevision: number, geometry: unknown): unknown
   activateSession(sessionId: string): unknown
+  openSessionEnvironment(sessionId: string): Promise<SessionEnvironmentOpenResult>
+  restoreSessionEnvironment(sessionId: string): Promise<SessionEnvironmentActionResult>
+  locateSessionEnvironment(sessionId: string, path: string): Promise<SessionEnvironmentActionResult>
+  handoffSessionEnvironment(
+    sessionId: string,
+    target: SessionEnvironmentTarget
+  ): Promise<SessionEnvironmentActionResult>
   deleteSession(sessionId: string, confirmed?: boolean, preserveSceneOnLastSession?: boolean): unknown
   detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
   returnSession(sceneWindowId: string): unknown
   setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown
   setModel(sessionId: string, modelStrategy: HudModelStrategy): unknown
 }
+import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 import type {
-  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult,
+  SessionEnvironmentActionResult, SessionEnvironmentOpenResult,
+  SessionEnvironmentTarget
 } from '@matou/contracts'

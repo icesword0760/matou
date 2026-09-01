@@ -53,6 +53,8 @@ import { exportReadOnlyDatabaseBundle } from './storage/read-only-database-expor
 import { WorktreeHealthService } from './worktrees/worktree-health-service'
 import { WorktreeReconciler } from './worktrees/worktree-reconciler'
 import { WorktreeService } from './worktrees/worktree-service'
+import { SessionEnvironmentRepository } from './session/session-environment-repository'
+import { SessionEnvironmentService } from './session/session-environment-service'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -187,6 +189,48 @@ async function initializeRuntime(): Promise<RuntimeState> {
   if (worktreeReconciliation.degraded > 0) {
     console.error(
       `[runtime.worktree-reconciliation] ${worktreeReconciliation.degraded} environment(s) need attention`
+    )
+  }
+  const environmentTransitions = await new SessionEnvironmentService(
+    new SessionEnvironmentRepository(database),
+    {
+      restoreOwnedWorktree: async (identity) => {
+        const row = database.get<{ setup_policy_json: string }>(
+          'SELECT setup_policy_json FROM worktrees WHERE id = ?', identity.worktreeId
+        )
+        const operationId = randomUUID()
+        await worktreeService.create({
+          commandId: `startup-environment-restore-${identity.sessionId}-${operationId}`,
+          commandType: 'session.environment-startup-restore',
+          requestHash: `${identity.sessionId}:${identity.worktreeId}:${identity.path}`
+        }, {
+          id: identity.worktreeId,
+          executionContextId: identity.executionContextId,
+          workspaceId: identity.workspaceId,
+          repositoryRoot: identity.repositoryRoot,
+          path: identity.path,
+          branch: identity.branch,
+          baseRef: identity.baseRef ?? identity.baseRevision ?? 'HEAD',
+          setupPolicy: row
+            ? JSON.parse(row.setup_policy_json) as Array<{ command: string; args: string[] }>
+            : [],
+          now: Date.now()
+        })
+      },
+      pauseSession: async (sessionId) => {
+        const live = sessions.get(sessionId)
+        if (!live) return
+        live.dispose({ notifyExit: false, reason: 'environment-transition' })
+        await live.whenClosed()
+        sessions.delete(sessionId, live)
+      },
+      resumeSession: async () => undefined
+    },
+    new WorktreeHealthService()
+  ).reconcileTransitions(Date.now())
+  if (environmentTransitions.failed > 0) {
+    console.error(
+      `[runtime.environment-reconciliation] ${environmentTransitions.failed} transition(s) need attention`
     )
   }
   const sessionRepository = new SessionRepository(database, transactions)

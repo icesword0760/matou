@@ -4,9 +4,15 @@ import { createPortal } from 'react-dom'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { GitControlMenu, type GitControlContext, type GitRequestClient } from './GitControlMenu'
+import {
+  EnvironmentControlMenu,
+  environmentLabel,
+  type SessionEnvironmentActions
+} from './EnvironmentControlMenu'
 import type {
   HudModelStrategy, HudPermissionMode, SessionHudView
 } from '../hierarchy/hierarchy-types'
+import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 
 const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
   { value: 'default', label: 'Default' },
@@ -22,11 +28,16 @@ const MODEL_OPTIONS: Array<{ id: HudModelStrategy; label: string }> = [
 
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
+  sessionId?: string
   onPermissionMode(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
   onModel(sessionId: string, strategy: HudModelStrategy): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
   disabledReason?: string
+  environment?: SessionEnvironment
+  git?: SessionGitState
+  hasOwnedWorktree?: boolean
+  environmentActions?: SessionEnvironmentActions
 }) {
   const { hud } = props
   const contextClient = useRuntimeClient()
@@ -40,6 +51,7 @@ export function TerminalHud(props: {
   const [switching, setSwitching] = useState(false)
   const [switchError, setSwitchError] = useState('')
   const [gitOpen, setGitOpen] = useState(false)
+  const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [elapsed, setElapsed] = useState(() => formatElapsed(hud?.startedAt))
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -65,8 +77,8 @@ export function TerminalHud(props: {
       }
     }
     const closeEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || (!menu && !gitOpen)) return
-      setMenu(null); setGitOpen(false)
+      if (event.key !== 'Escape' || (!menu && !gitOpen && !environmentOpen)) return
+      setMenu(null); setGitOpen(false); setEnvironmentOpen(false)
       event.preventDefault()
       event.stopPropagation()
     }
@@ -76,11 +88,16 @@ export function TerminalHud(props: {
       document.removeEventListener('pointerdown', closeOutside, true)
       document.removeEventListener('keydown', closeEscape, true)
     }
-  }, [menu, gitOpen])
+  }, [menu, gitOpen, environmentOpen])
 
-  if (!hud) return null
-  const shortCwd = cwdShortName(hud.cwd)
-  const gitDisplay = hud.gitBranch ? `${hud.gitBranch}${hud.gitDirty ? '*' : ''}` : ''
+  const sessionId = hud?.sessionId ?? props.sessionId
+  if (!sessionId || (!hud && !props.environment && !props.git)) return null
+  const shortCwd = cwdShortName(hud?.cwd)
+  const git = props.git ?? legacyGitState(hud) ?? (props.environment
+    ? { state: 'unavailable' as const, dirty: false }
+    : undefined)
+  const gitDisplay = git ? gitStateLabel(git) : ''
+  const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
   const openMenu = (target: 'permission' | 'model', event: React.MouseEvent<HTMLElement>) => {
     if (disabled || switching) return
     if (menu === target) { setMenu(null); return }
@@ -89,8 +106,8 @@ export function TerminalHud(props: {
     setMenu(target)
   }
 
-  return <div className="status-info" data-hud-mode={hud.mode} data-session-id={hud.sessionId} ref={rootRef}>
-    {hud.mode === 'agent' ? <>
+  return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
+    {hud?.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
         disabled={disabled || switching}
         title={props.disabledReason ?? `当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
@@ -114,20 +131,19 @@ export function TerminalHud(props: {
       </span>}
       {hasAgentInfo(hud) && (shortCwd || gitDisplay || elapsed) && <span className="status-divider status-priority-3" />}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
-      {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={disabled || !gitClient} aria-label="打开 Git 与 Worktree"
-        title={props.disabledReason ?? 'Git 与 Worktree'}
-        onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
-      {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
-    </> : <>
+    </> : hud?.mode === 'shell' ? <>
       {hud.shell && <span className="status-field">{hud.shell}</span>}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
-      {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={disabled || !gitClient} aria-label="打开 Git 与 Worktree"
-        title={props.disabledReason ?? 'Git 与 Worktree'}
-        onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
-      {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
-    </>}
+    </> : null}
+    {git && <button type="button" className="status-field status-git is-clickable"
+      disabled={disabled || !gitClient || git.state === 'unavailable'} aria-label="打开 Git"
+      title={props.disabledReason ?? gitStateTitle(git)}
+      onClick={() => { setMenu(null); setEnvironmentOpen(false); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
+    {props.environment && <EnvironmentButton environment={props.environment}
+      disabled={!props.environmentActions} onClick={() => {
+        setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
+      }} />}
+    {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label={menu === 'permission' ? '权限模式' : '模型'}>
@@ -140,7 +156,7 @@ export function TerminalHud(props: {
           const respawn = option.value === 'bypassPermissions' || permissionMode === 'bypassPermissions'
           if (respawn) { setConfirmTarget(option.value); return }
           setPermissionMode(option.value)
-          void Promise.resolve(props.onPermissionMode(hud.sessionId, option.value, false)).catch(() => {})
+          void Promise.resolve(props.onPermissionMode(sessionId, option.value, false)).catch(() => {})
         }}><span className={`perm-menu__dot perm-${option.value}`} />
         <span className="perm-menu__label">{option.label}</span>
         {permissionMode === option.value && <span className="perm-menu__check">✓</span>}
@@ -150,19 +166,19 @@ export function TerminalHud(props: {
           setMenu(null)
           if (option.id === modelStrategy) return
           setModelStrategy(option.id)
-          void Promise.resolve(props.onModel(hud.sessionId, option.id)).catch(() => {})
+          void Promise.resolve(props.onModel(sessionId, option.id)).catch(() => {})
         }}><span className="perm-menu__label">{option.label}</span>
         {modelStrategy === option.id && <span className="perm-menu__check">✓</span>}
       </button>)}
     </div></div>, document.body)}
-    {confirmTarget && !disabled && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
+    {confirmTarget && hud && !disabled && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
       body={bypassCopy(confirmTarget, hud.resumable === true)}
       confirmLabel={confirmTarget === 'bypassPermissions' ? '确认切换' : '确认退出'} onCancel={() => setConfirmTarget(null)}
       onConfirm={() => {
         const target = confirmTarget
         setConfirmTarget(null)
         setSwitching(true)
-        void Promise.resolve(props.onPermissionMode(hud.sessionId, target, true)).then(() => {
+        void Promise.resolve(props.onPermissionMode(sessionId, target, true)).then(() => {
           setPermissionMode(target)
         }).catch((error: unknown) => {
           setSwitchError(`切换失败：${error instanceof Error ? error.message : '未知错误'}`)
@@ -170,10 +186,28 @@ export function TerminalHud(props: {
         }).finally(() => setSwitching(false))
       }} />, document.body)}
     {switchError && createPortal(<div className="kooky-toast is-error" role="status">{switchError}</div>, document.body)}
-    {gitOpen && !disabled && gitClient && hud.cwd && createPortal(<GitControlMenu client={gitClient}
-      cwd={hud.cwd} sessionId={hud.sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
+    {environmentOpen && props.environment && props.environmentActions && createPortal(
+      <EnvironmentControlMenu sessionId={sessionId} environment={props.environment}
+        hasOwnedWorktree={props.hasOwnedWorktree === true} actions={props.environmentActions}
+        {...(props.disabledReason ? { mutationDisabledReason: props.disabledReason } : {})}
+        onClose={() => setEnvironmentOpen(false)} />, document.body
+    )}
+    {gitOpen && !disabled && git?.state === 'ready' && gitClient && gitCwd && createPortal(<GitControlMenu client={gitClient}
+      cwd={gitCwd} sessionId={sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
       onClose={() => setGitOpen(false)} />, document.body)}
   </div>
+}
+
+function EnvironmentButton(props: {
+  environment: SessionEnvironment
+  disabled: boolean
+  onClick(): void
+}) {
+  const label = environmentLabel(props.environment)
+  return <button type="button"
+    className={`status-field status-environment is-clickable state-${props.environment.state}`}
+    disabled={props.disabled} aria-label={`打开运行环境：${label}`} title="运行环境"
+    onClick={props.onClick}>{label}</button>
 }
 
 function ContextRing({ percent }: { percent: number }) {
@@ -200,6 +234,20 @@ function formatElapsed(startedAt: number | undefined): string {
 function cwdShortName(cwd: string | undefined): string {
   const tail = cwd?.split(/[\\/]/).filter(Boolean).at(-1)
   return tail ? `~/${tail}` : ''
+}
+function legacyGitState(hud: SessionHudView | undefined): SessionGitState | undefined {
+  return hud?.gitBranch
+    ? { state: 'ready', branch: hud.gitBranch, dirty: hud.gitDirty === true }
+    : undefined
+}
+function gitStateLabel(git: SessionGitState): string {
+  if (git.state === 'unavailable') return 'Git 不可用'
+  const reference = git.branch ?? `HEAD ${git.detachedHead.slice(0, 7)}`
+  return `${reference}${git.dirty ? '*' : ''}`
+}
+function gitStateTitle(git: SessionGitState): string {
+  if (git.state === 'unavailable') return '当前目录不是可用的 Git 工作区'
+  return git.branch ? `Git 分支：${git.branch}` : `Git detached HEAD：${git.detachedHead}`
 }
 function permissionLabel(mode: HudPermissionMode): string {
   return PERMISSION_MODES.find(({ value }) => value === mode)?.label ?? 'Default'

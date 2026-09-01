@@ -1,6 +1,8 @@
 import { mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
 
@@ -26,6 +28,7 @@ let quitting = false
 let runtimeShutdownComplete = false
 let runtimeShutdownPromise: Promise<void> | undefined
 let mainWindowSequence = 0
+const execFileAsync = promisify(execFile)
 
 if (process.env.MATOU_E2E_SCALE === '1') {
   Object.defineProperty(globalThis, '__matouE2eScaleMetrics', {
@@ -306,7 +309,18 @@ ipcMain.handle(DESKTOP_CHANNELS.selectWorkspaceDirectory, async () => {
   })
   return result.canceled ? null : result.filePaths[0] ?? null
 })
+ipcMain.handle(DESKTOP_CHANNELS.selectSessionEnvironmentDirectory, async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+  return result.canceled ? null : result.filePaths[0] ?? null
+})
 ipcMain.handle(DESKTOP_CHANNELS.revealDirectory, async (_event, path: string) => {
+  await shell.openPath(path)
+})
+ipcMain.handle(DESKTOP_CHANNELS.openDirectoryInTerminal, async (_event, path: string) => {
+  if (process.platform === 'darwin') {
+    await execFileAsync('/usr/bin/open', ['-a', 'Terminal', path])
+    return
+  }
   await shell.openPath(path)
 })
 ipcMain.handle(DESKTOP_CHANNELS.hideWindow, (_event, windowId: string) => {

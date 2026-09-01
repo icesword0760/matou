@@ -10,6 +10,7 @@ const READ_ONLY_RPC_METHODS = [
   'hierarchy.get-scene-session-graph',
   'claude-sessions.list',
   'claude-sessions.detail',
+  'session.environment-open',
   'geometry.list',
   'events.replay',
   'events.ack'

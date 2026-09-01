@@ -44,7 +44,11 @@ window.addEventListener('message', (event) => {
 const desktopApi: MatouDesktopApi = {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   selectWorkspaceDirectory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.selectWorkspaceDirectory),
+  selectSessionEnvironmentDirectory: () =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.selectSessionEnvironmentDirectory),
   revealDirectory: (path) => ipcRenderer.invoke(DESKTOP_CHANNELS.revealDirectory, path),
+  openDirectoryInTerminal: (path) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.openDirectoryInTerminal, path),
   hideWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.hideWindow, windowId),
   showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId),
   createDetachedTerminalWindow: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.createDetachedTerminalWindow, input),
