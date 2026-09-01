@@ -32,6 +32,7 @@ import { nextProviderWorkStatus } from './session/provider-work-status'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
 import { RuntimeLifecycleCoordinator } from './runtime-lifecycle-coordinator'
+import { RuntimeProcessOrchestrator } from './runtime-process-orchestrator'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -210,17 +211,15 @@ function shutdown(): Promise<void> {
     shutdownSessions: () => sessions.shutdownAll()
   })
 }
-void runtimeReady.catch(() => {
-  if (!lifecycleCoordinator.shutdownRequested) void shutdown().catch(() => undefined)
+const processOrchestrator = new RuntimeProcessOrchestrator({
+  runtimeReady,
+  shutdown,
+  reportError: (label, error) => console.error(label, error),
+  exit: (code) => process.exit(code)
 })
+void processOrchestrator.watchInitialization()
 process.once('SIGTERM', () => {
-  void shutdown().then(
-    () => process.exit(0),
-    (error) => {
-      console.error('[runtime.shutdown]', error)
-      process.exit(1)
-    }
-  )
+  void processOrchestrator.terminateFromSignal()
 })
 
 parentPort.on('message', async (event) => {
