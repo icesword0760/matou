@@ -12,6 +12,7 @@ import {
   readSessionFrames,
   repairSegmentTail
 } from './segment-journal'
+import { loadJournalTailIndex, writeJournalTailIndex } from './journal-tail-index'
 
 const temporaryDirectories: string[] = []
 
@@ -214,5 +215,78 @@ describe('SegmentJournal', () => {
       { kind: 'output', sequence: 1, data: Uint8Array.from([65]) },
       { kind: 'output', sequence: 2, data: Uint8Array.from([66]) }
     ])
+  })
+
+  it('persists the 10,000-line tail boundary and rebuilds a corrupt sidecar', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const journal = await SegmentJournal.open(directory, 'session-tail-index')
+    for (let sequence = 1; sequence <= 10_001; sequence += 1) {
+      await journal.appendOutput(sequence, new TextEncoder().encode(`line-${sequence}\n`))
+    }
+    expect(journal.tailStart()).toBe(2)
+    await journal.close()
+
+    const sidecar = join(directory, 'journal', 'session-tail-index', 'tail-index.json')
+    expect((await loadJournalTailIndex(sidecar)).lastSequence).toBe(10_001)
+    const reopened = await SegmentJournal.open(directory, 'session-tail-index')
+    expect(reopened.tailStart()).toBe(2)
+    await reopened.close()
+
+    await writeFile(sidecar, '{truncated')
+    const rebuilt = await SegmentJournal.open(directory, 'session-tail-index')
+    expect(rebuilt.tailStart()).toBe(2)
+    expect(rebuilt.tailIndexSnapshot().completedLineCount).toBe(10_001)
+    await rebuilt.close()
+  }, 15_000)
+
+  it('catches a valid but stale sidecar up from newer Journal output', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const first = await SegmentJournal.open(directory, 'session-stale-index')
+    await first.appendOutput(1, new TextEncoder().encode('one\n'))
+    await first.close()
+    const sidecar = join(directory, 'journal', 'session-stale-index', 'tail-index.json')
+    const stale = await loadJournalTailIndex(sidecar)
+
+    const second = await SegmentJournal.open(directory, 'session-stale-index')
+    await second.appendOutput(2, new TextEncoder().encode('two\n'))
+    await second.close()
+    await writeJournalTailIndex(sidecar, stale)
+
+    const recovered = await SegmentJournal.open(directory, 'session-stale-index')
+    expect(recovered.tailIndexSnapshot()).toMatchObject({
+      lastSequence: 2,
+      completedLineCount: 2
+    })
+    await recovered.close()
+  })
+
+  it('catches a sidecar up across every sealed segment without skipping lines or domain cursors', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const options = { maxSegmentBytes: 128 }
+    const first = await SegmentJournal.open(directory, 'session-multi-stale-index', options)
+    await first.appendOutput(1, new TextEncoder().encode('one\n'.repeat(20)))
+    await first.close()
+    const sidecar = join(directory, 'journal', 'session-multi-stale-index', 'tail-index.json')
+    const stale = await loadJournalTailIndex(sidecar)
+
+    const writer = await SegmentJournal.open(directory, 'session-multi-stale-index', options)
+    await writer.appendOutput(2, new TextEncoder().encode('two\n'.repeat(20)))
+    await writer.appendDomainCursor(3, 19)
+    await writer.appendOutput(4, new TextEncoder().encode('three\n'.repeat(20)))
+    await writer.close()
+    expect((await loadJournalTailIndex(sidecar)).activeSegmentIndex).toBeGreaterThan(
+      stale.activeSegmentIndex + 1
+    )
+    await writeJournalTailIndex(sidecar, stale)
+
+    const recovered = await SegmentJournal.open(directory, 'session-multi-stale-index', options)
+    expect(recovered.tailIndexSnapshot()).toMatchObject({
+      lastSequence: 4, completedLineCount: 60
+    })
+    expect(recovered.domainEventSequenceAtOrBefore(4)).toBe(19)
+    await recovered.close()
   })
 })

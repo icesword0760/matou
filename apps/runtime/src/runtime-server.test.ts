@@ -675,6 +675,170 @@ describe('RuntimeServer domain RPC', () => {
     ])
   })
 
+  it('uses a current-run checkpoint on PTY reattach without dropping the requested prefix', async () => {
+    registerSession(database, 'reattach-checkpoint')
+    const journal = await SegmentJournal.open(root, 'reattach-checkpoint')
+    for (let sequence = 1; sequence <= 6; sequence += 1) {
+      await journal.appendOutput(sequence, Uint8Array.from([64 + sequence]))
+    }
+    await journal.close()
+    await new CheckpointManager(root, database).create({
+      sessionId: 'reattach-checkpoint', terminalSequence: 5, domainEventSequence: 0,
+      screenEpoch: 0, snapshot: Uint8Array.from([9, 9])
+    })
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'reattach-checkpoint', fromSequence: 3
+    })
+    await settle()
+
+    expect(port.last('terminal.replay-start')).toMatchObject({
+      source: 'checkpoint', fromSequence: 6, checkpointSequence: 5
+    })
+    expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
+      expect.objectContaining({ sequence: 6, data: Uint8Array.from([70]) })
+    ])
+  })
+
+  it('ignores a checkpoint older than the requested PTY run and replays the full run prefix', async () => {
+    registerSession(database, 'older-reattach-checkpoint')
+    const journal = await SegmentJournal.open(root, 'older-reattach-checkpoint')
+    for (let sequence = 1; sequence <= 6; sequence += 1) {
+      await journal.appendOutput(sequence, Uint8Array.from([64 + sequence]))
+    }
+    await journal.close()
+    await new CheckpointManager(root, database).create({
+      sessionId: 'older-reattach-checkpoint', terminalSequence: 2, domainEventSequence: 0,
+      screenEpoch: 0, snapshot: Uint8Array.from([8, 8])
+    })
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'older-reattach-checkpoint', fromSequence: 3
+    })
+    await settle()
+
+    expect(port.last('terminal.replay-start')).toMatchObject({
+      source: 'tail', fromSequence: 3
+    })
+    expect(port.last('terminal.replay-start')).not.toHaveProperty('checkpoint')
+    expect(port.sent.filter((message) => message.type === 'terminal.data').map(
+      (message) => message.sequence
+    )).toEqual([3, 4, 5, 6])
+  })
+
+  it('stores an acknowledged Renderer checkpoint at a durable Journal watermark', async () => {
+    registerSession(database, 'renderer-checkpoint')
+    const journal = await SegmentJournal.open(root, 'renderer-checkpoint')
+    await journal.appendOutput(1, new TextEncoder().encode('first\n'))
+    await journal.appendDomainCursor(2, 7)
+    await journal.appendOutput(3, new TextEncoder().encode('second\n'))
+    await journal.close()
+
+    port.receive({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'renderer-checkpoint', throughSequence: 3, screenEpoch: 4,
+      snapshot: '\u001b[2Jserialized screen'
+    })
+    await waitUntil(() => port.last('terminal.checkpoint-stored') !== undefined)
+
+    expect(port.last('terminal.checkpoint-stored')).toMatchObject({
+      sessionId: 'renderer-checkpoint', throughSequence: 3
+    })
+    await expect(new CheckpointManager(root, database).loadLatest('renderer-checkpoint', {
+      terminalSequence: 3, domainEventSequence: 7
+    })).resolves.toMatchObject({
+      terminalSequence: 3, domainEventSequence: 7, screenEpoch: 4,
+      snapshot: new TextEncoder().encode('\u001b[2Jserialized screen')
+    })
+  })
+
+  it('rejects checkpoints ahead of the Journal or behind an already stored watermark', async () => {
+    registerSession(database, 'invalid-renderer-checkpoint')
+    const journal = await SegmentJournal.open(root, 'invalid-renderer-checkpoint')
+    await journal.appendOutput(1, new TextEncoder().encode('one\n'))
+    await journal.appendOutput(2, new TextEncoder().encode('two\n'))
+    await journal.close()
+
+    port.receive({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'invalid-renderer-checkpoint', throughSequence: 3, screenEpoch: 0,
+      snapshot: 'future'
+    })
+    await waitUntil(() => port.last('terminal.checkpoint-rejected') !== undefined)
+    expect(port.last('terminal.checkpoint-rejected')).toMatchObject({
+      throughSequence: 3, sessionId: 'invalid-renderer-checkpoint'
+    })
+
+    port.receive({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'invalid-renderer-checkpoint', throughSequence: 2, screenEpoch: 0,
+      snapshot: 'current'
+    })
+    await waitUntil(() => port.last('terminal.checkpoint-stored') !== undefined)
+    const errorsBeforeBackwardsAttempt = port.sent.filter(
+      (message) => message.type === 'terminal.checkpoint-rejected'
+    ).length
+    port.receive({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'invalid-renderer-checkpoint', throughSequence: 1, screenEpoch: 0,
+      snapshot: 'stale'
+    })
+    await waitUntil(() => port.sent.filter(
+      (message) => message.type === 'terminal.checkpoint-rejected'
+    ).length > errorsBeforeBackwardsAttempt)
+    expect(port.last('terminal.checkpoint-rejected')).toMatchObject({
+      throughSequence: 1, sessionId: 'invalid-renderer-checkpoint'
+    })
+  })
+
+  it('limits a checkpoint-free instant replay to the latest 10,000 indexed lines', async () => {
+    registerSession(database, 'tail-limited-replay')
+    const journal = await SegmentJournal.open(root, 'tail-limited-replay')
+    for (let sequence = 1; sequence <= 10_001; sequence += 1) {
+      await journal.appendOutput(sequence, new TextEncoder().encode(`line-${sequence}\n`))
+    }
+    await journal.close()
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'tail-limited-replay', fromSequence: 0
+    })
+    await waitUntil(() => port.last('terminal.replay-complete') !== undefined, 10_000)
+
+    expect(port.last('terminal.replay-start')).toMatchObject({
+      source: 'tail', fromSequence: 2, throughSequence: 10_001,
+      instantLineLimit: 10_000
+    })
+    const output = port.sent.filter((message) => message.type === 'terminal.data')
+    expect(output).toHaveLength(10_000)
+    expect(output.at(0)).toMatchObject({ sequence: 2 })
+    expect(output.at(-1)).toMatchObject({ sequence: 10_001 })
+  })
+
+  it('keeps resize and reset frames before the first output in a checkpoint-free replay', async () => {
+    registerSession(database, 'non-output-prefix-replay')
+    const journal = await SegmentJournal.open(root, 'non-output-prefix-replay')
+    await journal.appendResize(1, 100, 35)
+    await journal.appendReset(2, 4)
+    await journal.appendOutput(3, new TextEncoder().encode('visible'))
+    await journal.close()
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'non-output-prefix-replay', fromSequence: 0
+    })
+    await settle()
+
+    expect(port.last('terminal.replay-start')).toMatchObject({
+      source: 'tail', fromSequence: 1
+    })
+    expect(port.last('terminal.replay-resize')).toMatchObject({ sequence: 1, cols: 100, rows: 35 })
+    expect(port.last('terminal.replay-reset')).toMatchObject({ sequence: 2, screenEpoch: 4 })
+    expect(port.last('terminal.data')).toMatchObject({ sequence: 3 })
+  })
+
   it('falls back to an older checkpoint without changing recovery sources in read-only mode', async () => {
     registerSession(database, 'readonly-corrupt-checkpoint')
     const journal = await SegmentJournal.open(root, 'readonly-corrupt-checkpoint')
@@ -914,7 +1078,9 @@ describe('RuntimeServer domain RPC', () => {
       type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'run-session',
       executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
     })
-    await settle()
+    await waitUntil(() => database.get<{ status: string }>(
+      'SELECT status FROM session_runs WHERE session_id = ?', 'run-session'
+    )?.status === 'running')
     const running = database.get<{ id: string; status: string; runtime_generation: string }>(
       'SELECT id, status, runtime_generation FROM session_runs WHERE session_id = ?',
       'run-session'

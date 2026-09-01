@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { RuntimeErrorCode, StorageFaultCode } from './runtime-lifecycle'
 
 export const PROTOCOL_VERSION = 1 as const
+export const MAX_CHECKPOINT_SNAPSHOT_BYTES = 16 * 1024 * 1024
 
 const protocolVersion = z.literal(PROTOCOL_VERSION)
 const identifier = z
@@ -76,6 +77,18 @@ const replayRequestSchema = z.object({
   protocolVersion,
   sessionId,
   fromSequence: z.number().int().nonnegative()
+})
+
+const checkpointSchema = z.object({
+  type: z.literal('terminal.checkpoint'),
+  protocolVersion,
+  sessionId,
+  throughSequence: z.number().int().nonnegative(),
+  screenEpoch: z.number().int().nonnegative(),
+  snapshot: z.string().refine(
+    (value) => new TextEncoder().encode(value).byteLength <= MAX_CHECKPOINT_SNAPSHOT_BYTES,
+    'checkpoint snapshot exceeds the transport limit'
+  )
 })
 
 export const RPC_METHODS = [
@@ -199,6 +212,7 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   disposeSchema,
   ackSchema,
   replayRequestSchema,
+  checkpointSchema,
   rpcRequestSchema,
   rpcCancelSchema,
   eventsSubscribeSchema
@@ -314,6 +328,10 @@ export type RuntimeMessage =
       }
       availableFromSequence: number
       liveSequence: number
+      source: 'checkpoint' | 'tail'
+      fromSequence: number
+      throughSequence: number
+      instantLineLimit: 10_000
     }
   | {
       type: 'terminal.replay-resize'
@@ -335,6 +353,19 @@ export type RuntimeMessage =
       protocolVersion: typeof PROTOCOL_VERSION
       sessionId: string
       throughSequence: number
+    }
+  | {
+      type: 'terminal.checkpoint-stored'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      throughSequence: number
+    }
+  | {
+      type: 'terminal.checkpoint-rejected'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      throughSequence: number
+      reason: string
     }
   | {
       type: 'terminal.gap'

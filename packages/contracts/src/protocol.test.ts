@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { PROTOCOL_VERSION, RPC_METHODS, parseRendererMessage } from './protocol'
+import {
+  MAX_CHECKPOINT_SNAPSHOT_BYTES,
+  PROTOCOL_VERSION,
+  RPC_METHODS,
+  parseRendererMessage
+} from './protocol'
 
 describe('parseRendererMessage', () => {
   it('accepts an exact-version hello message', () => {
@@ -81,6 +86,26 @@ describe('parseRendererMessage', () => {
       type: 'terminal.ack',
       throughSequence: 17
     })
+  })
+
+  it('accepts a bounded serialized terminal checkpoint', () => {
+    expect(parseRendererMessage({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 17, screenEpoch: 2,
+      snapshot: '\u001b[2Jrestored screen'
+    })).toMatchObject({ type: 'terminal.checkpoint', throughSequence: 17 })
+  })
+
+  it('rejects unsafe checkpoint identities and oversized UTF-8 snapshots', () => {
+    expect(() => parseRendererMessage({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: '../outside', throughSequence: 17, screenEpoch: 2, snapshot: 'screen'
+    })).toThrow(/sessionId/)
+    expect(() => parseRendererMessage({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 17, screenEpoch: 2,
+      snapshot: '😀'.repeat(Math.floor(MAX_CHECKPOINT_SNAPSHOT_BYTES / 4) + 1)
+    })).toThrow(/transport limit/)
   })
 
   it.each(['submit', 'control', 'provider-action'])(

@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import type { RuntimeDatabase } from '../storage/database'
 
 const MAGIC = Buffer.from('MTCPV1\n', 'ascii')
+export const MAX_CHECKPOINT_SNAPSHOT_BYTES = 16 * 1024 * 1024
 
 export type CheckpointFaultPhase =
   | 'after-file-sync'
@@ -93,6 +94,22 @@ export class CheckpointManager {
   ): Promise<CreatedCheckpoint> {
     validateInput(input)
     return this.#database.enqueueWrite(async () => {
+      const latest = this.#database.get<{
+        terminal_sequence: number
+        domain_event_sequence: number
+      }>(
+        `SELECT terminal_sequence, domain_event_sequence
+         FROM journal_checkpoints WHERE session_id = ? AND valid = 1
+         ORDER BY generation DESC LIMIT 1`,
+        input.sessionId
+      )
+      if (
+        latest &&
+        (input.terminalSequence < latest.terminal_sequence ||
+          input.domainEventSequence < latest.domain_event_sequence)
+      ) {
+        throw new Error('checkpoint watermark must not move backwards')
+      }
       const generation =
         (this.#database.get<{ maximum: number }>(
           'SELECT COALESCE(MAX(generation), 0) AS maximum FROM journal_checkpoints WHERE session_id = ?',
@@ -293,12 +310,21 @@ function digest(encoded: Buffer): string {
 }
 
 function validateInput(input: CreateCheckpointInput): void {
+  if (
+    input.sessionId.length > 160 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.sessionId)
+  ) {
+    throw new Error('sessionId contains unsupported characters')
+  }
   for (const [name, value] of [
     ['terminalSequence', input.terminalSequence],
     ['domainEventSequence', input.domainEventSequence],
     ['screenEpoch', input.screenEpoch]
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be non-negative`)
+  }
+  if (input.snapshot.byteLength > MAX_CHECKPOINT_SNAPSHOT_BYTES) {
+    throw new Error('checkpoint snapshot exceeds the storage limit')
   }
 }
 

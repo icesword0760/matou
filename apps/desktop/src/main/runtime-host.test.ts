@@ -144,6 +144,23 @@ describe('RuntimeHost', () => {
     expect(electron.children).toHaveLength(2)
   })
 
+  it('transfers a fresh port when the same Renderer finishes a reload', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn')
+    await starting
+    child.emit('message', ready)
+    const renderer = new MockWebContents()
+
+    host.connect(renderer as never)
+    host.connect(renderer as never)
+
+    expect(renderer.messages).toHaveLength(2)
+    expect(renderer.messages[1]!.ports[0]).not.toBe(renderer.messages[0]!.ports[0])
+    expect(child.postMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('backs off repeated pre-ready failures and resets the delay after ready', async () => {
     const host = new RuntimeHost('/runtime/index.cjs')
     const starting = host.start()

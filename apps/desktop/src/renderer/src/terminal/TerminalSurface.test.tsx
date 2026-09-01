@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -15,10 +15,12 @@ const state = vi.hoisted(() => ({
   onData: undefined as undefined | ((data: string) => void),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
+  serialize: vi.fn(() => '\u001b[2Jserialized screen'),
   attachTerminal: vi.fn(),
   sendTerminalInput: vi.fn(),
   updateTerminalProfile: vi.fn(),
-  recordTerminalInteraction: vi.fn()
+  recordTerminalInteraction: vi.fn(),
+  storeTerminalCheckpoint: vi.fn()
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -53,6 +55,9 @@ vi.mock('@xterm/addon-search', () => ({
     }
   }
 }))
+vi.mock('@xterm/addon-serialize', () => ({
+  SerializeAddon: class { serialize = state.serialize }
+}))
 vi.mock('../runtime/RuntimeProvider', () => ({
   useRuntimeClient: (() => {
     const client = {
@@ -66,7 +71,8 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     resizeTerminal: vi.fn(),
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
-    recordTerminalInteraction: state.recordTerminalInteraction
+    recordTerminalInteraction: state.recordTerminalInteraction,
+    storeTerminalCheckpoint: state.storeTerminalCheckpoint
     }
     return () => client
   })()
@@ -87,6 +93,8 @@ describe('TerminalSurface focus continuity', () => {
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
     state.terminalWrite.mockClear()
+    state.serialize.mockClear()
+    state.storeTerminalCheckpoint.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -98,6 +106,7 @@ describe('TerminalSurface focus continuity', () => {
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
   })
   afterEach(() => {
+    vi.useRealTimers()
     cleanup()
     Reflect.deleteProperty(window, 'matouDesktop')
     vi.unstubAllGlobals()
@@ -119,6 +128,108 @@ describe('TerminalSurface focus continuity', () => {
     })
 
     expect(state.terminalResize).toHaveBeenCalledWith(100, 40)
+  })
+
+  it('restores a serialized checkpoint before applying its Journal tail', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'checkpoint',
+      fromSequence: 8, throughSequence: 8, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 8,
+      checkpoint: {
+        terminalSequence: 7, domainEventSequence: 2, screenEpoch: 3,
+        snapshot: new TextEncoder().encode('\u001b[2Jcheckpoint screen')
+      }
+    })
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 8,
+      data: new TextEncoder().encode('tail')
+    })
+
+    expect(state.terminalWrite.mock.calls.slice(-2).map(([data]) =>
+      typeof data === 'string' ? data : new TextDecoder().decode(data as Uint8Array)
+    )).toEqual(['\u001b[2Jcheckpoint screen', 'tail'])
+  })
+
+  it('checkpoints the latest applied screen after output becomes quiet', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    vi.useFakeTimers()
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('first')
+    })
+    await act(() => vi.advanceTimersByTimeAsync(499))
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(1))
+    expect(state.storeTerminalCheckpoint).toHaveBeenLastCalledWith(
+      'session-1', 1, 0, '\u001b[2Jserialized screen'
+    )
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 2,
+      data: new TextEncoder().encode('second')
+    })
+    await act(() => vi.advanceTimersByTimeAsync(500))
+    expect(state.storeTerminalCheckpoint).toHaveBeenLastCalledWith(
+      'session-1', 2, 0, '\u001b[2Jserialized screen'
+    )
+    expect(state.storeTerminalCheckpoint).toHaveBeenCalledTimes(2)
+  })
+
+  it('checkpoints only when the whole Scene leaves foreground, not when a sibling loses focus or viewport', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    vi.useFakeTimers()
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('screen')
+    })
+
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground={false} />)
+    expect(state.storeTerminalCheckpoint).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not checkpoint unsequenced restored Shell history when its Scene moves behind', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.restored-history', sessionId: 'session-1', blockCount: 1,
+      data: new TextEncoder().encode('completed block')
+    })
+
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground={false} />)
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+  })
+
+  it('creates a fresh checkpoint immediately after replay has fully applied', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    vi.useFakeTimers()
+
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'tail',
+      fromSequence: 4, throughSequence: 4, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 4
+    })
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('restored')
+    })
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    state.onMessage?.({
+      type: 'terminal.replay-complete', sessionId: 'session-1', throughSequence: 4
+    })
+    await act(() => vi.advanceTimersByTimeAsync(0))
+
+    expect(state.storeTerminalCheckpoint).toHaveBeenCalledWith(
+      'session-1', 4, 0, '\u001b[2Jserialized screen'
+    )
   })
 
   it('shows durable completed Shell Blocks before the fresh live prompt', async () => {

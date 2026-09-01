@@ -36,11 +36,23 @@ interface TerminalConsumer {
   listeners: Set<(message: RuntimeMessage) => void>
 }
 
+interface TerminalCheckpoint {
+  throughSequence: number
+  screenEpoch: number
+  snapshot: string
+}
+
+interface TerminalCheckpointQueue {
+  inFlight?: TerminalCheckpoint
+  pending?: TerminalCheckpoint
+}
+
 export class RuntimeClient {
   readonly #clientId: string
   readonly #requestTimeoutMs: number
   readonly #requests = new Map<string, PendingRequest>()
   readonly #terminals = new Map<string, TerminalConsumer>()
+  readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
@@ -62,6 +74,11 @@ export class RuntimeClient {
     this.#port.close()
     this.#port = port
     this.#ready = false
+    // An acknowledgement belongs to the port generation that carried the
+    // write. A replacement Runtime may already have committed it or may never
+    // have seen it, so discard transport state and let the next replay/output
+    // snapshot establish a fresh authoritative checkpoint.
+    this.#terminalCheckpoints.clear()
     for (const [requestId, pending] of this.#requests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Runtime channel replaced before the request completed'))
@@ -72,6 +89,7 @@ export class RuntimeClient {
 
   setRuntimeMode(mode: RuntimeMode): void {
     this.#readOnly = mode === 'read-only'
+    if (this.#readOnly) this.#terminalCheckpoints.clear()
     for (const consumer of this.#terminals.values()) {
       consumer.config = effectiveTerminalConfig(
         consumer.config,
@@ -139,7 +157,13 @@ export class RuntimeClient {
     if (this.#ready && consumer.listeners.size === 1) this.#spawn(consumer.config)
     return () => {
       consumer.listeners.delete(listener)
-      if (consumer.listeners.size === 0) this.#terminals.delete(config.sessionId)
+      if (consumer.listeners.size === 0) {
+        this.#terminals.delete(config.sessionId)
+        const queue = this.#terminalCheckpoints.get(config.sessionId)
+        if (!queue?.inFlight && !queue?.pending) {
+          this.#terminalCheckpoints.delete(config.sessionId)
+        }
+      }
     }
   }
 
@@ -199,8 +223,28 @@ export class RuntimeClient {
     })
   }
 
+  storeTerminalCheckpoint(
+    sessionId: string,
+    throughSequence: number,
+    screenEpoch: number,
+    snapshot: string
+  ): void {
+    if (this.#readOnly) return
+    const checkpoint = { throughSequence, screenEpoch, snapshot }
+    const queue = this.#terminalCheckpoints.get(sessionId) ?? {}
+    this.#terminalCheckpoints.set(sessionId, queue)
+    if (queue.inFlight) {
+      if (!queue.pending || throughSequence >= queue.pending.throughSequence) {
+        queue.pending = checkpoint
+      }
+      return
+    }
+    this.#postTerminalCheckpoint(sessionId, queue, checkpoint)
+  }
+
   disposeDeletedTerminal(sessionId: string): void {
     this.#terminals.delete(sessionId)
+    this.#terminalCheckpoints.delete(sessionId)
     if (this.#readOnly) return
     this.#post({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
   }
@@ -233,6 +277,21 @@ export class RuntimeClient {
       else pending.reject(Object.assign(new Error(message.message), { code: message.code }))
       return
     }
+    if (
+      message.type === 'terminal.checkpoint-stored' ||
+      message.type === 'terminal.checkpoint-rejected'
+    ) {
+      const queue = this.#terminalCheckpoints.get(message.sessionId)
+      if (queue?.inFlight && queue.inFlight.throughSequence <= message.throughSequence) {
+        delete queue.inFlight
+        const pending = queue.pending
+        delete queue.pending
+        if (pending) this.#postTerminalCheckpoint(message.sessionId, queue, pending)
+        else if (!this.#terminals.has(message.sessionId)) {
+          this.#terminalCheckpoints.delete(message.sessionId)
+        }
+      }
+    }
     if ('sessionId' in message && typeof message.sessionId === 'string') {
       for (const listener of this.#terminals.get(message.sessionId)?.listeners ?? []) {
         listener(message)
@@ -255,6 +314,18 @@ export class RuntimeClient {
     this.#post({
       type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
       consumerId: `${this.#clientId}-projection`, afterSequence, batchSize: 250
+    })
+  }
+
+  #postTerminalCheckpoint(
+    sessionId: string,
+    queue: TerminalCheckpointQueue,
+    checkpoint: TerminalCheckpoint
+  ): void {
+    queue.inFlight = checkpoint
+    this.#post({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId, ...checkpoint
     })
   }
 

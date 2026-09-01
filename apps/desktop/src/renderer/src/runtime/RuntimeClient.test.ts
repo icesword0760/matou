@@ -151,6 +151,86 @@ describe('RuntimeClient', () => {
     })
   })
 
+  it('sends a serialized terminal checkpoint with its applied Journal watermark', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+
+    client.storeTerminalCheckpoint('session-1', 42, 3, '\u001b[2Jscreen')
+
+    expect(port.sent.at(-1)).toMatchObject({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 42, screenEpoch: 3,
+      snapshot: '\u001b[2Jscreen'
+    })
+    expect(() => parseRendererMessage(port.sent.at(-1))).not.toThrow()
+  })
+
+  it('keeps one checkpoint in flight per Session and retains only the newest pending screen', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+
+    client.storeTerminalCheckpoint('session-1', 1, 0, 'first')
+    client.storeTerminalCheckpoint('session-1', 2, 0, 'second')
+    client.storeTerminalCheckpoint('session-1', 3, 0, 'newest')
+    client.storeTerminalCheckpoint('session-2', 4, 1, 'independent')
+
+    expect(port.sent.filter(({ type }) => type === 'terminal.checkpoint')).toEqual([
+      expect.objectContaining({ sessionId: 'session-1', throughSequence: 1, snapshot: 'first' }),
+      expect.objectContaining({ sessionId: 'session-2', throughSequence: 4, snapshot: 'independent' })
+    ])
+    port.deliver({
+      type: 'terminal.checkpoint-stored', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 1
+    })
+    expect(port.sent.filter(({ type }) => type === 'terminal.checkpoint').at(-1)).toMatchObject({
+      sessionId: 'session-1', throughSequence: 3, snapshot: 'newest'
+    })
+  })
+
+  it('continues checkpointing after rejection and after replacing a port with a lost acknowledgement', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    client.storeTerminalCheckpoint('session-1', 1, 0, 'first')
+    client.storeTerminalCheckpoint('session-1', 2, 0, 'pending')
+
+    first.deliver({
+      type: 'terminal.checkpoint-rejected', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 1, reason: 'stale'
+    })
+    expect(first.sent.filter(({ type }) => type === 'terminal.checkpoint').at(-1)).toMatchObject({
+      sessionId: 'session-1', throughSequence: 2, snapshot: 'pending'
+    })
+
+    const second = new FakePort()
+    client.replacePort(second)
+    client.storeTerminalCheckpoint('session-1', 3, 0, 'after reconnect')
+    expect(second.sent.at(-1)).toMatchObject({
+      type: 'terminal.checkpoint', sessionId: 'session-1', throughSequence: 3,
+      snapshot: 'after reconnect'
+    })
+  })
+
+  it('drains the final pending foreground checkpoint after its terminal view detaches', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    const detach = client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1',
+      profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+    client.storeTerminalCheckpoint('session-1', 1, 0, 'quiet')
+    client.storeTerminalCheckpoint('session-1', 2, 0, 'leaving foreground')
+
+    detach()
+    port.deliver({
+      type: 'terminal.checkpoint-stored', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 1
+    })
+
+    expect(port.sent.filter(({ type }) => type === 'terminal.checkpoint').at(-1)).toMatchObject({
+      sessionId: 'session-1', throughSequence: 2, snapshot: 'leaving foreground'
+    })
+  })
+
   it('attaches a read-only terminal through replay without spawning a process', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })
@@ -210,6 +290,7 @@ describe('RuntimeClient', () => {
     client.resizeTerminal('session-1', 100, 30)
     client.retryLastTerminalInput('session-1')
     client.recordTerminalInteraction('session-1', 'submit')
+    client.storeTerminalCheckpoint('session-1', 1, 0, 'blocked')
     client.disposeDeletedTerminal('session-1')
 
     expect(port.sent).toHaveLength(before)

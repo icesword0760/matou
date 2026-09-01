@@ -619,6 +619,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
                   active={isFocused} visible={scene.id === activeSceneId && cardVisible}
+                  foreground={scene.id === activeSceneId}
                   workspaceSessionCount={workspaceSessionCount}
                   taskName={task.title} sceneId={scene.id} pathValid={pathValid} readOnly={readOnly}
                   themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}

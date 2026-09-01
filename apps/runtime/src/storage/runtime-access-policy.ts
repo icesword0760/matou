@@ -13,6 +13,7 @@ export type TerminalMessageType =
   | 'terminal.dispose'
   | 'terminal.ack'
   | 'terminal.replay-request'
+  | 'terminal.checkpoint'
 
 const NORMAL_CAPABILITIES: RuntimeCapability[] = [
   'terminal-v1',

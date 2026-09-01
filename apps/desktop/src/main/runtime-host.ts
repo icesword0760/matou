@@ -175,6 +175,10 @@ export class RuntimeHost {
 
   connect(webContents: WebContents): void {
     this.#renderers.add(webContents)
+    // did-finish-load is emitted again after a Renderer reload. The previously
+    // transferred port belongs to the old document and is no longer reachable,
+    // so this load must receive a fresh direct Runtime channel.
+    this.#connectedRenderers.delete(webContents)
     this.#sendConnectionState(webContents)
     this.#sendLifecycle(webContents)
     if (this.#isRuntimeReady()) this.#connectRenderer(webContents)

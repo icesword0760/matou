@@ -68,6 +68,10 @@ export class PtySession {
   #resolveClosed: () => void = () => {}
 
   get lastSequence(): number { return this.#sequence }
+  tailStart(maxLines = 10_000): number { return this.#journal.tailStart(maxLines) }
+  domainEventSequenceAtOrBefore(sequence: number): number {
+    return this.#journal.domainEventSequenceAtOrBefore(sequence)
+  }
 
   private constructor(options: PtySessionOptions, journal: SegmentJournal, terminal: pty.IPty) {
     this.sessionId = options.sessionId

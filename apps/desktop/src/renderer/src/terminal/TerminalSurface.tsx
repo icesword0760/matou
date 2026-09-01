@@ -1,8 +1,9 @@
 import { type DragEvent, useEffect, useRef, useState } from 'react'
 
-import type { RuntimeMessage } from '@matou/contracts'
+import { MAX_CHECKPOINT_SNAPSHOT_BYTES, type RuntimeMessage } from '@matou/contracts'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
@@ -15,6 +16,8 @@ import {
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
 const REFERENCE_FILE_TREE_MIME = 'application/x-file-tree-nodes'
+const CHECKPOINT_QUIET_MS = 500
+const CHECKPOINT_SCROLLBACK_LINES = 10_000
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -34,6 +37,7 @@ interface TerminalSurfaceProps {
   profile?: 'shell' | 'claude-code' | 'codex'
   visible?: boolean
   active?: boolean
+  foreground?: boolean
   inputDisabled?: boolean
   readOnly?: boolean
   themeKey?: TerminalThemeKey
@@ -54,7 +58,8 @@ interface TerminalSurfaceProps {
 export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
-    profile = 'shell', visible = true, active = true, inputDisabled = false, readOnly = false,
+    profile = 'shell', visible = true, active = true, foreground = true,
+    inputDisabled = false, readOnly = false,
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onRuntimeError = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
@@ -78,6 +83,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
   const sendInputRef = useRef<(data: string) => void>(NOOP)
+  const checkpointNowRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
 
   // Runtime bytes can arrive during React's commit phase, before passive
@@ -98,6 +104,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [visible])
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
+  useEffect(() => {
+    if (!foreground) checkpointNowRef.current()
+  }, [foreground])
   useEffect(() => { onOscNotificationRef.current = onOscNotification }, [onOscNotification])
   useEffect(() => { onFontSizeChangeRef.current = onFontSizeChange }, [onFontSizeChange])
   useEffect(() => { onSearchResultsRef.current = onSearchResults }, [onSearchResults])
@@ -139,8 +148,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     })
     const fit = new FitAddon()
     const search = new SearchAddon()
+    const serialize = new SerializeAddon()
     terminal.loadAddon(fit)
     terminal.loadAddon(search)
+    terminal.loadAddon(serialize)
     terminal.open(container)
     terminalRef.current = terminal
     fit.fit()
@@ -157,6 +168,39 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let replayRequested = false
     let replaying = false
     let spawned = false
+    let lastAppliedSequence = 0
+    let screenEpoch = 0
+    let lastCheckpointSequence = -1
+    let checkpointTimer: ReturnType<typeof setTimeout> | undefined
+    const clearCheckpointTimer = () => {
+      if (checkpointTimer !== undefined) clearTimeout(checkpointTimer)
+      checkpointTimer = undefined
+    }
+    const storeCheckpoint = () => {
+      clearCheckpointTimer()
+      if (
+        readOnly || replaying || lastAppliedSequence <= 0 ||
+        lastAppliedSequence <= lastCheckpointSequence
+      ) return
+      const snapshot = serializeCheckpoint(serialize)
+      if (snapshot === undefined) return
+      lastCheckpointSequence = lastAppliedSequence
+      client.storeTerminalCheckpoint(
+        sessionId,
+        lastAppliedSequence,
+        screenEpoch,
+        snapshot
+      )
+    }
+    const scheduleCheckpoint = (delay = CHECKPOINT_QUIET_MS) => {
+      clearCheckpointTimer()
+      if (
+        readOnly || replaying || lastAppliedSequence <= 0 ||
+        lastAppliedSequence <= lastCheckpointSequence
+      ) return
+      checkpointTimer = setTimeout(storeCheckpoint, delay)
+    }
+    checkpointNowRef.current = storeCheckpoint
     const markSpawned = () => {
       spawned = true
       if (pendingInputRef.current) {
@@ -205,7 +249,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           }
         }
         terminal.write(bytes, () => {
+          lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
           client.acknowledgeTerminal(sessionId, message.sequence)
+          scheduleCheckpoint()
           if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) terminal.focus()
         })
       } else if (message.type === 'terminal.restored-history') {
@@ -215,27 +261,48 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         terminal.write(bytes)
       } else if (message.type === 'terminal.exited') {
         spawned = false
+        lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
+        scheduleCheckpoint()
         onStatusChange('exited')
       } else if (message.type === 'protocol.error') {
         onStatusChange('error')
         onRuntimeError(message.message)
       } else if (message.type === 'terminal.replay-start') {
+        clearCheckpointTimer()
         replaying = true
         terminal.reset()
+        lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
+        lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
+        screenEpoch = message.checkpoint?.screenEpoch ?? 0
+        if (message.checkpoint) {
+          const snapshot = message.checkpoint.snapshot instanceof Uint8Array
+            ? message.checkpoint.snapshot
+            : new Uint8Array(message.checkpoint.snapshot)
+          terminal.write(snapshot)
+        }
       } else if (message.type === 'terminal.replay-resize') {
         // Resize is part of VT history: zsh and full-screen tools emit cursor
         // movements relative to the active grid. Apply it at its original
         // sequence instead of replaying every byte at today's card width.
-        terminal.write('', () => terminal.resize(message.cols, message.rows))
-      } else if (message.type === 'terminal.replay-reset') {
-        terminal.write('', () => terminal.reset())
-      } else if (message.type === 'terminal.replay-complete') {
-        replaying = false
         terminal.write('', () => {
+          terminal.resize(message.cols, message.rows)
+          lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
+        })
+      } else if (message.type === 'terminal.replay-reset') {
+        terminal.write('', () => {
+          terminal.reset()
+          screenEpoch = message.screenEpoch
+          lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
+        })
+      } else if (message.type === 'terminal.replay-complete') {
+        terminal.write('', () => {
+          replaying = false
+          lastAppliedSequence = Math.max(lastAppliedSequence, message.throughSequence)
           fit.fit()
           if (validTerminalDimensions(terminal.cols, terminal.rows)) {
             resizeCoalescer.offer(terminal.cols, terminal.rows)
           }
+          scheduleCheckpoint(0)
           onReplayComplete(`replayed-through:${message.throughSequence}`)
         })
       }
@@ -296,6 +363,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     container.addEventListener('wheel', wheel, { passive: false })
     return () => {
+      clearCheckpointTimer()
+      storeCheckpoint()
+      checkpointNowRef.current = NOOP
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
       resizeCoalescer.flush()
@@ -382,6 +452,21 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     <div className="terminal-surface__viewport" ref={containerRef} />
     {isDragOverTerminal && <div className="terminal-drop-overlay" data-testid="terminal-drop-overlay" />}
   </div>
+}
+
+function serializeCheckpoint(serialize: SerializeAddon): string | undefined {
+  let scrollback = CHECKPOINT_SCROLLBACK_LINES
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const snapshot = serialize.serialize({ scrollback })
+    const bytes = new TextEncoder().encode(snapshot).byteLength
+    if (bytes <= MAX_CHECKPOINT_SNAPSHOT_BYTES) {
+      return snapshot
+    }
+    if (scrollback === 0) return undefined
+    const ratio = MAX_CHECKPOINT_SNAPSHOT_BYTES / bytes
+    scrollback = Math.max(0, Math.floor(scrollback * ratio * 0.9))
+  }
+  return undefined
 }
 
 function validTerminalDimensions(cols: number, rows: number): boolean {

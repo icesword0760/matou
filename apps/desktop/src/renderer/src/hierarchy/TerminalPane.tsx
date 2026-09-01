@@ -16,6 +16,7 @@ export function TerminalPane(props: {
   session: SessionView
   active: boolean
   visible?: boolean
+  foreground?: boolean
   workspaceSessionCount: number
   taskName: string
   workspaceId?: string
@@ -58,7 +59,7 @@ export function TerminalPane(props: {
   onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
 }) {
   const {
-    session, active, visible = true, workspaceSessionCount, taskName,
+    session, active, visible = true, foreground = true, workspaceSessionCount, taskName,
     pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError, cwd, git,
     sharedWorkingDirectory = false,
@@ -310,7 +311,8 @@ export function TerminalPane(props: {
       workStatus={workStatus} latestLines={latestLines} />}
     {!isTeamMember && forkState !== 'failed' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
-      profile={profile} visible={visible} active={active} inputDisabled={readOnly || !pathValid}
+      profile={profile} visible={visible} active={active} foreground={foreground}
+      inputDisabled={readOnly || !pathValid}
       readOnly={readOnly}
       themeKey={themeKey} fontSize={fontSize}
       {...(onFontSizeChange ? { onFontSizeChange } : {})}

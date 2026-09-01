@@ -15,6 +15,7 @@ import {
 import { DomainEventStore } from './events/domain-event-store'
 import { JournalCorruptionError, SegmentJournal, readSessionFrames } from './journal/segment-journal'
 import type { DecodedJournalFrame } from './journal/segment-journal'
+import { JournalTailIndex } from './journal/journal-tail-index'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import type { CapabilityTokenService } from './control/host-control-server'
 import type { RuntimeControlBackend } from './control/runtime-control-backend'
@@ -407,6 +408,9 @@ export class RuntimeServer {
       case 'terminal.replay-request':
         await this.#replay(message)
         break
+      case 'terminal.checkpoint':
+        await this.#storeCheckpoint(message)
+        break
       case 'rpc.cancel':
         this.#cancelledRequests.add(message.requestId)
         break
@@ -626,20 +630,27 @@ export class RuntimeServer {
         : await readSessionFrames(this.#dataRoot, message.sessionId)
       const availableFromSequence = frames.at(0)?.sequence ?? 0
       const liveSequence = frames.at(-1)?.sequence ?? 0
-      const checkpointTerminalWatermark = message.fromSequence === 0
-        ? liveSequence
-        : Math.min(message.fromSequence, liveSequence)
+      const tailFromSequence = activeSession?.tailStart(10_000) ?? tailStartFromFrames(frames)
+      const checkpointTerminalWatermark = liveSequence
       const checkpointDomainWatermark = highestDomainCursorAtOrBefore(
         frames,
         checkpointTerminalWatermark
       )
-      const checkpoint = await new CheckpointManager(this.#dataRoot, this.#database).loadLatest(
+      const candidateCheckpoint = await new CheckpointManager(this.#dataRoot, this.#database).loadLatest(
         message.sessionId,
         {
           terminalSequence: checkpointTerminalWatermark,
           domainEventSequence: checkpointDomainWatermark
         }
       )
+      // A re-attached PTY asks for the beginning of its current run. An older
+      // checkpoint cannot replace that prefix: resetting to it and then
+      // starting at requestedFrom would leave a visible hole. A newer
+      // checkpoint already contains that prefix and is the fastest exact base.
+      const checkpoint = candidateCheckpoint && (
+        message.fromSequence === 0 ||
+        candidateCheckpoint.terminalSequence >= message.fromSequence
+      ) ? candidateCheckpoint : undefined
       if (
         message.fromSequence > 0 &&
         availableFromSequence > 0 &&
@@ -668,10 +679,18 @@ export class RuntimeServer {
           }
         }),
         availableFromSequence,
-        liveSequence
+        liveSequence,
+        source: checkpoint === undefined ? 'tail' : 'checkpoint',
+        fromSequence: checkpoint === undefined
+          ? (message.fromSequence === 0
+              ? tailFromSequence
+              : Math.max(message.fromSequence, availableFromSequence))
+          : checkpoint.terminalSequence + 1,
+        throughSequence: liveSequence,
+        instantLineLimit: 10_000
       })
       const requestedFrom = message.fromSequence === 0
-        ? availableFromSequence
+        ? tailFromSequence
         : Math.max(message.fromSequence, availableFromSequence)
       const effectiveFrom = checkpoint === undefined
         ? requestedFrom
@@ -704,6 +723,64 @@ export class RuntimeServer {
         return
       }
       this.#sendError('INTERNAL_ERROR', errorMessage(error))
+    }
+  }
+
+  async #storeCheckpoint(
+    message: Extract<RendererMessage, { type: 'terminal.checkpoint' }>
+  ): Promise<void> {
+    if (
+      !this.#attachedSessionIds.has(message.sessionId) &&
+      !this.#database.get('SELECT id FROM sessions WHERE id = ?', message.sessionId)
+    ) {
+      this.#sendError(
+        'SESSION_FORBIDDEN',
+        `session ${message.sessionId} is outside this Renderer capability`,
+        message.sessionId
+      )
+      return
+    }
+    try {
+      const activeSession = this.#attachedSessionIds.has(message.sessionId)
+        ? this.#sessions.get(message.sessionId)
+        : undefined
+      const frames = activeSession
+        ? undefined
+        : await readSessionFrames(this.#dataRoot, message.sessionId)
+      const liveSequence = activeSession?.lastSequence ?? frames?.at(-1)?.sequence ?? 0
+      if (message.throughSequence > liveSequence) {
+        this.#port.postMessage({
+          type: 'terminal.checkpoint-rejected',
+          protocolVersion: PROTOCOL_VERSION,
+          sessionId: message.sessionId,
+          throughSequence: message.throughSequence,
+          reason: `checkpoint sequence ${message.throughSequence} exceeds live sequence ${liveSequence}`
+        })
+        return
+      }
+      await new CheckpointManager(this.#dataRoot, this.#database).create({
+        sessionId: message.sessionId,
+        terminalSequence: message.throughSequence,
+        domainEventSequence: activeSession
+          ? activeSession.domainEventSequenceAtOrBefore(message.throughSequence)
+          : highestDomainCursorAtOrBefore(frames ?? [], message.throughSequence),
+        screenEpoch: message.screenEpoch,
+        snapshot: new TextEncoder().encode(message.snapshot)
+      })
+      this.#port.postMessage({
+        type: 'terminal.checkpoint-stored',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: message.sessionId,
+        throughSequence: message.throughSequence
+      })
+    } catch (error) {
+      this.#port.postMessage({
+        type: 'terminal.checkpoint-rejected',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: message.sessionId,
+        throughSequence: message.throughSequence,
+        reason: errorMessage(error)
+      })
     }
   }
 
@@ -1965,6 +2042,19 @@ function highestDomainCursorAtOrBefore(frames: DecodedJournalFrame[], terminalSe
   }
   return sequence
 }
+
+function tailStartFromFrames(frames: DecodedJournalFrame[]): number {
+  const index = new JournalTailIndex()
+  for (const frame of frames) {
+    index.record(
+      frame.sequence,
+      frame.kind === 'output' ? frame.data : EMPTY_JOURNAL_FRAME_DATA
+    )
+  }
+  return index.tailStart(10_000)
+}
+
+const EMPTY_JOURNAL_FRAME_DATA = new Uint8Array()
 
 function disposedSessionIds(result: unknown): string[] {
   if (typeof result !== 'object' || result === null || !('disposedSessionIds' in result)) {

@@ -39,6 +39,49 @@ test('streams PTY output from UtilityProcess to xterm over a transferred Message
   }
 })
 
+test('stores a real xterm checkpoint and restores it before the Journal tail after Renderer reload', async () => {
+  test.setTimeout(60_000)
+  const fixture = await launchMatou()
+  try {
+    const { page } = fixture
+    await installCheckpointProbe(page)
+    await page.addInitScript(checkpointProbeInstaller)
+    const surface = activeTerminalSurface(page)
+    await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
+    const sessionId = await surface.getAttribute('data-session-id')
+    expect(sessionId).toBeTruthy()
+    const marker = `__REAL_CHECKPOINT_${Date.now()}__`
+    const textarea = surface.locator('.xterm-helper-textarea')
+    await textarea.focus()
+    await textarea.pressSequentially(`printf '${marker}\\n'`, { delay: 2 })
+    await textarea.press('Enter')
+    await expect(surface.locator('.xterm-rows')).toContainText(marker)
+
+    await expect.poll(() => checkpointProbeEntries(page).then((entries) => entries.some((entry) =>
+      entry.direction === 'in' && entry.type === 'terminal.checkpoint-stored' &&
+      entry.sessionId === sessionId
+    ))).toBe(true)
+    const beforeReload = await checkpointProbeEntries(page)
+    const offered = beforeReload.findLast((entry) =>
+      entry.direction === 'out' && entry.type === 'terminal.checkpoint' &&
+      entry.sessionId === sessionId
+    )
+    expect(offered).toMatchObject({ sessionId, snapshot: expect.stringContaining(marker) })
+
+    await page.reload()
+    await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+    await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
+    await expect.poll(() => checkpointProbeEntries(page).then((entries) => entries.some((entry) =>
+      entry.direction === 'in' && entry.type === 'terminal.replay-start' &&
+      entry.sessionId === sessionId && entry.source === 'checkpoint' &&
+      entry.checkpointSequence === offered?.throughSequence
+    ))).toBe(true)
+    await expect(activeTerminalSurface(page).locator('.xterm-rows')).toContainText(marker)
+  } finally {
+    await fixture.close()
+  }
+})
+
 test('drops reference-visible paths as safe single argv without executing them', async () => {
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-e2e-'))
   const dropDirectory = join('/tmp', `matou-drop-e2e-${process.pid}-${Date.now()}`)
@@ -326,4 +369,70 @@ async function pasteIntoTerminal(
       clipboardData: clipboard
     }))
   }, value)
+}
+
+interface CheckpointProbeEntry {
+  direction: 'in' | 'out'
+  type: string
+  sessionId?: string
+  throughSequence?: number
+  checkpointSequence?: number
+  source?: string
+  snapshot?: string
+}
+
+async function installCheckpointProbe(page: import('@playwright/test').Page): Promise<void> {
+  await page.evaluate(checkpointProbeInstaller)
+}
+
+async function checkpointProbeEntries(
+  page: import('@playwright/test').Page
+): Promise<CheckpointProbeEntry[]> {
+  return page.evaluate(() => (
+    window as typeof window & { __matouCheckpointProbe?: CheckpointProbeEntry[] }
+  ).__matouCheckpointProbe ?? [])
+}
+
+function checkpointProbeInstaller(): void {
+  type ProbeEntry = CheckpointProbeEntry
+  const scope = window as typeof window & {
+    __matouCheckpointProbe?: ProbeEntry[]
+    __matouCheckpointProbeInstalled?: boolean
+  }
+  if (scope.__matouCheckpointProbeInstalled) return
+  scope.__matouCheckpointProbeInstalled = true
+  scope.__matouCheckpointProbe = []
+  const observed = new WeakSet<MessagePort>()
+  const original = MessagePort.prototype.postMessage
+  MessagePort.prototype.postMessage = function(message: unknown, transferOrOptions?: unknown) {
+    if (!observed.has(this)) {
+      observed.add(this)
+      this.addEventListener('message', (event: MessageEvent<unknown>) => {
+        const incoming = event.data
+        if (!incoming || typeof incoming !== 'object' || !('type' in incoming)) return
+        const value = incoming as Record<string, unknown>
+        if (value.type !== 'terminal.checkpoint-stored' && value.type !== 'terminal.replay-start') return
+        scope.__matouCheckpointProbe?.push({
+          direction: 'in', type: String(value.type),
+          ...(typeof value.sessionId === 'string' ? { sessionId: value.sessionId } : {}),
+          ...(typeof value.throughSequence === 'number' ? { throughSequence: value.throughSequence } : {}),
+          ...(typeof value.checkpointSequence === 'number' ? { checkpointSequence: value.checkpointSequence } : {}),
+          ...(typeof value.source === 'string' ? { source: value.source } : {})
+        })
+      })
+    }
+    if (message && typeof message === 'object' && 'type' in message) {
+      const value = message as Record<string, unknown>
+      if (value.type === 'terminal.checkpoint') {
+        scope.__matouCheckpointProbe?.push({
+          direction: 'out', type: 'terminal.checkpoint',
+          ...(typeof value.sessionId === 'string' ? { sessionId: value.sessionId } : {}),
+          ...(typeof value.throughSequence === 'number' ? { throughSequence: value.throughSequence } : {}),
+          ...(typeof value.snapshot === 'string' ? { snapshot: value.snapshot } : {})
+        })
+      }
+    }
+    if (transferOrOptions === undefined) return original.call(this, message)
+    return original.call(this, message, transferOrOptions as StructuredSerializeOptions)
+  }
 }
