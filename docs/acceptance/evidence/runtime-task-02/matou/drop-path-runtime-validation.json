@@ -1,0 +1,36 @@
+{
+  "capturedAt": "2026-09-01T23:19:00+08:00",
+  "platform": "macOS",
+  "shell": "/bin/zsh",
+  "commands": [
+    "pnpm --filter @matou/desktop exec vitest run src/renderer/src/terminal/shell-path-quote.test.ts src/renderer/src/terminal/TerminalSurface.test.tsx",
+    "pnpm exec playwright test tests/e2e/terminal-channel.spec.ts --grep \"drops reference-visible paths\" --workers=1"
+  ],
+  "results": {
+    "unitAndComponent": "24 passed",
+    "electron": "1 passed",
+    "ordinaryVisible": "unquoted path with one leading separator space",
+    "spaceVisible": "double-quoted path with one leading separator space",
+    "structuredMimePrecedence": true,
+    "textPlainOnlyIgnored": true,
+    "autoSubmit": false,
+    "argvRoundTrip": [
+      "single quote",
+      "double quote",
+      "backslash",
+      "dollar command substitution",
+      "backtick command substitution",
+      "newline",
+      "carriage return",
+      "semicolon",
+      "pipe",
+      "redirection and glob",
+      "Unicode and emoji"
+    ],
+    "sideEffectFilesCreated": false
+  },
+  "screenshots": [
+    "ordinary-path-visible.png",
+    "space-path-visible.png"
+  ]
+}

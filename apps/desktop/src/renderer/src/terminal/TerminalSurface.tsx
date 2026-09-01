@@ -6,6 +6,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { quoteDroppedPath } from './shell-path-quote'
 import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
 import {
   DEFAULT_TERMINAL_THEME, TERMINAL_THEMES, type TerminalThemeKey
@@ -382,13 +383,29 @@ function isTerminalFileDrop(dataTransfer: DataTransfer): boolean {
 
 function terminalDropPaths(dataTransfer: DataTransfer): string {
   if (Array.from(dataTransfer.types ?? []).includes(KOOKY_FILE_TREE_MIME)) {
-    return dataTransfer.getData('text/plain')
+    return structuredFileTreePaths(dataTransfer.getData(KOOKY_FILE_TREE_MIME))
+      .map(quoteDroppedPath)
+      .join(' ')
   }
   return Array.from(dataTransfer.files ?? [])
     .map((file) => window.matouDesktop?.getPathForFile?.(file) ?? '')
     .filter(Boolean)
-    .map((path) => path.includes(' ') ? `"${path}"` : path)
+    .map(quoteDroppedPath)
     .join(' ')
+}
+
+function structuredFileTreePaths(value: string): string[] {
+  try {
+    const nodes: unknown = JSON.parse(value)
+    if (!Array.isArray(nodes)) return []
+    return nodes.flatMap((node) => {
+      if (!node || typeof node !== 'object' || !('path' in node)) return []
+      const path = node.path
+      return typeof path === 'string' && path.length > 0 ? [path] : []
+    })
+  } catch {
+    return []
+  }
 }
 
 function terminalFocusAllowed(container: HTMLElement): boolean {

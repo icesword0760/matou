@@ -277,16 +277,23 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.sendTerminalInput).not.toHaveBeenCalled()
   })
 
-  it('matches Kooky by previewing an internal file-tree drag and inserting its quoted paths without submitting', async () => {
+  it('prefers structured file-tree paths and safely quotes each path without submitting', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
     const dataTransfer = {
       types: ['text/plain', 'application/x-file-tree-nodes'],
       dropEffect: 'none',
-      getData: vi.fn((type: string) => type === 'text/plain'
-        ? '/tmp/plain.txt "/tmp/with space.txt"'
-        : '')
+      getData: vi.fn((type: string) => {
+        if (type === 'application/x-file-tree-nodes') {
+          return JSON.stringify([
+            { path: '/tmp/plain.txt', name: 'plain.txt', type: 'file' },
+            { path: '/tmp/with space.txt', name: 'with space.txt', type: 'file' },
+            { path: "/tmp/quote'and$(touch PWN).txt", name: 'special', type: 'file' }
+          ])
+        }
+        return type === 'text/plain' ? '$(touch SHOULD_NOT_RUN)\nsecond-command' : ''
+      })
     }
     const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
 
@@ -298,7 +305,7 @@ describe('TerminalSurface focus continuity', () => {
     fireEvent.drop(surface, { dataTransfer })
 
     expect(state.sendTerminalInput).toHaveBeenCalledWith(
-      'session-1', ' /tmp/plain.txt "/tmp/with space.txt"'
+      'session-1', ` /tmp/plain.txt "/tmp/with space.txt" '/tmp/quote'\\''and$(touch PWN).txt'`
     )
     expect(state.sendTerminalInput).not.toHaveBeenCalledWith(
       'session-1', expect.stringContaining('\r')
@@ -307,10 +314,12 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.focus).toHaveBeenCalled()
   })
 
-  it('uses native file paths for Finder drops while preserving Kooky path quoting', async () => {
-    const getPathForFile = vi.fn((file: File) => file.name === 'plain.txt'
-      ? '/tmp/plain.txt'
-      : '/tmp/with space.txt')
+  it('uses native file paths for Finder drops and safely quotes shell-sensitive names', async () => {
+    const getPathForFile = vi.fn((file: File) => ({
+      'plain.txt': '/tmp/plain.txt',
+      'with space.txt': '/tmp/with space.txt',
+      'special.txt': '/tmp/a$(touch PWN).txt'
+    })[file.name] ?? '')
     Object.defineProperty(window, 'matouDesktop', {
       configurable: true,
       value: { getPathForFile }
@@ -318,7 +327,11 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
-    const files = [new File(['a'], 'plain.txt'), new File(['b'], 'with space.txt')]
+    const files = [
+      new File(['a'], 'plain.txt'),
+      new File(['b'], 'with space.txt'),
+      new File(['c'], 'special.txt')
+    ]
     const dataTransfer = {
       types: ['Files'], files, dropEffect: 'none', getData: vi.fn(() => '')
     }
@@ -330,8 +343,25 @@ describe('TerminalSurface focus continuity', () => {
 
     expect(getPathForFile.mock.calls.map(([file]) => file)).toEqual(files)
     expect(state.sendTerminalInput).toHaveBeenCalledWith(
-      'session-1', ' /tmp/plain.txt "/tmp/with space.txt"'
+      'session-1', ` /tmp/plain.txt "/tmp/with space.txt" '/tmp/a$(touch PWN).txt'`
     )
+  })
+
+  it('does not treat arbitrary text/plain as a terminal path drop', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const dataTransfer = {
+      types: ['text/plain'], files: [], dropEffect: 'none',
+      getData: vi.fn(() => 'echo should-not-enter-terminal\nsecond-command')
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    const accepted = fireEvent.drop(surface, { dataTransfer })
+
+    expect(accepted).toBe(true)
+    expect(state.sendTerminalInput).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('terminal-drop-overlay')).toBeNull()
   })
 
   it('keeps the Kooky drop overlay stable across nested drag enter and leave events', async () => {

@@ -1,0 +1,21 @@
+{
+  "capturedAt": "2026-09-01T23:19:00+08:00",
+  "sourceRoot": "<reference-checkout>",
+  "fileTreeProducer": {
+    "file": "src/modules/file/components/FileTreeNode.vue",
+    "lines": "669-684",
+    "behavior": {
+      "ordinary": "/tmp/a.txt",
+      "spaceOnly": "\"/tmp/a b.txt\"",
+      "selectionOrder": "dragNodes insertion order",
+      "structuredMime": "application/x-file-tree-nodes"
+    }
+  },
+  "terminalConsumer": {
+    "file": "src/modules/terminal/components/ClaudeCodeTerminal.vue",
+    "lines": "690-724",
+    "behavior": "adds one leading space, writes the dropped text, does not append Enter, then focuses xterm"
+  },
+  "runtimeVisualContext": "docs/acceptance/evidence/runtime-task-02/reference/cli-runtime-visual-context.png",
+  "conclusion": "Ordinary and space-only visible forms are the current source baseline. Shell-sensitive names require the confirmed D-14 safety extension."
+}
