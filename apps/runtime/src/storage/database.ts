@@ -2,10 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync
+  statSync
 } from 'node:fs'
 import { dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -16,6 +13,11 @@ import type {
 } from 'node:sqlite'
 
 import { StorageQueue } from './storage-queue'
+import {
+  acquireDatabaseOwner,
+  assertNoLiveDatabaseOwner,
+  releaseDatabaseOwner
+} from './database-owner'
 
 // Electron 43 embeds Node 24 with node:sqlite, while the current esbuild
 // builtin table rewrites a normal node:sqlite import to require("sqlite").
@@ -49,11 +51,6 @@ export class StorageReadOnlyError extends Error {
   }
 }
 
-interface OwnerRecord {
-  pid: number
-  runtimeGeneration: string
-}
-
 export interface RuntimeDatabaseOwnership {
   readonly runtimeGeneration: string
   openReadOnly(): RuntimeDatabase
@@ -67,20 +64,20 @@ export class RuntimeDatabase implements DatabaseTransaction {
   readonly readOnly: boolean
   readonly #connection: DatabaseSyncType
   readonly #queue = new StorageQueue()
-  readonly #ownerDirectory: string | undefined
+  readonly #ownerPath: string | undefined
   #closed = false
 
   constructor(
     token: typeof DATABASE_CONSTRUCTOR_TOKEN,
     path: string,
     generation: string,
-    ownerDirectory: string | undefined,
+    ownerPath: string | undefined,
     readOnly: boolean
   ) {
     if (token !== DATABASE_CONSTRUCTOR_TOKEN) throw new Error('invalid RuntimeDatabase constructor')
     this.path = path
     this.runtimeGeneration = generation
-    this.#ownerDirectory = ownerDirectory
+    this.#ownerPath = ownerPath
     this.readOnly = readOnly
     this.#connection = readOnly ? openReadOnlyConnection(path) : new DatabaseSync(path)
 
@@ -106,7 +103,7 @@ export class RuntimeDatabase implements DatabaseTransaction {
         .run('runtime_generation', generation)
     } catch (error) {
       this.#connection.close()
-      if (ownerDirectory !== undefined) releaseOwner(ownerDirectory, generation)
+      if (ownerPath !== undefined) releaseDatabaseOwner(ownerPath, generation)
       throw error
     }
   }
@@ -125,10 +122,9 @@ export class RuntimeDatabase implements DatabaseTransaction {
   }
 
   static assertNoLiveOwner(path: string): void {
-    const existing = readOwner(`${path}.owner`)
-    if (existing !== undefined && isLiveProcess(existing.pid)) {
-      throw new Error('database is already owned by a live Runtime')
-    }
+    const ownerPath = `${path}.owner`
+    if (!existsSync(ownerPath)) return
+    assertNoLiveDatabaseOwner(ownerPath)
   }
 
   pragmas(): DatabasePragmas {
@@ -194,21 +190,21 @@ export class RuntimeDatabase implements DatabaseTransaction {
   close(): void {
     if (this.#closed) return
     this.#closeConnection()
-    if (this.#ownerDirectory !== undefined) {
-      releaseOwner(this.#ownerDirectory, this.runtimeGeneration)
+    if (this.#ownerPath !== undefined) {
+      releaseDatabaseOwner(this.#ownerPath, this.runtimeGeneration)
     }
   }
 
   closeRetainingOwnership(): RuntimeDatabaseOwnership {
     if (this.#closed) throw new Error('database is closed')
-    if (this.#ownerDirectory === undefined) {
+    if (this.#ownerPath === undefined) {
       throw new Error('read-only database does not own the Runtime database fence')
     }
     this.#closeConnection()
     return RuntimeDatabaseOwnershipLease.adopt(
       this.path,
       this.runtimeGeneration,
-      this.#ownerDirectory
+      this.#ownerPath
     )
   }
 
@@ -245,27 +241,27 @@ export class RuntimeDatabase implements DatabaseTransaction {
 class RuntimeDatabaseOwnershipLease implements RuntimeDatabaseOwnership {
   readonly runtimeGeneration: string
   readonly #path: string
-  readonly #ownerDirectory: string
+  readonly #ownerPath: string
   #held = true
 
   constructor(
     path: string,
     runtimeGeneration: string = randomUUID(),
-    ownerDirectory = `${path}.owner`,
+    ownerPath = `${path}.owner`,
     acquire = true
   ) {
     this.#path = path
     this.runtimeGeneration = runtimeGeneration
-    this.#ownerDirectory = ownerDirectory
-    if (acquire) acquireOwner(this.#ownerDirectory, this.runtimeGeneration)
+    this.#ownerPath = ownerPath
+    if (acquire) acquireDatabaseOwner(this.#ownerPath, this.runtimeGeneration)
   }
 
   static adopt(
     path: string,
     runtimeGeneration: string,
-    ownerDirectory: string
+    ownerPath: string
   ): RuntimeDatabaseOwnershipLease {
-    return new RuntimeDatabaseOwnershipLease(path, runtimeGeneration, ownerDirectory, false)
+    return new RuntimeDatabaseOwnershipLease(path, runtimeGeneration, ownerPath, false)
   }
 
   openReadOnly(): RuntimeDatabase {
@@ -287,11 +283,11 @@ class RuntimeDatabaseOwnershipLease implements RuntimeDatabaseOwnership {
         DATABASE_CONSTRUCTOR_TOKEN,
         this.#path,
         this.runtimeGeneration,
-        this.#ownerDirectory,
+        this.#ownerPath,
         false
       )
     } catch (error) {
-      releaseOwner(this.#ownerDirectory, this.runtimeGeneration)
+      releaseDatabaseOwner(this.#ownerPath, this.runtimeGeneration)
       throw error
     }
   }
@@ -299,60 +295,12 @@ class RuntimeDatabaseOwnershipLease implements RuntimeDatabaseOwnership {
   release(): void {
     if (!this.#held) return
     this.#held = false
-    releaseOwner(this.#ownerDirectory, this.runtimeGeneration)
+    releaseDatabaseOwner(this.#ownerPath, this.runtimeGeneration)
   }
 
   #assertHeld(): void {
     if (!this.#held) throw new Error('database ownership has already been released')
   }
-}
-
-function acquireOwner(ownerDirectory: string, runtimeGeneration: string): void {
-  const owner: OwnerRecord = { pid: process.pid, runtimeGeneration }
-  try {
-    mkdirSync(ownerDirectory)
-  } catch (error) {
-    if (!isAlreadyExists(error)) {
-      throw error
-    }
-
-    const existing = readOwner(ownerDirectory)
-    if (existing !== undefined && isLiveProcess(existing.pid)) {
-      throw new Error('database is already owned by a live Runtime')
-    }
-
-    rmSync(ownerDirectory, { recursive: true, force: true })
-    mkdirSync(ownerDirectory)
-  }
-  writeFileSync(`${ownerDirectory}/owner.json`, JSON.stringify(owner), { mode: 0o600 })
-}
-
-function releaseOwner(ownerDirectory: string, runtimeGeneration: string): void {
-  const existing = readOwner(ownerDirectory)
-  if (existing?.runtimeGeneration === runtimeGeneration) {
-    rmSync(ownerDirectory, { recursive: true, force: true })
-  }
-}
-
-function readOwner(ownerDirectory: string): OwnerRecord | undefined {
-  try {
-    return JSON.parse(readFileSync(`${ownerDirectory}/owner.json`, 'utf8')) as OwnerRecord
-  } catch {
-    return undefined
-  }
-}
-
-function isLiveProcess(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException).code === 'EEXIST'
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {

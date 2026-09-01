@@ -158,7 +158,9 @@ export async function openRecoverableRuntimeDatabase(
 
     const recoveryReason = recoveryReasonFor(error)
     if (database) {
-      if (recoveryReason || isWriteDenied(error) || isNewerSchema(error)) {
+      if (database.readOnly) {
+        closeObservedDatabase(database, observer)
+      } else if (recoveryReason || isWriteDenied(error) || isNewerSchema(error)) {
         ownership = database.closeRetainingOwnership()
         observer.onDatabaseClosed?.(database)
       } else {

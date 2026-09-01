@@ -131,7 +131,7 @@ describe('openRecoverableRuntimeDatabase', () => {
       async onRecoveryMarkerPublished(marker) {
         expect(marker.markerPath).toBe(join(root, 'matou.sqlite.recovery.json'))
         expect(await readFile(marker.markerPath, 'utf8')).toContain(marker.quarantinedPath)
-        expect(await readFile(`${databasePath}.owner/owner.json`, 'utf8')).toContain(
+        expect(await readFile(`${databasePath}.owner`, 'utf8')).toContain(
           'runtimeGeneration'
         )
         markerPublished.resolve()
@@ -157,7 +157,7 @@ describe('openRecoverableRuntimeDatabase', () => {
         : 'unexpected'
     })
     await expect(readFile(databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(`${databasePath}.owner/owner.json`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(`${databasePath}.owner`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('keeps recovery-required stable when valid backup enumeration fails', async () => {
@@ -255,13 +255,55 @@ describe('openRecoverableRuntimeDatabase', () => {
     expect((await readFile(result.quarantinedPath)).subarray(0, 100)).toEqual(intactHeader)
   })
 
+  it('retains the owner fence when a read-only handle discovers non-header corruption', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-readonly-midpage-corruption-'))
+    const databasePath = join(root, 'matou.sqlite')
+    const initial = RuntimeDatabase.open(databasePath)
+    initial.exec('CREATE TABLE payloads (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)')
+    initial.transaction((transaction) => {
+      for (let id = 1; id <= 20; id += 1) {
+        transaction.run(
+          'INSERT INTO payloads (id, payload) VALUES (?, ?)', id, `${id}:${'x'.repeat(3000)}`
+        )
+      }
+    })
+    initial.close()
+
+    const inspection = new DatabaseSync(databasePath, { readOnly: true })
+    const pageSizeRow = inspection.prepare('PRAGMA page_size').get() as Record<string, number>
+    const rootPageRow = inspection.prepare(
+      "SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = 'payloads'"
+    ).get() as { rootpage: number }
+    inspection.close()
+    const pageSize = Number(Object.values(pageSizeRow)[0])
+    const handle = await open(databasePath, 'r+')
+    try {
+      await handle.write(Buffer.alloc(16, 0xff), 0, 16, (rootPageRow.rootpage - 1) * pageSize)
+    } finally {
+      await handle.close()
+    }
+    const corruptBytes = await readFile(databasePath)
+    await chmod(databasePath, 0o444)
+
+    const result = await openRecoverableRuntimeDatabase(root, FOUNDATION_MIGRATIONS)
+
+    expect(result).toMatchObject({
+      kind: 'recovery-required',
+      reason: 'physical-corruption',
+      markerPath: join(root, 'matou.sqlite.recovery.json')
+    })
+    if (result.kind !== 'recovery-required') throw new Error('expected database recovery')
+    expect(await readFile(result.quarantinedPath)).toEqual(corruptBytes)
+    await expect(readFile(databasePath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(`${databasePath}.owner`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('does not inspect or quarantine a database owned by a live Runtime', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-owned-corruption-'))
     const databasePath = join(root, 'matou.sqlite')
     const corruptBytes = Buffer.from('owned corrupt database')
     await writeFile(databasePath, corruptBytes)
-    await mkdir(`${databasePath}.owner`)
-    await writeFile(`${databasePath}.owner/owner.json`, JSON.stringify({
+    await writeFile(`${databasePath}.owner`, JSON.stringify({
       pid: process.pid,
       runtimeGeneration: 'live-owner'
     }))
@@ -278,8 +320,7 @@ describe('openRecoverableRuntimeDatabase', () => {
     const databasePath = join(root, 'matou.sqlite')
     const corruptBytes = Buffer.from('owned readonly corrupt database')
     await writeFile(databasePath, corruptBytes)
-    await mkdir(`${databasePath}.owner`)
-    await writeFile(`${databasePath}.owner/owner.json`, JSON.stringify({
+    await writeFile(`${databasePath}.owner`, JSON.stringify({
       pid: process.pid,
       runtimeGeneration: 'live-readonly-owner'
     }))

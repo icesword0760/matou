@@ -96,7 +96,16 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
         defaultRootDirectory: queryValue('defaultRootDirectory') ?? '/tmp',
         defaultName: queryValue('defaultName') ?? 'home', now
       }
-    }).then(refresh).catch((error: unknown) => alive && setLoadError(errorMessage(error)))
+    }).then(refresh).catch((error: unknown) => {
+      if (!alive) return
+      if (!isStorageReadOnlyError(error)) {
+        setLoadError(errorMessage(error))
+        return
+      }
+      void refresh().catch((refreshError: unknown) => {
+        if (alive) setLoadError(errorMessage(refreshError))
+      })
+    })
     return () => { alive = false; unsubscribe() }
   }, [client, fixture, refresh, windowId])
 
@@ -1051,6 +1060,11 @@ function queryValue(name: string): string | null {
 }
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isStorageReadOnlyError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error &&
+    error.code === 'STORAGE_READ_ONLY'
 }
 
 function mutationSessionId(value: unknown): string | undefined {

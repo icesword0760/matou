@@ -35,7 +35,6 @@ const READ_ONLY_RPC_METHODS = new Set<RpcMethod>([
   'claude-sessions.list',
   'claude-sessions.detail',
   'geometry.list',
-  'git.status',
   'events.replay'
 ])
 

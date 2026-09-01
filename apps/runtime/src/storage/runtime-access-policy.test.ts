@@ -11,7 +11,6 @@ const READ_ONLY_RPC_METHODS = [
   'claude-sessions.list',
   'claude-sessions.detail',
   'geometry.list',
-  'git.status',
   'events.replay'
 ] satisfies RpcMethod[]
 

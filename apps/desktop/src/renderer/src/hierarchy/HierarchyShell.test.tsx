@@ -16,7 +16,17 @@ vi.mock('../terminal/TerminalSurface', () => ({
     data-search-direction={searchRequest?.direction} data-focus-request={focusRequest} />
 }))
 
+const runtime = vi.hoisted(() => ({
+  current: null as null | {
+    request: ReturnType<typeof vi.fn>
+    startProjection: ReturnType<typeof vi.fn>
+    subscribeProjection: ReturnType<typeof vi.fn>
+  }
+}))
+vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
+
 beforeEach(() => {
+  runtime.current = null
   Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
 })
 
@@ -589,6 +599,52 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByText(/恢复|加载/)).toBeNull()
   })
 
+  it('loads the existing projection when bootstrap is rejected specifically as storage read-only', async () => {
+    const data = fixture()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window') {
+        throw Object.assign(new Error('storage is read-only'), { code: 'STORAGE_READ_ONLY' })
+      }
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+
+    expect(await screen.findByRole('region', { name: 'Workspace A 工作现场' })).toBeTruthy()
+    expect(request.mock.calls.slice(0, 2).map(([method]) => method)).toEqual([
+      'hierarchy.bootstrap-window', 'projection.snapshot'
+    ])
+    expect(runtime.current.startProjection).toHaveBeenCalledWith(17)
+  })
+
+  it('does not treat an ordinary bootstrap failure as storage read-only', async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window') {
+        throw Object.assign(new Error('bootstrap failed'), { code: 'INTERNAL_ERROR' })
+      }
+      if (method === 'projection.snapshot') return projectionSnapshot(fixture())
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    const rendered = render(<HierarchyShell />)
+
+    await vi.waitFor(() => expect(rendered.container.querySelector('.hierarchy-loading')
+      ?.getAttribute('data-load-error')).toBe('bootstrap failed'))
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request).not.toHaveBeenCalledWith('projection.snapshot', expect.anything())
+  })
+
   it('restores each Workspace navigation context after switching away', async () => {
     const user = userEvent.setup()
     render(<HierarchyShell fixture={fixture()} />)
@@ -714,6 +770,15 @@ function fixture(): HierarchyProjection {
       sceneByTask: { 'task-a1': 'scene-a1', 'task-b1': 'scene-b1' },
       sessionByScene: { 'scene-a1': 'session-a1', 'scene-a2': 'session-a2', 'scene-b1': 'session-b1' }
     }
+  }
+}
+
+function projectionSnapshot(hierarchy: HierarchyProjection) {
+  return {
+    runtimeGeneration: 'readonly-runtime', eventSequence: 17,
+    workspaces: hierarchy.workspaces, tasks: hierarchy.tasks,
+    sessions: hierarchy.sessions, relations: [], scenes: hierarchy.scenes,
+    sessionGraphs: hierarchy.sessionGraphs ?? {}, hierarchy
   }
 }
 
