@@ -51,3 +51,34 @@ setInterval(() => {}, 1_000)
     }
   })
 })
+
+describe('PtySession resize deduplication', () => {
+  it('records and applies adjacent identical dimensions only once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-resize-'))
+    roots.push(root)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'deduplicated-resize', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {}
+      })
+      session.resize(120, 42)
+      session.resize(120, 42)
+
+      const resizeFrames = (await session.readFrames())
+        .filter((frame) => frame.kind === 'resize')
+
+      expect(resizeFrames).toEqual([
+        { kind: 'resize', sequence: 1, cols: 120, rows: 42 }
+      ])
+    } finally {
+      session?.dispose({ notifyExit: false, reason: 'runtime-shutdown' })
+      await session?.whenClosed()
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  })
+})

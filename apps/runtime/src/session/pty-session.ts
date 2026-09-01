@@ -62,6 +62,8 @@ export class PtySession {
   #forceFinalized = false
   #closedResolved = false
   #pendingReplayFrom: number | undefined
+  #lastCols: number
+  #lastRows: number
   readonly #closed: Promise<void>
   #resolveClosed: () => void = () => {}
 
@@ -76,6 +78,8 @@ export class PtySession {
     this.#pty = terminal
     this.#journal = journal
     this.#sequence = journal.lastSequence
+    this.#lastCols = options.cols
+    this.#lastRows = options.rows
     this.replayFromSequence = journal.lastSequence + 1
     this.#send = options.send
     this.#creditWindow = this.#newCreditWindow()
@@ -138,7 +142,10 @@ export class PtySession {
     if (this.#disposed) {
       throw new Error('session is disposed')
     }
+    if (cols === this.#lastCols && rows === this.#lastRows) return
     this.#pty.resize(cols, rows)
+    this.#lastCols = cols
+    this.#lastRows = rows
     const sequence = ++this.#sequence
     this.#writeChain = this.#writeChain.then(() => this.#journal.appendResize(sequence, cols, rows))
   }

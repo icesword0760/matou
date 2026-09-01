@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 import {
-  activeSurface, launchSessionCanvas, terminalCommand, visibleSurfaces
+  activeSurface, launchSessionCanvas, readText, terminalCommand, visibleSurfaces
 } from './fixtures/session-canvas-fixture'
 
 test.describe('horizontal sibling navigation', () => {
@@ -703,6 +703,110 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('coalesces real window dragging to 60 terminal resizes per second', async () => {
+    test.setTimeout(120_000)
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      for (let index = 1; index < 16; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const foregroundSurfaces = fixture.page.locator(
+        '.scene-stage:not([hidden]) [data-testid="terminal-pane"] .terminal-surface'
+      )
+      await expect(foregroundSurfaces).toHaveCount(16)
+      await expect.poll(async () => foregroundSurfaces.evaluateAll((surfaces) =>
+        surfaces.every((surface) => /^[1-9][0-9]*$/.test(surface.getAttribute('data-pid') ?? ''))
+      )).toBe(true)
+
+      await fixture.page.evaluate(() => {
+        type ResizeProbe = {
+          entries: Array<{ sessionId: string; cols: number; rows: number; at: number }>
+        }
+        const scope = window as typeof window & { __matouResizeProbe?: ResizeProbe }
+        scope.__matouResizeProbe = { entries: [] }
+        const original = MessagePort.prototype.postMessage
+        MessagePort.prototype.postMessage = function(message: unknown, transferOrOptions?: unknown) {
+          if (message && typeof message === 'object' && 'type' in message &&
+            message.type === 'terminal.resize' && 'sessionId' in message &&
+            'cols' in message && 'rows' in message) {
+            scope.__matouResizeProbe?.entries.push({
+              sessionId: String(message.sessionId),
+              cols: Number(message.cols), rows: Number(message.rows), at: performance.now()
+            })
+          }
+          if (transferOrOptions === undefined) return original.call(this, message)
+          return original.call(this, message, transferOrOptions as StructuredSerializeOptions)
+        }
+      })
+
+      const active = activeSurface(fixture.page)
+      const activeSessionId = await active.getAttribute('data-session-id')
+      expect(activeSessionId).toBeTruthy()
+      const textarea = active.locator('.xterm-helper-textarea')
+      await textarea.focus()
+      const dragWindow = fixture.app.evaluate(async ({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0]
+        if (!window) throw new Error('Matou window is missing')
+        const startedAt = Date.now()
+        let step = 0
+        await new Promise<void>((resolve) => {
+          const timer = setInterval(() => {
+            if (Date.now() - startedAt >= 2_100) {
+              clearInterval(timer)
+              window.setSize(1500, 820)
+              resolve()
+              return
+            }
+            window.setSize(1200 + (step % 30) * 10, 820)
+            step += 1
+          }, 8)
+        })
+      })
+      await textarea.pressSequentially("printf '__RESIZE_INPUT_OK__\\n'", { delay: 8 })
+      await textarea.press('Enter')
+      await expect(active.locator('.xterm-rows')).toContainText('__RESIZE_INPUT_OK__')
+      await dragWindow
+      await fixture.page.waitForTimeout(250)
+
+      const entries = await fixture.page.evaluate(() => (
+        window as typeof window & {
+          __matouResizeProbe?: {
+            entries: Array<{ sessionId: string; cols: number; rows: number; at: number }>
+          }
+        }
+      ).__matouResizeProbe?.entries ?? [])
+      expect(entries.length).toBeGreaterThan(0)
+      const bySession = new Map<string, typeof entries>()
+      for (const entry of entries) {
+        const sessionEntries = bySession.get(entry.sessionId) ?? []
+        sessionEntries.push(entry)
+        bySession.set(entry.sessionId, sessionEntries)
+      }
+      // Fixed-width off-screen cards may keep their exact grid dimensions and
+      // therefore correctly emit zero resize messages during a window drag.
+      expect(bySession.size).toBeLessThanOrEqual(16)
+      for (const sessionEntries of bySession.values()) {
+        expect(maximumMessagesInOneSecond(sessionEntries.map(({ at }) => at))).toBeLessThanOrEqual(60)
+      }
+
+      const marker = `__FINAL_STTY_${Date.now()}__`
+      const sttyResultPath = `${fixture.rootDirectory}/final-stty-size.txt`
+      await terminalCommand(active, `stty size > '${sttyResultPath}'; printf '${marker}\\n'`)
+      await expect.poll(async () => readText(sttyResultPath).catch(() => '')).toMatch(/^\d+ \d+\n$/)
+      await expect(active.locator('.xterm-rows')).toContainText(marker)
+      const size = (await readText(sttyResultPath)).trim().match(/^(\d+) (\d+)$/)
+      expect(size).not.toBeNull()
+      const finalResize = entries.filter(({ sessionId }) => sessionId === activeSessionId).at(-1)
+      expect(finalResize).toBeDefined()
+      expect({ rows: Number(size![1]), cols: Number(size![2]) }).toEqual({
+        rows: finalResize!.rows, cols: finalResize!.cols
+      })
+    } finally {
+      await fixture.close()
+    }
+  })
 })
 
 function directionReversals(values: number[], tolerance: number): number {
@@ -716,4 +820,16 @@ function directionReversals(values: number[], tolerance: number): number {
     direction = nextDirection
   }
   return reversals
+}
+
+function maximumMessagesInOneSecond(timestamps: number[]): number {
+  let left = 0
+  let maximum = 0
+  for (let right = 0; right < timestamps.length; right += 1) {
+    while (timestamps[left] !== undefined && timestamps[left]! <= timestamps[right]! - 1_000) {
+      left += 1
+    }
+    maximum = Math.max(maximum, right - left + 1)
+  }
+  return maximum
 }

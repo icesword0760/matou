@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 1 大段 UTF-8 输入 | 大粘贴立即进入终端，透明分块且保持顺序 | **已闭合** | `runtime-task-1-utf8-input-chunking-report.md` |
 | 2 拖入路径 | 普通/空格路径保持既有可见形式；复杂文件名只形成单个 argv，拖入不执行 | **已闭合** | `runtime-task-2-dropped-paths-report.md` |
-| 3 Resize 合并 | 每帧最多一次且尺寸去重 | 待实施 | Task 3 |
+| 3 Resize 合并 | 卡片即时适配；Runtime 更新不超过 60Hz，最终 PTY 尺寸准确 | **已闭合** | `runtime-task-3-resize-coalescing-report.md` |
 | 4 App 回焦 | 恢复离开前的真实焦点 | 待实施 | Task 4 |
 | 5 通知容量与 TTL | 每个工作空间独立保留最新 1,000 条；未读持续保留，已读 30 天后清理 | **已闭合** | `runtime-task-5-notification-capacity-report.md` |
 | 6 Journal 策略 | 16 MiB segment / 256 MiB raw 热窗口 | 待实施 | Task 6 |
@@ -44,6 +44,18 @@ Task 1 只在 Renderer → Runtime 输入边界分块；PTY、协议语义、bra
 | GREEN：真实 Electron / PTY | `terminal-channel.spec.ts` drop 场景 | 通过；8 个真实文件名，副作用文件不存在 |
 
 Task 2 只改变路径拖入解析和引用。普通键入与 paste 仍走原输入链路，未加入确认、自动提交或错误提示。
+
+## Task 3 RED → GREEN 记录
+
+| 阶段 | 证据 | 结果 |
+|---|---|---|
+| RED：fake-rAF 合并器 | `resize-coalescer.test.ts` 首次运行 | 模块不存在；目标失败成立 |
+| GREEN：单帧合并与 60Hz | 定向 Vitest 5 tests | 单帧只发最终尺寸、跨帧去重、60Hz 间隔、flush/dispose 全部通过 |
+| RED：Runtime 二次去重 | `pty-session.test.ts` 首次运行 | 相同尺寸产生 2 个 Journal frame；目标失败成立 |
+| GREEN：Runtime / Journal | 定向 Vitest 2 tests | 相同尺寸只调用一次有效 resize 路径并只写 1 个 frame |
+| GREEN：真实 Electron / PTY | `session-canvas-navigation.spec.ts` 16 sibling resize 场景 | 每会话任意连续一秒不超过 60 条；最终 `stty size` 匹配；拖动中输入回显连续 |
+
+Task 3 只合并 Runtime resize，不延迟卡片的本地 `fit.fit()`，也不改变横向列表中滑出视野会话的前台身份。
 
 ## Task 5 RED → GREEN 记录
 

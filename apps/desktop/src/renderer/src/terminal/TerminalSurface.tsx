@@ -6,6 +6,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { ResizeCoalescer } from './resize-coalescer'
 import { quoteDroppedPath } from './shell-path-quote'
 import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
 import {
@@ -145,6 +146,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     fit.fit()
     fitRef.current = fit
     searchRef.current = search
+    const resizeCoalescer = new ResizeCoalescer((cols, rows) => {
+      if (!readOnly) client.resizeTerminal(sessionId, cols, rows)
+    })
     if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
       requestAnimationFrame(() => terminal.focus())
     }
@@ -229,7 +233,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         replaying = false
         terminal.write('', () => {
           fit.fit()
-          if (!readOnly) client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+          if (validTerminalDimensions(terminal.cols, terminal.rows)) {
+            resizeCoalescer.offer(terminal.cols, terminal.rows)
+          }
           onReplayComplete(`replayed-through:${message.throughSequence}`)
         })
       }
@@ -276,8 +282,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       fit.fit()
-      if (terminal.cols >= 2 && terminal.cols <= 1000 && terminal.rows >= 1 && terminal.rows <= 500) {
-        if (!readOnly) client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+      if (validTerminalDimensions(terminal.cols, terminal.rows)) {
+        resizeCoalescer.offer(terminal.cols, terminal.rows)
       }
     })
     observer.observe(container)
@@ -292,6 +298,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     return () => {
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
+      resizeCoalescer.flush()
+      resizeCoalescer.dispose()
       input.dispose()
       window.removeEventListener('matou:forward-terminal-tab', forwardTab)
       searchResults.dispose()
@@ -374,6 +382,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     <div className="terminal-surface__viewport" ref={containerRef} />
     {isDragOverTerminal && <div className="terminal-drop-overlay" data-testid="terminal-drop-overlay" />}
   </div>
+}
+
+function validTerminalDimensions(cols: number, rows: number): boolean {
+  return cols >= 2 && cols <= 1000 && rows >= 1 && rows <= 500
 }
 
 function isTerminalFileDrop(dataTransfer: DataTransfer): boolean {
