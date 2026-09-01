@@ -77,6 +77,7 @@ export function TerminalPane(props: {
   const [runtimeError, setRuntimeError] = useState('')
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
+  const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
   const [forkReadinessHint, setForkReadinessHint] = useState(false)
   const previousPathValid = useRef(pathValid)
   const handleRuntimeStatus = useCallback((status: RuntimeStatus) => {
@@ -149,6 +150,10 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)
+  const restoreNoticeKey = restoreIdentityExpired && providerRestoreState === 'failed'
+    ? `${session.id}:${restoreError ?? ''}`
+    : null
+  const restoreNoticeVisible = restoreNoticeKey === null || dismissedRestoreNotice !== restoreNoticeKey
   const effectiveRestoreState = providerRestoreState === 'failed' && session.kind === 'claude-code'
     ? 'none'
     : providerRestoreState
@@ -238,7 +243,8 @@ export function TerminalPane(props: {
         }}>移除</button>}
       </div>
     </div>}
-    {effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && <div className="provider-restore-banner" role="status">
+    {effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && restoreNoticeVisible &&
+      <div className="provider-restore-banner" role="status">
       <div><strong>{restoreIdentityExpired ? '原 Claude Code 对话已失效' : 'Claude Code 恢复失败'}</strong>
         <span className="provider-restore-reason">{restoreIdentityExpired
           ? '当前已切换到 Shell，可继续使用终端'
@@ -295,6 +301,9 @@ export function TerminalPane(props: {
       spawnRevision={spawnRevision + startupRetry}
       onStatusChange={handleRuntimeStatus}
       onRuntimeError={setRuntimeError}
+      onUserInput={() => {
+        if (restoreNoticeKey !== null) setDismissedRestoreNotice(restoreNoticeKey)
+      }}
       onOscNotification={(oscId, content) => {
         const notification = toOscNotification(oscId, content)
         if (!notification) return

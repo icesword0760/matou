@@ -244,6 +244,19 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.recordTerminalInteraction).not.toHaveBeenCalled()
   })
 
+  it('reports accepted terminal input to its owner', async () => {
+    const onUserInput = vi.fn()
+    const view = render(<TerminalSurface sessionId="session-1" active visible onUserInput={onUserInput} />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+
+    state.onData?.('pwd')
+    expect(onUserInput).toHaveBeenCalledTimes(1)
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible inputDisabled onUserInput={onUserInput} />)
+    await waitFor(() => state.onData?.('ignored'))
+    expect(onUserInput).toHaveBeenCalledTimes(1)
+  })
+
   it('treats Escape as a completed Claude action but not as Shell navigation', async () => {
     const view = render(
       <TerminalSurface sessionId="session-1" profile="claude-code" active visible />

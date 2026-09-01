@@ -9,10 +9,12 @@ vi.mock('../terminal/TerminalSurface', () => ({
   TerminalSurface: (props: {
     sessionId: string; visible: boolean; inputDisabled: boolean; spawnRevision?: number
     onStatusChange?(status: string): void; onRuntimeError?(message: string): void
+    onUserInput?(): void
   }) =>
     <div data-testid={`surface-${props.sessionId}`} data-visible={props.visible}
       data-input-disabled={props.inputDisabled} data-spawn-revision={props.spawnRevision}>
-      <textarea className="xterm-helper-textarea" aria-label="Terminal input" />
+      <textarea className="xterm-helper-textarea" aria-label="Terminal input"
+        onInput={() => props.onUserInput?.()} />
       <button type="button" aria-label="触发启动失败" onClick={() => {
         props.onRuntimeError?.('spawn ENOENT: /missing/SHELL')
         props.onStatusChange?.('error')
@@ -212,8 +214,9 @@ describe('Terminal pane', () => {
   })
 
 
-  it('keeps an expired Claude identity usable as Shell without a retry loop', () => {
+  it('dismisses an expired Claude identity notice after the user starts using the Shell', async () => {
     const onRetryRestore = vi.fn()
+    const user = userEvent.setup()
     const props = fixture()
     render(<TerminalPane {...props}
       session={{ ...props.session, kind: 'shell', title: 'Shell' }}
@@ -225,6 +228,9 @@ describe('Terminal pane', () => {
     expect(screen.getByTestId('surface-session-1')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '重试恢复' })).toBeNull()
     expect(onRetryRestore).not.toHaveBeenCalled()
+
+    await user.type(screen.getByRole('textbox', { name: 'Terminal input' }), 'pwd')
+    expect(screen.queryByText('原 Claude Code 对话已失效')).toBeNull()
   })
 
   it('does not describe a live Claude card as Shell when an older failure projection arrives', () => {

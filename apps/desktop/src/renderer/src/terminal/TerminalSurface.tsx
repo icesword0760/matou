@@ -44,6 +44,7 @@ interface TerminalSurfaceProps {
   onSmokeMarker?: (marker: string) => void
   onReplayComplete?: (marker: string) => void
   onOscNotification?: (oscId: number, content: string) => void
+  onUserInput?: () => void
 }
 
 export function TerminalSurface(props: TerminalSurfaceProps) {
@@ -53,7 +54,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onRuntimeError = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
-    onOscNotification = NOOP
+    onOscNotification = NOOP, onUserInput = NOOP
   } = props
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
@@ -68,6 +69,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const onOscNotificationRef = useRef(onOscNotification)
   const onFontSizeChangeRef = useRef(onFontSizeChange)
   const onSearchResultsRef = useRef(onSearchResults)
+  const onUserInputRef = useRef(onUserInput)
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
 
@@ -77,6 +79,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   visibleRef.current = visible
   activeRef.current = active
   profileRef.current = profile
+  onUserInputRef.current = onUserInput
 
   useEffect(() => { pendingInputRef.current = '' }, [sessionId])
   useEffect(() => {
@@ -234,6 +237,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }, onMessage)
     const input = terminal.onData((data) => {
       if (inputDisabledRef.current) return
+      onUserInputRef.current()
       const interactionKind = classifyCompletedUserInteraction(
         data,
         profileRef.current !== 'shell'
