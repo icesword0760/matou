@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -16,12 +16,15 @@ import {
   type PortMessageEvent, type RuntimePort
 } from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
+import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeDatabase } from './storage/database'
+import { RuntimeAccessPolicy } from './storage/runtime-access-policy'
 import { MigrationRunner } from './storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
+import { WorkspacePathService } from './hierarchy/workspace-path-service'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ShellHistoryRepository } from './shell-history/shell-history'
 import { PreferenceRepository } from './product/experience-foundation'
@@ -49,6 +52,109 @@ afterEach(() => {
 })
 
 describe('RuntimeServer domain RPC', () => {
+  it('publishes a read-only capability surface and gates RPC, Git, terminal, polling, and probes', async () => {
+    const repositoryRoot = join(root, 'readonly-repository')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'baseline\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'baseline'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'branch', 'feature/read-only-must-not-switch'])
+
+    const loginProbeMarker = join(root, 'login-probe-ran')
+    const terminalMarker = join(root, 'terminal-process-ran')
+    const shell = join(root, 'read-only-shell.sh')
+    await writeFile(shell, [
+      '#!/bin/sh',
+      `if [ "$1" = "-ic" ]; then echo probe > ${JSON.stringify(loginProbeMarker)}; exit 0; fi`,
+      `echo terminal > ${JSON.stringify(terminalMarker)}`,
+      'sleep 5'
+    ].join('\n'))
+    await chmod(shell, 0o755)
+    const previousShell = process.env.SHELL
+    const previousHome = process.env.HOME
+    const previousZdotdir = process.env.ZDOTDIR
+    process.env.SHELL = shell
+    process.env.HOME = root
+    process.env.ZDOTDIR = join(root, 'readonly-zdotdir')
+
+    server.close()
+    const databasePath = database.path
+    database.close()
+    const originalBytes = await readFile(databasePath)
+    database = RuntimeDatabase.openReadOnly(databasePath)
+    const policy = new RuntimeAccessPolicy('read-only')
+    const router = new RuntimeRpcRouter(database, undefined, { accessPolicy: policy })
+    const workspacePaths = new PollingSpyWorkspacePathService(
+      database,
+      new DomainTransactionManager(database)
+    )
+    port = new MockPort()
+    server = new RuntimeServer(
+      port,
+      root,
+      database,
+      router,
+      undefined,
+      new RuntimeSessionRegistry(),
+      undefined,
+      workspacePaths,
+      { accessPolicy: policy }
+    )
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'readonly' })
+    await settle()
+
+    try {
+      expect(port.last('protocol.ready')?.capabilities).toEqual([
+        'semantic-events-v1', 'replay-v1', 'projection-v1'
+      ])
+      expect(workspacePaths.startCount).toBe(0)
+
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'readonly-projection',
+        method: 'projection.snapshot', capability: 'renderer', deadlineAt: Date.now() + 1000,
+        payload: {}
+      })
+      await settle()
+      expect(port.findRpcResponse('readonly-projection')).toMatchObject({
+        result: { hierarchy: { workspaces: [expect.objectContaining({ id: 'replay-workspace' })] } }
+      })
+
+      port.receive(rpc('readonly-bootstrap', 'hierarchy.bootstrap-window', {
+        windowId: 'read-only-window', defaultRootDirectory: root,
+        defaultName: 'Must Not Create', now: Date.now()
+      }))
+      port.receive(rpc('readonly-git', 'git.checkout', {
+        cwd: repositoryRoot, branch: 'feature/read-only-must-not-switch', now: Date.now()
+      }))
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'read-only-transient', executionContextId: 'local-default',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await settle()
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      expect(port.findRpcError('readonly-bootstrap')).toMatchObject({ code: 'STORAGE_READ_ONLY' })
+      expect(port.findRpcError('readonly-git')).toMatchObject({ code: 'STORAGE_READ_ONLY' })
+      expect(port.last('protocol.error')).toMatchObject({ code: 'STORAGE_READ_ONLY' })
+      expect((await execFileAsync('git', ['-C', repositoryRoot, 'branch', '--show-current'])).stdout.trim())
+        .toBe('main')
+      await expect(stat(loginProbeMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(terminalMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(join(root, 'sessions', 'read-only-transient'))).rejects.toMatchObject({
+        code: 'ENOENT'
+      })
+      expect(await readFile(databasePath)).toEqual(originalBytes)
+    } finally {
+      restoreEnv('SHELL', previousShell)
+      restoreEnv('HOME', previousHome)
+      restoreEnv('ZDOTDIR', previousZdotdir)
+    }
+  })
+
   it('adds current cwd and Git information to a direct DAG graph response', () => {
     const result = withSessionRuntimeEnvironment({
       sceneId: 'scene-1',
@@ -2283,6 +2389,16 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 })
+
+class PollingSpyWorkspacePathService extends WorkspacePathService {
+  startCount = 0
+
+  override startPolling(): void {
+    this.startCount += 1
+  }
+
+  override stopPolling(): void {}
+}
 
 class MockPort extends EventEmitter implements RuntimePort {
   readonly sent: RuntimeMessage[] = []

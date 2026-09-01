@@ -32,6 +32,7 @@ import { ProviderModeService } from '../session-canvas/provider-mode-service'
 import { ForkWorkflowError, ForkWorkflowService } from '../session-canvas/fork-workflow-service'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
+import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
@@ -76,11 +77,12 @@ export class RuntimeRpcRouter {
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
   readonly #claudeSessions: ClaudeSessionCatalog
+  readonly #accessPolicy: RuntimeAccessPolicy
 
   constructor(
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
-    options: { projectsRoot?: string } = {}
+    options: { projectsRoot?: string; accessPolicy?: RuntimeAccessPolicy } = {}
   ) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
@@ -109,9 +111,13 @@ export class RuntimeRpcRouter {
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
     )
+    this.#accessPolicy = options.accessPolicy ?? new RuntimeAccessPolicy(
+      database.readOnly ? 'read-only' : 'normal'
+    )
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
+    this.#accessPolicy.assertRpcAllowed(method)
     try {
       return await this.#dispatch(method, payload)
     } catch (error) {

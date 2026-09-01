@@ -33,6 +33,11 @@ import type {
 import { SessionRepository } from './domain/session-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import type { RuntimeDatabase } from './storage/database'
+import { StorageReadOnlyError } from './storage/database'
+import {
+  RuntimeAccessPolicy,
+  type TerminalMessageType
+} from './storage/runtime-access-policy'
 import {
   WorkspacePathInvalidError,
   WorkspacePathService
@@ -80,6 +85,7 @@ type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
   hudRegistry?: SessionHudRegistry
+  accessPolicy?: RuntimeAccessPolicy
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -141,6 +147,7 @@ export class RuntimeServer {
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
+  readonly #accessPolicy: RuntimeAccessPolicy
   #handshakeComplete = false
   #closed = false
 
@@ -175,23 +182,28 @@ export class RuntimeServer {
     this.#control = control
     this.#sessions = sessions
     this.#providerHooks = providerHooks
+    this.#accessPolicy = options.accessPolicy ?? new RuntimeAccessPolicy(
+      database.readOnly ? 'read-only' : 'normal'
+    )
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
       DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
     )
     this.#workspacePaths = workspacePaths
-    void configuredCcLaunch()
-    for (const session of [...this.#sessions.values()]) {
-      const authority = this.#database.get<{ archived_at: number | null }>(
-        'SELECT archived_at FROM sessions WHERE id = ?', session.sessionId
-      )
-      if (authority?.archived_at !== null && authority?.archived_at !== undefined) {
-        session.dispose()
-        this.#sessions.delete(session.sessionId, session)
+    if (this.#accessPolicy.startBackgroundServices) {
+      void configuredCcLaunch()
+      for (const session of [...this.#sessions.values()]) {
+        const authority = this.#database.get<{ archived_at: number | null }>(
+          'SELECT archived_at FROM sessions WHERE id = ?', session.sessionId
+        )
+        if (authority?.archived_at !== null && authority?.archived_at !== undefined) {
+          session.dispose()
+          this.#sessions.delete(session.sessionId, session)
+        }
       }
+      this.#workspacePaths.startPolling()
     }
-    this.#workspacePaths.startPolling()
     port.on('message', (event) => {
       void this.#receive(event.data).catch((error) => {
         this.#sendError('INVALID_MESSAGE', errorMessage(error))
@@ -282,17 +294,12 @@ export class RuntimeServer {
         type: 'protocol.ready',
         protocolVersion: PROTOCOL_VERSION,
         runtimeId: this.#runtimeId,
-        capabilities: [
-          'terminal-v1',
-          'semantic-events-v1',
-          'replay-v1',
-          'domain-rpc-v1',
-          'projection-v1',
-          'hud-v1'
-        ]
+        capabilities: this.#accessPolicy.capabilities
       })
       return
     }
+
+    if (!this.#messageAllowed(message)) return
 
     switch (message.type) {
       case 'protocol.hello':
@@ -399,6 +406,34 @@ export class RuntimeServer {
         })
         this.#pumpSubscription(message.consumerId)
         break
+    }
+  }
+
+  #messageAllowed(message: RendererMessage): boolean {
+    try {
+      if (message.type === 'rpc.request') {
+        this.#accessPolicy.assertRpcAllowed(message.method)
+      } else if (message.type.startsWith('terminal.')) {
+        this.#accessPolicy.assertTerminalAllowed(message.type as TerminalMessageType)
+      }
+      return true
+    } catch (error) {
+      if (!(error instanceof StorageReadOnlyError)) throw error
+      if (message.type === 'rpc.request') {
+        this.#sendRpcError(
+          message.requestId,
+          error.code as Extract<RuntimeMessage, { type: 'rpc.error' }>['code'],
+          error.message,
+          false
+        )
+      } else {
+        this.#sendError(
+          error.code as Extract<RuntimeMessage, { type: 'protocol.error' }>['code'],
+          error.message,
+          'sessionId' in message ? String(message.sessionId) : undefined
+        )
+      }
+      return false
     }
   }
 

@@ -27,6 +27,7 @@ import {
 } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
+import { RuntimeAccessPolicy } from './storage/runtime-access-policy'
 import { NotificationProjection } from './product/experience-foundation'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
@@ -54,6 +55,7 @@ interface RuntimeStateBase {
   dataRoot: string
   database: RuntimeDatabase
   rpcRouter: RuntimeRpcRouter
+  accessPolicy: RuntimeAccessPolicy
 }
 
 interface WritableRuntimeState extends RuntimeStateBase {
@@ -103,14 +105,18 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const database = opened.database
   const runtimeDataRoot = opened.dataRoot
   const notifications = new NotificationProjection()
-  const rpcRouter = new RuntimeRpcRouter(database, notifications)
+  const accessPolicy = new RuntimeAccessPolicy(
+    opened.kind === 'read-only' ? 'read-only' : 'normal'
+  )
+  const rpcRouter = new RuntimeRpcRouter(database, notifications, { accessPolicy })
   if (opened.kind === 'read-only') {
     console.error(`[runtime.storage] database opened read-only: ${opened.reason}`)
     return {
       mode: 'read-only',
       dataRoot: runtimeDataRoot,
       database,
-      rpcRouter
+      rpcRouter,
+      accessPolicy
     }
   }
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
@@ -225,6 +231,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     controlTokens,
     controlBackend,
     rpcRouter,
+    accessPolicy,
     hostControl,
     providerHooks
   }
@@ -288,7 +295,7 @@ parentPort.on('message', async (event) => {
       sessions,
       providerHooks,
       undefined,
-      { hudRegistry: sessionHuds }
+      { hudRegistry: sessionHuds, accessPolicy: state.accessPolicy }
     )
     servers.add(server)
     port.once('close', () => servers.delete(server))
