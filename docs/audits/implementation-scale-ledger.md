@@ -18,3 +18,4 @@
 3. 定向单元：RuntimeDatabase statement reset/read、RuntimeSessionRegistry PTY authority、RuntimeHost 相关请求全部通过。
 4. 真实规模：`pnpm test:scale --grep "harness" --reporter=line`，3 passed。
 5. Seed：5000 深链 + 10000 DAG 重复 seed 测试通过；Journal payload 重复 seed 测试通过。
+6. Post-review：seed 通过 Runtime storage authority 访问 SQLite，dependency-boundary 通过；v22 environment binding 存在时 `test:scale` 5/5 通过。

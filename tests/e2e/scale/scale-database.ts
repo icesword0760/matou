@@ -1,8 +1,40 @@
 import { mkdir, readdir, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 
 import { SegmentJournal } from '../../../apps/runtime/src/journal/segment-journal'
+import { RuntimeDatabase } from '../../../apps/runtime/src/storage/database'
+
+type ScaleParameter = string | number | bigint | Uint8Array | null
+
+class ScaleDatabaseConnection {
+  readonly #database: RuntimeDatabase
+
+  private constructor(database: RuntimeDatabase) {
+    this.#database = database
+  }
+
+  static open(path: string, readOnly = false): ScaleDatabaseConnection {
+    return new ScaleDatabaseConnection(
+      readOnly ? RuntimeDatabase.openReadOnly(path) : RuntimeDatabase.open(path)
+    )
+  }
+
+  exec(sql: string): void {
+    this.#database.exec(sql)
+  }
+
+  prepare(sql: string) {
+    return {
+      run: (...params: ScaleParameter[]) => this.#database.run(sql, ...params),
+      get: (...params: ScaleParameter[]) => this.#database.get(sql, ...params),
+      all: (...params: ScaleParameter[]) => this.#database.all(sql, ...params)
+    }
+  }
+
+  close(): void {
+    this.#database.close()
+  }
+}
 
 export interface ScaleDataset {
   siblingSessions: 50 | 200 | 1000
@@ -37,7 +69,7 @@ export async function seedScaleDatabase(
 ): Promise<void> {
   validateDataset(dataset)
   await mkdir(dataDirectory, { recursive: true })
-  const database = new DatabaseSync(join(dataDirectory, DATABASE_NAME))
+  const database = ScaleDatabaseConnection.open(join(dataDirectory, DATABASE_NAME))
   try {
     assertMigrated(database)
     database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;')
@@ -62,7 +94,7 @@ export async function seedScaleDatabase(
 export async function readScaleDatabaseCounts(
   dataDirectory: string
 ): Promise<ScaleDatabaseCounts> {
-  const database = new DatabaseSync(join(dataDirectory, DATABASE_NAME), { readOnly: true })
+  const database = ScaleDatabaseConnection.open(join(dataDirectory, DATABASE_NAME), true)
   try {
     const count = (sql: string, ...params: Array<string | number>): number => {
       const row = database.prepare(sql).get(...params) as { count: number | bigint } | undefined
@@ -119,7 +151,7 @@ function validateDataset(dataset: ScaleDataset): void {
   }
 }
 
-function assertMigrated(database: DatabaseSync): void {
+function assertMigrated(database: ScaleDatabaseConnection): void {
   const required = ['workspaces', 'sessions', 'session_canvas_memberships']
   const present = new Set((database.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -130,7 +162,7 @@ function assertMigrated(database: DatabaseSync): void {
   }
 }
 
-function removePreviousScaleSeed(database: DatabaseSync): void {
+function removePreviousScaleSeed(database: ScaleDatabaseConnection): void {
   const statements = [
     "DELETE FROM window_scene_focus WHERE scene_id GLOB 'scale-*-scene*'",
     "DELETE FROM window_task_focus WHERE task_id = 'scale-task'",
@@ -145,6 +177,7 @@ function removePreviousScaleSeed(database: DatabaseSync): void {
     "DELETE FROM session_fork_intents WHERE session_id GLOB 'scale-*' OR source_session_id GLOB 'scale-*'",
     "DELETE FROM provider_bindings WHERE session_id GLOB 'scale-*'",
     "DELETE FROM session_runs WHERE session_id GLOB 'scale-*'",
+    "DELETE FROM session_environment_bindings WHERE session_id GLOB 'scale-*'",
     "DELETE FROM session_mounts WHERE session_id GLOB 'scale-*' OR scene_id GLOB 'scale-*-scene*'",
     "DELETE FROM session_canvas_memberships WHERE session_id GLOB 'scale-*' OR scene_id GLOB 'scale-*-scene*'",
     "DELETE FROM session_relations_current WHERE relation_id GLOB 'scale-*' OR from_session_id GLOB 'scale-*' OR to_session_id GLOB 'scale-*'",
@@ -161,7 +194,7 @@ function removePreviousScaleSeed(database: DatabaseSync): void {
   for (const statement of statements) database.exec(statement)
 }
 
-function archiveOrdinaryFixtureRows(database: DatabaseSync): void {
+function archiveOrdinaryFixtureRows(database: ScaleDatabaseConnection): void {
   database.prepare(
     "UPDATE sessions SET status = 'archived', work_status = 'exited', archived_at = COALESCE(archived_at, ?) WHERE id NOT GLOB 'scale-*'"
   ).run(FIXED_TIME)
@@ -177,7 +210,7 @@ function archiveOrdinaryFixtureRows(database: DatabaseSync): void {
 }
 
 function insertScaleAuthority(
-  database: DatabaseSync,
+  database: ScaleDatabaseConnection,
   dataDirectory: string,
   dataset: ScaleDataset
 ): void {
@@ -296,7 +329,7 @@ function insertScaleAuthority(
 }
 
 function insertScene(
-  database: DatabaseSync,
+  database: ScaleDatabaseConnection,
   id: string,
   name: string,
   mode: 'card' | 'dag',
@@ -310,7 +343,7 @@ function insertScene(
   ).run(id, SCALE_TASK_ID, name, mode, FIXED_TIME + index, FIXED_TIME + index, fixedIndex(index))
 }
 
-function insertSessions(database: DatabaseSync, input: {
+function insertSessions(database: ScaleDatabaseConnection, input: {
   prefix: 'scale-sibling' | 'scale-depth' | 'scale-dag'
   count: number
   sceneId: string

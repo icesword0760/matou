@@ -62,3 +62,17 @@ pnpm test:scale --grep "harness" --reporter=line
 ## 对照边界
 
 Task 1 没有新增用户可见界面或操作入口，因此 reference product 交互矩阵无新增场景。产品可感知差异只记录为后续容量工作输入：当前前台列表 PTY 数为 1，与已确认的“全部当前横向 Session 保持即时输入”目标不同。
+
+## Post-review dependency-boundary closure
+
+Scale seed no longer imports `node:sqlite` outside Runtime storage. It now uses
+the authoritative `RuntimeDatabase` API for writable ownership, read-only
+queries and statement execution. The seed cleanup also removes v22
+`session_environment_bindings` before re-inserting deterministic Sessions.
+
+Verification after the v22 migration was present in the working tree:
+
+- Runtime storage dependency boundary: 1/1 passed.
+- Full `pnpm test:scale --reporter=line`: 5/5 passed.
+- Packages, Runtime and Desktop production build: passed.
+- Workspace typecheck: passed.
