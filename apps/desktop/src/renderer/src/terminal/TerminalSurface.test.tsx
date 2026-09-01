@@ -314,6 +314,28 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.focus).toHaveBeenCalled()
   })
 
+  it('drops invalid NUL paths while preserving valid structured path order', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const dataTransfer = {
+      types: ['application/x-file-tree-nodes'], files: [], dropEffect: 'none',
+      getData: vi.fn(() => JSON.stringify([
+        { path: '/tmp/first.txt', type: 'file' },
+        { path: '/tmp/a\0b.txt', type: 'file' },
+        { path: '=ls', type: 'file' },
+        { path: '/tmp/last.txt', type: 'file' }
+      ]))
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    fireEvent.drop(surface, { dataTransfer })
+
+    expect(state.sendTerminalInput).toHaveBeenCalledWith(
+      'session-1', " /tmp/first.txt '=ls' /tmp/last.txt"
+    )
+  })
+
   it('uses native file paths for Finder drops and safely quotes shell-sensitive names', async () => {
     const getPathForFile = vi.fn((file: File) => ({
       'plain.txt': '/tmp/plain.txt',
@@ -364,7 +386,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(screen.queryByTestId('terminal-drop-overlay')).toBeNull()
   })
 
-  it('keeps the Kooky drop overlay stable across nested drag enter and leave events', async () => {
+  it('keeps the reference drop overlay stable across nested drag enter and leave events', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     const dataTransfer = {

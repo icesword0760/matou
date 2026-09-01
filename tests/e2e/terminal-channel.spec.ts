@@ -1,8 +1,11 @@
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
-import { _electron as electron, expect, test } from '@playwright/test'
+import {
+  _electron as electron, expect, test, type CDPSession, type Locator
+} from '@playwright/test'
 
 import { launchMatou } from './matou-fixture'
 
@@ -45,9 +48,9 @@ test('drops reference-visible paths as safe single argv without executing them',
     'plain.txt',
     'with space.txt',
     "single'quote.txt",
-    'command$(touch PWNED).txt',
+    'command$(touch$IFS$MATOU_DROP_SIDE_EFFECT).txt',
     'back\\slash.txt',
-    'backtick`touch PWNED_TICK`.txt',
+    'backtick`touch$IFS$MATOU_DROP_TICK_SIDE_EFFECT`.txt',
     'line\nbreak.txt',
     '你好🚀.txt'
   ]
@@ -60,6 +63,8 @@ test('drops reference-visible paths as safe single argv without executing them',
       ...process.env,
       MATOU_E2E: '1',
       MATOU_DATA_DIR: dataDirectory,
+      MATOU_DROP_SIDE_EFFECT: sideEffectPath,
+      MATOU_DROP_TICK_SIDE_EFFECT: tickSideEffectPath,
       MATOU_RUNTIME_ENTRY: resolve(import.meta.dirname, '../../apps/runtime/dist/index.cjs')
     }
   })
@@ -74,20 +79,16 @@ test('drops reference-visible paths as safe single argv without executing them',
     const textarea = surface.locator('.xterm-helper-textarea')
     await textarea.focus()
 
-    await page.keyboard.type(`cd ${dropDirectory} && printf '__DROP_CWD_READY__\\n'`)
-    await page.keyboard.press('Enter')
-    await expect.poll(() => terminalText(surface)).toContain('__DROP_CWD_READY__')
-
     const ordinaryPath = join(dropDirectory, names[0]!)
     await dispatchStructuredPathDrop(surface, [ordinaryPath], 'echo TEXT_PLAIN_MUST_BE_IGNORED')
     await expect.poll(() => terminalText(surface)).toContain(` ${ordinaryPath}`)
     expect(await terminalText(surface)).not.toContain('TEXT_PLAIN_MUST_BE_IGNORED')
-    await page.keyboard.press('Control+C')
+    await clearTerminalInput(textarea, surface, ordinaryPath)
 
     const spacedPath = join(dropDirectory, names[1]!)
     await dispatchStructuredPathDrop(surface, [spacedPath], 'echo TEXT_PLAIN_MUST_BE_IGNORED')
     await expect.poll(() => terminalText(surface)).toContain(` "${spacedPath}"`)
-    await page.keyboard.press('Control+C')
+    await clearTerminalInput(textarea, surface, spacedPath)
 
     for (const name of names.slice(2)) {
       const path = join(dropDirectory, name)
@@ -109,8 +110,72 @@ test('drops reference-visible paths as safe single argv without executing them',
   }
 })
 
+test('drops native files and directories through Electron webUtils as exact zsh argv', async () => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-e2e-'))
+  const dropDirectory = await mkdtemp(join(tmpdir(), 'matou-native-drop-'))
+  const sideEffectPath = join(dropDirectory, 'NATIVE_SIDE_EFFECT')
+  const ordinaryPath = join(dropDirectory, 'plain.txt')
+  const spacedDirectory = join(dropDirectory, 'with space')
+  const specialPath = join(
+    dropDirectory,
+    'command$(touch$IFS$MATOU_NATIVE_DROP_SIDE_EFFECT).txt'
+  )
+  const unicodePath = join(dropDirectory, '你好🚀.txt')
+  await writeFile(ordinaryPath, 'fixture')
+  await mkdir(spacedDirectory)
+  await writeFile(specialPath, 'fixture')
+  await writeFile(unicodePath, 'fixture')
+
+  const app = await electron.launch({
+    args: [resolve(import.meta.dirname, '../../apps/desktop')],
+    env: {
+      ...process.env,
+      MATOU_E2E: '1',
+      MATOU_DATA_DIR: dataDirectory,
+      MATOU_NATIVE_DROP_SIDE_EFFECT: sideEffectPath,
+      MATOU_RUNTIME_ENTRY: resolve(import.meta.dirname, '../../apps/runtime/dist/index.cjs')
+    }
+  })
+
+  try {
+    const page = await app.firstWindow()
+    await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+    const surface = activeTerminalSurface(page)
+    await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
+    const textarea = surface.locator('.xterm-helper-textarea')
+    await textarea.focus()
+
+    const paths = [ordinaryPath, spacedDirectory, specialPath, unicodePath]
+    const expected = Buffer.from(JSON.stringify(paths)).toString('base64')
+    await page.keyboard.type([
+      "python3 -c 'import base64,json,sys;",
+      ' print("__NATIVE_ARGV__"+base64.b64encode(json.dumps(sys.argv[2:],ensure_ascii=False,separators=(",", ":")).encode()).decode())\' --'
+    ].join(''))
+
+    await dispatchNativeFileDrop(page, surface, paths)
+
+    await expect(access(sideEffectPath).then(() => true, () => false)).resolves.toBe(false)
+    expect(await terminalText(surface)).not.toContain('__NATIVE_ARGV__' + expected)
+    await page.keyboard.press('Enter')
+    await expect.poll(() => terminalText(surface)).toContain(`__NATIVE_ARGV__${expected}`)
+    await expect(access(sideEffectPath).then(() => true, () => false)).resolves.toBe(false)
+
+    await page.keyboard.type('printf URI_ONLY_SENTINEL')
+    await expect.poll(() => terminalText(surface)).toContain('URI_ONLY_SENTINEL')
+    const beforeUriDrop = await terminalText(surface)
+    await dispatchUriOnlyDrop(page, surface, pathToFileURL(spacedDirectory).href)
+    await page.waitForTimeout(100)
+    expect(await terminalText(surface)).toBe(beforeUriDrop)
+    await page.keyboard.press('Control+C')
+  } finally {
+    await app.close()
+    await rm(dataDirectory, { recursive: true, force: true })
+    await rm(dropDirectory, { recursive: true, force: true })
+  }
+})
+
 async function dispatchStructuredPathDrop(
-  surface: import('@playwright/test').Locator,
+  surface: Locator,
   paths: string[],
   plainText: string
 ): Promise<void> {
@@ -128,8 +193,70 @@ async function dispatchStructuredPathDrop(
   }, { paths, plainText })
 }
 
+async function dispatchNativeFileDrop(
+  page: import('@playwright/test').Page,
+  surface: Locator,
+  paths: string[]
+): Promise<void> {
+  const session = await page.context().newCDPSession(page)
+  try {
+    await dispatchCdpDrop(session, surface, { items: [], files: paths, dragOperationsMask: 1 })
+  } finally {
+    await session.detach()
+  }
+}
+
+async function dispatchUriOnlyDrop(
+  page: import('@playwright/test').Page,
+  surface: Locator,
+  uri: string
+): Promise<void> {
+  const session = await page.context().newCDPSession(page)
+  try {
+    await dispatchCdpDrop(session, surface, {
+      items: [{ mimeType: 'text/uri-list', data: uri }], dragOperationsMask: 1
+    })
+  } finally {
+    await session.detach()
+  }
+}
+
+async function dispatchCdpDrop(
+  session: CDPSession,
+  surface: Locator,
+  data: {
+    items: Array<{ mimeType: string; data: string }>
+    files?: string[]
+    dragOperationsMask: number
+  }
+): Promise<void> {
+  const box = await surface.boundingBox()
+  if (!box) throw new Error('active terminal surface has no bounding box')
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await session.send('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data })
+  await session.send('Input.dispatchDragEvent', { type: 'dragOver', x, y, data })
+  await session.send('Input.dispatchDragEvent', { type: 'drop', x, y, data })
+}
+
+function activeTerminalSurface(page: import('@playwright/test').Page): Locator {
+  return page.locator(
+    '.scene-stage:not([hidden]) [data-testid="terminal-pane"][data-active="true"] .terminal-surface'
+  )
+}
+
 async function terminalText(surface: import('@playwright/test').Locator): Promise<string> {
   return (await surface.locator('.xterm-rows').innerText()).replace(/\r?\n/g, '')
+}
+
+async function clearTerminalInput(
+  textarea: Locator,
+  surface: Locator,
+  visiblePath: string
+): Promise<void> {
+  await textarea.focus()
+  await textarea.press('Control+U')
+  await expect.poll(() => terminalText(surface)).not.toContain(visiblePath)
 }
 
 test('transparently chunks a large UTF-8 paste into one continuous PTY input', async () => {

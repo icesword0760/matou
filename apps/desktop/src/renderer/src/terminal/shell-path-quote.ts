@@ -8,7 +8,8 @@ const SPACE_ONLY_SPECIAL_PATH = /^[A-Za-z0-9_./:@%+=,-]+(?: +[A-Za-z0-9_./:@%+=,
  * the quoted string.
  */
 export function quoteDroppedPath(path: string): string {
-  if (ORDINARY_PATH.test(path)) return path
-  if (SPACE_ONLY_SPECIAL_PATH.test(path)) return `"${path}"`
+  if (path.includes('\0')) return ''
+  if (!path.startsWith('=') && ORDINARY_PATH.test(path)) return path
+  if (!path.startsWith('=') && SPACE_ONLY_SPECIAL_PATH.test(path)) return `"${path}"`
   return `'${path.replaceAll("'", "'\\''")}'`
 }

@@ -17,6 +17,21 @@ describe('quoteDroppedPath', () => {
     expect(quoteDroppedPath('/tmp/a b.txt')).toBe('"/tmp/a b.txt"')
   })
 
+  it('quotes leading equals so zsh preserves the original relative path', () => {
+    const path = '=ls'
+    const quoted = quoteDroppedPath(path)
+    const command = `python3 -c 'import json,sys; print(json.dumps(sys.argv[-1]))' -- ${quoted}`
+    const result = spawnSync('/bin/zsh', ['-fc', command], { encoding: 'utf8' })
+
+    expect(quoted).toBe("'=ls'")
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout.trim())).toBe(path)
+  })
+
+  it('rejects NUL because no shell argv or native file path can preserve it', () => {
+    expect(quoteDroppedPath('/tmp/a\0b.txt')).toBe('')
+  })
+
   it('uses POSIX single-quote escaping for shell-sensitive and Unicode paths', () => {
     expect(quoteDroppedPath('/tmp/a$(touch PWN).txt')).toBe("'/tmp/a$(touch PWN).txt'")
     expect(quoteDroppedPath("/tmp/a'b.txt")).toBe("'/tmp/a'\\''b.txt'")
