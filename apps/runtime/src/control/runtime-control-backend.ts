@@ -1,4 +1,10 @@
-import type { HostControlBackend, HostTarget } from './host-control-server'
+import {
+  resolveTargetFromProjection,
+  type HostCallerIdentity,
+  type HostControlBackend,
+  type HostTarget,
+  type HostTargetSelector
+} from './host-control-server'
 import { CommandBoundaryRepository } from '../anchors/anchor-resolver'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { readSessionFrames } from '../journal/segment-journal'
@@ -41,7 +47,22 @@ export class RuntimeControlBackend implements HostControlBackend {
     if (this.#active.get(sessionId) === session) this.#active.delete(sessionId)
   }
 
-  listTargets(): HostTarget[] {
+  identify(caller: HostCallerIdentity): unknown {
+    const target = this.listTargets(caller, 'all').find(({ sessionId }) => sessionId === caller.sessionId)
+    if (!target) throw new Error(`Session ${caller.sessionId} is not available`)
+    return { caller, target }
+  }
+
+  resolveTarget(
+    caller: HostCallerIdentity,
+    selector: HostTargetSelector,
+    targets: HostTarget[]
+  ): string {
+    if (selector.kind === 'self') return caller.sessionId
+    return resolveTargetFromProjection(selector, targets)
+  }
+
+  listTargets(_caller?: HostCallerIdentity, _scope?: 'current-level' | 'all'): HostTarget[] {
     return this.#database.all<{
       workspace_id: string; task_id: string; session_id: string; mount_id: string; title: string
     }>(
@@ -78,8 +99,8 @@ export class RuntimeControlBackend implements HostControlBackend {
     return this.#commands.list(sessionId).slice(-limits.limit)
   }
 
-  async sendText(sessionId: string, text: string): Promise<void> {
-    this.#requireActive(sessionId).write(text)
+  async sendText(sessionId: string, text: string, submit = false): Promise<void> {
+    this.#requireActive(sessionId).write(text + (submit ? '\r' : ''))
   }
 
   async sendKey(sessionId: string, key: Parameters<HostControlBackend['sendKey']>[1]): Promise<void> {
@@ -188,9 +209,10 @@ function errorMessage(error: unknown): string {
 }
 
 const KEY_SEQUENCES = {
-  Enter: '\r', Tab: '\t', Escape: '\u001b', ArrowUp: '\u001b[A', ArrowDown: '\u001b[B',
-  ArrowLeft: '\u001b[D', ArrowRight: '\u001b[C', CtrlC: '\u0003', CtrlD: '\u0004',
-  CtrlL: '\u000c', CtrlZ: '\u001a'
+  Enter: '\r', Tab: '\t', Escape: '\u001b', Backspace: '\u007f', Delete: '\u001b[3~',
+  ArrowUp: '\u001b[A', ArrowDown: '\u001b[B', ArrowLeft: '\u001b[D', ArrowRight: '\u001b[C',
+  Home: '\u001b[H', End: '\u001b[F', PageUp: '\u001b[5~', PageDown: '\u001b[6~',
+  CtrlC: '\u0003', CtrlD: '\u0004', CtrlL: '\u000c', CtrlU: '\u0015', CtrlZ: '\u001a'
 } as const
 
 function tailText(text: string, maxLines: number, maxBytes: number): string {

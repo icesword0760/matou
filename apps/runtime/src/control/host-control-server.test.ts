@@ -70,6 +70,38 @@ describe('HostControlServer', () => {
     })
   })
 
+  it('binds capabilities to the caller SessionRun and identifies that caller', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-caller', sessionId: 'session-2' },
+      ['host.identify'],
+      Date.now() + 1000
+    )
+
+    expect(await request(socketPath, controlRequest('identify', token, 'host.identify', {})))
+      .toMatchObject({
+        ok: true,
+        result: { caller: { runId: 'run-caller', sessionId: 'session-2' }, target: { title: 'Two' } }
+      })
+    expect(backend.identify).toHaveBeenCalledWith({ runId: 'run-caller', sessionId: 'session-2' })
+  })
+
+  it('passes relative and relation selectors to the topology backend with caller context', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-caller', sessionId: 'session-1' },
+      ['terminal.read-current'],
+      Date.now() + 1000
+    )
+    expect(await request(socketPath, controlRequest('right', token, 'terminal.read-current', {
+      target: { kind: 'relative', direction: 'right' }, maxLines: 10, maxBytes: 1000
+    }))).toMatchObject({ ok: true })
+    expect(backend.resolveTarget).toHaveBeenCalledWith(
+      { runId: 'run-caller', sessionId: 'session-1' },
+      { kind: 'relative', direction: 'right' },
+      expect.any(Array),
+      expect.any(String)
+    )
+  })
+
   it('resolves human ordinals only with their matching projection revision', async () => {
     const token = tokenService.issue('run-1', ['host.list', 'terminal.read-current'], Date.now() + 1000)
     const listing = await request(socketPath, controlRequest('list', token, 'host.list', {})) as {
@@ -101,6 +133,22 @@ describe('HostControlServer', () => {
       target: { sessionId: 'session-1' }, key: 'Enter'
     }))).toMatchObject({ ok: true })
     expect(backend.sendKey).toHaveBeenCalledWith('session-1', 'Enter')
+
+    for (const key of [
+      'Backspace', 'Delete', 'Home', 'End', 'PageUp', 'PageDown', 'CtrlU'
+    ]) {
+      expect(await request(socketPath, controlRequest(`key-${key}`, token, 'terminal.send-key', {
+        target: { sessionId: 'session-1' }, key
+      }))).toMatchObject({ ok: true })
+    }
+  })
+
+  it('sends text and optional Enter as one backend action', async () => {
+    const token = tokenService.issue('run-1', ['terminal.send-text'], Date.now() + 1000)
+    expect(await request(socketPath, controlRequest('send', token, 'terminal.send-text', {
+      target: { sessionId: 'session-1' }, text: 'pnpm test', submit: true
+    }))).toMatchObject({ ok: true })
+    expect(backend.sendText).toHaveBeenCalledWith('session-1', 'pnpm test', true)
   })
 
   it('clamps external Task progress before it reaches the product data channel', async () => {
@@ -155,6 +203,18 @@ class TestBackend implements HostControlBackend {
   writeTaskProgress = vi.fn(async () => undefined)
   appendTaskLog = vi.fn(async () => undefined)
   moveTaskToWindow = vi.fn(async () => ({ state: 'committed' }))
+  identify = vi.fn(async (caller: { sessionId: string }) => ({
+    caller,
+    target: this.targets.find(({ sessionId }) => sessionId === caller.sessionId)
+  }))
+  resolveTarget = vi.fn(async (
+    _caller: { sessionId: string }, selector: { kind: string; sessionId?: string; direction?: string },
+    targets: HostTarget[]
+  ) => {
+    if (selector.kind === 'session') return selector.sessionId!
+    if (selector.kind === 'relative' && selector.direction === 'right') return targets[1]!.sessionId
+    return targets[0]!.sessionId
+  })
   listTargets(): HostTarget[] { return this.targets.map((target) => ({ ...target })) }
 }
 
