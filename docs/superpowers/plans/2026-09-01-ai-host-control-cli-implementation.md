@@ -377,4 +377,4 @@ PATH=<MATOU_CONTROL_ASSET_ROOT/bin>:<inherited PATH>
 - 新增真实 App 验收已通过：Shell 内 `mt identify`、向右侧同级发送文本、读取右侧最新屏幕，并确认焦点、横向位置和通知计数保持不变。
 - `pnpm typecheck`、`pnpm build` 以及 `ai-host-control-cli + terminal-channel + session-canvas-navigation` 共 16 项 E2E 已通过。
 - runtime 产物和安装包资源已核对包含 `mt-cli.cjs`、两套 wrapper、Claude plugin、Codex instructions；Unix wrapper 在干净 HOME/PATH 下可直接显示帮助。
-- packaged App 已通过资源存在性检查和真实 Shell 内的 `mt identify --json`。完整 packaged 回归继续执行到独立窗口关闭场景时，既有断言期望会话停止，但实测主窗口仍保留该终端；Host Control 验收在此之前已通过，保留确切失败位置 `tests/e2e/packaged-runtime.spec.ts:136` 供后续定位。
+- packaged App 已通过资源存在性检查和真实 Shell 内的 `mt identify --json`。完整 packaged 回归继续执行到独立窗口关闭场景时，既有断言期望会话停止，但实测主窗口仍保留该终端；在基线提交 `aad224a` 独立打包复跑后同样失败于原测试第 120 行，确认并非本功能引入。当前分支保留失败位置 `tests/e2e/packaged-runtime.spec.ts:136` 供该生命周期用例后续统一。
