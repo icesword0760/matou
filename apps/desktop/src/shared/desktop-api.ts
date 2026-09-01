@@ -1,4 +1,5 @@
 export interface MatouDesktopApi {
+  getPathForFile(file: File): string
   selectWorkspaceDirectory(): Promise<string | null>
   revealDirectory(path: string): Promise<void>
   hideWindow(windowId: string): Promise<void>

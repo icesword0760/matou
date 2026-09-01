@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -99,6 +99,7 @@ describe('TerminalSurface focus continuity', () => {
   })
   afterEach(() => {
     cleanup()
+    Reflect.deleteProperty(window, 'matouDesktop')
     vi.unstubAllGlobals()
   })
 
@@ -255,6 +256,80 @@ describe('TerminalSurface focus continuity', () => {
     view.rerender(<TerminalSurface sessionId="session-1" active visible inputDisabled onUserInput={onUserInput} />)
     await waitFor(() => state.onData?.('ignored'))
     expect(onUserInput).toHaveBeenCalledTimes(1)
+  })
+
+  it('matches Kooky by previewing an internal file-tree drag and inserting its quoted paths without submitting', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const dataTransfer = {
+      types: ['text/plain', 'application/x-file-tree-nodes'],
+      dropEffect: 'none',
+      getData: vi.fn((type: string) => type === 'text/plain'
+        ? '/tmp/plain.txt "/tmp/with space.txt"'
+        : '')
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    fireEvent.dragEnter(surface, { dataTransfer })
+
+    expect(dataTransfer.dropEffect).toBe('copy')
+    expect(screen.getByTestId('terminal-drop-overlay')).not.toBeNull()
+
+    fireEvent.drop(surface, { dataTransfer })
+
+    expect(state.sendTerminalInput).toHaveBeenCalledWith(
+      'session-1', ' /tmp/plain.txt "/tmp/with space.txt"'
+    )
+    expect(state.sendTerminalInput).not.toHaveBeenCalledWith(
+      'session-1', expect.stringContaining('\r')
+    )
+    expect(screen.queryByTestId('terminal-drop-overlay')).toBeNull()
+    expect(state.focus).toHaveBeenCalled()
+  })
+
+  it('uses native file paths for Finder drops while preserving Kooky path quoting', async () => {
+    const getPathForFile = vi.fn((file: File) => file.name === 'plain.txt'
+      ? '/tmp/plain.txt'
+      : '/tmp/with space.txt')
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { getPathForFile }
+    })
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const files = [new File(['a'], 'plain.txt'), new File(['b'], 'with space.txt')]
+    const dataTransfer = {
+      types: ['Files'], files, dropEffect: 'none', getData: vi.fn(() => '')
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    fireEvent.dragEnter(surface, { dataTransfer })
+    expect(screen.getByTestId('terminal-drop-overlay')).not.toBeNull()
+    fireEvent.drop(surface, { dataTransfer })
+
+    expect(getPathForFile.mock.calls.map(([file]) => file)).toEqual(files)
+    expect(state.sendTerminalInput).toHaveBeenCalledWith(
+      'session-1', ' /tmp/plain.txt "/tmp/with space.txt"'
+    )
+  })
+
+  it('keeps the Kooky drop overlay stable across nested drag enter and leave events', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    const dataTransfer = {
+      types: ['application/x-file-tree-nodes'], dropEffect: 'none', getData: vi.fn(() => '')
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    fireEvent.dragEnter(surface, { dataTransfer })
+    fireEvent.dragEnter(surface, { dataTransfer })
+    fireEvent.dragLeave(surface, { dataTransfer })
+    expect(screen.getByTestId('terminal-drop-overlay')).not.toBeNull()
+
+    fireEvent.dragLeave(surface, { dataTransfer })
+    expect(screen.queryByTestId('terminal-drop-overlay')).toBeNull()
   })
 
   it('treats Escape as a completed Claude action but not as Shell navigation', async () => {

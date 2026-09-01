@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { type DragEvent, useEffect, useRef, useState } from 'react'
 
 import type { RuntimeMessage } from '@matou/contracts'
 import { FitAddon } from '@xterm/addon-fit'
@@ -12,6 +12,7 @@ import {
 } from './terminal-themes'
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
+const KOOKY_FILE_TREE_MIME = 'application/x-file-tree-nodes'
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -58,6 +59,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   } = props
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
+  const [isDragOverTerminal, setIsDragOverTerminal] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
@@ -72,6 +74,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const onUserInputRef = useRef(onUserInput)
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
+  const sendInputRef = useRef<(data: string) => void>(NOOP)
+  const dragOverCounterRef = useRef(0)
 
   // Runtime bytes can arrive during React's commit phase, before passive
   // effects run. Keep focus authority synchronized with the latest render so
@@ -158,6 +162,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (spawned) client.sendTerminalInput(sessionId, data)
       else pendingInputRef.current += data
     }
+    sendInputRef.current = sendOrBufferInput
     const replayProbe = shouldRunReplayProbe(
       sessionId,
       new URLSearchParams(window.location.search).get('e2e') === '1'
@@ -292,6 +297,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       fitRef.current = null
       searchRef.current = null
       terminalRef.current = null
+      sendInputRef.current = NOOP
       terminal.dispose()
     }
   }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, sessionId, spawnRevision])
@@ -323,9 +329,64 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     else search.findNext(searchRequest.query, options)
   }, [searchRequest])
 
-  return <div className="terminal-surface" ref={containerRef} aria-hidden={!visible}
+  const handleTerminalDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!isTerminalFileDrop(event.dataTransfer)) return
+    event.preventDefault()
+    dragOverCounterRef.current += 1
+    setIsDragOverTerminal(true)
+    event.dataTransfer.dropEffect = 'copy'
+  }
+  const handleTerminalDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!isTerminalFileDrop(event.dataTransfer)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }
+  const handleTerminalDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!isTerminalFileDrop(event.dataTransfer)) return
+    dragOverCounterRef.current -= 1
+    if (dragOverCounterRef.current <= 0) {
+      dragOverCounterRef.current = 0
+      setIsDragOverTerminal(false)
+    }
+  }
+  const handleTerminalDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!isTerminalFileDrop(event.dataTransfer)) return
+    event.preventDefault()
+    dragOverCounterRef.current = 0
+    setIsDragOverTerminal(false)
+
+    const pathsText = terminalDropPaths(event.dataTransfer)
+    if (pathsText && !inputDisabledRef.current) {
+      onUserInputRef.current()
+      sendInputRef.current(` ${pathsText}`)
+    }
+    requestAnimationFrame(() => terminalRef.current?.focus())
+  }
+
+  return <div className="terminal-surface" aria-hidden={!visible}
     data-session-id={sessionId} data-profile={profile} data-theme={themeKey} data-font-size={fontSize}
-    {...(pid === undefined ? {} : { 'data-pid': pid })} />
+    {...(pid === undefined ? {} : { 'data-pid': pid })}
+    onDragEnter={handleTerminalDragEnter} onDragOver={handleTerminalDragOver}
+    onDragLeave={handleTerminalDragLeave} onDrop={handleTerminalDrop}>
+    <div className="terminal-surface__viewport" ref={containerRef} />
+    {isDragOverTerminal && <div className="terminal-drop-overlay" data-testid="terminal-drop-overlay" />}
+  </div>
+}
+
+function isTerminalFileDrop(dataTransfer: DataTransfer): boolean {
+  const types = Array.from(dataTransfer.types ?? [])
+  return types.includes(KOOKY_FILE_TREE_MIME) || types.includes('Files') || dataTransfer.files.length > 0
+}
+
+function terminalDropPaths(dataTransfer: DataTransfer): string {
+  if (Array.from(dataTransfer.types ?? []).includes(KOOKY_FILE_TREE_MIME)) {
+    return dataTransfer.getData('text/plain')
+  }
+  return Array.from(dataTransfer.files ?? [])
+    .map((file) => window.matouDesktop?.getPathForFile?.(file) ?? '')
+    .filter(Boolean)
+    .map((path) => path.includes(' ') ? `"${path}"` : path)
+    .join(' ')
 }
 
 function terminalFocusAllowed(container: HTMLElement): boolean {

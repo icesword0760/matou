@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 import type { MatouDesktopApi, RuntimeConnectionState } from '../shared/desktop-api'
 import { DESKTOP_CHANNELS } from '../shared/desktop-api'
@@ -42,6 +42,7 @@ window.addEventListener('message', (event) => {
 })
 
 const desktopApi: MatouDesktopApi = {
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   selectWorkspaceDirectory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.selectWorkspaceDirectory),
   revealDirectory: (path) => ipcRenderer.invoke(DESKTOP_CHANNELS.revealDirectory, path),
   hideWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.hideWindow, windowId),
