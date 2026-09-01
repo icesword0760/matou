@@ -14,6 +14,8 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { TaskWindowMigrationService } from '../hierarchy/task-window-migration-service'
 import { NotificationProjection } from '../product/experience-foundation'
 import { TerminalScreenProjector } from './terminal-screen-projector'
+import { CONTROL_KEY_SEQUENCES, TerminalInputQueue } from './terminal-input-queue'
+import { HostControlTargetNotReadyError } from './host-control-types'
 
 export class RuntimeControlBackend implements HostControlBackend {
   readonly #database: RuntimeDatabase
@@ -24,6 +26,7 @@ export class RuntimeControlBackend implements HostControlBackend {
   readonly #active = new Map<string, PtySession>()
   readonly #taskMigrations: TaskWindowMigrationService
   readonly #topology: HostTopologyProjector
+  readonly #inputQueue = new TerminalInputQueue()
 
   constructor(
     database: RuntimeDatabase,
@@ -47,7 +50,10 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   unregister(sessionId: string, session: PtySession): void {
-    if (this.#active.get(sessionId) === session) this.#active.delete(sessionId)
+    if (this.#active.get(sessionId) === session) {
+      this.#active.delete(sessionId)
+      this.#inputQueue.clear(sessionId)
+    }
   }
 
   identify(caller: HostCallerIdentity): unknown {
@@ -100,11 +106,15 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   async sendText(sessionId: string, text: string, submit = false): Promise<void> {
-    this.#requireActive(sessionId).write(text + (submit ? '\r' : ''))
+    await this.#inputQueue.enqueue(sessionId, () => {
+      this.#requireActive(sessionId).write(text + (submit ? '\r' : ''))
+    })
   }
 
   async sendKey(sessionId: string, key: Parameters<HostControlBackend['sendKey']>[1]): Promise<void> {
-    this.#requireActive(sessionId).write(KEY_SEQUENCES[key])
+    await this.#inputQueue.enqueue(sessionId, () => {
+      this.#requireActive(sessionId).write(CONTROL_KEY_SEQUENCES[key])
+    })
   }
 
   async writeTaskStatus(taskId: string, key: string, value: string | null): Promise<void> {
@@ -182,7 +192,7 @@ export class RuntimeControlBackend implements HostControlBackend {
 
   #requireActive(sessionId: string): PtySession {
     const session = this.#active.get(sessionId)
-    if (!session) throw new Error(`Session ${sessionId} is not active`)
+    if (!session) throw new HostControlTargetNotReadyError('目标会话当前没有可输入的终端进程')
     return session
   }
 
@@ -201,13 +211,6 @@ function command(commandId: string) {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-
-const KEY_SEQUENCES = {
-  Enter: '\r', Tab: '\t', Escape: '\u001b', Backspace: '\u007f', Delete: '\u001b[3~',
-  ArrowUp: '\u001b[A', ArrowDown: '\u001b[B', ArrowLeft: '\u001b[D', ArrowRight: '\u001b[C',
-  Home: '\u001b[H', End: '\u001b[F', PageUp: '\u001b[5~', PageDown: '\u001b[6~',
-  CtrlC: '\u0003', CtrlD: '\u0004', CtrlL: '\u000c', CtrlU: '\u0015', CtrlZ: '\u001a'
-} as const
 
 function tailText(text: string, maxLines: number, maxBytes: number): string {
   const lines = text.split('\n').slice(-maxLines).join('\n')
