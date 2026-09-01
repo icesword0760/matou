@@ -1,0 +1,5 @@
+{
+  "name": "matou-host-control",
+  "version": "1.0.0",
+  "description": "Use Matou's session-scoped mt CLI to inspect and interact with managed terminals."
+}

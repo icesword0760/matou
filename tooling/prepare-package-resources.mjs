@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,3 +18,18 @@ await writeFile(
   runtimeEntry,
   bundledRuntime.replaceAll('require("node-pty")', 'require("./node-pty/lib/index.js")')
 )
+
+const requiredRuntimeResources = [
+  'index.cjs',
+  'mt-cli.cjs',
+  'control-assets/bin/mt',
+  'control-assets/bin/mt.cmd',
+  'control-assets/providers/host-control.md',
+  'control-assets/providers/claude-plugin/.claude-plugin/plugin.json',
+  'control-assets/providers/claude-plugin/skills/mt-terminal/SKILL.md',
+  'control-assets/providers/codex-developer-instructions.md'
+]
+await Promise.all(requiredRuntimeResources.map((path) => access(join(destination, path))))
+if (process.platform !== 'win32') {
+  await chmod(join(destination, 'control-assets', 'bin', 'mt'), 0o755)
+}

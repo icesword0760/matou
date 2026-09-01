@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if [ -z "${MATOU_CONTROL_NODE_EXECUTABLE:-}" ]; then
+  echo "mt 仅在 Matou 托管终端中可用：缺少运行入口" >&2
+  exit 5
+fi
+
+asset_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+export ELECTRON_RUN_AS_NODE=1
+exec "$MATOU_CONTROL_NODE_EXECUTABLE" "$asset_root/mt-cli.cjs" "$@"
