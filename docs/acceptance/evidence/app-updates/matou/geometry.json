@@ -1,0 +1,8 @@
+{
+  "x": 1082,
+  "y": 46,
+  "width": 350,
+  "height": 197,
+  "borderRadius": "16px",
+  "backdropFilter": "blur(28px) saturate(1.25)"
+}

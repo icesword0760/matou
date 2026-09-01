@@ -51,6 +51,18 @@ describe('AppUpdateControl', () => {
     expect(api.installAppUpdate).toHaveBeenCalledTimes(1)
   })
 
+  it('lets the user cancel an idle-install request before sessions finish', async () => {
+    const api = installApi(downloaded())
+    const view = render(<AppUpdateControl activeSessionCount={2} />)
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: '空闲后自动更新' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '取消空闲更新' }))
+    expect(screen.queryByText('已安排：空闲后自动更新')).toBeNull()
+
+    view.rerender(<AppUpdateControl activeSessionCount={0} />)
+    expect(api.installAppUpdate).not.toHaveBeenCalled()
+  })
+
   it('allows immediate restart or install on normal exit after download', async () => {
     const api = installApi(downloaded())
     render(<AppUpdateControl activeSessionCount={0} />)

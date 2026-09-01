@@ -112,8 +112,9 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
         </>}
         {state.status === 'downloading' && <button className="is-quiet" onClick={() => setOpen(false)}>继续在后台下载</button>}
         {state.status === 'downloaded' && activeSessionCount > 0 && <>
-          <button className="is-primary" disabled={waitingForIdle || installing} onClick={() => setWaitingForIdle(true)}>
-            {waitingForIdle ? '等待会话空闲' : '空闲后自动更新'}
+          <button className={waitingForIdle ? '' : 'is-primary'} disabled={installing}
+            onClick={() => setWaitingForIdle((waiting) => !waiting)}>
+            {waitingForIdle ? '取消空闲更新' : '空闲后自动更新'}
           </button>
           <div className="app-update-action-row">
             <button disabled={installing} onClick={installNow}>立即重启并更新</button>
