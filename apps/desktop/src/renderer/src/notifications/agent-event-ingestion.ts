@@ -14,6 +14,10 @@ export function ingestAgentNotification(
   const providerEvent = object(payload?.event)
   if (!providerEvent) return false
   const replacementKey = text(providerEvent.replacementKey)
+  if (replacementKey?.startsWith('provider-restore:')) {
+    store.removeByReplacementKey(replacementKey)
+    return true
+  }
   if (text(providerEvent.operation) === 'dismiss') {
     if (replacementKey) store.removeByReplacementKey(replacementKey)
     return true
