@@ -362,6 +362,27 @@ describe('SessionCarousel', () => {
     expect(active.classList.contains('is-expanded')).toBe(true)
   })
 
+  it('uses slot expansion only for transient hover while focus remains independently visible', () => {
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-2"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    const activeSlot = document.querySelector<HTMLElement>('[data-session-id="session-2"]')!
+    const otherSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+
+    expect(activeSlot.classList.contains('is-focused')).toBe(true)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(false)
+    fireEvent.mouseEnter(activeSlot.querySelector('[data-session-card]')!)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(true)
+    fireEvent.pointerLeave(viewport)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(false)
+    fireEvent.mouseEnter(otherSlot.querySelector('[data-session-card]')!)
+    expect(otherSlot.classList.contains('is-expanded')).toBe(true)
+
+    fireEvent.pointerLeave(viewport)
+    expect(otherSlot.classList.contains('is-expanded')).toBe(false)
+    expect(activeSlot.classList.contains('is-focused')).toBe(true)
+  })
+
   it('keeps bringing the active card into view while its layout settles', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-5"

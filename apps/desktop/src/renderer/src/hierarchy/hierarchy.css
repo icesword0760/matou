@@ -329,11 +329,11 @@ button { -webkit-app-region: no-drag; }
 .notification-item__time { margin-top: 8px; color: #7b7b7b; font-size: 12px; }
 @keyframes notification-panel-drop-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 
-.terminal-dialog-overlay { position: fixed; z-index: 9999; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.58); }
-.terminal-dialog-overlay.is-session-scoped { position: absolute; }
-.terminal-rename-dialog, [role="alertdialog"] { display: flex; flex-direction: column; width: 420px; max-width: calc(100vw - 40px); padding: 0; overflow: hidden; border: 0; border-radius: 12px; color: #f4f4f4; background: #292929; box-shadow: none; }
-.terminal-rename-dialog header, [role="alertdialog"] header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; }
-.terminal-rename-dialog h2, [role="alertdialog"] h2 { margin: 0; color: #f4f4f4; font-size: 16px; font-weight: 600; }
+.dialog-overlay { position: fixed; z-index: 9999; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.58); }
+.dialog-overlay.is-session-scoped { position: absolute; }
+.rename-dialog, [role="alertdialog"] { display: flex; flex-direction: column; width: 420px; max-width: calc(100vw - 40px); padding: 0; overflow: hidden; border: 0; border-radius: 12px; color: #f4f4f4; background: #292929; box-shadow: none; }
+.rename-dialog header, [role="alertdialog"] header { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px 16px; }
+.rename-dialog h2, [role="alertdialog"] h2 { margin: 0; color: #f4f4f4; font-size: 16px; font-weight: 600; }
 .dialog-close { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: rgba(255,255,255,.34); background: transparent; cursor: pointer; font-size: 20px; }
 .dialog-close:hover { color: rgba(255,255,255,.6); background: rgba(255,255,255,.06); }
 .rename-dialog-body { padding: 8px 24px 24px; }
@@ -342,14 +342,14 @@ button { -webkit-app-region: no-drag; }
 .rename-input-wrap input:focus { box-shadow: 0 0 0 1px rgba(255,255,255,.15); }
 .rename-input-wrap > span { position: absolute; right: 14px; color: rgba(255,255,255,.34); font-size: 13px; pointer-events: none; }
 .rename-dialog-body [role="alert"] { margin: 8px 0 0; color: #ff7b72; font-size: 12px; }
-.terminal-rename-dialog footer, [role="alertdialog"] footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 24px; }
-.terminal-rename-dialog footer button, [role="alertdialog"] footer button { min-width: 80px; height: 32px; padding: 0 16px; border: 1px solid #383838; border-radius: 8px; color: #f2f2f2; background: transparent; cursor: pointer; font-size: 14px; }
-.terminal-rename-dialog footer button:hover, [role="alertdialog"] footer button:hover { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.04); }
-.terminal-rename-dialog footer .dialog-primary, [role="alertdialog"] footer .dialog-primary { border: 0; color: #fff; background: #347fd6; }
-.terminal-rename-dialog footer .dialog-primary:hover, [role="alertdialog"] footer .dialog-primary:hover { border-color: transparent; color: #fff; background: #2f72c1; }
+.rename-dialog footer, [role="alertdialog"] footer { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 24px; }
+.rename-dialog footer button, [role="alertdialog"] footer button { min-width: 80px; height: 32px; padding: 0 16px; border: 1px solid #383838; border-radius: 8px; color: #f2f2f2; background: transparent; cursor: pointer; font-size: 14px; }
+.rename-dialog footer button:hover, [role="alertdialog"] footer button:hover { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.04); }
+.rename-dialog footer .dialog-primary, [role="alertdialog"] footer .dialog-primary { border: 0; color: #fff; background: #347fd6; }
+.rename-dialog footer .dialog-primary:hover, [role="alertdialog"] footer .dialog-primary:hover { border-color: transparent; color: #fff; background: #2f72c1; }
 .dialog-primary.is-danger { border-color: transparent; color: #fff; background: #c5443e; }
 .dialog-primary.is-danger:hover { border-color: transparent; color: #fff; background: #ad3733; }
-.terminal-rename-dialog footer button:disabled { opacity: .45; cursor: not-allowed; }
+.rename-dialog footer button:disabled { opacity: .45; cursor: not-allowed; }
 [role="alertdialog"] > p { margin: 0; padding: 8px 24px 24px; color: rgba(255,255,255,.7); font-size: 14px; line-height: 1.6; white-space: pre-line; }
 
 .detached-placeholder { display: grid; height: 100%; place-content: center; justify-items: center; color: #8792a6; background: #10141b; text-align: center; }
@@ -640,15 +640,15 @@ button { -webkit-app-region: no-drag; }
 .light-theme .workbench-action-popover button:hover,
 .light-theme .perm-menu button.perm-menu__item:hover { background: #eceef3; }
 .light-theme .workbench-action-popover .is-delete:hover { color: #a8322e; background: #fff1f0; }
-.light-theme .terminal-rename-dialog,
+.light-theme .rename-dialog,
 .light-theme [role="alertdialog"] { color: #2f3547; background: #fff; }
-.light-theme .terminal-rename-dialog h2,
+.light-theme .rename-dialog h2,
 .light-theme [role="alertdialog"] h2 { color: rgba(0,0,0,.85); }
 .light-theme .rename-input-wrap input { color: rgba(0,0,0,.85); background: rgba(0,0,0,.04); }
 .light-theme [role="alertdialog"] > p { color: rgba(0,0,0,.65); }
-.light-theme .terminal-rename-dialog footer button,
+.light-theme .rename-dialog footer button,
 .light-theme [role="alertdialog"] footer button { border-color: rgba(0,0,0,.12); color: rgba(0,0,0,.7); }
-.light-theme .terminal-rename-dialog footer .dialog-primary,
+.light-theme .rename-dialog footer .dialog-primary,
 .light-theme [role="alertdialog"] footer .dialog-primary { border-color: transparent; color: #fff; background: #347fd6; }
 .light-theme .dialog-primary.is-danger { border-color: transparent; color: #fff; background: #c5443e; }
 .light-theme .dialog-primary.is-danger:hover { border-color: transparent; color: #fff; background: #ad3733; }

@@ -605,7 +605,10 @@ export function SessionCarousel(props: {
       hoverVisibilitySessionId.current = null
       if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
       hoverVisibilityFrame.current = undefined
-      setHoveredSessionId(null)
+      // Keep the visual width owned by focus, but still expose pointer entry
+      // as a transient preview state. Pointer leave clears `is-expanded`
+      // without collapsing the active card or polluting persisted geometry.
+      setHoveredSessionId(sessionId)
       // The active card owns the viewport. Pointer entry may reveal a clipped
       // edge, but pointer exit must never restore it to a partially hidden
       // position as if this were a temporary preview.
@@ -880,7 +883,7 @@ export function SessionCarousel(props: {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
-      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${node.sessionId === focusedSessionId || hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return

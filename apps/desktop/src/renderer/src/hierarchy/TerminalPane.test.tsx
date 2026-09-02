@@ -221,6 +221,18 @@ describe('Terminal pane', () => {
     expect(screen.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeTruthy()
   })
 
+  it('removes only the selected Session from the header context menu', async () => {
+    const user = userEvent.setup()
+    const onDelete = vi.fn()
+    render(<TerminalPane {...fixture()} onDelete={onDelete} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '删除会话' }))
+
+    expect(onDelete).toHaveBeenCalledWith('session-1', false)
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
   it('dismisses pane actions on a pointer press anywhere outside the menu', async () => {
     const user = userEvent.setup()
     render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
