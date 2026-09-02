@@ -163,6 +163,34 @@ describe('SegmentJournal', () => {
     await journal.close()
   })
 
+  it('keeps the live journal retryable when opening the next segment fails', async () => {
+    if (process.platform === 'win32') return
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const journal = await SegmentJournal.open(directory, 'session-rotate-retry', {
+      maxSegmentBytes: 160,
+      compressSealed: false
+    })
+    const sessionDirectory = join(directory, 'journal', 'session-rotate-retry')
+    await journal.appendOutput(1, new TextEncoder().encode('first-line'.repeat(10)))
+
+    await chmod(sessionDirectory, 0o500)
+    try {
+      await expect(journal.appendOutput(2, new TextEncoder().encode('second-line')))
+        .rejects.toMatchObject({ code: expect.stringMatching(/EACCES|EPERM/) })
+    } finally {
+      await chmod(sessionDirectory, 0o700)
+    }
+
+    await expect(journal.appendOutput(2, new TextEncoder().encode('second-line')))
+      .resolves.toBeUndefined()
+    await expect(journal.readFrames()).resolves.toMatchObject([
+      { kind: 'output', sequence: 1 },
+      { kind: 'output', sequence: 2 }
+    ])
+    await journal.close()
+  })
+
   it('surfaces a read-only data directory without damaging another Session', async () => {
     if (process.platform === 'win32') return
     const writable = await mkdtemp(join(tmpdir(), 'matou-journal-'))

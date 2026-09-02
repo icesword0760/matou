@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   stat,
   truncate,
 } from 'node:fs/promises'
@@ -329,24 +330,45 @@ export class SegmentJournal {
   }
 
   async #rotate(): Promise<void> {
-    await this.#handle.sync()
-    await this.#handle.close()
-    this.#scheduleTailIndexWrite()
-    await this.#tailIndexWrite
-    this.#sealedSegments.push({
+    const sealedHandle = this.#handle
+    const sealedSegment = {
       index: this.#segmentIndex,
       path: this.#path,
       bytes: this.#size,
-      state: 'sealed-raw'
-    })
+      state: 'sealed-raw' as const
+    }
+    await sealedHandle.sync()
+    this.#scheduleTailIndexWrite()
+    await this.#tailIndexWrite
 
-    this.#segmentIndex += 1
-    this.#path = segmentPath(this.directory, this.#segmentIndex)
-    this.#handle = await open(this.#path, 'a+', 0o600)
-    await this.#handle.write(MAGIC)
-    await chmod(this.#path, 0o600)
+    const nextSegmentIndex = this.#segmentIndex + 1
+    const nextPath = segmentPath(this.directory, nextSegmentIndex)
+    let nextHandle: FileHandle | undefined
+    try {
+      nextHandle = await open(nextPath, 'a+', 0o600)
+      await nextHandle.truncate(0)
+      await writeEntireFrame(nextHandle, MAGIC)
+      await nextHandle.sync()
+      await chmod(nextPath, 0o600)
+    } catch (error) {
+      await nextHandle?.close().catch(() => undefined)
+      await rm(nextPath, { force: true }).catch(() => undefined)
+      throw error
+    }
+
+    let closeError: unknown
+    try {
+      await sealedHandle.close()
+    } catch (error) {
+      closeError = error
+    }
+    this.#sealedSegments.push(sealedSegment)
+    this.#segmentIndex = nextSegmentIndex
+    this.#path = nextPath
+    this.#handle = nextHandle
     this.#size = MAGIC.byteLength
     this.#scheduleSealedCompression()
+    if (closeError !== undefined) throw closeError
   }
 
   #scheduleSealedCompression(): void {
