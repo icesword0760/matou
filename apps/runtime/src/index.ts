@@ -29,6 +29,7 @@ import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
+import { createE2eMigrationInterruptionObserver } from './storage/e2e-migration-interruption-observer'
 import { DatabaseLifecycleService } from './storage/database-lifecycle-service'
 import type { DatabaseBackupService } from './storage/database-backup-service'
 import {
@@ -88,6 +89,7 @@ const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
 const e2eJournalOptionsForSession = createE2eJournalOptionsProvider(process.env)
 const e2eForkCrashObserver = createE2eForkCrashObserver(process.env)
+const e2eMigrationObserver = createE2eMigrationInterruptionObserver(process.env)
 interface RuntimeStateBase {
   mode: 'normal' | 'read-only'
   dataRoot: string
@@ -120,6 +122,7 @@ let forkCoordinator: ForkOperationCoordinator | undefined
 const lifecycleCoordinator = new RuntimeLifecycleCoordinator()
 const lifecyclePublisher = new RuntimeLifecyclePublisher(parentPort)
 const bootstrapObserver: RuntimeDatabaseBootstrapObserver = {
+  ...(e2eMigrationObserver ? { migrationObserver: e2eMigrationObserver } : {}),
   onDatabaseOpened: (
     database: RuntimeDatabase,
     _effectiveDataRoot: string,

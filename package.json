@@ -25,6 +25,7 @@
     "test:e2e:long-terminal-history": "pnpm build && playwright test tests/e2e/terminal-long-history.spec.ts --workers=1 --reporter=line",
     "test:e2e:background-scene-pty": "pnpm build && playwright test tests/e2e/runtime-background-scene-pty.spec.ts --workers=1 --reporter=line",
     "test:runtime:pty-stress": "pnpm build:packages && pnpm build:runtime && node --test tests/runtime/pty-stress.test.mjs",
+    "test:runtime:migration-interruption": "pnpm build:packages && pnpm build:runtime && node --experimental-strip-types --test tests/runtime/migration-interruption.test.mjs",
     "check:identifiers": "node tooling/project-identifier-policy.mjs",
     "package:dir": "pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir",
     "test:packaged": "pnpm package:dir && playwright test tests/e2e/packaged-runtime.spec.ts",

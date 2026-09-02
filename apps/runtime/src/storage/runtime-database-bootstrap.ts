@@ -24,7 +24,11 @@ import {
   DatabaseBackupService,
   type DatabaseBackupDescriptor
 } from './database-backup-service'
-import { MigrationRunner, type Migration } from './migration-runner'
+import {
+  MigrationRunner,
+  type Migration,
+  type MigrationRunnerObserver
+} from './migration-runner'
 
 export interface RuntimeDatabaseRecoveryError {
   code: 'BACKUP_LIST_FAILED' | 'RECOVERY_MARKER_FAILED' | 'RECOVERY_MOVE_FAILED'
@@ -74,6 +78,7 @@ export interface RuntimeRecoveryMarkerFinalizationObserver {
 }
 
 export interface RuntimeDatabaseBootstrapObserver {
+  migrationObserver?: MigrationRunnerObserver
   onDatabaseOpened?(
     database: RuntimeDatabase,
     dataRoot: string,
@@ -105,7 +110,7 @@ export async function openRecoverableRuntimeDatabaseWithOwnership(
     database = ownership.openWritable()
     observer.onDatabaseOpened?.(database, dataRoot, backups)
     assertFullIntegrity(database)
-    await new MigrationRunner(database, migrations, backups).migrate()
+    await new MigrationRunner(database, migrations, backups, observer.migrationObserver).migrate()
     return { kind: 'writable', database, dataRoot }
   } catch (error) {
     ownership.release()
@@ -213,7 +218,7 @@ export async function openRecoverableRuntimeDatabase(
 
     observer.onDatabaseOpened?.(database, dataRoot, backups)
     assertFullIntegrity(database)
-    await new MigrationRunner(database, migrations, backups).migrate()
+    await new MigrationRunner(database, migrations, backups, observer.migrationObserver).migrate()
     return { kind: 'writable', database, dataRoot }
   } catch (error) {
     if (database && observer.isShutdownRequested?.()) throw error

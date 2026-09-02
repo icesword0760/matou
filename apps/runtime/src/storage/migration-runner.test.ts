@@ -762,6 +762,46 @@ describe('MigrationRunner', () => {
     expect(result.backupPath).toBe('/backups/pre-migration.sqlite')
     expect(events).toEqual(['backup:pre-migration', 'rotate'])
   })
+
+  it('publishes deterministic interruption points around a durable migration', async () => {
+    const { database } = await createDatabase()
+    const first: Migration = {
+      version: 1,
+      name: 'observable-migration',
+      sql: 'CREATE TABLE observable_table (id TEXT PRIMARY KEY) STRICT;'
+    }
+    const events: string[] = []
+    const backups = {
+      async create(_database: RuntimeDatabase, reason: 'pre-migration') {
+        events.push(`backup:${reason}`)
+        return {
+          id: 'observable-backup', path: '/backups/observable.sqlite', createdAt: 1,
+          reason, schemaVersion: 0, size: 1, sha256: 'a'.repeat(64)
+        }
+      },
+      async rotate() { events.push('rotate') }
+    }
+
+    await new MigrationRunner(database, [first], backups, {
+      onPreMigrationBackupReady: (backup) => events.push(`ready:${backup.id}`),
+      onMigrationTransactionPrepared: (migration) => {
+        events.push(`prepared:${migration.version}`)
+        expect(database.get(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'observable_table'"
+        )).toEqual({ name: 'observable_table' })
+        expect(database.all('SELECT * FROM schema_migrations')).toEqual([])
+      },
+      onMigrationCommitted: (migration) => events.push(`committed:${migration.version}`)
+    }).migrate()
+
+    expect(events).toEqual([
+      'backup:pre-migration',
+      'rotate',
+      'ready:observable-backup',
+      'prepared:1',
+      'committed:1'
+    ])
+  })
 })
 
 function durableLegacyRow(
