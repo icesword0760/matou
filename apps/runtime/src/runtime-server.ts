@@ -17,7 +17,6 @@ import { DomainEventStore } from './events/domain-event-store'
 import {
   JournalCorruptionError,
   SegmentJournal,
-  readSessionFrames,
   type SegmentJournalOptions
 } from './journal/segment-journal'
 import type { DecodedJournalFrame } from './journal/segment-journal'
@@ -1790,10 +1789,11 @@ export class RuntimeServer {
   ): Promise<void> {
     if (!this.#failFork(message.sessionId, reason, authority)) return
     const banner = '[Fork 未完成，请检查上方原因后重试]'
-    const frames = await readSessionFrames(this.#dataRoot, message.sessionId).catch(() => [])
-    const alreadyPresented = frames.some((frame) =>
-      frame.kind === 'output' && new TextDecoder().decode(frame.data).includes(banner)
-    )
+    const tail = await this.#history.page({
+      sessionId: message.sessionId,
+      lineLimit: 16
+    }).catch(() => ({ lines: [] }))
+    const alreadyPresented = tail.lines.some((line) => line.text.includes(banner))
     if (!alreadyPresented) {
       const journal = await SegmentJournal.open(
         this.#dataRoot,

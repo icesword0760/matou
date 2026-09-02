@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -9,8 +9,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/contracts'
 
-import { SegmentJournal, readSessionFrames } from './journal/segment-journal'
-import { readSessionJournalBounds } from './journal/journal-range-reader'
+import { SegmentJournal, readSegmentFrames, readSessionFrames } from './journal/segment-journal'
+import {
+  readSessionJournalBounds
+} from './journal/journal-range-reader'
 import { JournalCompressor } from './journal/journal-compressor'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import {
@@ -2560,6 +2562,78 @@ describe('RuntimeServer domain RPC', () => {
       expect(durableText.match(/\[Fork 未完成，请检查上方原因后重试\]/g)).toHaveLength(1)
     } finally {
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('does not repeat a durable fork failure banner when unrelated cold history is corrupt', async () => {
+    const journalOptions = {
+      maxSegmentBytes: 256,
+      rawHotBytes: 4_096,
+      compressSealed: false
+    }
+    let forkServer: RuntimeServer | undefined
+    try {
+      registerSession(database, 'fork-corrupt-source', 'claude-code')
+      registerSession(database, 'fork-corrupt-derived', 'claude-code')
+      database.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, error_message, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'failed', ?, 1)`,
+        'fork-corrupt-derived', 'fork-corrupt-source', 'missing-provider-corrupt',
+        'No session found for requested id'
+      )
+      const seeded = await SegmentJournal.open(root, 'fork-corrupt-derived', journalOptions)
+      for (let sequence = 1; sequence <= 8; sequence += 1) {
+        await seeded.appendOutput(sequence, new TextEncoder().encode(
+          `historical-output-${sequence}-${'x'.repeat(180)}\r\n`
+        ))
+      }
+      await seeded.appendOutput(9, new TextEncoder().encode(
+        '\r\n\u001b[31mNo session found for requested id\u001b[0m\r\n' +
+        '\u001b[33m[Fork 未完成，请检查上方原因后重试]\u001b[0m\r\n'
+      ))
+      await seeded.close()
+
+      await writeFile(
+        join(root, 'journal', 'fork-corrupt-derived', 'segment-000001.mtj'),
+        'corrupt-cold-history'
+      )
+
+      const sessions = new RuntimeSessionRegistry()
+      const forkPort = new MockPort()
+      forkServer = new RuntimeServer(
+        forkPort,
+        root,
+        database,
+        undefined,
+        undefined,
+        sessions,
+        undefined,
+        undefined,
+        { journalOptionsForSession: () => journalOptions }
+      )
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-corrupt-renderer'
+      })
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-corrupt-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => forkPort.last('terminal.spawned')?.pid === 0)
+
+      const journalDirectory = join(root, 'journal', 'fork-corrupt-derived')
+      let durableText = ''
+      for (const entry of (await readdir(journalDirectory)).sort()) {
+        if (!/^segment-\d+\.mtj$/.test(entry) || entry === 'segment-000001.mtj') continue
+        for (const frame of await readSegmentFrames(join(journalDirectory, entry))) {
+          if (frame.kind === 'output') durableText += new TextDecoder().decode(frame.data)
+        }
+      }
+      expect(durableText.match(/\[Fork 未完成，请检查上方原因后重试\]/g)).toHaveLength(1)
+    } finally {
+      forkServer?.close()
     }
   })
 
