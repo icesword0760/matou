@@ -19,7 +19,7 @@
 | 11 每卡恢复遮罩 | 恢复阶段只覆盖所属卡片，其他工作保持可用 | **已闭合** | 20 PTY recovery scale；组件与完整 E2E |
 | 12 压缩历史搜索 | 同一搜索入口进入命中上下文并可返回实时终端 | **已闭合** | `TerminalHistoryContextView`；长历史 E2E |
 | 13 终端恢复边界 | 长行、ANSI、alternate screen、损坏和 Unicode 均有真实/定向门禁 | **已闭合** | PTY stress 4/4；long history；corruption E2E |
-| 14 全系统门禁 | unit、type、build、E2E、scale、stress、package 同版本收口 | **已闭合** | `2f27432`；`2026-09-02-internal-hardening-final.md` |
+| 14 全系统门禁 | unit、type、build、E2E、scale、stress、package 同版本收口 | **已闭合** | `a606b93`；`2026-09-02-internal-hardening-final.md` |
 
 ## 状态口径
 

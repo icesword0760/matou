@@ -3,7 +3,7 @@
 - 终审日期：2026-09-02
 - 工作树：`/Users/icesword/Documents/AIProjects/matou/.worktrees/internal-hardening-audit`
 - 分支：`codex/internal-hardening-audit`
-- 终审代码基线：`2f27432`
+- 终审代码基线：`a606b93`
 
 ## 1. 产品结论
 
