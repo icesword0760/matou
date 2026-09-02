@@ -4,7 +4,10 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
+import type { RuntimeMessage } from '@matou/contracts'
+
 import { PtySession } from './pty-session'
+import { readSessionJournalBounds } from '../journal/journal-range-reader'
 
 const roots: string[] = []
 
@@ -52,6 +55,48 @@ setInterval(() => {}, 1_000)
   })
 })
 
+describe('PtySession live catch-up', () => {
+  it('streams a credit-resumed suffix without decoding a cold segment', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-range-replay-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    const sent: RuntimeMessage[] = []
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'credit-range-session', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: (message) => { sent.push(message) },
+        journalOptions: { maxSegmentBytes: 700 * 1024, compressSealed: false }
+      })
+      session.display('a'.repeat(600 * 1024))
+      session.display('b'.repeat(600 * 1024))
+      session.display('c'.repeat(600 * 1024))
+      await waitUntil(() => sent.filter(({ type }) => type === 'terminal.data').length === 2)
+      await session.replayMetadata()
+      const bounds = await readSessionJournalBounds(root, 'credit-range-session')
+      const cold = bounds.segments.find(({ lastSequence }) => lastSequence < 3)
+      expect(cold).toBeDefined()
+      await writeFile(cold!.path, 'corrupted cold segment')
+
+      session.acknowledge(2)
+      await waitUntil(() => sent.filter(({ type }) => type === 'terminal.data').length === 3)
+
+      expect(sent.filter(({ type }) => type === 'terminal.data').at(-1)).toMatchObject({
+        sequence: 3
+      })
+    } finally {
+      await session?.endDurability()
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  }, 10_000)
+})
+
 describe('PtySession resize deduplication', () => {
   it('records and applies adjacent identical dimensions only once', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-pty-resize-'))
@@ -82,6 +127,14 @@ describe('PtySession resize deduplication', () => {
     }
   })
 })
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition did not become true')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
 
 describe('PtySession durability recovery', () => {
   it('publishes output metadata only after the retained frame is durably retried', async () => {

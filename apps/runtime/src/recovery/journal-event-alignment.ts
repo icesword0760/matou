@@ -44,7 +44,7 @@ export class JournalEventCoordinator {
     injectFault?.('after-domain-commit')
 
     if (commit.lastEventSequence !== undefined) {
-      const existingCursor = highestDomainCursor(await journal.readFrames())
+      const existingCursor = journal.domainEventSequenceAtOrBefore(journal.lastSequence)
       if (existingCursor < commit.lastEventSequence) {
         await journal.appendDomainCursor(journal.lastSequence + 1, commit.lastEventSequence)
         injectFault?.('after-marker-append')
@@ -56,12 +56,11 @@ export class JournalEventCoordinator {
   }
 
   async recover(sessionId: string, journal: SegmentJournal): Promise<RecoveryWatermark> {
-    const frames = await journal.readFrames()
     const committedMaximum =
       this.#database.get<{ maximum: number }>(
         'SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events'
       )?.maximum ?? 0
-    const cursor = highestDomainCursor(frames)
+    const cursor = journal.domainEventSequenceAtOrBefore(journal.lastSequence)
     if (cursor > committedMaximum) {
       throw new Error(
         `journal domain cursor ${cursor} is ahead of committed sequence ${committedMaximum}`
@@ -105,18 +104,6 @@ export class JournalEventCoordinator {
       pendingDomainEventSequence
     }
   }
-}
-
-function highestDomainCursor(
-  frames: Awaited<ReturnType<SegmentJournal['readFrames']>>
-): number {
-  let maximum = 0
-  for (const frame of frames) {
-    if (frame.kind === 'domain-cursor') {
-      maximum = Math.max(maximum, frame.domainEventSequence)
-    }
-  }
-  return maximum
 }
 
 // Keeps the transaction-only dependency explicit for boundary checks and repository signatures.

@@ -1,10 +1,11 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { SegmentJournal } from '../journal/segment-journal'
+import { readSessionJournalBounds } from '../journal/journal-range-reader'
 import { JournalEventCoordinator } from './journal-event-alignment'
 import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
@@ -31,6 +32,43 @@ afterEach(async () => {
 })
 
 describe('JournalEventCoordinator', () => {
+  it('aligns new domain events from the live cursor without decoding cold Journal segments', async () => {
+    await journal.close()
+    journal = await SegmentJournal.open(root, 'session-1', {
+      maxSegmentBytes: 360,
+      compressSealed: false
+    })
+    await journal.appendOutput(1, new TextEncoder().encode('old-output'.repeat(30)))
+    await journal.appendDomainCursor(2, 0)
+    await journal.appendOutput(3, new TextEncoder().encode('current-output'.repeat(30)))
+    const bounds = await readSessionJournalBounds(root, 'session-1')
+    const cold = bounds.segments.find(({ lastSequence }) => lastSequence < 3)
+    expect(cold).toBeDefined()
+    await writeFile(cold!.path, 'corrupt cold segment')
+
+    const commit = await coordinator.execute(
+      'session-1',
+      journal,
+      { commandId: 'cold-skip', commandType: 'todo.create', requestHash: 'cold-skip' },
+      ({ emit }) => {
+        emit({
+          eventId: 'cold-skip-event',
+          eventType: 'agent.todo',
+          aggregateType: 'session',
+          aggregateId: 'session-1',
+          sessionId: 'session-1',
+          payload: {},
+          requiredTerminalSequence: 3,
+          occurredAt: 100
+        })
+        return null
+      }
+    )
+
+    expect(commit.lastEventSequence).toBe(1)
+    expect(journal.domainEventSequenceAtOrBefore(journal.lastSequence)).toBe(1)
+  })
+
   it('flushes a domain cursor after the domain transaction commits', async () => {
     await journal.appendOutput(1, Uint8Array.from([65]))
 
