@@ -2166,7 +2166,9 @@ describe('RuntimeServer domain RPC', () => {
       await waitUntil(() => forkPort.sent.some((message) =>
         message.type === 'terminal.spawned' && message.reattached === true
       ))
-      expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(2)
+      // The coordinator starts the provider without binding a presentation;
+      // only the later Renderer attach publishes a visible spawn event.
+      expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(1)
       expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
         '--resume', 'provider-source-durable', '--fork-session'

@@ -90,14 +90,14 @@ export class SessionExecutionService<T = void> {
         if (row?.stage === 'failed' && !live) {
           return { kind: 'deferred', operationId: row.operation_id, stage: row.stage }
         }
-        const value = await this.#backend.startOrResume(descriptor, undefined, undefined, attachView)
+        const value = await this.#startBackend(descriptor, undefined, undefined, attachView)
         return { kind: 'started', value }
       }
 
       // A Renderer may only attach an existing process. It never becomes the
       // executor for an accepted durable Fork merely by mounting an xterm view.
       if (live && authority === undefined) {
-        const value = await this.#backend.startOrResume(descriptor, undefined, 'attach-only', attachView)
+        const value = await this.#startBackend(descriptor, undefined, 'attach-only', attachView)
         return { kind: 'started', value }
       }
       if (!authority) {
@@ -111,9 +111,21 @@ export class SessionExecutionService<T = void> {
         sourceSessionId: row.source_session_id,
         sourceProviderSessionId: row.source_provider_session_id
       }
-      const value = await this.#backend.startOrResume(descriptor, bound, undefined, attachView)
+      const value = await this.#startBackend(descriptor, bound, undefined, attachView)
       return { kind: 'started', value, authority: bound }
     })
+  }
+
+  #startBackend(
+    descriptor: SessionExecutionDescriptor,
+    authority: ForkExecutionAuthority | undefined,
+    mode: 'attach-only' | undefined,
+    attachView: boolean
+  ): Promise<T> {
+    if (!attachView) return this.#backend.startOrResume(descriptor, authority, mode, false)
+    if (mode !== undefined) return this.#backend.startOrResume(descriptor, authority, mode)
+    if (authority !== undefined) return this.#backend.startOrResume(descriptor, authority)
+    return this.#backend.startOrResume(descriptor)
   }
 
   #durableFork(sessionId: string): DurableForkRow | undefined {
