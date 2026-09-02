@@ -859,6 +859,12 @@ sleep 30
       profile: 'shell', cols: 80, rows: 24
     })
     await waitUntil(() => port.last('terminal.hud')?.hud?.configCounts?.mcpServers === 0)
+    const initialHudCount = port.sent.filter(({ type }) => type === 'terminal.hud').length
+    port.receive({
+      type: 'terminal.hud-refresh', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'live-config-session'
+    })
+    await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.hud').length > initialHudCount)
 
     await writeFile(join(configDir, 'settings.json'), JSON.stringify({
       mcpServers: { live_bridge: {} }, hooks: { Stop: [] }

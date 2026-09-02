@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { watch, type FSWatcher } from 'node:fs'
 import { readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
-import { basename, delimiter, join, resolve } from 'node:path'
+import { basename, delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
@@ -3116,12 +3116,14 @@ interface LiveGitEnvironment {
 
 async function gitEnvironment(cwd: string): Promise<LiveGitEnvironment | undefined> {
   try {
-    const [{ stdout: branchOutput }, { stdout: statusOutput }, gitDirectory] = await Promise.all([
-      execFileAsync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']),
-      execFileAsync('git', ['-C', cwd, 'status', '--porcelain', '--untracked-files=normal']),
-      resolveGitDirectory(cwd)
+    const environment = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+    const [{ stdout: branchOutput }, { stdout: statusOutput }, { stdout: directoryOutput }] = await Promise.all([
+      execFileAsync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { env: environment }),
+      execFileAsync('git', ['-C', cwd, 'status', '--porcelain', '--untracked-files=normal'], { env: environment }),
+      execFileAsync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], { env: environment })
     ])
     const gitBranch = branchOutput.trim()
+    const gitDirectory = directoryOutput.trim()
     return gitBranch ? {
       gitBranch,
       gitDirty: statusOutput.trim().length > 0,
@@ -3134,9 +3136,12 @@ async function gitEnvironment(cwd: string): Promise<LiveGitEnvironment | undefin
 
 async function resolveGitDirectory(cwd: string): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', cwd, 'rev-parse', '--git-dir'])
+    const environment = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+    const { stdout } = await execFileAsync(
+      'git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], { env: environment }
+    )
     const path = stdout.trim()
-    return path ? resolve(cwd, path) : undefined
+    return path || undefined
   } catch {
     return undefined
   }

@@ -8,6 +8,7 @@ import {
 } from '../terminal/TerminalSurface'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { TerminalHud } from '../hud/TerminalHud'
+import { VisibleHudRefreshLoop } from '../hud/visible-hud-refresh-loop'
 import type { HudPermissionMode, SessionGraphNodeView, SessionHudView } from './hierarchy-types'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
@@ -88,6 +89,23 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
     void loadSnapshot().catch(() => {})
     return unsubscribe
   }, [client, isTeamMember, sceneId, sessionId])
+  useEffect(() => {
+    if (!client || !sessionId || isTeamMember || typeof client.refreshTerminalHud !== 'function') return
+    const loop = new VisibleHudRefreshLoop(
+      () => client.refreshTerminalHud(sessionId),
+      () => document.visibilityState === 'visible'
+    )
+    const onFocus = () => loop.focus()
+    const onVisibility = () => loop.visibilityChanged()
+    loop.start()
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      loop.stop()
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [client, isTeamMember, sessionId])
   const setPermissionMode = (targetSessionId: string, permissionMode: HudPermissionMode, respawn: boolean) => {
     if (!client || readOnly || storageFault !== null) return
     const method = 'session.set-permission-mode'
