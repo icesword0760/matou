@@ -10,6 +10,10 @@ describe('RuntimeSessionRegistry', () => {
 
     expect(registry.size).toBe(2)
     expect(registry.pids()).toEqual([101, 101])
+    expect(registry.sessionPids()).toEqual([
+      { sessionId: 'first', pid: 101 },
+      { sessionId: 'second', pid: 101 }
+    ])
     registry.delete('first')
     expect(registry.size).toBe(1)
   })

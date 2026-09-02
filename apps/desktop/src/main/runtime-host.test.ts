@@ -55,6 +55,14 @@ describe('RuntimeHost', () => {
       runtimePid: 321,
       ptyCount: 17,
       ptyPids: [401, 402],
+      ptySessions: [{ sessionId: 'session-1', pid: 401 }],
+      recoveryObservation: {
+        maxRestoring: 1,
+        transitions: [{
+          sequence: 1, sessionId: 'session-1', sceneId: 'scene-1',
+          priority: 'active-session', state: 'restoring', restoringCount: 1
+        }]
+      },
       statementCount: 81,
       statementProfile: [{ statement: 'SELECT 1', count: 81 }],
       eventLoopDelayP99Ms: 12.5,
@@ -70,6 +78,14 @@ describe('RuntimeHost', () => {
       runtimePid: 321,
       ptyCount: 17,
       ptyPids: [401, 402],
+      ptySessions: [{ sessionId: 'session-1', pid: 401 }],
+      recoveryObservation: {
+        maxRestoring: 1,
+        transitions: [{
+          sequence: 1, sessionId: 'session-1', sceneId: 'scene-1',
+          priority: 'active-session', state: 'restoring', restoringCount: 1
+        }]
+      },
       statementCount: 81,
       statementProfile: [{ statement: 'SELECT 1', count: 81 }],
       eventLoopDelayP99Ms: 12.5,

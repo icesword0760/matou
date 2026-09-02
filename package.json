@@ -26,6 +26,7 @@
     "check:identifiers": "node tooling/project-identifier-policy.mjs",
     "package:dir": "pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir",
     "test:packaged": "pnpm package:dir && playwright test tests/e2e/packaged-runtime.spec.ts",
+    "test:e2e:recovery-scale": "node tooling/run-recovery-scale-gate.mjs",
     "clean": "pnpm -r --if-present run clean"
   },
   "devDependencies": {
