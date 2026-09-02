@@ -91,15 +91,7 @@ test('returns persisted detached history to one read-only main window for search
     await expect(fixture.page.locator('.terminal-search-bar__count')).toHaveText('1/1')
     await search.press('Escape')
 
-    const markerRow = recovered.locator('.xterm-rows > div').filter({
-      hasText: 'MATOU_READONLY_HISTORY_COPY'
-    }).last()
-    const row = await markerRow.boundingBox()
-    if (!row) throw new Error('Expected replayed marker row geometry')
-    await fixture.page.mouse.move(row.x + 1, row.y + row.height / 2)
-    await fixture.page.mouse.down()
-    await fixture.page.mouse.move(row.x + row.width - 1, row.y + row.height / 2, { steps: 8 })
-    await fixture.page.mouse.up()
+    await selectVisibleTerminal(fixture.page, recovered)
     await fixture.page.keyboard.press(`${mod}+c`)
     await expect.poll(() => fixture.app.evaluate(({ clipboard }) => clipboard.readText()))
       .toContain('MATOU_READONLY_HISTORY_COPY')
@@ -164,15 +156,7 @@ test('returns a live detached window to replay-only history after Runtime enters
     await expect(fixture.page.locator('.terminal-search-bar__count')).toHaveText('1/1')
     await search.press('Escape')
 
-    const markerRow = returned.locator('.xterm-rows > div').filter({
-      hasText: 'MATOU_LIVE_READONLY_CLOSE'
-    }).last()
-    const row = await markerRow.boundingBox()
-    if (!row) throw new Error('Expected returned marker row geometry')
-    await fixture.page.mouse.move(row.x + 1, row.y + row.height / 2)
-    await fixture.page.mouse.down()
-    await fixture.page.mouse.move(row.x + row.width - 1, row.y + row.height / 2, { steps: 8 })
-    await fixture.page.mouse.up()
+    await selectVisibleTerminal(fixture.page, returned)
     await fixture.page.keyboard.press(`${process.platform === 'darwin' ? 'Meta' : 'Control'}+c`)
     await expect.poll(() => fixture.app.evaluate(({ clipboard }) => clipboard.readText()))
       .toContain('MATOU_LIVE_READONLY_CLOSE')
@@ -200,6 +184,23 @@ async function findRuntimePid(electronPid: number): Promise<number> {
     return runtimePid
   }).not.toBe(0)
   return runtimePid
+}
+
+async function selectVisibleTerminal(
+  page: import('@playwright/test').Page,
+  surface: import('@playwright/test').Locator
+): Promise<void> {
+  // WebGL terminals draw glyphs on a canvas, so selection must use the real
+  // xterm viewport rather than DOM row geometry. Search has already scrolled
+  // the matching history into view; dragging the viewport verifies the same
+  // user-visible copy path for both WebGL and its DOM fallback.
+  const screen = surface.locator('.xterm-screen')
+  const box = await screen.boundingBox()
+  if (!box) throw new Error('Expected terminal viewport geometry')
+  await page.mouse.move(box.x + 2, box.y + 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width - 2, box.y + box.height - 2, { steps: 12 })
+  await page.mouse.up()
 }
 
 async function snapshotFiles(root: string): Promise<Record<string, string>> {

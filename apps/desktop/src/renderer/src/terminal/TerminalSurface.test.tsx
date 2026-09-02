@@ -39,6 +39,12 @@ vi.mock('@xterm/xterm', () => ({
     options: Record<string, unknown> = {}
     cols = 80
     rows = 24
+    buffer = {
+      active: {
+        length: 1,
+        getLine: () => ({ translateToString: () => 'observed terminal buffer' })
+      }
+    }
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
     loadAddon = vi.fn()
     constructor() { state.terminalConstructed() }
@@ -105,6 +111,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({
 
 describe('TerminalSurface focus continuity', () => {
   beforeEach(() => {
+    window.history.replaceState({}, '', '/')
     foregroundTerminalModels.setForegroundSessions([])
     state.focus.mockClear()
     state.searchNext.mockClear()
@@ -157,12 +164,17 @@ describe('TerminalSurface focus continuity', () => {
   })
 
   it('uses WebGL after opening xterm and falls back when the GPU context is lost', async () => {
+    window.history.replaceState({}, '', '/?e2e=1')
     render(<TerminalSurface sessionId="session-webgl" active visible />)
     await waitFor(() => expect(state.webglConstructed).toHaveBeenCalledTimes(1))
+    expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
+      .toBe(true)
 
     state.webglContextLossListener?.()
 
     expect(state.webglDisposed).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
+      .toBe(false)
   })
 
   it('reuses its xterm VT model after foreground card DOM virtualization', async () => {

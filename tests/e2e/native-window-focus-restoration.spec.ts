@@ -53,7 +53,9 @@ test.describe('native macOS window focus restoration', () => {
       await terminal.focus()
       await terminal.pressSequentially('claude')
       await terminal.press('Enter')
-      const surface = terminal.locator('..').locator('..')
+      const surface = fixture.page.locator(
+        '.scene-stage:not([hidden]) [data-testid="terminal-pane"][data-active="true"] .terminal-surface'
+      )
       await expect(surface.locator('.xterm-rows')).toContainText('READY:focus-provider')
       await terminal.pressSequentially('ENABLE_FORK')
       await terminal.press('Enter')
