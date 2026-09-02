@@ -148,8 +148,8 @@ export async function readScaleDatabaseCounts(
 }
 
 function validateDataset(dataset: ScaleDataset): void {
-  if (![20, 50, 200, 1000].includes(dataset.siblingSessions)) {
-    throw new Error('siblingSessions must be one of 20, 50, 200, or 1000')
+  if (![20, 50, 81, 200, 1000].includes(dataset.siblingSessions)) {
+    throw new Error('siblingSessions must be one of 20, 50, 81, 200, or 1000')
   }
   if (dataset.relationshipDepth !== undefined && dataset.relationshipDepth !== 5000) {
     throw new Error('relationshipDepth must be 5000 when supplied')
