@@ -16,6 +16,7 @@ const state = vi.hoisted(() => ({
   onData: undefined as undefined | ((data: string) => void),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
+  terminalReset: vi.fn(),
   terminalConstructed: vi.fn(),
   terminalDisposed: vi.fn(),
   webglConstructed: vi.fn(),
@@ -49,7 +50,7 @@ vi.mock('@xterm/xterm', () => ({
       state.onData = listener
       return { dispose: vi.fn() }
     })
-    reset = vi.fn()
+    reset = state.terminalReset
     dispose = state.terminalDisposed
   }
 }))
@@ -118,6 +119,7 @@ describe('TerminalSurface focus continuity', () => {
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
     state.terminalWrite.mockClear()
+    state.terminalReset.mockClear()
     state.terminalConstructed.mockClear()
     state.terminalDisposed.mockClear()
     state.webglConstructed.mockClear()
@@ -174,6 +176,32 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
 
     expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps cached history when a restarted Runtime reattaches the foreground terminal', async () => {
+    foregroundTerminalModels.setForegroundSessions(['session-1'])
+    const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('history before Runtime restart')
+    })
+    first.unmount()
+
+    render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+    state.onMessage?.({
+      type: 'terminal.spawned', sessionId: 'session-1', pid: 456,
+      reattached: true, replayFromSequence: 2
+    })
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'tail',
+      fromSequence: 2, throughSequence: 3, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 3
+    })
+
+    expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
+    expect(state.terminalReset).not.toHaveBeenCalled()
   })
 
   it('replays historical terminal resize frames before continuing output', async () => {

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { RuntimeLifecyclePresentation } from '../../shared/desktop-api'
@@ -74,6 +74,27 @@ describe('App database lifecycle gate', () => {
     api.publish({ ...initial, snapshot: { ...initial.snapshot, revision: 3, mode: 'read-only' } })
 
     expect((await screen.findByTestId('detached')).getAttribute('data-runtime-mode')).toBe('read-only')
+  })
+
+  it('keeps an already-open workspace mounted while Runtime reconnects', async () => {
+    const initial = readyState()
+    const api = installDynamicApi(initial)
+    render(<App />)
+    expect(await screen.findByTestId('workspace')).toBeTruthy()
+
+    act(() => {
+      api.publish({
+        ...initial,
+        snapshot: {
+          ...initial.snapshot,
+          recoveryId: 'runtime-restart', revision: 0,
+          stage: 'opening-database', completed: 0
+        }
+      })
+    })
+
+    expect(screen.getByTestId('workspace')).toBeTruthy()
+    expect(screen.queryByText('正在打开工作区…')).toBeNull()
   })
 
   it('keeps the recovery page visible while a restore reopens the database', async () => {

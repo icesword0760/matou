@@ -154,6 +154,31 @@ describe('RuntimeClient', () => {
     }))
   })
 
+  it('marks every attached terminal queued as soon as its Runtime port is replaced', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    first.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    first.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
+    })
+    for (const sessionId of ['session-a', 'session-b']) {
+      client.attachTerminal({
+        sessionId, executionContextId: 'context-1', profile: 'shell', cols: 80, rows: 24
+      }, () => undefined)
+    }
+    const observed: string[] = []
+    client.subscribeSessionRecovery((status) => {
+      observed.push(`${status.sessionId}:${status.state}`)
+    })
+
+    client.replacePort(new FakePort())
+
+    expect(observed).toEqual(['session-a:queued', 'session-b:queued'])
+  })
+
   it('clears stale failed recovery state when a replacement Runtime publishes an empty snapshot', () => {
     const first = new FakePort()
     const client = new RuntimeClient(first, { clientId: 'renderer-1' })
