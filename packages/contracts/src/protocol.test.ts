@@ -242,6 +242,12 @@ describe('parseRendererMessage', () => {
     })).toMatchObject({ type: 'rpc.request', method: 'session.set-permission-mode' })
   })
 
+  it('allowlists terminal history paging and search RPCs', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'terminal.history-page', 'terminal.history-search'
+    ]))
+  })
+
   it('rejects RPC methods outside the explicit allowlist', () => {
     expect(() => parseRendererMessage({
       type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'request-1',

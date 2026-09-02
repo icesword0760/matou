@@ -2,7 +2,11 @@ import {
   PROTOCOL_VERSION,
   type RpcMethod,
   type RuntimeMessage,
-  type RuntimeMode
+  type RuntimeMode,
+  type TerminalHistoryCursor,
+  type TerminalHistoryPage,
+  type TerminalHistorySearchOptions,
+  type TerminalHistorySearchResult
 } from '@matou/contracts'
 
 import { splitUtf8ForTransport } from '../terminal/terminal-input-chunker'
@@ -129,6 +133,34 @@ export class RuntimeClient {
   whenReady(): Promise<void> {
     if (this.#ready) return Promise.resolve()
     return new Promise((resolve) => this.#readyWaiters.add(resolve))
+  }
+
+  pageTerminalHistory(
+    sessionId: string,
+    before?: TerminalHistoryCursor,
+    lineLimit = 1_000
+  ): Promise<TerminalHistoryPage> {
+    return this.request('terminal.history-page', {
+      sessionId,
+      lineLimit,
+      ...(before ? { before } : {})
+    })
+  }
+
+  searchTerminalHistory(
+    sessionId: string,
+    query: string,
+    options: TerminalHistorySearchOptions,
+    before?: TerminalHistoryCursor,
+    limit = 1_000
+  ): Promise<TerminalHistorySearchResult> {
+    return this.request('terminal.history-search', {
+      sessionId,
+      query,
+      options,
+      limit,
+      ...(before ? { before } : {})
+    })
   }
 
   subscribeProjection(listener: (message: RuntimeMessage) => void): () => void {

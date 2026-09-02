@@ -5,6 +5,35 @@ import { PROTOCOL_VERSION, parseRendererMessage } from '@matou/contracts'
 import { RuntimeClient, type RuntimeClientPort } from './RuntimeClient'
 
 describe('RuntimeClient', () => {
+  it('queries archived terminal history through the typed Runtime RPC', async () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['domain-rpc-v1']
+    })
+
+    const pending = client.searchTerminalHistory('session-1', 'needle', {
+      caseSensitive: false, regex: false, wholeWord: true
+    })
+    await Promise.resolve()
+    const request = port.sent.find(({ type }) => type === 'rpc.request')!
+    expect(request).toMatchObject({
+      method: 'terminal.history-search',
+      payload: {
+        sessionId: 'session-1', query: 'needle', limit: 1_000,
+        options: { caseSensitive: false, regex: false, wholeWord: true }
+      }
+    })
+    port.deliver({
+      type: 'rpc.response', protocolVersion: PROTOCOL_VERSION,
+      requestId: request.requestId, runtimeGeneration: 'generation-1',
+      result: { matches: [{ text: 'needle line' }], gaps: [], hasMore: false }
+    })
+
+    await expect(pending).resolves.toMatchObject({ matches: [{ text: 'needle line' }] })
+  })
+
   it('gives every terminal resize a session-local identity', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port)

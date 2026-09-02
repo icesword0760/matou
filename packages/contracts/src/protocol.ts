@@ -169,6 +169,8 @@ export const RPC_METHODS = [
   'scene.archive',
   'geometry.put',
   'geometry.list',
+  'terminal.history-page',
+  'terminal.history-search',
   'git.status',
   'git.checkout',
   'git.create-branch',
