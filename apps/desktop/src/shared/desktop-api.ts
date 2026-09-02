@@ -40,13 +40,31 @@ export interface AppUpdateReleaseState {
   releaseDate?: string
   releaseNotes: string[]
   sizeBytes?: number
+  installMode: AppUpdateInstallMode
+  manualDownloadUrl?: string
 }
 
+export type AppUpdateInstallMode = 'automatic' | 'manual'
+export type AppUpdateErrorStage = 'check' | 'download' | 'verify' | 'install'
+
 export type AppUpdateState =
-  | { status: 'idle' | 'checking' | 'not-available'; currentVersion: string }
+  | { status: 'idle' | 'not-available'; currentVersion: string }
+  | {
+      status: 'checking'
+      currentVersion: string
+      retryAttempt?: number
+      maxRetryAttempts?: number
+    }
   | ({ status: 'available' | 'downloaded' } & AppUpdateReleaseState)
   | ({ status: 'downloading'; progress: AppUpdateProgress } & AppUpdateReleaseState)
-  | { status: 'error'; currentVersion: string; errorMessage: string }
+  | {
+      status: 'error'
+      currentVersion: string
+      errorMessage: string
+      errorStage: AppUpdateErrorStage
+      version?: string
+      manualDownloadUrl?: string
+    }
 
 export interface DetachedTerminalWindowInput {
   windowId: string

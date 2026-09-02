@@ -8,9 +8,8 @@ import { taskDeleteFlow } from './terminal-close-flow'
 import { NotificationCenter } from '../notifications/NotificationCenter'
 import type { AgentNotification } from '../notifications/AgentNotificationStore'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
-import notificationIcon from '../assets/terminal-reference/terminal/dark_toongzhi.svg'
-import notificationAnimatedIcon from '../assets/terminal-reference/terminal/rongzhi_ani.gif'
 import workbenchIcon from '../assets/terminal-reference/terminal/dark_lujing.svg'
+import { AppIcon } from '../ui/AppIcon'
 
 const TASK_TRANSFER = 'application/x-matou-pinned-task'
 const WORKSPACE_TRANSFER = 'application/x-matou-pinned-workspace'
@@ -189,7 +188,8 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
       </button>
       <button className="flat-sidebar__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
         onClick={() => setNotificationCenterOpen((value) => !value)}>
-        <img src={notificationSnapshot.unreadCount > 0 ? notificationAnimatedIcon : notificationIcon} alt="" />
+        <AppIcon name="bell" />
+        {notificationSnapshot.unreadCount > 0 && <span className="flat-sidebar__notify-dot" aria-hidden="true" />}
       </button>
     </header>
     {notificationCenterOpen && <NotificationCenter projection={projection}
@@ -238,7 +238,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
               aria-label={`重新关联工作空间目录：${workspace.name}`} title="选择工作空间的新位置"
               onClick={(event) => { event.stopPropagation(); void relinkDirectory(workspace) }}>恢复目录</button>}
             <button className="workspace-group__more" aria-label={`工作空间菜单：${workspace.name}`}
-              onClick={(event) => openWorkspaceMenu(workspace, event)}>•••</button>
+              onClick={(event) => openWorkspaceMenu(workspace, event)}><AppIcon name="ellipsis" /></button>
           </div>
           {!isCollapsed && <div className="workspace-group__tasks" role="list">
             {tasks.map((task) => <div role="listitem" key={task.id} data-testid={`task-${task.id}`}
@@ -278,7 +278,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
                 </span>
                 {unreadCount(task.id) === 0 && <span className="workbench-item__actions">
                   <button className={`workbench-item__more-btn${menuTask?.id === task.id ? ' is-open' : ''}`}
-                    aria-label={`事项菜单：${task.title}`} title="更多操作" onClick={(event) => openTaskMenu(task, event)}>•••</button>
+                    aria-label={`事项菜单：${task.title}`} title="更多操作" onClick={(event) => openTaskMenu(task, event)}><AppIcon name="ellipsis" /></button>
                 </span>}
               </div>
             </div>)}
@@ -357,15 +357,15 @@ export function orderNavigation<T extends NavigationItem>(items: T[]): T[] {
 function toggleSet(current: Set<string>, id: string): Set<string> {
   const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next
 }
-function PlusIcon() { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14"/><path d="M12 5v14"/></svg> }
-function ComposeIcon() { return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> }
-function ChevronIcon({ collapsed }: { collapsed: boolean }) { return <svg className="workspace-group__chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d={collapsed ? 'm9 18 6-6-6-6' : 'm6 9 6 6 6-6'}/></svg> }
-function FolderIcon({ home }: { home?: boolean }) { return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">{home ? <><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/></> : <path d="M3 6h7l2 2h9v10H3Z"/>}</svg> }
-function PinIcon() { return <svg className="pin-icon" data-icon="pushpin" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 17v5"/><path d="M5 17h14"/><path d="M15 2.5a1 1 0 0 0-1 1V7a3 3 0 0 0 3 3v2H7v-2a3 3 0 0 0 3-3V3.5a1 1 0 0 0-1-1Z"/></svg> }
-function EditIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> }
-function TrashIcon() { return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/></svg> }
-function KanbanIcon() { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16M15 4v16"/></svg> }
-function SettingsIcon() { return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.2.36.52.7 1 .9.3.13.64.2 1 .2h.1v4h-.1c-.4 0-.74.07-1 .2-.48.2-.8.54-1 .9Z"/></svg> }
+function PlusIcon() { return <AppIcon name="plus" size={14} /> }
+function ComposeIcon() { return <AppIcon name="square-pen" size={17} /> }
+function ChevronIcon({ collapsed }: { collapsed: boolean }) { return <AppIcon className="workspace-group__chevron" name={collapsed ? 'chevron-right' : 'chevron-down'} size={14} /> }
+function FolderIcon(_props: { home?: boolean }) { return <AppIcon name="folder" /> }
+function PinIcon() { return <AppIcon className="pin-icon" name="pin" size={13} /> }
+function EditIcon() { return <AppIcon name="pencil" size={14} /> }
+function TrashIcon() { return <AppIcon name="trash-2" size={14} /> }
+function KanbanIcon() { return <AppIcon name="columns-3" /> }
+function SettingsIcon() { return <AppIcon name="settings-2" /> }
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 function NOOP(): void {}
 function parseTransfer(value: string): { workspaceId: string; taskId: string } | undefined {

@@ -13,13 +13,14 @@ import { NotificationProvider } from './NotificationProvider'
 describe('reference product notification hierarchy interactions', () => {
   afterEach(cleanup)
 
-  it('opens below the Workspace header, swaps to the animated icon, and closes outside or on Escape', async () => {
+  it('opens below the Workspace header, shows the approved Bell unread state, and closes outside or on Escape', async () => {
     const user = userEvent.setup()
     const store = notificationStore()
     renderWithStore(<TaskSidebar projection={fixture()} commands={commands()} />, store)
 
     const trigger = screen.getByRole('button', { name: '通知中心' })
-    expect(trigger.querySelector('img')?.getAttribute('src')).toContain('rongzhi_ani.gif')
+    expect(trigger.querySelector('svg')?.dataset.icon).toBe('bell')
+    expect(trigger.querySelector('.flat-sidebar__notify-dot')).toBeTruthy()
     await user.click(trigger)
     expect(screen.getByRole('region', { name: '通知中心' })).toBeTruthy()
     fireEvent.pointerDown(document.body)
@@ -132,12 +133,12 @@ describe('reference product notification hierarchy interactions', () => {
     expect(store.snapshot().notifications).toHaveLength(0)
   })
 
-  it('clears a focused pane notification without redundantly reactivating that pane', () => {
+  it('shows a high-contrast badge only for an unread pane and clears it on selection', () => {
     const store = new AgentNotificationStore({ now: () => 10_000 })
     store.push({
-      eventId: 'focused', eventType: 'completed', title: 'Claude Code', body: '当前面板完成',
+      eventId: 'unread', eventType: 'completed', title: 'Claude Code', body: '当前面板完成',
       workspaceId: 'workspace-1', taskId: 'task-a', sceneId: 'scene-a', sessionId: 'session-a',
-      isFocusedSession: true
+      isFocusedSession: false
     })
     const onActivate = vi.fn()
     renderWithStore(<TerminalPane session={{ id: 'session-a', taskId: 'task-a', title: 'Shell' }} active visible={false}
@@ -145,10 +146,25 @@ describe('reference product notification hierarchy interactions', () => {
 
     const pane = screen.getByTestId('terminal-pane')
     expect(pane.classList.contains('has-notification')).toBe(true)
+    expect(screen.getByText('新通知').classList.contains('pane-notification-badge')).toBe(true)
     fireEvent.pointerDown(pane)
     expect(store.snapshot().notifications).toHaveLength(0)
     expect(pane.classList.contains('has-notification')).toBe(false)
     expect(onActivate).not.toHaveBeenCalled()
+  })
+
+  it('does not mark a focused read event as another notified pane', () => {
+    const store = new AgentNotificationStore({ now: () => 10_000 })
+    store.push({
+      eventId: 'focused', eventType: 'completed', title: 'Claude Code', body: '当前面板完成',
+      workspaceId: 'workspace-1', taskId: 'task-a', sceneId: 'scene-a', sessionId: 'session-a',
+      isFocusedSession: true
+    })
+    renderWithStore(<TerminalPane session={{ id: 'session-a', taskId: 'task-a', title: 'Shell' }} active
+      workspaceSessionCount={2} taskName="事项 A" onActivate={vi.fn()} onDelete={vi.fn()} />, store)
+
+    expect(screen.getByTestId('terminal-pane').classList.contains('has-notification')).toBe(false)
+    expect(screen.queryByText('新通知')).toBeNull()
   })
 })
 

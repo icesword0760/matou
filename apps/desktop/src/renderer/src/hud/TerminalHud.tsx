@@ -49,8 +49,8 @@ export function TerminalHud(props: {
       }
     }
     const closeEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || (!menu && !gitOpen)) return
-      setMenu(null); setGitOpen(false)
+      if (event.key !== 'Escape' || !menu) return
+      setMenu(null)
       event.preventDefault()
       event.stopPropagation()
     }
@@ -60,7 +60,7 @@ export function TerminalHud(props: {
       document.removeEventListener('pointerdown', closeOutside, true)
       document.removeEventListener('keydown', closeEscape, true)
     }
-  }, [menu, gitOpen])
+  }, [menu])
 
   if (!hud) return null
   const shortCwd = cwdShortName(hud.cwd)
@@ -95,14 +95,14 @@ export function TerminalHud(props: {
       {hasAgentInfo(hud) && (shortCwd || gitDisplay || elapsed) && <span className="status-divider status-priority-3" />}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
       {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={!gitClient} aria-label="打开 Git 与 Worktree" title="Git 与 Worktree"
+        disabled={!gitClient} aria-label="打开 Git 控制" title="Git"
         onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </> : <>
       {hud.shell && <span className="status-field">{hud.shell}</span>}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
       {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={!gitClient} aria-label="打开 Git 与 Worktree" title="Git 与 Worktree"
+        disabled={!gitClient} aria-label="打开 Git 控制" title="Git"
         onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
       {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
     </>}

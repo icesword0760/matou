@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>Matou · Git 控制器</title>
+  <style>
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    :root { color-scheme: light; --text:#202124; --muted:#8b8e94; --line:rgba(31,35,40,.10); --hover:#f1f1f2; --panel:rgba(255,255,255,.985); }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; }
+    body { font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Segoe UI",sans-serif; color:var(--text); background:#eef1f5; -webkit-font-smoothing:antialiased; }
+    button,input,textarea { font:inherit; } button { color:inherit; }
+    .app { position:absolute; inset:18px; display:grid; grid-template-columns:258px minmax(0,1fr); overflow:hidden; border:1px solid rgba(22,29,37,.12); border-radius:18px; background:#f6f7f8; box-shadow:0 20px 55px rgba(45,54,67,.18); }
+    .sidebar { position:relative; border-right:1px solid #e3e6e9; background:rgba(248,249,250,.92); }
+    .traffic { height:48px; display:flex; align-items:center; gap:8px; padding:0 14px; }
+    .traffic i { width:11px; height:11px; border-radius:50%; }
+    .traffic i:nth-child(1){background:#ff5f57}.traffic i:nth-child(2){background:#febc2e}.traffic i:nth-child(3){background:#28c840}
+    .brand { margin-left:9px; color:#3c4045; font-size:13px; font-weight:650; }
+    .workspace { padding:14px 12px 0; }
+    .workspace-title { display:flex; align-items:center; gap:8px; padding:8px 7px; font-size:13px; font-weight:620; }
+    .folder{color:#6b9fed}.task{margin-top:2px;padding:9px 12px 9px 28px;border-radius:8px;color:#686d74;font-size:12px}.task.active{color:#3e4248;background:#e9eaec;font-weight:550}
+    .sidebar-bottom { position:absolute; left:0; right:0; bottom:0; display:flex; justify-content:space-between; padding:10px 14px; border-top:1px solid #e5e7e9; color:#6f747a; font-size:12px; }
+    .main { position:relative; display:grid; grid-template-rows:47px minmax(0,1fr) 35px; min-width:0; background:#edf1f5; }
+    .tabs { display:flex; align-items:flex-end; padding:0 12px; border-bottom:1px solid #dfe3e7; background:rgba(255,255,255,.75); }
+    .tab { height:37px; min-width:142px; display:flex; align-items:center; gap:8px; padding:0 12px; border:1px solid #e0e3e6; border-bottom-color:#fff; border-radius:8px 8px 0 0; background:white; font-size:12px; color:#4d5157; }
+    .dot{width:6px;height:6px;border-radius:50%;background:#ff5c51}
+    .stage { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:10px; overflow:hidden; }
+    .terminal { overflow:hidden; border:1px solid #dfe3e8; border-radius:11px; background:rgba(255,255,255,.91); box-shadow:0 7px 20px rgba(43,52,64,.06); }
+    .terminal header { height:39px; display:flex; align-items:center; justify-content:space-between; padding:0 12px; border-bottom:1px solid #e8eaed; font-size:12px; font-weight:620; }
+    pre { margin:0; padding:16px; color:#4f555c; font:11px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; }
+    .statusbar { display:flex; align-items:center; justify-content:flex-end; gap:13px; padding:0 14px; border-top:1px solid #dfe3e7; background:rgba(255,255,255,.88); color:#858a91; font-size:10px; }
+    .branch-trigger { display:inline-flex; align-items:center; gap:5px; padding:4px 7px; border:0; border-radius:6px; background:transparent; cursor:pointer; }
+    .branch-trigger:hover,.branch-trigger[aria-expanded="true"]{color:#34383d;background:#eceef0}.branch-trigger strong{color:#f06e4d;font-weight:650}
+    .popover { position:absolute; right:14px; bottom:37px; z-index:10; width:316px; max-height:390px; overflow:hidden; border:1px solid rgba(20,24,29,.12); border-radius:17px; background:var(--panel); box-shadow:0 16px 44px rgba(23,28,35,.20),0 2px 8px rgba(23,28,35,.10); transform-origin:bottom right; animation:pop-in 150ms cubic-bezier(.2,.8,.2,1); }
+    .popover[hidden]{display:none}.picker{display:flex;max-height:390px;flex-direction:column;padding:7px 8px 8px}
+    .search{position:relative;height:37px;flex:0 0 auto}.search svg{position:absolute;left:10px;top:10px;color:#a5a8ad;pointer-events:none}.search input{width:100%;height:100%;padding:0 32px;border:0;border-radius:9px;outline:0;color:#33363a;background:transparent;font-size:13px}.search input::placeholder{color:#a6a8ac}.search input:focus{background:#f7f7f8;box-shadow:inset 0 0 0 1px rgba(30,34,39,.06)}
+    .clear{position:absolute;right:6px;top:6px;width:25px;height:25px;border:0;border-radius:6px;color:#a0a3a8;background:transparent;cursor:pointer}.clear:hover{color:#555a60;background:#eceeef}
+    .section-label{padding:5px 10px 6px;color:#a1a4a9;font-size:12px}.branch-list{min-height:0;max-height:190px;overflow-y:auto;padding:0 1px 5px;scrollbar-color:#d9dadd transparent;scrollbar-width:thin}
+    .branch-row{width:100%;min-height:45px;display:grid;grid-template-columns:20px minmax(0,1fr) 22px;align-items:center;padding:5px 8px;border:0;border-radius:10px;background:transparent;cursor:pointer;text-align:left}.branch-row:hover,.branch-row.is-keyboard{background:var(--hover)}.branch-row:active{background:#e9eaeb;transform:scale(.997)}
+    .branch-icon{align-self:start;margin-top:6px;color:#7d8288}.branch-copy{min-width:0;display:flex;flex-direction:column;gap:1px}.branch-name{overflow:hidden;color:#303338;font-size:13px;font-weight:560;text-overflow:ellipsis;white-space:nowrap}.branch-meta{overflow:hidden;color:#a3a6ab;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.check{color:#696d72;text-align:right}.empty{padding:26px 12px 31px;color:#9a9da2;font-size:12px;text-align:center}
+    .menu-actions{flex:0 0 auto;padding-top:5px;border-top:1px solid #ececee}.menu-action{width:100%;height:36px;display:flex;align-items:center;gap:9px;padding:0 10px;border:0;border-radius:9px;color:#3e4247;background:transparent;cursor:pointer;text-align:left;font-size:12px}.menu-action:hover{background:var(--hover)}.menu-action svg{color:#85898f}.menu-action__count{margin-left:auto;color:#a1a4a9;font-size:11px}
+    .subview{padding:7px 8px 8px}.sub-head{height:36px;display:grid;grid-template-columns:32px 1fr 32px;align-items:center}.sub-title{text-align:center;font-size:12px;font-weight:620}.worktree-list{max-height:210px;overflow:auto;padding:3px 0 5px;scrollbar-color:#d9dadd transparent;scrollbar-width:thin}.worktree-row{position:relative;display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;min-height:55px;padding:6px 7px;border-radius:10px;gap:3px}.worktree-row:hover{background:var(--hover)}.worktree-glyph{align-self:start;margin-top:5px;color:#7d8288}.worktree-copy{min-width:0;display:flex;flex-direction:column;gap:1px}.worktree-name{overflow:hidden;color:#303338;font-size:12px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}.worktree-path{overflow:hidden;color:#a3a6ab;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.worktree-tags{display:flex;align-items:center;gap:4px;margin-top:2px}.worktree-tag{padding:1px 5px;border-radius:999px;color:#777b80;background:#e9eaec;font-size:9px}.worktree-tag.is-blue{color:#3973bd;background:#e7f0fc}.worktree-actions{display:flex;align-items:center;gap:2px}.worktree-action{height:27px;padding:0 8px;border:0;border-radius:7px;color:#686d73;background:transparent;cursor:pointer;font-size:10px}.worktree-action:hover{color:#30343a;background:#e3e4e6}.worktree-more{width:27px;padding:0;font-size:16px;letter-spacing:1px}.worktree-action:disabled{color:#b6b9bd;cursor:default}.worktree-menu{position:absolute;right:9px;z-index:12;width:142px;padding:5px;border:1px solid rgba(20,24,29,.12);border-radius:10px;background:#fff;box-shadow:0 10px 26px rgba(23,28,35,.17)}.worktree-menu[hidden]{display:none}.worktree-menu button{width:100%;height:31px;padding:0 8px;border:0;border-radius:7px;background:transparent;text-align:left;cursor:pointer;font-size:11px}.worktree-menu button:hover{background:var(--hover)}.worktree-menu button.is-danger{color:#c74d43}.sub-footer{padding-top:5px;border-top:1px solid #ececee}
+    .commit-view{padding:7px 8px 8px}.commit-branch{display:flex;align-items:center;gap:6px;padding:3px 8px 7px;color:#3b3f44;font-size:12px;font-weight:620}.commit-message{width:100%;height:86px;padding:9px;border:0;outline:0;color:#33373c;background:transparent;resize:none;font-size:12px;line-height:1.45}.commit-message::placeholder{color:#b1b3b7}.commit-scope{height:36px;display:flex;align-items:center;gap:7px;padding:0 8px;border-bottom:1px solid #ececee;color:#555a60;font-size:11px}.commit-scope input{accent-color:#30343a}.commit-stats{margin-left:auto;display:flex;align-items:center;gap:5px}.commit-stats b{color:#2fac63;font-weight:520}.commit-stats i{color:#ed5f58;font-style:normal}.commit-actions{padding-top:5px}.commit-action{width:100%;height:36px;display:flex;align-items:center;gap:9px;padding:0 9px;border:0;border-radius:9px;background:transparent;cursor:pointer;text-align:left;font-size:12px}.commit-action:hover:not(:disabled){background:var(--hover)}.commit-action:disabled{color:#c5c7ca;cursor:default}.commit-shortcut{margin-left:auto;padding:2px 6px;border-radius:6px;color:#777b80;background:#e9eaec;font-size:9px}.commit-action svg{color:#81868c}
+    .create-view{padding:8px}.create-head{height:36px;display:grid;grid-template-columns:32px 1fr 32px;align-items:center}.icon-button{width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:8px;color:#767b81;background:transparent;cursor:pointer}.icon-button:hover{color:#30343a;background:var(--hover)}.create-title{text-align:center;font-size:12px;font-weight:620}.create-body{padding:10px 6px 6px}.field-label{display:block;margin:0 0 7px 2px;color:#777b81;font-size:11px}.create-input{width:100%;height:38px;padding:0 11px;border:1px solid #d8dade;border-radius:9px;outline:0;color:#2e3237;background:#fff;font-size:12px}.create-input:focus{border-color:#98b9ee;box-shadow:0 0 0 3px rgba(52,120,246,.10)}.base{display:flex;align-items:center;gap:7px;margin-top:9px;padding:9px 10px;border-radius:8px;color:#85898f;background:#f5f5f6;font-size:11px}.create-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:14px}.button{min-width:65px;height:32px;padding:0 12px;border:1px solid #d9dade;border-radius:8px;background:#fff;cursor:pointer;font-size:11px}.button:hover{background:#f5f5f6}.button.primary{border-color:#22262b;color:white;background:#22262b}.button.primary:hover{background:#111418}.button.primary:disabled{border-color:#e1e2e4;color:#afb2b6;background:#f1f2f3;cursor:default}
+    .toast{position:absolute;left:50%;bottom:53px;z-index:20;padding:8px 12px;border-radius:9px;color:white;background:rgba(30,33,37,.92);box-shadow:0 8px 24px rgba(20,24,29,.2);font-size:11px;transform:translateX(-50%);animation:toast-in 160ms ease-out}.toast[hidden]{display:none}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @keyframes pop-in{from{opacity:0;transform:translateY(5px) scale(.985)}to{opacity:1;transform:none}}@keyframes toast-in{from{opacity:0;transform:translate(-50%,4px)}to{opacity:1;transform:translate(-50%,0)}}
+    @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:1ms!important;transition-duration:1ms!important}}
+  </style>
+</head>
+<body>
+  <main class="app" aria-label="Matou Git 分支选择器 Mockup">
+    <aside class="sidebar">
+      <div class="traffic"><i></i><i></i><i></i><span class="brand">Matou</span></div>
+      <div class="workspace">
+        <div class="workspace-title"><span>⌄</span><span class="folder">▭</span><span>matou_workspace</span></div>
+        <div class="task active">新事项 3</div><div class="task">新事项 2</div><div class="task">默认</div>
+        <div class="workspace-title" style="margin-top:14px"><span>⌄</span><span class="folder">▭</span><span>AIWriteX</span></div><div class="task">默认</div>
+      </div>
+      <div class="sidebar-bottom"><span>▣ 看板</span><span>⚙ 设置</span></div>
+    </aside>
+    <section class="main">
+      <div class="tabs"><div class="tab"><span>新画布</span><span class="dot"></span><span style="margin-left:auto;color:#aaa">×</span></div></div>
+      <div class="stage">
+        <article class="terminal"><header><span>Claude</span><span style="color:#9da1a6">⌁</span></header><pre>~/matou_workspace
+
+› 优化当前分支切换交互
+
+• 已读取当前 Git 状态
+• 正在等待你的选择…
+
+›</pre></article>
+        <article class="terminal"><header><span>左边会话内容</span><span style="color:#9da1a6">⌁</span></header><pre>~/matou_workspace
+
+当前分支：main
+工作区：6,285 个文件未提交
+
+选择其他分支后，会在当前工作区检出。
+
+›</pre></article>
+      </div>
+      <footer class="statusbar"><span>zsh</span><span>~/AIWriteX</span><button class="branch-trigger" id="branchTrigger" aria-expanded="true"><span>⑂</span><strong id="statusBranch">main</strong></button></footer>
+      <section class="popover" id="popover" role="dialog" aria-label="选择 Git 分支">
+        <div class="picker" id="pickerView">
+          <label class="search"><span class="sr-only">搜索分支</span><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.6-3.6"></path></svg><input id="searchInput" autocomplete="off" placeholder="搜索 matou 分支" /><button class="clear" id="clearSearch" type="button" aria-label="清空搜索" hidden>×</button></label>
+          <div class="section-label">分支</div><div class="branch-list" id="branchList" role="listbox" aria-label="Git 分支"></div>
+          <div class="menu-actions">
+            <button class="menu-action" id="openCreate" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg><span>创建并检出新分支…</span></button>
+            <button class="menu-action" id="openWorktrees" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5h6v6H5zM13 13h6v6h-6zM8 11v3a2 2 0 0 0 2 2h3M11 8h3a2 2 0 0 1 2 2v3"/></svg><span>管理 Worktree…</span><span class="menu-action__count" id="worktreeCount">3</span></button>
+            <button class="menu-action" id="openCommit" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 12h10"/></svg><span>提交与推送…</span><span class="menu-action__count">6,285</span></button>
+          </div>
+        </div>
+        <div class="create-view" id="createView" hidden>
+          <div class="create-head"><button class="icon-button" id="backToList" type="button" aria-label="返回分支列表"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 18-6-6 6-6"/></svg></button><div class="create-title">创建新分支</div><span></span></div>
+          <div class="create-body"><label class="field-label" for="newBranch">分支名称</label><input class="create-input" id="newBranch" placeholder="例如 feature/improve-git-menu" autocomplete="off" /><div class="base"><span>⑂</span><span>基于当前分支 <strong id="baseBranch">main</strong></span></div><div class="create-actions"><button class="button" id="cancelCreate" type="button">取消</button><button class="button primary" id="confirmCreate" type="button" disabled>创建并检出</button></div></div>
+        </div>
+        <div class="subview" id="worktreeView" hidden>
+          <div class="sub-head"><button class="icon-button" id="backFromWorktrees" type="button" aria-label="返回分支列表"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 18-6-6 6-6"/></svg></button><div class="sub-title">Worktree</div><span></span></div>
+          <div class="worktree-list" id="worktreeList"></div>
+          <div class="sub-footer"><button class="menu-action" id="openCreateWorktree" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg><span>创建新 Worktree…</span></button></div>
+        </div>
+        <div class="create-view" id="createWorktreeView" hidden>
+          <div class="create-head"><button class="icon-button" id="backToWorktrees" type="button" aria-label="返回 Worktree 列表"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 18-6-6 6-6"/></svg></button><div class="create-title">创建 Worktree</div><span></span></div>
+          <div class="create-body"><label class="field-label" for="newWorktree">新 Worktree 分支</label><input class="create-input" id="newWorktree" placeholder="例如 feature/new-worktree" autocomplete="off" /><div class="base"><span>▱</span><span>创建在 matou-worktrees 目录</span></div><div class="create-actions"><button class="button" id="cancelWorktreeCreate" type="button">取消</button><button class="button primary" id="confirmWorktreeCreate" type="button" disabled>创建</button></div></div>
+        </div>
+        <div class="worktree-menu" id="worktreeMenu" hidden><button type="button" id="revealWorktree">在 Finder 中显示</button><button type="button" class="is-danger" id="removeWorktree">移除 Worktree</button></div>
+        <div class="commit-view" id="commitView" hidden>
+          <div class="sub-head"><button class="icon-button" id="backFromCommit" type="button" aria-label="返回分支列表"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m15 18-6-6 6-6"/></svg></button><div class="sub-title">提交与推送</div><span></span></div>
+          <div class="commit-branch"><span>⑂</span><span id="commitBranch">main</span><span style="color:#979a9f">⌄</span></div>
+          <textarea class="commit-message" id="commitMessage" placeholder="提交信息（留空将自动生成）…"></textarea>
+          <label class="commit-scope"><input id="includeUnstaged" type="checkbox" checked /><span>包含未暂存的更改</span><span class="commit-stats"><span>◌</span><b>+2,154</b><i>-501</i></span></label>
+          <div class="commit-actions">
+            <button class="commit-action" id="commitOnly" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 12h10"/></svg><span>提交</span><span class="commit-shortcut">⌘↵</span></button>
+            <button class="commit-action" id="commitPush" type="button"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 17 0-11m-4 4 4-4 4 4"/><path d="M5 15v3h14v-3"/></svg><span>提交并推送</span></button>
+            <button class="commit-action" id="pushOnly" type="button" disabled><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m12 17 0-11m-4 4 4-4 4 4"/><path d="M5 15v3h14v-3"/></svg><span>推送</span></button>
+          </div>
+        </div>
+      </section>
+      <div class="toast" id="toast" role="status" hidden></div>
+    </section>
+  </main>
+  <script>
+    const branches=[{name:'main',detail:'未提交：6,285 个文件'},{name:'feature/internal-hardening-audit',detail:''},{name:'feature/brand-neutral-cleanup',detail:''},{name:'feature/cloud-app-updates',detail:''},{name:'feature/model-switch-settings',detail:''},{name:'feature/session-dag',detail:''},{name:'feature/provider-switcher',detail:''}];
+    const worktrees=[
+      {id:'main',name:'main',path:'~/AIProjects/matou',current:true,dirty:true,sessions:2},
+      {id:'provider',name:'feature/provider-switcher',path:'…/matou-worktrees/provider-switcher',current:false,dirty:false,sessions:1},
+      {id:'audit',name:'feature/internal-hardening-audit',path:'…/matou-worktrees/internal-hardening-audit',current:false,dirty:true,sessions:0}
+    ];
+    let current='main',selectedIndex=0,selectedWorktree='',pendingChanges=true,ahead=0; const $=id=>document.getElementById(id);
+    const branchIcon='<svg class="branch-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="6" r="2"></circle><circle cx="6" cy="18" r="2"></circle><circle cx="18" cy="6" r="2"></circle><path d="M6 8v8M8 18c5 0 4-10 8-10"></path></svg>';
+    function filtered(){const q=$('searchInput').value.trim().toLowerCase();return branches.filter(x=>x.name.toLowerCase().includes(q))}
+    function render(){const items=filtered();selectedIndex=Math.max(0,Math.min(selectedIndex,items.length-1));$('branchList').innerHTML=items.length?items.map((item,index)=>`<button type="button" class="branch-row${index===selectedIndex?' is-keyboard':''}" role="option" aria-selected="${item.name===current}" data-name="${item.name}">${branchIcon}<span class="branch-copy"><span class="branch-name">${item.name}</span>${item.detail?`<span class="branch-meta">${item.detail}</span>`:''}</span><span class="check">${item.name===current?'✓':''}</span></button>`).join(''):'<div class="empty">没有匹配的分支</div>';$('branchList').querySelectorAll('.branch-row').forEach(row=>row.addEventListener('click',()=>choose(row.dataset.name)));$('statusBranch').textContent=current.split('/').at(-1);$('baseBranch').textContent=current;$('commitBranch').textContent=current;$('worktreeCount').textContent=worktrees.length}
+    function renderWorktrees(){$('worktreeList').innerHTML=worktrees.map(item=>`<article class="worktree-row" data-id="${item.id}"><span class="worktree-glyph">▱</span><span class="worktree-copy"><span class="worktree-name">${item.name}</span><span class="worktree-path">${item.path}</span><span class="worktree-tags">${item.current?'<span class="worktree-tag is-blue">当前</span>':''}${item.dirty?'<span class="worktree-tag">有更改</span>':''}${item.sessions?`<span class="worktree-tag">${item.sessions} 会话</span>`:''}</span></span><span class="worktree-actions">${item.current?'':`<button class="worktree-action enter-worktree" type="button" data-id="${item.id}">进入</button>`}<button class="worktree-action worktree-more" type="button" data-id="${item.id}" aria-label="${item.name} 更多操作">···</button></span></article>`).join('');$('worktreeList').querySelectorAll('.enter-worktree').forEach(button=>button.addEventListener('click',()=>enterWorktree(button.dataset.id)));$('worktreeList').querySelectorAll('.worktree-more').forEach(button=>button.addEventListener('click',event=>openWorktreeMenu(event.currentTarget,button.dataset.id)));$('worktreeCount').textContent=worktrees.length}
+    function choose(name){current=name;render();showToast(`已切换到 ${name}`);closePopover()}
+    let toastTimer;function showToast(message){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,1800)}
+    const viewIds=['pickerView','createView','worktreeView','createWorktreeView','commitView'];
+    function hideViews(){viewIds.forEach(id=>$(id).hidden=true);$('worktreeMenu').hidden=true}
+    function closePopover(){$('popover').hidden=true;$('branchTrigger').setAttribute('aria-expanded','false');$('worktreeMenu').hidden=true}
+    function showList(){hideViews();$('pickerView').hidden=false;$('newBranch').value='';$('confirmCreate').disabled=true}
+    function showCreate(){hideViews();$('createView').hidden=false;requestAnimationFrame(()=>$('newBranch').focus())}
+    function showWorktrees(){hideViews();renderWorktrees();$('worktreeView').hidden=false}
+    function showCreateWorktree(){hideViews();$('createWorktreeView').hidden=false;$('newWorktree').value='';$('confirmWorktreeCreate').disabled=true;requestAnimationFrame(()=>$('newWorktree').focus())}
+    function showCommit(){hideViews();$('commitView').hidden=false;updateCommitActions();requestAnimationFrame(()=>$('commitMessage').focus())}
+    function openPopover(){$('popover').hidden=false;$('branchTrigger').setAttribute('aria-expanded','true');showList();requestAnimationFrame(()=>$('searchInput').focus())}
+    function enterWorktree(id){const target=worktrees.find(item=>item.id===id);if(!target)return;worktrees.forEach(item=>item.current=item.id===id);current=target.name;render();renderWorktrees();closePopover();showToast(`已进入 ${target.name}`)}
+    function openWorktreeMenu(button,id){selectedWorktree=id;const target=worktrees.find(item=>item.id===id);const row=button.closest('.worktree-row');const popRect=$('popover').getBoundingClientRect(),rowRect=row.getBoundingClientRect();$('worktreeMenu').style.top=`${Math.min(238,rowRect.bottom-popRect.top-2)}px`;$('removeWorktree').disabled=Boolean(target?.current);$('worktreeMenu').hidden=false}
+    function updateCommitActions(){$('commitOnly').disabled=!pendingChanges;$('commitPush').disabled=!pendingChanges;$('pushOnly').disabled=ahead===0}
+    $('searchInput').addEventListener('input',()=>{selectedIndex=0;$('clearSearch').hidden=!$('searchInput').value;render()});$('searchInput').addEventListener('keydown',event=>{const items=filtered();if(event.key==='ArrowDown'){event.preventDefault();selectedIndex=Math.min(items.length-1,selectedIndex+1);render()}if(event.key==='ArrowUp'){event.preventDefault();selectedIndex=Math.max(0,selectedIndex-1);render()}if(event.key==='Enter'&&items[selectedIndex]){event.preventDefault();choose(items[selectedIndex].name)}});$('clearSearch').addEventListener('click',()=>{$('searchInput').value='';$('clearSearch').hidden=true;selectedIndex=0;render();$('searchInput').focus()});
+    $('openCreate').addEventListener('click',showCreate);$('openWorktrees').addEventListener('click',showWorktrees);$('openCommit').addEventListener('click',showCommit);$('backToList').addEventListener('click',()=>{showList();$('searchInput').focus()});$('backFromWorktrees').addEventListener('click',()=>{showList();$('searchInput').focus()});$('backFromCommit').addEventListener('click',()=>{showList();$('searchInput').focus()});$('cancelCreate').addEventListener('click',()=>{showList();$('searchInput').focus()});
+    $('newBranch').addEventListener('input',()=> $('confirmCreate').disabled=!$('newBranch').value.trim());$('newBranch').addEventListener('keydown',event=>{if(event.key==='Enter'&&!$('confirmCreate').disabled)$('confirmCreate').click()});$('confirmCreate').addEventListener('click',()=>{const name=$('newBranch').value.trim();if(!name)return;branches.unshift({name,detail:''});current=name;render();showList();closePopover();showToast(`已创建并切换到 ${name}`)});
+    $('openCreateWorktree').addEventListener('click',showCreateWorktree);$('backToWorktrees').addEventListener('click',showWorktrees);$('cancelWorktreeCreate').addEventListener('click',showWorktrees);$('newWorktree').addEventListener('input',()=> $('confirmWorktreeCreate').disabled=!$('newWorktree').value.trim());$('confirmWorktreeCreate').addEventListener('click',()=>{const name=$('newWorktree').value.trim();if(!name)return;if(!branches.some(item=>item.name===name))branches.push({name,detail:''});worktrees.push({id:`wt-${Date.now()}`,name,path:`…/matou-worktrees/${name.split('/').at(-1)}`,current:false,dirty:false,sessions:0});render();showWorktrees();showToast(`已创建 Worktree：${name}`)});
+    $('revealWorktree').addEventListener('click',()=>{const target=worktrees.find(item=>item.id===selectedWorktree);$('worktreeMenu').hidden=true;showToast(`已在 Finder 中显示 ${target?.name}`)});$('removeWorktree').addEventListener('click',()=>{const index=worktrees.findIndex(item=>item.id===selectedWorktree);if(index<0||worktrees[index].current)return;const [removed]=worktrees.splice(index,1);$('worktreeMenu').hidden=true;renderWorktrees();render();showToast(`已移除 ${removed.name}`)});
+    $('commitOnly').addEventListener('click',()=>{pendingChanges=false;ahead=1;branches.find(item=>item.name===current).detail='领先远端 1 个提交';$('commitMessage').value='';render();updateCommitActions();closePopover();showToast('提交完成，可继续推送')});$('commitPush').addEventListener('click',()=>{pendingChanges=false;ahead=0;branches.find(item=>item.name===current).detail='';$('commitMessage').value='';render();closePopover();showToast('提交并推送完成')});$('pushOnly').addEventListener('click',()=>{ahead=0;branches.find(item=>item.name===current).detail='';render();closePopover();showToast('推送完成')});$('commitMessage').addEventListener('keydown',event=>{if((event.metaKey||event.ctrlKey)&&event.key==='Enter'&&!$('commitOnly').disabled)$('commitOnly').click()});
+    $('branchTrigger').addEventListener('click',()=>$('popover').hidden?openPopover():closePopover());document.addEventListener('pointerdown',event=>{if(!$('popover').hidden&&!$('popover').contains(event.target)&&!$('branchTrigger').contains(event.target))closePopover();else if(!$('worktreeMenu').hidden&&!$('worktreeMenu').contains(event.target)&&!event.target.closest('.worktree-more'))$('worktreeMenu').hidden=true});document.addEventListener('keydown',event=>{if(event.key!=='Escape'||$('popover').hidden)return;if(!$('createView').hidden){showList();$('searchInput').focus()}else if(!$('createWorktreeView').hidden){showWorktrees()}else if(!$('worktreeView').hidden||!$('commitView').hidden){showList();$('searchInput').focus()}else closePopover()});render();renderWorktrees();requestAnimationFrame(()=>$('searchInput').focus());
+  </script>
+</body>
+</html>

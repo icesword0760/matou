@@ -14,6 +14,7 @@ describe('ModelSwitchSettings', () => {
     render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
 
     expect((await screen.findAllByText('Anthropic 官方')).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('heading', { name: '设置' })).toBeNull()
     await userEvent.setup().click(screen.getByRole('tab', { name: 'Codex' }))
     expect(screen.getAllByText('OpenAI 官方').length).toBeGreaterThan(0)
     await userEvent.setup().click(screen.getByRole('button', { name: '切换到 PackyCode' }))

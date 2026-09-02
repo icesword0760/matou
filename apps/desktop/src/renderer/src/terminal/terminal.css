@@ -104,6 +104,10 @@ body {
 .terminal-surface .xterm {
   height: 100%;
   padding: var(--terminal-padding-block) var(--terminal-padding-inline);
+  /* Chromium compresses consecutive CJK punctuation by default. xterm's DOM
+     renderer measures repeated glyphs, then renders them individually; keep
+     both paths at the same advance width so spacing does not drift per mark. */
+  text-spacing-trim: space-all;
 }
 
 .terminal-surface .xterm-viewport {

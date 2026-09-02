@@ -10,6 +10,7 @@ import { useNotificationSnapshot, useNotificationStore } from '../notifications/
 import { toOscNotification } from '../notifications/osc-notification'
 import type { TerminalThemeKey } from '../terminal/terminal-themes'
 import { ChildSessionBadge } from '../session-canvas/ChildSessionBadge'
+import { AppIcon } from '../ui/AppIcon'
 import type { SessionGraphNodeView } from './hierarchy-types'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 
@@ -186,6 +187,7 @@ export function TerminalPane(props: {
         if (outside && canDetach) void onDetach?.(session.id)
       }}>
       <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
+        {hasNotification && <span className="pane-notification-badge" role="status">新通知</span>}
         {git && <span className="pane-environment-badge" title={`Git 分支 ${git.branch}${git.dirty ? '，有未提交修改' : ''}`}>
           {git.branch}{git.dirty ? '*' : ''}
         </span>}
@@ -382,10 +384,7 @@ export function TerminalPane(props: {
 }
 
 function LoadSessionIcon() {
-  return <svg viewBox="0 0 20 20" aria-hidden="true" fill="none">
-    <path d="M3.5 5.5h5l1.4 1.8h6.6v8.2h-13z" />
-    <path d="M10 9v4m-2-2 2 2 2-2" />
-  </svg>
+  return <AppIcon name="folder-input" />
 }
 
 function NOOP(): void {}
@@ -422,23 +421,15 @@ export function removalConfirmLabel(
 }
 
 function BranchChildIcon() {
-  return <svg aria-hidden="true" viewBox="0 0 24 24">
-    <circle cx="6" cy="5" r="2" /><circle cx="18" cy="7" r="2" /><circle cx="6" cy="19" r="2" />
-    <path d="M6 7v10M8 9c4 0 5-2 8-2" />
-  </svg>
+  return <AppIcon name="layers-plus" />
 }
 
 function BranchSiblingIcon() {
-  return <svg aria-hidden="true" viewBox="0 0 24 24">
-    <path d="M5 4v16M5 8h7M12 8v8M12 16h7" />
-    <circle cx="5" cy="4" r="1.8" /><circle cx="19" cy="16" r="1.8" />
-  </svg>
+  return <AppIcon name="copy-plus" />
 }
 
 export function RemoveNodeIcon() {
-  return <svg aria-hidden="true" viewBox="0 0 24 24">
-    <circle cx="12" cy="12" r="8" /><path d="M8 12h8" />
-  </svg>
+  return <AppIcon name="circle-minus" />
 }
 
 function claudeWorkFailureReason(latestLines: string[]): string {

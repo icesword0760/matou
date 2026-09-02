@@ -487,15 +487,7 @@ function HierarchyProduct({ projection, commands }: {
           <button type="button" aria-label="关闭 DAG 异常提示" onClick={() => setDagOpenError(false)}>×</button>
         </div>}
         {task && <>
-          {settingsActive ? <div className="scene-bar tab-bar" role="tablist">
-            <div className="scene-tabs tab-bar-left">
-              <div className="tab-item active">
-                <button role="tab" className="tab-title" aria-selected="true">设置 · 模型切换</button>
-                <button className="tab-close" aria-label="关闭设置页签" onClick={() => setSettingsActive(false)}>✕</button>
-              </div>
-            </div>
-            <div className="tab-bar-right">{appUpdateControl}</div>
-          </div> : <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
+          {!settingsActive && <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
             onOpenDag={openDag} trailingControl={appUpdateControl} />}
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {

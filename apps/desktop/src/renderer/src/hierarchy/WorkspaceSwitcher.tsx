@@ -5,8 +5,7 @@ import { EmptyWorkspaceState } from './EmptyWorkspaceState'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
-import notificationIcon from '../assets/terminal-reference/terminal/dark_toongzhi.svg'
-import notificationAnimatedIcon from '../assets/terminal-reference/terminal/rongzhi_ani.gif'
+import { AppIcon } from '../ui/AppIcon'
 
 export function WorkspaceSwitcher({
   projection, commands, notificationCenterOpen = false, onNotificationToggle, onWorkspaceMenuOpen
@@ -41,7 +40,8 @@ export function WorkspaceSwitcher({
     <span className="project-dropdown__notify-group"><i className="project-dropdown__divider" />
       <button className="project-dropdown__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
         onClick={(event) => { event.stopPropagation(); setOpen(false); onNotificationToggle?.() }}>
-        <img src={notificationSnapshot.unreadCount > 0 ? notificationAnimatedIcon : notificationIcon} alt="" />
+        <AppIcon name="bell" />
+        {notificationSnapshot.unreadCount > 0 && <span className="project-dropdown__notify-dot" aria-hidden="true" />}
       </button></span>
     {open && <div role="menu" className="project-dropdown__panel">
       <div className="project-dropdown__header"><span>workspace</span>

@@ -18,14 +18,14 @@ describe('ingestAgentNotification', () => {
     })
   })
 
-  it('marks a focused Session event read while preserving the reference product visible indicator', () => {
+  it('marks a focused Session event read without creating a second visible indicator', () => {
     const playSound = vi.fn()
     const store = new AgentNotificationStore({ now: () => 20, playSound })
 
     ingestAgentNotification(domainEvent(), projection(), 'session-1', store)
 
     expect(store.snapshot().notifications[0]?.read).toBe(true)
-    expect(store.sessionHasVisibleIndicator('session-1')).toBe(true)
+    expect(store.sessionHasVisibleIndicator('session-1')).toBe(false)
     expect(playSound).not.toHaveBeenCalled()
   })
 

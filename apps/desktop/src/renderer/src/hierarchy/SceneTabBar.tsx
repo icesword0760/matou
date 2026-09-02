@@ -6,7 +6,7 @@ import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
-import splitRightIcon from '../assets/terminal-reference/terminal/vertical.png'
+import { AppIcon } from '../ui/AppIcon'
 
 export interface SceneCommands {
   activateScene(sceneId: string): unknown
@@ -173,11 +173,11 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
           title={`${scene.name}\n双击重命名画布`} onDoubleClick={() => setRenamingSceneId(scene.id)}
           onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
-        <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}>✕</button>
+        <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}><AppIcon name="x" /></button>
       </div>)}
       {!isTabOverflowing && <button className="tab-add-btn" aria-label="新建页签"
         disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-        onClick={addCanvas}>+</button>}
+        onClick={addCanvas}><AppIcon name="plus" /></button>}
     </div>
     {isTabOverflowing && <div className="tab-bar-overflow-actions">
       <button className="tab-overflow-btn" aria-label="更多页签" title="查看隐藏页签"
@@ -185,14 +185,14 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
           event.stopPropagation()
           refreshHiddenTabs()
           setTabOverflowVisible((visible) => !visible)
-        }}>···</button>
+        }}><AppIcon name="ellipsis" /></button>
       <button className="tab-add-btn" aria-label="新建页签"
         disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
-        onClick={addCanvas}>+</button>
+        onClick={addCanvas}><AppIcon name="plus" /></button>
     </div>}
     <div className="tab-bar-right">
     {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
-      title="会话 DAG（Option + Tab）" onClick={onOpenDag}><DagIcon /></button>}
+      title="会话 DAG（Option + Tab）" onClick={onOpenDag}><AppIcon name="graph-ring" /></button>}
     <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell" disabled={!pathValid || !activeSceneId || !activeSessionId}
       title={!pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
       onClick={() => {
@@ -200,7 +200,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
         if (commands.createShellSibling) commands.createShellSibling(activeSceneId, activeSessionId)
         else commands.splitSession(activeSceneId, activeSessionId, 'horizontal')
       }}>
-      <img src={splitRightIcon} alt="" aria-hidden="true" />
+      <AppIcon name="panel-right-open" />
     </button>
     {trailingControl}
     </div>
@@ -285,12 +285,4 @@ export function sceneDisplayName(
   if (!node?.cwd) return scene.name
   const label = node.currentMode === 'claude-code' ? 'Claude' : node.currentMode === 'codex' ? 'Codex' : 'Shell'
   return `${label} · ${node.cwd}`
-}
-
-function DagIcon() {
-  return <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none"
-    stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-    <circle cx="3" cy="8" r="1.7"/><circle cx="12.5" cy="3" r="1.7"/><circle cx="12.5" cy="13" r="1.7"/>
-    <path d="M4.7 8h2.1c2.2 0 2.2-5 4-5M6.8 8c2.2 0 2.2 5 4 5"/>
-  </svg>
 }

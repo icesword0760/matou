@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 
 import type { AppUpdateState } from '../../../shared/desktop-api'
+import desktopPackage from '../../../../package.json'
 
-const INITIAL_STATE: AppUpdateState = { status: 'idle', currentVersion: '' }
+const INITIAL_STATE: AppUpdateState = { status: 'idle', currentVersion: desktopPackage.version }
 const LAST_VERSION_KEY = 'matou:last-seen-app-version'
 
 export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: number }) {
@@ -56,7 +57,8 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
   }, [open])
 
   useEffect(() => {
-    if (!waitingForIdle || activeSessionCount > 0 || state.status !== 'downloaded' || installRequestedRef.current) return
+    if (!waitingForIdle || activeSessionCount > 0 || state.status !== 'downloaded'
+      || state.installMode !== 'automatic' || installRequestedRef.current) return
     installRequestedRef.current = true
     setInstalling(true)
     void window.matouDesktop?.installAppUpdate?.()
@@ -67,9 +69,16 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
 
   const installNow = () => {
     if (installRequestedRef.current) return
+    const manualInstall = state.status === 'downloaded' && state.installMode === 'manual'
     installRequestedRef.current = true
     setInstalling(true)
-    void window.matouDesktop?.installAppUpdate?.()
+    const request = window.matouDesktop?.installAppUpdate?.()
+    if (manualInstall) {
+      void request?.finally(() => {
+        installRequestedRef.current = false
+        setInstalling(false)
+      })
+    }
   }
 
   return <div className="app-update-control" ref={rootRef}>
@@ -87,31 +96,50 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
       <UpdateHeader state={state} onClose={() => setOpen(false)} />
       <div className="app-update-popover__body">
         {state.status === 'idle' && <p>当前版本 {state.currentVersion || '—'}</p>}
-        {state.status === 'checking' && <p>正在检查云端是否有新版本…</p>}
+        {state.status === 'checking' && <p>{state.retryAttempt
+          ? `连接波动，正在自动重试（${state.retryAttempt}/${state.maxRetryAttempts ?? state.retryAttempt}）…`
+          : '正在检查云端是否有新版本…'}</p>}
         {state.status === 'not-available' && <p>当前已是最新版本（{state.currentVersion}）</p>}
         {state.status === 'error' && <div className="app-update-error">
-          <strong>更新检查失败</strong><span>{friendlyError(state.errorMessage)}</span>
+          <span>{friendlyError(state)}</span>
         </div>}
+        {state.status === 'available' && state.installMode === 'manual' &&
+          <div className="app-update-waiting">当前体验包将通过应用内下载 DMG 更新。</div>}
         {isReleaseState(state) && state.status !== 'downloading' && state.releaseNotes.length > 0 &&
           <ul className="app-update-notes">{state.releaseNotes.slice(0, 3).map((note) => <li key={note}>{note}</li>)}</ul>}
         {state.status === 'downloading' && <DownloadProgress state={state} />}
-        {state.status === 'downloaded' && activeSessionCount > 0 && <div className="app-update-session-warning">
+        {state.status === 'downloaded' && state.installMode === 'automatic' && activeSessionCount > 0 && <div className="app-update-session-warning">
           <i /><span><strong>当前有 {activeSessionCount} 个活动会话</strong>
             <small>空闲后更新会保留工作区、画布位置及会话恢复信息。</small></span>
         </div>}
-        {waitingForIdle && <div className="app-update-waiting">已安排：空闲后自动更新</div>}
+        {waitingForIdle && state.status === 'downloaded' && state.installMode === 'automatic' &&
+          <div className="app-update-waiting">已安排：空闲后自动更新</div>}
       </div>
       <div className="app-update-popover__actions">
-        {(state.status === 'idle' || state.status === 'not-available' || state.status === 'error') &&
+        {(state.status === 'idle' || state.status === 'not-available') &&
           <button className="is-primary" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>
-            {state.status === 'error' ? '重新检查' : '检查更新'}
+            检查更新
           </button>}
+        {state.status === 'error' && state.manualDownloadUrl && <>
+          <button className="is-primary" onClick={() => void window.matouDesktop?.downloadAppUpdate?.()}>下载 DMG 更新</button>
+          <button className="is-quiet" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>重新检查</button>
+        </>}
+        {state.status === 'error' && !state.manualDownloadUrl &&
+          <button className="is-primary" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>重新检查</button>}
         {state.status === 'available' && <>
-          <button className="is-primary" onClick={() => void window.matouDesktop?.downloadAppUpdate?.()}>后台下载</button>
+          <button className="is-primary" onClick={() => void window.matouDesktop?.downloadAppUpdate?.()}>
+            {state.installMode === 'manual' ? '下载更新' : '后台下载'}
+          </button>
           <button className="is-quiet" onClick={() => setOpen(false)}>稍后提醒</button>
         </>}
         {state.status === 'downloading' && <button className="is-quiet" onClick={() => setOpen(false)}>继续在后台下载</button>}
-        {state.status === 'downloaded' && activeSessionCount > 0 && <>
+        {state.status === 'downloaded' && state.installMode === 'manual' && <>
+          <button className="is-primary" disabled={installing} onClick={installNow}>
+            {installing ? '正在打开…' : '打开 DMG 安装'}
+          </button>
+          <button className="is-quiet" onClick={() => setOpen(false)}>稍后安装</button>
+        </>}
+        {state.status === 'downloaded' && state.installMode === 'automatic' && activeSessionCount > 0 && <>
           <button className={waitingForIdle ? '' : 'is-primary'} disabled={installing}
             onClick={() => setWaitingForIdle((waiting) => !waiting)}>
             {waitingForIdle ? '取消空闲更新' : '空闲后自动更新'}
@@ -121,7 +149,7 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
             <button onClick={() => setOpen(false)}>退出时安装</button>
           </div>
         </>}
-        {state.status === 'downloaded' && activeSessionCount === 0 && <>
+        {state.status === 'downloaded' && state.installMode === 'automatic' && activeSessionCount === 0 && <>
           <button className="is-primary" disabled={installing} onClick={installNow}>{installing ? '正在准备更新…' : '重启并更新'}</button>
           <button className="is-quiet" onClick={() => setOpen(false)}>退出时安装</button>
         </>}
@@ -137,9 +165,9 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
 function UpdateHeader({ state, onClose }: { state: AppUpdateState; onClose: () => void }) {
   const title = state.status === 'available' ? `Matou ${state.version} 可用`
     : state.status === 'downloading' ? '正在后台下载'
-    : state.status === 'downloaded' ? '更新已准备好'
+    : state.status === 'downloaded' ? state.installMode === 'manual' ? 'DMG 已下载完成' : '更新已准备好'
     : state.status === 'checking' ? '正在检查更新'
-    : state.status === 'error' ? '应用更新'
+    : state.status === 'error' ? errorTitle(state.errorStage)
     : state.status === 'not-available' ? 'Matou 已是最新版本'
     : 'Matou 应用更新'
   const subtitle = isReleaseState(state)
@@ -176,8 +204,10 @@ function updateButtonLabel(state: AppUpdateState): string {
   if (state.status === 'checking') return '应用更新：正在检查'
   if (state.status === 'available') return `应用更新：发现 ${state.version}`
   if (state.status === 'downloading') return `应用更新：下载中 ${Math.round(state.progress.percent)}%`
-  if (state.status === 'downloaded') return '应用更新：等待安装'
-  if (state.status === 'error') return '应用更新：检查失败'
+  if (state.status === 'downloaded') return state.installMode === 'manual'
+    ? '应用更新：等待打开安装包'
+    : '应用更新：等待安装'
+  if (state.status === 'error') return `应用更新：${errorTitle(state.errorStage)}`
   return '应用更新'
 }
 
@@ -192,7 +222,42 @@ function formatDate(value?: string): string {
   return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(date)
 }
 
-function friendlyError(message: string): string {
-  if (/network|server|fetch|ECONN|timeout/i.test(message)) return '暂时没有连接到更新服务器，请检查网络后重试。'
+function errorTitle(stage: Extract<AppUpdateState, { status: 'error' }>['errorStage']): string {
+  if (stage === 'download') return '更新下载失败'
+  if (stage === 'verify') return '安装包校验未通过'
+  if (stage === 'install') return '更新安装失败'
+  return '更新检查失败'
+}
+
+function friendlyError(state: Extract<AppUpdateState, { status: 'error' }>): string {
+  if (state.errorStage === 'verify') {
+    return '当前安装包缺少 Apple 发布签名，改用应用内 DMG 下载继续更新。'
+  }
+  if (state.errorStage === 'install') return '更新安装前的会话保存或应用退出过程出现异常，请重新尝试。'
+  if (/ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED|\bDNS\b|getaddrinfo/i.test(state.errorMessage)) {
+    return '更新服务器域名解析失败，请检查网络或 DNS 设置。'
+  }
+  if (/ETIMEDOUT|ERR_TIMED_OUT|timed?\s*out/i.test(state.errorMessage)) {
+    return '连接更新服务器超时，请检查网络后重试。'
+  }
+  if (/ENETUNREACH|ERR_INTERNET_DISCONNECTED|network is unreachable/i.test(state.errorMessage)) {
+    return '当前设备尚未接入网络，请恢复网络后重试。'
+  }
+  if (/ECONNREFUSED|ERR_CONNECTION_REFUSED/i.test(state.errorMessage)) {
+    return '更新服务器暂时拒绝连接，请稍后重试。'
+  }
+  if (/ECONNRESET|ERR_CONNECTION_RESET|socket hang up/i.test(state.errorMessage)) {
+    return '下载连接被中途断开，应用已保留当前版本，请重新尝试。'
+  }
+  if (/CERT_|SSL|TLS|certificate/i.test(state.errorMessage)) {
+    return '更新服务器的安全连接校验异常，请检查系统时间后重试。'
+  }
+  const httpStatus = state.errorMessage.match(/(?:HTTP|status(?: code)?)\D*(\d{3})/i)?.[1]
+  if (httpStatus) return `更新服务器返回 HTTP ${httpStatus}，请稍后重试。`
+  if (/stable-mac\.yml|latest[^\s]*\.yml|YAML|parse/i.test(state.errorMessage)) {
+    return '更新信息格式异常，当前版本保持不变，请稍后重试。'
+  }
+  if (/network|server|fetch|ECONN|timeout/i.test(state.errorMessage)) return '暂时没有连接到更新服务器，请检查网络后重试。'
+  if (state.errorStage === 'download') return '更新文件下载中断，请检查网络后重试。'
   return '更新服务出现异常，请稍后重新检查。'
 }

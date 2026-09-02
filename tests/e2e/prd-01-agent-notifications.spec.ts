@@ -21,6 +21,7 @@ test('shows the reference product unread trail and navigates back to the origina
     })
 
     await expect(origin).toHaveClass(/has-notification/)
+    await expect(origin.locator('.pane-notification-badge')).toHaveText('新通知')
     await expect(page.locator('.workbench-item__badge')).toHaveText('1')
     await expect(page.getByTestId(`scene-unread-${ids.sceneId}`)).toBeVisible()
     await expect(page.locator('.flat-sidebar__notify img')).toHaveAttribute('src', /rongzhi_ani-.*\.gif/)
@@ -46,23 +47,38 @@ test('shows the reference product unread trail and navigates back to the origina
   }
 })
 
-test('keeps focused events visible only on the pane until the user returns to it', async () => {
+test('keeps focused read events out of every unread indicator and highlights only the unread Session', async () => {
   const fixture = await launchMatou()
   try {
     const { page } = fixture
-    const pane = page.locator('[data-testid="terminal-pane"]:visible').first()
-    const ids = await hierarchyIds(page, pane)
-    await pushNotification(page, ids, {
+    await page.getByRole('button', { name: '横向新增 Shell' }).click()
+    const panes = page.locator('[data-testid="terminal-pane"]:visible')
+    await expect(panes).toHaveCount(2)
+    const unreadPane = panes.first()
+    const focusedPane = panes.last()
+    await focusedPane.dispatchEvent('pointerdown')
+
+    await pushNotification(page, await hierarchyIds(page, focusedPane), {
       eventId: 'completed-1', eventType: 'completed', title: 'Claude Code',
       subtitle: 'Completed', body: 'The task is complete', isFocusedSession: true
     })
 
-    await expect(pane).toHaveClass(/has-notification/)
+    await expect(focusedPane).not.toHaveClass(/has-notification/)
+    await expect(focusedPane.locator('.pane-notification-badge')).toHaveCount(0)
     await expect(page.locator('.workbench-item__badge')).toHaveCount(0)
     await expect(page.locator('.tab-status-dot')).toHaveCount(0)
 
-    await pane.dispatchEvent('pointerdown')
-    await expect(pane).not.toHaveClass(/has-notification/)
+    await pushNotification(page, await hierarchyIds(page, unreadPane), {
+      eventId: 'permission-2', eventType: 'permission', title: 'Claude Code',
+      subtitle: 'Permission', body: 'Permission required'
+    })
+
+    await expect(page.locator('.workbench-item__badge')).toHaveText('1')
+    await expect(panes.filter({ has: page.locator('.pane-notification-badge') })).toHaveCount(1)
+    await expect(page.locator('.terminal-pane.has-notification')).toHaveCount(1)
+    await expect(unreadPane).toHaveClass(/has-notification/)
+    await expect(unreadPane.locator('.pane-notification-badge')).toHaveText('新通知')
+    await expect(focusedPane).not.toHaveClass(/has-notification/)
   } finally {
     await fixture.close()
   }

@@ -45,11 +45,17 @@ describe('Scene tabs and split actions', () => {
     expect(add.parentElement?.classList.contains('tab-bar-left')).toBe(true)
   })
 
-  it('keeps horizontal Shell creation and removes the unused file toolbar action', () => {
-    render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
+  it('uses the approved graph and panel icons while removing the unused file toolbar action', () => {
+    render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} onOpenDag={vi.fn()} />)
 
-    expect(screen.getByRole('button', { name: '横向新增 Shell' }).querySelector('img')?.getAttribute('src') ?? '')
-      .toContain('vertical.png')
+    expect(screen.getByRole('button', { name: '打开会话 DAG' })
+      .querySelector('svg')?.dataset.icon).toBe('graph-ring')
+    expect(screen.getByRole('button', { name: '横向新增 Shell' })
+      .querySelector('svg')?.dataset.icon).toBe('panel-right-open')
+    expect(screen.getByRole('button', { name: '新建页签' })
+      .querySelector('svg')?.dataset.icon).toBe('plus')
+    expect(screen.getByRole('button', { name: '关闭页签：页签 1' })
+      .querySelector('svg')?.dataset.icon).toBe('x')
     expect(screen.queryByRole('button', { name: '文件' })).toBeNull()
   })
 

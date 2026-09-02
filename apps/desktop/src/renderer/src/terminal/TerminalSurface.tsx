@@ -13,6 +13,7 @@ import {
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
 const FILE_TREE_MIME = 'application/x-file-tree-nodes'
+const SETTLED_LAYOUT_DELAY_MS = 120
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -75,6 +76,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
   const sendInputRef = useRef<(data: string) => void>(NOOP)
+  const scheduleLayoutFitRef = useRef<() => void>(NOOP)
+  const layoutFitTimerRef = useRef<number | undefined>(undefined)
+  const replayingRef = useRef(false)
   const dragOverCounterRef = useRef(0)
 
   // Runtime bytes can arrive during React's commit phase, before passive
@@ -91,7 +95,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [client, profile, sessionId])
 
   useEffect(() => {
-    if (visible) requestAnimationFrame(() => fitRef.current?.fit())
+    if (visible) scheduleLayoutFitRef.current()
   }, [visible])
 
   useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
@@ -102,7 +106,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     fontSizeRef.current = fontSize
     if (!terminalRef.current) return
     terminalRef.current.options.fontSize = fontSize
-    requestAnimationFrame(() => fitRef.current?.fit())
+    scheduleLayoutFitRef.current()
   }, [fontSize])
   useEffect(() => {
     if (!terminalRef.current) return
@@ -151,6 +155,30 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let replayRequested = false
     let replaying = false
     let spawned = false
+    const fitSettledLayout = () => {
+      layoutFitTimerRef.current = undefined
+      if (!visibleRef.current || replayingRef.current) return
+      const buffer = terminal.buffer.active
+      const wasAtBottom = buffer.viewportY >= buffer.baseY
+      fit.fit()
+      if (terminal.cols >= 2 && terminal.cols <= 1000 && terminal.rows >= 1 && terminal.rows <= 500) {
+        client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+      }
+      // A font or card-width adjustment must not leave the live prompt below
+      // the viewport. Preserve manual history inspection by following the
+      // bottom only when the user was already there before the layout changed.
+      if (wasAtBottom) terminal.scrollToBottom()
+    }
+    const scheduleLayoutFit = () => {
+      if (layoutFitTimerRef.current !== undefined) {
+        window.clearTimeout(layoutFitTimerRef.current)
+      }
+      layoutFitTimerRef.current = window.setTimeout(
+        fitSettledLayout,
+        SETTLED_LAYOUT_DELAY_MS
+      )
+    }
+    scheduleLayoutFitRef.current = scheduleLayoutFit
     const markSpawned = () => {
       spawned = true
       if (pendingInputRef.current) {
@@ -215,6 +243,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         onRuntimeError(message.message)
       } else if (message.type === 'terminal.replay-start') {
         replaying = true
+        replayingRef.current = true
         terminal.reset()
       } else if (message.type === 'terminal.replay-resize') {
         // Resize is part of VT history: zsh and full-screen tools emit cursor
@@ -224,10 +253,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-reset') {
         terminal.write('', () => terminal.reset())
       } else if (message.type === 'terminal.replay-complete') {
-        replaying = false
         terminal.write('', () => {
-          fit.fit()
-          client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+          replaying = false
+          replayingRef.current = false
+          fitSettledLayout()
           onReplayComplete(`replayed-through:${message.throughSequence}`)
         })
       }
@@ -272,10 +301,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const searchResults = search.onDidChangeResults((result) => onSearchResultsRef.current(result))
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
-      fit.fit()
-      if (terminal.cols >= 2 && terminal.cols <= 1000 && terminal.rows >= 1 && terminal.rows <= 500) {
-        client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
-      }
+      scheduleLayoutFit()
     })
     observer.observe(container)
     const wheel = (event: WheelEvent) => {
@@ -287,6 +313,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     container.addEventListener('wheel', wheel, { passive: false })
     return () => {
+      if (layoutFitTimerRef.current !== undefined) {
+        window.clearTimeout(layoutFitTimerRef.current)
+        layoutFitTimerRef.current = undefined
+      }
+      if (scheduleLayoutFitRef.current === scheduleLayoutFit) scheduleLayoutFitRef.current = NOOP
+      replayingRef.current = false
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
       input.dispose()

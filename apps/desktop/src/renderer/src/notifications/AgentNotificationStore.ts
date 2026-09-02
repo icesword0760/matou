@@ -63,7 +63,6 @@ export class AgentNotificationStore {
   readonly #listeners = new Set<() => void>()
   readonly #cooldowns = new Map<string, number>()
   readonly #notifications: AgentNotification[] = []
-  readonly #focusedReadIndicators = new Set<string>()
   #soundEnabled: boolean
   #snapshot: AgentNotificationSnapshot
   #sequence = 0
@@ -106,7 +105,6 @@ export class AgentNotificationStore {
       })
       this.#notifications.splice(replacementIndex, 1)
       this.#notifications.unshift(current)
-      if (input.isFocusedSession && sessionId) this.#focusedReadIndicators.add(sessionId)
       if (!input.isFocusedSession && current.sound && this.#soundEnabled) this.#playSound()
       this.#emit()
       return current
@@ -143,7 +141,6 @@ export class AgentNotificationStore {
       teamStatusTone: input.teamStatusTone ?? ''
     }
     this.#notifications.unshift(notification)
-    if (input.isFocusedSession && sessionId) this.#focusedReadIndicators.add(sessionId)
     if (!input.isFocusedSession && notification.sound && this.#soundEnabled) this.#playSound()
     this.#emit()
     return notification
@@ -175,7 +172,7 @@ export class AgentNotificationStore {
   }
 
   sessionHasVisibleIndicator(sessionId: string): boolean {
-    return this.sessionHasUnread(sessionId) || this.#focusedReadIndicators.has(sessionId)
+    return this.sessionHasUnread(sessionId)
   }
 
   dismissSessionIndicator(sessionId: string): void {
@@ -183,8 +180,7 @@ export class AgentNotificationStore {
     for (let index = this.#notifications.length - 1; index >= 0; index -= 1) {
       if (this.#notifications[index]?.sessionId === sessionId) this.#notifications.splice(index, 1)
     }
-    const changedIndicator = this.#focusedReadIndicators.delete(sessionId)
-    if (this.#notifications.length !== before || changedIndicator) this.#emit()
+    if (this.#notifications.length !== before) this.#emit()
   }
 
   markWorkspaceRead(workspaceId: string): void {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -102,7 +102,7 @@ describe('DagCanvas', () => {
     expect(handle.getAttribute('title')).toBe('按住拖动浮框')
   })
 
-  it('shows the same blue breathing border for a node with a pending notification', () => {
+  it('shows the same explicit notification badge for a node with a pending notification', () => {
     render(<DagCanvas graph={graph()} focusedSessionId="root" onSelect={vi.fn()}
       notifiedSessionIds={['child']} />)
 
@@ -110,6 +110,7 @@ describe('DagCanvas', () => {
     const child = screen.getByRole('button', { name: '打开会话：Child' })
     expect(root.classList.contains('has-notification')).toBe(false)
     expect(child.classList.contains('has-notification')).toBe(true)
+    expect(within(child).getByLabelText('新通知：Child')).toBeTruthy()
   })
 
   it('renders a legacy archived node as stopped without exposing a history concept', () => {

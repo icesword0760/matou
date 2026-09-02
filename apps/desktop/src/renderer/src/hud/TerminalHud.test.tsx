@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { RpcMethod } from '@matou/contracts'
+import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
 
 import { TerminalHud } from './TerminalHud'
 import type { GitRequestClient } from './GitControlMenu'
@@ -54,14 +54,34 @@ describe('PRD 02 bottom HUD', () => {
       gitBranch: 'main', gitDirty: false, startedAt: Date.now()
     }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: '打开 Git 与 Worktree' }))
-    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
-    await user.click(await screen.findByRole('button', { name: /feature\/menu/ }))
+    await user.click(screen.getByRole('button', { name: '打开 Git 控制' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 控制' })).toBeTruthy()
+    await user.click(await screen.findByRole('option', { name: /feature\/menu/ }))
     expect(request).toHaveBeenCalledWith(
       'git.checkout', expect.objectContaining({ input: expect.objectContaining({
         cwd: '/Users/demo/project', branch: 'feature/menu'
       }) }), { timeoutMs: 120_000 }
     )
+  })
+
+  it('lets the Git control consume Escape for its second-level navigation', async () => {
+    const user = userEvent.setup()
+    const repository = gitStatus()
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(): Promise<T> { return repository as T }
+    }
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/Users/demo/project',
+      gitBranch: 'main', gitDirty: false, startedAt: Date.now()
+    }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: '打开 Git 控制' }))
+    await user.click(await screen.findByRole('button', { name: '管理 Worktree… 0' }))
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: 'Git 控制' })).toBeTruthy()
+    expect(screen.getByPlaceholderText('搜索 matou 分支')).toBeTruthy()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Git 控制' })).toBeNull()
   })
 
   it('renders the current reference product Agent order and process fields without hidden metrics', () => {
@@ -188,5 +208,18 @@ function agent(patch: Partial<SessionHudView> = {}): SessionHudView {
     sessionId: 'session-1', mode: 'agent', permissionMode: 'default',
     modelStrategy: 'opusplan', model: 'Claude Opus 4.6', startedAt: Date.now(),
     ...patch
+  }
+}
+
+function gitStatus(): GitRepositoryStatus {
+  return {
+    repositoryRoot: '/Users/demo/project', cwd: '/Users/demo/project',
+    currentBranch: 'main', defaultBranch: 'main', dirty: false,
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+    additions: 0, deletions: 0, ahead: 0, behind: 0,
+    hasRemote: false, canPush: false,
+    branches: [{ name: 'main', current: true, commitTimestamp: 1 }],
+    worktrees: [{ path: '/Users/demo/project', branch: 'main', head: 'abc',
+      current: true, main: true, dirty: false, managed: false, sessionCount: 1 }]
   }
 }

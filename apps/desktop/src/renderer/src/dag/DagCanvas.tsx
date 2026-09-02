@@ -197,6 +197,7 @@ function DagNodeCard(props: {
   const visualStatus = legacyStopped ? 'exited' : node.workStatus
   return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}${ghost ? ' is-ghost' : ''}`}
     style={style} data-session-id={node.sessionId} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
+    {notified && <span className="dag-node-card__notification" aria-label={`新通知：${node.title}`} />}
     <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{modeLabel(node.currentMode)}</em></span>
     <strong className="dag-node-card__title" title={node.title}>{node.title}</strong>
     <span className="dag-node-card__path" title={node.cwd}>

@@ -4,6 +4,8 @@ import type {
   ProviderCli, ProviderConfigInput, ProviderConfigSnapshot, ProviderConfigView, RpcMethod
 } from '@matou/contracts'
 
+import { APP_DISPLAY_NAME } from '../../../shared/brand'
+
 export interface ProviderConfigClient {
   request(method: RpcMethod, payload: unknown): Promise<unknown>
 }
@@ -129,12 +131,11 @@ export function ModelSwitchSettings({ client, onClose }: {
   return <section className="model-settings" aria-label="模型切换设置">
     <div className="model-settings__frame">
       <nav className="model-settings__nav" aria-label="设置分类">
-        <h1>设置</h1>
         <span className="model-settings__section-label">AI 服务</span>
         <button className="model-settings__nav-item is-active" type="button">
           <SlidersIcon /><span>模型切换</span>
         </button>
-        <p>供应商切换是全局设置，将同步影响所有 Matou 窗口。</p>
+        <p>供应商切换是全局设置，将同步影响所有 {APP_DISPLAY_NAME} 窗口。</p>
       </nav>
       <main className="model-settings__main">
         <header className="model-settings__heading">
@@ -177,7 +178,7 @@ export function ModelSwitchSettings({ client, onClose }: {
               </article>
             })}
           </div>
-          <p className="model-settings__impact"><span>ⓘ</span><b>切换会影响所有 Matou 窗口。</b> Claude Code 会话自动更新；Codex 新会话直接生效，运行中的会话需要重启。</p>
+          <p className="model-settings__impact"><span>ⓘ</span><b>切换会影响所有 {APP_DISPLAY_NAME} 窗口。</b> Claude Code 会话自动更新；Codex 新会话直接生效，运行中的会话需要重启。</p>
         </>}
       </main>
     </div>

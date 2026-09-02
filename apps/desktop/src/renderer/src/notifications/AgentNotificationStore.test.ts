@@ -70,7 +70,7 @@ describe('AgentNotificationStore', () => {
     expect(store.snapshot().notifications.map(({ eventId }) => eventId)).toEqual(['permission'])
   })
 
-  it('matches reference product by showing a read indicator without sound for a focused Session event', () => {
+  it('keeps a focused Session event read without creating an unread indicator or sound', () => {
     const playSound = vi.fn()
     const store = new AgentNotificationStore({ now: () => 1_000, playSound })
 
@@ -78,8 +78,18 @@ describe('AgentNotificationStore', () => {
 
     expect(notification?.read).toBe(true)
     expect(store.snapshot().unreadCount).toBe(0)
-    expect(store.sessionHasVisibleIndicator('session')).toBe(true)
+    expect(store.sessionHasVisibleIndicator('session')).toBe(false)
     expect(playSound).not.toHaveBeenCalled()
+  })
+
+  it('keeps one unread count aligned with exactly one notified Session', () => {
+    const store = new AgentNotificationStore({ now: () => 1_000 })
+    store.push(event({ eventId: 'focused', sessionId: 'session-a', isFocusedSession: true }))
+    store.push(event({ eventId: 'unread', sessionId: 'session-b', isFocusedSession: false }))
+
+    expect(store.snapshot().unreadCount).toBe(1)
+    expect(store.sessionHasVisibleIndicator('session-a')).toBe(false)
+    expect(store.sessionHasVisibleIndicator('session-b')).toBe(true)
   })
 
   it('matches reference product by removing the Session notification history when its indicator is dismissed', () => {

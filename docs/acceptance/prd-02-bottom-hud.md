@@ -8,6 +8,7 @@
 - 用户在 Shell 中运行 `claude` 后，同一面板立即进入 Agent HUD；权限、模型、上下文、任务、工具、待办和环境信息集中在一行内，退出 AI 后原位回到可继续输入的 Shell。
 - 用户可以直接在底部切模型或切 Default / Accept Edits / Plan Mode。跨越 Bypass 边界时会先看到明确确认，再中断并重建当前 AI 进程；有可恢复身份时继续原话题，没有身份时明确新开。
 - 多个面板各自保有独立 HUD，焦点切换不会串状态；独立窗口复用同一组件和 Runtime 命令。
+- 用户点击底部 Git 分支后，会直接进入紧凑分支选择器；可搜索或键盘切换分支，并在同一控制器内创建分支、管理 Worktree、提交和推送。
 - 窗口变窄时字段按 reference product 当前优先级逐级让位，始终保持单行，不显示 `--`、`N/A` 等噪音。
 
 ## 2. 已确认的产品基线
@@ -57,6 +58,32 @@
 | 29 | Bypass 中关闭面板 | 本期按 Runtime 终止 / 重建时序处理，不增加额外产品承诺 | PRD 边界定义 | 通过（P2 无硬承诺） |
 | 30 | 多面板混合 | 每个 Session 独立存储 HUD；焦点决定唯一可见 HUD | registry isolation + focus-switch test | 通过 |
 
+### 3.1 Git 控制器 reference product 交互对照矩阵
+
+2026-09-01 产品确认以交互 Mockup 为本项最终基准，Git 控制器保持紧凑、就地完成，不恢复旧的顶栏和三页签结构。
+
+| 场景 | reference product / Mockup 基线 | Matou 实际结果 | 运行证据 | 差异结论 |
+|---|---|---|---|---|
+| 打开入口 | 点击底部当前分支，直接出现已聚焦的搜索框 | 显示 316px 紧凑浮层，搜索框自动聚焦 | `git-control.png`、PRD 02 Electron Git 场景 | 一致 |
+| 查找与切换分支 | 当前分支显示勾选和未提交摘要；方向键选择、Enter 切换 | 支持过滤、鼠标选择、上下键和 Enter；已在其它 Worktree 的分支不可重复检出 | component tests、Electron Git 场景 | 一致，并保留冲突保护 |
+| 创建分支 | 底部单行入口进入二级表单，创建后直接检出并收起 | 显示当前基线分支；创建成功后 HUD 更新为新分支 | component tests、Electron Git 场景 | 一致 |
+| 查看 Worktree | 列表显示分支、路径、当前/有更改/会话状态 | 可进入当前画布、在 Finder 显示，并对可移除项显示操作；入口数量只统计主工作目录之外的附加 Worktree | component tests、Electron Git 场景 | 一致 |
+| 创建与移除 Worktree | 二级表单创建；更多菜单执行 Finder 或移除 | 创建后回到列表；有会话的 Worktree 禁用移除，有本地更改时保留现场并反馈 | component tests、Runtime Git tests | 一致，并明确保护状态 |
+| 提交 | 提交信息可留空自动生成；可选择包含未暂存更改 | 显示增删行统计；空信息生成稳定摘要，提交完成后即时反馈 | component tests、Electron Git 场景 | 一致 |
+| 提交并推送 / 推送 | 有远端时开放组合操作；无远端时保持禁用 | 组合操作严格先提交再推送；独立推送按仓库状态启用 | component tests、Runtime Git tests | 一致 |
+| 返回与关闭 | 二级页 Esc 返回分支列表，再按 Esc 关闭；点浮层外关闭 | 键盘、返回键和浮层外点击均按相同层级处理 | component tests、Electron Git 场景 | 一致 |
+| 重复操作与错误 | 操作中锁定入口，结果在浮层底部就地反馈 | 同步互斥避免双击产生并发 Git 写入；错误保留当前页面并提供刷新 | component tests、Electron Git 场景 | 一致 |
+
+### 3.2 模型切换设置视觉统一迭代（2026-09-01）
+
+产品确认以 `docs/prd/mockups/Matou-主界面统一看板与设置.html` 为视觉基准后，模型切换设置已对齐主工作区：
+
+- 点击左下角“设置”后，右侧仍由设置页面完整接管，不恢复页签顶栏，也不在四周保留空白；
+- 设置导航和主内容共享主工作区浅灰画布与细分隔线，取消独立的大面积渐变卡片；
+- 当前供应商只使用一层浅蓝状态强调；供应商配置合并为单个高密度列表表面，配置之间使用 1px 分隔线；
+- 新增、编辑、切换和状态反馈保留原能力，按钮、输入框、弹窗、焦点环与进入动效统一为主界面节奏；
+- Electron 真实窗口已校验画布颜色、零外边距、透明内容框、列表圆角和行内无独立卡片圆角，运行截图为 `docs/acceptance/evidence/prd-02/matou/model-switch-settings.png`。
+
 ## 4. 当前运行与自动化证据
 
 - reference product 当前运行程序和 reference product 完整 HUD 源码已双重对照；可运行程序仍装载旧栏这一缺口已单独记录，没有被误写成最终标准。
@@ -72,14 +99,16 @@
   - `docs/acceptance/evidence/prd-02/matou/agent-hud.png`
   - `docs/acceptance/evidence/prd-02/matou/agent-hud.json`
   - `docs/acceptance/evidence/prd-02/matou/bypass-confirmation.png`
+  - `docs/acceptance/evidence/prd-02/matou/git-control.png`
 
 ## 5. 产品验收建议
 
-重点体验四条路径：
+重点体验五条路径：
 
 1. **Shell 环境感知**：执行 `cd`、切分支、改文件，确认底部目录 / Git / `*` 自动更新。
 2. **进入与退出 AI**：在 Shell 输入 `claude`，确认 HUD 整体切换；结束 AI 后确认原位回到可输入 Shell。
 3. **就地控制**：切 Plan Mode、切 Sonnet，再跨到 Bypass，确认普通切换无中断、Bypass 有确认且清屏续话。
 4. **多面板与窄窗口**：切换不同面板、拖出独立窗口、缩窄窗口，确认状态不串扰且始终单行。
+5. **Git 闭环**：从底部分支入口完成搜索切换、创建分支、Worktree 管理、提交与推送，确认无额外顶栏或页签。
 
 PRD 02 的需求台账与 reference product 双基线已经闭合，等待产品验收。

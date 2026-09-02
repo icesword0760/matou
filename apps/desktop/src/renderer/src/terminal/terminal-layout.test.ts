@@ -16,6 +16,23 @@ describe('terminal grid layout', () => {
     expect(canvasCss).toContain('--terminal-padding-block: 12px;')
   })
 
+  it('measures repeated CJK punctuation at the same width used for rendered rows', () => {
+    const terminalCss = css('terminal/terminal.css')
+
+    expect(terminalCss).toMatch(
+      /\.terminal-surface \.xterm\s*\{[^}]*text-spacing-trim:\s*space-all;/
+    )
+  })
+
+  it('aligns the sidebar footer to the 38px terminal status bar', () => {
+    const hierarchyCss = css('hierarchy/hierarchy.css')
+
+    expect(hierarchyCss).toContain(
+      '.flat-sidebar__toolbar { position: relative; z-index: 2; display: flex; flex: 0 0 38px;'
+    )
+    expect(hierarchyCss).toContain('height: 38px; min-height: 38px;')
+  })
+
   it('uses the full top bar as a window drag surface outside interactive controls', () => {
     const hierarchyCss = css('hierarchy/hierarchy.css')
 

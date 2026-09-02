@@ -1,6 +1,11 @@
+import { mkdir } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+
 import { expect, test } from '@playwright/test'
 
 import { launchMatou } from './matou-fixture'
+
+const evidenceDirectory = resolve(import.meta.dirname, '../../docs/acceptance/evidence/prd-05/matou')
 
 test('first launch presents the complete Workspace, Task, Scene, and terminal hierarchy', async () => {
   const fixture = await launchMatou()
@@ -173,6 +178,36 @@ test('uses one frosted sidebar material with flat Workspace groups and a single 
     expect(pinBox).not.toBeNull()
     expect(actionBox).not.toBeNull()
     expect(pinBox!.x + pinBox!.width).toBeLessThanOrEqual(actionBox!.x)
+  } finally { await fixture.close() }
+})
+
+test('extends the main workspace visual system into the Workspace board', async () => {
+  const fixture = await launchMatou()
+  try {
+    const { app, page } = fixture
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1400, 820))
+    await page.getByRole('button', { name: '看板' }).click()
+    const board = page.getByRole('region', { name: 'matou_workspace 看板' })
+    await expect(board).toBeVisible()
+    const appearance = await board.evaluate((element) => {
+      const columns = [...element.querySelectorAll<HTMLElement>('.board-column')]
+      const dots = [...element.querySelectorAll<HTMLElement>('.board-column__header i')]
+      return {
+        canvas: getComputedStyle(element).backgroundColor,
+        columnSurfaces: columns.map((column) => getComputedStyle(column).backgroundColor),
+        columnRadii: columns.map((column) => getComputedStyle(column).borderRadius),
+        statusDots: dots.map((dot) => getComputedStyle(dot).backgroundColor)
+      }
+    })
+    expect(appearance.canvas).toBe('rgb(247, 248, 250)')
+    expect(new Set(appearance.columnSurfaces)).toEqual(new Set(['rgb(251, 252, 253)']))
+    expect(new Set(appearance.columnRadii)).toEqual(new Set(['11px']))
+    expect(new Set(appearance.statusDots).size).toBe(4)
+    await mkdir(evidenceDirectory, { recursive: true })
+    await page.waitForTimeout(250)
+    await page.locator('.hierarchy-shell').screenshot({
+      path: join(evidenceDirectory, 'workspace-board-unified.png')
+    })
   } finally { await fixture.close() }
 })
 

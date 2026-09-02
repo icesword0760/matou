@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -13,6 +13,10 @@ const state = vi.hoisted(() => ({
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
+  resizeObserverCallback: undefined as undefined | ResizeObserverCallback,
+  fit: vi.fn(),
+  resizeTerminal: vi.fn(),
+  scrollToBottom: vi.fn(),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
   attachTerminal: vi.fn(),
@@ -25,10 +29,13 @@ vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 80
     rows = 24
+    options = { fontSize: 11, theme: {} }
+    buffer = { active: { baseY: 20, viewportY: 20 } }
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
     loadAddon = vi.fn()
     open = vi.fn()
     focus = state.focus
+    scrollToBottom = state.scrollToBottom
     write = state.terminalWrite
     resize = state.terminalResize
     onData = vi.fn((listener: (data: string) => void) => {
@@ -40,7 +47,7 @@ vi.mock('@xterm/xterm', () => ({
   }
 }))
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class { fit = vi.fn() }
+  FitAddon: class { fit = state.fit }
 }))
 vi.mock('@xterm/addon-search', () => ({
   SearchAddon: class {
@@ -63,7 +70,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     },
     acknowledgeTerminal: vi.fn(),
     requestTerminalReplay: vi.fn(),
-    resizeTerminal: vi.fn(),
+    resizeTerminal: state.resizeTerminal,
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
     recordTerminalInteraction: state.recordTerminalInteraction
@@ -81,6 +88,10 @@ describe('TerminalSurface focus continuity', () => {
     state.searchResultsListener = undefined
     state.onMessage = undefined
     state.onData = undefined
+    state.resizeObserverCallback = undefined
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    state.scrollToBottom.mockClear()
     state.sendTerminalInput.mockClear()
     state.attachTerminal.mockClear()
     state.updateTerminalProfile.mockClear()
@@ -88,6 +99,9 @@ describe('TerminalSurface focus continuity', () => {
     state.terminalResize.mockClear()
     state.terminalWrite.mockClear()
     vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) {
+        state.resizeObserverCallback = callback
+      }
       observe() {}
       disconnect() {}
     })
@@ -99,6 +113,7 @@ describe('TerminalSurface focus continuity', () => {
   })
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
     Reflect.deleteProperty(window, 'matouDesktop')
     vi.unstubAllGlobals()
   })
@@ -119,6 +134,60 @@ describe('TerminalSurface focus continuity', () => {
     })
 
     expect(state.terminalResize).toHaveBeenCalledWith(100, 40)
+  })
+
+  it('waits for replay and animated layout changes to settle before fitting once', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible fontSize={11} />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    state.scrollToBottom.mockClear()
+    vi.useFakeTimers()
+
+    act(() => {
+      state.onMessage?.({ type: 'terminal.replay-start', sessionId: 'session-1' })
+      view.rerender(<TerminalSurface sessionId="session-1" active visible fontSize={13} />)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(500)
+    })
+
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+
+    act(() => {
+      state.onMessage?.({
+        type: 'terminal.replay-complete', sessionId: 'session-1', throughSequence: 9
+      })
+    })
+
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledTimes(1)
+    expect(state.scrollToBottom).toHaveBeenCalledTimes(1)
+  })
+
+  it('coalesces carousel resize frames and preserves a visible bottom prompt', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.resizeObserverCallback).toBeTypeOf('function'))
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    state.scrollToBottom.mockClear()
+    vi.useFakeTimers()
+
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(50)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(50)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+    })
+    expect(state.fit).not.toHaveBeenCalled()
+
+    act(() => vi.advanceTimersByTime(500))
+
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledTimes(1)
+    expect(state.scrollToBottom).toHaveBeenCalledTimes(1)
   })
 
   it('shows durable completed Shell Blocks before the fresh live prompt', async () => {

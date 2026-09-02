@@ -1,4 +1,5 @@
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
+import { AppIcon } from '../ui/AppIcon'
 
 export function ChildSessionBadge(props: {
   children: SessionGraphNodeView[]
@@ -24,6 +25,7 @@ export function ChildSessionBadge(props: {
         event.stopPropagation()
         onOpen()
       }}>
+      <AppIcon name="layers" className="child-session-badge__icon" size={14} />
       <span className="child-session-badge__dot" aria-hidden="true" />
       <span>{summary}</span>
       <span className="child-session-badge__chevron" aria-hidden="true">›</span>

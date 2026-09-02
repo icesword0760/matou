@@ -75,7 +75,7 @@ describe('Terminal pane', () => {
     ]
     render(<TerminalPane {...fixture()} resumable git={{ branch: 'feat/notification', dirty: false }}
       childNodes={children} onOpenChildren={vi.fn()} onLoadSession={vi.fn()}
-      onFork={onFork} onForkSibling={onForkSibling} />)
+      onFork={onFork} onForkSibling={onForkSibling} onRemoveBranch={vi.fn()} />)
 
     const header = screen.getByRole('banner')
     expect(header.textContent).toContain('Claude 主会话')
@@ -85,6 +85,16 @@ describe('Terminal pane', () => {
     const actions = header.querySelector('.terminal-pane-actions')
     expect(actions?.querySelector('.child-session-badge')).not.toBeNull()
     expect(actions?.firstElementChild?.classList.contains('child-session-badge-wrap')).toBe(true)
+    expect(screen.getByRole('button', { name: '查看 2 个子会话' })
+      .querySelector('svg')?.dataset.icon).toBe('layers')
+    expect(screen.getByRole('button', { name: '载入 Claude Code 会话到“Claude 主会话”' })
+      .querySelector('svg')?.dataset.icon).toBe('folder-input')
+    expect(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })
+      .querySelector('svg')?.dataset.icon).toBe('layers-plus')
+    expect(screen.getByRole('button', { name: '从共同父会话创建“Claude 主会话”的兄弟分支' })
+      .querySelector('svg')?.dataset.icon).toBe('copy-plus')
+    expect(screen.getByRole('button', { name: '移出节点：Claude 主会话' })
+      .querySelector('svg')?.dataset.icon).toBe('circle-minus')
     expect(screen.queryByRole('button', { name: '删除终端：Claude 主会话' })).toBeNull()
 
     const user = userEvent.setup()

@@ -54,6 +54,68 @@ test('shows the live Shell environment with reference product geometry and refre
   }
 })
 
+test('operates the compact Git controller for branches, Worktrees, commits, and push availability', async () => {
+  const fixture = await launchMatou()
+  try {
+    await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1400, 820))
+    const surface = activeSurface(fixture.page.locator('body'))
+    await positivePid(surface)
+    await execFileAsync('git', ['-C', fixture.workspaceDirectory, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', fixture.workspaceDirectory, 'config', 'user.name', 'Matou E2E'])
+    await execFileAsync('git', ['-C', fixture.workspaceDirectory, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(fixture.workspaceDirectory, 'README.md'), 'initial\n')
+    await execFileAsync('git', ['-C', fixture.workspaceDirectory, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', fixture.workspaceDirectory, 'commit', '-m', 'initial'])
+    await writeFile(join(fixture.workspaceDirectory, 'README.md'), 'changed\n')
+    await terminalCommand(surface, 'true')
+
+    const gitTrigger = fixture.page.getByRole('button', { name: '打开 Git 控制' })
+    await expect(gitTrigger).toHaveText('main*')
+    await gitTrigger.click()
+    const controller = fixture.page.getByRole('dialog', { name: 'Git 控制' })
+    const search = controller.getByPlaceholder('搜索 matou 分支')
+    await expect(search).toBeFocused()
+    await expect(controller.getByRole('navigation')).toHaveCount(0)
+    await expect(controller.getByRole('button', { name: '创建并检出新分支…' })).toBeVisible()
+    await expect(controller.getByRole('button', { name: '管理 Worktree… 0' })).toBeVisible()
+    await expect(controller.getByRole('button', { name: '提交与推送…' })).toBeVisible()
+    await mkdir(evidenceDirectory, { recursive: true })
+    await controller.screenshot({ path: join(evidenceDirectory, 'git-control.png') })
+
+    await controller.getByRole('button', { name: '创建并检出新分支…' }).click()
+    await controller.getByPlaceholder('例如 feature/improve-git-menu').fill('feature/e2e-git-control')
+    await controller.getByRole('button', { name: '创建并检出' }).click()
+    await expect(controller).toHaveCount(0)
+    await terminalCommand(surface, 'true')
+    await expect(gitTrigger).toHaveText('feature/e2e-git-control*')
+
+    await gitTrigger.click()
+    await controller.getByRole('button', { name: '提交与推送…' }).click()
+    await expect(controller.getByRole('button', { name: '推送', exact: true })).toBeDisabled()
+    await controller.getByRole('button', { name: '提交', exact: true }).click()
+    await expect(controller.getByRole('status')).toContainText('提交已完成')
+    const { stdout: latestCommit } = await execFileAsync('git', [
+      '-C', fixture.workspaceDirectory, 'log', '-1', '--pretty=%s'
+    ])
+    expect(latestCommit.trim()).toBe('chore: update 1 file')
+
+    await fixture.page.keyboard.press('Escape')
+    await expect(search).toBeFocused()
+    await controller.getByRole('button', { name: '管理 Worktree… 0' }).click()
+    await expect(controller.getByText('Worktree', { exact: true })).toBeVisible()
+    await expect(controller.getByText('当前')).toBeVisible()
+    await controller.getByRole('button', { name: '创建新 Worktree…' }).click()
+    await controller.getByPlaceholder('例如 feature/new-worktree').fill('feature/e2e-worktree')
+    await controller.getByRole('button', { name: '创建' }).click()
+    await expect(controller.getByText('feature/e2e-worktree')).toBeVisible()
+    await controller.getByRole('button', { name: 'feature/e2e-worktree 更多操作' }).click()
+    await expect(controller.getByRole('button', { name: '在 Finder 中显示' })).toBeVisible()
+    await expect(controller.getByRole('button', { name: '移除 Worktree' })).toBeEnabled()
+  } finally {
+    await fixture.close()
+  }
+})
+
 test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass, and returns to Shell', async () => {
   const providerRoot = await mkdtemp(join(tmpdir(), 'matou-prd02-provider-'))
   const provider = join(providerRoot, 'claude-fixture.sh')
@@ -97,6 +159,34 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
     const providerSettings = fixture.page.getByRole('region', { name: '模型切换设置' })
     await expect(providerSettings.getByRole('heading', { name: '模型切换' })).toBeVisible()
     await expect(providerSettings).toContainText('Anthropic 官方')
+    const settingsBounds = await providerSettings.boundingBox()
+    const frameBounds = await providerSettings.locator('.model-settings__frame').boundingBox()
+    expect(settingsBounds).not.toBeNull()
+    expect(frameBounds).not.toBeNull()
+    expect({
+      left: roundedGap(frameBounds!.x - settingsBounds!.x),
+      top: roundedGap(frameBounds!.y - settingsBounds!.y),
+      right: roundedGap(settingsBounds!.x + settingsBounds!.width - frameBounds!.x - frameBounds!.width),
+      bottom: roundedGap(settingsBounds!.y + settingsBounds!.height - frameBounds!.y - frameBounds!.height)
+    }).toEqual({ left: 0, top: 0, right: 0, bottom: 0 })
+    expect(await providerSettings.evaluate((element) => {
+      const frame = element.querySelector<HTMLElement>('.model-settings__frame')!
+      const providers = element.querySelector<HTMLElement>('.model-settings__providers')!
+      const row = element.querySelector<HTMLElement>('.model-provider')!
+      return {
+        canvas: getComputedStyle(element).backgroundColor,
+        frame: getComputedStyle(frame).backgroundColor,
+        providerBorder: getComputedStyle(providers).borderTopWidth,
+        providerRadius: getComputedStyle(providers).borderRadius,
+        rowRadius: getComputedStyle(row).borderRadius
+      }
+    })).toEqual({
+      canvas: 'rgb(247, 248, 250)',
+      frame: 'rgba(0, 0, 0, 0)',
+      providerBorder: '1px',
+      providerRadius: '10px',
+      rowRadius: '0px'
+    })
     await fixture.page.waitForTimeout(250)
     await fixture.page.locator('.hierarchy-shell').screenshot({
       path: join(evidenceDirectory, 'model-switch-settings.png')
@@ -142,6 +232,11 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
     await rm(providerRoot, { recursive: true, force: true })
   }
 })
+
+function roundedGap(value: number): number {
+  const rounded = Math.round(value)
+  return Object.is(rounded, -0) ? 0 : rounded
+}
 
 function activeSurface(root: Locator): Locator {
   return root.locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"] .terminal-surface').first()

@@ -43,9 +43,12 @@ test.describe('native session DAG window', () => {
   test('mirrors a live Session notification into the DAG until selecting that node clears it', async () => {
     const fixture = await launchSessionCanvas()
     try {
+      await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
       const surface = visibleSurfaces(fixture.page).first()
       const sessionId = await surface.getAttribute('data-session-id')
       expect(sessionId).toBeTruthy()
+      await visibleSurfaces(fixture.page).last().dispatchEvent('pointerdown')
 
       await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
@@ -62,11 +65,14 @@ test.describe('native session DAG window', () => {
         window.matouE2e.pushNotification({
           eventId: 'dag-notification-e2e', eventType: 'attention',
           title: 'Shell', body: 'DAG node attention', sound: false,
-          workspaceId, taskId, sceneId, sessionId: targetSessionId,
-          isFocusedSession: true
+          workspaceId, taskId, sceneId, sessionId: targetSessionId
         })
       }, sessionId)
       await expect(node).toHaveClass(/has-notification/)
+      await expect(node.getByLabel(/新通知/)).toBeVisible()
+      await expect(dag.locator('.dag-node-card.has-notification')).toHaveCount(1)
+      await expect(fixture.page.locator('.terminal-pane.has-notification')).toHaveCount(1)
+      await expect(fixture.page.locator('.workbench-item__badge')).toHaveText('1')
 
       await node.click()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(1)

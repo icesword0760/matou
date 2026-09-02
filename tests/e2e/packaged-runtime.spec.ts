@@ -226,12 +226,12 @@ async function packagedExecutable(): Promise<string> {
   const release = resolve(import.meta.dirname, '../../apps/desktop/release')
   if (process.platform === 'darwin') {
     for (const directory of await readdir(release)) {
-      const candidate = join(release, directory, 'Matou.app', 'Contents', 'MacOS', 'Matou')
+      const candidate = join(release, directory, '码头.app', 'Contents', 'MacOS', '码头')
       if (existsSync(candidate)) return candidate
     }
   } else if (process.platform === 'win32') {
     for (const directory of await readdir(release)) {
-      const candidate = join(release, directory, 'Matou.exe')
+      const candidate = join(release, directory, '码头.exe')
       if (existsSync(candidate)) return candidate
     }
   } else {
@@ -240,5 +240,5 @@ async function packagedExecutable(): Promise<string> {
       if (existsSync(candidate)) return candidate
     }
   }
-  throw new Error(`packaged Matou executable was not found under ${release}`)
+  throw new Error(`packaged 码头 executable was not found under ${release}`)
 }

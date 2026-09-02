@@ -1,15 +1,22 @@
 import { mkdirSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { dirname, join, resolve } from 'node:path'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, screen, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, screen, shell, Tray } from 'electron'
 import electronUpdater from 'electron-updater'
 
 import { AppUpdateManager } from './app-update-manager'
+import { resolveAppUpdateInstallMode } from './app-update-install-mode'
 import { RuntimeHost } from './runtime-host'
+import { resolvePackagedApplication } from './app-environment'
+import { applyApplicationBrand } from './application-brand'
 import { resolveDefaultWorkspacePath } from './default-workspace-policy'
 import { claimSingleInstance } from './single-instance-policy'
 import { WindowManager } from './window-manager'
 import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
+import { installDevelopmentDockIcon } from './app-icon'
+import { downloadManualUpdate } from './manual-update-downloader'
+import { readUpdateBaseUrl } from './update-feed'
 import {
   DESKTOP_CHANNELS,
   type DagNodeSelection,
@@ -17,6 +24,7 @@ import {
   type DetachedTerminalWindowInput,
   type DetachedWindowClosedEvent
 } from '../shared/desktop-api'
+import { APP_DISPLAY_NAME, APP_STORAGE_DIRECTORY_NAME } from '../shared/brand'
 
 let runtimeHost: RuntimeHost | undefined
 const windows = new WindowManager()
@@ -30,10 +38,18 @@ let mainWindowSequence = 0
 let updateManager: AppUpdateManager | undefined
 
 const { autoUpdater } = electronUpdater
+const isPackagedApplication = resolvePackagedApplication({
+  electronPackaged: app.isPackaged,
+  developmentBundle: process.env.MATOU_DEV_BUNDLE
+})
+
+applyApplicationBrand(app, APP_DISPLAY_NAME)
 
 if (process.env.ELECTRON_USER_DATA_DIR) {
   mkdirSync(process.env.ELECTRON_USER_DATA_DIR, { recursive: true })
   app.setPath('userData', process.env.ELECTRON_USER_DATA_DIR)
+} else {
+  app.setPath('userData', join(app.getPath('appData'), APP_STORAGE_DIRECTORY_NAME))
 }
 
 const dagWindows = new DagWindowManager({
@@ -66,7 +82,7 @@ const primaryInstance = claimSingleInstance({
   requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
   quit: () => app.quit(),
   onSecondInstance: (listener) => { app.on('second-instance', listener) }
-}, windows, app.isPackaged)
+}, windows, isPackagedApplication)
 
 async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
@@ -192,7 +208,7 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
     frame: true,
     resizable: true,
     maximizable: true,
-    title: 'Matou 会话 DAG',
+    title: `${APP_DISPLAY_NAME} · 会话 DAG`,
     backgroundColor: context.theme === 'light' ? '#F7F8FA' : '#171717',
     ...(process.platform === 'darwin' ? {
       titleBarStyle: 'hidden' as const,
@@ -259,17 +275,25 @@ function resolveRuntimeEntry(): string {
   if (process.env.MATOU_RUNTIME_ENTRY) {
     return resolve(process.env.MATOU_RUNTIME_ENTRY)
   }
-  if (app.isPackaged) {
+  if (isPackagedApplication) {
     return join(process.resourcesPath, 'runtime', 'index.cjs')
   }
   return resolve(app.getAppPath(), '../runtime/dist/index.cjs')
 }
 
 if (primaryInstance) app.whenReady().then(async () => {
+  installDevelopmentDockIcon({
+    platform: process.platform,
+    isPackaged: isPackagedApplication,
+    appPath: app.getAppPath(),
+    dock: app.dock
+  })
   runtimeHost = new RuntimeHost(resolveRuntimeEntry())
   await runtimeHost.start()
   await createWindow()
   autoUpdater.channel = process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
+  const updateBaseUrl = process.env.MATOU_UPDATE_BASE_URL
+    ?? readUpdateBaseUrl(join(process.resourcesPath, 'app-update.yml'))
   if (process.env.MATOU_UPDATE_BASE_URL) {
     autoUpdater.setFeedURL({
       provider: 'generic', url: process.env.MATOU_UPDATE_BASE_URL,
@@ -280,6 +304,32 @@ if (primaryInstance) app.whenReady().then(async () => {
     updater: autoUpdater,
     enabled: app.isPackaged && process.env.MATOU_DISABLE_AUTO_UPDATE !== '1',
     currentVersion: app.getVersion(),
+    installMode: resolveAppUpdateInstallMode({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      inspectSignature: () => {
+        const bundlePath = resolve(dirname(app.getPath('exe')), '../..')
+        const result = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', bundlePath], {
+          encoding: 'utf8'
+        })
+        return {
+          status: result.status,
+          output: `${result.stdout ?? ''}\n${result.stderr ?? ''}`
+        }
+      }
+    }),
+    ...(updateBaseUrl ? { updateBaseUrl } : {}),
+    downloadManualInstaller: ({ url, expectedSha512, onProgress }) => downloadManualUpdate({
+      url,
+      destinationDirectory: join(app.getPath('userData'), 'pending-updates'),
+      ...(expectedSha512 ? { expectedSha512 } : {}),
+      fetcher: (input) => net.fetch(input),
+      onProgress
+    }),
+    openManualInstaller: async (path) => {
+      const error = await shell.openPath(path)
+      if (error) throw new Error(error)
+    },
     publish: (state) => {
       for (const window of browserWindows.values()) {
         if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.appUpdateState, state)
@@ -292,10 +342,10 @@ if (primaryInstance) app.whenReady().then(async () => {
   })
   updateManager.start()
   tray = new Tray(nativeImage.createEmpty())
-  tray.setToolTip('Matou')
+  tray.setToolTip(APP_DISPLAY_NAME)
   tray.setContextMenu(Menu.buildFromTemplate([
     {
-      label: '显示 Matou', click: () => {
+      label: `显示${APP_DISPLAY_NAME}`, click: () => {
         const windowId = windows.firstLiveWindowId()
         if (windowId) windows.showWindow(windowId)
         else void createWindow()
