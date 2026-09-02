@@ -34,6 +34,35 @@ describe('RuntimeClient', () => {
     await expect(pending).resolves.toMatchObject({ matches: [{ text: 'needle line' }] })
   })
 
+  it('queries a bounded history context around a stable cursor', async () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['domain-rpc-v1']
+    })
+
+    const pending = client.historyAroundTerminalCursor(
+      'session-1', { sequence: 42, lineIndex: 3 }, 250
+    )
+    await Promise.resolve()
+    const request = port.sent.find(({ type }) => type === 'rpc.request')!
+    expect(request).toMatchObject({
+      method: 'terminal.history-page',
+      payload: {
+        sessionId: 'session-1', around: { sequence: 42, lineIndex: 3 },
+        beforeLines: 250, afterLines: 250
+      }
+    })
+    port.deliver({
+      type: 'rpc.response', protocolVersion: PROTOCOL_VERSION,
+      requestId: request.requestId, runtimeGeneration: 'generation-1',
+      result: { lines: [], gaps: [], hasMore: false }
+    })
+
+    await expect(pending).resolves.toMatchObject({ lines: [] })
+  })
+
   it('gives every terminal resize a session-local identity', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port)

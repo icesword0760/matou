@@ -1,6 +1,11 @@
 import { type DragEvent, useEffect, useRef, useState } from 'react'
 
-import { MAX_CHECKPOINT_SNAPSHOT_BYTES, type RuntimeMessage } from '@matou/contracts'
+import {
+  MAX_CHECKPOINT_SNAPSHOT_BYTES,
+  type RuntimeMessage,
+  type TerminalHistoryCursor,
+  type TerminalHistoryLine
+} from '@matou/contracts'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { SerializeAddon } from '@xterm/addon-serialize'
@@ -71,6 +76,18 @@ interface ArchivedSearchView {
   hasMore: boolean
 }
 
+interface HistoryContextView {
+  state: 'loading' | 'ready'
+  match: TerminalHistoryLine
+  resultIndex: number
+  resultCount: number
+  lines: TerminalHistoryLine[]
+  anchorIndex?: number
+  gapCount: number
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+}
+
 interface CachedTerminalModel {
   terminal: Terminal
   fit: FitAddon
@@ -95,6 +112,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const [pid, setPid] = useState<number | undefined>()
   const [isDragOverTerminal, setIsDragOverTerminal] = useState(false)
   const [archivedSearch, setArchivedSearch] = useState<ArchivedSearchView | undefined>()
+  const [historyContext, setHistoryContext] = useState<HistoryContextView | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
@@ -115,6 +133,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const sendInputRef = useRef<(data: string) => void>(NOOP)
   const checkpointNowRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
+  const historyModeRef = useRef(false)
+  const historyRequestGenerationRef = useRef(0)
+  const historyDismissedSearchSequenceRef = useRef<number | undefined>(undefined)
+  const historyOpenedSearchSequenceRef = useRef<number | undefined>(undefined)
+  const historyAnchorRef = useRef<HTMLDivElement>(null)
 
   // Runtime bytes can arrive during React's commit phase, before passive
   // effects run. Keep focus authority synchronized with the latest render so
@@ -126,8 +149,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   onStorageFaultRef.current = onStorageFault
   onStorageRecoveredRef.current = onStorageRecovered
   searchRequestRef.current = searchRequest
+  inputDisabledRef.current = inputDisabled || historyContext !== undefined
 
-  useEffect(() => { pendingInputRef.current = '' }, [sessionId])
+  useEffect(() => {
+    pendingInputRef.current = ''
+    historyRequestGenerationRef.current += 1
+    historyModeRef.current = false
+    historyDismissedSearchSequenceRef.current = undefined
+    historyOpenedSearchSequenceRef.current = undefined
+    setHistoryContext(undefined)
+    setArchivedSearch(undefined)
+  }, [sessionId])
   useEffect(() => {
     client?.updateTerminalProfile(sessionId, profile)
   }, [client, profile, sessionId])
@@ -136,7 +168,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (visible) requestAnimationFrame(() => fitRef.current?.fit())
   }, [visible])
 
-  useEffect(() => { inputDisabledRef.current = inputDisabled }, [inputDisabled])
   useEffect(() => {
     if (!foreground) checkpointNowRef.current()
   }, [foreground])
@@ -153,6 +184,39 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (!terminalRef.current) return
     terminalRef.current.options.theme = TERMINAL_THEMES[themeKey]
   }, [themeKey])
+
+  useEffect(() => {
+    if (historyContext?.state !== 'ready') return
+    const frame = requestAnimationFrame(() => {
+      historyAnchorRef.current?.scrollIntoView?.({ block: 'center' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [historyContext])
+
+  const exitHistoryView = () => {
+    historyRequestGenerationRef.current += 1
+    historyModeRef.current = false
+    historyOpenedSearchSequenceRef.current = undefined
+    historyDismissedSearchSequenceRef.current = searchRequestRef.current?.sequence
+    setHistoryContext(undefined)
+    setArchivedSearch(undefined)
+    requestAnimationFrame(() => {
+      fitRef.current?.fit()
+      if (activeRef.current && visibleRef.current) terminalRef.current?.focus()
+    })
+  }
+
+  useEffect(() => {
+    if (!historyContext) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      exitHistoryView()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [historyContext])
 
   useEffect(() => {
     if (!active || !visible) return
@@ -304,7 +368,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
           client.acknowledgeTerminal(sessionId, message.sequence)
           scheduleCheckpoint()
-          if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) terminal.focus()
+          if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
+            terminal.focus()
+          }
         })
       } else if (message.type === 'terminal.restored-history') {
         const bytes = message.data instanceof Uint8Array
@@ -407,16 +473,62 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       key: string
       requestSequence: number
       index: number
-      matches: Array<{ text: string }>
+      matches: TerminalHistoryLine[]
       gapCount: number
       hasMore: boolean
     } | undefined
     let archiveQueryGeneration = 0
+    const openHistoryContext = (result: NonNullable<typeof archivedResult>) => {
+      publishArchivedSearch(result, setArchivedSearch, onSearchResultsRef.current)
+      if (historyDismissedSearchSequenceRef.current === searchRequestRef.current?.sequence) return
+      const match = result.matches[result.index]
+      if (!match) return
+      const generation = ++historyRequestGenerationRef.current
+      historyModeRef.current = true
+      historyOpenedSearchSequenceRef.current = searchRequestRef.current?.sequence
+      setHistoryContext({
+        state: 'loading', match,
+        resultIndex: result.index,
+        resultCount: result.matches.length,
+        lines: [], gapCount: result.gapCount,
+        hasMoreBefore: false, hasMoreAfter: false
+      })
+      void client.historyAroundTerminalCursor(sessionId, match.cursor, 250).then((page) => {
+        if (generation !== historyRequestGenerationRef.current) return
+        if (page.anchorIndex === undefined || !page.lines[page.anchorIndex] ||
+          !sameHistoryCursor(page.lines[page.anchorIndex]!.cursor, match.cursor)) {
+          historyModeRef.current = false
+          historyOpenedSearchSequenceRef.current = undefined
+          setHistoryContext(undefined)
+          return
+        }
+        setHistoryContext({
+          state: 'ready', match,
+          resultIndex: result.index,
+          resultCount: result.matches.length,
+          lines: page.lines,
+          anchorIndex: page.anchorIndex,
+          gapCount: page.gaps.length,
+          hasMoreBefore: page.hasMoreBefore === true,
+          hasMoreAfter: page.hasMoreAfter === true
+        })
+      }).catch(() => {
+        if (generation !== historyRequestGenerationRef.current) return
+        historyModeRef.current = false
+        historyOpenedSearchSequenceRef.current = undefined
+        setHistoryContext(undefined)
+      })
+    }
     const searchResults = search.onDidChangeResults((result) => {
-      onSearchResultsRef.current(result)
       const request = searchRequestRef.current
+      if (historyModeRef.current && historyOpenedSearchSequenceRef.current === request?.sequence) return
+      onSearchResultsRef.current(result)
       if (result.resultCount > 0 || !request?.query) {
         archivedResult = undefined
+        historyRequestGenerationRef.current += 1
+        historyModeRef.current = false
+        historyOpenedSearchSequenceRef.current = undefined
+        setHistoryContext(undefined)
         setArchivedSearch(undefined)
         return
       }
@@ -428,7 +540,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             : (archivedResult.index + 1) % archivedResult.matches.length
           archivedResult.requestSequence = request.sequence
         }
-        publishArchivedSearch(archivedResult, setArchivedSearch, onSearchResultsRef.current)
+        openHistoryContext(archivedResult)
         return
       }
       const generation = ++archiveQueryGeneration
@@ -448,9 +560,13 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           gapCount: history.gaps.length,
           hasMore: history.hasMore
         }
-        publishArchivedSearch(archivedResult, setArchivedSearch, onSearchResultsRef.current)
+        openHistoryContext(archivedResult)
       }).catch(() => {
         if (generation !== archiveQueryGeneration) return
+        historyRequestGenerationRef.current += 1
+        historyModeRef.current = false
+        historyOpenedSearchSequenceRef.current = undefined
+        setHistoryContext(undefined)
         setArchivedSearch(undefined)
       })
     })
@@ -472,6 +588,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     container.addEventListener('wheel', wheel, { passive: false })
     return () => {
+      historyRequestGenerationRef.current += 1
+      historyModeRef.current = false
+      historyOpenedSearchSequenceRef.current = undefined
       clearCheckpointTimer()
       storeCheckpoint()
       checkpointNowRef.current = NOOP
@@ -504,6 +623,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (!search || !searchRequest) return
     if (!searchRequest.query) {
       search.clearDecorations()
+      historyRequestGenerationRef.current += 1
+      historyModeRef.current = false
+      historyOpenedSearchSequenceRef.current = undefined
+      setHistoryContext(undefined)
       setArchivedSearch(undefined)
       onSearchResultsRef.current({ resultIndex: 0, resultCount: 0 })
       return
@@ -561,8 +684,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     {...(pid === undefined ? {} : { 'data-pid': pid })}
     onDragEnter={handleTerminalDragEnter} onDragOver={handleTerminalDragOver}
     onDragLeave={handleTerminalDragLeave} onDrop={handleTerminalDrop}>
-    <div className="terminal-surface__viewport" ref={containerRef} />
-    {archivedSearch && <div className="terminal-history-result" role="status"
+    <div className="terminal-surface__viewport" ref={containerRef}
+      aria-hidden={historyContext !== undefined} />
+    {historyContext && <TerminalHistoryContextView view={historyContext}
+      anchorRef={historyAnchorRef} onClose={exitHistoryView} />}
+    {archivedSearch && !historyContext && <div className="terminal-history-result" role="status"
       aria-label="归档历史搜索结果">
       <span className="terminal-history-result__source">归档历史</span>
       <span className="terminal-history-result__text">{archivedSearch.text}</span>
@@ -574,6 +700,51 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     </div>}
     {isDragOverTerminal && <div className="terminal-drop-overlay" data-testid="terminal-drop-overlay" />}
   </div>
+}
+
+function TerminalHistoryContextView(props: {
+  view: HistoryContextView
+  anchorRef: React.RefObject<HTMLDivElement | null>
+  onClose: () => void
+}) {
+  const { view, anchorRef, onClose } = props
+  return <section className="terminal-history-context" role="region" aria-label="终端历史记录">
+    <header className="terminal-history-context__header">
+      <div className="terminal-history-context__title">
+        <strong>历史记录</strong>
+        <span>只读</span>
+        <span>{view.resultIndex + 1}/{view.resultCount}</span>
+      </div>
+      <button type="button" className="terminal-history-context__return" onClick={onClose}>
+        返回实时终端
+      </button>
+    </header>
+    {view.state === 'loading'
+      ? <div className="terminal-history-context__loading" role="status">正在读取历史上下文…</div>
+      : <div className="terminal-history-context__body">
+        {view.hasMoreBefore && <div className="terminal-history-context__boundary">上方还有更早记录</div>}
+        {view.lines.map((line, index) => {
+          const current = index === view.anchorIndex
+          return <div key={`${line.cursor.sequence}:${line.cursor.lineIndex}`}
+            ref={current ? anchorRef : undefined}
+            className={`terminal-history-context__line${current ? ' is-current' : ''}`}
+            data-current-match={current ? 'true' : undefined}>
+            <span className="terminal-history-context__line-number">{index + 1}</span>
+            <span className="terminal-history-context__line-text">{line.text || ' '}</span>
+          </div>
+        })}
+        {view.hasMoreAfter && <div className="terminal-history-context__boundary">下方还有更新记录</div>}
+      </div>}
+    <footer className="terminal-history-context__footer">
+      <span>命中行前后各最多 250 行</span>
+      {view.gapCount > 0 && <span>{view.gapCount} 处历史缺口</span>}
+      <span>Esc 返回</span>
+    </footer>
+  </section>
+}
+
+function sameHistoryCursor(left: TerminalHistoryCursor, right: TerminalHistoryCursor): boolean {
+  return left.sequence === right.sequence && left.lineIndex === right.lineIndex
 }
 
 function publishArchivedSearch(

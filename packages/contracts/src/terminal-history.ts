@@ -19,6 +19,10 @@ export interface TerminalHistoryPage {
   lines: TerminalHistoryLine[]
   gaps: TerminalHistoryGap[]
   hasMore: boolean
+  /** Index of the requested cursor when this page is a bounded context window. */
+  anchorIndex?: number
+  hasMoreBefore?: boolean
+  hasMoreAfter?: boolean
 }
 
 export interface TerminalHistorySearchOptions {

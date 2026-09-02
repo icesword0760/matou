@@ -156,6 +156,19 @@ export class RuntimeClient {
     })
   }
 
+  historyAroundTerminalCursor(
+    sessionId: string,
+    around: TerminalHistoryCursor,
+    contextLines = 250
+  ): Promise<TerminalHistoryPage> {
+    return this.request('terminal.history-page', {
+      sessionId,
+      around,
+      beforeLines: contextLines,
+      afterLines: contextLines
+    })
+  }
+
   searchTerminalHistory(
     sessionId: string,
     query: string,

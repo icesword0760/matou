@@ -813,11 +813,20 @@ export class RuntimeServer {
     const sessionId = terminalHistorySessionId(input.sessionId)
     const before = terminalHistoryCursor(input.before)
     if (method === 'terminal.history-page') {
+      const around = terminalHistoryCursor(input.around)
+      if (before && around) {
+        throw new RpcFault('INVALID_REQUEST', 'history page accepts before or around, not both')
+      }
       const lineLimit = optionalBoundedInteger(input.lineLimit, 'lineLimit', 1, 1_000)
+      const beforeLines = optionalBoundedInteger(input.beforeLines, 'beforeLines', 0, 499)
+      const afterLines = optionalBoundedInteger(input.afterLines, 'afterLines', 0, 499)
       return this.#history.page({
         sessionId,
         ...(before ? { before } : {}),
-        ...(lineLimit === undefined ? {} : { lineLimit })
+        ...(lineLimit === undefined ? {} : { lineLimit }),
+        ...(around ? { around } : {}),
+        ...(beforeLines === undefined ? {} : { beforeLines }),
+        ...(afterLines === undefined ? {} : { afterLines })
       })
     }
     const query = terminalHistoryQuery(input.query)
