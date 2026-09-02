@@ -20,6 +20,7 @@ import {
 } from './journal-compressor'
 
 import {
+  RAW_HOT_BYTES,
   SEGMENT_BYTES,
   selectCompressionCandidates,
   type SegmentDescriptor
@@ -53,6 +54,8 @@ export type DecodedJournalFrame =
 
 export interface SegmentJournalOptions {
   maxSegmentBytes?: number
+  /** Override only for deterministic tests; production keeps 256 MiB raw. */
+  rawHotBytes?: number
   compressSealed?: boolean
   compressor?: JournalCompressor
   /** Fault-injectable frame boundary; production callers use the default durable file writer. */
@@ -61,6 +64,7 @@ export interface SegmentJournalOptions {
 
 type NormalizedSegmentJournalOptions = {
   maxSegmentBytes: number
+  rawHotBytes: number
   compressSealed: boolean
   compressor: JournalCompressor
   writeFrame: (handle: FileHandle, encoded: Buffer) => Promise<void>
@@ -86,6 +90,7 @@ export class JournalCorruptionError extends Error {
 export class SegmentJournal {
   readonly directory: string
   readonly #maxSegmentBytes: number
+  readonly #rawHotBytes: number
   readonly #writeFrame: NormalizedSegmentJournalOptions['writeFrame']
   readonly #compressSealed: boolean
   readonly #compressor: JournalCompressor
@@ -119,6 +124,7 @@ export class SegmentJournal {
     this.#size = size
     this.#lastSequence = lastSequence
     this.#maxSegmentBytes = options.maxSegmentBytes
+    this.#rawHotBytes = options.rawHotBytes
     this.#writeFrame = options.writeFrame
     this.#compressSealed = options.compressSealed
     this.#compressor = options.compressor
@@ -155,6 +161,7 @@ export class SegmentJournal {
   ): Promise<SegmentJournal> {
     const normalizedOptions: NormalizedSegmentJournalOptions = {
       maxSegmentBytes: options.maxSegmentBytes ?? SEGMENT_BYTES,
+      rawHotBytes: options.rawHotBytes ?? RAW_HOT_BYTES,
       compressSealed: options.compressSealed ?? true,
       compressor: options.compressor ?? defaultJournalCompressor,
       writeFrame: options.writeFrame ?? writeEntireFrame
@@ -288,7 +295,7 @@ export class SegmentJournal {
         state: 'active'
       }
     ]
-    return selectCompressionCandidates(descriptors)
+    return selectCompressionCandidates(descriptors, this.#rawHotBytes)
   }
 
   async #append(
@@ -373,8 +380,7 @@ export class SegmentJournal {
 
   #scheduleSealedCompression(): void {
     if (!this.#compressSealed) return
-    for (const segment of this.#sealedSegments) {
-      if (segment.state !== 'sealed-raw') continue
+    for (const segment of this.compressionCandidates()) {
       const candidate = {
         sessionId: this.directory.split(/[/\\]/).at(-1)!,
         index: segment.index,

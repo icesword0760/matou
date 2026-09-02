@@ -211,27 +211,27 @@ describe('SegmentJournal', () => {
     await expect(readSessionFrames(writable, 'healthy-session')).resolves.toHaveLength(1)
   })
 
-  it('rotates by sealing raw segments without synchronously compressing the PTY write path', async () => {
+  it('rotates without blocking the PTY write path and keeps the newest raw hot window', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
     temporaryDirectories.push(directory)
     const compressor = new JournalCompressor()
     const journal = await SegmentJournal.open(directory, 'session-rotate', {
       maxSegmentBytes: 150,
+      rawHotBytes: 160,
       compressSealed: true,
       compressor
     })
-    for (let sequence = 1; sequence <= 6; sequence += 1) {
+    for (let sequence = 1; sequence <= 12; sequence += 1) {
       await journal.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
     }
-    expect(journal.compressionCandidates()).toEqual([])
     await journal.close()
     await compressor.whenIdle()
 
     const files = await readdir(join(directory, 'journal', 'session-rotate'))
-    expect(files.some((file) => file.endsWith('.mtj'))).toBe(true)
-    expect(files.some((file) => file.endsWith('.gz'))).toBe(true)
+    expect(files.filter((file) => file.endsWith('.mtj')).length).toBeGreaterThanOrEqual(2)
+    expect(files.filter((file) => file.endsWith('.gz')).length).toBeGreaterThan(0)
     expect((await readSessionFrames(directory, 'session-rotate')).map(({ sequence }) => sequence)).toEqual([
-      1, 2, 3, 4, 5, 6
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
     ])
   })
 

@@ -12,7 +12,8 @@ export interface SegmentDescriptor {
 }
 
 export function selectCompressionCandidates(
-  segments: readonly SegmentDescriptor[]
+  segments: readonly SegmentDescriptor[],
+  rawHotBytes = RAW_HOT_BYTES
 ): SegmentDescriptor[] {
   const compressedIndexes = new Set(
     segments.filter(({ state }) => state === 'compressed').map(({ index }) => index)
@@ -33,7 +34,7 @@ export function selectCompressionCandidates(
   const hotIndexes = new Set<number>()
   let hotBytes = 0
   for (const segment of rawNewestFirst) {
-    if (hotIndexes.size > 0 && hotBytes + segment.bytes > RAW_HOT_BYTES) break
+    if (hotIndexes.size > 0 && hotBytes + segment.bytes > rawHotBytes) break
     hotIndexes.add(segment.index)
     hotBytes += segment.bytes
   }
