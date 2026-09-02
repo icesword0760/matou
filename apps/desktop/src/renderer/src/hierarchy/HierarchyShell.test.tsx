@@ -809,6 +809,39 @@ describe('PRD 05 hierarchy shell', () => {
     }))
   })
 
+  it('refreshes the authoritative Environment and HUD after recovery completes', async () => {
+    const missing = environmentFixture('missing')
+    const ready = environmentFixture('ready')
+    let snapshots = 0
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(snapshots++ === 0 ? missing : ready)
+      if (method === 'session.environment-restore') {
+        return {
+          kind: 'environment', sessionId: 'session-a1', activeTarget: 'worktree',
+          state: 'ready', path: '/tmp/worktree', restartRequired: true
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '恢复 Worktree' }))
+
+    await vi.waitFor(() => expect(
+      request.mock.calls.map(([method]) => method)
+    ).toContain('session.environment-restore'))
+    await vi.waitFor(() => expect(
+      request.mock.calls.filter(([method]) => method === 'projection.snapshot')
+    ).toHaveLength(2))
+    expect(screen.getByRole('button', { name: '打开运行环境：Worktree' })).toBeTruthy()
+  })
+
   it('navigates the visible canvas to the owner Session when Locate selects another owned Worktree', async () => {
     let current = environmentFixture('missing')
     current.sessions.push({

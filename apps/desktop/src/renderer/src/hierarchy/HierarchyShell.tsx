@@ -78,6 +78,10 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     result: unknown,
     context: { type: string; input: Record<string, unknown> }
   ) => {
+    if (context.type.startsWith('session.environment-')) {
+      await refresh()
+      return
+    }
     storeRef.current.applyCommandResult(result, context)
     const sceneId = mutationSceneId(result, context)
     if (client && sceneId && requiresFreshSceneSnapshot(context.type)) {
@@ -91,7 +95,7 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
       storeRef.current.applySceneGraph(sceneGraph)
     }
     setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
-  }, [client, windowId])
+  }, [client, refresh, windowId])
 
   useEffect(() => {
     if (fixture || !client) return
@@ -482,7 +486,9 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
     foregroundTerminalModels.setForegroundSessions([])
   }, [client])
   const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
-  const applyEnvironmentResult = (result: Awaited<ReturnType<HierarchyCommands['restoreSessionEnvironment']>>) => {
+  const applyEnvironmentResult = (
+    result: Awaited<ReturnType<HierarchyCommands['restoreSessionEnvironment']>>
+  ) => {
     if (result.kind === 'environment' && result.restartRequired) {
       setEnvironmentRestartBySession((current) => ({
         ...current,
@@ -955,6 +961,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                           ? READ_ONLY_REASON
                           : '当前运行环境需要先恢复或交接'
                       } : {})}
+                      {...(readOnly ? { environmentDisabledReason: READ_ONLY_REASON } : {})}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />

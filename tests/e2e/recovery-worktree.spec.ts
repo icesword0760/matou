@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { access, readFile, realpath, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -19,12 +19,145 @@ const exec = promisify(execFile)
 test.describe('real Session environment recovery', () => {
   test.setTimeout(120_000)
 
+  test('locates a moved Worktree after rejecting the wrong repository and branch', async () => {
+    let fixture = await launchMatou()
+    const worktreePath = join(fixture.rootDirectory, 'owned-worktree')
+    const movedWorktreePath = join(fixture.rootDirectory, 'relocated', 'owned-worktree')
+    const wrongBranchPath = join(fixture.rootDirectory, 'wrong-branch-worktree')
+    const wrongRepositoryPath = join(fixture.rootDirectory, 'wrong-repository')
+    const worktreeCwdMarker = join(fixture.rootDirectory, 'moved-worktree-cwd.txt')
+    try {
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
+      const bootstrapSurface = activeSurface(fixture.page)
+      await expect(bootstrapSurface).toHaveAttribute('data-session-id', /.+/, { timeout: 20_000 })
+      const bootstrapSessionId = requiredAttribute(
+        await bootstrapSurface.getAttribute('data-session-id'), 'bootstrap Session identity'
+      )
+      const bootstrapPid = await positivePid(bootstrapSurface)
+      await initializeRepository(fixture.workspaceDirectory)
+      await stopMatouPreservingData(fixture)
+      await expect.poll(() => processExists(bootstrapPid)).toBe(false)
+      await exec('git', [
+        '-C', fixture.workspaceDirectory, 'worktree', 'add', '-b', 'feature/environment-e2e',
+        worktreePath, 'HEAD'
+      ])
+      await exec('git', [
+        '-C', fixture.workspaceDirectory, 'worktree', 'add', '-b', 'feature/wrong-environment-e2e',
+        wrongBranchPath, 'HEAD'
+      ])
+      await mkdir(wrongRepositoryPath, { recursive: true })
+      await initializeRepository(wrongRepositoryPath)
+      seedOwnedWorktree(fixture, worktreePath)
+
+      fixture = await restartMatou(fixture)
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
+      await expect(fixture.page.getByRole('button', { name: '打开运行环境：Worktree' }))
+        .toBeVisible({ timeout: 20_000 })
+      const initialSurface = activeSurface(fixture.page)
+      expect(await initialSurface.getAttribute('data-session-id')).toBe(bootstrapSessionId)
+      const initialWorktreePid = await positivePid(initialSurface)
+
+      await stopMatouPreservingData(fixture)
+      await expect.poll(() => processExists(initialWorktreePid)).toBe(false)
+      const assetsBeforeMove = readSessionAssets(fixture, bootstrapSessionId)
+      const runsBeforeMove = readSessionRuns(fixture, bootstrapSessionId)
+      await mkdir(join(fixture.rootDirectory, 'relocated'), { recursive: true })
+      await rename(worktreePath, movedWorktreePath)
+      const canonicalMovedWorktreePath = await realpath(movedWorktreePath)
+      fixture = await restartMatou(fixture)
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
+
+      const pane = fixture.page.getByTestId('terminal-pane')
+      await expect(pane.getByRole('status', { name: '运行环境Worktree 需要恢复' }))
+        .toBeVisible({ timeout: 20_000 })
+      await expect(pane.locator('.terminal-surface')).not.toHaveAttribute('data-pid', /[1-9][0-9]*/)
+      await expect(fixture.page.getByRole('tab', { name: /Shell/ })).toBeVisible()
+      expect(readSessionAssets(fixture, bootstrapSessionId)).toEqual(assetsBeforeMove)
+      expect(readSessionRuns(fixture, bootstrapSessionId)).toEqual(runsBeforeMove)
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'worktree', state: 'missing', cwd: worktreePath, worktreePath
+      })
+
+      await setNextEnvironmentDirectory(fixture, wrongRepositoryPath)
+      await fixture.page.getByRole('button', { name: '打开运行环境：待恢复' }).click()
+      let environmentDialog = fixture.page.getByRole('dialog', { name: '运行环境' })
+      await environmentDialog.getByRole('button', { name: '定位已移动的 Worktree' }).click()
+      await expect(environmentDialog.locator('.environment-control-menu__feedback'))
+        .toHaveText('所选目录不属于当前仓库')
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'worktree', state: 'missing', cwd: worktreePath, worktreePath
+      })
+
+      await setNextEnvironmentDirectory(fixture, wrongBranchPath)
+      await environmentDialog.getByRole('button', { name: '定位已移动的 Worktree' }).click()
+      await expect(environmentDialog.locator('.environment-control-menu__feedback'))
+        .toHaveText('所选 Worktree 的分支与原会话不一致')
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'worktree', state: 'missing', cwd: worktreePath, worktreePath
+      })
+
+      await setNextEnvironmentDirectory(fixture, movedWorktreePath)
+      await environmentDialog.getByRole('button', { name: '定位已移动的 Worktree' }).click()
+      await expect(environmentDialog).toHaveCount(0, { timeout: 30_000 })
+      await expect(fixture.page.getByRole('button', { name: '打开运行环境：Worktree' }))
+        .toBeVisible({ timeout: 20_000 })
+      const movedSurface = activeSurface(fixture.page)
+      const movedPid = await differentPositivePid(movedSurface, initialWorktreePid)
+      await expect.poll(async () => realpath(await processCwd(movedPid)))
+        .toBe(await realpath(movedWorktreePath))
+      await terminalCommand(movedSurface, `pwd > '${worktreeCwdMarker}'`)
+      await expect.poll(() => readTrimmed(worktreeCwdMarker)).toBe(canonicalMovedWorktreePath)
+      expect(readSessionAssets(fixture, bootstrapSessionId)).toEqual(assetsBeforeMove)
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'worktree', state: 'ready', cwd: canonicalMovedWorktreePath,
+        worktreePath: canonicalMovedWorktreePath
+      })
+      const worktrees = (await exec('git', [
+        '-C', fixture.workspaceDirectory, 'worktree', 'list', '--porcelain'
+      ])).stdout
+      expect(worktrees).toContain(`worktree ${canonicalMovedWorktreePath}`)
+      expect(worktrees).not.toContain(`worktree ${worktreePath}\n`)
+
+      await fixture.page.getByRole('button', { name: '打开运行环境：Worktree' }).click()
+      environmentDialog = fixture.page.getByRole('dialog', { name: '运行环境' })
+      await environmentDialog.getByRole('button', { name: '交接到 Local' }).click()
+      await expect(fixture.page.getByRole('button', { name: '打开运行环境：Local' }))
+        .toBeVisible({ timeout: 20_000 })
+      const localSurface = activeSurface(fixture.page)
+      const localPid = await differentPositivePid(localSurface, movedPid)
+      await expect.poll(async () => realpath(await processCwd(localPid)))
+        .toBe(await realpath(fixture.workspaceDirectory))
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'local', state: 'ready', cwd: fixture.workspaceDirectory,
+        worktreePath: canonicalMovedWorktreePath
+      })
+
+      await fixture.page.getByRole('button', { name: '打开运行环境：Local' }).click()
+      environmentDialog = fixture.page.getByRole('dialog', { name: '运行环境' })
+      await environmentDialog.getByRole('button', { name: '交接到自有 Worktree' }).click()
+      await expect(fixture.page.getByRole('button', { name: '打开运行环境：Worktree' }))
+        .toBeVisible({ timeout: 20_000 })
+      const returnedSurface = activeSurface(fixture.page)
+      const returnedPid = await differentPositivePid(returnedSurface, localPid)
+      await expect.poll(async () => realpath(await processCwd(returnedPid)))
+        .toBe(await realpath(movedWorktreePath))
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'worktree', state: 'ready', cwd: canonicalMovedWorktreePath,
+        worktreePath: canonicalMovedWorktreePath
+      })
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('restores a deleted owned Worktree and hands one real PTY between Worktree and Local', async () => {
     let fixture = await launchMatou()
     const worktreePath = join(fixture.rootDirectory, 'owned-worktree')
     const localCwdMarker = join(fixture.rootDirectory, 'local-cwd.txt')
     const worktreeCwdMarker = join(fixture.rootDirectory, 'worktree-cwd.txt')
     try {
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
       const bootstrapSurface = activeSurface(fixture.page)
       await expect(bootstrapSurface).toHaveAttribute('data-session-id', /.+/, { timeout: 20_000 })
       const bootstrapSessionId = requiredAttribute(
@@ -41,6 +174,7 @@ test.describe('real Session environment recovery', () => {
       seedOwnedWorktree(fixture, worktreePath)
 
       fixture = await restartMatou(fixture)
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
       await expect(fixture.page.getByRole('button', { name: '打开运行环境：Worktree' }))
         .toBeVisible({ timeout: 20_000 })
       await expect(fixture.page.getByRole('button', { name: '打开 Git' }))
@@ -56,6 +190,7 @@ test.describe('real Session environment recovery', () => {
       const runsBeforeMissing = readSessionRuns(fixture, sessionId)
       await exec('git', ['-C', fixture.workspaceDirectory, 'worktree', 'remove', '--force', worktreePath])
       fixture = await restartMatou(fixture)
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
 
       const pane = fixture.page.getByTestId('terminal-pane')
       await expect(pane.getByRole('status', { name: '运行环境Worktree 需要恢复' }))
@@ -66,6 +201,9 @@ test.describe('real Session environment recovery', () => {
       expect(readSessionAssets(fixture, sessionId)).toEqual(assetsBeforeMissing)
       expect(readSessionRuns(fixture, sessionId)).toEqual(runsBeforeMissing)
       expect(readLatestRun(fixture, sessionId)?.status).not.toMatch(/^(starting|running)$/)
+      expect(readEnvironmentAuthority(fixture)).toMatchObject({
+        activeTarget: 'worktree', state: 'missing', cwd: worktreePath, worktreePath
+      })
 
       await pane.getByRole('button', { name: '恢复 Worktree' }).click()
       await expect(pane.getByRole('status', { name: '运行环境Worktree 需要恢复' }))
@@ -122,8 +260,11 @@ test.describe('real Session environment recovery', () => {
       const authority = readEnvironmentAuthority(fixture)
       expect(authority.bindingCount).toBe(1)
       expect(authority.activeTarget).toBe('worktree')
+      expect(authority.state).toBe('ready')
       expect(authority.cwd).toBe(worktreePath)
+      expect(authority.worktreePath).toBe(worktreePath)
       await expect(access(worktreePath).then(() => true, () => false)).resolves.toBe(true)
+      await assertVisibleWindowsOnSecondaryColorLcd(fixture)
     } finally {
       await fixture.close()
     }
@@ -200,18 +341,31 @@ function seedOwnedWorktree(fixture: MatouFixture, worktreePath: string): void {
 function readEnvironmentAuthority(fixture: MatouFixture): {
   bindingCount: number
   activeTarget: string
+  state: string
   cwd: string
+  worktreePath: string
 } {
   const database = RuntimeDatabase.openReadOnly(join(fixture.dataDirectory, 'matou.sqlite'))
   try {
-    const row = database.get<{ binding_count: number; active_target: string; cwd: string }>(
-      `SELECT COUNT(*) AS binding_count, bindings.active_target, sessions.cwd
+    const row = database.get<{
+      binding_count: number
+      active_target: string
+      state: string
+      cwd: string
+      worktree_path: string
+    }>(
+      `SELECT COUNT(*) AS binding_count, bindings.active_target, bindings.state,
+              sessions.cwd, worktrees.worktree_path
        FROM session_environment_bindings AS bindings
        JOIN sessions ON sessions.id = bindings.session_id
+       JOIN worktrees ON worktrees.id = bindings.managed_worktree_id
        WHERE bindings.managed_worktree_id = 'environment-e2e-worktree'`
     )
     if (!row) throw new Error('owned Worktree authority was not persisted')
-    return { bindingCount: row.binding_count, activeTarget: row.active_target, cwd: row.cwd }
+    return {
+      bindingCount: row.binding_count, activeTarget: row.active_target,
+      state: row.state, cwd: row.cwd, worktreePath: row.worktree_path
+    }
   } finally {
     database.close()
   }
@@ -369,4 +523,35 @@ async function processCwd(pid: number): Promise<string> {
   }
   const { stdout } = await exec('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'])
   return stdout.split('\n').find((line) => line.startsWith('n'))?.slice(1) ?? ''
+}
+
+async function setNextEnvironmentDirectory(fixture: MatouFixture, path: string): Promise<void> {
+  await fixture.app.evaluate(({ ipcMain }, selectedPath) => {
+    const channel = 'matou:select-session-environment-directory'
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, () => selectedPath)
+  }, path)
+}
+
+async function assertVisibleWindowsOnSecondaryColorLcd(fixture: MatouFixture): Promise<void> {
+  await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
+    const primary = screen.getPrimaryDisplay()
+    const colorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>
+      id !== primary.id && (internal || /color\s*lcd|内建视网膜显示器/i.test(label)))
+    const visibleWindows = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
+    const displays = visibleWindows.map((window) => screen.getDisplayMatching(window.getBounds()))
+    return {
+      primaryLabel: primary.label,
+      colorLcdCount: colorLcd.length,
+      visibleWindowCount: visibleWindows.length,
+      allWindowsOnColorLcd: displays.every(({ id }) => colorLcd.some((display) => display.id === id)),
+      windowsOnPrimary: displays.filter(({ id }) => id === primary.id).length
+    }
+  })).toEqual({
+    primaryLabel: 'XV272U',
+    colorLcdCount: 1,
+    visibleWindowCount: 1,
+    allWindowsOnColorLcd: true,
+    windowsOnPrimary: 0
+  })
 }
