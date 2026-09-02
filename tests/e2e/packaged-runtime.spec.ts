@@ -20,7 +20,9 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
   const historyMarker = 'PACKAGED_HISTORY_SURVIVES_READ_ONLY'
   try {
     await expectPackagedHostControlResources(executablePath)
-    await runPackagedSmoke(executablePath, dataDirectory, true)
+    const persistedSessionId = await runPackagedSmoke(
+      executablePath, dataDirectory, true, 'normal', historyMarker
+    )
 
     const databasePath = join(dataDirectory, 'matou.sqlite')
     expect(existsSync(databasePath)).toBe(true)
@@ -36,7 +38,7 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
     })
     database.close()
 
-    const journalDirectory = join(dataDirectory, 'journal', 'foundation-shell')
+    const journalDirectory = join(dataDirectory, 'journal', persistedSessionId)
     const activeName = (await readdir(journalDirectory))
       .filter((name) => name.endsWith('.mtj') || name.endsWith('.bin'))
       .sort()
@@ -73,7 +75,7 @@ async function runPackagedSmoke(
   exerciseProduct: boolean,
   expectedMode: 'normal' | 'read-only',
   historyMarker: string
-): Promise<void> {
+): Promise<string> {
   await chmod(executablePath, 0o755)
   // MATOU_DEFAULT_WORKSPACE models the directory a normal macOS Terminal opens
   // into. The product no longer recreates a previously moved/missing Workspace,
@@ -88,7 +90,8 @@ async function runPackagedSmoke(
     mkdir(electronUserDataDirectory, { recursive: true })
   ])
   const launchEnvironment = {
-    ...process.env, MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
+    ...process.env, MATOU_E2E: '1', MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
+    MATOU_DATA_DIR: dataDirectory,
     MATOU_DEFAULT_WORKSPACE: workspaceDirectory,
     HOME: homeDirectory,
     ELECTRON_USER_DATA_DIR: electronUserDataDirectory,
@@ -105,12 +108,17 @@ async function runPackagedSmoke(
     await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 3)
-    await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
-    await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
-    await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
-    await page.waitForTimeout(200)
     if (expectedMode === 'normal') {
       await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+      await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
+      await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
+      await page.waitForTimeout(200)
+    } else {
+      await expect(page.locator('.read-only-recovery-banner'))
+        .toContainText('数据库处于只读恢复模式')
+      const replayOnlySurface = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
+      await expect(replayOnlySurface.locator('.xterm-rows')).toContainText(historyMarker)
+      await expect(replayOnlySurface).not.toHaveAttribute('data-pid', /\d+/)
     }
     if (exerciseProduct) {
       const packagedSurface = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
@@ -198,7 +206,25 @@ async function runPackagedSmoke(
         BrowserWindow.getAllWindows()[0]?.isVisible()
       )).toBe(true)
       await expect(page.getByTestId('terminal-pane')).toHaveCount(3)
+    } else if (expectedMode === 'read-only') {
+      const databasePath = join(dataDirectory, 'matou.sqlite')
+      const databaseBeforeInput = await readFile(databasePath)
+      const replayOnlySurface = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
+      const textarea = replayOnlySurface.locator('.xterm-helper-textarea')
+      await textarea.focus()
+      await textarea.pressSequentially('READ_ONLY_INPUT_MUST_NOT_START_A_PROCESS')
+      await textarea.press('Enter')
+      await page.waitForTimeout(200)
+      await expect(replayOnlySurface).not.toHaveAttribute('data-pid', /\d+/)
+      await expect(replayOnlySurface.locator('.xterm-rows')).not
+        .toContainText('READ_ONLY_INPUT_MUST_NOT_START_A_PROCESS')
+      expect((await readFile(databasePath)).equals(databaseBeforeInput)).toBe(true)
     }
+    const sessionId = await page.locator(
+      '.scene-stage:not([hidden]) .terminal-surface[data-session-id]'
+    ).first().getAttribute('data-session-id')
+    if (!sessionId) throw new Error('Packaged smoke did not expose an active persisted session')
+    return sessionId
   } finally {
     await app.close()
   }
@@ -233,6 +259,22 @@ async function expectPackagedHostControlResources(executablePath: string): Promi
   if (process.platform !== 'win32') {
     expect((await stat(join(resources, 'control-assets/bin/mt'))).mode & 0o111).not.toBe(0)
   }
+}
+
+async function expectAllVisibleWindowsOnSecondaryDisplay(
+  app: ElectronApplication
+): Promise<void> {
+  if (process.platform !== 'darwin') return
+  await expect.poll(() => app.evaluate(({ BrowserWindow, screen }) => {
+    const primary = screen.getPrimaryDisplay()
+    const secondaryColorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>
+      id !== primary.id && (internal || /color\s*lcd|内建视网膜显示器/i.test(label)))
+    const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
+    const placements = visible.map((window) => screen.getDisplayMatching(window.getBounds()))
+    return primary.label === 'XV272U' && secondaryColorLcd.length === 1 && visible.length > 0 &&
+      placements.every(({ id }) => secondaryColorLcd.some((display) => display.id === id)) &&
+      placements.every(({ id }) => id !== primary.id)
+  })).toBe(true)
 }
 
 async function packagedExecutable(): Promise<string> {

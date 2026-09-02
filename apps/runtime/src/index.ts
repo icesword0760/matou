@@ -47,6 +47,26 @@ import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { nextProviderWorkStatus } from './session/provider-work-status'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
+import {
+  RuntimeLifecycleCoordinator,
+  RuntimeShutdownRequestedError
+} from './runtime-lifecycle-coordinator'
+import { RuntimeProcessOrchestrator } from './runtime-process-orchestrator'
+import { RuntimeLifecyclePublisher } from './runtime-lifecycle-publisher'
+import { DatabaseRecoveryController } from './storage/database-recovery-controller'
+import { exportReadOnlyDatabaseBundle } from './storage/read-only-database-export'
+import { WorktreeHealthService } from './worktrees/worktree-health-service'
+import { WorktreeReconciler } from './worktrees/worktree-reconciler'
+import { WorktreeService } from './worktrees/worktree-service'
+import { SessionEnvironmentRepository } from './session/session-environment-repository'
+import { SessionEnvironmentService } from './session/session-environment-service'
+import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
+import type { SessionExecutionDescriptor } from './session/session-execution-service'
+import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
+import { ForkOperationCoordinator } from './session-canvas/fork-operation-coordinator'
+import { createE2eForkCrashObserver } from './session-canvas/fork-operation-e2e-crash-controller'
+import { createE2eForkSetupPolicyProvider } from './session-canvas/e2e-fork-setup-policy'
+import { createE2eJournalOptionsProvider } from './journal/e2e-journal-fault-controller'
 import { ProviderConfigStore } from './provider-config/provider-config-store'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
@@ -79,6 +99,7 @@ interface RuntimeStateBase {
   database: RuntimeDatabase
   rpcRouter: RuntimeRpcRouter
   accessPolicy: RuntimeAccessPolicy
+  providerConfigs: ProviderConfigStore
 }
 
 interface WritableRuntimeState extends RuntimeStateBase {
@@ -89,7 +110,8 @@ interface WritableRuntimeState extends RuntimeStateBase {
   controlBackend: RuntimeControlBackend
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
-  providerConfigs: ProviderConfigStore
+  forkCoordinator: ForkOperationCoordinator
+  recoveryCoordinator: RuntimeRecoveryCoordinator
 }
 
 interface ReadOnlyRuntimeState extends RuntimeStateBase {
@@ -156,6 +178,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const database = opened.database
   const runtimeDataRoot = opened.dataRoot
   const notifications = new NotificationProjection()
+  const providerConfigs = new ProviderConfigStore(runtimeDataRoot)
   const accessPolicy = new RuntimeAccessPolicy(
     opened.kind === 'read-only' ? 'read-only' : 'normal'
   )
@@ -163,7 +186,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     accessPolicy,
     ...(e2eForkSetupPolicyForWorkspace ? {
       setupPolicyForWorkspace: e2eForkSetupPolicyForWorkspace
-    } : {})
+    } : {}),
+    providerConfigs
   })
   if (opened.kind === 'read-only') {
     console.error(`[runtime.storage] database opened read-only: ${opened.reason}`)
@@ -172,7 +196,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
       dataRoot: runtimeDataRoot,
       database,
       rpcRouter,
-      accessPolicy
+      accessPolicy,
+      providerConfigs
     }
   }
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
@@ -251,8 +276,6 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionCanvas = new SessionCanvasService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
-  const providerConfigs = new ProviderConfigStore(runtimeDataRoot)
-  const rpcRouter = new RuntimeRpcRouter(database, notifications, { providerConfigs })
   const hostControl = new HostControlServer({
     socketPath: controlEndpoint,
     tokenService: controlTokens,
@@ -396,6 +419,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
     {
       hudRegistry: sessionHuds,
       accessPolicy,
+      providerConfigs,
+      ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
+        controlAssetRoot: process.env.MATOU_CONTROL_ASSET_ROOT
+      }),
+      ...(process.env.MATOU_CONTROL_NODE_EXECUTABLE === undefined ? {} : {
+        controlNodeExecutable: process.env.MATOU_CONTROL_NODE_EXECUTABLE
+      }),
       ...(e2eJournalOptionsForSession ? {
         journalOptionsForSession: e2eJournalOptionsForSession
       } : {})
@@ -470,6 +500,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     accessPolicy,
     hostControl,
     providerHooks,
+    forkCoordinator,
+    recoveryCoordinator,
     providerConfigs
   }
 }
@@ -571,20 +603,39 @@ parentPort.on('message', async (event) => {
       port.close()
       return
     }
-    const server = new RuntimeServer(port, state.dataRoot, state.database, state.rpcRouter, {
-      backend: state.controlBackend,
-      tokens: state.controlTokens,
-      endpoint: state.controlEndpoint
-    }, sessions, state.providerHooks, undefined, {
-      hudRegistry: sessionHuds,
-      providerConfigs: state.providerConfigs,
-      ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
-        controlAssetRoot: process.env.MATOU_CONTROL_ASSET_ROOT
-      }),
-      ...(process.env.MATOU_CONTROL_NODE_EXECUTABLE === undefined ? {} : {
-        controlNodeExecutable: process.env.MATOU_CONTROL_NODE_EXECUTABLE
-      })
-    })
+    const control = state.mode === 'normal'
+      ? {
+          backend: state.controlBackend,
+          tokens: state.controlTokens,
+          endpoint: state.controlEndpoint
+        }
+      : undefined
+    const providerHooks = state.mode === 'normal' ? state.providerHooks : undefined
+    const server = new RuntimeServer(
+      port,
+      state.dataRoot,
+      state.database,
+      state.rpcRouter,
+      control,
+      sessions,
+      providerHooks,
+      undefined,
+      {
+        hudRegistry: sessionHuds,
+        accessPolicy: state.accessPolicy,
+        providerConfigs: state.providerConfigs,
+        ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
+          controlAssetRoot: process.env.MATOU_CONTROL_ASSET_ROOT
+        }),
+        ...(process.env.MATOU_CONTROL_NODE_EXECUTABLE === undefined ? {} : {
+          controlNodeExecutable: process.env.MATOU_CONTROL_NODE_EXECUTABLE
+        }),
+        ...(e2eJournalOptionsForSession ? {
+          journalOptionsForSession: e2eJournalOptionsForSession
+        } : {}),
+        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {})
+      }
+    )
     servers.add(server)
     for (const resolve of recoveryServerWaiters) resolve(server)
     recoveryServerWaiters.clear()

@@ -5,7 +5,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 
-import type { SessionRepository } from '../domain/session-repository'
+import {
+  StaleForkProviderIdentityError,
+  type ProviderIdentityForkAuthority,
+  type SessionRepository
+} from '../domain/session-repository'
 import { latestClaudeAutoTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
@@ -84,6 +88,7 @@ export interface ProviderHookServerOptions {
     providerSessionId: string
     title: string
   }) => void | Promise<void>
+  onIdentityMismatch?: (event: ProviderIdentityMismatch) => void
   onTeamObservations?: (observations: AgentTeamObservation[]) => void | Promise<void>
 }
 
@@ -106,6 +111,7 @@ export class ProviderHookServer {
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
   readonly #onTitleObserved: NonNullable<ProviderHookServerOptions['onTitleObserved']>
+  readonly #onIdentityMismatch: NonNullable<ProviderHookServerOptions['onIdentityMismatch']>
   readonly #onTeamObservations: NonNullable<ProviderHookServerOptions['onTeamObservations']>
   #server: Server | undefined
   #port: number | undefined
@@ -117,6 +123,7 @@ export class ProviderHookServer {
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
     this.#onTitleObserved = options.onTitleObserved ?? (() => {})
+    this.#onIdentityMismatch = options.onIdentityMismatch ?? (() => {})
     this.#onTeamObservations = options.onTeamObservations ?? (() => {})
   }
 
@@ -246,14 +253,6 @@ export class ProviderHookServer {
       }
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
-      if (transcriptPath && providerSessionId && eventName !== 'unknown') {
-        const titleObserved = await this.#observeTitle(
-          registration, providerSessionId, transcriptPath
-        ).catch(() => false)
-        if (eventName === 'Stop' && !titleObserved) {
-          await this.#startTitleWatch(registration, providerSessionId, transcriptPath)
-        }
-      }
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
@@ -366,6 +365,14 @@ export class ProviderHookServer {
       })
       const transcriptPath = providerTranscriptPath(payload)
       if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
+        if (providerSessionId && eventName !== 'unknown') {
+          const titleObserved = await this.#observeTitle(
+            registration, providerSessionId, transcriptPath
+          ).catch(() => false)
+          if (eventName === 'Stop' && !titleObserved) {
+            await this.#startTitleWatch(registration, providerSessionId, transcriptPath)
+          }
+        }
         const observations = await readAgentTeamObservations(transcriptPath, {
           runId: registration.runId,
           leadSessionId: registration.sessionId

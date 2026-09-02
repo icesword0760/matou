@@ -230,7 +230,15 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   const focusedSessionId = graph.nodes.some(({ sessionId }) => sessionId === context.sessionId)
     ? context.sessionId
     : graph.focusedSessionId ?? graph.nodes[0]?.sessionId ?? ''
-  return <main className="dag-window" aria-label="会话 DAG">
+  if (firstOperableMs.current === undefined && context.requestedAt !== undefined) {
+    firstOperableMs.current = Math.max(0, Date.now() - context.requestedAt)
+  }
+  return <main className="dag-window" aria-label="会话 DAG"
+    data-first-operable-ms={firstOperableMs.current}>
+    {readOnly && <div className="dag-runtime-notice" role="status">
+      <strong>{READ_ONLY_REASON}</strong>
+      <span>会话关系仍可浏览和选择；画布位置变化仅在本次窗口内保留。</span>
+    </div>}
     {(runtimeConnection === 'reconnecting' || error) && <div className="dag-runtime-notice" role="status">
       <strong>会话信息暂时未更新</strong>
       <span>{runtimeConnection === 'reconnecting'

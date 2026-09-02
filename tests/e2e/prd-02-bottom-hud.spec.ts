@@ -69,10 +69,10 @@ test('operates the compact Git controller for branches, Worktrees, commits, and 
     await writeFile(join(fixture.workspaceDirectory, 'README.md'), 'changed\n')
     await terminalCommand(surface, 'true')
 
-    const gitTrigger = fixture.page.getByRole('button', { name: '打开 Git 控制' })
+    const gitTrigger = fixture.page.getByRole('button', { name: '打开 Git' })
     await expect(gitTrigger).toHaveText('main*')
     await gitTrigger.click()
-    const controller = fixture.page.getByRole('dialog', { name: 'Git 控制' })
+    const controller = fixture.page.getByRole('dialog', { name: 'Git 与 Worktree' })
     const search = controller.getByPlaceholder('搜索 matou 分支')
     await expect(search).toBeFocused()
     await expect(controller.getByRole('navigation')).toHaveCount(0)

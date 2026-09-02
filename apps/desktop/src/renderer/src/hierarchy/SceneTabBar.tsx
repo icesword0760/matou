@@ -19,7 +19,7 @@ export interface SceneCommands {
   createShellSibling?(sceneId: string, sessionId: string): unknown
 }
 
-export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag, trailingControl }: {
+export function SceneTabBar({ projection, commands, pathValid = true, readOnly = false, onOpenDag, trailingControl }: {
   projection: HierarchyProjection
   commands: SceneCommands
   pathValid?: boolean
@@ -98,7 +98,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
     })
   }
   const addCanvas = () => {
-    if (!taskId) return
+    if (readOnly || !taskId) return
     if (commands.createCanvas) commands.createCanvas(taskId)
     else commands.createScene(taskId)
   }
@@ -124,17 +124,14 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
   }
   const workspaceTasks = projection.tasks.filter(({ workspaceId: candidate }) => candidate === workspaceId)
   const closeFlowFor = (sceneId: string) => {
-    const graphNodes = projection.sessionGraphs?.[sceneId]?.nodes
-    const nodes = graphNodes?.filter(({ archivedAt }) => archivedAt === undefined) ?? []
     const scene = scenes.find(({ id }) => id === sceneId)
-    const mountedSessionCount = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === sceneId)
-      ?.mounts.length ?? 0
+    const nodes = projection.sessionGraphs?.[sceneId]?.nodes.filter(({ archivedAt }) => archivedAt === undefined) ?? []
     return sceneCloseFlow({
       isLastScene: scenes.length === 1,
       isLastTask: workspaceTasks.length === 1,
       taskName: task?.title ?? '当前事项',
       sceneName: scene?.name ?? '当前画布',
-      sessionCount: graphNodes?.length ?? mountedSessionCount,
+      sessionCount: nodes.length,
       runningCount: nodes.filter(({ workStatus }) => workStatus === 'running' || workStatus === 'starting').length,
       needsInputCount: nodes.filter(({ workStatus }) => workStatus === 'needs-input').length
     })
@@ -169,16 +166,20 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
         onContextMenu={(event) => {
           event.preventDefault()
           event.stopPropagation()
-          setSceneMenu(canvasMenuPosition(scene.id, event.clientX, event.clientY))
+          if (!readOnly) setSceneMenu(canvasMenuPosition(scene.id, event.clientX, event.clientY))
         }}>
         <button role="tab" className="tab-title" aria-selected={scene.id === activeSceneId}
-          title={`${scene.name}\n双击重命名画布`} onDoubleClick={() => setRenamingSceneId(scene.id)}
+          title={readOnly ? scene.name : `${scene.name}\n双击重命名画布`}
+          onDoubleClick={() => { if (!readOnly) setRenamingSceneId(scene.id) }}
           onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
-        <button className="tab-close" aria-label={`关闭页签：${scene.name}`} onClick={() => close(scene.id)}><AppIcon name="x" /></button>
+        <button className="tab-close" aria-label={`关闭页签：${scene.name}`}
+          disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+          onClick={() => close(scene.id)}><AppIcon name="x" /></button>
       </div>)}
       {!isTabOverflowing && <button className="tab-add-btn" aria-label="新建页签"
-        disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        disabled={readOnly || !pathValid}
+        title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
         onClick={addCanvas}><AppIcon name="plus" /></button>}
     </div>
     {isTabOverflowing && <div className="tab-bar-overflow-actions">
@@ -189,14 +190,16 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
           setTabOverflowVisible((visible) => !visible)
         }}><AppIcon name="ellipsis" /></button>
       <button className="tab-add-btn" aria-label="新建页签"
-        disabled={!pathValid} title={!pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        disabled={readOnly || !pathValid}
+        title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
         onClick={addCanvas}><AppIcon name="plus" /></button>
     </div>}
     <div className="tab-bar-right">
     {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
-      title="会话 DAG（Option + Tab）" onClick={onOpenDag}><AppIcon name="graph-ring" /></button>}
-    <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell" disabled={!pathValid || !activeSceneId || !activeSessionId}
-      title={!pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
+      title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><AppIcon name="graph-ring" /></button>}
+    <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell"
+      disabled={readOnly || !pathValid || !activeSceneId || !activeSessionId}
+      title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
       onClick={() => {
         if (!activeSceneId || !activeSessionId) return
         if (commands.createShellSibling) commands.createShellSibling(activeSceneId, activeSessionId)
@@ -208,7 +211,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
     </div>
     {sceneMenu && createPortal(<div ref={sceneMenuRef} role="menu" className="scene-tab-menu"
       style={{ left: sceneMenu.x, top: sceneMenu.y }}>
-      <button role="menuitem" onClick={() => {
+      <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
         setRenamingSceneId(sceneMenu.sceneId)
         setSceneMenu(null)
       }}>重命名页签</button>
@@ -257,6 +260,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
 }
 
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
+const READ_ONLY_REASON = '数据库处于只读恢复模式'
 const CANVAS_MENU_WIDTH = 128
 const CANVAS_MENU_HEIGHT = 36
 const CANVAS_MENU_MARGIN = 8

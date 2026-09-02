@@ -35,6 +35,7 @@ const READ_ONLY_CAPABILITIES: RuntimeCapability[] = [
 
 const READ_ONLY_RPC_METHODS = new Set<RpcMethod>([
   'projection.snapshot',
+  'provider-config.snapshot',
   'hierarchy.get-scene-session-graph',
   'claude-sessions.list',
   'claude-sessions.detail',

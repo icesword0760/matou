@@ -176,9 +176,6 @@ export function DagCanvas(props: {
     <header className="dag-toolbar">
       <DagSearch nodes={graph.nodes} onPreview={(sessionId) => focusNode(sessionId)} onChoose={onSelect} />
       <div className="dag-toolbar__zoom" aria-label="画布缩放">
-        <span className="dag-toolbar__drag-handle" aria-label="拖动浮框" title="按住拖动浮框">
-          <i /><i /><i /><i /><i /><i />
-        </span>
         <button aria-label="缩小" onClick={() => update(zoomAt(transform, transform.scale - .1, center(viewportRef.current)))}>−</button>
         <button aria-label="恢复 100%" onClick={restoreViewport}>{Math.round(transform.scale * 100)}%</button>
         <button aria-label="放大" onClick={() => update(zoomAt(transform, transform.scale + .1, center(viewportRef.current)))}>＋</button>
@@ -241,8 +238,8 @@ function DagNodeCard(props: {
   const shared = node.sharedWorkingDirectory === true || node.worktree?.shared === true
   const legacyStopped = node.archivedAt !== undefined
   const visualStatus = legacyStopped ? 'exited' : node.workStatus
-  return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}${ghost ? ' is-ghost' : ''}`}
-    style={style} data-session-id={node.sessionId} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
+  return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}`}
+    style={style} data-session-id={node.sessionId} aria-label={`打开会话：${node.title}`} onClick={onClick}>
     {notified && <span className="dag-node-card__notification" aria-label={`新通知：${node.title}`} />}
     <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{modeLabel(node.currentMode)}</em></span>
     <strong className="dag-node-card__title" title={node.title}>{node.title}</strong>

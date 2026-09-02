@@ -1,6 +1,6 @@
 {
   "mode": "agent",
-  "text": "Default72%任务中◐Read: src/App.tsx◐TodoWrite▸实现 HUD(1/2)~/matou_workspace⏱0s",
+  "text": "Default72%任务中◐Read: src/App.tsx◐TodoWrite▸实现 HUD(1/2)~/matou_workspaceLocal⏱0s",
   "fields": [
     {
       "className": "status-field status-perm-badge is-clickable perm-default",
@@ -35,6 +35,10 @@
       "text": "~/matou_workspace"
     },
     {
+      "className": "status-field status-environment is-clickable state-ready",
+      "text": "Local"
+    },
+    {
       "className": "status-field status-priority-1",
       "text": "⏱0s"
     }
@@ -46,7 +50,7 @@
     "gap": "8px"
   },
   "hud": {
-    "maxWidth": "760px",
+    "maxWidth": "695.52px",
     "fontSize": "10px",
     "gap": "8px",
     "whiteSpace": "nowrap",

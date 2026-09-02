@@ -57,15 +57,15 @@ for (const { stage, migrationVersion } of interruptionCases) {
       : stage === 'migration-committed' ? migrationVersion : migrationVersion - 1
     assert.equal(result.killedMigrationVersion, migrationVersion)
     assert.equal(result.interruptedSchemaVersion, interruptedVersion)
-    assert.equal(result.interruptedLatestColumns, interruptedVersion >= 25 ? 11 : 0)
-    assert.equal(result.interruptedStructuralIndex, interruptedVersion >= 26)
+    assert.equal(result.interruptedLatestColumns, interruptedVersion >= 27 ? 11 : 0)
+    assert.equal(result.interruptedStructuralIndex, interruptedVersion >= 28)
   })
 }
 
 test('real Runtime selects the next valid migration backup after the newest is damaged', {
   timeout: 90_000
 }, async () => {
-  const result = await runScenario('migration-transaction-prepared', true, 25)
+  const result = await runScenario('migration-transaction-prepared', true, 27)
   assert.equal(result.runtimeHost, 'background-process')
   assert.equal(result.databaseIntegrity, 'ok')
   assert.equal(result.damagedBackupOffered, false)

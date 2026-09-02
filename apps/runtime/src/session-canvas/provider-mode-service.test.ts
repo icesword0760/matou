@@ -90,27 +90,6 @@ describe('ProviderModeService', () => {
     ].sort())
   })
 
-  it('records a loaded Claude title without replacing a card the user renamed', () => {
-    const initial = bootstrapClaudeTree()
-    database.run(
-      `UPDATE sessions SET title = '我的排查窗口', title_source = 'manual' WHERE id = ?`,
-      initial.childSessionId
-    )
-
-    const result = providerModes.loadClaudeSession(command('load-with-manual-title'), {
-      sessionId: initial.childSessionId,
-      bindingId: 'binding-manual-title',
-      providerSessionId: 'provider-loaded-title',
-      title: 'Claude 自动生成标题',
-      permissionMode: 'default',
-      now: 30
-    })
-
-    expect(result.session).toMatchObject({
-      title: '我的排查窗口', titleSource: 'manual', providerTitle: 'Claude 自动生成标题'
-    })
-  })
-
   it('returns a manually exited Claude node to ordinary Shell and preserves its children', () => {
     const initial = bootstrapClaudeTree()
 
@@ -134,7 +113,7 @@ describe('ProviderModeService', () => {
     }))
   })
 
-  it('keeps restore failure as a retryable card state without creating a global notification', () => {
+  it('keeps restore failure on the original Claude card and emits a locatable notification', () => {
     const initial = bootstrapClaudeTree()
 
     const failed = providerModes.markRestoreFailed(command('restore-failed'), {
@@ -155,7 +134,11 @@ describe('ProviderModeService', () => {
         currentMode: 'claude-code', workStatus: 'error',
         providerRestoreState: 'failed', activeChildCount: 1
       })
-    expect(latestRecoveryNotification(initial.parentSessionId)).toBeUndefined()
+    expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
+      operation: 'upsert', eventType: 'error', title: 'Claude Code 恢复失败',
+      body: 'provider session not found',
+      replacementKey: `provider-restore:${initial.parentSessionId}`
+    })
 
     const retrying = providerModes.retryRestore(command('restore-retry'), {
       sessionId: initial.parentSessionId, now: 31

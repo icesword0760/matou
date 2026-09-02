@@ -15,7 +15,7 @@ test('first launch presents the complete Workspace, Task, Scene, and terminal hi
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByRole('tab')).toHaveCount(1)
     await expect(page.getByTestId('terminal-pane')).toHaveCount(1)
-    await expect(page.locator('.terminal-surface[data-pid]')).toHaveCount(2)
+    await expect(page.locator('.terminal-surface[data-pid]')).toHaveCount(1)
   } finally { await fixture.close() }
 })
 

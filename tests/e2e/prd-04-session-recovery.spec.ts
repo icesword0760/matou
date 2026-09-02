@@ -237,6 +237,8 @@ test('does not resurrect an explicitly removed Task, Scene, or terminal panel', 
     await test.step('删除 Scene 后只保留原 Scene', async () => {
       const { page } = fixture
       await page.getByRole('button', { name: /^关闭页签：/ }).last().click()
+      await expect(page.getByRole('alertdialog', { name: '关闭画布' })).toBeVisible()
+      await page.getByRole('button', { name: '关闭画布' }).click()
       await expect(page.getByRole('tab')).toHaveCount(1)
     })
 

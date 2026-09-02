@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
+import type { RpcMethod } from '@matou/contracts'
 
 import { TerminalHud } from './TerminalHud'
 import type { GitRequestClient } from './GitControlMenu'
@@ -55,34 +55,14 @@ describe('PRD 02 bottom HUD', () => {
       gitBranch: 'main', gitDirty: false, startedAt: Date.now()
     }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: '打开 Git 控制' }))
-    expect(await screen.findByRole('dialog', { name: 'Git 控制' })).toBeTruthy()
-    await user.click(await screen.findByRole('option', { name: /feature\/menu/ }))
+    await user.click(screen.getByRole('button', { name: '打开 Git' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    await user.click(await screen.findByRole('button', { name: /feature\/menu/ }))
     expect(request).toHaveBeenCalledWith(
       'git.checkout', expect.objectContaining({ input: expect.objectContaining({
         cwd: '/Users/demo/project', branch: 'feature/menu'
       }) }), { timeoutMs: 120_000 }
     )
-  })
-
-  it('lets the Git control consume Escape for its second-level navigation', async () => {
-    const user = userEvent.setup()
-    const repository = gitStatus()
-    const runtimeClient: GitRequestClient = {
-      request: async function<T>(): Promise<T> { return repository as T }
-    }
-    render(<TerminalHud hud={{
-      sessionId: 'session-1', mode: 'shell', cwd: '/Users/demo/project',
-      gitBranch: 'main', gitDirty: false, startedAt: Date.now()
-    }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
-
-    await user.click(screen.getByRole('button', { name: '打开 Git 控制' }))
-    await user.click(await screen.findByRole('button', { name: '管理 Worktree… 0' }))
-    await user.keyboard('{Escape}')
-    expect(screen.getByRole('dialog', { name: 'Git 控制' })).toBeTruthy()
-    expect(screen.getByPlaceholderText('搜索 matou 分支')).toBeTruthy()
-    await user.keyboard('{Escape}')
-    expect(screen.queryByRole('dialog', { name: 'Git 控制' })).toBeNull()
   })
 
   it('renders the current reference product Agent order and process fields without hidden metrics', () => {
@@ -131,13 +111,12 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByText(label)).toBeTruthy()
   })
 
-  it('removes the session model entry and closes the permission menu by Escape or outside click', async () => {
+  it('closes the permission menu by Escape or outside click', async () => {
     const user = userEvent.setup()
     render(<TerminalHud hud={agent()} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
 
     await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
     expect(screen.getByRole('menu', { name: '权限模式' })).toBeTruthy()
-    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('menu', { name: '权限模式' })).toBeNull()
 
@@ -146,11 +125,10 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.queryByRole('menu', { name: '权限模式' })).toBeNull()
   })
 
-  it('switches ordinary permission modes immediately without a session model command', async () => {
+  it('switches ordinary permission modes immediately and keeps model switching in global settings', async () => {
     const user = userEvent.setup()
     const onPermissionMode = vi.fn()
-    const onModel = vi.fn()
-    render(<TerminalHud hud={agent()} onPermissionMode={onPermissionMode} onModel={onModel} />)
+    render(<TerminalHud hud={agent()} onPermissionMode={onPermissionMode} />)
 
     await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
     await user.click(screen.getByRole('menuitem', { name: 'Plan Mode' }))
@@ -158,7 +136,6 @@ describe('PRD 02 bottom HUD', () => {
     expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'plan', false)
 
     expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
-    expect(onModel).not.toHaveBeenCalled()
   })
 
   it('uses reference product confirmation copy across the Bypass boundary and keeps the old mode on cancel', async () => {
@@ -396,15 +373,20 @@ function agent(patch: Partial<SessionHudView> = {}): SessionHudView {
   }
 }
 
-function gitStatus(): GitRepositoryStatus {
+function environmentActions(): SessionEnvironmentActions {
   return {
-    repositoryRoot: '/Users/demo/project', cwd: '/Users/demo/project',
-    currentBranch: 'main', defaultBranch: 'main', dirty: false,
-    stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
-    additions: 0, deletions: 0, ahead: 0, behind: 0,
-    hasRemote: false, canPush: false,
-    branches: [{ name: 'main', current: true, commitTimestamp: 1 }],
-    worktrees: [{ path: '/Users/demo/project', branch: 'main', head: 'abc',
-      current: true, main: true, dirty: false, managed: false, sessionCount: 1 }]
+    open: vi.fn(async () => ({ sessionId: 'session-1', kind: 'local' as const, path: '/repo' })),
+    restore: vi.fn(async () => ({
+      kind: 'environment' as const, sessionId: 'session-1', activeTarget: 'worktree' as const,
+      state: 'ready' as const, path: '/worktree', restartRequired: true
+    })),
+    locate: vi.fn(async () => ({
+      kind: 'environment' as const, sessionId: 'session-1', activeTarget: 'worktree' as const,
+      state: 'ready' as const, path: '/worktree', restartRequired: true
+    })),
+    handoff: vi.fn(async (_sessionId, target) => ({
+      kind: 'environment' as const, sessionId: 'session-1', activeTarget: target,
+      state: 'ready' as const, path: target === 'local' ? '/repo' : '/worktree', restartRequired: true
+    }))
   }
 }

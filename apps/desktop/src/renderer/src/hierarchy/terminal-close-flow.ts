@@ -31,8 +31,8 @@ export function sceneCloseFlow(input: {
   isLastScene: boolean
   isLastTask: boolean
   taskName: string
-  sceneName: string
-  sessionCount: number
+  sceneName?: string
+  sessionCount?: number
   runningCount?: number
   needsInputCount?: number
 }): CloseFlow {
@@ -48,10 +48,33 @@ export function sceneCloseFlow(input: {
     action: 'confirm',
     steps: [{
       title: '关闭画布',
-      body: `关闭后，“${input.sceneName}”下的 ${input.sessionCount} 个会话会全部从界面移除。${activity}项目文件和工作树保持原样。`,
+      body: `关闭后，“${input.sceneName ?? '当前画布'}”下的 ${input.sessionCount ?? 0} 个会话会全部从界面移除。${activity}项目文件和工作树保持原样。`,
       confirmLabel: '关闭画布',
       confirmTone: 'danger',
       cancelLabel: '取消'
+    }]
+  }
+}
+
+export function sessionDeleteFlow(input: {
+  isWorkspaceFinal: boolean
+  taskName: string
+  sessionTitle?: string
+  workStatus?: 'starting' | 'idle' | 'running' | 'needs-input' | 'error' | 'interrupted' | 'exited'
+  childCount?: number
+}): CloseFlow {
+  if (input.isWorkspaceFinal) return { action: 'hide-window', steps: [] }
+  const childCount = input.childCount ?? 0
+  const active = input.workStatus === 'running' || input.workStatus === 'needs-input'
+  if (!active && childCount === 0) return { action: 'silent', steps: [] }
+  const activity = active ? '正在运行' : '当前空闲'
+  const descendants = childCount > 0 ? `，并有 ${childCount} 个子会话` : ''
+  return {
+    action: 'confirm',
+    steps: [{
+      title: '停止会话',
+      body: `“${input.sessionTitle ?? '当前会话'}”${activity}${descendants}。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。`,
+      confirmLabel: '停止会话', cancelLabel: '取消'
     }]
   }
 }

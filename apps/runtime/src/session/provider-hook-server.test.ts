@@ -21,6 +21,7 @@ let notificationEvents: unknown[]
 let hudEvents: unknown[]
 let identityEvents: unknown[]
 let titleEvents: unknown[]
+let teamObservations: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -47,11 +48,13 @@ beforeEach(async () => {
   hudEvents = []
   identityEvents = []
   titleEvents = []
+  teamObservations = []
   hooks = new ProviderHookServer(root, sessions, {
     onNotification: (event) => { notificationEvents.push(event) },
     onHudPayload: (event) => { hudEvents.push(event) },
     onIdentityRecorded: (event) => { identityEvents.push(event) },
-    onTitleObserved: (event) => { titleEvents.push(event) }
+    onTitleObserved: (event) => { titleEvents.push(event) },
+    onTeamObservations: (events) => { teamObservations.push(...events) }
   })
   await hooks.start()
 })
@@ -248,10 +251,12 @@ describe('ProviderHookServer', () => {
     const rejectedHudEvents: unknown[] = []
     const rejectedNotificationEvents: unknown[] = []
     const rejectedTeamObservations: unknown[] = []
+    const rejectedTitleEvents: unknown[] = []
     const strictHooks = new ProviderHookServer(root, sessions, {
       onIdentityMismatch: (event) => { mismatches.push(event) },
       onHudPayload: (event) => { rejectedHudEvents.push(event) },
       onNotification: (event) => { rejectedNotificationEvents.push(event) },
+      onTitleObserved: (event) => { rejectedTitleEvents.push(event) },
       onTeamObservations: (events) => { rejectedTeamObservations.push(...events) }
     })
     await strictHooks.start()
@@ -262,16 +267,21 @@ describe('ProviderHookServer', () => {
         expectedProviderSessionId: 'provider-old'
       })
       const transcriptPath = join(root, 'provider-wrong-team.jsonl')
-      await writeFile(transcriptPath, JSON.stringify({
-        type: 'user',
-        toolUseResult: {
-          status: 'teammate_spawned',
-          teammate_id: 'WRONG_TEAMMATE@wrong-team',
-          name: 'WRONG_TEAMMATE',
-          team_name: 'wrong-team',
-          prompt: 'This observation belongs to another conversation'
-        }
-      }))
+      await writeFile(transcriptPath, [
+        JSON.stringify({
+          type: 'user',
+          toolUseResult: {
+            status: 'teammate_spawned',
+            teammate_id: 'WRONG_TEAMMATE@wrong-team',
+            name: 'WRONG_TEAMMATE',
+            team_name: 'wrong-team',
+            prompt: 'This observation belongs to another conversation'
+          }
+        }),
+        JSON.stringify({
+          type: 'ai-title', sessionId: 'provider-new', aiTitle: 'Wrong conversation title'
+        })
+      ].join('\n'))
 
       expect((await postHook(registration.hookUrl, {
         hook_event_name: 'Stop', session_id: 'provider-new', cwd: root,
@@ -288,6 +298,7 @@ describe('ProviderHookServer', () => {
       expect(rejectedHudEvents).toEqual([])
       expect(rejectedNotificationEvents).toEqual([])
       expect(rejectedTeamObservations).toEqual([])
+      expect(rejectedTitleEvents).toEqual([])
       expect(mismatches).toEqual([{
         runId: 'run-strict-resume', sessionId: 'session-1', provider: 'claude-code',
         expectedProviderSessionId: 'provider-old', actualProviderSessionId: 'provider-new',

@@ -169,6 +169,7 @@ async function run() {
       bytesPerHistorySession,
       logicalHistoryBytesBySession: archives.map(({ logicalBytes }) => logicalBytes),
       coldCompressedLogicalBytesBySession: archives.map(({ compressedLogicalBytes }) => compressedLogicalBytes),
+      compressionEventLoopDelayP99Ms: compressionMetrics.eventLoopDelayP99Ms,
       compressionEventLoopDelayMaxMs: compressionMetrics.eventLoopDelayMaxMs,
       firstPagePeakRssDeltaBytes: firstPageMeasurement.peakRssDeltaBytes,
       firstPageLineCount: firstPageMeasurement.result.lines.length,

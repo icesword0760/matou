@@ -968,5 +968,266 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       SET status = 'planned'
       WHERE status = 'active';
     `
+  },
+  {
+    version: 24,
+    name: 'session-environment-bindings',
+    sql: `
+      CREATE TABLE session_environment_bindings (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        local_execution_context_id TEXT NOT NULL REFERENCES execution_contexts(id),
+        managed_worktree_id TEXT UNIQUE REFERENCES worktrees(id),
+        active_target TEXT NOT NULL CHECK (active_target IN ('local', 'worktree')),
+        state TEXT NOT NULL CHECK (
+          state IN ('ready', 'missing', 'recovering', 'handoff', 'failed')
+        ),
+        error_message TEXT,
+        updated_at INTEGER NOT NULL,
+        CHECK (active_target <> 'worktree' OR managed_worktree_id IS NOT NULL),
+        CHECK (active_target <> 'local' OR state <> 'missing')
+      ) STRICT;
+
+      WITH worktree_sessions AS (
+        SELECT
+          sessions.id AS session_id,
+          sessions.created_at,
+          worktrees.id AS worktree_id,
+          CASE WHEN EXISTS (
+            SELECT 1
+            FROM session_fork_intents AS fork
+            WHERE fork.session_id = sessions.id
+              AND fork.worktree_mode = 'new'
+              AND fork.worktree_id = worktrees.id
+          ) THEN 1 ELSE 0 END AS explicit_owner,
+          COUNT(*) OVER (PARTITION BY worktrees.id) AS context_session_count,
+          ROW_NUMBER() OVER (
+            PARTITION BY worktrees.id
+            ORDER BY
+              CASE WHEN EXISTS (
+                SELECT 1
+                FROM session_fork_intents AS fork
+                WHERE fork.session_id = sessions.id
+                  AND fork.worktree_mode = 'new'
+                  AND fork.worktree_id = worktrees.id
+              ) THEN 0 ELSE 1 END,
+              sessions.created_at,
+              sessions.id
+          ) AS ownership_rank
+        FROM sessions
+        JOIN execution_contexts
+          ON execution_contexts.id = sessions.execution_context_id
+         AND execution_contexts.kind = 'git-worktree'
+        JOIN worktrees
+          ON worktrees.execution_context_id = sessions.execution_context_id
+      ),
+      owned_worktrees AS (
+        SELECT session_id, worktree_id
+        FROM worktree_sessions
+        WHERE ownership_rank = 1
+          AND (explicit_owner = 1 OR context_session_count = 1)
+      )
+      INSERT INTO session_environment_bindings (
+        session_id, local_execution_context_id, managed_worktree_id,
+        active_target, state, error_message, updated_at
+      )
+      SELECT
+        sessions.id,
+        CASE WHEN owned_worktrees.worktree_id IS NULL
+          THEN sessions.execution_context_id
+          ELSE COALESCE(
+            (
+              SELECT source.execution_context_id
+              FROM session_fork_intents AS fork
+              JOIN sessions AS source ON source.id = fork.source_session_id
+              WHERE fork.session_id = sessions.id
+              LIMIT 1
+            ),
+            tasks.execution_context_id,
+            sessions.execution_context_id
+          )
+        END,
+        owned_worktrees.worktree_id,
+        CASE WHEN owned_worktrees.worktree_id IS NULL THEN 'local' ELSE 'worktree' END,
+        CASE
+          WHEN owned_worktrees.worktree_id IS NULL THEN 'ready'
+          WHEN worktrees.state IN ('ready', 'dirty', 'retained') THEN 'ready'
+          WHEN worktrees.state = 'creating' THEN 'recovering'
+          WHEN worktrees.state IN ('removed', 'removing') THEN 'missing'
+          ELSE 'failed'
+        END,
+        CASE
+          WHEN worktrees.state IN ('removed', 'removing') THEN 'managed Worktree is unavailable'
+          WHEN worktrees.state = 'failed' THEN 'managed Worktree failed before migration'
+          ELSE NULL
+        END,
+        sessions.updated_at
+      FROM sessions
+      JOIN tasks ON tasks.id = sessions.task_id
+      LEFT JOIN owned_worktrees ON owned_worktrees.session_id = sessions.id
+      LEFT JOIN worktrees ON worktrees.id = owned_worktrees.worktree_id;
+
+      CREATE INDEX session_environment_local_context_idx
+      ON session_environment_bindings(local_execution_context_id);
+
+      CREATE TRIGGER session_environment_binding_after_session_insert
+      AFTER INSERT ON sessions
+      BEGIN
+        INSERT INTO session_environment_bindings (
+          session_id, local_execution_context_id, managed_worktree_id,
+          active_target, state, error_message, updated_at
+        ) VALUES (
+          NEW.id, NEW.execution_context_id, NULL,
+          'local', 'ready', NULL, NEW.updated_at
+        );
+      END;
+    `
+  },
+  {
+    version: 25,
+    name: 'execution-context-git-state',
+    sql: `
+      CREATE TABLE execution_context_git_states (
+        execution_context_id TEXT PRIMARY KEY
+          REFERENCES execution_contexts(id) ON DELETE CASCADE,
+        repository_root TEXT,
+        state TEXT NOT NULL CHECK (state IN ('ready', 'unavailable')),
+        branch TEXT,
+        detached_head TEXT,
+        dirty INTEGER NOT NULL CHECK (dirty IN (0, 1)),
+        error_message TEXT,
+        updated_at INTEGER NOT NULL,
+        CHECK (
+          state = 'unavailable' OR (
+            repository_root IS NOT NULL AND
+            ((branch IS NOT NULL) <> (detached_head IS NOT NULL))
+          )
+        ),
+        CHECK (
+          state = 'ready' OR (
+            branch IS NULL AND detached_head IS NULL AND dirty = 0
+          )
+        )
+      ) STRICT;
+
+      INSERT INTO execution_context_git_states (
+        execution_context_id, repository_root, state, branch, detached_head,
+        dirty, error_message, updated_at
+      )
+      SELECT
+        execution_context_id,
+        repository_root,
+        CASE
+          WHEN state IN ('ready', 'dirty', 'retained')
+            AND (branch_name <> '(detached)' OR base_revision IS NOT NULL)
+          THEN 'ready'
+          ELSE 'unavailable'
+        END,
+        CASE
+          WHEN state IN ('ready', 'dirty', 'retained') AND branch_name <> '(detached)'
+          THEN branch_name
+          ELSE NULL
+        END,
+        CASE
+          WHEN state IN ('ready', 'dirty', 'retained') AND branch_name = '(detached)'
+          THEN base_revision
+          ELSE NULL
+        END,
+        CASE
+          WHEN state IN ('dirty', 'retained')
+            AND (branch_name <> '(detached)' OR base_revision IS NOT NULL)
+          THEN 1
+          ELSE 0
+        END,
+        CASE
+          WHEN state NOT IN ('ready', 'dirty', 'retained')
+          THEN 'registered Worktree is unavailable'
+          WHEN branch_name = '(detached)' AND base_revision IS NULL
+          THEN 'detached Worktree HEAD is unavailable'
+          ELSE NULL
+        END,
+        updated_at
+      FROM worktrees;
+    `
+  },
+  {
+    version: 26,
+    name: 'session-environment-transitions',
+    sql: `
+      CREATE TABLE session_environment_transitions (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        operation_id TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('restore', 'locate', 'handoff')),
+        previous_active_target TEXT NOT NULL CHECK (
+          previous_active_target IN ('local', 'worktree')
+        ),
+        previous_state TEXT NOT NULL CHECK (
+          previous_state IN ('ready', 'missing', 'failed')
+        ),
+        target TEXT NOT NULL CHECK (target IN ('local', 'worktree')),
+        candidate_path TEXT,
+        phase TEXT NOT NULL CHECK (
+          phase IN ('accepted', 'external-ready', 'failed')
+        ),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK (kind = 'locate' OR candidate_path IS NULL)
+      ) STRICT;
+    `
+  },
+  {
+    version: 27,
+    name: 'durable-fork-operations',
+    sql: `
+      ALTER TABLE session_fork_intents ADD COLUMN operation_id TEXT NOT NULL DEFAULT '';
+      ALTER TABLE session_fork_intents ADD COLUMN submission_key TEXT NOT NULL DEFAULT '';
+      ALTER TABLE session_fork_intents ADD COLUMN stage TEXT NOT NULL DEFAULT 'queued'
+        CHECK (stage IN (
+          'queued', 'creating-worktree', 'applying-setup', 'binding-session',
+          'restoring-provider', 'starting-window', 'succeeded', 'failed'
+        ));
+      ALTER TABLE session_fork_intents ADD COLUMN completed_steps INTEGER NOT NULL DEFAULT 0
+        CHECK (completed_steps >= 0);
+      ALTER TABLE session_fork_intents ADD COLUMN total_steps INTEGER NOT NULL DEFAULT 5
+        CHECK (total_steps > 0 AND completed_steps <= total_steps);
+      ALTER TABLE session_fork_intents ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0
+        CHECK (attempt >= 0);
+      ALTER TABLE session_fork_intents ADD COLUMN lease_owner TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN lease_token TEXT;
+      ALTER TABLE session_fork_intents ADD COLUMN lease_expires_at INTEGER;
+      ALTER TABLE session_fork_intents ADD COLUMN lease_fence INTEGER NOT NULL DEFAULT 0
+        CHECK (lease_fence >= 0);
+      ALTER TABLE session_fork_intents ADD COLUMN last_heartbeat_at INTEGER;
+
+      UPDATE session_fork_intents
+      SET operation_id = 'legacy-operation:' || session_id,
+          submission_key = 'legacy-submission:' || session_id,
+          stage = CASE state
+            WHEN 'succeeded' THEN 'succeeded'
+            WHEN 'failed' THEN 'failed'
+            ELSE 'queued'
+          END,
+          total_steps = CASE worktree_mode WHEN 'current' THEN 2 ELSE 5 END,
+          completed_steps = CASE state
+            WHEN 'succeeded' THEN CASE worktree_mode WHEN 'current' THEN 2 ELSE 5 END
+            ELSE 0
+          END,
+          attempt = attempt_count;
+
+      CREATE UNIQUE INDEX session_fork_intents_operation_idx
+      ON session_fork_intents(operation_id);
+      CREATE UNIQUE INDEX session_fork_intents_submission_idx
+      ON session_fork_intents(submission_key);
+      CREATE INDEX session_fork_intents_lease_idx
+      ON session_fork_intents(stage, lease_expires_at, created_at);
+    `
+  },
+  {
+    version: 28,
+    name: 'session-structural-relation-lookup',
+    sql: `
+      CREATE INDEX session_relations_structural_lookup_idx
+      ON session_relations_current(from_session_id, relation_kind);
+    `
   }
 ]

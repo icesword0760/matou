@@ -24,7 +24,7 @@ test('shows the reference product unread trail and navigates back to the origina
     await expect(origin.locator('.pane-notification-badge')).toHaveText('新通知')
     await expect(page.locator('.workbench-item__badge')).toHaveText('1')
     await expect(page.getByTestId(`scene-unread-${ids.sceneId}`)).toBeVisible()
-    await expect(page.locator('.flat-sidebar__notify img')).toHaveAttribute('src', /rongzhi_ani-.*\.gif/)
+    await expect(page.locator('.flat-sidebar__notify svg[data-icon="bell"]')).toBeVisible()
 
     await page.getByRole('button', { name: '通知中心' }).click()
     const center = page.getByRole('region', { name: '通知中心' })

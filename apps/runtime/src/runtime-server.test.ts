@@ -32,6 +32,8 @@ import { WorkspacePathService } from './hierarchy/workspace-path-service'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ShellHistoryRepository } from './shell-history/shell-history'
 import { PreferenceRepository } from './product/experience-foundation'
+import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
+import { ProviderConfigStore } from './provider-config/provider-config-store'
 import { CapabilityTokenService } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
@@ -60,8 +62,6 @@ afterEach(() => {
 
 describe('RuntimeServer domain RPC', () => {
   it('injects a run-bound mt identity into an ordinary managed Shell', async () => {
-    // This case owns the runtime process it observes; stop the fixture server
-    // so its asynchronous replay cannot launch the same test shell.
     server.close()
     const executable = join(root, 'control-env-shell.sh')
     const environmentFile = join(root, 'control-env.txt')
@@ -135,12 +135,17 @@ sleep 30
     }
   })
 
-  it('applies a global Claude provider to launches and refreshes the live session', async () => {
+  it('applies a global Claude provider to launches and refreshes the attached live session', async () => {
     const executable = join(root, 'provider-config-claude.sh')
     const log = join(root, 'provider-config-invocations.txt')
-    await writeFile(executable, `#!/bin/sh\nprintf '%s|%s|%s|%s\\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> "${log}"\nsleep 30\n`)
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> ${JSON.stringify(log)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
     await chmod(executable, 0o755)
-    const previous = process.env.MATOU_CLAUDE_COMMAND
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
     registerSession(database, 'provider-config-live', 'claude-code')
     try {
@@ -149,13 +154,13 @@ sleep 30
         sessionId: 'provider-config-live', executionContextId: 'replay-context',
         profile: 'claude-code', cols: 80, rows: 24
       })
-      await waitUntilAsync(async () => (await readFile(log, 'utf8').catch(() => '')).split('\n').length >= 2)
+      await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
       const firstPid = (port.last('terminal.spawned') as { pid: number }).pid
 
       port.receive({
         type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'provider-config-upsert', method: 'provider-config.upsert', capability: 'renderer',
-        deadlineAt: Date.now() + 2_000,
+        requestId: 'provider-config-upsert', method: 'provider-config.upsert',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
         payload: { provider: {
           cli: 'claude-code', name: 'Team Gateway', endpoint: 'https://gateway.example/',
           model: 'claude-team', apiKey: 'TOKEN'
@@ -167,11 +172,15 @@ sleep 30
       }).result.provider.id
       port.receive({
         type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'provider-config-activate', method: 'provider-config.activate', capability: 'renderer',
-        deadlineAt: Date.now() + 2_000, payload: { cli: 'claude-code', providerId }
+        requestId: 'provider-config-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId }
       })
       await waitUntil(() => port.findRpcResponse('provider-config-activate') !== undefined)
-      await waitUntilAsync(async () => (await readFile(log, 'utf8')).trim().split('\n').length === 2)
+      await waitUntilAsync(async () => {
+        const text = await readFile(log, 'utf8').catch(() => '')
+        return text.trim().split('\n').length === 2
+      })
 
       const lines = (await readFile(log, 'utf8')).trim().split('\n')
       expect(lines[1]).toBe('--model claude-team|https://gateway.example|TOKEN|TOKEN')
@@ -182,7 +191,439 @@ sleep 30
         sessionId: 'provider-config-live'
       })
       await settle()
-      restoreEnv('MATOU_CLAUDE_COMMAND', previous)
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('keeps a globally refreshed background Claude session detached across windows', async () => {
+    const executable = join(root, 'provider-config-background-claude.sh')
+    const log = join(root, 'provider-config-background-invocations.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" "$ANTHROPIC_AUTH_TOKEN" >> ${JSON.stringify(log)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'provider-config-background', 'claude-code')
+    const providerConfigs = new ProviderConfigStore(root)
+    const sessions = new RuntimeSessionRegistry()
+    const backgroundPort = new MockPort()
+    const backgroundServer = new RuntimeServer(
+      backgroundPort, root, database, undefined, undefined, sessions,
+      undefined, undefined, { providerConfigs }
+    )
+    const settingsPort = new MockPort()
+    const settingsRouter = new RuntimeRpcRouter(database, undefined, { providerConfigs })
+    const settingsServer = new RuntimeServer(
+      settingsPort, root, database, settingsRouter, undefined, sessions,
+      undefined, undefined, { providerConfigs }
+    )
+    backgroundPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-config-background-window'
+    })
+    settingsPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-config-settings-window'
+    })
+    try {
+      await backgroundServer.startOrResumeSession({
+        sessionId: 'provider-config-background', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => {
+        const text = await readFile(log, 'utf8').catch(() => '')
+        return Boolean(text.trim()) && text.trim().split('\n').length === 1
+      })
+      const firstPid = sessions.get('provider-config-background')?.pid
+      expect(firstPid).toEqual(expect.any(Number))
+      expect(backgroundPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(0)
+
+      settingsPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-background-upsert', method: 'provider-config.upsert',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { provider: {
+          cli: 'claude-code', name: 'Team Gateway', endpoint: 'https://gateway.example/',
+          model: 'claude-team', apiKey: 'TOKEN'
+        } }
+      })
+      await waitUntil(() => settingsPort.findRpcResponse('provider-config-background-upsert') !== undefined)
+      const providerId = (settingsPort.findRpcResponse('provider-config-background-upsert') as {
+        result: { provider: { id: string } }
+      }).result.provider.id
+      settingsPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-background-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId }
+      })
+      await waitUntil(() => settingsPort.findRpcResponse('provider-config-background-activate') !== undefined)
+      await waitUntilAsync(async () => {
+        const text = await readFile(log, 'utf8').catch(() => '')
+        return Boolean(text.trim()) && text.trim().split('\n').length === 2
+      })
+
+      expect(sessions.get('provider-config-background')?.pid).not.toBe(firstPid)
+      expect((await readFile(log, 'utf8')).trim().split('\n')[1])
+        .toBe('--model claude-team|https://gateway.example|TOKEN|TOKEN')
+      expect(backgroundPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(0)
+      expect(settingsPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(0)
+    } finally {
+      await sessions.shutdownAll()
+      settingsServer.close()
+      backgroundServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('keeps a running Codex session and applies a global provider to the next launch', async () => {
+    const executable = join(root, 'provider-config-codex.sh')
+    const log = join(root, 'provider-config-codex-invocations.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\n' "$*" "$OPENAI_BASE_URL" "$OPENAI_API_KEY" >> ${JSON.stringify(log)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    registerSession(database, 'provider-config-codex-running', 'codex')
+    registerSession(database, 'provider-config-codex-next', 'codex')
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-codex-running', executionContextId: 'replay-context',
+        profile: 'codex', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => {
+        const text = await readFile(log, 'utf8').catch(() => '')
+        return Boolean(text.trim()) && text.trim().split('\n').length === 1
+      })
+      const firstPid = port.last('terminal.spawned')?.pid
+
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-codex-upsert', method: 'provider-config.upsert',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { provider: {
+          cli: 'codex', name: 'Codex Gateway', endpoint: 'https://codex.example/v1/',
+          model: 'gpt-team', apiKey: 'OPENAI_TOKEN'
+        } }
+      })
+      await waitUntil(() => port.findRpcResponse('provider-config-codex-upsert') !== undefined)
+      const providerId = (port.findRpcResponse('provider-config-codex-upsert') as {
+        result: { provider: { id: string } }
+      }).result.provider.id
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-codex-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'codex', providerId }
+      })
+      await waitUntil(() => port.findRpcResponse('provider-config-codex-activate') !== undefined)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(port.sent.filter((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === 'provider-config-codex-running'
+      )).toHaveLength(1)
+      expect(port.last('terminal.spawned')?.pid).toBe(firstPid)
+
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-codex-next', executionContextId: 'replay-context',
+        profile: 'codex', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => {
+        const text = await readFile(log, 'utf8').catch(() => '')
+        return Boolean(text.trim()) && text.trim().split('\n').length === 2
+      })
+      expect((await readFile(log, 'utf8')).trim().split('\n')[1])
+        .toBe('--model gpt-team|https://codex.example/v1|OPENAI_TOKEN')
+    } finally {
+      for (const sessionId of ['provider-config-codex-running', 'provider-config-codex-next']) {
+        port.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })
+      }
+      await settle()
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+    }
+  })
+
+  it('pages and searches archived terminal history through Runtime RPC', async () => {
+    const journal = await SegmentJournal.open(root, 'rpc-history', { compressSealed: false })
+    await journal.appendOutput(1, new TextEncoder().encode('older line\n'))
+    await journal.appendOutput(2, new TextEncoder().encode('needle line\nnewest line\n'))
+    await journal.close()
+
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'history-page',
+      method: 'terminal.history-page', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: { sessionId: 'rpc-history', lineLimit: 2 }
+    })
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'history-search',
+      method: 'terminal.history-search', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: {
+        sessionId: 'rpc-history', query: 'needle', limit: 10,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }
+    })
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'history-context',
+      method: 'terminal.history-page', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: {
+        sessionId: 'rpc-history', around: { sequence: 2, lineIndex: 0 },
+        beforeLines: 1, afterLines: 1
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('history-context') !== undefined)
+
+    expect(port.findRpcResponse('history-page')?.result).toMatchObject({
+      lines: [{ text: 'needle line' }, { text: 'newest line' }], hasMore: true
+    })
+    expect(port.findRpcResponse('history-search')?.result).toMatchObject({
+      matches: [{ text: 'needle line' }], hasMore: false
+    })
+    expect(port.findRpcResponse('history-context')?.result).toMatchObject({
+      lines: [{ text: 'older line' }, { text: 'needle line' }, { text: 'newest line' }],
+      anchorIndex: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false
+    })
+  })
+
+  it('hands one real PTY from Local to its owned Worktree and keeps the Session identity', async () => {
+    const repositoryRoot = join(root, 'handoff-repository')
+    const worktreePath = join(root, 'handoff-worktree')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'handoff\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'initial'])
+    await execFileAsync('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/handoff', worktreePath, 'HEAD'
+    ])
+    database.run(
+      "UPDATE workspaces SET root_directory = ? WHERE id = 'replay-workspace'",
+      repositoryRoot
+    )
+    database.run(
+      "UPDATE execution_contexts SET cwd = ? WHERE id = 'replay-context'",
+      repositoryRoot
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('handoff-worktree-context', 'replay-workspace', 'git-worktree', ?, 1)`,
+      worktreePath
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         base_ref, state, setup_policy_json, setup_result_json,
+         cleanup_policy, created_at, updated_at
+       ) VALUES (
+         'handoff-worktree', 'handoff-worktree-context', ?, ?, 'feature/handoff',
+         'HEAD', 'ready', '[]', '[]', 'retain-dirty', 1, 1
+       )`,
+      repositoryRoot, worktreePath
+    )
+    registerSession(database, 'environment-handoff-session')
+    database.run(
+      "UPDATE sessions SET cwd = ? WHERE id = 'environment-handoff-session'",
+      repositoryRoot
+    )
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'handoff-worktree', active_target = 'local',
+           state = 'ready', updated_at = 1
+       WHERE session_id = 'environment-handoff-session'`
+    )
+
+    const observedCwds = join(root, 'handoff-cwds.txt')
+    const executable = join(root, 'handoff-shell.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `pwd >> ${JSON.stringify(observedCwds)}`,
+      "printf 'ready\\n'",
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'environment-handoff-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned')?.sessionId === 'environment-handoff-session')
+      const firstPid = port.last('terminal.spawned')?.pid
+      const firstRun = database.get<{ id: string }>(
+        `SELECT id FROM session_runs
+         WHERE session_id = 'environment-handoff-session' ORDER BY ordinal DESC LIMIT 1`
+      )
+      expect(firstRun?.id).toEqual(expect.any(String))
+      if (!firstRun) throw new Error('first terminal run was not persisted')
+      await waitUntilAsync(async () => (await readFile(observedCwds, 'utf8').catch(() => '')).trim() === repositoryRoot)
+
+      port.receive(rpc('environment-handoff', 'session.environment-handoff', {
+        sessionId: 'environment-handoff-session', target: 'worktree', now: Date.now()
+      }))
+      await waitUntil(() => port.findRpcResponse('environment-handoff') !== undefined)
+      expect(port.findRpcResponse('environment-handoff')).toMatchObject({
+        result: {
+          kind: 'environment', sessionId: 'environment-handoff-session',
+          activeTarget: 'worktree', state: 'ready', path: worktreePath
+        }
+      })
+      expect(database.get(
+        `SELECT execution_context_id, cwd FROM sessions
+         WHERE id = 'environment-handoff-session'`
+      )).toEqual({ execution_context_id: 'handoff-worktree-context', cwd: worktreePath })
+      expect(database.get(
+        `SELECT status FROM session_runs WHERE id = ?`, firstRun.id
+      )).toEqual({ status: 'interrupted' })
+      await waitUntil(() => port.sent.filter((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === 'environment-handoff-session'
+      ).length === 2)
+      const spawned = port.sent.filter((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === 'environment-handoff-session'
+      )
+      expect(spawned[1]).toMatchObject({ pid: expect.any(Number) })
+      expect(spawned[1]).not.toHaveProperty('reattached', true)
+      expect((spawned[1] as { pid: number }).pid).not.toBe(firstPid)
+      expect(database.get(
+        `SELECT status FROM session_runs
+         WHERE session_id = 'environment-handoff-session' ORDER BY ordinal DESC LIMIT 1`
+      )).toEqual({ status: 'running' })
+      await waitUntilAsync(async () => (await readFile(observedCwds, 'utf8').catch(() => ''))
+        .trim().split('\n').at(-1) === worktreePath)
+    } finally {
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('publishes a read-only capability surface and gates RPC, Git, terminal, polling, and probes', async () => {
+    const repositoryRoot = join(root, 'readonly-repository')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'baseline\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'baseline'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'branch', 'feature/read-only-must-not-switch'])
+
+    const loginProbeMarker = join(root, 'login-probe-ran')
+    const terminalMarker = join(root, 'terminal-process-ran')
+    const shell = join(root, 'read-only-shell.sh')
+    await writeFile(shell, [
+      '#!/bin/sh',
+      `if [ "$1" = "-ic" ]; then echo probe > ${JSON.stringify(loginProbeMarker)}; exit 0; fi`,
+      `echo terminal > ${JSON.stringify(terminalMarker)}`,
+      'sleep 5'
+    ].join('\n'))
+    await chmod(shell, 0o755)
+    const previousShell = process.env.SHELL
+    const previousHome = process.env.HOME
+    const previousZdotdir = process.env.ZDOTDIR
+    process.env.SHELL = shell
+    process.env.HOME = root
+    process.env.ZDOTDIR = join(root, 'readonly-zdotdir')
+    registerSession(database, 'readonly-environment-session')
+
+    server.close()
+    const databasePath = database.path
+    database.close()
+    const originalBytes = await readFile(databasePath)
+    database = RuntimeDatabase.openReadOnly(databasePath)
+    const policy = new RuntimeAccessPolicy('read-only')
+    const router = new RuntimeRpcRouter(database, undefined, { accessPolicy: policy })
+    const workspacePaths = new PollingSpyWorkspacePathService(
+      database,
+      new DomainTransactionManager(database)
+    )
+    port = new MockPort()
+    server = new RuntimeServer(
+      port,
+      root,
+      database,
+      router,
+      undefined,
+      new RuntimeSessionRegistry(),
+      undefined,
+      workspacePaths,
+      { accessPolicy: policy }
+    )
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'readonly' })
+    await settle()
+
+    try {
+      expect(port.last('protocol.ready')?.capabilities).toEqual([
+        'semantic-events-v1', 'replay-v1', 'projection-v1'
+      ])
+      expect(port.last('session.recovery-snapshot')).toMatchObject({ statuses: [] })
+      expect(workspacePaths.startCount).toBe(0)
+
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'readonly-projection',
+        method: 'projection.snapshot', capability: 'renderer', deadlineAt: Date.now() + 1000,
+        payload: {}
+      })
+      await settle()
+      expect(port.findRpcResponse('readonly-projection')).toMatchObject({
+        result: { hierarchy: { workspaces: [expect.objectContaining({ id: 'replay-workspace' })] } }
+      })
+
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'readonly-environment-open', method: 'session.environment-open',
+        capability: 'renderer', deadlineAt: Date.now() + 1000,
+        payload: { sessionId: 'readonly-environment-session' }
+      })
+      await waitUntil(() => port.findRpcResponse('readonly-environment-open') !== undefined)
+      expect(port.findRpcResponse('readonly-environment-open')).toMatchObject({
+        result: {
+          sessionId: 'readonly-environment-session', kind: 'local', path: await realpath(root)
+        }
+      })
+
+      port.receive(rpc('readonly-bootstrap', 'hierarchy.bootstrap-window', {
+        windowId: 'read-only-window', defaultRootDirectory: root,
+        defaultName: 'Must Not Create', now: Date.now()
+      }))
+      port.receive(rpc('readonly-git', 'git.checkout', {
+        cwd: repositoryRoot, branch: 'feature/read-only-must-not-switch', now: Date.now()
+      }))
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'read-only-transient', executionContextId: 'local-default',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await settle()
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      expect(port.findRpcError('readonly-bootstrap')).toMatchObject({ code: 'STORAGE_READ_ONLY' })
+      expect(port.findRpcError('readonly-git')).toMatchObject({ code: 'STORAGE_READ_ONLY' })
+      expect(port.last('protocol.error')).toMatchObject({ code: 'STORAGE_READ_ONLY' })
+      expect((await execFileAsync('git', ['-C', repositoryRoot, 'branch', '--show-current'])).stdout.trim())
+        .toBe('main')
+      await expect(stat(loginProbeMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(terminalMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(join(root, 'sessions', 'read-only-transient'))).rejects.toMatchObject({
+        code: 'ENOENT'
+      })
+      expect(await readFile(databasePath)).toEqual(originalBytes)
+    } finally {
+      restoreEnv('SHELL', previousShell)
+      restoreEnv('HOME', previousHome)
+      restoreEnv('ZDOTDIR', previousZdotdir)
     }
   })
 
@@ -1241,12 +1682,13 @@ sleep 30
     const sessions = new RuntimeSessionRegistry()
     const shutdownPort = new MockPort()
     new RuntimeServer(shutdownPort, root, database, undefined, undefined, sessions)
+    registerSession(database, 'shutdown-session')
     shutdownPort.receive({
       type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'shutdown-renderer'
     })
     shutdownPort.receive({
       type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
-      sessionId: 'shutdown-session', executionContextId: 'local-default',
+      sessionId: 'shutdown-session', executionContextId: 'replay-context',
       profile: 'shell', cols: 80, rows: 24
     })
     await waitUntil(() => sessions.has('shutdown-session'))
@@ -2835,6 +3277,140 @@ sleep 30
     }
   })
 
+  it('publishes the failed Fork graph when the authoritative provider launch rejects its source', async () => {
+    const executable = join(root, 'provider-fork-graph-failure.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    try {
+      registerSession(database, 'fork-graph-source', 'claude-code')
+      registerCanvasSession(database, 'fork-graph-derived', 'claude-code')
+      const intents = new SessionForkIntentRepository(database)
+      intents.accept({
+        operationId: 'fork-graph-operation', submissionKey: 'fork-graph-submission',
+        sessionId: 'fork-graph-derived', sourceSessionId: 'fork-graph-source',
+        sourceProviderSessionId: 'missing-provider-graph', displayName: '失败分支',
+        worktreeMode: 'current', totalSteps: 2, now: 1
+      })
+      const leaseDecision = intents.acquireLease({
+        operationId: 'fork-graph-operation', owner: 'runtime-test',
+        now: Date.now(), ttlMs: 60_000
+      })
+      expect(leaseDecision.kind).toBe('acquired')
+      if (leaseDecision.kind !== 'acquired') throw new Error('Fork lease was not acquired')
+      expect(intents.advanceStage({
+        operationId: 'fork-graph-operation', lease: leaseDecision.lease,
+        stage: 'restoring-provider', now: Date.now()
+      }).kind).toBe('applied')
+      port.receive({
+        type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+        consumerId: 'fork-graph-renderer', afterSequence: 0, batchSize: 100
+      })
+
+      await server.startOrResumeSession({
+        sessionId: 'fork-graph-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      }, {
+        operationId: 'fork-graph-operation', runId: 'fork-graph-run',
+        lease: leaseDecision.lease
+      })
+
+      await waitUntil(() => intents.progressByOperation('fork-graph-operation')?.stage === 'failed')
+      await waitUntil(() => port.sent.some((message) =>
+        message.type === 'events.batch' && message.events.some((event) =>
+          event.eventType === 'session.fork-failed'
+        )
+      ))
+      const event = port.sent.flatMap((message) =>
+        message.type === 'events.batch' ? message.events : []
+      ).find(({ eventType }) => eventType === 'session.fork-failed')
+      expect(event?.payload).toMatchObject({
+        graph: {
+          sceneId: 'scene-fork-graph-derived',
+          nodes: [{
+            sessionId: 'fork-graph-derived', workStatus: 'error',
+            forkProgress: { stage: 'failed', error: 'provider session not found' }
+          }]
+        }
+      })
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('does not repeat a durable fork failure banner when unrelated cold history is corrupt', async () => {
+    const journalOptions = {
+      maxSegmentBytes: 256,
+      rawHotBytes: 4_096,
+      compressSealed: false
+    }
+    let forkServer: RuntimeServer | undefined
+    try {
+      registerSession(database, 'fork-corrupt-source', 'claude-code')
+      registerSession(database, 'fork-corrupt-derived', 'claude-code')
+      database.run(
+        `INSERT INTO session_fork_intents (
+           session_id, source_session_id, source_provider, source_provider_session_id,
+           state, error_message, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'failed', ?, 1)`,
+        'fork-corrupt-derived', 'fork-corrupt-source', 'missing-provider-corrupt',
+        'No session found for requested id'
+      )
+      const seeded = await SegmentJournal.open(root, 'fork-corrupt-derived', journalOptions)
+      for (let sequence = 1; sequence <= 8; sequence += 1) {
+        await seeded.appendOutput(sequence, new TextEncoder().encode(
+          `historical-output-${sequence}-${'x'.repeat(180)}\r\n`
+        ))
+      }
+      await seeded.appendOutput(9, new TextEncoder().encode(
+        '\r\n\u001b[31mNo session found for requested id\u001b[0m\r\n' +
+        '\u001b[33m[Fork 未完成，请检查上方原因后重试]\u001b[0m\r\n'
+      ))
+      await seeded.close()
+
+      await writeFile(
+        join(root, 'journal', 'fork-corrupt-derived', 'segment-000001.mtj'),
+        'corrupt-cold-history'
+      )
+
+      const sessions = new RuntimeSessionRegistry()
+      const forkPort = new MockPort()
+      forkServer = new RuntimeServer(
+        forkPort,
+        root,
+        database,
+        undefined,
+        undefined,
+        sessions,
+        undefined,
+        undefined,
+        { journalOptionsForSession: () => journalOptions }
+      )
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-corrupt-renderer'
+      })
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-corrupt-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => forkPort.last('terminal.spawned')?.pid === 0)
+
+      const journalDirectory = join(root, 'journal', 'fork-corrupt-derived')
+      let durableText = ''
+      for (const entry of (await readdir(journalDirectory)).sort()) {
+        if (!/^segment-\d+\.mtj$/.test(entry) || entry === 'segment-000001.mtj') continue
+        for (const frame of await readSegmentFrames(join(journalDirectory, entry))) {
+          if (frame.kind === 'output') durableText += new TextDecoder().decode(frame.data)
+        }
+      }
+      expect(durableText.match(/\[Fork 未完成，请检查上方原因后重试\]/g)).toHaveLength(1)
+    } finally {
+      forkServer?.close()
+    }
+  })
+
   it('shows the reference product fork failure banner when the fork process exits before producing output', async () => {
     const executable = join(root, 'provider-fork-exit.sh')
     await writeFile(executable, '#!/bin/sh\nexit 7\n')
@@ -3213,7 +3789,11 @@ sleep 30
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'atomic-shell-promotion', data: 'claude\r'
       })
-      await waitUntil(() => !sessions.has('atomic-shell-promotion'), 10_000)
+      firstPort.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion', data: 'AFTER_PROMOTION'
+      })
+      await waitUntil(() => !sessions.has('atomic-shell-promotion'))
       secondPort.receive(spawn)
 
       await waitUntil(() => sessions.get('atomic-shell-promotion')?.profile === 'claude-code', 4_000)

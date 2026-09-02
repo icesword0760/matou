@@ -16,6 +16,7 @@ test('streams PTY output from UtilityProcess to xterm over a transferred Message
     env: {
       ...process.env,
       MATOU_E2E: '1',
+      MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
       MATOU_DATA_DIR: dataDirectory,
       MATOU_RUNTIME_ENTRY: resolve(import.meta.dirname, '../../apps/runtime/dist/index.cjs')
     }
@@ -41,7 +42,7 @@ test('streams PTY output from UtilityProcess to xterm over a transferred Message
 
 test('stores a real xterm checkpoint and restores it before the Journal tail after Renderer reload', async () => {
   test.setTimeout(60_000)
-  const fixture = await launchMatou()
+  const fixture = await launchMatou({ env: { MATOU_E2E_TERMINAL_DIAGNOSTICS: '1' } })
   try {
     const { page } = fixture
     await installCheckpointProbe(page)
@@ -105,6 +106,7 @@ test('drops reference-visible paths as safe single argv without executing them',
     env: {
       ...process.env,
       MATOU_E2E: '1',
+      MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
       MATOU_DATA_DIR: dataDirectory,
       MATOU_DROP_SIDE_EFFECT: sideEffectPath,
       MATOU_DROP_TICK_SIDE_EFFECT: tickSideEffectPath,
@@ -174,6 +176,7 @@ test('drops native files and directories through Electron webUtils as exact zsh 
     env: {
       ...process.env,
       MATOU_E2E: '1',
+      MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
       MATOU_DATA_DIR: dataDirectory,
       MATOU_NATIVE_DROP_SIDE_EFFECT: sideEffectPath,
       MATOU_RUNTIME_ENTRY: resolve(import.meta.dirname, '../../apps/runtime/dist/index.cjs')
@@ -304,7 +307,7 @@ async function clearTerminalInput(
 
 test('transparently chunks a large UTF-8 paste into one continuous PTY input', async () => {
   test.setTimeout(60_000)
-  const fixture = await launchMatou()
+  const fixture = await launchMatou({ env: { MATOU_E2E_TERMINAL_DIAGNOSTICS: '1' } })
 
   try {
     const { page } = fixture

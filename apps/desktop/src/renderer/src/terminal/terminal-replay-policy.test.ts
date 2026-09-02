@@ -29,6 +29,7 @@ describe('PRD 04 terminal replay policy', () => {
   it('keeps the E2E replay probe out of user terminal panels', () => {
     expect(shouldRunReplayProbe('foundation-shell', true)).toBe(true)
     expect(shouldRunReplayProbe('session-user', true)).toBe(false)
+    expect(shouldRunReplayProbe('session-user', true, true)).toBe(true)
     expect(shouldRunReplayProbe('foundation-shell', false)).toBe(false)
   })
 })

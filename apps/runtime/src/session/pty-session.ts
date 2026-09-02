@@ -8,7 +8,15 @@ import * as pty from 'node-pty'
 
 import { CreditWindow } from '../flow-control/credit-window'
 import { TerminalScreenProjector, type TerminalScreenSnapshot } from '../control/terminal-screen-projector'
-import { SegmentJournal } from '../journal/segment-journal'
+import { SegmentJournal, type SegmentJournalOptions } from '../journal/segment-journal'
+import {
+  SessionDurabilityGate,
+  type SessionDurabilityFaultEvent,
+  type SessionDurabilityRecoveredEvent,
+  type SessionDurabilityState
+} from './session-durability-gate'
+import { PtyExecutionPauser } from './pty-execution-pauser'
+import { PtyOutputBatcher } from './pty-output-batcher'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
 
@@ -62,6 +70,7 @@ export class PtySession {
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
+  readonly #outputBatcher: PtyOutputBatcher
   readonly #screen: TerminalScreenProjector
 
   #sequence: number
@@ -205,8 +214,23 @@ export class PtySession {
     this.#outputBatcher.flush()
     this.#pty.resize(cols, rows)
     void this.#screen.resize(cols, rows)
-    const sequence = ++this.#sequence
-    this.#writeChain = this.#writeChain.then(() => this.#journal.appendResize(sequence, cols, rows))
+    this.#lastCols = cols
+    this.#lastRows = rows
+    const sequence = this.#sequence + 1
+    let operation: Promise<void>
+    try {
+      operation = this.#durabilityGate.append({
+        sequence,
+        kind: 'resize',
+        bytes: this.#encoder.encode(`${cols}:${rows}`),
+        persist: () => this.#journal.appendResize(sequence, cols, rows)
+      })
+    } catch {
+      void this.endDurability()
+      return
+    }
+    this.#sequence = sequence
+    this.#trackWrite(operation)
   }
 
   acknowledge(throughSequence: number): void {
@@ -218,8 +242,17 @@ export class PtySession {
     return this.#writeChain.then(() => this.#journal.readFrames())
   }
 
+  async replayMetadata(maxLines = 10_000) {
+    await this.#writeChain
+    return this.#journal.replayMetadata(maxLines)
+  }
+
   snapshotScreen(): Promise<TerminalScreenSnapshot> {
     return this.#screen.snapshot()
+  }
+
+  iterateFrames(options: { fromSequence: number; throughSequence?: number }) {
+    return this.#journal.iterateFrames(options)
   }
 
   whenClosed(): Promise<void> { return this.#closed }
@@ -303,9 +336,8 @@ export class PtySession {
   }
 
   #enqueueOutputNow(data: string): void {
-    if (this.#forceFinalized) return
-    this.#onOutput?.(data)
     void this.#screen.write(data)
+    if (this.#forceFinalized) return
     const bytes = this.#encoder.encode(data)
     const sequence = this.#sequence + 1
     let operation: Promise<void>
@@ -500,20 +532,16 @@ export class PtySession {
   }
 }
 
-async function readProviderInstructions(controlAssetRoot: string): Promise<string | undefined> {
-  try {
-    return await readFile(
-      join(controlAssetRoot, 'providers', 'codex-developer-instructions.md'),
-      'utf8'
-    )
-  } catch (error) {
-    console.error(`[host-control.instructions] ${errorMessage(error)}`)
-    return undefined
-  }
+function storageFaultCode(error: unknown): StorageFaultCode {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  if (code === 'ENOSPC' || code === 'EDQUOT') return 'STORAGE_QUOTA_EXCEEDED'
+  if (code === 'EROFS' || code === 'EACCES' || code === 'EPERM') return 'STORAGE_READ_ONLY'
+  return 'STORAGE_WRITE_FAILED'
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+function storageFaultMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message
+  return 'terminal journal write failed'
 }
 
 function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
@@ -548,4 +576,15 @@ function resolveExecutable(profile: 'shell' | 'claude-code' | 'codex'): string {
     return process.env.MATOU_CODEX_COMMAND ?? 'codex'
   }
   return resolveShell()
+}
+
+async function readProviderInstructions(controlAssetRoot: string): Promise<string | undefined> {
+  try {
+    return await readFile(
+      join(controlAssetRoot, 'providers', 'codex-developer-instructions.md'),
+      'utf8'
+    )
+  } catch {
+    return undefined
+  }
 }

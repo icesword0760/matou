@@ -141,13 +141,9 @@ export function SessionCanvas(props: {
         if (node.archivedAt === undefined) return renderSession(node, inViewport, viewportMoving)
         const descendantNodes = graphIndex.descendantsOf(node.sessionId)
         return <StoppedSessionCard node={node}
-          directChildCount={directChildren.length} descendantCount={descendants.length}
-          descendantImpact={{
-            running: descendants.filter(({ workStatus }) =>
-              workStatus === 'running' || workStatus === 'starting').length,
-            needsInput: descendants.filter(({ workStatus }) => workStatus === 'needs-input').length
-          }}
-          {...(onRemoveBranch && branchHasSurvivingCard(graph.nodes, node.sessionId)
+          descendantNodes={[...descendantNodes]}
+          disabled={disabled} {...(disabledReason ? { disabledReason } : {})}
+          {...(onRemoveBranch && graph.nodes.length > descendantNodes.length + 1
             ? { onRemoveBranch }
             : {})} />
       }}
@@ -165,24 +161,4 @@ export function SessionCanvas(props: {
       {...(disabled ? {} : { onGeometryChange: putGeometry })}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
-}
-
-function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
-  const children = nodes.filter(({ parentSessionId }) => parentSessionId === sessionId)
-  return children.flatMap((child) => [child, ...sessionDescendants(nodes, child.sessionId)])
-}
-
-export function branchHasSurvivingCard(nodes: SessionGraphNodeView[], sessionId: string): boolean {
-  const branchIds = new Set([sessionId])
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const node of nodes) {
-      if (node.parentSessionId && branchIds.has(node.parentSessionId) && !branchIds.has(node.sessionId)) {
-        branchIds.add(node.sessionId)
-        changed = true
-      }
-    }
-  }
-  return nodes.some(({ sessionId: candidate }) => !branchIds.has(candidate))
 }

@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
+import type { ProviderCli, ProviderConfigInput } from '@matou/contracts'
 import type {
   DomainCommandMetadata,
   LayoutNode,
@@ -36,8 +37,9 @@ import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
+import { SessionGitStateRepository } from '../session/session-git-state-repository'
+import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
-import type { ProviderCli, ProviderConfigInput } from '@matou/contracts'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -80,12 +82,18 @@ export class RuntimeRpcRouter {
   readonly #git: GitWorkspaceService
   readonly #gitStates: SessionGitStateRepository
   readonly #claudeSessions: ClaudeSessionCatalog
+  readonly #accessPolicy: RuntimeAccessPolicy
   readonly #providerConfigs: ProviderConfigStore
 
   constructor(
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
-    options: { projectsRoot?: string; providerConfigs?: ProviderConfigStore } = {}
+    options: {
+      projectsRoot?: string
+      accessPolicy?: RuntimeAccessPolicy
+      setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
+      providerConfigs?: ProviderConfigStore
+    } = {}
   ) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
@@ -120,6 +128,9 @@ export class RuntimeRpcRouter {
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
     )
+    this.#accessPolicy = options.accessPolicy ?? new RuntimeAccessPolicy(
+      database.readOnly ? 'read-only' : 'normal'
+    )
     this.#providerConfigs = options.providerConfigs ?? new ProviderConfigStore(dirname(database.path))
   }
 
@@ -152,13 +163,15 @@ export class RuntimeRpcRouter {
     if (method === 'provider-config.delete') {
       const input = record(payload)
       return this.#providerConfigs.delete(
-        providerCli(input.cli), text(input.providerId, 'providerId')
+        providerCli(input.cli),
+        text(input.providerId, 'providerId')
       )
     }
     if (method === 'provider-config.activate') {
       const input = record(payload)
       return this.#providerConfigs.activate(
-        providerCli(input.cli), text(input.providerId, 'providerId')
+        providerCli(input.cli),
+        text(input.providerId, 'providerId')
       )
     }
     if (method === 'projection.snapshot') return this.#snapshot(payload)
@@ -417,47 +430,11 @@ export class RuntimeRpcRouter {
           title: text(input.title, 'title'),
           now: integer(input.now, 'now', 0)
         })
-      case 'hierarchy.rename-session':
-        return this.#sessions.renameSession(command, {
-          sessionId: text(input.sessionId, 'sessionId'),
-          title: text(input.title, 'title'),
-          now: integer(input.now, 'now', 0)
-        })
-      case 'hierarchy.restore-session-auto-title': {
-        const sessionId = text(input.sessionId, 'sessionId')
-        const binding = this.#database.get<{ provider_session_id: string }>(
-          `SELECT provider_session_id FROM provider_bindings
-           WHERE session_id = ? AND provider = 'claude-code'
-           ORDER BY updated_at DESC, id DESC LIMIT 1`,
-          sessionId
-        )
-        const title = binding
-          ? await this.#claudeSessions.autoTitle({
-              cwd: this.#sessionCwd(sessionId),
-              providerSessionId: binding.provider_session_id
-            })
-          : undefined
-        return this.#sessions.restoreProviderTitle(command, {
-          sessionId,
-          ...(title ? { title } : {}),
-          now: integer(input.now, 'now', 0)
-        })
-      }
       case 'hierarchy.reorder-task':
         return this.#hierarchy.reorderTask(command, {
           windowId: text(input.windowId, 'windowId'),
           workspaceId: text(input.workspaceId, 'workspaceId'),
           taskId: text(input.taskId, 'taskId'),
-          ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
-            ? {}
-            : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
-          now: integer(input.now, 'now', 0)
-        })
-      case 'hierarchy.move-task-on-board':
-        return this.#hierarchy.moveTaskOnBoard(command, {
-          workspaceId: text(input.workspaceId, 'workspaceId'),
-          taskId: text(input.taskId, 'taskId'),
-          status: enumeration(input.status, ['planned', 'active', 'blocked', 'completed'] as const, 'status'),
           ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
             ? {}
             : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),

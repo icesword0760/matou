@@ -53,6 +53,7 @@ export function SessionCarousel(props: {
   const focusVisibilityFrame = useRef<number | undefined>(undefined)
   const focusVisibilitySessionId = useRef<string | null>(null)
   const wheelTimer = useRef<number | undefined>(undefined)
+  const viewportSettleTimer = useRef<number | undefined>(undefined)
   const parentCommitTimer = useRef<number | undefined>(undefined)
   const pullSpringFrame = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
@@ -131,6 +132,7 @@ export function SessionCarousel(props: {
       if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
       if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
+      if (viewportSettleTimer.current !== undefined) window.clearTimeout(viewportSettleTimer.current)
       if (parentCommitTimer.current !== undefined) window.clearTimeout(parentCommitTimer.current)
       if (pullSpringFrame.current !== undefined) cancelAnimationFrame(pullSpringFrame.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
@@ -754,12 +756,12 @@ export function SessionCarousel(props: {
     if (event.ctrlKey || event.metaKey) return
     const viewport = viewportRef.current
     if (!viewport) return
-    const terminalSurface = (event.target as HTMLElement).closest('.terminal-surface')
+    const overTerminal = (event.target as HTMLElement).closest('.terminal-surface') !== null
     // macOS trackpads dispatch the wheel event from inside xterm. Capture it
     // before xterm consumes horizontal movement for its own viewport. A mouse
     // user can express the same intent with Shift + wheel.
     const horizontal = event.shiftKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY)
-    if (!horizontal && terminalCanConsumeVerticalWheel(terminalSurface, event.deltaY)) return
+    if (!horizontal && overTerminal) return
     const delta = horizontal
       ? (Math.abs(event.deltaX) > 0 ? event.deltaX : event.deltaY)
       : event.deltaY
@@ -962,15 +964,6 @@ export function SessionCarousel(props: {
     </div>
     {edgeBrowsePhase !== 'idle' && <div className="session-edge-intent" aria-hidden="true" />}
   </div>
-}
-
-function terminalCanConsumeVerticalWheel(surface: Element | null, deltaY: number): boolean {
-  if (!surface || deltaY === 0) return false
-  const viewport = surface.querySelector<HTMLElement>('.xterm-viewport')
-  if (!viewport) return false
-  const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight)
-  if (maxScrollTop <= 1) return false
-  return deltaY < 0 ? viewport.scrollTop > 1 : viewport.scrollTop < maxScrollTop - 1
 }
 
 export function centeredCardScrollLeft(

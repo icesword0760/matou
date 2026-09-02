@@ -30,16 +30,16 @@ describe('createE2eMigrationInterruptionObserver', () => {
 
     observer.onPreMigrationBackupReady?.({
       id: 'backup', path: '/tmp/backup', createdAt: 1, reason: 'pre-migration',
-      schemaVersion: 24, size: 1, sha256: 'a'.repeat(64)
+      schemaVersion: 26, size: 1, sha256: 'a'.repeat(64)
     })
     await expect(readFile(reachedPath)).rejects.toMatchObject({ code: 'ENOENT' })
     observer.onMigrationCommitted?.({
-      version: 25, name: 'durable-fork-operations', sql: 'SELECT 1'
+      version: 27, name: 'durable-fork-operations', sql: 'SELECT 1'
     })
 
     expect(JSON.parse(await readFile(reachedPath, 'utf8'))).toMatchObject({
       stage: 'migration-committed',
-      migrationVersion: 25,
+      migrationVersion: 27,
       pid: process.pid
     })
   })

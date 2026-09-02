@@ -9,6 +9,7 @@ import {
   PROTOCOL_VERSION,
   parseRendererMessage,
   type RendererMessage,
+  type RpcMethod,
   type RuntimeMessage,
   type ProviderCli
 } from '@matou/contracts'
@@ -79,6 +80,11 @@ import {
   ShellHistoryRepository,
   formatShellHistoryForTerminal
 } from './shell-history/shell-history'
+import type {
+  RecoveryJob,
+  RecoveryJobSnapshot
+} from './recovery/runtime-session-recovery-scheduler'
+import type { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 import { ProviderConfigStore } from './provider-config/provider-config-store'
 
 export interface PortMessageEvent {
@@ -111,6 +117,9 @@ export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
   forkProviderIdentityTimeoutMs?: number
   hudRegistry?: SessionHudRegistry
+  accessPolicy?: RuntimeAccessPolicy
+  journalOptionsForSession?(sessionId: string): SegmentJournalOptions | undefined
+  recoveryCoordinator?: RuntimeRecoveryCoordinator
   controlAssetRoot?: string
   controlNodeExecutable?: string
   providerConfigs?: ProviderConfigStore
@@ -200,14 +209,14 @@ export class RuntimeServer {
   readonly #providerResumeTimeoutMs: number
   readonly #forkProviderIdentityTimeoutMs: number
   readonly #hud: SessionHudRegistry
-  readonly #controlAssetRoot: string | undefined
-  readonly #controlNodeExecutable: string
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
   readonly #accessPolicy: RuntimeAccessPolicy
   readonly #journalOptionsForSession: NonNullable<RuntimeServerOptions['journalOptionsForSession']>
   readonly #recoveryCoordinator: RuntimeRecoveryCoordinator | undefined
+  readonly #controlAssetRoot: string | undefined
+  readonly #controlNodeExecutable: string
   #handshakeComplete = false
   #closed = false
 
@@ -303,24 +312,30 @@ export class RuntimeServer {
     )
   this.#journalOptionsForSession = options.journalOptionsForSession ?? (() => undefined)
   this.#recoveryCoordinator = options.recoveryCoordinator
+    this.#controlAssetRoot = options.controlAssetRoot ?? process.env.MATOU_CONTROL_ASSET_ROOT
+    this.#controlNodeExecutable = options.controlNodeExecutable ??
+      process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
       DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
     )
-    this.#controlAssetRoot = options.controlAssetRoot ?? process.env.MATOU_CONTROL_ASSET_ROOT
-    this.#controlNodeExecutable = options.controlNodeExecutable ??
-      process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
+    this.#forkProviderIdentityTimeoutMs = positiveTimeout(
+      options.forkProviderIdentityTimeoutMs,
+      DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS
+    )
     this.#workspacePaths = workspacePaths
     RuntimeServer.#instances.add(this)
-    void configuredCcLaunch()
-    for (const session of [...this.#sessions.values()]) {
-      const authority = this.#database.get<{ archived_at: number | null }>(
-        'SELECT archived_at FROM sessions WHERE id = ?', session.sessionId
-      )
-      if (authority?.archived_at !== null && authority?.archived_at !== undefined) {
-        session.dispose()
-        this.#sessions.delete(session.sessionId, session)
+    if (this.#accessPolicy.startBackgroundServices) {
+      void configuredCcLaunch()
+      for (const session of [...this.#sessions.values()]) {
+        const authority = this.#database.get<{ archived_at: number | null }>(
+          'SELECT archived_at FROM sessions WHERE id = ?', session.sessionId
+        )
+        if (authority?.archived_at !== null && authority?.archived_at !== undefined) {
+          session.dispose()
+          this.#sessions.delete(session.sessionId, session)
+        }
       }
       this.#workspacePaths.startPolling()
     }
@@ -859,7 +874,11 @@ export class RuntimeServer {
             permissionMode: textFromRpcInput(message.payload, 'permissionMode'),
             persisted: false
           }
-        : await this.#router.handle(message.method, message.payload)
+        : isSessionEnvironmentRpc(message.method)
+          ? await this.#handleSessionEnvironmentRpc(message.method, message.payload)
+          : isTerminalHistoryRpc(message.method)
+            ? await this.#handleTerminalHistoryRpc(message.method, message.payload)
+            : await this.#router.handle(message.method, message.payload)
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
         const cli = input?.cli === 'claude-code' || input?.cli === 'codex' ? input.cli : undefined
@@ -1528,7 +1547,7 @@ export class RuntimeServer {
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
     try {
-      const runId = randomUUID()
+      const runId = forkAuthority?.runId ?? randomUUID()
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
         : undefined
@@ -1560,9 +1579,8 @@ export class RuntimeServer {
         const token = this.#control.tokens.issue(
           { runId, sessionId: message.sessionId },
           [
-            'host.identify', 'host.list', 'terminal.read-current',
-            'terminal.read-history', 'terminal.read-commands',
-            'terminal.send-text', 'terminal.send-key'
+            'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history',
+            'terminal.read-commands', 'terminal.send-text', 'terminal.send-key'
           ],
           Date.now() + 24 * 60 * 60 * 1000
         )
@@ -1684,7 +1702,7 @@ export class RuntimeServer {
         ...((controlEnvironment === undefined && Object.keys(providerLaunch.env).length === 0) ? {} : {
           env: { ...providerLaunch.env, ...controlEnvironment }
         }),
-        send: this.#sendToPort,
+        ...(attachView ? { send: this.#sendToPort } : {}),
         onOutput: (data) => {
           emittedTerminalOutput = true
           if (providerDerivationState === 'pending') {
@@ -1730,7 +1748,7 @@ export class RuntimeServer {
             )?.work_status
             const preserveInterruptedRun = exited.profile === 'shell' &&
               (workStatus === 'starting' || workStatus === 'running' || workStatus === 'needs-input')
-            if (exited.runId && persistentAuthority && !preserveInterruptedRun) {
+            if (exited.runId && !preserveInterruptedRun) {
               try {
                 this.#sessionRepository.finishRun(
                   {
@@ -1791,7 +1809,7 @@ export class RuntimeServer {
             this.#providerInputBuffers.delete(message.sessionId)
             this.#workStatusTrackers.delete(message.sessionId)
           }
-          if (exited.runId && persistentAuthority) {
+          if (exited.runId) {
             try {
               this.#sessionRepository.finishRun(
                 {
@@ -1849,7 +1867,7 @@ export class RuntimeServer {
         }
       })
       providerProcessStarted = message.profile !== 'shell'
-      if (persistentAuthority) {
+      if (runId) {
         try {
           this.#sessionRepository.startRun(
             {
@@ -2693,17 +2711,23 @@ export class RuntimeServer {
     }
   }
 
-  async #respawnForProviderConfig(sessionId: string, descriptor: TerminalSpawnMessage): Promise<void> {
+  async #respawnForProviderConfig(
+    sessionId: string,
+    descriptor: TerminalSpawnMessage
+  ): Promise<void> {
     await this.#sessions.runExclusive(sessionId, async () => {
       const session = this.#sessions.get(sessionId)
       if (!session || session.profile !== descriptor.profile) return
+      const wasAttached = this.#attachedSessionIds.has(sessionId)
       this.#clearProviderResumeTimer(sessionId)
       this.#sessions.delete(sessionId, session)
       this.#control?.backend.unregister(sessionId, session)
       this.#control?.tokens.revokeRun(session.runId ?? sessionId)
+      this.#providerInputBuffers.delete(sessionId)
+      this.#workStatusTrackers.delete(sessionId)
       session.dispose({ notifyExit: false })
       await session.whenClosed()
-      await this.#spawn(descriptor)
+      await this.#spawn(descriptor, undefined, undefined, wasAttached)
       const replacement = this.#sessions.get(sessionId)
       if (replacement && replacement.profile === descriptor.profile) {
         replacement.display('\u001b[2J\u001b[3J\u001b[H')
@@ -2823,7 +2847,7 @@ function prependedPathEnvironment(
   environment: NodeJS.ProcessEnv
 ): Record<string, string> {
   const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
-  const inherited = pathKey ? environment[pathKey] : undefined
+  const inherited = environment[pathKey]
   return { [pathKey]: inherited ? `${entry}${delimiter}${inherited}` : entry }
 }
 

@@ -202,10 +202,7 @@ describe('parseRendererMessage', () => {
       'hierarchy.validate-workspace-path',
       'hierarchy.create-task',
       'hierarchy.rename-task',
-      'hierarchy.rename-session',
-      'hierarchy.restore-session-auto-title',
       'hierarchy.reorder-task',
-      'hierarchy.move-task-on-board',
       'hierarchy.delete-task',
       'hierarchy.activate-task',
       'hierarchy.create-scene',
@@ -271,6 +268,12 @@ describe('parseRendererMessage', () => {
       'provider-config.upsert',
       'provider-config.delete',
       'provider-config.activate'
+    ]))
+  })
+
+  it('allowlists terminal history paging and search RPCs', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'terminal.history-page', 'terminal.history-search'
     ]))
   })
 

@@ -157,6 +157,7 @@ export class AgentNotificationStore {
       teamStatusTone: input.teamStatusTone ?? ''
     }
     this.#notifications.unshift(notification)
+    this.#trackCooldown(notification.id, cooldownKey)
     if (!input.isFocusedSession && notification.sound && this.#soundEnabled) this.#playSound()
     this.#prune(now)
     this.#emit()
@@ -231,7 +232,6 @@ export class AgentNotificationStore {
     const index = this.#notifications.findIndex((notification) => notification.id === id)
     if (index < 0) return
     this.#removeAt(index)
-    this.#cleanupFocusedReadIndicators()
     this.#emit()
   }
 
@@ -241,7 +241,6 @@ export class AgentNotificationStore {
     const index = this.#notifications.findIndex((notification) => notification.replacementKey === normalized)
     if (index < 0) return
     this.#removeAt(index)
-    this.#cleanupFocusedReadIndicators()
     this.#emit()
   }
 
@@ -251,7 +250,6 @@ export class AgentNotificationStore {
     this.#cooldowns.clear()
     this.#cooldownKeysByNotificationId.clear()
     this.#cooldownKeyRefCounts.clear()
-    this.#focusedReadIndicators.clear()
     this.#emit()
   }
 
@@ -307,7 +305,6 @@ export class AgentNotificationStore {
     for (let index = this.#notifications.length - 1; index >= 0; index -= 1) {
       if (removeIds.has(this.#notifications[index]!.id)) this.#removeAt(index)
     }
-    this.#cleanupFocusedReadIndicators()
     return true
   }
 
@@ -329,16 +326,6 @@ export class AgentNotificationStore {
     }
     this.#cooldownKeyRefCounts.delete(cooldownKey)
     this.#cooldowns.delete(cooldownKey)
-  }
-
-  #cleanupFocusedReadIndicators(): void {
-    if (this.#focusedReadIndicators.size === 0) return
-    const remainingSessionIds = new Set(
-      this.#notifications.flatMap(({ sessionId }) => sessionId ? [sessionId] : [])
-    )
-    for (const sessionId of this.#focusedReadIndicators) {
-      if (!remainingSessionIds.has(sessionId)) this.#focusedReadIndicators.delete(sessionId)
-    }
   }
 
   #buildSnapshot(): AgentNotificationSnapshot {

@@ -158,7 +158,7 @@ describe('Terminal pane', () => {
     ]
     render(<TerminalPane {...fixture()} resumable git={{ state: 'ready', branch: 'feat/notification', dirty: false }}
       childNodes={children} onOpenChildren={vi.fn()} onLoadSession={vi.fn()}
-      onFork={onFork} onForkSibling={onForkSibling} onRemoveBranch={vi.fn()} />)
+      onFork={onFork} onForkSibling={onForkSibling} />)
 
     const header = screen.getByRole('banner')
     expect(header.textContent).toContain('Claude 主会话')
@@ -168,16 +168,6 @@ describe('Terminal pane', () => {
     const actions = header.querySelector('.terminal-pane-actions')
     expect(actions?.querySelector('.child-session-badge')).not.toBeNull()
     expect(actions?.firstElementChild?.classList.contains('child-session-badge-wrap')).toBe(true)
-    expect(screen.getByRole('button', { name: '查看 2 个子会话' })
-      .querySelector('svg')?.dataset.icon).toBe('layers')
-    expect(screen.getByRole('button', { name: '载入 Claude Code 会话到“Claude 主会话”' })
-      .querySelector('svg')?.dataset.icon).toBe('folder-input')
-    expect(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })
-      .querySelector('svg')?.dataset.icon).toBe('layers-plus')
-    expect(screen.getByRole('button', { name: '从共同父会话创建“Claude 主会话”的兄弟分支' })
-      .querySelector('svg')?.dataset.icon).toBe('copy-plus')
-    expect(screen.getByRole('button', { name: '移出节点：Claude 主会话' })
-      .querySelector('svg')?.dataset.icon).toBe('circle-minus')
     expect(screen.queryByRole('button', { name: '删除终端：Claude 主会话' })).toBeNull()
 
     const user = userEvent.setup()
@@ -230,13 +220,12 @@ describe('Terminal pane', () => {
       ]}
       onRemoveBranch={onRemoveBranch} />)
 
-    expect(screen.queryByRole('button', { name: '移出节点：Claude 主会话' })).toBeNull()
+    expect(screen.getByRole('button', { name: '移出节点：Claude 主会话' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: '更多会话操作：Claude 主会话' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '停止运行' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '重新启动' })).toBeNull()
 
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
-    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
     const dialog = screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })
     const nodeOnly = screen.getByRole('radio', { name: /仅移除当前节点/ })
     const branch = screen.getByRole('radio', { name: /移除当前节点及全部后代/ })
@@ -252,20 +241,52 @@ describe('Terminal pane', () => {
     expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
+  it('removes the selected complete descendant branch', async () => {
+    const user = userEvent.setup()
+    const onRemoveBranch = vi.fn()
+    render(<TerminalPane {...fixture()} childNodes={[childNode('child-1')]}
+      descendantNodes={[childNode('child-1')]}
+      onRemoveBranch={onRemoveBranch} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    await user.click(screen.getByRole('radio', { name: /移除当前节点及全部后代/ }))
+    await user.click(screen.getByRole('button', { name: '移除 2 个会话' }))
+
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-and-descendants')
+  })
+
+  it('closes a pending structural removal when read-only recovery starts', async () => {
+    const user = userEvent.setup()
+    const onRemoveBranch = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+
+    view.rerender(<TerminalPane {...props} readOnly onRemoveBranch={onRemoveBranch} />)
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+  })
+
   it('presents a leaf Session as one direct removal instead of an entire branch', async () => {
     const user = userEvent.setup()
     const onRemoveBranch = vi.fn()
     render(<TerminalPane {...fixture()} onRemoveBranch={onRemoveBranch} />)
 
-    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
-    const dialog = screen.getByRole('alertdialog', { name: '移除“Claude 主会话”？' })
-    expect(dialog.textContent).toContain('“Claude 主会话”会从会话列表和 DAG 中消失')
-    expect(dialog.textContent).not.toContain('整个分支')
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    const dialog = screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })
+    expect(dialog.textContent).toContain('影响 1 个会话')
+    expect(dialog.textContent).not.toContain('移除当前节点及全部后代')
     const confirm = screen.getByRole('button', { name: '移除' })
     expect(confirm.classList.contains('is-danger')).toBe(true)
 
     await user.click(confirm)
-    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', false)
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('opens pane actions only from the card header', async () => {

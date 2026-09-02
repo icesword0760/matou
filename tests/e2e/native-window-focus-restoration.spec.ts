@@ -130,7 +130,17 @@ async function focusNativeMacWindow(fixture: MatouFixture, title: string): Promi
     end tell
   end tell
 end tell`
-  await execFileAsync('/usr/bin/osascript', ['-e', script])
+  await expect.poll(async () => {
+    try {
+      await execFileAsync('/usr/bin/osascript', ['-e', script])
+      return fixture.app.evaluate(({ BrowserWindow }, expectedTitle) =>
+        BrowserWindow.getAllWindows().find((window) => window.getTitle() === expectedTitle)?.isFocused() === true,
+      title)
+    } catch {
+      return false
+    }
+  }, { message: `the native macOS window "${title}" must become available to Accessibility` })
+    .toBe(true)
 }
 
 async function createNativeFocusSink(fixture: MatouFixture): Promise<void> {

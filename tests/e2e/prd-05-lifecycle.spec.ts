@@ -52,6 +52,8 @@ test('closes only one non-final Scene and selects its deterministic successor', 
     const successorId = await tabs.nth(2).getAttribute('data-scene-id')
     await tabs.nth(1).getByRole('tab').click()
     await tabs.nth(1).getByRole('button', { name: /^关闭页签：/ }).click()
+    await expect(page.getByRole('alertdialog', { name: '关闭画布' })).toBeVisible()
+    await page.getByRole('button', { name: '关闭画布' }).click()
 
     await expect(tabs).toHaveCount(2)
     await expect(page.locator(`[data-scene-id="${successorId}"] [role="tab"]`))

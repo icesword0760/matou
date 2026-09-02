@@ -202,6 +202,7 @@ export interface HierarchyCommands {
   setFocusedSession(sceneId: string, sessionId: string): unknown
   putGeometry(sceneId: string, ownerKey: string, layoutRevision: number, geometry: unknown): unknown
   activateSession(sessionId: string): unknown
+  deleteSession?(sessionId: string, confirmed?: boolean, preserveSceneOnLastSession?: boolean): unknown
   openSessionEnvironment(sessionId: string): Promise<SessionEnvironmentOpenResult>
   restoreSessionEnvironment(sessionId: string): Promise<SessionEnvironmentActionResult>
   locateSessionEnvironment(sessionId: string, path: string): Promise<SessionEnvironmentActionResult>

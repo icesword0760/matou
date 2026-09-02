@@ -1,6 +1,6 @@
 {
   "mode": "shell",
-  "text": "zsh~/matou_workspacehud-main*⏱0s",
+  "text": "zsh~/matou_workspacehud-main*Local⏱0s",
   "fields": [
     {
       "className": "status-field",
@@ -11,8 +11,12 @@
       "text": "~/matou_workspace"
     },
     {
-      "className": "status-field status-git status-priority-2 is-clickable",
+      "className": "status-field status-git is-clickable",
       "text": "hud-main*"
+    },
+    {
+      "className": "status-field status-environment is-clickable state-ready",
+      "text": "Local"
     },
     {
       "className": "status-field status-priority-1",

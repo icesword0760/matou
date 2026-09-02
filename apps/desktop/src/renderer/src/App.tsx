@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { HierarchyShell } from './hierarchy/HierarchyShell'
 import { DetachedTerminalApp } from './hierarchy/DetachedTerminalApp'
-import { TerminalSurface, type RuntimeStatus } from './terminal/TerminalSurface'
+import type { RuntimeStatus } from './terminal/TerminalSurface'
 import { DagWindowApp } from './dag/DagWindowApp'
 import { DatabaseRecoveryPage } from './recovery/DatabaseRecoveryPage'
 import type { RuntimeLifecyclePresentation } from '../../shared/desktop-api'
@@ -14,7 +14,7 @@ export function App() {
   const [lifecycle, setLifecycle] = useState<RuntimeLifecyclePresentation>()
   const e2e = new URLSearchParams(window.location.search).get('e2e') === '1'
   const terminalDiagnostics = new URLSearchParams(window.location.search)
-    .get('terminalDiagnostics') !== '0'
+    .get('terminalDiagnostics') === '1'
   const detached = new URLSearchParams(window.location.search).get('kind') === 'detached-terminal'
   const dag = new URLSearchParams(window.location.search).get('kind') === 'dag'
   const lastReadyLifecycle = useRef<RuntimeLifecyclePresentation | undefined>(undefined)
@@ -60,10 +60,13 @@ export function App() {
   if (dag) return <DagWindowApp runtimeMode={presentedLifecycle.snapshot.mode} />
 
   return <>
-    <HierarchyShell runtimeMode={presentedLifecycle.snapshot.mode} />
+    <HierarchyShell runtimeMode={presentedLifecycle.snapshot.mode}
+      {...(e2e && terminalDiagnostics ? { terminalDiagnostics: {
+        onStatusChange: setStatus,
+        onSmokeMarker: setSmokeMarker,
+        onReplayComplete: setReplayMarker
+      } } : {})} />
     {e2e && terminalDiagnostics && <div className="e2e-diagnostics" aria-hidden="true">
-      <TerminalSurface onStatusChange={setStatus}
-        onSmokeMarker={setSmokeMarker} onReplayComplete={setReplayMarker} />
       <output data-testid="runtime-status">{status}</output>
       <output data-testid="smoke-marker">{smokeMarker}</output>
       <output data-testid="replay-marker">{replayMarker}</output>

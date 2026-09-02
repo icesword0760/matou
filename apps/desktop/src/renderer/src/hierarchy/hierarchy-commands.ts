@@ -27,12 +27,19 @@ export function createHierarchyCommands(
       result = await client.request(type as Parameters<RuntimeClient['request']>[0], payload)
     } catch (error) {
       if (type !== 'hierarchy.create-workspace' || !isTransientRuntimeError(error)) throw error
-      // Workspace creation is path-idempotent and Runtime commands are deduplicated
-      // by commandId. Replaying the same envelope covers a port handoff or a lost
-      // response without creating a second Workspace.
       result = await client.request(type as Parameters<RuntimeClient['request']>[0], payload)
     }
-    await afterMutation?.()
+    await afterMutation?.(result, { type, input })
+    return result
+  }
+  const environmentCommand = async (
+    type: 'session.environment-restore' | 'session.environment-locate' | 'session.environment-handoff',
+    input: Record<string, unknown>
+  ): Promise<SessionEnvironmentActionResult> => {
+    const result = await command(type, input) as SessionEnvironmentActionResult
+    if (result.kind === 'switch-session') {
+      await command('hierarchy.activate-session', { sessionId: result.sessionId })
+    }
     return result
   }
   return {
@@ -140,6 +147,10 @@ export function createHierarchyCommands(
       sceneId, ownerKey, layoutRevision, geometry, now: Date.now()
     }),
     activateSession: (sessionId) => command('hierarchy.activate-session', { sessionId }),
+    deleteSession: (sessionId, confirmed = false, preserveSceneOnLastSession = false) => command('hierarchy.delete-session', {
+      sessionId, ...(confirmed ? { confirmedIntent: `delete-session:${sessionId}` } : {}),
+      ...(preserveSceneOnLastSession ? { preserveSceneOnLastSession: true } : {})
+    }),
     openSessionEnvironment: (sessionId) => client.request<SessionEnvironmentOpenResult>(
       'session.environment-open', { sessionId }
     ),
@@ -166,10 +177,110 @@ export function createHierarchyCommands(
   }
 }
 
-function isTransientRuntimeError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  return error.message === 'Runtime channel replaced before the request completed' ||
-    error.message.startsWith('Runtime request hierarchy.create-workspace timed out')
+export const READ_ONLY_RECOVERY_REASON = '数据库处于只读恢复模式'
+
+export function createReadOnlyHierarchyCommands(
+  base: HierarchyCommands,
+  updateProjection: (update: (value: HierarchyProjection) => void) => void
+): HierarchyCommands {
+  const blocked = () => Promise.reject(Object.assign(
+    new Error(READ_ONLY_RECOVERY_REASON), { code: 'STORAGE_READ_ONLY' }
+  ))
+  const navigate = (update: (value: HierarchyProjection) => void) => {
+    updateProjection(update)
+    return Promise.resolve()
+  }
+  const activateWorkspace = (workspaceId: string) => navigate((value) => {
+    if (!value.workspaces.some(({ id }) => id === workspaceId)) return
+    value.navigation.activeWorkspaceId = workspaceId
+  })
+  const activateTask = (taskId: string) => navigate((value) => {
+    const task = value.tasks.find(({ id }) => id === taskId)
+    if (!task) return
+    value.navigation.activeWorkspaceId = task.workspaceId
+    value.navigation.taskByWorkspace[task.workspaceId] = task.id
+  })
+  const activateScene = (sceneId: string) => navigate((value) => {
+    const scene = value.scenes.find(({ id }) => id === sceneId)
+    const task = scene && value.tasks.find(({ id }) => id === scene.taskId)
+    if (!scene || !task) return
+    value.navigation.activeWorkspaceId = task.workspaceId
+    value.navigation.taskByWorkspace[task.workspaceId] = task.id
+    value.navigation.sceneByTask[task.id] = scene.id
+  })
+  const setFocusedSession = (sceneId: string, sessionId: string) => navigate((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
+    if (!snapshot?.mounts.some(({ sessionId: candidate }) => candidate === sessionId)) return
+    value.navigation.sessionByScene[sceneId] = sessionId
+    if (value.sessionGraphs?.[sceneId]) value.sessionGraphs[sceneId]!.focusedSessionId = sessionId
+  })
+  const activateSession = (sessionId: string) => navigate((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ mounts }) =>
+      mounts.some(({ sessionId: candidate }) => candidate === sessionId))
+    if (!snapshot) return
+    const scene = value.scenes.find(({ id }) => id === snapshot.scene.id)
+    const task = scene && value.tasks.find(({ id }) => id === scene.taskId)
+    if (!scene || !task) return
+    value.navigation.activeWorkspaceId = task.workspaceId
+    value.navigation.taskByWorkspace[task.workspaceId] = task.id
+    value.navigation.sceneByTask[task.id] = scene.id
+    value.navigation.sessionByScene[scene.id] = sessionId
+    if (value.sessionGraphs?.[scene.id]) value.sessionGraphs[scene.id]!.focusedSessionId = sessionId
+  })
+
+  return {
+    ...base,
+    activateWorkspace,
+    activateTask,
+    activateScene,
+    activateSession,
+    openSessionEnvironment: base.openSessionEnvironment,
+    restoreSessionEnvironment: blocked,
+    locateSessionEnvironment: blocked,
+    handoffSessionEnvironment: blocked,
+    setFocusedSession,
+    createWorkspace: blocked,
+    renameWorkspace: blocked,
+    relinkWorkspace: blocked,
+    removeWorkspace: blocked,
+    setWorkspacePinned: blocked,
+    reorderPinnedWorkspace: blocked,
+    createTask: blocked,
+    renameTask: blocked,
+    renameSession: blocked,
+    restoreSessionAutoTitle: blocked,
+    reorderTask: blocked,
+    moveTaskOnBoard: blocked,
+    deleteTask: blocked,
+    setTaskPinned: blocked,
+    reorderPinnedTask: blocked,
+    createScene: blocked,
+    renameScene: blocked,
+    reorderScene: blocked,
+    closeScene: blocked,
+    reopenScene: blocked,
+    splitSession: blocked,
+    forkSession: blocked,
+    createCanvas: blocked,
+    createShellSibling: blocked,
+    createForkChild: blocked,
+    createForkSibling: blocked,
+    retryFork: blocked,
+    removeFailedFork: blocked,
+    retryProviderRestore: blocked,
+    startFreshProvider: blocked,
+    loadClaudeSession: blocked,
+    restartStoppedSession: blocked,
+    removeSessionBranch: blocked,
+    recordSessionInteraction: blocked,
+    // Scrolling remains local and usable. Persistence resumes after storage is writable.
+    putGeometry: () => Promise.resolve(),
+    deleteSession: blocked,
+    detachSession: blocked,
+    returnSession: blocked,
+    setPermissionMode: blocked,
+    setModel: blocked
+  }
 }
 
 function mutationSessionId(value: unknown): string | undefined {
@@ -177,4 +288,10 @@ function mutationSessionId(value: unknown): string | undefined {
   const session = value.session
   if (!session || typeof session !== 'object' || !('id' in session)) return undefined
   return typeof session.id === 'string' ? session.id : undefined
+}
+
+function isTransientRuntimeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.message === 'Runtime channel replaced before the request completed' ||
+    error.message.startsWith('Runtime request hierarchy.create-workspace timed out')
 }

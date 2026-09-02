@@ -32,19 +32,37 @@ describe('DAG layout', () => {
     expect(results.map(({ sessionId }) => sessionId)).toContain('summary-hit')
   })
 
-  it('reserves vertical card space for a complete multi-line node name', () => {
-    const longTitle = '这是一个足够长并且需要完整换行显示的会话节点名称用于验证布局不会裁切'
+  it('lays out a 5000-deep chain iteratively without overflowing the stack', () => {
+    const nodes = Array.from({ length: 5000 }, (_, index) => node(
+      `deep-${index}`, `Deep ${index}`, index === 0 ? undefined : `deep-${index - 1}`, index + 1
+    ))
     const graph: SessionGraphView = {
-      sceneId: 'scene',
-      nodes: [node('long', longTitle, undefined, 1), node('short', '短标题', undefined, 2)],
-      edges: []
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: `deep-${index}`, childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const, createdAt: index + 1
+      }))
     }
-
     const layout = layoutGraph(graph)
-    const long = layout.nodes.find(({ sessionId }) => sessionId === 'long')!
-    const short = layout.nodes.find(({ sessionId }) => sessionId === 'short')!
-    expect(long.height).toBeGreaterThan(short.height)
-    expect(short.y).toBeGreaterThanOrEqual(long.y + long.height)
+
+    expect(layout.depthCount).toBe(5000)
+    expect(layout.nodeById.get('deep-4999')?.depth).toBe(4999)
+    expect(layout.nodes).toHaveLength(5000)
+  })
+
+  it('keeps a repeatable 10000-node wide DAG layout inside a stable budget', () => {
+    const graph = fixture(10000)
+    const durations = Array.from({ length: 5 }, () => {
+      const startedAt = performance.now()
+      const layout = layoutGraph(graph)
+      expect(layout.nodes).toHaveLength(10001)
+      return performance.now() - startedAt
+    }).sort((left, right) => left - right)
+    const p95 = durations[Math.ceil(durations.length * .95) - 1]!
+
+    console.log(`[scale-dag-layout] ${JSON.stringify({ durations, p95 })}`)
+
+    expect(p95).toBeLessThan(1500)
   })
 })
 

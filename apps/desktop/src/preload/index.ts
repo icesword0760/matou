@@ -95,6 +95,24 @@ const desktopApi: MatouDesktopApi = {
     listener(runtimeConnectionState)
     return () => runtimeConnectionListeners.delete(listener)
   },
+  getRuntimeLifecycle: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getRuntimeLifecycle),
+  onRuntimeLifecycle: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.runtimeLifecycle, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.runtimeLifecycle, handler)
+  },
+  restoreDatabaseBackup: (backupId, expectedRecoveryId) =>
+    ipcRenderer.invoke(
+      DESKTOP_CHANNELS.restoreDatabaseBackup,
+      backupId,
+      expectedRecoveryId
+    ),
+  exportDatabaseRecoveryBundle: () =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.exportDatabaseRecoveryBundle),
+  retryDatabaseOpen: (expectedRecoveryId) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.retryDatabaseOpen, expectedRecoveryId),
+  startWithEmptyDatabase: (expectedRecoveryId) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.startWithEmptyDatabase, expectedRecoveryId),
   getAppUpdateState: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getAppUpdateState),
   checkForAppUpdates: () => ipcRenderer.invoke(DESKTOP_CHANNELS.checkForAppUpdates),
   downloadAppUpdate: () => ipcRenderer.invoke(DESKTOP_CHANNELS.downloadAppUpdate),

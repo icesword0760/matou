@@ -34,6 +34,20 @@ describe('JournalTailIndex', () => {
     expect(index.tailStart()).toBe(2)
   })
 
+  it('keeps dense output indexing below one Runtime long-task budget', () => {
+    const index = new JournalTailIndex()
+    const denseLines = bytes('x\n'.repeat(1_000))
+    const startedAt = performance.now()
+
+    for (let sequence = 1; sequence <= 200; sequence += 1) {
+      index.record(sequence, denseLines)
+    }
+
+    expect(index.snapshot().completedLineCount).toBe(200_000)
+    expect(index.tailStart()).toBe(191)
+    expect(performance.now() - startedAt).toBeLessThan(50)
+  })
+
   it('counts LF and split CRLF once while preserving Unicode split across frames', () => {
     const index = new JournalTailIndex(4)
     const emoji = bytes('😀')

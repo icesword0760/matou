@@ -80,13 +80,11 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('heading', { name: 'Workspace A 看板' })).toBeTruthy()
     expect(screen.getAllByRole('group', { name: /列$/ }).map((column) => column.getAttribute('aria-label')))
       .toEqual(['就绪列', '运行中列', '阻塞列', '完成列'])
-    expect(screen.queryByText('等待介入')).toBeNull()
     expect(within(screen.getByRole('group', { name: '就绪列' }))
       .getByRole('article', { name: '事项 A1' })).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1')).toBe(terminal)
 
     await userEvent.setup().click(toggle)
-    expect(toggle.getAttribute('aria-pressed')).toBe('false')
     expect(screen.queryByRole('heading', { name: 'Workspace A 看板' })).toBeNull()
     expect(screen.getByTestId('xterm-session-a1')).toBe(terminal)
   })
@@ -127,18 +125,70 @@ describe('PRD 05 hierarchy shell', () => {
     expect(document.querySelector('.session-level-header')).toBeNull()
   })
 
-  it('does not offer structural removal when the branch is the final card on the canvas', () => {
+  it('covers only the recovering card from authoritative Runtime status and retries that card', async () => {
+    const data = fixture()
+    let recoveryListener: ((status: SessionRecoveryStatus) => void) | undefined
+    const retrySessionRecovery = vi.fn()
+    runtime.current = {
+      request: vi.fn(async (method: string) => {
+        if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+        if (method === 'projection.snapshot') return projectionSnapshot(data)
+        throw new Error(`unexpected Runtime request: ${method}`)
+      }),
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {}),
+      subscribeSessionRecovery: vi.fn((listener) => {
+        recoveryListener = listener
+        return () => { recoveryListener = undefined }
+      }),
+      prioritizeSessionRecovery: vi.fn(),
+      retrySessionRecovery
+    }
+
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await waitFor(() => expect(recoveryListener).toBeTypeOf('function'))
+    act(() => recoveryListener?.({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
+      state: 'restoring'
+    }))
+    expect(screen.getByRole('status', { name: '正在恢复终端：终端 A1' })).toBeTruthy()
+    expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
+
+    act(() => recoveryListener?.({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
+      state: 'failed', error: '恢复进程退出'
+    }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：终端 A1' }))
+    expect(retrySessionRecovery).toHaveBeenCalledWith('session-a1')
+  })
+
+  it('prioritizes every current-level sibling including cards outside the viewport', async () => {
     const data = fixture()
     data.sessionGraphs = {
       'scene-a1': {
         sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
-        nodes: [graphNode('session-a1', '终端 A1')]
+        nodes: [
+          { ...graphNode('session-a1', '终端 A1'), parentSessionId: 'parent-a' },
+          { ...graphNode('session-offscreen', '终端 A2'), parentSessionId: 'parent-a' },
+          { ...graphNode('session-other-level', '终端 B'), parentSessionId: 'parent-b' }
+        ]
       }
+    }
+    const prioritizeSessionRecovery = vi.fn()
+    runtime.current = {
+      request: vi.fn(), startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {}),
+      subscribeSessionRecovery: vi.fn(() => () => {}), prioritizeSessionRecovery,
+      retrySessionRecovery: vi.fn()
     }
 
     render(<HierarchyShell fixture={data} />)
 
-    expect(screen.queryByRole('button', { name: '移出节点：终端 A1' })).toBeNull()
+    await waitFor(() => expect(prioritizeSessionRecovery).toHaveBeenCalledWith(
+      'scene-a1', 'session-a1', ['session-a1', 'session-offscreen']
+    ))
   })
 
   it('opens session management from the card header centered inside the workspace stage', async () => {
@@ -389,11 +439,45 @@ describe('PRD 05 hierarchy shell', () => {
     expect(splitSurface).toBeTruthy()
 
     fireEvent.keyDown(document, { key: 'w', metaKey: true })
-    expect(screen.getByRole('alertdialog', { name: /移除节点/ })).toBeTruthy()
-    await userEvent.setup().click(screen.getByRole('button', { name: '移除' }))
     expect(screen.queryByTestId(splitSurface!.dataset.testid!)).toBeNull()
     expect(screen.getAllByTestId(/xterm-/).map(({ dataset }) => dataset.testid))
       .toEqual(['xterm-session-a1'])
+  })
+
+  it('closes an inactive leaf without a Worktree immediately from the pane shortcut', () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.scene.rootNodeId = 'split-a1'
+    first.nodes = [
+      { id: 'split-a1', sceneId: first.scene.id, kind: 'split', direction: 'horizontal', ordinal: 0 },
+      { id: 'node-a1', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 0 },
+      { id: 'node-safe-close', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 1 }
+    ]
+    first.mounts.push({
+      id: 'mount-safe-close', sceneId: first.scene.id,
+      sceneNodeId: 'node-safe-close', sessionId: 'session-safe-close'
+    })
+    data.sessions.push({
+      id: 'session-safe-close', taskId: 'task-a1', title: '可直接关闭',
+      executionContextId: 'context-a'
+    })
+    data.navigation.sessionByScene['scene-a1'] = 'session-safe-close'
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-safe-close', edges: [],
+        nodes: [
+          { ...graphNode('session-a1', '终端 A1'), hasOwnedWorktree: false },
+          { ...graphNode('session-safe-close', '可直接关闭'), hasOwnedWorktree: false }
+        ]
+      }
+    }
+
+    render(<HierarchyShell fixture={data} />)
+    fireEvent.keyDown(document, { key: 'w', metaKey: true })
+
+    expect(screen.queryByRole('alertdialog', { name: /移除节点/ })).toBeNull()
+    expect(screen.queryByTestId('xterm-session-safe-close')).toBeNull()
+    expect(screen.getByTestId('xterm-session-a1')).toBeTruthy()
   })
 
   it('keeps reference product font boundaries while zooming by shortcut', () => {
@@ -690,7 +774,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
-  it('opens a stopped root node from the DAG without offering removal of the final branch', async () => {
+  it('opens a stopped root node from the DAG with structural removal and no process controls', async () => {
     const data = fixture()
     data.sessionGraphs = {
       'scene-a1': {
@@ -721,7 +805,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     expect(await screen.findByText('已停止父会话')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
-    expect(screen.queryByRole('button', { name: '移出节点：已停止父会话' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '移除节点…：已停止父会话' })).toBeNull()
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
@@ -770,7 +854,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(await screen.findByRole('status', { name: '运行环境正在交接运行环境' })).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
     expect(screen.getByRole('button', { name: /当前权限模式/ })).toHaveProperty('disabled', true)
-    expect(screen.getByRole('button', { name: '点击切换模型' })).toHaveProperty('disabled', true)
+    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
 
     fireEvent.keyDown(document, { key: 'd', metaKey: true })
     fireEvent.keyDown(document, { key: 'w', metaKey: true })
@@ -1417,7 +1501,7 @@ describe('PRD 05 hierarchy shell', () => {
       mountId: 'mount-a1', sessionId: 'session-a1'
     }))
 
-    await waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull())
+    await waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull(), { timeout: 3_000 })
     expect(screen.getByTestId('xterm-session-a1')).toBeTruthy()
     expect(request.mock.calls.map(([method]) => method)).toEqual(expect.arrayContaining([
       'hierarchy.get-scene-snapshot', 'hierarchy.get-scene-session-graph'

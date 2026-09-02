@@ -36,13 +36,12 @@ import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
 import { SessionBreadcrumb } from '../session-canvas/SessionBreadcrumb'
-import { branchHasSurvivingCard, SessionCanvas } from '../session-canvas/SessionCanvas'
+import { SessionCanvas } from '../session-canvas/SessionCanvas'
+import { indexSessionGraph } from '../session-canvas/session-graph-index'
 import { SessionLoaderDialog } from '../session-canvas/SessionLoaderDialog'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
-import { AppUpdateControl } from '../updates/AppUpdateControl'
-import { activeAppSessionCount } from '../updates/active-app-sessions'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
@@ -51,12 +50,21 @@ import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRe
 import { AppFocusRestorer } from './focus-restoration'
 import { useSessionRecovery } from '../runtime/useSessionRecovery'
 import { indexSceneLayout, layoutFromSnapshot } from './scene-layout-index'
+import { AppUpdateControl } from '../updates/AppUpdateControl'
+import { activeAppSessionCount } from '../updates/active-app-sessions'
 
 const DETACHED_RETURN_RETRY_DELAYS_MS = [100, 300, 900, 1_800] as const
 
-export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
+export interface HierarchyTerminalDiagnostics {
+  onStatusChange(status: import('../terminal/TerminalSurface').RuntimeStatus): void
+  onSmokeMarker(marker: string): void
+  onReplayComplete(marker: string): void
+}
+
+export function HierarchyShell({ fixture, runtimeMode = 'normal', terminalDiagnostics }: {
   fixture?: HierarchyProjection
   runtimeMode?: RuntimeMode
+  terminalDiagnostics?: HierarchyTerminalDiagnostics
 }) {
   const client = useRuntimeClient()
   const windowId = fixture?.windowId ?? queryValue('windowId') ?? 'window-1'
@@ -243,15 +251,17 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
   }
   return <NotificationProvider store={notificationStoreRef.current}>
     <HierarchyProduct projection={projection} commands={commands} readOnly={readOnly}
-      eventSequence={storeRef.current.eventSequence} />
+      eventSequence={storeRef.current.eventSequence}
+      {...(terminalDiagnostics ? { terminalDiagnostics } : {})} />
   </NotificationProvider>
 }
 
-function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
+function HierarchyProduct({ projection, commands, readOnly, eventSequence, terminalDiagnostics }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
   readOnly: boolean
   eventSequence: number
+  terminalDiagnostics?: HierarchyTerminalDiagnostics
 }) {
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
@@ -317,7 +327,10 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
   const [boardActive, setBoardActive] = useState(false)
   const [settingsActive, setSettingsActive] = useState(false)
-  const appUpdateControl = <AppUpdateControl activeSessionCount={activeAppSessionCount(projection.sessionGraphs)} />
+  const [environmentRestartBySession, setEnvironmentRestartBySession] = useState<Record<string, number>>({})
+  const [environmentTransitionBySession, setEnvironmentTransitionBySession] = useState<
+    Record<string, 'recovering' | 'handoff' | undefined>
+  >({})
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
@@ -485,29 +498,16 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
         owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
       )?.id
   const task = projection.tasks.find(({ id }) => id === taskId)
-  const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
-  const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
-  useEffect(() => {
-    if (!activeSceneId || !commands.restartStoppedSession) return
-    const graph = projection.sessionGraphs?.[activeSceneId]
-    for (const node of graph?.nodes ?? []) {
-      if (node.archivedAt === undefined || restartingStoppedSessions.current.has(node.sessionId)) continue
-      restartingStoppedSessions.current.add(node.sessionId)
-      void Promise.resolve(commands.restartStoppedSession(node.sessionId)).catch(() => {
-        restartingStoppedSessions.current.delete(node.sessionId)
-      })
-    }
-  }, [activeSceneId, commands, projection.sessionGraphs])
-  const workspaceTaskIds = new Set(
-    projection.tasks.filter(({ id, workspaceId: owner }) =>
-      owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
-    ).map(({ id }) => id)
-  )
-  const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const workspaceTasks = projection.tasks.filter(({ workspaceId: owner }) => owner === workspaceId)
   const sessionCountByTask = Object.fromEntries(workspaceTasks.map(({ id }) => [
     id, projection.sessions.filter(({ taskId: owner }) => owner === id).length
   ]))
+  const workspaceSessionCount = Object.values(sessionCountByTask)
+    .reduce((total, count) => total + count, 0)
+  const appUpdateControl = <AppUpdateControl
+    activeSessionCount={activeAppSessionCount(projection.sessionGraphs)} />
+  const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
+  const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
   const activeHud = focusedSessionId ? sessionHudById.get(focusedSessionId) : undefined
@@ -654,18 +654,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
     },
     closePane: () => {
       if (!activeSessionMutationBlocked && focusedSessionId) {
-        const focusedNode = activeGraphIndex?.byId.get(focusedSessionId)
-        const inactiveLeafWithoutWorktree = focusedNode !== undefined &&
-          (activeGraphIndex?.descendantsOf(focusedSessionId).length ?? 0) === 0 &&
-          focusedNode.hasOwnedWorktree === false &&
-          focusedNode.workStatus !== 'starting' &&
-          focusedNode.workStatus !== 'running' &&
-          focusedNode.workStatus !== 'needs-input'
-        if (activeSceneId && commands.removeSessionBranch && inactiveLeafWithoutWorktree) {
-          run(commands.removeSessionBranch(activeSceneId, focusedSessionId, 'node-only'))
-        } else {
-          setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
-        }
+        setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
       }
     },
     newTab: () => { if (!readOnly && pathValid && task) run(commands.createCanvas(task.id)) },
@@ -723,7 +712,8 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
   })
   useEffect(() => window.matouDesktop?.onDagShortcut?.(() => {
     openDag()
-  }), [activeSceneId, dagFocusSessionId, projection.windowId, themeKey])
+  }), [activeSceneId, dagFocusSessionId, dagNotificationSignature, projection.windowId,
+    serializedDagInitialGraph, themeKey])
   useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
     const currentProjection = projectionRef.current
     if (selection.mainWindowId !== currentProjection.windowId) return
@@ -772,6 +762,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                 window.matouDesktop.exportDatabaseRecoveryBundle()} />}
               <div className="claude-code-view hierarchy-body">
                 <TaskSidebar projection={projection} commands={commands} pathValid={pathValid}
+                  readOnly={readOnly}
                   boardActive={boardActive} onBoardActiveChange={setBoardActive}
                   settingsActive={settingsActive} onSettingsActiveChange={setSettingsActive}
                   onRevealSession={(sceneId, sessionId) => {
@@ -798,6 +789,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
         </div>}
         {task && <>
           {!settingsActive && <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
+            readOnly={readOnly}
             onOpenDag={openDag} trailingControl={appUpdateControl} />}
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {
@@ -819,15 +811,40 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                 const mountedWindow = mount.sceneWindowId
                   ? layoutIndex?.windowById.get(mount.sceneWindowId)
                   : undefined
-                const childNodes = graph?.nodes.filter(({ parentSessionId }) => parentSessionId === session.id) ?? []
-                const descendantNodes = graph ? sessionDescendants(graph.nodes, session.id) : []
+                const detachedWindow = mountedWindow?.state === 'detached' ? mountedWindow : undefined
+                if (detachedWindow) {
+                  if (!readOnly || liveDetachedWindowIds?.has(detachedWindow.id)) {
+                    return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id}
+                      onReturn={(sceneWindowId) => {
+                        requestDetachedReturn(sceneWindowId)
+                        void window.matouDesktop?.closeDetachedTerminalWindow?.(sceneWindowId)
+                          .catch(() => {})
+                      }} />
+                  }
+                  if (liveDetachedWindowIds === null) {
+                    return <div className="scene-recovery" role="status">正在确认历史窗口…</div>
+                  }
+                }
+                const graphNode = graphIndex?.byId.get(session.id)
+                const sessionEnvironment = optimisticEnvironment(
+                  graphNode?.environment,
+                  environmentTransitionBySession[session.id]
+                )
+                const parentGraphNode = graphNode?.parentSessionId
+                  ? graphIndex?.byId.get(graphNode.parentSessionId)
+                  : undefined
+                const childNodes = graphIndex?.childrenOf(session.id) ?? []
+                const descendantNodes = graphIndex?.descendantsOf(session.id) ?? []
                 const canRemoveBranch = graph
-                  ? branchHasSurvivingCard(graph.nodes, session.id)
+                  ? graph.nodes.length > descendantNodes.length + 1
                   : (snapshot?.mounts.length ?? 0) > 1
-                const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
+                const sessionHud = sessionHudById.get(session.id)
+                const recoveryStatus = sessionRecovery.statusBySession.get(session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
                   active={isFocused}
+                  workspaceSessionCount={workspaceSessionCount}
+                  taskName={task.title}
                   visible={scene.id === activeSceneId && (cardVisible || isFocused)}
                   viewportMoving={viewportMoving}
                   foreground={scene.id === activeSceneId}
@@ -837,6 +854,12 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                   {...(searchOpen && scene.id === activeSceneId && isFocused ? { searchRequest } : {})}
                   {...(scene.id === activeSceneId && isFocused ? { onSearchResults: setSearchResults } : {})}
                   focusRequest={scene.id === activeSceneId && isFocused ? terminalFocusRequest : 0}
+                  {...(scene.id === activeSceneId && isFocused && terminalDiagnostics ? {
+                    diagnosticsProbe: true,
+                    onDiagnosticsStatusChange: terminalDiagnostics.onStatusChange,
+                    onDiagnosticsSmokeMarker: terminalDiagnostics.onSmokeMarker,
+                    onDiagnosticsReplayComplete: terminalDiagnostics.onReplayComplete
+                  } : {})}
                   resumable={sessionHud?.resumable === true}
                   {...(recoveryStatus ? {
                     recoveryState: recoveryStatus.state,
@@ -875,6 +898,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                     ? {} : { hasOwnedWorktree: graphNode.hasOwnedWorktree })}
                   {...(workspace ? { workspaceId: workspace.id } : {})}
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
+                  {...(commands.deleteSession ? { onDelete: commands.deleteSession } : {})}
                   onLoadSession={() => setSessionLoader({
                     sessionId: session.id,
                     sceneId: scene.id,
@@ -882,22 +906,11 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                     running: graphNode?.workStatus === 'running' ||
                       graphNode?.workStatus === 'starting'
                   })}
-                  onDelete={commands.deleteSession}
-                  {...(commands.renameSession ? {
-                    onRename: (sessionId: string, title: string) => commands.renameSession?.(sessionId, title)
-                  } : {})}
-                  {...(commands.restoreSessionAutoTitle ? {
-                    onRestoreAutoTitle: (sessionId: string) => commands.restoreSessionAutoTitle?.(sessionId)
-                  } : {})}
-                  descendantCount={descendantNodes.length}
-                  descendantImpact={{
-                    running: descendantNodes.filter(({ workStatus }) =>
-                      workStatus === 'running' || workStatus === 'starting').length,
-                    needsInput: descendantNodes.filter(({ workStatus }) => workStatus === 'needs-input').length
-                  }}
+                  descendantNodes={[...descendantNodes]}
+                  {...(graphNode?.parentSessionId ? { parentSessionId: graphNode.parentSessionId } : {})}
                   {...(commands.removeSessionBranch && canRemoveBranch ? {
-                    onRemoveBranch: (sessionId: string, includeDescendants: boolean) =>
-                      commands.removeSessionBranch?.(scene.id, sessionId, includeDescendants)
+                    onRemoveBranch: (sessionId, scope) =>
+                      commands.removeSessionBranch?.(scene.id, sessionId, scope)
                   } : {})}
                   onRetryRestore={commands.retryProviderRestore}
                   onStartFreshProvider={commands.startFreshProvider}
@@ -905,6 +918,12 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                     client.retryLastTerminalInput(sessionId)
                   } } : {})}
                   onRetryFork={() => commands.retryFork(scene.id, session.id)}
+                  {...(commands.renameSession ? {
+                    onRename: (sessionId: string, title: string) => commands.renameSession?.(sessionId, title)
+                  } : {})}
+                  {...(commands.restoreSessionAutoTitle ? {
+                    onRestoreAutoTitle: (sessionId: string) => commands.restoreSessionAutoTitle?.(sessionId)
+                  } : {})}
                   onRestoreEnvironment={(sessionId) => environmentActions.restore(sessionId)}
                   onLocateEnvironment={(sessionId) => locateEnvironment(sessionId)}
                   onHandoffEnvironment={(sessionId, target) => environmentActions.handoff(sessionId, target)}
@@ -1048,11 +1067,15 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />
                   </div>
-                  {boardActive && workspace && <WorkspaceKanbanBoard workspace={workspace}
-                    tasks={workspaceTasks} {...(task ? { activeTaskId: task.id } : {})}
+                  {boardActive && workspace && !readOnly && <WorkspaceKanbanBoard
+                    workspace={workspace}
+                    tasks={workspaceTasks}
+                    {...(task ? { activeTaskId: task.id } : {})}
                     sessionCountByTask={sessionCountByTask}
                     onMoveTask={(taskId, status, beforeTaskId) => {
-                      if (!commands.moveTaskOnBoard) throw new Error('Board persistence command is unavailable')
+                      if (!commands.moveTaskOnBoard) {
+                        throw new Error('Board persistence command is unavailable')
+                      }
                       return commands.moveTaskOnBoard(workspace.id, taskId, status, beforeTaskId)
                     }} />}
                   {settingsActive && <ModelSwitchSettings client={client} onClose={() => {
@@ -1340,6 +1363,7 @@ function createFixtureCommands(
       const snapshot = value.sceneSnapshots?.find(({ mounts }) => mounts.some((mount) => mount.sessionId === sessionId))
       if (snapshot) value.navigation.sessionByScene[snapshot.scene.id] = sessionId
     }),
+    deleteSession: (sessionId) => removeFixtureSession(sessionId),
     openSessionEnvironment: async (sessionId) => ({
       sessionId, kind: 'local' as const, path: '/tmp'
     }),
@@ -1358,21 +1382,11 @@ function createFixtureCommands(
     createWorkspace: NOOP, renameWorkspace: NOOP, relinkWorkspace: NOOP, removeWorkspace: NOOP,
     setWorkspacePinned: NOOP, reorderPinnedWorkspace: NOOP,
     createTask: NOOP, renameTask: NOOP, reorderTask: NOOP, deleteTask: NOOP,
-    moveTaskOnBoard: (workspaceId, taskId, status, beforeTaskId) => updateNavigation((value) => {
-      const source = value.tasks.find(({ id, workspaceId: owner }) => id === taskId && owner === workspaceId)
-      if (!source) return
-      const target = value.tasks
-        .filter(({ id, workspaceId: owner, status: ownerStatus }) =>
-          owner === workspaceId && id !== taskId && (ownerStatus ?? 'active') === status)
-        .sort((left, right) => (left.sortKey ?? '').localeCompare(right.sortKey ?? '') || left.id.localeCompare(right.id))
-      const index = beforeTaskId ? target.findIndex(({ id }) => id === beforeTaskId) : target.length
-      target.splice(index < 0 ? target.length : index, 0, source)
-      target.forEach((candidate, ordinal) => {
-        candidate.status = status
-        candidate.sortKey = `a${ordinal.toString().padStart(8, '0')}`
-      })
-    }),
     setTaskPinned: NOOP, reorderPinnedTask: NOOP,
+    moveTaskOnBoard: (_workspaceId, taskId, status) => updateNavigation((value) => {
+      const task = value.tasks.find(({ id }) => id === taskId)
+      if (task) task.status = status
+    }),
     createCanvas: createFixtureCanvas,
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
     createForkChild: createFixtureForkChild, createForkSibling: NOOP,

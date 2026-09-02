@@ -23,6 +23,8 @@ export function GitControlMenu(props: {
   cwd: string
   sessionId: string
   context?: GitControlContext
+  dialogLabel?: string
+  branchRowsAsButtons?: boolean
   onClose(): void
 }) {
   const [status, setStatus] = useState<GitRepositoryStatus>()
@@ -153,7 +155,7 @@ export function GitControlMenu(props: {
     <div className="git-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) props.onClose()
     }}>
-      <section className="git-control-menu" role="dialog" aria-label="Git 控制">
+      <section className="git-control-menu" role="dialog" aria-label={props.dialogLabel ?? 'Git 控制'}>
         {!status && !error && <div className="git-control-menu__empty">正在读取仓库状态…</div>}
         {status && view === 'branches' && <div className="git-picker-view">
           <label className="git-search-field">
@@ -173,8 +175,9 @@ export function GitControlMenu(props: {
           </label>
           <div className="git-section-label">分支</div>
           <div className="git-branch-list" role="listbox" aria-label="Git 分支">
-            {branches.map((branch, index) => <button type="button" role="option"
-              aria-selected={branch.current} className={`git-branch-row${branch.current ? ' is-current' : ''}${selectedBranchIndex === index ? ' is-keyboard' : ''}`}
+            {branches.map((branch, index) => <button type="button"
+              {...(props.branchRowsAsButtons ? {} : { role: 'option', 'aria-selected': branch.current })}
+              className={`git-branch-row${branch.current ? ' is-current' : ''}${selectedBranchIndex === index ? ' is-keyboard' : ''}`}
               key={branch.name} disabled={Boolean(busy)}
               title={branch.checkedOutPath && !branch.current ? `已在 ${branch.checkedOutPath} 中打开` : undefined}
               onPointerMove={() => setSelectedBranchIndex(index)}
@@ -231,8 +234,6 @@ export function GitControlMenu(props: {
                   {worktree.dirty && <span>有更改</span>}{worktree.sessionCount > 0 && <span>{worktree.sessionCount} 会话</span>}</div>
               </div>
               <div className="git-worktree-row-actions">
-                {props.context && !worktree.current && <button type="button" disabled={Boolean(busy)}
-                  onClick={() => void openWorktree(worktree)}>进入</button>}
                 <button type="button" className="git-worktree-more" aria-label={`${worktree.branch} 更多操作`}
                   onClick={() => setWorktreeMenuPath((path) => path === worktree.path ? '' : worktree.path)}><AppIcon name="ellipsis" /></button>
               </div>
@@ -317,17 +318,6 @@ export function GitControlMenu(props: {
         setView('commit')
       }} />}
   </>
-
-  function openWorktree(worktree: GitWorktreeSummary) {
-    return run('正在进入 Worktree…', async () => {
-      await request('git.worktree-open', {
-        cwd: props.cwd, sessionId: props.sessionId,
-        windowId: props.context!.windowId, sceneId: props.context!.sceneId,
-        repositoryRoot: status!.repositoryRoot, path: worktree.path, branch: worktree.branch
-      })
-      props.onClose()
-    })
-  }
 
   function removeWorktree(worktree: GitWorktreeSummary) {
     return run('正在移除 Worktree…', async () => {

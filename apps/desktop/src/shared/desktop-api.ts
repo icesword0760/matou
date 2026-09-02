@@ -25,6 +25,15 @@ export interface MatouDesktopApi {
   onDagShortcut(listener: (kind: 'short' | 'long') => void): () => void
   onScrollGesture(listener: (phase: 'begin' | 'end') => void): () => void
   onRuntimeConnectionState(listener: (state: RuntimeConnectionState) => void): () => void
+  getRuntimeLifecycle(): Promise<RuntimeLifecyclePresentation>
+  onRuntimeLifecycle(listener: (state: RuntimeLifecyclePresentation) => void): () => void
+  restoreDatabaseBackup(
+    backupId: string,
+    expectedRecoveryId: string
+  ): Promise<RuntimeRecoveryCommandResult>
+  exportDatabaseRecoveryBundle(): Promise<RuntimeRecoveryCommandResult>
+  retryDatabaseOpen(expectedRecoveryId: string): Promise<RuntimeRecoveryCommandResult>
+  startWithEmptyDatabase(expectedRecoveryId: string): Promise<RuntimeRecoveryCommandResult>
   getAppUpdateState(): Promise<AppUpdateState>
   checkForAppUpdates(): Promise<void>
   downloadAppUpdate(): Promise<void>
@@ -73,6 +82,42 @@ export type AppUpdateState =
       version?: string
       manualDownloadUrl?: string
     }
+
+export interface RuntimeRecoveryBackup {
+  id: string
+  createdAt: number
+  reason: 'pre-migration' | 'clean-exit'
+  schemaVersion: number
+  size: number
+  sha256: string
+}
+
+export interface RuntimeRecoveryDetails {
+  recoveryId: string
+  reason: 'physical-corruption' | 'wal-recovery-required' | 'ownership-recovery-required'
+  durableDatabasePath: string
+  quarantinedPath: string
+  ownershipIssue?: 'owner-record-malformed' | 'takeover-sidecar-unusable'
+  backups: RuntimeRecoveryBackup[]
+  error?: string
+}
+
+export interface RuntimeRecoveryOperation {
+  requestId: string
+  action: RuntimeRecoveryCommandAction
+  pending: boolean
+  error?: string
+}
+
+export interface RuntimeLifecyclePresentation {
+  snapshot: RuntimeRecoverySnapshot
+  recovery?: RuntimeRecoveryDetails
+  operation?: RuntimeRecoveryOperation
+}
+
+export interface RuntimeRecoveryCommandResult {
+  exportedPath?: string
+}
 
 export interface DetachedTerminalWindowInput {
   windowId: string
@@ -128,6 +173,12 @@ export const DESKTOP_CHANNELS = {
   dagShortcut: 'matou:dag-shortcut',
   scrollGesture: 'matou:scroll-gesture',
   runtimeConnectionState: 'matou:runtime-connection-state',
+  runtimeLifecycle: 'matou:runtime-lifecycle',
+  getRuntimeLifecycle: 'matou:get-runtime-lifecycle',
+  restoreDatabaseBackup: 'matou:restore-database-backup',
+  exportDatabaseRecoveryBundle: 'matou:export-database-recovery-bundle',
+  retryDatabaseOpen: 'matou:retry-database-open',
+  startWithEmptyDatabase: 'matou:start-with-empty-database',
   getAppUpdateState: 'matou:app-update:get-state',
   checkForAppUpdates: 'matou:app-update:check',
   downloadAppUpdate: 'matou:app-update:download',

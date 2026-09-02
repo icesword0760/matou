@@ -44,7 +44,7 @@ function SidebarGlassMaterial() {
     optics={SIDEBAR_GLASS_OPTICS} radius={0} />
 }
 
-export function TaskSidebar({ projection, commands, onRevealSession, boardActive = false, onBoardActiveChange,
+export function TaskSidebar({ projection, commands, readOnly = false, onRevealSession, boardActive = false, onBoardActiveChange,
   settingsActive = false, onSettingsActiveChange }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
@@ -106,6 +106,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
   }, [toast])
 
   const chooseDirectory = async () => {
+    if (readOnly) return
     const path = await window.matouDesktop?.selectWorkspaceDirectory()
     if (!path) return
     setCreatingWorkspace(true)
@@ -118,6 +119,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
     }
   }
   const relinkDirectory = async (workspace: WorkspaceView) => {
+    if (readOnly) return
     const path = await window.matouDesktop?.selectWorkspaceDirectory()
     if (!path) return
     try {
@@ -184,7 +186,8 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
     <SidebarGlassMaterial />
     <header className="flat-sidebar__topbar">
       <button className="flat-sidebar__new-workspace" aria-label="新增工作空间"
-        disabled={creatingWorkspace} onClick={() => void chooseDirectory()}>
+        disabled={readOnly || creatingWorkspace} title={readOnly ? READ_ONLY_REASON : undefined}
+        onClick={() => void chooseDirectory()}>
         <ComposeIcon /><span>{creatingWorkspace ? '正在添加…' : '新增工作空间'}</span>
       </button>
       <button className="flat-sidebar__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
@@ -293,6 +296,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
     <footer className="flat-sidebar__toolbar" aria-label="工作空间视图">
       <button type="button" className={`flat-sidebar__board-toggle${boardActive ? ' is-active' : ''}`}
         aria-label="看板" aria-pressed={boardActive}
+        disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
         onClick={() => { onSettingsActiveChange?.(false); onBoardActiveChange?.(!boardActive) }}>
         <KanbanIcon /><span>看板</span><i aria-hidden="true" />
       </button>
@@ -326,9 +330,12 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
         onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
     </div>}
     {menuTask && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
-        <button role="menuitem" onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
-        <button role="menuitem" onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
-        <button role="menuitem" className="is-delete" onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
+        <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+          onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
+        <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+          onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
+        <button role="menuitem" className="is-delete" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+          onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
     </div>}
     {removeWorkspace && <ConfirmDialog title="移出工作空间"
       body={`移出 "${removeWorkspace.name}" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？`}

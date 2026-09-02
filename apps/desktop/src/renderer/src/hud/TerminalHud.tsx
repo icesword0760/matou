@@ -10,7 +10,7 @@ import {
   type SessionEnvironmentActions
 } from './EnvironmentControlMenu'
 import type {
-  HudPermissionMode, SessionHudView
+  HudModelStrategy, HudPermissionMode, SessionHudView
 } from '../hierarchy/hierarchy-types'
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 
@@ -24,7 +24,7 @@ export function TerminalHud(props: {
   hud: SessionHudView | undefined
   sessionId?: string
   onPermissionMode(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
-  onModel?(sessionId: string, strategy: string): unknown
+  onModel?(sessionId: string, strategy: HudModelStrategy): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
   disabledReason?: string
@@ -70,8 +70,8 @@ export function TerminalHud(props: {
       }
     }
     const closeEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || !menu) return
-      setMenu(null)
+      if (event.key !== 'Escape' || (!menu && !environmentOpen)) return
+      setMenu(null); setEnvironmentOpen(false)
       event.preventDefault()
       event.stopPropagation()
     }
@@ -81,13 +81,18 @@ export function TerminalHud(props: {
       document.removeEventListener('pointerdown', closeOutside, true)
       document.removeEventListener('keydown', closeEscape, true)
     }
-  }, [menu])
+  }, [menu, environmentOpen])
 
-  if (!hud) return null
-  const shortCwd = cwdShortName(hud.cwd)
-  const gitDisplay = hud.gitBranch ? `${hud.gitBranch}${hud.gitDirty ? '*' : ''}` : ''
+  const sessionId = hud?.sessionId ?? props.sessionId
+  if (!sessionId || (!hud && !props.environment && !props.git)) return null
+  const shortCwd = cwdShortName(hud?.cwd)
+  const git = hud
+    ? legacyGitState(hud)
+    : props.git ?? (props.environment ? { state: 'unavailable' as const, dirty: false } : undefined)
+  const gitDisplay = git ? gitStateLabel(git) : ''
+  const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
   const openMenu = (event: React.MouseEvent<HTMLElement>) => {
-    if (switching) return
+    if (disabled || switching) return
     if (menu === 'permission') { setMenu(null); return }
     const rect = event.currentTarget.getBoundingClientRect()
     setMenuStyle({ left: rect.left, top: rect.top - 8, transform: 'translateY(-100%)' })
@@ -116,19 +121,20 @@ export function TerminalHud(props: {
       </span>}
       {hasAgentInfo(hud) && (shortCwd || gitDisplay || elapsed) && <span className="status-divider status-priority-3" />}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
-      {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={!gitClient} aria-label="打开 Git 控制" title="Git"
-        onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
-      {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
-    </> : <>
+    </> : hud?.mode === 'shell' ? <>
       {hud.shell && <span className="status-field">{hud.shell}</span>}
       {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
-      {gitDisplay && <button type="button" className="status-field status-git status-priority-2 is-clickable"
-        disabled={!gitClient} aria-label="打开 Git 控制" title="Git"
-        onClick={() => { setMenu(null); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
-      {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
-    </>}
-    {menu && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
+    </> : null}
+    {git && <button type="button" className="status-field status-git is-clickable"
+      disabled={disabled || !gitClient || git.state === 'unavailable'} aria-label="打开 Git"
+      title={props.disabledReason ?? gitStateTitle(git)}
+      onClick={() => { setMenu(null); setEnvironmentOpen(false); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
+    {props.environment && <EnvironmentButton environment={props.environment}
+      disabled={!props.environmentActions} onClick={() => {
+        setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
+      }} />}
+    {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
+    {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label="权限模式">
       <div className="perm-menu__title">权限模式</div>
@@ -161,8 +167,17 @@ export function TerminalHud(props: {
         }).finally(() => setSwitching(false))
       }} />, document.body)}
     {switchError && createPortal(<div className="terminal-toast is-error" role="status">{switchError}</div>, document.body)}
-    {gitOpen && gitClient && hud.cwd && createPortal(<GitControlMenu client={gitClient}
-      cwd={hud.cwd} sessionId={hud.sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
+    {environmentOpen && props.environment && props.environmentActions && createPortal(
+      <EnvironmentControlMenu sessionId={sessionId} environment={props.environment}
+        hasOwnedWorktree={props.hasOwnedWorktree === true} actions={props.environmentActions}
+        {...(props.environmentDisabledReason
+          ? { mutationDisabledReason: props.environmentDisabledReason }
+          : {})}
+        onClose={() => setEnvironmentOpen(false)} />, document.body
+    )}
+    {gitOpen && !disabled && git?.state === 'ready' && gitClient && gitCwd && createPortal(<GitControlMenu client={gitClient}
+      cwd={gitCwd} sessionId={sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
+      dialogLabel="Git 与 Worktree" branchRowsAsButtons
       onClose={() => setGitOpen(false)} />, document.body)}
   </div>
 }

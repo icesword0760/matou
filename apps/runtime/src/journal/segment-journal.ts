@@ -406,7 +406,7 @@ export class SegmentJournal {
       header.kind === 'output' ? data : EMPTY_BYTES,
       header.kind === 'domain-cursor' ? header.domainEventSequence : undefined
     )
-    if (this.#tailIndex.snapshot(this.#segmentIndex).framesRecorded % 256 === 0) {
+    if (this.#tailIndex.framesRecorded % 256 === 0) {
       this.#scheduleTailIndexWrite()
     }
     if (this.#size - this.#lastCompressionScanSize >= this.#compressionScanStep) {

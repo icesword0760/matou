@@ -316,10 +316,6 @@ describe('SessionCanvasService', () => {
 
   it('removes only an active root and promotes its direct child without breaking deeper descendants', () => {
     const initial = bootstrap()
-    const survivor = service.createShellSibling(command('active-branch-survivor'), {
-      windowId: 'window-1', sceneId: initial.scene!.id,
-      sourceSessionId: initial.session!.id, now: 19
-    })
     const child = service.createShellSibling(command('active-branch-child'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
       sourceSessionId: initial.session!.id, parentSessionId: initial.session!.id, now: 20
@@ -345,6 +341,10 @@ describe('SessionCanvasService', () => {
 
   it('removes an active parent and its complete descendant branch from both projections', () => {
     const initial = bootstrap()
+    const survivor = service.createShellSibling(command('active-whole-branch-survivor'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 19
+    })
     const child = service.createShellSibling(command('active-whole-branch-child'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
       sourceSessionId: initial.session!.id, parentSessionId: initial.session!.id, now: 20
@@ -372,7 +372,7 @@ describe('SessionCanvasService', () => {
 
     expect(() => service.removeSessionBranch(command('remove-final-card'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
-      includeDescendants: false, now: 20
+      scope: 'node-only', now: 20
     })).toThrow('Scene must keep one Session')
 
     expect(service.projectSceneGraph(initial.scene!.id, 'window-1').nodes.map(({ sessionId }) => sessionId))

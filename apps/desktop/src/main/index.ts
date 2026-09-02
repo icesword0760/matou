@@ -1,6 +1,8 @@
 import { mkdirSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { execFile, spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, screen, shell, Tray } from 'electron'
 import electronUpdater from 'electron-updater'
@@ -14,6 +16,7 @@ import { resolveDefaultWorkspacePath } from './default-workspace-policy'
 import { claimSingleInstance } from './single-instance-policy'
 import { WindowManager } from './window-manager'
 import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
+import { secondaryDisplayWindowBounds } from './e2e-window-placement'
 import { installDevelopmentDockIcon } from './app-icon'
 import { downloadManualUpdate } from './manual-update-downloader'
 import { readUpdateBaseUrl } from './update-feed'
@@ -36,7 +39,7 @@ let runtimeShutdownComplete = false
 let runtimeShutdownPromise: Promise<void> | undefined
 let mainWindowSequence = 0
 let updateManager: AppUpdateManager | undefined
-
+const execFileAsync = promisify(execFile)
 const { autoUpdater } = electronUpdater
 const isPackagedApplication = resolvePackagedApplication({
   electronPackaged: app.isPackaged,
@@ -44,6 +47,16 @@ const isPackagedApplication = resolvePackagedApplication({
 })
 
 applyApplicationBrand(app, APP_DISPLAY_NAME)
+
+if (process.env.MATOU_E2E_SCALE === '1') {
+  Object.defineProperty(globalThis, '__matouE2eScaleMetrics', {
+    configurable: true,
+    value: (options: { resetStatementCount?: boolean } = {}) => {
+      if (!runtimeHost) throw new Error('Runtime is not running')
+      return runtimeHost.getScaleMetrics(options)
+    }
+  })
+}
 
 if (process.env.ELECTRON_USER_DATA_DIR) {
   mkdirSync(process.env.ELECTRON_USER_DATA_DIR, { recursive: true })
@@ -138,9 +151,10 @@ async function createWindow(): Promise<BrowserWindow> {
     rendererUrl.searchParams.set('defaultName', defaultName)
     if (process.env.MATOU_E2E === '1') {
       rendererUrl.searchParams.set('e2e', '1')
-      if (process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0') {
-        rendererUrl.searchParams.set('terminalDiagnostics', '0')
-      }
+      rendererUrl.searchParams.set(
+        'terminalDiagnostics',
+        process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '1' ? '1' : '0'
+      )
     }
     await window.loadURL(rendererUrl.toString())
   } else {
@@ -151,9 +165,7 @@ async function createWindow(): Promise<BrowserWindow> {
         defaultName,
         ...(process.env.MATOU_E2E === '1' ? {
           e2e: '1',
-          ...(process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0'
-            ? { terminalDiagnostics: '0' }
-            : {})
+          terminalDiagnostics: process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '1' ? '1' : '0'
         } : {})
       }
     })
@@ -212,9 +224,7 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
     profile: input.profile, title: input.title,
     ...(process.env.MATOU_E2E === '1' ? {
       e2e: '1',
-      ...(process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0'
-        ? { terminalDiagnostics: '0' }
-        : {})
+      terminalDiagnostics: process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '1' ? '1' : '0'
     } : {})
   }
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -245,8 +255,6 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
     minHeight: 480,
     show: false,
     frame: true,
-    resizable: true,
-    maximizable: true,
     title: `${APP_DISPLAY_NAME} · 会话 DAG`,
     backgroundColor: context.theme === 'light' ? '#F7F8FA' : '#171717',
     ...(process.platform === 'darwin' ? {
@@ -311,16 +319,6 @@ function installNativeScrollGesture(window: BrowserWindow): void {
   })
 }
 
-function installNativeScrollGesture(window: BrowserWindow): void {
-  window.webContents.on('input-event', (_event, input) => {
-    const phase = input.type === 'gestureScrollBegin'
-      ? 'begin'
-      : input.type === 'gestureScrollEnd' ? 'end' : undefined
-    if (!phase || window.isDestroyed()) return
-    window.webContents.send(DESKTOP_CHANNELS.scrollGesture, phase)
-  })
-}
-
 function resolveRuntimeEntry(): string {
   if (process.env.MATOU_RUNTIME_ENTRY) {
     return resolve(process.env.MATOU_RUNTIME_ENTRY)
@@ -362,10 +360,7 @@ if (primaryInstance) app.whenReady().then(async () => {
         const result = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', bundlePath], {
           encoding: 'utf8'
         })
-        return {
-          status: result.status,
-          output: `${result.stdout ?? ''}\n${result.stderr ?? ''}`
-        }
+        return { status: result.status, output: `${result.stdout ?? ''}\n${result.stderr ?? ''}` }
       }
     }),
     ...(updateBaseUrl ? { updateBaseUrl } : {}),
@@ -462,6 +457,31 @@ ipcMain.handle(DESKTOP_CHANNELS.updateDagNotifications, (
 ) => {
   dagWindows.updateNotifications(mainWindowId, sessionIds)
 })
+ipcMain.handle(DESKTOP_CHANNELS.getRuntimeLifecycle, () => runtimeHost?.getLifecycle())
+ipcMain.handle(DESKTOP_CHANNELS.restoreDatabaseBackup, (
+  _event,
+  backupId: string,
+  expectedRecoveryId: string
+) =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(),
+    action: 'restore-backup', backupId, expectedRecoveryId
+  }))
+ipcMain.handle(DESKTOP_CHANNELS.exportDatabaseRecoveryBundle, () =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(),
+    action: 'export-recovery-bundle'
+  }))
+ipcMain.handle(DESKTOP_CHANNELS.retryDatabaseOpen, (_event, expectedRecoveryId: string) =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'retry-open',
+    expectedRecoveryId
+  }))
+ipcMain.handle(DESKTOP_CHANNELS.startWithEmptyDatabase, (_event, expectedRecoveryId: string) =>
+  runtimeHost?.recover({
+    type: 'runtime.recovery-command', requestId: randomUUID(), action: 'start-empty-database',
+    expectedRecoveryId
+  }))
 ipcMain.handle(DESKTOP_CHANNELS.getAppUpdateState, () => updateManager?.state() ?? ({
   status: 'idle', currentVersion: app.getVersion()
 }))
@@ -481,12 +501,6 @@ app.on('will-quit', (event) => {
   void shutdownRuntime().then(() => app.quit())
 })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin' || process.env.MATOU_E2E === '1') {
-    app.quit()
-  }
-})
-
 async function shutdownRuntime(): Promise<void> {
   if (runtimeShutdownComplete || !runtimeHost) return
   runtimeShutdownPromise ??= runtimeHost.stop().then(() => {
@@ -494,3 +508,9 @@ async function shutdownRuntime(): Promise<void> {
   })
   await runtimeShutdownPromise
 }
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin' || process.env.MATOU_E2E === '1') {
+    app.quit()
+  }
+})

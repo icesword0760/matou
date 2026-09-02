@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -16,44 +16,6 @@ afterEach(async () => {
 })
 
 describe('PtySession Runtime shutdown', () => {
-  it('loads packaged Codex guidance as a session-only launch argument', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'matou-pty-codex-guidance-'))
-    roots.push(root)
-    const controlAssetRoot = join(root, 'control assets 空格')
-    const providerDirectory = join(controlAssetRoot, 'providers')
-    await mkdir(providerDirectory, { recursive: true })
-    const instructions = '先 identify\n再使用 "mt" 和 \\path'
-    await writeFile(join(providerDirectory, 'codex-developer-instructions.md'), instructions)
-    const executable = join(root, 'capture-codex-args.js')
-    const argumentFile = join(root, 'codex-args.json')
-    await writeFile(executable, `#!/usr/bin/env node
-const fs = require('node:fs')
-fs.writeFileSync(process.env.MATOU_TEST_ARGS_FILE, JSON.stringify(process.argv.slice(2)))
-setInterval(() => {}, 1_000)
-`)
-    await chmod(executable, 0o755)
-    const previousCommand = process.env.MATOU_CODEX_COMMAND
-    process.env.MATOU_CODEX_COMMAND = executable
-    try {
-      const session = await PtySession.create({
-        sessionId: 'codex-guidance', executionContextId: 'local-default',
-        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'codex',
-        providerSessionId: 'codex-resume-id', permissionMode: 'bypassPermissions',
-        controlAssetRoot, env: { MATOU_TEST_ARGS_FILE: argumentFile }, send: () => {}
-      })
-      const args = await waitForJsonArray(argumentFile)
-      expect(args).toEqual([
-        '-c', `developer_instructions=${JSON.stringify(instructions)}`,
-        '--dangerously-bypass-approvals-and-sandbox',
-        'resume', 'codex-resume-id'
-      ])
-      await session.shutdownForRuntime({ gracePeriodMs: 40, hardKillWaitMs: 1_000 })
-    } finally {
-      if (previousCommand === undefined) delete process.env.MATOU_CODEX_COMMAND
-      else process.env.MATOU_CODEX_COMMAND = previousCommand
-    }
-  })
-
   it('escalates an unresponsive PTY and still closes its journal', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-pty-shutdown-'))
     roots.push(root)
@@ -93,14 +55,173 @@ setInterval(() => {}, 1_000)
   })
 })
 
-async function waitForJsonArray(path: string): Promise<unknown[]> {
-  const deadline = Date.now() + 2_000
-  while (Date.now() < deadline) {
+describe('PtySession live catch-up', () => {
+  it('streams a credit-resumed suffix without decoding a cold segment', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-range-replay-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    const sent: RuntimeMessage[] = []
+    let session: PtySession | undefined
     try {
-      return JSON.parse(await readFile(path, 'utf8')) as unknown[]
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 20))
+      session = await PtySession.create({
+        sessionId: 'credit-range-session', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: (message) => { sent.push(message) },
+        journalOptions: { maxSegmentBytes: 700 * 1024, compressSealed: false }
+      })
+      session.display('a'.repeat(600 * 1024))
+      session.display('b'.repeat(600 * 1024))
+      session.display('c'.repeat(600 * 1024))
+      await waitUntil(() => sent.filter(({ type }) => type === 'terminal.data').length === 2)
+      await session.replayMetadata()
+      const bounds = await readSessionJournalBounds(root, 'credit-range-session')
+      const cold = bounds.segments.find(({ lastSequence }) => lastSequence < 3)
+      expect(cold).toBeDefined()
+      await writeFile(cold!.path, 'corrupted cold segment')
+
+      session.acknowledge(2)
+      await waitUntil(() => sent.filter(({ type }) => type === 'terminal.data').length === 3)
+
+      expect(sent.filter(({ type }) => type === 'terminal.data').at(-1)).toMatchObject({
+        sequence: 3
+      })
+    } finally {
+      await session?.endDurability()
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
     }
+  }, 10_000)
+})
+
+describe('PtySession resize deduplication', () => {
+  it('records and applies adjacent identical dimensions only once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-resize-'))
+    roots.push(root)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'deduplicated-resize', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {}
+      })
+      session.resize(120, 42)
+      session.resize(120, 42)
+
+      const resizeFrames = (await session.readFrames())
+        .filter((frame) => frame.kind === 'resize')
+
+      expect(resizeFrames).toEqual([
+        { kind: 'resize', sequence: 1, cols: 120, rows: 42 }
+      ])
+    } finally {
+      session?.dispose({ notifyExit: false, reason: 'runtime-shutdown' })
+      await session?.whenClosed()
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  })
+})
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition did not become true')
+    await new Promise((resolve) => setTimeout(resolve, 10))
   }
-  throw new Error('provider argument capture timed out')
 }
+
+describe('PtySession durability recovery', () => {
+  it('publishes output metadata only after the retained frame is durably retried', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-durability-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    let failOnce = true
+    const output: string[] = []
+    let faulted: () => void = () => {}
+    const storageFault = new Promise<void>((resolve) => { faulted = resolve })
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'durability-retry', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {},
+        onOutput: (data) => { output.push(data) },
+        onDurabilityFault: () => { faulted() },
+        journalOptions: {
+          writeFrame: async (handle, encoded) => {
+            if (failOnce) {
+              failOnce = false
+              await handle.write(encoded.subarray(0, 9))
+              throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
+            }
+            await handle.write(encoded)
+          }
+        }
+      })
+
+      session.display('retained-marker')
+      await storageFault
+      expect(session.durabilityState).toBe('paused')
+      expect(output).toEqual([])
+      expect(() => session!.write('echo blocked\n')).toThrow('session storage is paused')
+      session.display('after-marker')
+
+      await session.retryDurability()
+
+      expect(session.durabilityState).toBe('healthy')
+      expect(output).toEqual(['retained-marker', 'after-marker'])
+      await expect(session.readFrames()).resolves.toMatchObject([
+        { kind: 'output', sequence: 1, data: new TextEncoder().encode('retained-marker') },
+        { kind: 'output', sequence: 2, data: new TextEncoder().encode('after-marker') }
+      ])
+    } finally {
+      await session?.endDurability()
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  })
+
+  it('finishes Runtime shutdown within its bounds while journal storage is faulted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-durability-shutdown-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    let faulted: () => void = () => {}
+    const storageFault = new Promise<void>((resolve) => { faulted = resolve })
+    try {
+      const session = await PtySession.create({
+        sessionId: 'faulted-shutdown', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {},
+        onDurabilityFault: () => { faulted() },
+        journalOptions: {
+          writeFrame: async () => { throw Object.assign(new Error('read only'), { code: 'EACCES' }) }
+        }
+      })
+      session.display('fault')
+      await storageFault
+
+      const startedAt = Date.now()
+      await session.shutdownForRuntime({ gracePeriodMs: 100, hardKillWaitMs: 500 })
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000)
+      await expect(session.whenClosed()).resolves.toBeUndefined()
+    } finally {
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  })
+})

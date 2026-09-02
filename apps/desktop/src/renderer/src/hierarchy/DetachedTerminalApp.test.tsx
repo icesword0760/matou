@@ -49,15 +49,29 @@ describe('PRD 02 detached HUD', () => {
     expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
   })
 
-  it('keeps the removed session model control out of detached windows', () => {
+  it('turns an existing independent terminal into replay-only browsing with one clear reason', async () => {
+    window.matouDesktop = {
+      exportDatabaseRecoveryBundle: vi.fn(async () => ({ exportedPath: '/tmp/export' }))
+    } as unknown as typeof window.matouDesktop
     window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')
-    render(<DetachedTerminalApp />)
+    const view = render(<DetachedTerminalApp runtimeMode="normal" />)
+    expect(screen.getByText('独立窗口 · 会话保持运行')).toBeTruthy()
 
-    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
+    view.rerender(<DetachedTerminalApp runtimeMode="read-only" />)
+
+    expect(screen.getByText('数据库处于只读恢复模式')).toBeTruthy()
+    expect(screen.queryByText('独立窗口 · 会话保持运行')).toBeNull()
+    expect(screen.getByTestId('terminal-agent-1').dataset.readOnly).toBe('true')
+    expect(screen.getByTestId('terminal-agent-1').dataset.inputDisabled).toBe('true')
+    const permission = screen.getByRole('button', { name: /当前权限模式：Default/ })
+    expect(permission.hasAttribute('disabled')).toBe(true)
+    expect(permission.getAttribute('title')).toBe('数据库处于只读恢复模式')
+    expect(runtime.request).not.toHaveBeenCalledWith('session.set-permission-mode', expect.anything())
     expect(runtime.request).not.toHaveBeenCalledWith('session.set-model', expect.anything())
   })
 
-  it('opens the same scene DAG immediately on Option Tab from a detached session', () => {
+  it('opens the same scene DAG after a long Option Tab hold from a detached session', () => {
+    vi.useFakeTimers()
     const openDagWindow = vi.fn(async () => undefined)
     window.matouDesktop = { openDagWindow } as unknown as typeof window.matouDesktop
     window.history.replaceState({}, '',
@@ -65,6 +79,7 @@ describe('PRD 02 detached HUD', () => {
     render(<DetachedTerminalApp />)
 
     fireEvent.keyDown(window, { key: 'Tab', altKey: true })
+    vi.advanceTimersByTime(450)
 
     expect(openDagWindow).toHaveBeenCalledWith({
       mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'agent-1', theme: 'light'

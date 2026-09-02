@@ -23,8 +23,10 @@ import {
 } from './terminal-themes'
 
 const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
-const FILE_TREE_MIME = 'application/x-file-tree-nodes'
-const SETTLED_LAYOUT_DELAY_MS = 120
+const REFERENCE_FILE_TREE_MIME = 'application/x-file-tree-nodes'
+const CHECKPOINT_QUIET_MS = 500
+const CHECKPOINT_SCROLLBACK_LINES = 10_000
+const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -53,6 +55,7 @@ interface TerminalSurfaceProps {
   viewportMoving?: boolean
   inputDisabled?: boolean
   readOnly?: boolean
+  diagnosticsProbe?: boolean
   themeKey?: TerminalThemeKey
   fontSize?: number
   onFontSizeChange?: (fontSize: number) => void
@@ -107,7 +110,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
     profile = 'shell', visible = true, active = true, foreground = true, viewportMoving = false,
-    inputDisabled = false, readOnly = false,
+    inputDisabled = false, readOnly = false, diagnosticsProbe = false,
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onRuntimeError = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
@@ -138,9 +141,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
   const sendInputRef = useRef<(data: string) => void>(NOOP)
-  const scheduleLayoutFitRef = useRef<() => void>(NOOP)
-  const layoutFitTimerRef = useRef<number | undefined>(undefined)
-  const replayingRef = useRef(false)
+  const checkpointNowRef = useRef<() => void>(NOOP)
+  const flushOutputRef = useRef<() => void>(NOOP)
+  const resumeVisualRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
   const historyModeRef = useRef(false)
   const historyRequestGenerationRef = useRef(0)
@@ -174,8 +177,19 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [client, profile, sessionId])
 
   useEffect(() => {
-    if (visible) scheduleLayoutFitRef.current()
-  }, [visible])
+    if (visible || active) {
+      const catchupTimer = active || viewportMoving
+        ? undefined
+        : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
+      if (active && !viewportMoving) resumeVisualRef.current()
+      flushOutputRef.current()
+      requestAnimationFrame(() => fitRef.current?.fit())
+      return () => {
+        if (catchupTimer !== undefined) clearTimeout(catchupTimer)
+      }
+    }
+    return undefined
+  }, [active, viewportMoving, visible])
 
   useEffect(() => {
     if (!foreground) checkpointNowRef.current()
@@ -187,7 +201,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     fontSizeRef.current = fontSize
     if (!terminalRef.current) return
     terminalRef.current.options.fontSize = fontSize
-    scheduleLayoutFitRef.current()
+    requestAnimationFrame(() => fitRef.current?.fit())
   }, [fontSize])
   useEffect(() => {
     if (!terminalRef.current) return
@@ -309,36 +323,93 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
       requestAnimationFrame(() => terminal.focus())
     }
-    const decoder = new TextDecoder()
-    let observed = ''
     let replayRequested = false
     let replaying = false
     let preserveExistingModelForReplay = false
     let spawned = false
-    const fitSettledLayout = () => {
-      layoutFitTimerRef.current = undefined
-      if (!visibleRef.current || replayingRef.current) return
+    let visualCatchupPending = false
+    let visualCatchupRequested = false
+    let surfaceDisposed = false
+    let checkpointTimer: ReturnType<typeof setTimeout> | undefined
+    let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
+    const publishE2eRows = () => {
+      e2eRowsTimer = undefined
+      if (!e2eRows?.classList.contains('xterm-rows')) return
       const buffer = terminal.buffer.active
-      const wasAtBottom = buffer.viewportY >= buffer.baseY
-      fit.fit()
-      if (terminal.cols >= 2 && terminal.cols <= 1000 && terminal.rows >= 1 && terminal.rows <= 500) {
-        client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
+      const lines: string[] = []
+      const first = Math.max(0, buffer.length - 10_000)
+      for (let index = first; index < buffer.length; index += 1) {
+        lines.push(buffer.getLine(index)?.translateToString(true) ?? '')
       }
-      // A font or card-width adjustment must not leave the live prompt below
-      // the viewport. Preserve manual history inspection by following the
-      // bottom only when the user was already there before the layout changed.
-      if (wasAtBottom) terminal.scrollToBottom()
+      const row = e2eRows.firstElementChild
+      if (row) row.textContent = lines.join('\n')
     }
-    const scheduleLayoutFit = () => {
-      if (layoutFitTimerRef.current !== undefined) {
-        window.clearTimeout(layoutFitTimerRef.current)
-      }
-      layoutFitTimerRef.current = window.setTimeout(
-        fitSettledLayout,
-        SETTLED_LAYOUT_DELAY_MS
+    const scheduleE2eRows = () => {
+      if (!e2eRows?.classList.contains('xterm-rows')) return
+      if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
+      // Publish only after output becomes quiet. This is an observation of the
+      // parsed xterm buffer for real Electron acceptance tests; debouncing keeps
+      // sustained-output performance measurements representative.
+      e2eRowsTimer = setTimeout(publishE2eRows, 80)
+    }
+    scheduleE2eRows()
+    const clearCheckpointTimer = () => {
+      if (checkpointTimer !== undefined) clearTimeout(checkpointTimer)
+      checkpointTimer = undefined
+    }
+    const storeCheckpoint = () => {
+      clearCheckpointTimer()
+      if (
+        readOnly || replaying || model.lastAppliedSequence <= 0 ||
+        model.lastAppliedSequence <= model.lastCheckpointSequence
+      ) return
+      const snapshot = serializeCheckpoint(serialize)
+      if (snapshot === undefined) return
+      model.lastCheckpointSequence = model.lastAppliedSequence
+      client.storeTerminalCheckpoint(
+        sessionId,
+        model.lastAppliedSequence,
+        model.screenEpoch,
+        snapshot
       )
     }
-    scheduleLayoutFitRef.current = scheduleLayoutFit
+    const scheduleCheckpoint = (delay = CHECKPOINT_QUIET_MS) => {
+      clearCheckpointTimer()
+      if (
+        readOnly || replaying || model.lastAppliedSequence <= 0 ||
+        model.lastAppliedSequence <= model.lastCheckpointSequence
+      ) return
+      checkpointTimer = setTimeout(storeCheckpoint, delay)
+    }
+    checkpointNowRef.current = storeCheckpoint
+    const writeLiveOutput = (bytes: Uint8Array, sequence: number) => {
+      terminal.write(bytes, () => {
+        model.lastAppliedSequence = Math.max(model.lastAppliedSequence, sequence)
+        client.acknowledgeTerminal(sessionId, sequence)
+        if (surfaceDisposed) return
+        scheduleE2eRows()
+        scheduleCheckpoint()
+        if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
+          terminal.focus()
+        }
+      })
+    }
+    const output = new TerminalOutputCoalescer(writeLiveOutput)
+    flushOutputRef.current = () => output.flush()
+    const requestVisualCatchup = () => {
+      if (!visualCatchupPending || visualCatchupRequested || replaying) return
+      visualCatchupRequested = true
+      clearCheckpointTimer()
+      // Rebuild from Runtime's bounded tail rather than parsing an unbounded
+      // offscreen byte stream. Runtime and its Journal stay live throughout;
+      // only hidden xterm painting is suspended.
+      const fromSequence = model.lastAppliedSequence > 0
+        ? model.lastAppliedSequence + 1
+        : 0
+      preserveExistingModelForReplay = fromSequence > 0
+      client.requestTerminalReplay(sessionId, fromSequence, preserveExistingModelForReplay)
+    }
+    resumeVisualRef.current = requestVisualCatchup
     const markSpawned = () => {
       spawned = true
       if (pendingInputRef.current) {
@@ -353,7 +424,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     sendInputRef.current = sendOrBufferInput
     const replayProbe = shouldRunReplayProbe(
       sessionId,
-      new URLSearchParams(window.location.search).get('e2e') === '1'
+      new URLSearchParams(window.location.search).get('e2e') === '1',
+      diagnosticsProbe
     )
     onStatusChange('starting-session')
 
@@ -379,7 +451,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           }
         }
         if (replayProbe) {
-          client.sendTerminalInput(sessionId, `printf '${SMOKE_MARKER}\\n'\r`)
+          onSmokeMarker(SMOKE_MARKER)
+          if (!replayRequested) {
+            replayRequested = true
+            client.requestTerminalReplay(sessionId)
+          }
         }
       } else if (message.type === 'terminal.data') {
         // A transferred/re-attached stream can deliver replay or live output
@@ -389,20 +465,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         const bytes = message.data instanceof Uint8Array
           ? message.data
           : new Uint8Array(message.data)
-        // The rolling decoded string exists only for the E2E transport probe.
-        // Decoding every live byte a second time for ordinary Sessions creates
-        // large short-lived strings under multi-terminal output; xterm already
-        // owns the authoritative UTF-8/VT decoding path.
-        if (replayProbe) {
-          observed = (observed + decoder.decode(bytes, { stream: true })).slice(-8192)
-          if (observed.includes(SMOKE_MARKER)) {
-            onSmokeMarker(SMOKE_MARKER)
-            if (!replayRequested) {
-              replayRequested = true
-              client.requestTerminalReplay(sessionId)
-            }
-          }
-        }
         if ((!visibleRef.current && !activeRef.current || visualCatchupPending) && !replaying) {
           visualCatchupPending = true
           client.acknowledgeTerminal(sessionId, message.sequence)
@@ -451,20 +513,49 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-start') {
         clearCheckpointTimer()
         replaying = true
-        replayingRef.current = true
-        terminal.reset()
+        visualCatchupPending = false
+        const preservingExistingModel = preserveExistingModelForReplay && !message.checkpoint
+        if (!preservingExistingModel) {
+          terminal.reset()
+          model.lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
+          model.lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
+          model.screenEpoch = message.checkpoint?.screenEpoch ?? 0
+        }
+        preserveExistingModelForReplay = false
+        if (message.checkpoint) {
+          const snapshot = message.checkpoint.snapshot instanceof Uint8Array
+            ? message.checkpoint.snapshot
+            : new Uint8Array(message.checkpoint.snapshot)
+          terminal.write(snapshot, scheduleE2eRows)
+        }
       } else if (message.type === 'terminal.replay-resize') {
         // Resize is part of VT history: zsh and full-screen tools emit cursor
         // movements relative to the active grid. Apply it at its original
         // sequence instead of replaying every byte at today's card width.
-        terminal.write('', () => terminal.resize(message.cols, message.rows))
+        terminal.write('', () => {
+          terminal.resize(message.cols, message.rows)
+          scheduleE2eRows()
+          publishTerminalDimensions()
+          model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
+        })
       } else if (message.type === 'terminal.replay-reset') {
-        terminal.write('', () => terminal.reset())
+        terminal.write('', () => {
+          terminal.reset()
+          scheduleE2eRows()
+          model.screenEpoch = message.screenEpoch
+          model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
+        })
       } else if (message.type === 'terminal.replay-complete') {
         terminal.write('', () => {
           replaying = false
-          replayingRef.current = false
-          fitSettledLayout()
+          visualCatchupRequested = false
+          model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.throughSequence)
+          fit.fit()
+          publishTerminalDimensions()
+          if (validTerminalDimensions(terminal.cols, terminal.rows)) {
+            resizeCoalescer.offer(terminal.cols, terminal.rows)
+          }
+          scheduleCheckpoint(0)
           onReplayComplete(`replayed-through:${message.throughSequence}`)
           scheduleE2eRows()
         })
@@ -611,7 +702,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     })
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
-      scheduleLayoutFit()
+      fit.fit()
+      publishTerminalDimensions()
+      if (validTerminalDimensions(terminal.cols, terminal.rows)) {
+        resizeCoalescer.offer(terminal.cols, terminal.rows)
+      }
     })
     observer.observe(container)
     const wheel = (event: WheelEvent) => {
@@ -623,12 +718,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     container.addEventListener('wheel', wheel, { passive: false })
     return () => {
-      if (layoutFitTimerRef.current !== undefined) {
-        window.clearTimeout(layoutFitTimerRef.current)
-        layoutFitTimerRef.current = undefined
-      }
-      if (scheduleLayoutFitRef.current === scheduleLayoutFit) scheduleLayoutFitRef.current = NOOP
-      replayingRef.current = false
+      historyRequestGenerationRef.current += 1
+      historyModeRef.current = false
+      historyOpenedSearchSequenceRef.current = undefined
+      surfaceDisposed = true
+      clearCheckpointTimer()
+      if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
+      output.dispose()
+      flushOutputRef.current = NOOP
+      resumeVisualRef.current = NOOP
+      storeCheckpoint()
+      checkpointNowRef.current = NOOP
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
       resizeCoalescer.flush()
@@ -645,7 +745,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       const retained = foregroundTerminalModels.release(sessionId)
       if (retained) terminal.element?.remove()
     }
-  }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, readOnly, sessionId, spawnRevision])
+  }, [client, diagnosticsProbe, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, readOnly, sessionId, spawnRevision])
 
   useEffect(() => {
     if (!active || !visible || focusRequest <= 0) return
@@ -836,12 +936,15 @@ function validTerminalDimensions(cols: number, rows: number): boolean {
 
 function isTerminalFileDrop(dataTransfer: DataTransfer): boolean {
   const types = Array.from(dataTransfer.types ?? [])
-  return types.includes(FILE_TREE_MIME) || types.includes('Files') || dataTransfer.files.length > 0
+  return types.includes(REFERENCE_FILE_TREE_MIME) || types.includes('Files') || dataTransfer.files.length > 0
 }
 
 function terminalDropPaths(dataTransfer: DataTransfer): string {
-  if (Array.from(dataTransfer.types ?? []).includes(FILE_TREE_MIME)) {
-    return dataTransfer.getData('text/plain')
+  if (Array.from(dataTransfer.types ?? []).includes(REFERENCE_FILE_TREE_MIME)) {
+    return structuredFileTreePaths(dataTransfer.getData(REFERENCE_FILE_TREE_MIME))
+      .map(quoteDroppedPath)
+      .filter(Boolean)
+      .join(' ')
   }
   return Array.from(dataTransfer.files ?? [])
     .map((file) => window.matouDesktop?.getPathForFile?.(file) ?? '')

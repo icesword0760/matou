@@ -1,21 +1,21 @@
 {
   "text": [
+    "重命名…",
     "⑂ Fork 会话",
-    "↗ 独立窗口",
-    "移除节点…"
+    "↗ 独立窗口"
   ],
   "menu": {
-    "minWidth": "140px",
-    "padding": "4px 0px",
-    "borderRadius": "6px",
+    "minWidth": "132px",
+    "padding": "4px",
+    "borderRadius": "8px",
     "backgroundColor": "rgb(255, 255, 255)",
-    "border": "1px solid rgba(0, 0, 0, 0)",
+    "border": "0px none rgba(0, 0, 0, 0)",
     "boxShadow": "rgba(0, 0, 0, 0.1) 0px 4px 20px 0px",
-    "backdropFilter": "blur(12px)",
+    "backdropFilter": "blur(18px) saturate(1.24)",
     "zIndex": "9999"
   },
   "item": {
-    "padding": "6px 14px",
-    "fontSize": "13px"
+    "padding": "0px 9px",
+    "fontSize": "12px"
   }
 }

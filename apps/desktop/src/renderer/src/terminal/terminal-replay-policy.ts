@@ -17,6 +17,10 @@ lastAppliedSequence = 0): number | undefined {
   return hasReusableTerminalModel || profile === 'shell' ? message.replayFromSequence : 0
 }
 
-export function shouldRunReplayProbe(sessionId: string, e2e: boolean): boolean {
-  return e2e && sessionId === 'foundation-shell'
+export function shouldRunReplayProbe(
+  sessionId: string,
+  e2e: boolean,
+  diagnosticsProbe = false
+): boolean {
+  return e2e && (diagnosticsProbe || sessionId === 'foundation-shell')
 }

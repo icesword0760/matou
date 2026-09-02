@@ -14,10 +14,6 @@ const state = vi.hoisted(() => ({
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
-  resizeObserverCallback: undefined as undefined | ResizeObserverCallback,
-  fit: vi.fn(),
-  resizeTerminal: vi.fn(),
-  scrollToBottom: vi.fn(),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
   terminalReset: vi.fn(),
@@ -44,14 +40,17 @@ vi.mock('@xterm/xterm', () => ({
     options: Record<string, unknown> = {}
     cols = 80
     rows = 24
-    options = { fontSize: 11, theme: {} }
-    buffer = { active: { baseY: 20, viewportY: 20 } }
+    buffer = {
+      active: {
+        length: 1,
+        getLine: () => ({ translateToString: () => 'observed terminal buffer' })
+      }
+    }
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
     loadAddon = vi.fn()
     constructor() { state.terminalConstructed() }
     open = vi.fn((container: HTMLElement) => container.appendChild(this.element))
     focus = state.focus
-    scrollToBottom = state.scrollToBottom
     write = state.terminalWrite
     resize = state.terminalResize
     onData = vi.fn((listener: (data: string) => void) => {
@@ -63,7 +62,7 @@ vi.mock('@xterm/xterm', () => ({
   }
 }))
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class { fit = state.fit }
+  FitAddon: class { fit = vi.fn() }
 }))
 vi.mock('@xterm/addon-search', () => ({
   SearchAddon: class {
@@ -97,9 +96,9 @@ vi.mock('../runtime/RuntimeProvider', () => ({
       state.onMessage = onMessage
       return vi.fn()
     },
-    acknowledgeTerminal: vi.fn(),
-    requestTerminalReplay: vi.fn(),
-    resizeTerminal: state.resizeTerminal,
+    acknowledgeTerminal: state.acknowledgeTerminal,
+    requestTerminalReplay: state.requestTerminalReplay,
+    resizeTerminal: vi.fn(),
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
     recordTerminalInteraction: state.recordTerminalInteraction,
@@ -122,10 +121,6 @@ describe('TerminalSurface focus continuity', () => {
     state.searchResultsListener = undefined
     state.onMessage = undefined
     state.onData = undefined
-    state.resizeObserverCallback = undefined
-    state.fit.mockClear()
-    state.resizeTerminal.mockClear()
-    state.scrollToBottom.mockClear()
     state.sendTerminalInput.mockClear()
     state.attachTerminal.mockClear()
     state.updateTerminalProfile.mockClear()
@@ -148,9 +143,6 @@ describe('TerminalSurface focus continuity', () => {
     state.acknowledgeTerminal.mockClear()
     state.requestTerminalReplay.mockClear()
     vi.stubGlobal('ResizeObserver', class {
-      constructor(callback: ResizeObserverCallback) {
-        state.resizeObserverCallback = callback
-      }
       observe() {}
       disconnect() {}
     })
@@ -163,7 +155,6 @@ describe('TerminalSurface focus continuity', () => {
   afterEach(() => {
     vi.useRealTimers()
     cleanup()
-    vi.useRealTimers()
     Reflect.deleteProperty(window, 'matouDesktop')
     vi.unstubAllGlobals()
   })
@@ -376,58 +367,106 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.terminalResize).toHaveBeenCalledWith(100, 40)
   })
 
-  it('waits for replay and animated layout changes to settle before fitting once', async () => {
-    const view = render(<TerminalSurface sessionId="session-1" active visible fontSize={11} />)
+  it('restores a serialized checkpoint before applying its Journal tail', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
-    state.fit.mockClear()
-    state.resizeTerminal.mockClear()
-    state.scrollToBottom.mockClear()
-    vi.useFakeTimers()
 
-    act(() => {
-      state.onMessage?.({ type: 'terminal.replay-start', sessionId: 'session-1' })
-      view.rerender(<TerminalSurface sessionId="session-1" active visible fontSize={13} />)
-      state.resizeObserverCallback?.([], {} as ResizeObserver)
-      state.resizeObserverCallback?.([], {} as ResizeObserver)
-      vi.advanceTimersByTime(500)
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'checkpoint',
+      fromSequence: 8, throughSequence: 8, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 8,
+      checkpoint: {
+        terminalSequence: 7, domainEventSequence: 2, screenEpoch: 3,
+        snapshot: new TextEncoder().encode('\u001b[2Jcheckpoint screen')
+      }
+    })
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 8,
+      data: new TextEncoder().encode('tail')
     })
 
-    expect(state.fit).not.toHaveBeenCalled()
-    expect(state.resizeTerminal).not.toHaveBeenCalled()
-
-    act(() => {
-      state.onMessage?.({
-        type: 'terminal.replay-complete', sessionId: 'session-1', throughSequence: 9
-      })
-    })
-
-    expect(state.fit).toHaveBeenCalledTimes(1)
-    expect(state.resizeTerminal).toHaveBeenCalledTimes(1)
-    expect(state.scrollToBottom).toHaveBeenCalledTimes(1)
+    expect(state.terminalWrite.mock.calls.slice(-2).map(([data]) =>
+      typeof data === 'string' ? data : new TextDecoder().decode(data as Uint8Array)
+    )).toEqual(['\u001b[2Jcheckpoint screen', 'tail'])
   })
 
-  it('coalesces carousel resize frames and preserves a visible bottom prompt', async () => {
+  it('checkpoints the latest applied screen after output becomes quiet', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
-    await waitFor(() => expect(state.resizeObserverCallback).toBeTypeOf('function'))
-    state.fit.mockClear()
-    state.resizeTerminal.mockClear()
-    state.scrollToBottom.mockClear()
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
     vi.useFakeTimers()
 
-    act(() => {
-      state.resizeObserverCallback?.([], {} as ResizeObserver)
-      vi.advanceTimersByTime(50)
-      state.resizeObserverCallback?.([], {} as ResizeObserver)
-      vi.advanceTimersByTime(50)
-      state.resizeObserverCallback?.([], {} as ResizeObserver)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('first')
     })
-    expect(state.fit).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(499))
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(1))
+    expect(state.storeTerminalCheckpoint).toHaveBeenLastCalledWith(
+      'session-1', 1, 0, '\u001b[2Jserialized screen'
+    )
 
-    act(() => vi.advanceTimersByTime(500))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 2,
+      data: new TextEncoder().encode('second')
+    })
+    await act(() => vi.advanceTimersByTimeAsync(500))
+    expect(state.storeTerminalCheckpoint).toHaveBeenLastCalledWith(
+      'session-1', 2, 0, '\u001b[2Jserialized screen'
+    )
+    expect(state.storeTerminalCheckpoint).toHaveBeenCalledTimes(2)
+  })
 
-    expect(state.fit).toHaveBeenCalledTimes(1)
-    expect(state.resizeTerminal).toHaveBeenCalledTimes(1)
-    expect(state.scrollToBottom).toHaveBeenCalledTimes(1)
+  it('checkpoints only when the whole Scene leaves foreground, not when a sibling loses focus or viewport', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    vi.useFakeTimers()
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('screen')
+    })
+
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground={false} />)
+    expect(state.storeTerminalCheckpoint).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not checkpoint unsequenced restored Shell history when its Scene moves behind', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.restored-history', sessionId: 'session-1', blockCount: 1,
+      data: new TextEncoder().encode('completed block')
+    })
+
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground={false} />)
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+  })
+
+  it('creates a fresh checkpoint immediately after replay has fully applied', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    vi.useFakeTimers()
+
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'tail',
+      fromSequence: 4, throughSequence: 4, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 4
+    })
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('restored')
+    })
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    state.onMessage?.({
+      type: 'terminal.replay-complete', sessionId: 'session-1', throughSequence: 4
+    })
+    await act(() => vi.advanceTimersByTimeAsync(0))
+
+    expect(state.storeTerminalCheckpoint).toHaveBeenCalledWith(
+      'session-1', 4, 0, '\u001b[2Jserialized screen'
+    )
   })
 
   it('shows durable completed Shell Blocks before the fresh live prompt', async () => {
@@ -740,7 +779,26 @@ describe('TerminalSurface focus continuity', () => {
     expect(onUserInput).toHaveBeenCalledTimes(1)
   })
 
-  it('matches reference product by previewing an internal file-tree drag and inserting its quoted paths without submitting', async () => {
+  it('reattaches an existing Renderer as replay-only and stops terminal input after lifecycle downgrade', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(1))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    state.onData?.('before recovery')
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', 'before recovery')
+
+    state.sendTerminalInput.mockClear()
+    view.rerender(<TerminalSurface sessionId="session-1" active visible readOnly inputDisabled />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+
+    expect(state.attachTerminal.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+      sessionId: 'session-1', readOnly: true
+    }))
+    state.onData?.('after recovery')
+    window.dispatchEvent(new Event('matou:forward-terminal-tab'))
+    expect(state.sendTerminalInput).not.toHaveBeenCalled()
+  })
+
+  it('prefers structured file-tree paths and safely quotes each path without submitting', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
@@ -777,10 +835,34 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.focus).toHaveBeenCalled()
   })
 
-  it('uses native file paths for Finder drops while preserving reference product path quoting', async () => {
-    const getPathForFile = vi.fn((file: File) => file.name === 'plain.txt'
-      ? '/tmp/plain.txt'
-      : '/tmp/with space.txt')
+  it('drops invalid NUL paths while preserving valid structured path order', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const dataTransfer = {
+      types: ['application/x-file-tree-nodes'], files: [], dropEffect: 'none',
+      getData: vi.fn(() => JSON.stringify([
+        { path: '/tmp/first.txt', type: 'file' },
+        { path: '/tmp/a\0b.txt', type: 'file' },
+        { path: '=ls', type: 'file' },
+        { path: '/tmp/last.txt', type: 'file' }
+      ]))
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    fireEvent.drop(surface, { dataTransfer })
+
+    expect(state.sendTerminalInput).toHaveBeenCalledWith(
+      'session-1', " /tmp/first.txt '=ls' /tmp/last.txt"
+    )
+  })
+
+  it('uses native file paths for Finder drops and safely quotes shell-sensitive names', async () => {
+    const getPathForFile = vi.fn((file: File) => ({
+      'plain.txt': '/tmp/plain.txt',
+      'with space.txt': '/tmp/with space.txt',
+      'special.txt': '/tmp/a$(touch PWN).txt'
+    })[file.name] ?? '')
     Object.defineProperty(window, 'matouDesktop', {
       configurable: true,
       value: { getPathForFile }
@@ -808,7 +890,24 @@ describe('TerminalSurface focus continuity', () => {
     )
   })
 
-  it('keeps the reference product drop overlay stable across nested drag enter and leave events', async () => {
+  it('does not treat arbitrary text/plain as a terminal path drop', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    await waitFor(() => expect(state.onData).toBeTypeOf('function'))
+    state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
+    const dataTransfer = {
+      types: ['text/plain'], files: [], dropEffect: 'none',
+      getData: vi.fn(() => 'echo should-not-enter-terminal\nsecond-command')
+    }
+    const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
+
+    const accepted = fireEvent.drop(surface, { dataTransfer })
+
+    expect(accepted).toBe(true)
+    expect(state.sendTerminalInput).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('terminal-drop-overlay')).toBeNull()
+  })
+
+  it('keeps the reference drop overlay stable across nested drag enter and leave events', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     const dataTransfer = {

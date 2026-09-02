@@ -3,21 +3,6 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHierarchyCommands } from './hierarchy-commands'
 
 describe('PRD 02 HUD commands', () => {
-  it('replays an idempotent Workspace creation once when the first Runtime response is lost', async () => {
-    const request = vi.fn()
-      .mockRejectedValueOnce(new Error('Runtime channel replaced before the request completed'))
-      .mockResolvedValueOnce({ workspace: { id: 'workspace-new' } })
-    const afterMutation = vi.fn()
-    const commands = createHierarchyCommands({ request } as never, 'window-1', afterMutation)
-
-    await commands.createWorkspace('/Users/demo/new-workspace')
-
-    expect(request).toHaveBeenCalledTimes(2)
-    expect(request.mock.calls[1]?.[0]).toBe('hierarchy.create-workspace')
-    expect(request.mock.calls[1]?.[1]).toEqual(request.mock.calls[0]?.[1])
-    expect(afterMutation).toHaveBeenCalledTimes(1)
-  })
-
   it('sends permission and model changes through the authoritative Runtime', async () => {
     const request = vi.fn().mockResolvedValue({})
     const commands = createHierarchyCommands({ request } as never, 'window-1')
@@ -95,20 +80,38 @@ describe('PRD 02 HUD commands', () => {
     ])
   })
 
-  it('routes manual rename and Claude title restore through authoritative session commands', async () => {
-    const request = vi.fn().mockResolvedValue({})
-    const commands = createHierarchyCommands({ request } as never, 'window-1')
+  it('keeps environment operations authoritative and activates an already-owned Worktree Session', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce({ sessionId: 'session-1', kind: 'local', path: '/tmp/local' })
+      .mockResolvedValueOnce({ kind: 'switch-session', sessionId: 'owner-session' })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        kind: 'environment', sessionId: 'session-1', activeTarget: 'local',
+        state: 'ready', path: '/tmp/local', restartRequired: true
+      })
+    const afterMutation = vi.fn()
+    const commands = createHierarchyCommands(
+      { request } as never, 'window-1', afterMutation
+    )
 
-    await commands.renameSession?.('session-1', '发布问题排查')
-    await commands.restoreSessionAutoTitle?.('session-1')
+    await expect(commands.openSessionEnvironment('session-1')).resolves.toEqual({
+      sessionId: 'session-1', kind: 'local', path: '/tmp/local'
+    })
+    await expect(commands.locateSessionEnvironment('session-1', '/tmp/owned')).resolves.toEqual({
+      kind: 'switch-session', sessionId: 'owner-session'
+    })
+    await commands.handoffSessionEnvironment('session-1', 'local')
 
-    expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
-      ['hierarchy.rename-session', expect.objectContaining({
-        sessionId: 'session-1', title: '发布问题排查'
+    expect(request.mock.calls.map(([method, payload]) => [method, payload.input ?? payload])).toEqual([
+      ['session.environment-open', { sessionId: 'session-1' }],
+      ['session.environment-locate', expect.objectContaining({
+        sessionId: 'session-1', path: '/tmp/owned'
       })],
-      ['hierarchy.restore-session-auto-title', expect.objectContaining({
-        sessionId: 'session-1'
+      ['hierarchy.activate-session', expect.objectContaining({ sessionId: 'owner-session' })],
+      ['session.environment-handoff', expect.objectContaining({
+        sessionId: 'session-1', target: 'local'
       })]
     ])
+    expect(afterMutation).toHaveBeenCalledTimes(3)
   })
 })

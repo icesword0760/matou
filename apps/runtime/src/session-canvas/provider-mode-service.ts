@@ -23,8 +23,6 @@ interface SessionRow {
   status: SessionStatus
   work_status: SessionWorkStatus
   title: string
-  title_source: 'default' | 'auto' | 'manual'
-  provider_title: string | null
   cwd: string
   created_at: number
   updated_at: number
@@ -133,13 +131,10 @@ export class ProviderModeService {
         )
       }
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code',
-           title = CASE WHEN title_source = 'manual' THEN title ELSE ? END,
-           title_source = CASE WHEN title_source = 'manual' THEN 'manual' ELSE 'auto' END,
-           provider_title = ?, status = 'starting',
+        `UPDATE sessions SET kind = 'claude-code', title = ?, status = 'starting',
            work_status = 'starting', updated_at = ?, last_activity_at = ?, version = version + 1
          WHERE id = ?`,
-        title, title, input.now, input.now, session.id
+        title, input.now, input.now, session.id
       )
       const binding = existing
         ? requireBinding(tx, existing.id)
@@ -263,6 +258,33 @@ export class ProviderModeService {
              user_exited_at = NULL, metadata_json = ?, invalidated_at = NULL, updated_at = ?
          WHERE id = ?`,
         JSON.stringify(metadata), input.now, binding.id
+      )
+    }, 'session.restore-state-changed', undefined, true)
+  }
+
+  startFreshClaude(
+    command: DomainCommandMetadata,
+    input: { sessionId: string; now: number }
+  ): ProviderModeTransitionResult {
+    return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
+      if (binding.restore_state !== 'failed') {
+        throw new Error('只有恢复失败的 Claude Code 会话可新开对话')
+      }
+      const metadata = asMetadata(binding.metadata_json)
+      metadata.spawnRevision = input.now
+      tx.run(
+        `UPDATE sessions SET kind = 'claude-code',
+           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+           status = 'starting', work_status = 'starting',
+           updated_at = ?, version = version + 1 WHERE id = ?`,
+        input.now, session.id
+      )
+      tx.run(
+        `UPDATE provider_bindings
+         SET resume_state = 'expired', restore_state = 'none', restore_error = NULL,
+             user_exited_at = NULL, metadata_json = ?, invalidated_at = COALESCE(invalidated_at, ?),
+             updated_at = ? WHERE id = ?`,
+        JSON.stringify(metadata), input.now, input.now, binding.id
       )
     }, 'session.restore-state-changed', undefined, true)
   }
@@ -393,7 +415,9 @@ export class ProviderModeService {
       binding = requireBinding(tx, binding.id)
       const result = buildResult(tx, owner, requireSession(tx, sessionId), binding)
       emitTransition(emit, command.commandId, eventType, owner, result, now)
-      if (dismissRecoveryIndicator) {
+      if (result.binding.restoreState === 'failed') {
+        emitRecoveryNotificationFailure(emit, command.commandId, owner, result, now)
+      } else if (dismissRecoveryIndicator) {
         emitRecoveryNotificationDismissal(emit, command.commandId, owner, result, now)
       }
       return result
@@ -561,8 +585,6 @@ function mapSession(row: SessionRow): Session {
     kind: row.kind,
     status: row.status,
     title: row.title,
-    titleSource: row.title_source,
-    ...(row.provider_title === null ? {} : { providerTitle: row.provider_title }),
     cwd: row.cwd,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

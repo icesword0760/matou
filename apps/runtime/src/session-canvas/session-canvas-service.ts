@@ -554,6 +554,38 @@ export class SessionCanvasService {
       if (survivingMembershipCount === 0) {
         throw new Error('Scene must keep one Session')
       }
+      const directChildren = includeDescendants ? [] : tx.all<{
+        relation_id: string
+        task_id: string
+        from_session_id: string
+        relation_kind: 'derived-from' | 'forked-from'
+        metadata_json: string
+      }>(
+        `SELECT relation.relation_id, relation.task_id, relation.from_session_id,
+                relation.relation_kind, relation.metadata_json
+         FROM session_relations_current AS relation
+         JOIN session_canvas_memberships AS membership
+           ON membership.session_id = relation.from_session_id
+          AND membership.scene_id = ?
+         WHERE relation.to_session_id = ?
+           AND relation.relation_kind IN ('derived-from', 'forked-from')
+         ORDER BY membership.sibling_created_seq, relation.from_session_id`,
+        input.sceneId, input.sessionId
+      )
+      const structuralParent = includeDescendants ? undefined : tx.get<{
+        to_session_id: string
+      }>(
+        `SELECT relation.to_session_id
+         FROM session_relations_current AS relation
+         JOIN session_canvas_memberships AS membership
+           ON membership.session_id = relation.to_session_id
+          AND membership.scene_id = ?
+         WHERE relation.from_session_id = ?
+           AND relation.relation_kind IN ('derived-from', 'forked-from')
+         ORDER BY relation.updated_at DESC, relation.relation_id
+         LIMIT 1`,
+        input.sceneId, input.sessionId
+      )
       const focusedSessionId = tx.get<{ active_session_id: string | null }>(
         `SELECT active_session_id FROM window_scene_focus
          WHERE window_id = ? AND scene_id = ?`,

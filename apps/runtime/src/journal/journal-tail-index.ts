@@ -38,6 +38,7 @@ export class JournalTailIndex {
   #completedLineCount = 0
   #framesRecorded = 0
   #lineStartSequences: number[] = []
+  #lineStartHead = 0
   #sparse: JournalTailIndexSparseEntry[] = []
   #pendingLineStart = false
   #alternateScreen = false
@@ -74,10 +75,29 @@ export class JournalTailIndex {
       this.#domainCursors.push({ sequence, domainEventSequence })
     }
 
-    for (const byte of bytes) this.#recordByte(sequence, byte)
+    let offset = 0
+    while (offset < bytes.byteLength) {
+      if (this.#escapeBytes.length === 0) {
+        const escapeAt = bytes.indexOf(0x1b, offset)
+        const plainEnd = escapeAt < 0 ? bytes.byteLength : escapeAt
+        if (!this.#alternateScreen) {
+          this.#recordPlainRange(sequence, bytes, offset, plainEnd)
+        }
+        if (escapeAt < 0) break
+        this.#escapeBytes = [0x1b]
+        offset = escapeAt + 1
+        continue
+      }
+      this.#recordByte(sequence, bytes[offset]!)
+      offset += 1
+    }
     if (this.#framesRecorded % SPARSE_FRAME_INTERVAL === 0) {
       this.#sparse.push({ sequence, completedLineCount: this.#completedLineCount })
     }
+  }
+
+  get framesRecorded(): number {
+    return this.#framesRecorded
   }
 
   tailStart(maxLines = DEFAULT_MAX_TRACKED_LINES): number {
@@ -85,7 +105,9 @@ export class JournalTailIndex {
       throw new Error(`maxLines must be between 1 and ${this.#maxTrackedLines}`)
     }
     if (this.#firstSequence === 0) return 0
-    if (this.#lineStartSequences.length <= maxLines) return this.#firstSequence
+    if (this.#lineStartSequences.length - this.#lineStartHead <= maxLines) {
+      return this.#firstSequence
+    }
     return this.#lineStartSequences[this.#lineStartSequences.length - maxLines]!
   }
 
@@ -114,7 +136,7 @@ export class JournalTailIndex {
       completedLineCount: this.#completedLineCount,
       framesRecorded: this.#framesRecorded,
       maxTrackedLines: this.#maxTrackedLines,
-      lineStartSequences: [...this.#lineStartSequences],
+      lineStartSequences: this.#lineStartSequences.slice(this.#lineStartHead),
       sparse: this.#sparse.map((entry) => ({ ...entry })),
       pendingLineStart: this.#pendingLineStart,
       alternateScreen: this.#alternateScreen,
@@ -173,6 +195,33 @@ export class JournalTailIndex {
     }
   }
 
+  #recordPlainRange(
+    sequence: number,
+    bytes: Uint8Array<ArrayBufferLike>,
+    start: number,
+    end: number
+  ): void {
+    if (start >= end) return
+    if (this.#pendingLineStart) {
+      this.#pushLineStart(sequence)
+      this.#pendingLineStart = false
+    } else if (this.#lineStartSequences.length === this.#lineStartHead) {
+      this.#pushLineStart(sequence)
+    }
+
+    let newlineAt = bytes.indexOf(0x0a, start)
+    while (newlineAt >= 0 && newlineAt < end) {
+      this.#completedLineCount += 1
+      this.#pendingLineStart = true
+      const next = newlineAt + 1
+      if (next < end) {
+        this.#pushLineStart(sequence)
+        this.#pendingLineStart = false
+      }
+      newlineAt = bytes.indexOf(0x0a, next)
+    }
+  }
+
   #applyEscapeSequence(): void {
     const value = Buffer.from(this.#escapeBytes).toString('ascii')
     if (/^\x1b\[\?(?:47|1047|1049)h$/.test(value)) this.#alternateScreen = true
@@ -182,8 +231,14 @@ export class JournalTailIndex {
   #pushLineStart(sequence: number): void {
     this.#lineStartSequences.push(sequence)
     const limit = this.#maxTrackedLines + 1
-    if (this.#lineStartSequences.length > limit) {
-      this.#lineStartSequences.splice(0, this.#lineStartSequences.length - limit)
+    if (this.#lineStartSequences.length - this.#lineStartHead > limit) {
+      this.#lineStartHead += 1
+    }
+    // Keep appends O(1) on dense output. Compact only after one whole retained
+    // window has expired instead of shifting 10,000 entries for every line.
+    if (this.#lineStartHead >= limit) {
+      this.#lineStartSequences = this.#lineStartSequences.slice(this.#lineStartHead)
+      this.#lineStartHead = 0
     }
   }
 
@@ -193,6 +248,7 @@ export class JournalTailIndex {
     this.#completedLineCount = snapshot.completedLineCount
     this.#framesRecorded = snapshot.framesRecorded
     this.#lineStartSequences = [...snapshot.lineStartSequences]
+    this.#lineStartHead = 0
     this.#sparse = snapshot.sparse.map((entry) => ({ ...entry }))
     this.#pendingLineStart = snapshot.pendingLineStart
     this.#alternateScreen = snapshot.alternateScreen
