@@ -46,6 +46,12 @@ const desktopApi: MatouDesktopApi = {
   selectWorkspaceDirectory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.selectWorkspaceDirectory),
   selectSessionEnvironmentDirectory: () =>
     ipcRenderer.invoke(DESKTOP_CHANNELS.selectSessionEnvironmentDirectory),
+  consumeWorkspaceOpenRequests: () => ipcRenderer.invoke(DESKTOP_CHANNELS.consumeWorkspaceOpenRequests),
+  onWorkspaceOpenRequested: (listener) => {
+    const handler = () => listener()
+    ipcRenderer.on(DESKTOP_CHANNELS.workspaceOpenRequested, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.workspaceOpenRequested, handler)
+  },
   revealDirectory: (path) => ipcRenderer.invoke(DESKTOP_CHANNELS.revealDirectory, path),
   openDirectoryInTerminal: (path) =>
     ipcRenderer.invoke(DESKTOP_CHANNELS.openDirectoryInTerminal, path),

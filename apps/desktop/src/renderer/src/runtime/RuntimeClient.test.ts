@@ -603,6 +603,17 @@ describe('RuntimeClient', () => {
     expect(port.sent.some(({ type }) => type === 'terminal.spawn')).toBe(false)
   })
 
+  it('asks Runtime to refresh the visible Session HUD', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+
+    client.refreshTerminalHud('session-1')
+
+    expect(port.sent.at(-1)).toMatchObject({
+      type: 'terminal.hud-refresh', sessionId: 'session-1'
+    })
+  })
+
   it('routes a Session-scoped startup error only to that terminal card', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })

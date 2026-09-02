@@ -27,7 +27,7 @@ describe('RuntimeAccessPolicy', () => {
     for (const type of [
       'terminal.spawn', 'terminal.input', 'terminal.resize', 'terminal.dispose',
       'terminal.user-interaction', 'terminal.retry-last-input', 'terminal.ack',
-      'terminal.replay-request'
+      'terminal.replay-request', 'terminal.checkpoint', 'terminal.hud-refresh'
     ] as const) {
       expect(() => policy.assertTerminalAllowed(type)).not.toThrow()
     }
@@ -54,7 +54,8 @@ describe('RuntimeAccessPolicy', () => {
     }
     for (const type of [
       'terminal.spawn', 'terminal.input', 'terminal.resize', 'terminal.dispose',
-      'terminal.user-interaction', 'terminal.retry-last-input'
+      'terminal.user-interaction', 'terminal.retry-last-input', 'terminal.checkpoint',
+      'terminal.hud-refresh'
     ] as const) {
       expect(() => policy.assertTerminalAllowed(type)).toThrow(StorageReadOnlyError)
     }

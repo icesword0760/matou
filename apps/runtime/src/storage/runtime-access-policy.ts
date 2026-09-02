@@ -17,6 +17,7 @@ export type TerminalMessageType =
   | 'terminal.ack'
   | 'terminal.replay-request'
   | 'terminal.checkpoint'
+  | 'terminal.hud-refresh'
 
 const NORMAL_CAPABILITIES: RuntimeCapability[] = [
   'terminal-v1',

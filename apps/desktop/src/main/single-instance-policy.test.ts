@@ -31,21 +31,49 @@ describe('claimSingleInstance', () => {
     expect(window.isVisible()).toBe(true)
     expect(window.focused).toBe(true)
   })
+
+  it('forwards a workspace path from a second launch to the existing packaged instance', () => {
+    const app = new FakeApp(true)
+    const windows = new WindowManager()
+    const window = new FakeWindow()
+    const openWorkspace = vi.fn()
+    windows.register('main-window-1', window)
+
+    expect(claimSingleInstance(app, windows, true, openWorkspace)).toBe(true)
+    app.emitSecondInstance([
+      '/Applications/码头.app/Contents/MacOS/码头',
+      '--open-workspace',
+      '/Users/demo/projects/matou'
+    ])
+
+    expect(openWorkspace).toHaveBeenCalledWith('/Users/demo/projects/matou')
+    expect(window.focused).toBe(true)
+  })
+
+  it('ignores a second launch without an explicit workspace request', () => {
+    const app = new FakeApp(true)
+    const openWorkspace = vi.fn()
+
+    expect(claimSingleInstance(app, new WindowManager(), true, openWorkspace)).toBe(true)
+    app.emitSecondInstance(['/Applications/码头.app/Contents/MacOS/码头'])
+
+    expect(openWorkspace).not.toHaveBeenCalled()
+  })
 })
 
 class FakeApp implements SingleInstanceApp {
   readonly requestSingleInstanceLock = vi.fn(() => this.lockGranted)
   readonly quit = vi.fn()
-  #secondInstance: (() => void) | undefined
+  #secondInstance: ((argv: string[]) => void) | undefined
 
   constructor(private readonly lockGranted: boolean) {}
 
-  onSecondInstance(listener: () => void): void {
+  onSecondInstance(listener: (argv: string[]) => void): void {
     this.#secondInstance = listener
   }
 
-  emitSecondInstance(): void {
-    this.#secondInstance?.()
+  emitSecondInstance(argv: string[] = []): void {
+    this.#secondInstance?.(argv)
   }
 }
 

@@ -12,12 +12,12 @@ import {
 import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 
-const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
-  { value: 'default', label: 'Default' },
-  { value: 'auto', label: 'Auto' },
-  { value: 'acceptEdits', label: 'Accept Edits' },
-  { value: 'plan', label: 'Plan Mode' },
-  { value: 'bypassPermissions', label: 'Bypass Permissions' }
+const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string; abbreviation: string }> = [
+  { value: 'default', label: 'Default', abbreviation: 'D' },
+  { value: 'auto', label: 'Auto', abbreviation: 'A' },
+  { value: 'acceptEdits', label: 'Accept Edits', abbreviation: 'AE' },
+  { value: 'plan', label: 'Plan Mode', abbreviation: 'PM' },
+  { value: 'bypassPermissions', label: 'Bypass Permissions', abbreviation: 'BP' }
 ]
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
@@ -103,7 +103,7 @@ export function TerminalHud(props: {
         disabled={disabled || switching || !props.onPermissionMode}
         title={props.disabledReason ?? `当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         aria-label={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
-        onClick={openPermissionMenu}>{permissionLabel(permissionMode)}</button>
+        onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>
       {modelLabel(hud) && <span className="status-field status-model status-priority-8"
         title={`当前模型：${modelLabel(hud)}`}>{modelLabel(hud)}</span>}
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
@@ -130,7 +130,7 @@ export function TerminalHud(props: {
       </span>}
       {completedTools(hud).map((tool) => <span className="status-field status-tool-done status-priority-4" key={tool.name}>
         <span className="tool-icon tool-icon-done">✓</span><span className="tool-name">{tool.name}</span>
-        <span className="tool-count">×{tool.count}</span>
+        {showToolCount(tool.name) && <span className="tool-count">×{tool.count}</span>}
       </span>)}
       {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
@@ -258,6 +258,9 @@ function gitStateTitle(git: SessionGitState): string {
 function permissionLabel(mode: HudPermissionMode): string {
   return PERMISSION_MODES.find(({ value }) => value === mode)?.label ?? 'Default'
 }
+function permissionAbbreviation(mode: HudPermissionMode): string {
+  return PERMISSION_MODES.find(({ value }) => value === mode)?.abbreviation ?? 'D'
+}
 function modelLabel(hud: SessionHudView): string {
   const name = hud.model?.trim()
   let label = name?.replace(/^Claude\s+/i, '') ?? ''
@@ -317,7 +320,11 @@ function runningTools(hud: SessionHudView) {
   return (hud.runningTools ?? []).filter(({ name }) => name !== 'Bash' && name !== 'Skill').slice(-2)
 }
 function recentTool(hud: SessionHudView): SessionHudView['lastTool'] {
-  return hud.lastTool?.status === 'running' ? undefined : hud.lastTool
+  return hud.lastTool?.status === 'running' || hud.lastTool?.name.toLowerCase() === 'bash'
+    ? undefined : hud.lastTool
+}
+function showToolCount(name: string): boolean {
+  return !['bash', 'read'].includes(name.toLowerCase())
 }
 function toolDisplayName(name: string): string {
   const match = /^mcp__(.+?)__(.+)$/.exec(name)

@@ -13,13 +13,15 @@ import { RuntimeHost } from './runtime-host'
 import { resolvePackagedApplication } from './app-environment'
 import { applyApplicationBrand } from './application-brand'
 import { resolveDefaultWorkspacePath } from './default-workspace-policy'
-import { claimSingleInstance } from './single-instance-policy'
+import { claimSingleInstance, workspacePathFromArguments } from './single-instance-policy'
 import { WindowManager } from './window-manager'
 import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
 import { secondaryDisplayWindowBounds } from './e2e-window-placement'
 import { installDevelopmentDockIcon } from './app-icon'
 import { downloadManualUpdate } from './manual-update-downloader'
+import { installFinderQuickAction } from './finder-quick-action'
 import { readUpdateBaseUrl } from './update-feed'
+import { WorkspaceOpenRequests } from './workspace-open-requests'
 import {
   DESKTOP_CHANNELS,
   type DagNodeSelection,
@@ -31,6 +33,7 @@ import { APP_DISPLAY_NAME, APP_STORAGE_DIRECTORY_NAME } from '../shared/brand'
 
 let runtimeHost: RuntimeHost | undefined
 const windows = new WindowManager()
+const workspaceOpenRequests = new WorkspaceOpenRequests()
 const browserWindows = new Map<string, BrowserWindow>()
 const dagBrowserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
@@ -94,8 +97,33 @@ const dagWindows = new DagWindowManager({
 const primaryInstance = claimSingleInstance({
   requestSingleInstanceLock: () => app.requestSingleInstanceLock(),
   quit: () => app.quit(),
-  onSecondInstance: (listener) => { app.on('second-instance', listener) }
-}, windows, isPackagedApplication)
+  onSecondInstance: (listener) => {
+    app.on('second-instance', (_event, argv) => listener(argv))
+  }
+}, windows, isPackagedApplication, (path) => { void openWorkspaceDirectory(path) })
+
+app.on('open-file', (event, path) => {
+  event.preventDefault()
+  if (primaryInstance) void openWorkspaceDirectory(path)
+})
+
+const startupWorkspacePath = workspacePathFromArguments(process.argv)
+if (primaryInstance && startupWorkspacePath) void openWorkspaceDirectory(startupWorkspacePath)
+
+async function openWorkspaceDirectory(path: string): Promise<void> {
+  if (!await workspaceOpenRequests.enqueue(path)) return
+  let windowId = windows.firstLiveWindowId()
+  if (!windowId && app.isReady()) {
+    await createWindow()
+    windowId = windows.firstLiveWindowId()
+  }
+  if (!windowId) return
+  windows.showWindow(windowId)
+  const window = browserWindows.get(windowId)
+  if (window && !window.isDestroyed()) {
+    window.webContents.send(DESKTOP_CHANNELS.workspaceOpenRequested)
+  }
+}
 
 async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
@@ -339,6 +367,13 @@ if (primaryInstance) app.whenReady().then(async () => {
   runtimeHost = new RuntimeHost(resolveRuntimeEntry())
   await runtimeHost.start()
   await createWindow()
+  if (isPackagedApplication) {
+    void installFinderQuickAction({
+      platform: process.platform,
+      sourcePath: join(process.resourcesPath, 'finder-quick-action', '进入码头.workflow'),
+      homeDirectory: app.getPath('home')
+    }).catch((error) => console.error(`[finder-quick-action] ${String(error)}`))
+  }
   autoUpdater.channel = process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
   const updateBaseUrl = process.env.MATOU_UPDATE_BASE_URL
     ?? readUpdateBaseUrl(join(process.resourcesPath, 'app-update.yml'))
@@ -417,6 +452,7 @@ ipcMain.handle(DESKTOP_CHANNELS.selectSessionEnvironmentDirectory, async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
   return result.canceled ? null : result.filePaths[0] ?? null
 })
+ipcMain.handle(DESKTOP_CHANNELS.consumeWorkspaceOpenRequests, () => workspaceOpenRequests.drain())
 ipcMain.handle(DESKTOP_CHANNELS.revealDirectory, async (_event, path: string) => {
   await shell.openPath(path)
 })

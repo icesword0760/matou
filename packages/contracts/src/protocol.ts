@@ -125,6 +125,12 @@ const checkpointSchema = z.object({
   )
 })
 
+const hudRefreshSchema = z.object({
+  type: z.literal('terminal.hud-refresh'),
+  protocolVersion,
+  sessionId
+})
+
 export const RPC_METHODS = [
   'projection.snapshot',
   'hierarchy.bootstrap-window',
@@ -264,6 +270,7 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   ackSchema,
   replayRequestSchema,
   checkpointSchema,
+  hudRefreshSchema,
   rpcRequestSchema,
   rpcCancelSchema,
   eventsSubscribeSchema

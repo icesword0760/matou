@@ -42,6 +42,7 @@ import { SessionLoaderDialog } from '../session-canvas/SessionLoaderDialog'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
+import { WorkspaceOpenRequestConsumer } from './workspace-open-request-consumer'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
@@ -204,6 +205,20 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal', terminalDiagno
       return next
     }))
   }, [applyCommandResult, client, fixtureCommands, readOnly, windowId])
+
+  useEffect(() => {
+    if (fixture || !commands) return
+    const desktop = window.matouDesktop
+    if (!desktop?.consumeWorkspaceOpenRequests || !desktop.onWorkspaceOpenRequested) return
+    const consumer = new WorkspaceOpenRequestConsumer(
+      () => desktop.consumeWorkspaceOpenRequests(),
+      async (path) => { await Promise.resolve(commands.createWorkspace(path)) }
+    )
+    const drain = () => { void consumer.drain().catch((error: unknown) => setLoadError(errorMessage(error))) }
+    const unsubscribe = desktop.onWorkspaceOpenRequested(drain)
+    drain()
+    return unsubscribe
+  }, [commands, fixture])
 
   useEffect(() => {
     if (queryValue('e2e') !== '1') return

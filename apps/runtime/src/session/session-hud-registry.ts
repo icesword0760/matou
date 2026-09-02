@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { ProviderTranscriptHudReader } from './provider-transcript-hud'
 
@@ -11,6 +11,7 @@ export interface HudUsageWindow { label: string; percent: number; resetsAt?: num
 export interface HudToolCount { name: string; count: number }
 export interface HudToolActivity { name: string; target?: string; status: 'running' | 'completed' | 'error' }
 export interface HudConfigCounts { instructionFiles: number; mcpServers: number; hooks: number }
+export interface HudConfigWatchTarget { directory: string; names: string[] }
 
 export interface SessionHudSnapshot {
   sessionId: string
@@ -302,6 +303,24 @@ export class SessionHudRegistry {
     return true
   }
 
+  refreshConfig(sessionId: string): boolean {
+    const current = this.#states.get(sessionId)
+    if (!current || current.mode !== 'agent' || !current.cwd) return false
+    const next = inspectProviderConfig(current.cwd, this.#configDir)
+    const previous = current.configCounts
+    current.configCounts = next
+    current.configCwd = current.cwd
+    current.configCheckedAt = this.#now()
+    return previous?.instructionFiles !== next.instructionFiles ||
+      previous?.mcpServers !== next.mcpServers || previous?.hooks !== next.hooks
+  }
+
+  configWatchTargets(sessionId: string): HudConfigWatchTarget[] {
+    const current = this.#states.get(sessionId)
+    if (!current || current.mode !== 'agent' || !current.cwd) return []
+    return providerConfigWatchTargets(current.cwd, this.#configDir)
+  }
+
   snapshot(sessionId: string): SessionHudSnapshot | undefined {
     const state = this.#states.get(sessionId)
     if (!state) return undefined
@@ -360,6 +379,22 @@ export function inspectProviderConfig(cwd: string, configDir: string): HudConfig
     hooks += hookCount(config)
   }
   return { instructionFiles, mcpServers: userMcp.size + projectMcp.size, hooks }
+}
+
+export function providerConfigWatchTargets(cwd: string, configDir: string): HudConfigWatchTarget[] {
+  const targets = new Map<string, Set<string>>()
+  const append = (directory: string, names: string[]) => {
+    const current = targets.get(directory) ?? new Set<string>()
+    for (const name of names) current.add(name)
+    targets.set(directory, current)
+  }
+  append(dirname(configDir), ['.claude.json', basename(configDir)])
+  append(configDir, ['CLAUDE.md', 'settings.json', 'settings.local.json'])
+  append(cwd, ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json', '.claude'])
+  append(join(cwd, '.claude'), [
+    'CLAUDE.md', 'CLAUDE.local.md', 'settings.json', 'settings.local.json'
+  ])
+  return [...targets].map(([directory, names]) => ({ directory, names: [...names] }))
 }
 
 function readJson(path: string): Record<string, unknown> | undefined {

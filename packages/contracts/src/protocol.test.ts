@@ -119,6 +119,14 @@ describe('parseRendererMessage', () => {
     })).toThrow(/transport limit/)
   })
 
+  it('accepts an explicit HUD refresh for a visible Session', () => {
+    expect(parseRendererMessage({
+      type: 'terminal.hud-refresh', protocolVersion: PROTOCOL_VERSION, sessionId: 'session-1'
+    })).toEqual({
+      type: 'terminal.hud-refresh', protocolVersion: PROTOCOL_VERSION, sessionId: 'session-1'
+    })
+  })
+
   it.each(['submit', 'control', 'provider-action'])(
     'accepts a completed %s interaction marker',
     (interactionKind) => {

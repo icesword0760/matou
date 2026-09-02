@@ -374,6 +374,10 @@ export class RuntimeClient {
     this.#postTerminalCheckpoint(sessionId, queue, checkpoint)
   }
 
+  refreshTerminalHud(sessionId: string): void {
+    this.#post({ type: 'terminal.hud-refresh', protocolVersion: PROTOCOL_VERSION, sessionId })
+  }
+
   disposeDeletedTerminal(sessionId: string): void {
     this.#foregroundTerminalSessions.delete(sessionId)
     this.#terminals.delete(sessionId)

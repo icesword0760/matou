@@ -7,6 +7,8 @@ export interface MatouDesktopApi {
   getPathForFile(file: File): string
   selectWorkspaceDirectory(): Promise<string | null>
   selectSessionEnvironmentDirectory(): Promise<string | null>
+  consumeWorkspaceOpenRequests(): Promise<string[]>
+  onWorkspaceOpenRequested(listener: () => void): () => void
   revealDirectory(path: string): Promise<void>
   openDirectoryInTerminal(path: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
@@ -155,6 +157,8 @@ export interface DagNodeSelection extends Omit<DagWindowContext, 'initialGraph' 
 export const DESKTOP_CHANNELS = {
   selectWorkspaceDirectory: 'matou:select-workspace-directory',
   selectSessionEnvironmentDirectory: 'matou:select-session-environment-directory',
+  consumeWorkspaceOpenRequests: 'matou:consume-workspace-open-requests',
+  workspaceOpenRequested: 'matou:workspace-open-requested',
   revealDirectory: 'matou:reveal-directory',
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
   hideWindow: 'matou:hide-window',

@@ -21,6 +21,7 @@ import {
 } from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
+import { SessionHudRegistry } from './session/session-hud-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
@@ -835,6 +836,67 @@ sleep 30
     expect(port.last('terminal.hud')).toMatchObject({
       sessionId: 'git-hud-session', hud: { gitBranch: 'feature/hud-refresh', gitDirty: false }
     })
+  })
+
+  it('watches idle provider configuration and republishes changed HUD counts', async () => {
+    server.close()
+    const configDir = join(root, 'live-config')
+    const cwd = join(root, 'live-project')
+    await mkdir(configDir)
+    await mkdir(cwd)
+    database.run('UPDATE execution_contexts SET cwd = ? WHERE id = ?', cwd, 'replay-context')
+    registerSession(database, 'live-config-session')
+    const hud = new SessionHudRegistry(Date.now, configDir)
+    hud.spawn({ sessionId: 'live-config-session', profile: 'claude-code', cwd })
+    port = new MockPort()
+    server = new RuntimeServer(port, root, database, undefined, undefined, undefined, undefined, undefined, {
+      hudRegistry: hud
+    })
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'live-config-client' })
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'live-config-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('terminal.hud')?.hud?.configCounts?.mcpServers === 0)
+
+    await writeFile(join(configDir, 'settings.json'), JSON.stringify({
+      mcpServers: { live_bridge: {} }, hooks: { Stop: [] }
+    }))
+
+    await waitUntil(() => port.last('terminal.hud')?.hud?.configCounts?.mcpServers === 1)
+    expect(port.last('terminal.hud')).toMatchObject({
+      sessionId: 'live-config-session', hud: { configCounts: { mcpServers: 1, hooks: 1 } }
+    })
+  })
+
+  it('follows external Git metadata and refresh requests for visible working-tree changes', async () => {
+    const repositoryRoot = join(root, 'external-git-repository')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'baseline\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'baseline'])
+    database.run('UPDATE execution_contexts SET cwd = ? WHERE id = ?', repositoryRoot, 'replay-context')
+    registerSession(database, 'external-git-session')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'external-git-session', executionContextId: 'replay-context',
+      profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('terminal.hud')?.hud?.gitBranch === 'main')
+
+    await execFileAsync('git', ['-C', repositoryRoot, 'checkout', '-b', 'external/hud'])
+    await waitUntil(() => port.last('terminal.hud')?.hud?.gitBranch === 'external/hud')
+
+    await writeFile(join(repositoryRoot, 'outside-app.txt'), 'external edit\n')
+    port.receive({
+      type: 'terminal.hud-refresh', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'external-git-session'
+    })
+    await waitUntil(() => port.last('terminal.hud')?.hud?.gitDirty === true)
   })
 
   it('advertises replay and replays durable output after a Runtime reconnect', async () => {
