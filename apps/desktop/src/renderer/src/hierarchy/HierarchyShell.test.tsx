@@ -857,6 +857,41 @@ describe('PRD 05 hierarchy shell', () => {
     expect(runtime.current.startProjection).toHaveBeenCalledWith(17)
   })
 
+  it('applies ordered semantic events without requesting another full projection snapshot', async () => {
+    const data = fixture()
+    let projectionListener: ((message: unknown) => void) | undefined
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn((listener) => {
+        projectionListener = listener
+        return () => { projectionListener = undefined }
+      })
+    }
+
+    render(<HierarchyShell />)
+    await screen.findByRole('button', { name: 'Workspace A' })
+    request.mockClear()
+
+    act(() => projectionListener?.({
+      type: 'events.batch', runtimeGeneration: 'readonly-runtime', events: [{
+        sequence: 18, eventId: 'workspace-live-name', eventType: 'workspace.updated',
+        aggregateType: 'workspace', aggregateId: 'workspace-a', workspaceId: 'workspace-a',
+        payload: { ...data.workspaces[0], name: 'Workspace Live' }, schemaVersion: 1,
+        commandId: 'workspace-live-name', occurredAt: 18
+      }]
+    }))
+
+    expect(await screen.findByRole('button', { name: 'Workspace Live' })).toBeTruthy()
+    expect(request.mock.calls.map(([method]) => method).filter((method) => method === 'projection.snapshot'))
+      .toEqual([])
+  })
+
   it('browses Workspace, Task, Scene, search and copy surfaces while every mutation is disabled in read-only recovery', async () => {
     const data = fixture()
     data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code' }

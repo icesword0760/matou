@@ -94,10 +94,13 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
           ingestAgentNotification(event, after, focusedSessionId, notificationStoreRef.current)
         }
         setProjection(after)
-      } catch {
-        // A fresh snapshot below also repairs Runtime reconnects and event gaps.
+      } catch (error) {
+        // Runtime generation changes and event gaps are the only normal reason
+        // to rebuild the projection. Ordered events stay on the incremental path.
+        void refresh().catch((refreshError: unknown) => {
+          if (alive) setLoadError(errorMessage(refreshError ?? error))
+        })
       }
-      void refresh().catch((error: unknown) => alive && setLoadError(errorMessage(error)))
     }
     const unsubscribe = client.subscribeProjection(onProjection)
     const now = Date.now()
