@@ -5,6 +5,7 @@ import type { DomainEventWireEnvelope, RuntimeMessage, RuntimeMode } from '@mato
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagCanvas, type DagTransform } from './DagCanvas'
+import { DagGraphFrameQueue } from './DagGraphFrameQueue'
 import './dag.css'
 import { READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 
@@ -46,6 +47,14 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
     setGraph(next)
     layoutRevision.current = next.layoutRevision ?? layoutRevision.current
   }, [])
+  const applyGraphRef = useRef(applyGraph)
+  applyGraphRef.current = applyGraph
+  const graphFrameQueue = useRef<DagGraphFrameQueue | null>(null)
+  if (!graphFrameQueue.current) {
+    graphFrameQueue.current = new DagGraphFrameQueue(({ graph: next, sequence, runtimeGeneration: generation }) => {
+      applyGraphRef.current(next, sequence, generation)
+    })
+  }
   const refresh = useCallback(async () => {
     if (fixtureGraph || !client || refreshInFlight.current) return
     refreshInFlight.current = true
@@ -71,6 +80,7 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   }, [applyGraph, client, context.mainWindowId, context.sceneId, fixtureGraph])
 
   useEffect(() => window.matouDesktop?.onDagContext?.((next) => {
+    graphFrameQueue.current?.cancel()
     const initialGraph = graphFromContext(next.initialGraph, next.sceneId)
     setContext({
       mainWindowId: next.mainWindowId,
@@ -97,6 +107,7 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
     return client.subscribeProjection((message: RuntimeMessage) => {
       if (message.type !== 'events.batch') return
       if (runtimeGeneration.current && message.runtimeGeneration !== runtimeGeneration.current) {
+        graphFrameQueue.current?.cancel()
         runtimeGeneration.current = message.runtimeGeneration
         graphEventSequence.current = -1
         projectionStarted.current = false
@@ -115,12 +126,17 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
         }
       }
       if (latest) {
-        applyGraph(latest.graph, latest.sequence, message.runtimeGeneration)
+        graphFrameQueue.current?.enqueue({
+          graph: latest.graph,
+          sequence: latest.sequence,
+          runtimeGeneration: message.runtimeGeneration
+        })
       } else if (requiresScopedRefresh) {
         void refresh()
       }
     })
   }, [applyGraph, client, context.sceneId, fixtureGraph, refresh])
+  useEffect(() => () => graphFrameQueue.current?.cancel(), [])
   useEffect(() => {
     if (fixtureGraph || !client) return
     setGeometryReady(false)
@@ -155,6 +171,7 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
     }
     if (!wasReconnecting.current) return
     wasReconnecting.current = false
+    graphFrameQueue.current?.cancel()
     projectionStarted.current = false
     graphEventSequence.current = -1
     void refresh()

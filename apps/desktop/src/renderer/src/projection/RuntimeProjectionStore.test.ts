@@ -407,4 +407,38 @@ describe('RuntimeProjectionStore', () => {
       expect.objectContaining({ sessionId: 'session-1', cwd: '/deep/new/path' })
     ])
   })
+
+  it('reuses unchanged materialized views and copy-on-write graph branches', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-1' }], tasks: [], relations: [], scenes: [],
+      sessions: [{ id: 'session-1', cwd: '/old' }, { id: 'session-2', cwd: '/other' }],
+      sessionGraphs: {
+        'scene-1': {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'session-1', cwd: '/old' }], edges: []
+        },
+        'scene-2': {
+          sceneId: 'scene-2', nodes: [{ sessionId: 'session-2', cwd: '/other' }], edges: []
+        }
+      }
+    })
+    const before = store.view()
+
+    expect(store.view()).toBe(before)
+    expect(before.hierarchy.sessionGraphs).toBe(before.sessionGraphs)
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'cwd-2', eventType: 'session.cwd-updated',
+      aggregateType: 'session', aggregateId: 'session-1', payload: { cwd: '/new' },
+      schemaVersion: 1, commandId: 'cwd-command', occurredAt: 2
+    }])
+    const after = store.view()
+
+    expect(after).not.toBe(before)
+    expect(after.workspaces).toBe(before.workspaces)
+    expect(after.sessionGraphs['scene-2']).toBe(before.sessionGraphs['scene-2'])
+    expect(after.sessionGraphs['scene-1']).not.toBe(before.sessionGraphs['scene-1'])
+    expect(before.sessionGraphs['scene-1']?.nodes[0]?.cwd).toBe('/old')
+    expect(after.sessionGraphs['scene-1']?.nodes[0]?.cwd).toBe('/new')
+  })
 })

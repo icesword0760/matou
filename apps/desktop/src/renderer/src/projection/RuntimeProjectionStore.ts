@@ -53,15 +53,17 @@ export interface RuntimeProjectionView extends Omit<RuntimeProjectionSnapshot, '
 export class RuntimeProjectionStore {
   #runtimeGeneration: string | undefined
   #eventSequence = 0
-  readonly #workspaces = new Map<string, Entity>()
-  readonly #tasks = new Map<string, Entity>()
-  readonly #sessions = new Map<string, Entity>()
-  readonly #relations = new Map<string, Entity>()
-  readonly #scenes = new Map<string, Entity>()
+  readonly #workspaces = new ProjectionCollection()
+  readonly #tasks = new ProjectionCollection()
+  readonly #sessions = new ProjectionCollection()
+  readonly #relations = new ProjectionCollection()
+  readonly #scenes = new ProjectionCollection()
   #sessionGraphs: Record<string, SessionGraphProjection> = {}
+  readonly #graphLocationsBySession = new Map<string, Array<{ sceneId: string; index: number }>>()
   #hierarchyMeta: Omit<HierarchyProjection, 'workspaces' | 'tasks' | 'sessions' | 'scenes'> = {
     windowId: 'window-1', navigation: { windowId: 'window-1' }
   }
+  #viewCache: RuntimeProjectionView | undefined
 
   get eventSequence(): number {
     return this.#eventSequence
@@ -70,31 +72,40 @@ export class RuntimeProjectionStore {
   replace(snapshot: RuntimeProjectionSnapshot): void {
     this.#runtimeGeneration = snapshot.runtimeGeneration
     this.#eventSequence = snapshot.eventSequence
-    replaceMap(this.#workspaces, snapshot.workspaces)
-    replaceMap(this.#tasks, snapshot.tasks)
-    replaceMap(this.#sessions, snapshot.sessions)
-    replaceMap(this.#relations, snapshot.relations)
-    replaceMap(this.#scenes, snapshot.scenes)
-    this.#sessionGraphs = structuredClone(snapshot.sessionGraphs ?? {})
+    this.#workspaces.replace(snapshot.workspaces)
+    this.#tasks.replace(snapshot.tasks)
+    this.#sessions.replace(snapshot.sessions)
+    this.#relations.replace(snapshot.relations)
+    this.#scenes.replace(snapshot.scenes)
+    this.#replaceAllSessionGraphs(snapshot.sessionGraphs ?? {})
     if (snapshot.hierarchy) {
       const { workspaces: _workspaces, tasks: _tasks, sessions: _sessions, scenes: _scenes, ...meta } = snapshot.hierarchy
       this.#hierarchyMeta = structuredClone(meta)
     }
+    this.#viewCache = undefined
   }
 
   applyBatch(runtimeGeneration: string, events: DomainEventWireEnvelope[]): void {
     if (this.#runtimeGeneration !== runtimeGeneration) {
       throw new Error('runtime generation changed; a fresh projection snapshot is required')
     }
-    for (const event of events) {
-      if (event.sequence <= this.#eventSequence) continue
-      if (event.sequence !== this.#eventSequence + 1) {
-        throw new Error(
-          `projection event gap: expected ${this.#eventSequence + 1}, received ${event.sequence}`
-        )
+    const pendingGraphs = new Map<string, SessionGraphProjection>()
+    let changed = false
+    try {
+      for (const event of events) {
+        if (event.sequence <= this.#eventSequence) continue
+        if (event.sequence !== this.#eventSequence + 1) {
+          throw new Error(
+            `projection event gap: expected ${this.#eventSequence + 1}, received ${event.sequence}`
+          )
+        }
+        this.#apply(event, pendingGraphs)
+        this.#eventSequence = event.sequence
+        changed = true
       }
-      this.#apply(event)
-      this.#eventSequence = event.sequence
+    } finally {
+      this.#flushPendingGraphs(pendingGraphs)
+      if (changed) this.#viewCache = undefined
     }
   }
 
@@ -102,6 +113,7 @@ export class RuntimeProjectionStore {
     result: unknown,
     context?: { type: string; input: Record<string, unknown> }
   ): void {
+    this.#viewCache = undefined
     if (Array.isArray(result)) {
       const target = context?.type === 'hierarchy.reorder-pinned-workspace'
         ? this.#workspaces
@@ -141,7 +153,12 @@ export class RuntimeProjectionStore {
       if (sessionByScene) {
         for (const [sceneId, sessionId] of Object.entries(sessionByScene)) {
           const graph = this.#sessionGraphs[sceneId]
-          if (graph && typeof sessionId === 'string') graph.focusedSessionId = sessionId
+          if (graph && typeof sessionId === 'string' && graph.focusedSessionId !== sessionId) {
+            this.#sessionGraphs = {
+              ...this.#sessionGraphs,
+              [sceneId]: { ...graph, focusedSessionId: sessionId }
+            }
+          }
         }
       }
     }
@@ -154,7 +171,7 @@ export class RuntimeProjectionStore {
     }
     const graph = asSessionGraph(object.graph) ?? asSessionGraph(object)
     if (graph) {
-      this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
+      this.#replaceSessionGraph(graph)
       const sceneId = typeof context?.input.sceneId === 'string'
         ? context.input.sceneId
         : graph.sceneId
@@ -192,6 +209,7 @@ export class RuntimeProjectionStore {
     }
     this.#archiveCommandTarget(context)
     this.#mergeActiveSceneSnapshot(object)
+    this.#viewCache = undefined
   }
 
   applySceneSnapshot(snapshot: SceneSnapshotProjection): void {
@@ -205,40 +223,48 @@ export class RuntimeProjectionStore {
     if (index >= 0) snapshots[index] = next
     else snapshots.push(next)
     this.#hierarchyMeta = { ...this.#hierarchyMeta, sceneSnapshots: snapshots }
+    this.#viewCache = undefined
   }
 
   applySceneGraph(graph: SessionGraphProjection): void {
-    this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
+    this.#replaceSessionGraph(graph)
+    this.#viewCache = undefined
   }
 
   view(): RuntimeProjectionView {
     if (!this.#runtimeGeneration) throw new Error('projection snapshot has not been loaded')
-    const workspaces = [...this.#workspaces.values()]
-    const tasks = [...this.#tasks.values()]
-    const sessions = [...this.#sessions.values()]
-    const scenes = [...this.#scenes.values()]
-    return {
+    if (this.#viewCache) return this.#viewCache
+    const workspaces = this.#workspaces.values
+    const tasks = this.#tasks.values
+    const sessions = this.#sessions.values
+    const scenes = this.#scenes.values
+    const sessionGraphs = this.#sessionGraphs
+    this.#viewCache = {
       runtimeGeneration: this.#runtimeGeneration,
       eventSequence: this.#eventSequence,
       workspaces,
       tasks,
       sessions,
-      relations: [...this.#relations.values()],
+      relations: this.#relations.values,
       scenes,
-      sessionGraphs: structuredClone(this.#sessionGraphs),
+      sessionGraphs,
       hierarchy: {
-        ...structuredClone(this.#hierarchyMeta),
-        workspaces: workspaces.filter(isActive),
-        tasks: tasks.filter(isActive),
-        sessions: sessions.filter(isActive),
-        scenes: scenes.filter(isActive),
-        closedScenes: scenes.filter((scene) => !isActive(scene)),
-        sessionGraphs: structuredClone(this.#sessionGraphs)
+        ...this.#hierarchyMeta,
+        workspaces: this.#workspaces.activeValues,
+        tasks: this.#tasks.activeValues,
+        sessions: this.#sessions.activeValues,
+        scenes: this.#scenes.activeValues,
+        closedScenes: this.#scenes.inactiveValues,
+        sessionGraphs
       }
     }
+    return this.#viewCache
   }
 
-  #apply(event: DomainEventWireEnvelope): void {
+  #apply(
+    event: DomainEventWireEnvelope,
+    pendingGraphs: Map<string, SessionGraphProjection>
+  ): void {
     const payload = asEntity(event.payload)
     if (event.eventType === 'workspace.created' || event.eventType === 'workspace.updated') {
       if (payload) this.#workspaces.set(event.aggregateId, payload)
@@ -275,11 +301,11 @@ export class RuntimeProjectionStore {
       if (session) this.#sessions.set(event.aggregateId, session)
     } else if (event.eventType === 'session.cwd-updated') {
       patchEntity(this.#sessions, event.aggregateId, event.payload)
-      for (const graph of Object.values(this.#sessionGraphs)) {
-        graph.nodes = graph.nodes.map((node) => node.sessionId === event.aggregateId
-          ? { ...node, ...(asObject(event.payload) ?? {}) }
-          : node)
-      }
+      // Preserve event ordering when a rare batch interleaves a full graph and
+      // a cwd update. Ordinary cwd events use the session-to-node location
+      // index and touch only the owning graph.
+      this.#flushPendingGraphs(pendingGraphs)
+      this.#patchSessionGraphNodes(event.aggregateId, asObject(event.payload) ?? {})
     } else if (event.eventType === 'session.archived') {
       patchEntity(this.#sessions, event.aggregateId, { ...(asObject(event.payload) ?? {}), status: 'archived' })
     } else if (event.eventType === 'session-relation.created' || event.eventType === 'session-relation.restored') {
@@ -299,7 +325,72 @@ export class RuntimeProjectionStore {
       const session = asEntity(asObject(event.payload)?.session)
       if (session) this.#sessions.set(event.sessionId ?? event.aggregateId, session)
       const graph = asSessionGraph(asObject(event.payload)?.graph)
-      if (graph) this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
+      if (graph) pendingGraphs.set(graph.sceneId, graph)
+    }
+  }
+
+  #flushPendingGraphs(pendingGraphs: Map<string, SessionGraphProjection>): void {
+    if (pendingGraphs.size === 0) return
+    this.#replaceSessionGraphs(pendingGraphs.values())
+    pendingGraphs.clear()
+  }
+
+  #replaceAllSessionGraphs(graphs: Record<string, SessionGraphProjection>): void {
+    this.#sessionGraphs = {}
+    this.#graphLocationsBySession.clear()
+    this.#replaceSessionGraphs(Object.values(graphs))
+  }
+
+  #replaceSessionGraph(graph: SessionGraphProjection): void {
+    this.#replaceSessionGraphs([graph])
+  }
+
+  #replaceSessionGraphs(graphs: Iterable<SessionGraphProjection>): void {
+    const nextGraphs = { ...this.#sessionGraphs }
+    for (const graph of graphs) {
+      const previous = nextGraphs[graph.sceneId]
+      if (previous) this.#removeGraphLocations(previous)
+      // RPC and MessagePort payloads already cross a structured-clone boundary.
+      // Treat their arrays as immutable and clone only the graph shell; later
+      // node patches use copy-on-write so published views remain stable.
+      const next = { ...graph, nodes: graph.nodes, edges: graph.edges }
+      nextGraphs[graph.sceneId] = next
+      this.#indexGraphLocations(next)
+    }
+    this.#sessionGraphs = nextGraphs
+  }
+
+  #patchSessionGraphNodes(sessionId: string, patch: Record<string, unknown>): void {
+    const locations = this.#graphLocationsBySession.get(sessionId)
+    if (!locations || locations.length === 0) return
+    const graphs = { ...this.#sessionGraphs }
+    for (const { sceneId, index } of locations) {
+      const current = graphs[sceneId]
+      const node = current?.nodes[index]
+      if (!current || !node || node.sessionId !== sessionId) continue
+      const nodes = current.nodes.slice()
+      nodes[index] = { ...node, ...patch }
+      graphs[sceneId] = { ...current, nodes }
+    }
+    this.#sessionGraphs = graphs
+  }
+
+  #indexGraphLocations(graph: SessionGraphProjection): void {
+    graph.nodes.forEach((node, index) => {
+      const locations = this.#graphLocationsBySession.get(node.sessionId)
+      const location = { sceneId: graph.sceneId, index }
+      if (locations) locations.push(location)
+      else this.#graphLocationsBySession.set(node.sessionId, [location])
+    })
+  }
+
+  #removeGraphLocations(graph: SessionGraphProjection): void {
+    for (const node of graph.nodes) {
+      const locations = this.#graphLocationsBySession.get(node.sessionId)
+      if (!locations) continue
+      const remaining = locations.filter(({ sceneId }) => sceneId !== graph.sceneId)
+      if (remaining.length > 0) this.#graphLocationsBySession.set(node.sessionId, remaining)
+      else this.#graphLocationsBySession.delete(node.sessionId)
     }
   }
 
@@ -342,7 +433,7 @@ export class RuntimeProjectionStore {
     this.#hierarchyMeta = { ...this.#hierarchyMeta, taskPlacements: placements }
   }
 
-  #applyOrder(target: Map<string, Entity>, ids: unknown, key: string): void {
+  #applyOrder(target: ProjectionCollection, ids: unknown, key: string): void {
     if (!Array.isArray(ids)) return
     ids.forEach((id, index) => {
       if (typeof id === 'string') patchEntity(target, id, { [key]: projectionSortKey(index) })
@@ -361,7 +452,7 @@ export class RuntimeProjectionStore {
             ? [this.#sessions, context.input.sessionId]
             : undefined
     if (target && typeof target[1] === 'string') {
-      patchEntity(target[0] as Map<string, Entity>, target[1], { status: 'archived' })
+      patchEntity(target[0] as ProjectionCollection, target[1], { status: 'archived' })
     }
   }
 
@@ -420,14 +511,102 @@ function isActive(entity: Entity): boolean {
   return entity.archivedAt === undefined && entity.status !== 'archived'
 }
 
-function replaceMap(target: Map<string, Entity>, entities: Entity[]): void {
-  target.clear()
-  for (const entity of entities) target.set(entity.id, structuredClone(entity))
+class ProjectionCollection {
+  readonly #byId = new Map<string, Entity>()
+  readonly #indexById = new Map<string, number>()
+  readonly #activeIndexById = new Map<string, number>()
+  readonly #inactiveIndexById = new Map<string, number>()
+  #values: Entity[] = []
+  #activeValues: Entity[] = []
+  #inactiveValues: Entity[] = []
+
+  get values(): Entity[] { return this.#values }
+  get activeValues(): Entity[] { return this.#activeValues }
+  get inactiveValues(): Entity[] { return this.#inactiveValues }
+
+  get(id: string): Entity | undefined { return this.#byId.get(id) }
+
+  replace(entities: Entity[]): void {
+    this.#byId.clear()
+    this.#indexById.clear()
+    this.#values = entities.map((entity) => ({ ...entity }))
+    this.#values.forEach((entity, index) => {
+      this.#byId.set(entity.id, entity)
+      this.#indexById.set(entity.id, index)
+    })
+    this.#rebuildMembership()
+  }
+
+  set(id: string, entity: Entity): void {
+    const next = { ...entity, id }
+    const previous = this.#byId.get(id)
+    const index = this.#indexById.get(id)
+    this.#byId.set(id, next)
+    if (index === undefined) {
+      this.#indexById.set(id, this.#values.length)
+      this.#values = [...this.#values, next]
+      if (isActive(next)) {
+        this.#activeIndexById.set(id, this.#activeValues.length)
+        this.#activeValues = [...this.#activeValues, next]
+      } else {
+        this.#inactiveIndexById.set(id, this.#inactiveValues.length)
+        this.#inactiveValues = [...this.#inactiveValues, next]
+      }
+      return
+    }
+    const values = this.#values.slice()
+    values[index] = next
+    this.#values = values
+    if (previous && isActive(previous) === isActive(next)) {
+      const memberIndex = isActive(next)
+        ? this.#activeIndexById.get(id)
+        : this.#inactiveIndexById.get(id)
+      if (memberIndex !== undefined) {
+        const members = (isActive(next) ? this.#activeValues : this.#inactiveValues).slice()
+        members[memberIndex] = next
+        if (isActive(next)) this.#activeValues = members
+        else this.#inactiveValues = members
+      }
+      return
+    }
+    this.#rebuildMembership()
+  }
+
+  delete(id: string): void {
+    const index = this.#indexById.get(id)
+    if (index === undefined) return
+    this.#byId.delete(id)
+    this.#values = this.#values.filter((entity) => entity.id !== id)
+    this.#rebuildIndexes()
+    this.#rebuildMembership()
+  }
+
+  #rebuildIndexes(): void {
+    this.#indexById.clear()
+    this.#values.forEach((entity, index) => this.#indexById.set(entity.id, index))
+  }
+
+  #rebuildMembership(): void {
+    this.#activeValues = []
+    this.#inactiveValues = []
+    this.#activeIndexById.clear()
+    this.#inactiveIndexById.clear()
+    for (const entity of this.#values) {
+      if (isActive(entity)) {
+        this.#activeIndexById.set(entity.id, this.#activeValues.length)
+        this.#activeValues.push(entity)
+      } else {
+        this.#inactiveIndexById.set(entity.id, this.#inactiveValues.length)
+        this.#inactiveValues.push(entity)
+      }
+    }
+  }
 }
-function upsertEntity(target: Map<string, Entity>, entity: Entity): void {
-  target.set(entity.id, { ...(target.get(entity.id) ?? {}), ...structuredClone(entity) })
+
+function upsertEntity(target: ProjectionCollection, entity: Entity): void {
+  target.set(entity.id, { ...(target.get(entity.id) ?? {}), ...entity })
 }
-function patchEntity(target: Map<string, Entity>, id: string, patch: unknown): void {
+function patchEntity(target: ProjectionCollection, id: string, patch: unknown): void {
   const current = target.get(id)
   const object = asObject(patch)
   if (current && object) target.set(id, { ...current, ...object })
@@ -437,11 +616,11 @@ function projectionSortKey(index: number): string {
 }
 function commandEntityTarget(
   type: string | undefined,
-  workspaces: Map<string, Entity>,
-  tasks: Map<string, Entity>,
-  sessions: Map<string, Entity>,
-  scenes: Map<string, Entity>
-): Map<string, Entity> | undefined {
+  workspaces: ProjectionCollection,
+  tasks: ProjectionCollection,
+  sessions: ProjectionCollection,
+  scenes: ProjectionCollection
+): ProjectionCollection | undefined {
   if (!type) return undefined
   if ([
     'hierarchy.rename-workspace', 'hierarchy.relink-workspace', 'hierarchy.set-workspace-pinned'
@@ -451,7 +630,7 @@ function commandEntityTarget(
   if (['session.set-permission-mode', 'session.set-model'].includes(type)) return sessions
   return undefined
 }
-function unarchiveEntity(target: Map<string, Entity>, id: string, patch: unknown): void {
+function unarchiveEntity(target: ProjectionCollection, id: string, patch: unknown): void {
   const current = target.get(id)
   const object = asObject(patch)
   if (!current) return
