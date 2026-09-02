@@ -20,6 +20,7 @@ interface E2eMigrationControl {
   stage: InterruptionStage
   reachedPath: string
   hold?: boolean
+  migrationVersion?: number
 }
 
 interface E2eMigrationEnvironment {
@@ -53,6 +54,10 @@ function reachMigration(
   stage: InterruptionStage,
   migration: Migration
 ): void {
+  if (
+    control.migrationVersion !== undefined &&
+    control.migrationVersion !== migration.version
+  ) return
   reach(control, stage, { migrationVersion: migration.version })
 }
 
@@ -85,7 +90,10 @@ function parseControl(serialized: string): E2eMigrationControl {
     ].includes(String(value.stage)) ||
     typeof value.reachedPath !== 'string' ||
     value.reachedPath.trim() === '' ||
-    (value.hold !== undefined && typeof value.hold !== 'boolean')
+    (value.hold !== undefined && typeof value.hold !== 'boolean') ||
+    (value.migrationVersion !== undefined && (
+      !Number.isSafeInteger(value.migrationVersion) || value.migrationVersion <= 0
+    ))
   ) {
     throw new Error('invalid MATOU_E2E migration interruption control')
   }

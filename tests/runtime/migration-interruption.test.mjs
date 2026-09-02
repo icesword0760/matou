@@ -25,47 +25,55 @@ const runtimeParent = fileURLToPath(new URL(
   import.meta.url
 ))
 
-for (const stage of [
-  'pre-migration-backup-ready',
-  'migration-transaction-prepared',
-  'migration-committed'
-]) {
-  test(`real Runtime recovers after SIGKILL at ${stage}`, { timeout: 90_000 }, async () => {
-    const result = await runScenario(stage, false)
+const pendingMigrations = FOUNDATION_MIGRATIONS.filter(({ version }) => version > 24)
+const latestSchemaVersion = FOUNDATION_MIGRATIONS.at(-1).version
+const interruptionCases = [
+  { stage: 'pre-migration-backup-ready' },
+  ...pendingMigrations.flatMap(({ version }) => [
+    { stage: 'migration-transaction-prepared', migrationVersion: version },
+    { stage: 'migration-committed', migrationVersion: version }
+  ])
+]
+
+for (const { stage, migrationVersion } of interruptionCases) {
+  test(`real Runtime recovers after SIGKILL at ${stage}${migrationVersion ? ` v${migrationVersion}` : ''}`, {
+    timeout: 90_000
+  }, async () => {
+    const result = await runScenario(stage, false, migrationVersion)
     assert.equal(result.runtimeHost, 'background-process')
     assert.equal(result.killedStage, stage)
     assert.equal(result.killedWith, 'SIGKILL')
     assert.equal(result.databaseIntegrity, 'ok')
     assert.ok(result.validPreMigrationBackups >= 1)
     assert.deepEqual(result.assetCounts, expectedAssetCounts)
-    assert.equal(result.schemaVersion, 25)
-    assert.equal(result.latestMigrationRows, 1)
+    assert.equal(result.schemaVersion, latestSchemaVersion)
+    assert.equal(result.pendingMigrationRows, pendingMigrations.length)
     assert.equal(result.halfMigratedColumns, 0)
     assert.equal(result.forkOperationId, 'legacy-operation:session-child')
     assert.equal(result.forkSubmissionKey, 'legacy-submission:session-child')
     assert.equal(result.forkStage, 'succeeded')
-    if (stage === 'migration-committed') {
-      assert.equal(result.interruptedSchemaVersion, 25)
-      assert.equal(result.interruptedLatestColumns, 11)
-    } else {
-      assert.equal(result.interruptedSchemaVersion, 24)
-      assert.equal(result.interruptedLatestColumns, 0)
-    }
+    const interruptedVersion = stage === 'pre-migration-backup-ready'
+      ? 24
+      : stage === 'migration-committed' ? migrationVersion : migrationVersion - 1
+    assert.equal(result.killedMigrationVersion, migrationVersion)
+    assert.equal(result.interruptedSchemaVersion, interruptedVersion)
+    assert.equal(result.interruptedLatestColumns, interruptedVersion >= 25 ? 11 : 0)
+    assert.equal(result.interruptedStructuralIndex, interruptedVersion >= 26)
   })
 }
 
 test('real Runtime selects the next valid migration backup after the newest is damaged', {
   timeout: 90_000
 }, async () => {
-  const result = await runScenario('migration-transaction-prepared', true)
+  const result = await runScenario('migration-transaction-prepared', true, 25)
   assert.equal(result.runtimeHost, 'background-process')
   assert.equal(result.databaseIntegrity, 'ok')
   assert.equal(result.damagedBackupOffered, false)
   assert.equal(result.selectedFallbackSchemaVersion, 24)
   assert.equal(result.recoveryEvidencePreserved, true)
   assert.equal(result.recoveryMarkerResolved, true)
-  assert.equal(result.schemaVersion, 25)
-  assert.equal(result.latestMigrationRows, 1)
+  assert.equal(result.schemaVersion, latestSchemaVersion)
+  assert.equal(result.pendingMigrationRows, pendingMigrations.length)
   assert.deepEqual(result.assetCounts, expectedAssetCounts)
 })
 
@@ -78,7 +86,7 @@ const expectedAssetCounts = {
   currentRelations: 1
 }
 
-async function runScenario(stage, corruptNewest) {
+async function runScenario(stage, corruptNewest, migrationVersion) {
   const root = await mkdtemp(join(tmpdir(), 'matou-migration-gate-'))
   const databasePath = join(root, 'matou.sqlite')
   const reachedPath = join(root, 'fault-reached.json')
@@ -86,7 +94,10 @@ async function runScenario(stage, corruptNewest) {
   try {
     await createLegacyDatabase(databasePath, root)
 
-    await writeFile(controlPath, JSON.stringify({ stage, reachedPath, hold: true }))
+    await writeFile(controlPath, JSON.stringify({
+      stage, reachedPath, hold: true,
+      ...(migrationVersion === undefined ? {} : { migrationVersion })
+    }))
     const faulting = launchRuntime(root, { MATOU_E2E_MIGRATION_CONTROL: controlPath })
     const reached = await waitForJson(reachedPath, 30_000)
     assert.equal(reached.pid, faulting.child.pid)
@@ -132,9 +143,11 @@ async function runScenario(stage, corruptNewest) {
     return {
       runtimeHost: 'background-process',
       killedStage: stage,
+      killedMigrationVersion: reached.migrationVersion,
       killedWith: faultExit.signal,
       interruptedSchemaVersion: interrupted.schemaVersion,
       interruptedLatestColumns: interrupted.latestColumns,
+      interruptedStructuralIndex: interrupted.structuralIndex,
       validPreMigrationBackups,
       ...fallback,
       ...inspectFinalState(databasePath)
@@ -318,7 +331,8 @@ function inspectMigrationState(databasePath) {
       schemaVersion: Number(database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations'
       ).get().version),
-      latestColumns: latestMigrationColumns(database)
+      latestColumns: latestMigrationColumns(database),
+      structuralIndex: structuralIndexPresent(database)
     }
   } finally {
     database.close()
@@ -338,8 +352,8 @@ function inspectFinalState(databasePath) {
       schemaVersion: Number(database.prepare(
         'SELECT MAX(version) AS version FROM schema_migrations'
       ).get().version),
-      latestMigrationRows: Number(database.prepare(
-        'SELECT COUNT(*) AS count FROM schema_migrations WHERE version = 25'
+      pendingMigrationRows: Number(database.prepare(
+        'SELECT COUNT(*) AS count FROM schema_migrations WHERE version > 24'
       ).get().count),
       halfMigratedColumns: columns === 11 ? 0 : columns,
       assetCounts: {
@@ -357,6 +371,12 @@ function inspectFinalState(databasePath) {
   } finally {
     database.close()
   }
+}
+
+function structuralIndexPresent(database) {
+  return database.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = 'session_relations_structural_lookup_idx'"
+  ).get()?.present === 1
 }
 
 function latestMigrationColumns(database) {
