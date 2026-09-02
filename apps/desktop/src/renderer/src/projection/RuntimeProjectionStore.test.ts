@@ -323,6 +323,31 @@ describe('RuntimeProjectionStore', () => {
     expect(store.eventSequence).toBe(7)
   })
 
+  it('loads the graph for a Scene selected after the initial projection', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 7,
+      workspaces: [], tasks: [], sessions: [], relations: [], scenes: [],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: { windowId: 'window-1' }
+      }
+    })
+
+    store.applySceneGraph({
+      sceneId: 'scene-later', focusedSessionId: 'session-later',
+      nodes: [{ sessionId: 'session-later', title: 'Later' }], edges: []
+    })
+
+    expect(store.view().hierarchy.sessionGraphs).toEqual({
+      'scene-later': expect.objectContaining({
+        sceneId: 'scene-later', focusedSessionId: 'session-later',
+        nodes: [expect.objectContaining({ sessionId: 'session-later' })]
+      })
+    })
+    expect(store.eventSequence).toBe(7)
+  })
+
   it('updates the visible terminal path when a live Shell changes directory', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

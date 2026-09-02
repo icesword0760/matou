@@ -74,6 +74,7 @@ export async function seedScaleDatabase(
 ): Promise<void> {
   validateDataset(dataset)
   await mkdir(dataDirectory, { recursive: true })
+  await prepareScaleWorkspaceDirectories(dataDirectory, dataset)
   const database = ScaleDatabaseConnection.open(join(dataDirectory, DATABASE_NAME))
   try {
     assertMigrated(database)
@@ -94,6 +95,20 @@ export async function seedScaleDatabase(
   if (dataset.journalBytesPerSession !== undefined) {
     await seedScaleJournals(dataDirectory, dataset)
   }
+}
+
+async function prepareScaleWorkspaceDirectories(
+  dataDirectory: string,
+  dataset: ScaleDataset
+): Promise<void> {
+  const parentDirectory = dirname(dataDirectory)
+  const directories = [resolve(parentDirectory, 'matou_workspace')]
+  if (dataset.workspaceCount) {
+    for (let workspaceIndex = 1; workspaceIndex < dataset.workspaceCount; workspaceIndex += 1) {
+      directories.push(resolve(parentDirectory, `matou_workspace_${fixedIndex(workspaceIndex)}`))
+    }
+  }
+  await Promise.all(directories.map((directory) => mkdir(directory, { recursive: true })))
 }
 
 export async function readScaleDatabaseCounts(

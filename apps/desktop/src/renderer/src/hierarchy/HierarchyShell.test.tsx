@@ -924,7 +924,7 @@ describe('PRD 05 hierarchy shell', () => {
       .toEqual([])
   })
 
-  it('switches workspace from the authoritative command result without a second full snapshot', async () => {
+  it('switches workspace from the command result and loads only its active Scene', async () => {
     let data = fixture()
     const request = vi.fn(async (method: string) => {
       if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
@@ -941,6 +941,15 @@ describe('PRD 05 hierarchy shell', () => {
           navigation: data.navigation
         }
       }
+      if (method === 'hierarchy.get-scene-snapshot') {
+        return data.sceneSnapshots?.find(({ scene }) => scene.id === 'scene-b1')
+      }
+      if (method === 'hierarchy.get-scene-session-graph') {
+        return {
+          sceneId: 'scene-b1', focusedSessionId: 'session-b1', edges: [],
+          nodes: [graphNode('session-b1', '终端 B1')]
+        }
+      }
       throw new Error(`unexpected Runtime request: ${method}`)
     })
     runtime.current = {
@@ -955,6 +964,9 @@ describe('PRD 05 hierarchy shell', () => {
     expect(await screen.findByRole('region', { name: 'Workspace B 工作现场' })).toBeTruthy()
     expect(request.mock.calls.map(([method]) => method).filter((method) => method === 'projection.snapshot'))
       .toEqual(['projection.snapshot'])
+    expect(request.mock.calls.map(([method]) => method)).toEqual(expect.arrayContaining([
+      'hierarchy.get-scene-snapshot', 'hierarchy.get-scene-session-graph'
+    ]))
   })
 
   it('browses Workspace, Task, Scene, search and copy surfaces while every mutation is disabled in read-only recovery', async () => {

@@ -7,7 +7,8 @@ import type { ForkStage, LayoutNode, SessionEnvironment } from '@matou/domain'
 import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
 import {
-  RuntimeProjectionStore, type RuntimeProjectionSnapshot, type SceneSnapshotProjection
+  RuntimeProjectionStore, type RuntimeProjectionSnapshot, type SceneSnapshotProjection,
+  type SessionGraphProjection
 } from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
@@ -80,13 +81,17 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     storeRef.current.applyCommandResult(result, context)
     const sceneId = mutationSceneId(result, context)
     if (client && sceneId && requiresFreshSceneSnapshot(context.type)) {
-      const sceneSnapshot = await client.request<SceneSnapshotProjection>(
-        'hierarchy.get-scene-snapshot', { sceneId }
-      )
+      const [sceneSnapshot, sceneGraph] = await Promise.all([
+        client.request<SceneSnapshotProjection>('hierarchy.get-scene-snapshot', { sceneId }),
+        client.request<SessionGraphProjection>('hierarchy.get-scene-session-graph', {
+          sceneId, windowId
+        })
+      ])
       storeRef.current.applySceneSnapshot(sceneSnapshot)
+      storeRef.current.applySceneGraph(sceneGraph)
     }
     setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
-  }, [client])
+  }, [client, windowId])
 
   useEffect(() => {
     if (fixture || !client) return
@@ -1338,6 +1343,7 @@ function mutationSceneId(
 
 function requiresFreshSceneSnapshot(type: string): boolean {
   return [
+    'hierarchy.activate-workspace', 'hierarchy.activate-task', 'hierarchy.activate-scene',
     'hierarchy.create-scene', 'hierarchy.create-canvas', 'hierarchy.reopen-scene',
     'hierarchy.split-session', 'hierarchy.fork-session', 'hierarchy.create-shell-sibling',
     'hierarchy.create-fork-child', 'hierarchy.create-fork-sibling',

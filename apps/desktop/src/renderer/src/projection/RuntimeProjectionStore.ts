@@ -200,6 +200,10 @@ export class RuntimeProjectionStore {
     this.#hierarchyMeta = { ...this.#hierarchyMeta, sceneSnapshots: snapshots }
   }
 
+  applySceneGraph(graph: SessionGraphProjection): void {
+    this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
+  }
+
   view(): RuntimeProjectionView {
     if (!this.#runtimeGeneration) throw new Error('projection snapshot has not been loaded')
     const workspaces = [...this.#workspaces.values()]
