@@ -141,7 +141,7 @@ describe('reference product notification hierarchy interactions', () => {
     })
     const onActivate = vi.fn()
     renderWithStore(<TerminalPane session={{ id: 'session-a', taskId: 'task-a', title: 'Shell' }} active visible={false}
-      workspaceSessionCount={2} taskName="事项 A" onActivate={onActivate} onDelete={vi.fn()} />, store)
+      onActivate={onActivate} />, store)
 
     const pane = screen.getByTestId('terminal-pane')
     expect(pane.classList.contains('has-notification')).toBe(true)
@@ -211,7 +211,7 @@ function commands(): HierarchyCommands {
     retryProviderRestore: vi.fn(), listClaudeSessions: vi.fn(),
     getClaudeSessionDetail: vi.fn(), loadClaudeSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
-    putGeometry: vi.fn(), activateSession: vi.fn(), deleteSession: vi.fn(),
+    putGeometry: vi.fn(), activateSession: vi.fn(),
     openSessionEnvironment: vi.fn(), restoreSessionEnvironment: vi.fn(),
     locateSessionEnvironment: vi.fn(), handoffSessionEnvironment: vi.fn(),
     detachSession: vi.fn(), returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()

@@ -432,12 +432,6 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const task = projection.tasks.find(({ id }) => id === taskId)
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
-  const workspaceTaskIds = new Set(
-    projection.tasks.filter(({ id, workspaceId: owner }) =>
-      owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
-    ).map(({ id }) => id)
-  )
-  const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
   const activeHud = focusedSessionId ? sessionHudById.get(focusedSessionId) : undefined
@@ -744,15 +738,14 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   ? graphIndex?.byId.get(graphNode.parentSessionId)
                   : undefined
                 const childNodes = graphIndex?.childrenOf(session.id) ?? []
-                const descendantSummary = graphIndex?.descendantSummaryOf(session.id)
+                const descendantNodes = graphIndex?.descendantsOf(session.id) ?? []
                 const sessionHud = sessionHudById.get(session.id)
                 const recoveryStatus = sessionRecovery.statusBySession.get(session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
                   active={isFocused} visible={scene.id === activeSceneId && cardVisible}
                   foreground={scene.id === activeSceneId}
-                  workspaceSessionCount={workspaceSessionCount}
-                  taskName={task.title} sceneId={scene.id} pathValid={pathValid} readOnly={readOnly}
+                  sceneId={scene.id} pathValid={pathValid} readOnly={readOnly}
                   themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
                   closeRequest={session.id === closeRequest.sessionId ? closeRequest.sequence : 0}
                   {...(searchOpen && scene.id === activeSceneId && isFocused ? { searchRequest } : {})}
@@ -792,7 +785,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   } : {})}
                   sharedWorkingDirectory={graphNode?.sharedWorkingDirectory === true || graphNode?.worktree?.shared === true}
                   {...(sessionEnvironment ? { environment: sessionEnvironment } : {})}
-                  hasOwnedWorktree={graphNode?.hasOwnedWorktree === true}
+                  {...(graphNode?.hasOwnedWorktree === undefined
+                    ? {} : { hasOwnedWorktree: graphNode.hasOwnedWorktree })}
                   {...(workspace ? { workspaceId: workspace.id } : {})}
                   onActivate={(id) => commands.setFocusedSession(scene.id, id)}
                   onLoadSession={() => setSessionLoader({
@@ -802,22 +796,17 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                     running: graphNode?.workStatus === 'running' ||
                       graphNode?.workStatus === 'starting'
                   })}
-                  onDelete={commands.deleteSession}
-                  descendantCount={descendantSummary?.count ?? 0}
-                  descendantImpact={{
-                    running: descendantSummary?.running ?? 0,
-                    needsInput: descendantSummary?.needsInput ?? 0
-                  }}
+                  descendantNodes={[...descendantNodes]}
+                  {...(graphNode?.parentSessionId ? { parentSessionId: graphNode.parentSessionId } : {})}
                   {...(commands.removeSessionBranch ? {
-                    onRemoveBranch: (sessionId: string, includeDescendants: boolean) =>
-                      commands.removeSessionBranch?.(scene.id, sessionId, includeDescendants)
+                    onRemoveBranch: (sessionId, scope) =>
+                      commands.removeSessionBranch?.(scene.id, sessionId, scope)
                   } : {})}
                   onRetryRestore={commands.retryProviderRestore}
                   {...(client ? { onRetryWork: (sessionId: string) => {
                     client.retryLastTerminalInput(sessionId)
                   } } : {})}
                   onRetryFork={() => commands.retryFork(scene.id, session.id)}
-                  onRemoveFailedFork={() => commands.removeFailedFork(scene.id, session.id)}
                   onRestoreEnvironment={(sessionId) => environmentActions.restore(sessionId)}
                   onLocateEnvironment={(sessionId) => locateEnvironment(sessionId)}
                   onHandoffEnvironment={(sessionId, target) => environmentActions.handoff(sessionId, target)}
@@ -877,8 +866,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                       )}
                       onActivate={(sessionId) => run(commands.setFocusedSession(scene.id, sessionId))}
                       {...(commands.removeSessionBranch ? {
-                        onRemoveBranch: (sessionId: string, includeDescendants: boolean) =>
-                          commands.removeSessionBranch?.(scene.id, sessionId, includeDescendants)
+                        onRemoveBranch: (sessionId, scope) =>
+                          commands.removeSessionBranch?.(scene.id, sessionId, scope)
                       } : {})}
                       onNavigateToChildren={(sessionId) => {
                         setLevelParentByScene((current) => ({ ...current, [scene.id]: sessionId }))
@@ -1205,6 +1194,27 @@ function createFixtureCommands(
     graph.focusedSessionId = sessionId
     value.navigation.sessionByScene[sceneId] = sessionId
   })
+  const removeFixtureSession = (sessionId: string) => updateNavigation((value) => {
+    const snapshot = value.sceneSnapshots?.find(({ mounts }) =>
+      mounts.some((mount) => mount.sessionId === sessionId)
+    )
+    const mount = snapshot?.mounts.find((candidate) => candidate.sessionId === sessionId)
+    if (!snapshot || !mount || snapshot.mounts.length <= 1) return
+    snapshot.mounts = snapshot.mounts.filter(({ sessionId: candidate }) => candidate !== sessionId)
+    if (mount.sceneNodeId) snapshot.nodes = snapshot.nodes.filter(({ id }) => id !== mount.sceneNodeId)
+    value.sessions = value.sessions.filter(({ id }) => id !== sessionId)
+    const fallback = snapshot.mounts[0]?.sessionId
+    if (fallback) value.navigation.sessionByScene[snapshot.scene.id] = fallback
+    const graph = value.sessionGraphs?.[snapshot.scene.id]
+    if (graph) {
+      graph.nodes = graph.nodes.filter(({ sessionId: candidate }) => candidate !== sessionId)
+      graph.edges = graph.edges.filter(({ parentSessionId, childSessionId }) =>
+        parentSessionId !== sessionId && childSessionId !== sessionId
+      )
+      if (fallback) graph.focusedSessionId = fallback
+      else delete graph.focusedSessionId
+    }
+  })
   return {
     activateWorkspace: (workspaceId) => updateNavigation((value) => { value.navigation.activeWorkspaceId = workspaceId }),
     activateTask: (taskId) => updateNavigation((value) => {
@@ -1242,7 +1252,8 @@ function createFixtureCommands(
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
     createForkChild: createFixtureForkChild, createForkSibling: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
-    retryProviderRestore: NOOP, restartStoppedSession: NOOP, removeSessionBranch: NOOP,
+    retryProviderRestore: NOOP, restartStoppedSession: NOOP,
+    removeSessionBranch: (_sceneId, sessionId) => removeFixtureSession(sessionId),
     listClaudeSessions: async () => ({ sessions: [], total: 0 }),
     getClaudeSessionDetail: async () => { throw new Error('fixture session is unavailable') },
     loadClaudeSession: async (sessionId, providerSessionId) => ({
@@ -1268,16 +1279,8 @@ function createFixtureCommands(
         candidate.taskId === scene.taskId ? reordered[peerIndex++]! : candidate
       )
     }), closeScene: NOOP,
-    splitSession: createFixtureSibling, forkSession: NOOP, putGeometry: NOOP, deleteSession: (sessionId) => updateNavigation((value) => {
-      const snapshot = value.sceneSnapshots?.find(({ mounts }) => mounts.some((mount) => mount.sessionId === sessionId))
-      const mount = snapshot?.mounts.find((candidate) => candidate.sessionId === sessionId)
-      if (!snapshot || !mount || snapshot.mounts.length <= 1) return
-      snapshot.mounts = snapshot.mounts.filter(({ sessionId: candidate }) => candidate !== sessionId)
-      if (mount.sceneNodeId) snapshot.nodes = snapshot.nodes.filter(({ id }) => id !== mount.sceneNodeId)
-      value.sessions = value.sessions.filter(({ id }) => id !== sessionId)
-      const fallback = snapshot.mounts[0]?.sessionId
-      if (fallback) value.navigation.sessionByScene[snapshot.scene.id] = fallback
-    }), detachSession: NOOP, returnSession: (sceneWindowId) => updateNavigation((value) => {
+    splitSession: createFixtureSibling, forkSession: NOOP, putGeometry: NOOP,
+    detachSession: NOOP, returnSession: (sceneWindowId) => updateNavigation((value) => {
       const snapshot = value.sceneSnapshots?.find(({ windows }) =>
         windows.some(({ id }) => id === sceneWindowId)
       )
@@ -1348,7 +1351,7 @@ function requiresFreshSceneSnapshot(type: string): boolean {
     'hierarchy.split-session', 'hierarchy.fork-session', 'hierarchy.create-shell-sibling',
     'hierarchy.create-fork-child', 'hierarchy.create-fork-sibling',
     'hierarchy.retry-fork', 'hierarchy.remove-failed-fork',
-    'hierarchy.remove-session-branch', 'hierarchy.delete-session',
+    'hierarchy.remove-session-branch',
     'hierarchy.detach-session', 'hierarchy.return-session', 'hierarchy.replace-layout'
   ].includes(type)
 }

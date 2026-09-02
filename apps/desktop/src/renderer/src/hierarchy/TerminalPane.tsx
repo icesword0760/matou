@@ -7,9 +7,7 @@ import {
   type TerminalSearchRequest,
   type TerminalStorageFaultMessage
 } from '../terminal/TerminalSurface'
-import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
-import type { SessionView } from './hierarchy-types'
-import { sessionDeleteFlow } from './terminal-close-flow'
+import type { RemoveNodeScope, SessionView } from './hierarchy-types'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import { toOscNotification } from '../notifications/osc-notification'
 import type { TerminalThemeKey } from '../terminal/terminal-themes'
@@ -25,14 +23,13 @@ import {
   ForkProgressOverlay
 } from '../session-canvas/ForkProgressOverlay'
 import '../session-canvas/fork-progress-overlay.css'
+import { RemoveNodeDialog } from '../session-canvas/RemoveNodeDialog'
 
 export function TerminalPane(props: {
   session: SessionView
   active: boolean
   visible?: boolean
   foreground?: boolean
-  workspaceSessionCount: number
-  taskName: string
   workspaceId?: string
   sceneId?: string
   pathValid?: boolean
@@ -45,7 +42,6 @@ export function TerminalPane(props: {
   onSearchResults?(result: { resultIndex: number; resultCount: number }): void
   focusRequest?: number
   onActivate(sessionId: string): unknown
-  onDelete(sessionId: string, confirmed?: boolean): unknown
   resumable?: boolean
   forkReady?: boolean
   providerRestoreState?: 'none' | 'restoring' | 'failed'
@@ -65,8 +61,9 @@ export function TerminalPane(props: {
   onRetryRecovery?(sessionId: string): unknown
   onRetryWork?(sessionId: string): unknown
   onRetryFork?(sessionId: string): unknown
-  onRemoveFailedFork?(sessionId: string): unknown
   childNodes?: SessionGraphNodeView[]
+  descendantNodes?: SessionGraphNodeView[]
+  parentSessionId?: string
   workStatus?: SessionGraphNodeView['workStatus']
   latestLines?: string[]
   onOpenChildren?(sessionId: string): unknown
@@ -74,28 +71,24 @@ export function TerminalPane(props: {
   onFork?(sessionId: string): unknown
   onForkSibling?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
-  descendantCount?: number
-  descendantImpact?: { running: number; needsInput: number }
-  onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
+  onRemoveBranch?(sessionId: string, scope: RemoveNodeScope): unknown
   onRestoreEnvironment?(sessionId: string): unknown
   onLocateEnvironment?(sessionId: string): unknown
   onHandoffEnvironment?(sessionId: string, target: SessionEnvironmentTarget): unknown
 }) {
   const {
-    session, active, visible = true, foreground = true, workspaceSessionCount, taskName,
+    session, active, visible = true, foreground = true,
     pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
     recoveryState = 'ready', recoveryError,
-    sharedWorkingDirectory = false, environment, hasOwnedWorktree = false,
-    spawnRevision = 0, onRetryRestore, onRetryRecovery, onRetryWork, onRetryFork, onRemoveFailedFork,
-    childNodes = [], workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
+    sharedWorkingDirectory = false, environment, hasOwnedWorktree,
+    spawnRevision = 0, onRetryRestore, onRetryRecovery, onRetryWork, onRetryFork,
+    childNodes = [], descendantNodes = [], parentSessionId, workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
-    onActivate, onDelete, onFork, onForkSibling, onDetach,
-    descendantCount = 0, descendantImpact = { running: 0, needsInput: 0 },
+    onActivate, onFork, onForkSibling, onDetach,
     onRemoveBranch, onRestoreEnvironment, onLocateEnvironment, onHandoffEnvironment
   } = props
-  const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const [removalOpen, setRemovalOpen] = useState(false)
@@ -118,11 +111,6 @@ export function TerminalPane(props: {
   const runtimeClient = useRuntimeClient()
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
-  const flow = sessionDeleteFlow({
-    isWorkspaceFinal: workspaceSessionCount === 1,
-    taskName, sessionTitle: session.title, workStatus,
-    childCount: childNodes.length
-  })
   const profile = session.kind === 'claude-code' || session.kind === 'codex'
     ? session.kind : 'shell'
   const showFork = session.kind === 'claude-code' && onFork !== undefined
@@ -135,15 +123,9 @@ export function TerminalPane(props: {
   const actionBlockedReason = readOnly ? READ_ONLY_REASON : environmentUnavailable
     ? '当前运行环境需要先恢复或交接'
     : recoveryBlocking ? '当前终端仍在恢复' : undefined
-  const remove = useCallback((confirmed: boolean) => {
-    setConfirmationOpen(false)
-    void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
-  }, [onDelete, session.id])
   const requestRemove = useCallback(() => {
-    if (actionBlocked) return
-    if (flow.action === 'silent') remove(false)
-    else setConfirmationOpen(true)
-  }, [actionBlocked, flow.action, remove])
+    if (!actionBlocked && onRemoveBranch) setRemovalOpen(true)
+  }, [actionBlocked, onRemoveBranch])
   useEffect(() => {
     if (closeRequest <= consumedCloseRequest.current) return
     consumedCloseRequest.current = closeRequest
@@ -168,7 +150,6 @@ export function TerminalPane(props: {
   }, [canFork])
   useEffect(() => {
     if (!actionBlocked) return
-    setConfirmationOpen(false)
     setRemovalOpen(false)
     setContextMenu(null)
     setForkReadinessHint(false)
@@ -289,14 +270,6 @@ export function TerminalPane(props: {
             event.stopPropagation()
             void onForkSibling?.(session.id)
           }}><BranchSiblingIcon /></button>}
-        {onRemoveBranch && <button className="pane-fork pane-remove" type="button" draggable={false}
-          aria-label={`移出节点：${session.title}`} disabled={actionBlocked}
-          title={actionBlockedReason ?? '移出节点'}
-          onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
-          onClick={(event) => {
-            event.stopPropagation()
-            setRemovalOpen(true)
-          }}><RemoveNodeIcon /></button>}
       </div>
     </header>
     {!pathValid && visible && <div role="status">工作区目录不可用，请先在本地恢复原路径，或移出该工作区</div>}
@@ -310,11 +283,11 @@ export function TerminalPane(props: {
           event.stopPropagation()
           void onRetryFork(session.id)
         }}>重试</button>}
-        {onRemoveFailedFork && <button type="button" aria-label="移除失败分支" disabled={forkRepairBlocked}
+        {onRemoveBranch && <button type="button" aria-label="移除节点…" disabled={forkRepairBlocked}
           title={forkRepairBlocked ? actionBlockedReason : undefined} onClick={(event) => {
           event.stopPropagation()
-          void onRemoveFailedFork(session.id)
-        }}>移除</button>}
+          setRemovalOpen(true)
+        }}>移除节点…</button>}
       </div>
     </div>}
     {effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && restoreNoticeVisible &&
@@ -358,10 +331,10 @@ export function TerminalPane(props: {
             setRuntimeStatus('starting-session')
             setStartupRetry((value) => value + 1)
           }}>重试启动</button>
-          <button type="button" disabled={actionBlocked} title={actionBlockedReason} onClick={(event) => {
+          {onRemoveBranch && <button type="button" disabled={actionBlocked} title={actionBlockedReason} onClick={(event) => {
             event.stopPropagation()
-            void Promise.resolve(onDelete(session.id, true)).catch(NOOP)
-          }}>移除失败会话</button>
+            setRemovalOpen(true)
+          }}>移除节点…</button>}
         </div>
       </div>}
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
@@ -459,19 +432,13 @@ export function TerminalPane(props: {
         </small>}
       </div>
     </div>}
-    {confirmationOpen && !actionBlocked && flow.action === 'hide-window' && <ConfirmDialog title="提示"
-      body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
-      confirmLabel="我知道了" showCancel={false} onCancel={() => setConfirmationOpen(false)}
-      onConfirm={() => setConfirmationOpen(false)} />}
-    {confirmationOpen && !actionBlocked && flow.action !== 'hide-window' && <ConfirmationSequence steps={flow.steps}
-      onCancel={() => setConfirmationOpen(false)} onComplete={() => remove(true)} />}
-    {removalOpen && !actionBlocked && <ConfirmDialog title={removalTitle(session.title, descendantCount)}
-      body={removalBody(session.title, childNodes.length, descendantCount, descendantImpact)}
-      confirmLabel={removalConfirmLabel(descendantImpact, descendantCount)} confirmTone="danger"
-      cancelLabel="取消" scope="session"
-      onCancel={() => setRemovalOpen(false)} onConfirm={() => {
+    {removalOpen && !actionBlocked && <RemoveNodeDialog title={session.title}
+      current={{ workStatus, ...(hasOwnedWorktree === undefined ? {} : { hasOwnedWorktree }),
+        ...(parentSessionId ? { parentSessionId } : {}) }}
+      descendants={descendantNodes}
+      onCancel={() => setRemovalOpen(false)} onConfirm={(scope) => {
         setRemovalOpen(false)
-        void Promise.resolve(onRemoveBranch?.(session.id, descendantCount > 0)).catch(NOOP)
+        void Promise.resolve(onRemoveBranch?.(session.id, scope)).catch(NOOP)
       }} />}
     {forkReadinessHint && !actionBlocked && createPortal(<div className="fork-readiness-toast" role="status"
       aria-label="创建子分支条件说明">
@@ -544,37 +511,6 @@ function gitTitle(git: SessionGitState): string {
   if (git.state === 'unavailable') return '当前目录不是可用的 Git 工作区'
   if (git.branch) return `Git 分支 ${git.branch}${git.dirty ? '，有未提交修改' : ''}`
   return `Git detached HEAD ${git.detachedHead}${git.dirty ? '，有未提交修改' : ''}`
-}
-
-export function removalBody(
-  title: string,
-  directChildCount: number,
-  descendantCount: number,
-  impact: { running: number; needsInput: number }
-): string {
-  const activity = [
-    impact.running > 0 ? `${impact.running} 个运行中` : '',
-    impact.needsInput > 0 ? `${impact.needsInput} 个待输入` : ''
-  ].filter(Boolean).join('、')
-  if (descendantCount === 0) {
-    return `该节点没有子节点。移除后，“${title}”会从会话列表和 DAG 中消失。项目文件和工作树不会被删除。`
-  }
-  const scope = `该节点包含 ${directChildCount} 个直接子节点，共 ${descendantCount} 个后代节点。`
-  const process = activity ? `其中 ${activity}的会话将先停止。` : ''
-  return `${scope}${process}移除后，“${title}”及受影响节点会同时从会话列表和 DAG 中消失。项目文件和工作树不会被删除。`
-}
-
-export function removalTitle(title: string, descendantCount: number): string {
-  return descendantCount > 0 ? `移除“${title}”及其整个分支？` : `移除“${title}”？`
-}
-
-export function removalConfirmLabel(
-  impact: { running: number; needsInput: number },
-  descendantCount: number
-): string {
-  const count = impact.running + impact.needsInput
-  if (count > 0) return `停止 ${count} 个会话并移除`
-  return descendantCount > 0 ? '移除整个分支' : '移除'
 }
 
 function BranchChildIcon() {

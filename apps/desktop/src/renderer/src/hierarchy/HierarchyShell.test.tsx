@@ -366,7 +366,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('tab', { selected: true }).textContent).toContain('页签 A1')
   })
 
-  it('moves the active Scene and closes only the active split Session with reference product shortcuts', () => {
+  it('moves the active Scene and confirms removal of only the active split Session with shortcuts', async () => {
     render(<HierarchyShell fixture={fixture()} />)
 
     fireEvent.keyDown(document, { key: 'ArrowRight', metaKey: true, shiftKey: true })
@@ -379,6 +379,8 @@ describe('PRD 05 hierarchy shell', () => {
     expect(splitSurface).toBeTruthy()
 
     fireEvent.keyDown(document, { key: 'w', metaKey: true })
+    expect(screen.getByRole('alertdialog', { name: /移除节点/ })).toBeTruthy()
+    await userEvent.setup().click(screen.getByRole('button', { name: '移除' }))
     expect(screen.queryByTestId(splitSurface!.dataset.testid!)).toBeNull()
     expect(screen.getAllByTestId(/xterm-/).map(({ dataset }) => dataset.testid))
       .toEqual(['xterm-session-a1'])
@@ -709,7 +711,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     expect(await screen.findByText('已停止父会话')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
-    expect(screen.getByRole('button', { name: '移出节点：已停止父会话' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '移除节点…：已停止父会话' })).toBeTruthy()
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
