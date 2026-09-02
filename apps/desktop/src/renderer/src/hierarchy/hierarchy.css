@@ -244,14 +244,21 @@ button { -webkit-app-region: no-drag; }
 .session-level-breadcrumb button > span[aria-hidden="true"] { flex: none; margin-right: 6px; font-size: 13px; }
 .session-level-breadcrumb strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .session-level-breadcrumb strong + span { flex: none; color: rgba(255,255,255,.4); }
-.status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: min(46vw,760px); margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
+.status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: none; margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
 .status-field, .team-role-badge, .status-divider { flex-shrink: 0; }
 .status-info button.status-field { width: auto; height: auto; border: 0; background: transparent; font-family: inherit; }
 .status-info button.status-field:disabled { cursor: default; opacity: .7; }
 .status-model { color: #79c0ff; }
+.status-session-name { max-width: 180px; overflow: hidden; color: #8b949e; text-overflow: ellipsis; }
+.status-usage { color: #7f8a99; }
+.status-usage strong { color: #58a6ff; font-weight: 600; }
+.status-usage small { color: #6e7681; font-size: inherit; }
 .status-git { max-width: 150px; overflow: hidden; color: #ff6b35; text-overflow: ellipsis; }
+.status-config { color: #8b949e; }
+.status-mcp-error { color: #f47067; }
 .status-divider { width: 1px; height: 12px; margin: 0 2px; background: #21262d; }
-.status-tool-running, .status-todos { display: inline-flex; flex-shrink: 1; align-items: center; min-width: 0; overflow: hidden; gap: 3px; }
+.status-tool-running, .status-tool-done, .status-last-tool, .status-todos { display: inline-flex; flex-shrink: 1; align-items: center; min-width: 0; overflow: hidden; gap: 3px; }
+.status-last-tool.is-error .tool-icon, .status-last-tool.is-error .tool-name { color: #f47067; }
 .tool-icon { font-size: 11px; line-height: 1; }
 .tool-icon-running { color: #eab308; }
 .tool-icon-done { color: #22c55e; }
@@ -262,6 +269,7 @@ button { -webkit-app-region: no-drag; }
 .is-clickable:hover { background: rgba(255,255,255,.08) !important; }
 .status-perm-badge { font-size: 10px; font-weight: 600; letter-spacing: .2px; text-transform: uppercase; }
 .status-perm-badge.perm-default { color: #8b949e; }
+.status-perm-badge.perm-auto { color: #7ee787; }
 .status-perm-badge.perm-acceptEdits { color: #d29922; }
 .status-perm-badge.perm-plan { color: #58a6ff; }
 .status-perm-badge.perm-bypassPermissions { color: #ff6b35; }

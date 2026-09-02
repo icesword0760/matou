@@ -80,9 +80,10 @@ describe('ProviderHookServer', () => {
       'SessionStart', 'Stop', 'UserPromptSubmit'
     ])
     expect(settings.hooks.PreToolUse?.[0]).toMatchObject({
-      matcher: expect.stringContaining('TodoWrite'),
       hooks: [{ type: 'http', url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/hooks\//) }]
     })
+    expect(settings.hooks.PreToolUse?.[0]).not.toHaveProperty('matcher')
+    expect(settings.hooks.PostToolUse?.[0]).not.toHaveProperty('matcher')
     expect(settings.statusLine).toMatchObject({ type: 'command', padding: 0 })
     expect((await stat(settings.statusLine.command)).mode & 0o111).not.toBe(0)
   })

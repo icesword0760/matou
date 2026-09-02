@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { RpcMethod } from '@matou/contracts'
+import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
 
 import { TerminalHud } from './TerminalHud'
 import type { GitRequestClient } from './GitControlMenu'
@@ -16,7 +16,7 @@ describe('PRD 02 bottom HUD', () => {
     const { container } = render(<TerminalHud hud={{
       sessionId: 'session-1', mode: 'shell', shell: 'zsh', cwd: '/Users/demo/project',
       gitBranch: 'feature/hud', gitDirty: true, startedAt: Date.now() - 70_000
-    }} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+    }} />)
 
     expect(container.querySelector('.status-info')?.textContent).toMatch(
       /^zsh~\/projectfeature\/hud\*⏱1m$/
@@ -53,7 +53,7 @@ describe('PRD 02 bottom HUD', () => {
     render(<TerminalHud hud={{
       sessionId: 'session-1', mode: 'shell', cwd: '/Users/demo/project',
       gitBranch: 'main', gitDirty: false, startedAt: Date.now()
-    }} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+    }} runtimeClient={runtimeClient} />)
 
     await user.click(screen.getByRole('button', { name: '打开 Git' }))
     expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
@@ -65,13 +65,39 @@ describe('PRD 02 bottom HUD', () => {
     )
   })
 
-  it('renders the current reference product Agent order and process fields without hidden metrics', () => {
+  it('lets the Git control consume Escape for its second-level navigation', async () => {
+    const user = userEvent.setup()
+    const repository = gitStatus()
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(): Promise<T> { return repository as T }
+    }
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/Users/demo/project',
+      gitBranch: 'main', gitDirty: false, startedAt: Date.now()
+    }} runtimeClient={runtimeClient} />)
+
+    await user.click(screen.getByRole('button', { name: '打开 Git' }))
+    await user.click(await screen.findByRole('button', { name: '管理 Worktree… 0' }))
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    expect(screen.getByPlaceholderText('搜索 matou 分支')).toBeTruthy()
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Git 控制' })).toBeNull()
+  })
+
+  it('renders the complete Agent HUD from authoritative session metrics', () => {
     const hud: SessionHudView = {
       sessionId: 'session-1', mode: 'agent', shell: 'zsh', cwd: '/Users/demo/project',
       gitBranch: 'main', gitDirty: false, startedAt: Date.now() - 3_700_000,
       permissionMode: 'acceptEdits', modelStrategy: 'claude-opus-4-6', model: 'Claude Opus 4.6',
-      contextPercent: 86, taskStatus: 'running', subagentCount: 2,
+      contextPercent: 86, contextWindowSize: 1_000_000, taskStatus: 'running', subagentCount: 2,
+      sessionName: 'adaptive-painting-hoare',
       teamRole: 'Leader', teamStatus: 'running',
+      usageWindows: [{ label: 'Weekly', percent: 8, resetsAt: Date.now() + 4 * 86_400_000 + 22 * 3_600_000 }],
+      configCounts: { instructionFiles: 1, mcpServers: 2, hooks: 11 },
+      mcpErrors: ['browser-bridge'],
+      toolCounts: [{ name: 'Read', count: 9 }, { name: 'Bash', count: 9 }],
+      lastTool: { name: 'WebFetch', target: 'example.com', status: 'error' },
       runningTools: [
         { name: 'Bash', target: 'pnpm test' },
         { name: 'Read', target: '/Users/demo/project/src/very-long-component-name.tsx' },
@@ -82,16 +108,22 @@ describe('PRD 02 bottom HUD', () => {
         { content: '运行回归', status: 'completed' }
       ]
     }
-    const { container } = render(<TerminalHud hud={hud} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+    const { container } = render(<TerminalHud hud={hud} />)
 
     const text = container.querySelector('.status-info')?.textContent ?? ''
-    expect(text).toContain('Accept Edits86%任务中Agent:2Leader')
+    expect(text).toContain('Accept EditsOpus 4.6 (1M context)86%Weekly 8%')
+    expect(text).not.toContain('adaptive-painting-hoare')
+    expect(text).toContain('1 CLAUDE.md2 MCPs11 hooks')
+    expect(text).toContain('⚠ browser-bridge')
+    expect(text).toContain('✓Read×9')
+    expect(text).toContain('✓Bash×9')
+    expect(text).toContain('⚠WebFetch: example.com')
+    expect(text).toContain('任务中Agent:2Leader')
     expect(text).toContain('Read')
     expect(text).toContain('Edit')
-    expect(text).not.toContain('Bash')
+    expect([...container.querySelectorAll('.status-tool-running')].map((node) => node.textContent).join('')).not.toContain('Bash')
     expect(text).toContain('▸完成 HUD 实现(1/2)')
     expect(text).toMatch(/~\/projectmain⏱1h1m$/)
-    expect(text).not.toMatch(/cost|tok\/s|MCP/i)
     expect(container.querySelector('.context-ring-fg')?.getAttribute('stroke')).toBe('#f85149')
   })
 
@@ -99,7 +131,7 @@ describe('PRD 02 bottom HUD', () => {
     [69, '#3fb950'], [70, '#d29922'], [84, '#d29922'], [85, '#f85149'], [130, '#f85149']
   ])('uses the reference product risk color for %s%% context', (contextPercent, color) => {
     const { container } = render(<TerminalHud hud={agent({ contextPercent })}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      />)
     expect(container.querySelector('.context-ring-fg')?.getAttribute('stroke')).toBe(color)
     expect(screen.getByText(`${contextPercent}%`)).toBeTruthy()
   })
@@ -107,13 +139,13 @@ describe('PRD 02 bottom HUD', () => {
   it.each([
     ['running', '任务中'], ['needs-input', '待输入'], ['error', '错误']
   ] as const)('shows the reference product Agent task label for %s', (taskStatus, label) => {
-    render(<TerminalHud hud={agent({ taskStatus })} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+    render(<TerminalHud hud={agent({ taskStatus })} />)
     expect(screen.getByText(label)).toBeTruthy()
   })
 
   it('closes the permission menu by Escape or outside click', async () => {
     const user = userEvent.setup()
-    render(<TerminalHud hud={agent()} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+    render(<TerminalHud hud={agent()} onPermissionMode={vi.fn()} />)
 
     await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
     expect(screen.getByRole('menu', { name: '权限模式' })).toBeTruthy()
@@ -125,67 +157,44 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.queryByRole('menu', { name: '权限模式' })).toBeNull()
   })
 
-  it('switches ordinary permission modes immediately and keeps model switching in global settings', async () => {
+  it('keeps the permission switch interactive while the model remains read-only and live', async () => {
     const user = userEvent.setup()
     const onPermissionMode = vi.fn()
-    render(<TerminalHud hud={agent()} onPermissionMode={onPermissionMode} />)
+    const { rerender } = render(<TerminalHud hud={agent({
+      permissionMode: 'default', model: 'Claude Opus 4.6', contextWindowSize: 1_000_000
+    })} onPermissionMode={onPermissionMode} />)
 
-    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
+    await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
     await user.click(screen.getByRole('menuitem', { name: 'Plan Mode' }))
-    expect(screen.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeTruthy()
     expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'plan', false)
+    expect(screen.getByText('Opus 4.6 (1M context)').tagName).toBe('SPAN')
+    expect(screen.queryByRole('button', { name: /切换模型/ })).toBeNull()
 
-    expect(screen.queryByRole('button', { name: '点击切换模型' })).toBeNull()
+    rerender(<TerminalHud hud={agent({
+      permissionMode: 'auto', model: 'Claude Fable 5', contextWindowSize: 1_000_000
+    })} onPermissionMode={onPermissionMode} />)
+    expect(screen.getByRole('button', { name: /当前权限模式：Auto/ })).toBeTruthy()
+    expect(screen.getByText('Fable 5 (1M context)')).toBeTruthy()
   })
 
-  it('uses reference product confirmation copy across the Bypass boundary and keeps the old mode on cancel', async () => {
-    const user = userEvent.setup()
-    const onPermissionMode = vi.fn()
-    render(<TerminalHud hud={agent({ resumable: true })} onPermissionMode={onPermissionMode} onModel={vi.fn()} />)
+  it('hides a duplicate session title and the concrete Bash target while retaining its count', () => {
+    const { container } = render(<TerminalHud hud={agent({
+      sessionName: 'duplicate-card-title',
+      lastTool: { name: 'Bash', target: '/Users/demo/project/scripts/verify.sh', status: 'completed' },
+      toolCounts: [{ name: 'Bash', count: 5 }]
+    })} onPermissionMode={vi.fn()} />)
 
-    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
-    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
-    expect(screen.getByRole('alertdialog', { name: '切换到高权限模式' }).textContent).toContain(
-      '重启后会自动 resume 恢复会话历史'
-    )
-    await user.click(screen.getByRole('button', { name: '取消' }))
-    expect(screen.getByRole('button', { name: /当前权限模式：Default/ })).toBeTruthy()
-    expect(onPermissionMode).not.toHaveBeenCalled()
-
-    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
-    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
-    await user.click(screen.getByRole('button', { name: '确认切换' }))
-    expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'bypassPermissions', true)
-  })
-
-  it('warns that a new conversation starts when there is no resumable identity', async () => {
-    const user = userEvent.setup()
-    render(<TerminalHud hud={agent({ resumable: false })} onPermissionMode={vi.fn()} onModel={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
-    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
-    expect(screen.getByRole('alertdialog').textContent).toContain(
-      '当前 Claude 会话还没有生成可恢复的 sessionId'
-    )
-  })
-
-  it('keeps the old badge and shows reference product failure feedback when a Bypass respawn fails', async () => {
-    const user = userEvent.setup()
-    const onPermissionMode = vi.fn().mockRejectedValue(new Error('进程启动失败'))
-    render(<TerminalHud hud={agent({ resumable: true })} onPermissionMode={onPermissionMode} onModel={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
-    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
-    await user.click(screen.getByRole('button', { name: '确认切换' }))
-
-    expect(await screen.findByText('切换失败：进程启动失败')).toBeTruthy()
-    expect(screen.getByRole('button', { name: /当前权限模式：Default/ })).toBeTruthy()
+    const text = container.querySelector('.status-info')?.textContent ?? ''
+    expect(text).not.toContain('duplicate-card-title')
+    expect(text).not.toContain('/Users/demo/project/scripts/verify.sh')
+    expect(text).toContain('Bash×5')
   })
 
   it('closes open agent controls immediately when read-only recovery starts', async () => {
     const user = userEvent.setup()
     const onPermissionMode = vi.fn()
-    const onModel = vi.fn()
     const view = render(<TerminalHud hud={agent({ resumable: true })}
-      onPermissionMode={onPermissionMode} onModel={onModel} />)
+      onPermissionMode={onPermissionMode} />)
 
     await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
     await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
@@ -193,13 +202,12 @@ describe('PRD 02 bottom HUD', () => {
 
     view.rerender(<TerminalHud hud={agent({ resumable: true })}
       disabledReason="数据库处于只读恢复模式"
-      onPermissionMode={onPermissionMode} onModel={onModel} />)
+      onPermissionMode={onPermissionMode} />)
 
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(screen.getByRole('button', { name: /当前权限模式/ }).hasAttribute('disabled')).toBe(true)
     expect(screen.getByRole('button', { name: /当前权限模式/ }).title).toBe('数据库处于只读恢复模式')
     expect(onPermissionMode).not.toHaveBeenCalled()
-    expect(onModel).not.toHaveBeenCalled()
   })
 
   it('closes an open repository control immediately when read-only recovery starts', async () => {
@@ -221,7 +229,7 @@ describe('PRD 02 bottom HUD', () => {
       sessionId: 'session-1', mode: 'shell', cwd: '/tmp/project', gitBranch: 'main', startedAt: Date.now()
     }
     const view = render(<TerminalHud hud={hud} runtimeClient={runtimeClient}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     await user.click(screen.getByRole('button', { name: '打开 Git' }))
     expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
@@ -229,7 +237,7 @@ describe('PRD 02 bottom HUD', () => {
 
     view.rerender(<TerminalHud hud={hud} runtimeClient={runtimeClient}
       disabledReason="数据库处于只读恢复模式"
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     expect(screen.queryByRole('dialog', { name: 'Git 与 Worktree' })).toBeNull()
     expect(screen.getByRole('button', { name: '打开 Git' }).hasAttribute('disabled')).toBe(true)
@@ -244,7 +252,7 @@ describe('PRD 02 bottom HUD', () => {
       }}
       git={{ state: 'ready', detachedHead: '1234567890abcdef', dirty: true }}
       environmentActions={actions} runtimeClient={{ request: vi.fn() }}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('HEAD 1234567*')
     expect(screen.getByRole('button', { name: '打开运行环境：Local' }).textContent).toBe('Local')
@@ -261,7 +269,7 @@ describe('PRD 02 bottom HUD', () => {
       }}
       git={{ state: 'unavailable', dirty: false }}
       environmentActions={environmentActions()}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     expect(screen.getByRole('button', { name: '打开 Git' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('Git 不可用')
@@ -278,7 +286,7 @@ describe('PRD 02 bottom HUD', () => {
       }}
       git={{ state: 'unavailable', dirty: false }}
       environmentActions={environmentActions()}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     await userEvent.setup().click(screen.getByRole('button', { name: '打开运行环境：待恢复' }))
 
@@ -296,7 +304,7 @@ describe('PRD 02 bottom HUD', () => {
       }}
       git={{ state: 'ready', branch: 'stale-main', dirty: true }}
       environmentActions={environmentActions()}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     expect(screen.queryByRole('button', { name: '打开 Git' })).toBeNull()
     expect(screen.queryByText('Git 不可用')).toBeNull()
@@ -327,7 +335,7 @@ describe('PRD 02 bottom HUD', () => {
       worktreeExecutionContextId: 'worktree-context'
     }} git={{ state: 'ready', branch: 'main', dirty: false }}
       environmentActions={environmentActions()} runtimeClient={runtimeClient}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     await userEvent.setup().click(screen.getByRole('button', { name: '打开 Git' }))
     expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
@@ -346,7 +354,7 @@ describe('PRD 02 bottom HUD', () => {
       environment={{
         kind: 'local', state: 'ready', path: '/repo', localExecutionContextId: 'local-context'
       }} environmentActions={environmentActions()}
-      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+      onPermissionMode={vi.fn()} />)
 
     const git = screen.getByRole('button', { name: '打开 Git' })
     expect(git.textContent).toBe('Git 不可用')
@@ -357,7 +365,7 @@ describe('PRD 02 bottom HUD', () => {
     const { container } = render(<div style={{ width: 240 }}><TerminalHud hud={{
       sessionId: 'session-1', mode: 'shell', cwd: '/repo', gitBranch: 'main',
       gitDirty: false, startedAt: Date.now()
-    }} onPermissionMode={vi.fn()} onModel={vi.fn()} /></div>)
+    }} onPermissionMode={vi.fn()} /></div>)
 
     const git = screen.getByRole('button', { name: '打开 Git' })
     expect(git.className).not.toMatch(/status-priority-/)
@@ -370,6 +378,19 @@ function agent(patch: Partial<SessionHudView> = {}): SessionHudView {
     sessionId: 'session-1', mode: 'agent', permissionMode: 'default',
     modelStrategy: 'opusplan', model: 'Claude Opus 4.6', startedAt: Date.now(),
     ...patch
+  }
+}
+
+function gitStatus(): GitRepositoryStatus {
+  return {
+    repositoryRoot: '/Users/demo/project', cwd: '/Users/demo/project',
+    currentBranch: 'main', defaultBranch: 'main', dirty: false,
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+    additions: 0, deletions: 0, ahead: 0, behind: 0,
+    hasRemote: false, canPush: false,
+    branches: [{ name: 'main', current: true, commitTimestamp: 1 }],
+    worktrees: [{ path: '/Users/demo/project', branch: 'main', head: 'abc',
+      current: true, main: true, dirty: false, managed: false, sessionCount: 1 }]
   }
 }
 

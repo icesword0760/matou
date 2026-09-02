@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
@@ -9,13 +9,12 @@ import {
   environmentLabel,
   type SessionEnvironmentActions
 } from './EnvironmentControlMenu'
-import type {
-  HudModelStrategy, HudPermissionMode, SessionHudView
-} from '../hierarchy/hierarchy-types'
+import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 
 const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
   { value: 'default', label: 'Default' },
+  { value: 'auto', label: 'Auto' },
   { value: 'acceptEdits', label: 'Accept Edits' },
   { value: 'plan', label: 'Plan Mode' },
   { value: 'bypassPermissions', label: 'Bypass Permissions' }
@@ -23,8 +22,7 @@ const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
   sessionId?: string
-  onPermissionMode(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
-  onModel?(sessionId: string, strategy: HudModelStrategy): unknown
+  onPermissionMode?(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
   disabledReason?: string
@@ -91,8 +89,8 @@ export function TerminalHud(props: {
     : props.git ?? (props.environment ? { state: 'unavailable' as const, dirty: false } : undefined)
   const gitDisplay = git ? gitStateLabel(git) : ''
   const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
-  const openMenu = (event: React.MouseEvent<HTMLElement>) => {
-    if (disabled || switching) return
+  const openPermissionMenu = (event: React.MouseEvent<HTMLElement>) => {
+    if (disabled || switching || !props.onPermissionMode) return
     if (menu === 'permission') { setMenu(null); return }
     const rect = event.currentTarget.getBoundingClientRect()
     setMenuStyle({ left: rect.left, top: rect.top - 8, transform: 'translateY(-100%)' })
@@ -102,18 +100,37 @@ export function TerminalHud(props: {
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
     {hud?.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
-        disabled={disabled || switching}
+        disabled={disabled || switching || !props.onPermissionMode}
         title={props.disabledReason ?? `当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         aria-label={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
-        onClick={openMenu}>{permissionLabel(permissionMode)}</button>
+        onClick={openPermissionMenu}>{permissionLabel(permissionMode)}</button>
+      {modelLabel(hud) && <span className="status-field status-model status-priority-8"
+        title={`当前模型：${modelLabel(hud)}`}>{modelLabel(hud)}</span>}
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
+      {(hud.usageWindows ?? []).map((window, index) => <span
+        className="status-field status-usage status-priority-6"
+        title={usageTitle(window)} key={`${window.label}:${index}`}>
+        {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {formatReset(window.resetsAt)}</small>}
+      </span>)}
       {taskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus)}</span>}
       {(hud.subagentCount ?? 0) > 0 && <span className="status-field status-priority-5">Agent:{hud.subagentCount}</span>}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
+      {configDisplays(hud).map((item) => <span className="status-field status-config status-priority-5" key={item}>{item}</span>)}
+      {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {runningTools(hud).map((tool, index) => <span className="status-field status-tool-running status-priority-4"
         key={`${tool.name}:${tool.target ?? ''}:${index}`}>
         <span className="tool-icon tool-icon-running">◐</span><span className="tool-name">{tool.name}</span>
         {tool.target && <span className="tool-target">: {truncatePath(tool.target)}</span>}
+      </span>)}
+      {recentTool(hud) && <span className={`status-field status-last-tool status-priority-4 is-${recentTool(hud)!.status}`}>
+        <span className="tool-icon">{recentTool(hud)!.status === 'error' ? '⚠' : '✓'}</span>
+        <span className="tool-name">{toolDisplayName(recentTool(hud)!.name)}</span>
+        {recentTool(hud)!.target && recentTool(hud)!.name.toLowerCase() !== 'bash' &&
+          <span className="tool-target">: {truncateText(recentTool(hud)!.target!, 24)}</span>}
+      </span>}
+      {completedTools(hud).map((tool) => <span className="status-field status-tool-done status-priority-4" key={tool.name}>
+        <span className="tool-icon tool-icon-done">✓</span><span className="tool-name">{tool.name}</span>
+        <span className="tool-count">×{tool.count}</span>
       </span>)}
       {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
@@ -138,28 +155,33 @@ export function TerminalHud(props: {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label="权限模式">
       <div className="perm-menu__title">权限模式</div>
-      {PERMISSION_MODES.map((option) => <button type="button" role="menuitem"
+      {PERMISSION_MODES.filter(({ value }) => value !== 'auto').map((option) => <button type="button" role="menuitem"
         className={`perm-menu__item${permissionMode === option.value ? ' is-active' : ''}`} key={option.value}
         onClick={() => {
           setMenu(null)
-          if (option.value === permissionMode) return
+          if (option.value === permissionMode || !props.onPermissionMode) return
           const respawn = option.value === 'bypassPermissions' || permissionMode === 'bypassPermissions'
-          if (respawn) { setConfirmTarget(option.value); return }
+          if (respawn) {
+            setConfirmTarget(option.value)
+            return
+          }
           setPermissionMode(option.value)
-          void Promise.resolve(props.onPermissionMode(sessionId, option.value, false)).catch(() => {})
+          void Promise.resolve(props.onPermissionMode?.(sessionId, option.value, false)).catch(() => {})
         }}><span className={`perm-menu__dot perm-${option.value}`} />
         <span className="perm-menu__label">{option.label}</span>
         {permissionMode === option.value && <span className="perm-menu__check">✓</span>}
       </button>)}
     </div></div>, document.body)}
-    {confirmTarget && hud && !disabled && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
+    {confirmTarget && hud && !disabled && props.onPermissionMode && createPortal(<ConfirmDialog
+      title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
       body={bypassCopy(confirmTarget, hud.resumable === true)}
-      confirmLabel={confirmTarget === 'bypassPermissions' ? '确认切换' : '确认退出'} onCancel={() => setConfirmTarget(null)}
+      confirmLabel={confirmTarget === 'bypassPermissions' ? '确认切换' : '确认退出'}
+      onCancel={() => setConfirmTarget(null)}
       onConfirm={() => {
         const target = confirmTarget
         setConfirmTarget(null)
         setSwitching(true)
-        void Promise.resolve(props.onPermissionMode(sessionId, target, true)).then(() => {
+        void Promise.resolve(props.onPermissionMode?.(sessionId, target, true)).then(() => {
           setPermissionMode(target)
         }).catch((error: unknown) => {
           setSwitchError(`切换失败：${error instanceof Error ? error.message : '未知错误'}`)
@@ -236,6 +258,49 @@ function gitStateTitle(git: SessionGitState): string {
 function permissionLabel(mode: HudPermissionMode): string {
   return PERMISSION_MODES.find(({ value }) => value === mode)?.label ?? 'Default'
 }
+function modelLabel(hud: SessionHudView): string {
+  const name = hud.model?.trim()
+  let label = name?.replace(/^Claude\s+/i, '') ?? ''
+  if (!label && hud.modelStrategy === 'claude-opus-4-6') label = 'Opus 4.6'
+  if (!label && hud.modelStrategy === 'claude-sonnet-4-6') label = 'Sonnet 4.6'
+  if (!label && hud.modelStrategy === 'opusplan') label = 'Opus Plan'
+  const context = formatContextWindow(hud.contextWindowSize)
+  return label && context ? `${label} (${context} context)` : label
+}
+function formatContextWindow(size: number | undefined): string {
+  if (!size) return ''
+  if (size >= 1_000_000) return `${Number((size / 1_000_000).toFixed(1))}M`
+  if (size >= 1_000) return `${Math.round(size / 1_000)}K`
+  return String(Math.round(size))
+}
+function formatReset(resetsAt: number | undefined): string {
+  if (!resetsAt) return ''
+  const minutes = Math.max(0, Math.ceil((resetsAt - Date.now()) / 60_000))
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h${minutes % 60 ? `${minutes % 60}m` : ''}`
+  const days = Math.floor(hours / 24)
+  return `${days}d${hours % 24 ? `${hours % 24}h` : ''}`
+}
+function usageTitle(window: NonNullable<SessionHudView['usageWindows']>[number]): string {
+  const reset = formatReset(window.resetsAt)
+  return `${window.label} usage: ${window.percent}%${reset ? ` · resets in ${reset}` : ''}`
+}
+function configDisplays(hud: SessionHudView): string[] {
+  const counts = hud.configCounts
+  if (!counts) return []
+  return [
+    counts.instructionFiles > 0 ? `${counts.instructionFiles} CLAUDE.md` : '',
+    counts.mcpServers > 0 ? `${counts.mcpServers} MCPs` : '',
+    counts.hooks > 0 ? `${counts.hooks} hooks` : ''
+  ].filter(Boolean)
+}
+function completedTools(hud: SessionHudView): NonNullable<SessionHudView['toolCounts']> {
+  return [...(hud.toolCounts ?? [])]
+    .filter(({ count }) => count > 0)
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 4)
+}
 function taskStatusLabel(status: SessionHudView['taskStatus']): string {
   if (status === 'running') return '任务中'
   if (status === 'needs-input') return '待输入'
@@ -251,11 +316,21 @@ function teamTone(status: SessionHudView['teamStatus']): string {
 function runningTools(hud: SessionHudView) {
   return (hud.runningTools ?? []).filter(({ name }) => name !== 'Bash' && name !== 'Skill').slice(-2)
 }
+function recentTool(hud: SessionHudView): SessionHudView['lastTool'] {
+  return hud.lastTool?.status === 'running' ? undefined : hud.lastTool
+}
+function toolDisplayName(name: string): string {
+  const match = /^mcp__(.+?)__(.+)$/.exec(name)
+  return match ? `${match[1]}: ${match[2]}` : name
+}
 function truncatePath(value: string, maxLength = 20): string {
   const normalized = value.replace(/\\/g, '/')
   if (normalized.length <= maxLength) return normalized
   const file = normalized.split('/').at(-1) ?? normalized
   return file.length >= maxLength ? `${file.slice(0, maxLength - 3)}...` : `.../${file}`
+}
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value
 }
 function todoDisplay(hud: SessionHudView): { icon: string; text: string; progress: string; done: boolean } | null {
   const todos = hud.todos ?? []
@@ -272,8 +347,11 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
   return Boolean(hud.modelStrategy || hud.contextPercent !== undefined || taskStatusLabel(hud.taskStatus) ||
-    (hud.subagentCount ?? 0) > 0 || hud.teamRole || runningTools(hud).length || todoDisplay(hud))
+    (hud.usageWindows?.length ?? 0) > 0 || configDisplays(hud).length || (hud.mcpErrors?.length ?? 0) > 0 ||
+    completedTools(hud).length || recentTool(hud) || (hud.subagentCount ?? 0) > 0 || hud.teamRole ||
+    runningTools(hud).length || todoDisplay(hud))
 }
+
 function bypassCopy(target: HudPermissionMode, resumable: boolean): string {
   if (!resumable) return '当前 Claude 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 Claude 会话，当前内容将不会保留。\n\n是否确认？'
   return target === 'bypassPermissions'

@@ -453,6 +453,49 @@ describe('Terminal pane', () => {
     expect(onRetryWork).toHaveBeenCalledWith('session-1')
   })
 
+  it('disables every card-changing action when storage pauses after a button was focused', async () => {
+    const user = userEvent.setup()
+    const onRetryWork = vi.fn()
+    const onFork = vi.fn()
+    const onRemoveBranch = vi.fn()
+    const onLoadSession = vi.fn()
+    const onStartFreshProvider = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} resumable workStatus="error"
+      latestLines={['Connection refused — attempt 10/10']}
+      onRetryWork={onRetryWork} onFork={onFork} onRemoveBranch={onRemoveBranch}
+      onLoadSession={onLoadSession} onStartFreshProvider={onStartFreshProvider} />)
+
+    const retry = screen.getByRole('button', { name: '重试本轮任务' })
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+    await user.click(screen.getByRole('button', { name: '触发存储异常' }))
+
+    for (const name of [
+      '重试本轮任务',
+      '载入 Claude Code 会话到“Claude 主会话”',
+      '从“Claude 主会话”创建子分支',
+      '移出节点：Claude 主会话'
+    ]) {
+      const button = screen.getByRole('button', { name })
+      expect(button).toHaveProperty('disabled', true)
+      expect(button.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
+      fireEvent.click(button)
+    }
+    expect(onRetryWork).not.toHaveBeenCalled()
+    expect(onFork).not.toHaveBeenCalled()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+    expect(onLoadSession).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalPane {...props} resumable providerRestoreState="failed"
+      restoreError="provider session not found" onStartFreshProvider={onStartFreshProvider} />)
+    const startFresh = screen.getByRole('button', { name: '新开 Claude Code' })
+    expect(startFresh).toHaveProperty('disabled', true)
+    expect(startFresh.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
+    fireEvent.click(startFresh)
+    expect(onStartFreshProvider).not.toHaveBeenCalled()
+  })
+
   it('shows an ordinary Shell after a manual Claude exit', () => {
     const props = fixture()
     render(<TerminalPane {...props}

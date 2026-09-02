@@ -9,13 +9,22 @@ import type { HierarchyProjection } from './hierarchy-types'
 import type { SessionRecoveryStatus } from '../runtime/RuntimeClient'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, inputDisabled, readOnly, themeKey, fontSize, searchRequest, focusRequest }: {
+  TerminalSurface: ({ sessionId, inputDisabled, readOnly, themeKey, fontSize, searchRequest, focusRequest, onStorageFault }: {
     sessionId: string; inputDisabled: boolean; readOnly?: boolean; themeKey?: string; fontSize?: number
     searchRequest?: { query: string; direction: string; sequence: number }
     focusRequest?: number
+    onStorageFault?(fault: {
+      type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
+      code: 'STORAGE_WRITE_FAILED'; message: string; retainedBytes: number
+    }): void
   }) => <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled} data-read-only={readOnly}
     data-theme={themeKey} data-font-size={fontSize} data-search-query={searchRequest?.query}
-    data-search-direction={searchRequest?.direction} data-focus-request={focusRequest} />
+    data-search-direction={searchRequest?.direction} data-focus-request={focusRequest}>
+    <button type="button" aria-label={`触发存储异常：${sessionId}`} onClick={() => onStorageFault?.({
+      type: 'terminal.storage-fault', protocolVersion: 1, sessionId, sequence: 1,
+      code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
+    })} />
+  </div>
 }))
 
 const runtime = vi.hoisted(() => ({
@@ -41,6 +50,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  window.localStorage.clear()
   Reflect.deleteProperty(window, 'matouDesktop')
   Reflect.deleteProperty(window, 'matouE2e')
   Reflect.deleteProperty(document, 'visibilityState')
@@ -127,6 +137,11 @@ describe('PRD 05 hierarchy shell', () => {
 
   it('covers only the recovering card from authoritative Runtime status and retries that card', async () => {
     const data = fixture()
+    data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code', title: 'Claude 主会话' }
+    data.sessionHuds = [{
+      sessionId: 'session-a1', mode: 'agent', permissionMode: 'default',
+      cwd: '/tmp/a', startedAt: 1
+    }]
     let recoveryListener: ((status: SessionRecoveryStatus) => void) | undefined
     const retrySessionRecovery = vi.fn()
     runtime.current = {
@@ -153,15 +168,18 @@ describe('PRD 05 hierarchy shell', () => {
       sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
       state: 'restoring'
     }))
-    expect(screen.getByRole('status', { name: '正在恢复终端：终端 A1' })).toBeTruthy()
+    expect(screen.getByRole('status', { name: '正在恢复终端：Claude 主会话' })).toBeTruthy()
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
+    const permission = screen.getByRole('button', { name: /当前权限模式：Default/ })
+    expect(permission).toHaveProperty('disabled', true)
+    expect(permission.getAttribute('title')).toBe('当前终端需要先完成恢复')
 
     act(() => recoveryListener?.({
       type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
       state: 'failed', error: '恢复进程退出'
     }))
-    await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：终端 A1' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：Claude 主会话' }))
     expect(retrySessionRecovery).toHaveBeenCalledWith('session-a1')
   })
 
@@ -490,6 +508,18 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('24')
   })
 
+  it('restores the terminal font size after the main window is reopened', () => {
+    const first = render(<HierarchyShell fixture={fixture()} />)
+
+    fireEvent.keyDown(document, { key: '+', metaKey: true })
+    expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('12')
+
+    first.unmount()
+    render(<HierarchyShell fixture={fixture()} />)
+
+    expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('12')
+  })
+
   it('routes the reference product search bar to the focused Session only', async () => {
     render(<HierarchyShell fixture={fixture()} />)
     fireEvent.keyDown(document, { key: 'f', metaKey: true })
@@ -571,6 +601,40 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByLabelText('快捷指令栏').querySelector('[data-hud-mode="agent"]')).toBeTruthy()
     expect(screen.queryByText('zsh')).toBeNull()
     expect(screen.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeTruthy()
+  })
+
+  it('locks the focused Agent HUD while that terminal is waiting for storage recovery', async () => {
+    const data = fixture()
+    data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code', title: 'Claude 主会话' }
+    data.sessionHuds = [{
+      sessionId: 'session-a1', mode: 'agent', permissionMode: 'default',
+      cwd: '/tmp/a', startedAt: 1
+    }]
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+        nodes: [{
+          ...graphNode('session-a1', 'Claude 主会话'), currentMode: 'claude-code',
+          environment: {
+            kind: 'local', state: 'ready', path: '/tmp/a',
+            localExecutionContextId: 'context-a'
+          },
+          hasOwnedWorktree: true
+        }]
+      }
+    }
+
+    render(<HierarchyShell fixture={data} />)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: '触发存储异常：session-a1' }))
+
+    const permission = screen.getByRole('button', { name: /当前权限模式：Default/ })
+    expect(permission).toHaveProperty('disabled', true)
+    expect(permission.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
+    await user.click(screen.getByRole('button', { name: '打开运行环境：Local' }))
+    const handoff = screen.getByRole('button', { name: '交接到自有 Worktree' })
+    expect(handoff).toHaveProperty('disabled', true)
+    expect(handoff.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
   })
 
   it('opens the named Fork workflow from a valid Claude title line and restores terminal focus on cancel', async () => {

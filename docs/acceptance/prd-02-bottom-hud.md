@@ -5,11 +5,11 @@
 ## 1. 用户可获得的结果
 
 - 用户查看普通终端时，底部会常驻显示 Shell、当前目录、Git 分支 / 脏状态和面板寿命；`cd`、切分支或产生文件改动后会自动更新，不必再敲 `pwd` / `git status`。
-- 用户在 Shell 中运行 `claude` 后，同一面板立即进入 Agent HUD；权限、模型、上下文、任务、工具、待办和环境信息集中在一行内，退出 AI 后原位回到可继续输入的 Shell。
-- 用户可以直接在底部切模型或切 Default / Accept Edits / Plan Mode。跨越 Bypass 边界时会先看到明确确认，再中断并重建当前 AI 进程；有可恢复身份时继续原话题，没有身份时明确新开。
+- 用户在 Shell 中运行 `claude` 后，同一面板立即进入 Agent HUD；权限、模型与上下文容量、上下文占用、时长、用量窗口、项目配置、MCP 异常、工具、待办和环境信息集中在一行内，退出 AI 后原位回到可继续输入的 Shell。会话标题沿用卡片标题，不在 HUD 重复显示。
+- 权限在底部提供切换入口；模型只读展示当前 AI 进程的真实值，并随进程状态更新原位刷新。
 - 多个面板各自保有独立 HUD，焦点切换不会串状态；独立窗口复用同一组件和 Runtime 命令。
 - 用户点击底部 Git 分支后，会直接进入紧凑分支选择器；可搜索或键盘切换分支，并在同一控制器内创建分支、管理 Worktree、提交和推送。
-- 窗口变窄时字段按 reference product 当前优先级逐级让位，始终保持单行，不显示 `--`、`N/A` 等噪音。
+- 底栏优先使用剩余横向空间；窗口变窄时字段按 reference product 当前优先级逐级让位，始终保持单行，不显示 `--`、`N/A` 等噪音，也不让溢出的指标遮挡模型和权限入口。
 
 ## 2. 已确认的产品基线
 
@@ -17,9 +17,10 @@
 
 1. 可运行 reference product 当前仍是 50px 旧快捷栏且没有 HUD；这是需求缺口。Matou 采用 reference product 仓库内完整 HUD 的 38px 形态，而不是复制“没有 HUD”。
 2. Agent 环境区顺序采用 reference product 当前完整实现：目录 → Git → 时长。
-3. 折叠模型名采用 `Opus Plan / Opus / Sonnet`，菜单使用完整模型名。
-4. Bypass 确认沿用 reference product 的 `Claude / resume / sessionId` 文案。
+3. 模型采用当前进程上报的名称并附带上下文容量；权限覆盖 Default / Auto / Accept Edits / Plan / Bypass 的真实状态。
+4. 权限徽章可点击切换；模型在 HUD 中只读，模型切换仍由 AI 终端自身承载。
 5. 极窄窗口按 reference product 的八级阈值隐藏，不采用 PRD 旧描述中的永久底线字段。
+6. 2026-09-02 产品确认将会话详情中的可用指标纳入底栏：沿用 reference product 的单行、原位更新和向上弹出控制逻辑；不新增常驻详情面板。
 
 详细双基线矩阵：`docs/parity/prd-02-reference-parity.md`。
 
@@ -38,24 +39,19 @@
 | 9 | 离开 Git 仓库 | Git 字段安静消失 | Electron 场景 1 | 通过 |
 | 10 | Git 视觉 | 使用 reference product 橙红 `#ff6b35` | Electron CSS 断言 + `shell-hud.png` | 通过 |
 | 11 | 前台态 / 终端尺寸 | HUD 不展示这两类字段 | component field tests | 通过 |
-| 12 | 点击权限徽章 | 四档菜单完整出现 | component + Electron 场景 2 | 通过 |
-| 13 | 三档之间切换 | Shift+Tab 循环，同一 PID，不清屏 | Runtime live-permission test | 通过 |
-| 14 | 选中 Bypass | 有身份 / 无身份显示各自 reference product 确认文案 | component tests + Electron 场景 2 | 通过（方案 A 文案） |
-| 15 | Bypass 取消 | 徽章、进程和模式均保持不变 | component test | 通过 |
-| 16 | Bypass 确认 | AI 进程更换、带高权限参数、清屏；有身份 resume | Electron 场景 2 + Runtime respawn test | 通过 |
-| 17 | 从 Bypass 切回 | 复用同一跨边界确认与重建路径 | component / Runtime 双向逻辑 | 通过 |
-| 18 | 点击模型 | 三档菜单及当前选中态出现 | component + Electron 场景 2 | 通过 |
-| 19 | 选择模型 | 立即显示新模型，写入 `/model`，PID 不变，无失败弹窗 | component + Runtime live-model test | 通过 |
+| 12 | 查看权限 | 显示当前真实权限；Auto 不再误显示为 Default | component + Runtime registry tests | 通过 |
+| 13 | 权限变化 | 状态流更新后原位刷新，徽章本身无点击菜单 | component rerender + Electron Agent 场景 | 通过 |
+| 14 | 查看模型 | 显示当前真实模型与上下文容量，字段本身无点击菜单 | component + Electron Agent 场景 | 通过 |
+| 15 | 模型变化 | 状态流更新后原位刷新，不维护独立乐观状态 | component rerender + Runtime ingestion tests | 通过 |
 | 20 | 上下文到 70% | 圆环切为 `#d29922` | 69 / 70 边界测试 | 通过 |
 | 21 | 上下文到 85% | 圆环切为 `#f85149` | 84 / 85 / 超 100 测试 | 通过 |
 | 22 | 任务状态 | 任务中 / 待输入 / 错误按状态出现，idle 隐藏 | component task-label tests | 通过 |
-| 23 | 工具 / 待办 | 有数据才显示；工具取最近两项并过滤 Bash / Skill；待办显示进行项与进度 | HUD component + registry tests | 通过 |
+| 23 | 工具 / 待办 | 有数据才显示；正在运行工具取最近两项并过滤 Bash / Skill，同时显示已完成工具 Top 4、最近失败工具和待办进度；Bash 仅显示累计次数，不显示具体命令或路径 | HUD component + registry tests | 通过 |
 | 24 | 窗口从宽到窄 | 八级优先级逐级隐藏，始终单行 | CSS container queries + Electron 场景 2 | 通过 |
 | 25 | 极端窄窗口 | 严格沿用 reference product 当前阈值，而非 PRD 旧底线描述 | parity matrix + CSS | 通过（方案 A） |
 | 26 | 字段数据缺失 | 当前字段消失，其他字段继续展示，无占位符 | component Shell / Agent tests | 通过 |
-| 27 | 不常驻指标 | 配置计数、累计工具、速度、费用、尺寸和 Shell 前台态均不可见 | component negative assertions | 通过 |
-| 28 | 会话指标整体缺失 | 保留权限徽章与默认模型入口 | detached / component minimum tests | 通过 |
-| 29 | Bypass 中关闭面板 | 本期按 Runtime 终止 / 重建时序处理，不增加额外产品承诺 | PRD 边界定义 | 通过（P2 无硬承诺） |
+| 27 | 完整会话指标 | 当前状态流提供上下文与用量；会话记录回填名称、累计工具、最近工具、待办和 MCP 异常；没有可信数据的字段安静隐藏 | component + Runtime transcript tests + Electron Agent 场景 | 通过 |
+| 28 | 会话指标整体缺失 | 保留可切换权限与只读模型状态 | detached / component minimum tests | 通过 |
 | 30 | 多面板混合 | 每个 Session 独立存储 HUD；焦点决定唯一可见 HUD | registry isolation + focus-switch test | 通过 |
 
 ### 3.1 Git 控制器 reference product 交互对照矩阵
@@ -87,7 +83,7 @@
 ## 4. 当前运行与自动化证据
 
 - reference product 当前运行程序和 reference product 完整 HUD 源码已双重对照；可运行程序仍装载旧栏这一缺口已单独记录，没有被误写成最终标准。
-- Matou 已覆盖 Shell 环境刷新、Shell → Agent → Shell、权限菜单、模型切换、Bypass 有身份重建、清屏、窄窗口和独立窗口。
+- Matou 已覆盖 Shell 环境刷新、Shell → Agent → Shell、权限切换、模型只读实时显示、会话记录回填、窄窗口和独立窗口。
 - 完整工作区自动化：Contracts 15 项、Domain 3 项、Desktop 98 项、Runtime 239 项，共 355 项单元 / 集成测试通过。
 - 全量 Electron 回归 32 个用户场景通过；最终 HUD 修正后，PRD 02 两个 Electron 场景再次单独通过。
 - 类型检查与生产构建通过。
@@ -107,7 +103,7 @@
 
 1. **Shell 环境感知**：执行 `cd`、切分支、改文件，确认底部目录 / Git / `*` 自动更新。
 2. **进入与退出 AI**：在 Shell 输入 `claude`，确认 HUD 整体切换；结束 AI 后确认原位回到可输入 Shell。
-3. **就地控制**：切 Plan Mode、切 Sonnet，再跨到 Bypass，确认普通切换无中断、Bypass 有确认且清屏续话。
+3. **实时状态**：在 AI 终端内切换权限与模型，确认底栏原位显示最新值，点击底栏字段不出现菜单。
 4. **多面板与窄窗口**：切换不同面板、拖出独立窗口、缩窄窗口，确认状态不串扰且始终单行。
 5. **Git 闭环**：从底部分支入口完成搜索切换、创建分支、Worktree 管理、提交与推送，确认无额外顶栏或页签。
 

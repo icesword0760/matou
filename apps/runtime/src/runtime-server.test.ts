@@ -37,6 +37,7 @@ import { ProviderConfigStore } from './provider-config/provider-config-store'
 import { CapabilityTokenService } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
+import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 
 let root: string
 let database: RuntimeDatabase
@@ -276,6 +277,83 @@ sleep 30
       await sessions.shutdownAll()
       settingsServer.close()
       backgroundServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('applies a global Claude provider only to healthy sessions while a faulted process stays intact', async () => {
+    server.close()
+    const executable = join(root, 'provider-config-storage-aware.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "provider-ready\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'provider-config-faulted', 'claude-code')
+    registerSession(database, 'provider-config-healthy', 'claude-code')
+    let writable = false
+    const sessions = new RuntimeSessionRegistry()
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerPort = new MockPort()
+    const providerRouter = new RuntimeRpcRouter(database, undefined, { providerConfigs })
+    const providerServer = new RuntimeServer(
+      providerPort, root, database, providerRouter, undefined, sessions,
+      undefined, undefined, {
+        providerConfigs,
+        journalOptionsForSession: (sessionId) => sessionId === 'provider-config-faulted'
+          ? {
+              writeFrame: async (handle, encoded) => {
+                if (!writable) throw Object.assign(new Error('disk quota reached'), { code: 'ENOSPC' })
+                await handle.write(encoded)
+              }
+            }
+          : undefined
+      }
+    )
+    providerPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-config-storage-aware-window'
+    })
+    try {
+      for (const sessionId of ['provider-config-faulted', 'provider-config-healthy']) {
+        providerPort.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context',
+          profile: 'claude-code', cols: 80, rows: 24
+        })
+      }
+      await waitUntil(() => providerPort.last('terminal.storage-fault')?.sessionId === 'provider-config-faulted')
+      await waitUntil(() => sessions.has('provider-config-healthy'))
+      const faultedPid = sessions.get('provider-config-faulted')!.pid
+      const healthyPid = sessions.get('provider-config-healthy')!.pid
+
+      providerPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-storage-upsert', method: 'provider-config.upsert',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { provider: {
+          cli: 'claude-code', name: 'Storage Aware Gateway', endpoint: 'https://gateway.example/',
+          model: 'claude-team', apiKey: 'TOKEN'
+        } }
+      })
+      await waitUntil(() => providerPort.findRpcResponse('provider-config-storage-upsert') !== undefined)
+      const providerId = (providerPort.findRpcResponse('provider-config-storage-upsert') as {
+        result: { provider: { id: string } }
+      }).result.provider.id
+      providerPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-storage-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId }
+      })
+      await waitUntil(() => providerPort.findRpcResponse('provider-config-storage-activate') !== undefined)
+      await waitUntil(() => sessions.get('provider-config-healthy')?.pid !== healthyPid)
+
+      expect(sessions.get('provider-config-faulted')?.pid).toBe(faultedPid)
+      expect(sessions.get('provider-config-healthy')?.pid).not.toBe(healthyPid)
+    } finally {
+      writable = true
+      await sessions.shutdownAll()
+      providerServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
@@ -2519,6 +2597,15 @@ sleep 30
         'confirmed-derivation-session'
       )).toBeUndefined()
 
+      confirmedPort.receive(rpc('pending-permission-plan', 'session.set-permission-mode', {
+        sessionId: 'confirmed-derivation-session', provider: 'claude-code',
+        permissionMode: 'plan', respawn: false, now: 2
+      }))
+      await waitUntil(() => confirmedPort.findRpcError('pending-permission-plan') !== undefined)
+      expect(database.get<{ metadata_json: string }>(
+        'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-confirmed-derivation'
+      )).toEqual({ metadata_json: '{}' })
+
       const runId = sessions.get('confirmed-derivation-session')?.runId
       expect(runId).toEqual(expect.any(String))
       confirmedServer.providerIdentityRecorded('confirmed-derivation-session', runId!)
@@ -2546,6 +2633,7 @@ sleep 30
       'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
       "printf 'WRONG_PROVIDER_DAG_SUMMARY\\n'",
       "printf '\\033]7;file://host%s\\033\\\\' \"$MATOU_TEST_WRONG_CWD\"",
+      "printf '\\r\\033[2K▶▶ bypass permissions on (shift+tab to cycle) · ← for agents'",
       "printf 'API Error: wrong provider must not own status\\n'",
       'sleep 30',
       ''
@@ -2585,6 +2673,10 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'available', 'restoring', '{}', 1, 1, 1)`,
         'binding-mismatched-resume', 'mismatched-resume-session', 'provider-old'
       )
+      database.run(
+        `UPDATE provider_bindings SET metadata_json = ? WHERE id = ?`,
+        JSON.stringify({ permissionMode: 'default' }), 'binding-mismatched-resume'
+      )
       const sessions = new RuntimeSessionRegistry()
       const resumePort = new MockPort()
       resumeServer = new RuntimeServer(
@@ -2608,6 +2700,9 @@ sleep 30
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
       await waitUntil(() => terminalText(resumePort).includes('WRONG_PROVIDER_DAG_SUMMARY'))
+      expect(resumePort.sent.some((message) =>
+        message.type === 'terminal.hud' && message.hud?.permissionMode === 'bypassPermissions'
+      )).toBe(false)
       const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
       expect(arguments_).toContain('provider-old')
       const settingsIndex = arguments_.indexOf('--settings')
@@ -2645,6 +2740,9 @@ sleep 30
          WHERE session_id = ? AND event_type = 'session.work-status-changed'`,
         'mismatched-resume-session'
       )).toEqual({ count: 0 })
+      expect(resumePort.sent.some((message) =>
+        message.type === 'terminal.hud' && message.hud?.permissionMode === 'bypassPermissions'
+      )).toBe(false)
       expect(resumePort.sent.some((message) =>
         message.type === 'events.batch' && message.events.some((event) =>
           event.eventType === 'session.restore-state-changed' &&
@@ -3451,6 +3549,48 @@ sleep 30
     }
   })
 
+  it('follows Claude permission changes from the visible terminal footer', async () => {
+    server.close()
+    const executable = join(root, 'provider-permission-footer.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      "printf '\\033[2K▶▶ auto mode on (shift+tab to cycle)'",
+      'sleep 0.15',
+      "printf '\\r\\033[2K▶▶ bypass permissions on (shift+tab to cycle) · ← for agents'",
+      'sleep 30'
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = new RuntimeSessionRegistry()
+    const footerPort = new MockPort()
+    const footerServer = new RuntimeServer(footerPort, root, database, undefined, undefined, sessions)
+    try {
+      registerSession(database, 'provider-permission-footer', 'claude-code')
+      footerPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'permission-footer-renderer'
+      })
+      footerPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-permission-footer', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => footerPort.sent.some((message) =>
+        message.type === 'terminal.hud' && message.hud?.permissionMode === 'auto'
+      ))
+      await waitUntil(() => footerPort.last('terminal.hud')?.hud?.permissionMode === 'bypassPermissions')
+    } finally {
+      footerPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-permission-footer'
+      })
+      await settle()
+      footerServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('switches live permission modes in place and respawns across the Bypass boundary', async () => {
     const executable = join(root, 'provider-live-permission.sh')
     const argumentFile = join(root, 'provider-live-permission-arguments.txt')
@@ -3481,7 +3621,7 @@ sleep 30
         'binding-live-permission', 'provider-live-permission', 'provider-live-42',
         JSON.stringify({ permissionMode: 'default' })
       )
-      new RuntimeServer(livePort, root, database, undefined, undefined, sessions)
+      const liveServer = new RuntimeServer(livePort, root, database, undefined, undefined, sessions)
       livePort.receive({
         type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'live-permission-renderer'
       })
@@ -3491,6 +3631,9 @@ sleep 30
         profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntil(() => sessions.has('provider-live-permission'))
+      liveServer.providerIdentityRecorded(
+        'provider-live-permission', sessions.get('provider-live-permission')!.runId!
+      )
       const firstPid = sessions.get('provider-live-permission')!.pid
 
       livePort.receive(rpc('permission-plan', 'session.set-permission-mode', {
@@ -3537,6 +3680,140 @@ sleep 30
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
       restoreEnv('MATOU_TEST_INPUT_FILE', previousInputFile)
+    }
+  })
+
+  it('keeps provider identity confirmation authoritative across attached windows', async () => {
+    server.close()
+    const executable = join(root, 'provider-cross-window-identity.sh')
+    const launchLog = join(root, 'provider-cross-window-launches.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s\\n' "$*" >> ${JSON.stringify(launchLog)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'provider-cross-window', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+      'binding-cross-window', 'provider-cross-window', 'provider-cross-window-42',
+      JSON.stringify({ permissionMode: 'default' })
+    )
+    const sessions = new RuntimeSessionRegistry()
+    const providerConfigs = new ProviderConfigStore(root)
+    const secondaryPort = new MockPort()
+    const secondaryServer = new RuntimeServer(
+      secondaryPort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined, { providerConfigs }
+    )
+    const ownerPort = new MockPort()
+    const ownerServer = new RuntimeServer(
+      ownerPort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined, { providerConfigs }
+    )
+    secondaryPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-cross-window-secondary'
+    })
+    ownerPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-cross-window-owner'
+    })
+    try {
+      secondaryPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'cross-window-provider-upsert', method: 'provider-config.upsert',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { provider: {
+          cli: 'claude-code', name: 'Cross Window Gateway', endpoint: 'https://gateway.example/',
+          model: 'claude-team', apiKey: 'TOKEN'
+        } }
+      })
+      await waitUntil(() => secondaryPort.findRpcResponse('cross-window-provider-upsert') !== undefined)
+      const providerId = (secondaryPort.findRpcResponse('cross-window-provider-upsert') as {
+        result: { provider: { id: string } }
+      }).result.provider.id
+
+      secondaryPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-cross-window', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('provider-cross-window'))
+      secondaryServer.providerIdentityRecorded(
+        'provider-cross-window', sessions.get('provider-cross-window')!.runId!
+      )
+
+      ownerPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-cross-window', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24, spawnRevision: 1
+      })
+      await waitUntil(() => ownerPort.last('terminal.spawned')?.sessionId === 'provider-cross-window')
+      ownerServer.providerIdentityRecorded(
+        'provider-cross-window', sessions.get('provider-cross-window')!.runId!
+      )
+
+      const beforeOwnerRespawn = sessions.get('provider-cross-window')!.pid
+      ownerPort.receive(rpc('cross-window-owner-bypass', 'session.set-permission-mode', {
+        sessionId: 'provider-cross-window', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 2
+      }))
+      await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass') !== undefined)
+      await waitUntil(() => sessions.get('provider-cross-window')?.pid !== beforeOwnerRespawn)
+      const firstPendingPid = sessions.get('provider-cross-window')!.pid
+
+      secondaryPort.receive(rpc('cross-window-secondary-plan', 'session.set-permission-mode', {
+        sessionId: 'provider-cross-window', provider: 'claude-code',
+        permissionMode: 'plan', respawn: false, now: 3
+      }))
+      await waitUntil(() => secondaryPort.findRpcResponse('cross-window-secondary-plan') !== undefined ||
+        secondaryPort.findRpcError('cross-window-secondary-plan') !== undefined)
+      secondaryPort.receive(rpc('cross-window-secondary-bypass', 'session.set-permission-mode', {
+        sessionId: 'provider-cross-window', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 4
+      }))
+      await waitUntil(() => secondaryPort.findRpcResponse('cross-window-secondary-bypass') !== undefined ||
+        secondaryPort.findRpcError('cross-window-secondary-bypass') !== undefined)
+      const afterSecondaryPermissionPid = sessions.get('provider-cross-window')!.pid
+
+      const currentRunId = sessions.get('provider-cross-window')!.runId!
+      secondaryServer.providerIdentityRecorded('provider-cross-window', currentRunId)
+      ownerServer.providerIdentityRecorded('provider-cross-window', currentRunId)
+      ownerPort.receive(rpc('cross-window-owner-bypass-again', 'session.set-permission-mode', {
+        sessionId: 'provider-cross-window', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 5
+      }))
+      await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass-again') !== undefined)
+      await waitUntil(() => sessions.get('provider-cross-window')?.pid !== afterSecondaryPermissionPid)
+      const secondPendingPid = sessions.get('provider-cross-window')!.pid
+
+      secondaryPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'cross-window-provider-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId }
+      })
+      await waitUntil(() => secondaryPort.findRpcResponse('cross-window-provider-activate') !== undefined)
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      expect(secondaryPort.findRpcError('cross-window-secondary-plan')).toBeDefined()
+      expect(secondaryPort.findRpcError('cross-window-secondary-bypass')).toBeDefined()
+      expect(afterSecondaryPermissionPid).toBe(firstPendingPid)
+      expect(sessions.get('provider-cross-window')?.pid).toBe(secondPendingPid)
+    } finally {
+      await sessions.shutdownAll()
+      ownerServer.close()
+      secondaryServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
 
@@ -3606,7 +3883,7 @@ sleep 30
         'binding-failed-permission', 'provider-failed-permission', 'provider-failed-42',
         JSON.stringify({ permissionMode: 'default' })
       )
-      new RuntimeServer(failedPort, root, database, undefined, undefined, sessions)
+      const failedServer = new RuntimeServer(failedPort, root, database, undefined, undefined, sessions)
       failedPort.receive({
         type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
         clientId: 'failed-permission-renderer'
@@ -3617,6 +3894,9 @@ sleep 30
         profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntil(() => sessions.get('provider-failed-permission')?.profile === 'claude-code')
+      failedServer.providerIdentityRecorded(
+        'provider-failed-permission', sessions.get('provider-failed-permission')!.runId!
+      )
       await rm(executable)
 
       failedPort.receive(rpc('failed-permission-bypass', 'session.set-permission-mode', {
@@ -4228,6 +4508,267 @@ sleep 30
 })
 
 describe('RuntimeServer session-scoped journal recovery', () => {
+  it('keeps a faulted Session in its current environment without replacing its process', async () => {
+    server.close()
+    const repositoryRoot = join(root, 'faulted-handoff-repository')
+    const worktreePath = join(root, 'faulted-handoff-worktree')
+    await mkdir(repositoryRoot)
+    await execFileAsync('git', ['-C', repositoryRoot, 'init', '-b', 'main'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.name', 'Matou Test'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'config', 'user.email', 'matou@example.test'])
+    await writeFile(join(repositoryRoot, 'README.md'), 'faulted handoff\n')
+    await execFileAsync('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await execFileAsync('git', ['-C', repositoryRoot, 'commit', '-m', 'initial'])
+    await execFileAsync('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', 'feature/faulted-handoff', worktreePath, 'HEAD'
+    ])
+    database.run("UPDATE workspaces SET root_directory = ? WHERE id = 'replay-workspace'", repositoryRoot)
+    database.run("UPDATE execution_contexts SET cwd = ? WHERE id = 'replay-context'", repositoryRoot)
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('faulted-handoff-context', 'replay-workspace', 'git-worktree', ?, 1)`,
+      worktreePath
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         base_ref, state, setup_policy_json, setup_result_json,
+         cleanup_policy, created_at, updated_at
+       ) VALUES (
+         'faulted-handoff-worktree', 'faulted-handoff-context', ?, ?, 'feature/faulted-handoff',
+         'HEAD', 'ready', '[]', '[]', 'retain-dirty', 1, 1
+       )`,
+      repositoryRoot, worktreePath
+    )
+    registerSession(database, 'faulted-handoff-session')
+    database.run(
+      "UPDATE sessions SET cwd = ? WHERE id = 'faulted-handoff-session'",
+      repositoryRoot
+    )
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'faulted-handoff-worktree', active_target = 'local',
+           state = 'ready', updated_at = 1
+       WHERE session_id = 'faulted-handoff-session'`
+    )
+    const executable = join(root, 'faulted-handoff-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "trigger-faulted-handoff\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    let writable = false
+    const sessions = new RuntimeSessionRegistry()
+    port = new MockPort()
+    server = new RuntimeServer(
+      port, root, database, undefined, undefined, sessions, undefined, undefined,
+      {
+        journalOptionsForSession: (sessionId) => sessionId === 'faulted-handoff-session'
+          ? {
+              writeFrame: async (handle, encoded) => {
+                if (!writable) throw Object.assign(new Error('disk quota reached'), { code: 'ENOSPC' })
+                await handle.write(encoded)
+              }
+            }
+          : undefined
+      }
+    )
+    try {
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'faulted-handoff-test' })
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-handoff-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.storage-fault')?.sessionId === 'faulted-handoff-session')
+      const originalPid = sessions.get('faulted-handoff-session')!.pid
+
+      port.receive(rpc('faulted-environment-handoff', 'session.environment-handoff', {
+        sessionId: 'faulted-handoff-session', target: 'worktree', now: 2
+      }))
+      await waitUntil(() => port.findRpcError('faulted-environment-handoff') !== undefined)
+
+      expect(database.get(
+        "SELECT execution_context_id, cwd FROM sessions WHERE id = 'faulted-handoff-session'"
+      )).toEqual({ execution_context_id: 'replay-context', cwd: repositoryRoot })
+      expect(sessions.get('faulted-handoff-session')?.pid).toBe(originalPid)
+    } finally {
+      writable = true
+      server.close()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('leaves a recovering Claude process and its saved permission unchanged', async () => {
+    server.close()
+    registerSession(database, 'recovering-agent-session', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+      'binding-recovering-agent', 'recovering-agent-session', 'provider-recovering-agent',
+      JSON.stringify({ permissionMode: 'default' })
+    )
+    const executable = join(root, 'coordinated-recovery-agent.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 1,
+      jobs: [{
+        sessionId: 'recovering-agent-session', sceneId: 'scene-recovery',
+        priority: 'active-session', enqueueSequence: 1, profile: 'claude-code'
+      }],
+      start: () => new Promise<void>(() => {})
+    })
+    coordinator.start()
+    const sessions = new RuntimeSessionRegistry()
+    port = new MockPort()
+    server = new RuntimeServer(
+      port, root, database, undefined, undefined, sessions, undefined, undefined,
+      { recoveryCoordinator: coordinator }
+    )
+    try {
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'recovery-permission-test' })
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'recovering-agent-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('recovering-agent-session'))
+      const runId = sessions.get('recovering-agent-session')!.runId!
+      server.providerIdentityRecorded('recovering-agent-session', runId)
+      const originalPid = sessions.get('recovering-agent-session')!.pid
+      expect(coordinator.snapshot()).toContainEqual(expect.objectContaining({
+        sessionId: 'recovering-agent-session', state: 'restoring'
+      }))
+
+      port.receive(rpc('recovering-permission-plan', 'session.set-permission-mode', {
+        sessionId: 'recovering-agent-session', provider: 'claude-code',
+        permissionMode: 'plan', respawn: false, now: 2
+      }))
+      await waitUntil(() => port.findRpcError('recovering-permission-plan') !== undefined)
+      port.receive(rpc('recovering-permission-bypass', 'session.set-permission-mode', {
+        sessionId: 'recovering-agent-session', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 3
+      }))
+      await waitUntil(() => port.findRpcError('recovering-permission-bypass') !== undefined)
+
+      expect(database.get<{ metadata_json: string }>(
+        'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-recovering-agent'
+      )).toEqual({ metadata_json: JSON.stringify({ permissionMode: 'default' }) })
+      expect(sessions.get('recovering-agent-session')?.pid).toBe(originalPid)
+    } finally {
+      server.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('keeps permission changes out of storage and leaves the original Claude process running while its journal is paused', async () => {
+    server.close()
+    registerCanvasSession(database, 'faulted-agent-session', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+      'binding-faulted-agent', 'faulted-agent-session', 'provider-faulted-agent',
+      JSON.stringify({ permissionMode: 'default' })
+    )
+    const executable = join(root, 'journal-recovery-agent.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'IFS= read -r line',
+      "printf 'trigger-agent-storage-fault:%s\\n' \"$line\"",
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    let writable = false
+    const sessions = new RuntimeSessionRegistry()
+    port = new MockPort()
+    server = new RuntimeServer(
+      port, root, database, undefined, undefined, sessions, undefined, undefined,
+      {
+        journalOptionsForSession: (sessionId) => sessionId === 'faulted-agent-session'
+          ? {
+              writeFrame: async (handle, encoded) => {
+                if (!writable) throw Object.assign(new Error('disk quota reached'), { code: 'ENOSPC' })
+                await handle.write(encoded)
+              }
+            }
+          : undefined
+      }
+    )
+    try {
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'agent-storage-test' })
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-agent-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned')?.sessionId === 'faulted-agent-session')
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-agent-session', data: 'retry this prompt\r'
+      })
+      await waitUntil(() => port.last('terminal.storage-fault')?.sessionId === 'faulted-agent-session')
+      const originalPid = sessions.get('faulted-agent-session')!.pid
+
+      database.run(
+        "UPDATE sessions SET work_status = 'error' WHERE id = 'faulted-agent-session'"
+      )
+      const originalInteractionSequence = database.get<{ value: number }>(
+        "SELECT value FROM runtime_sequences WHERE name = 'session-user-interaction'"
+      )!.value
+      const originalMembership = database.get<{
+        last_user_interaction_seq: number; pending_user_interaction_seq: number
+      }>(
+        `SELECT last_user_interaction_seq, pending_user_interaction_seq
+         FROM session_canvas_memberships WHERE session_id = 'faulted-agent-session'`
+      )
+
+      port.receive({
+        type: 'terminal.retry-last-input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-agent-session'
+      })
+      await waitUntil(() => port.last('protocol.error')?.message.includes('storage is paused') === true)
+
+      expect(workStatus('faulted-agent-session')).toBe('error')
+      expect(database.get<{ value: number }>(
+        "SELECT value FROM runtime_sequences WHERE name = 'session-user-interaction'"
+      )?.value).toBe(originalInteractionSequence)
+      expect(database.get(
+        `SELECT last_user_interaction_seq, pending_user_interaction_seq
+         FROM session_canvas_memberships WHERE session_id = 'faulted-agent-session'`
+      )).toEqual(originalMembership)
+      expect(sessions.get('faulted-agent-session')?.pid).toBe(originalPid)
+
+      port.receive(rpc('faulted-permission-plan', 'session.set-permission-mode', {
+        sessionId: 'faulted-agent-session', provider: 'claude-code',
+        permissionMode: 'plan', respawn: false, now: 2
+      }))
+      await waitUntil(() => port.findRpcError('faulted-permission-plan') !== undefined)
+      port.receive(rpc('faulted-permission-bypass', 'session.set-permission-mode', {
+        sessionId: 'faulted-agent-session', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 3
+      }))
+      await waitUntil(() => port.findRpcError('faulted-permission-bypass') !== undefined)
+
+      expect(database.get<{ metadata_json: string }>(
+        'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-faulted-agent'
+      )).toEqual({ metadata_json: JSON.stringify({ permissionMode: 'default' }) })
+      expect(sessions.get('faulted-agent-session')?.pid).toBe(originalPid)
+    } finally {
+      writable = true
+      server.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('pauses only the affected card, replays retained output, and lets another Session continue', async () => {
     server.close()
     registerSession(database, 'faulted-session')

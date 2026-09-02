@@ -52,6 +52,7 @@ export function TerminalPane(props: {
   onDiagnosticsStatusChange?(status: RuntimeStatus): void
   onDiagnosticsSmokeMarker?(marker: string): void
   onDiagnosticsReplayComplete?(marker: string): void
+  onStorageFaultChange?(sessionId: string, faulted: boolean): void
   onActivate(sessionId: string): unknown
   onDelete?(sessionId: string, confirmed?: boolean): unknown
   resumable?: boolean
@@ -103,6 +104,7 @@ export function TerminalPane(props: {
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
     onDiagnosticsStatusChange,
+    onStorageFaultChange,
     onActivate, onDelete, onFork, onForkSibling, onDetach,
     onRemoveBranch, onRestoreEnvironment, onLocateEnvironment, onHandoffEnvironment,
     onRename, onRestoreAutoTitle
@@ -127,8 +129,20 @@ export function TerminalPane(props: {
   const handleRuntimeStatus = useCallback((status: RuntimeStatus) => {
     setRuntimeStatus(status)
     if (status === 'streaming') setRuntimeError('')
-    if (status === 'exited') setStorageFault(null)
-  }, [])
+    if (status === 'exited') {
+      setStorageFault(null)
+      onStorageFaultChange?.(session.id, false)
+    }
+  }, [onStorageFaultChange, session.id])
+  const handleStorageFault = useCallback((fault: TerminalStorageFaultMessage) => {
+    setStorageFault(fault)
+    onStorageFaultChange?.(session.id, true)
+  }, [onStorageFaultChange, session.id])
+  const handleStorageRecovered = useCallback(() => {
+    setStorageFault(null)
+    onStorageFaultChange?.(session.id, false)
+  }, [onStorageFaultChange, session.id])
+  useEffect(() => () => onStorageFaultChange?.(session.id, false), [onStorageFaultChange, session.id])
   const handleRuntimeAndDiagnosticsStatus = useCallback((status: RuntimeStatus) => {
     handleRuntimeStatus(status)
     onDiagnosticsStatusChange?.(status)
@@ -148,11 +162,20 @@ export function TerminalPane(props: {
   const environmentUnavailable = environment !== undefined && environment.state !== 'ready'
   const recoveryBlocking = recoveryState !== 'ready'
   const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
-  const actionBlocked = readOnly || environmentUnavailable || recoveryBlocking
-  const forkRepairBlocked = readOnly || environmentUnavailable
-  const actionBlockedReason = readOnly ? READ_ONLY_REASON : environmentUnavailable
+  const storageBlocked = storageFault !== null
+  const actionBlocked = readOnly || storageBlocked || environmentUnavailable || recoveryBlocking
+  const forkRepairBlocked = readOnly || storageBlocked || environmentUnavailable
+  const freshStartBlocked = readOnly || storageBlocked || environmentUnavailable
+  const environmentRepairBlocked = readOnly || storageBlocked
+  const actionBlockedReason = readOnly ? READ_ONLY_REASON : storageBlocked
+    ? STORAGE_FAULT_REASON : environmentUnavailable
     ? '当前运行环境需要先恢复或交接'
     : recoveryBlocking ? '当前终端仍在恢复' : undefined
+  const freshStartBlockedReason = readOnly ? READ_ONLY_REASON : storageBlocked
+    ? STORAGE_FAULT_REASON : environmentUnavailable
+      ? '当前运行环境需要先恢复或交接' : undefined
+  const environmentRepairBlockedReason = readOnly ? READ_ONLY_REASON : storageBlocked
+    ? STORAGE_FAULT_REASON : undefined
   const deleteSession = useCallback((confirmed: boolean) => {
     setConfirmationOpen(false)
     if (onDelete) void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
@@ -353,7 +376,7 @@ export function TerminalPane(props: {
         void Promise.resolve(onRetryRestore(session.id)).finally(() => setRestoreRetryPending(false))
       }}>{restoreRetryPending ? '正在恢复…' : '重试恢复'}</button>}
       {session.kind === 'claude-code' && onStartFreshProvider && <button type="button"
-        disabled={restoreRetryPending}
+        disabled={freshStartBlocked || restoreRetryPending} title={freshStartBlockedReason}
         onClick={(event) => {
           event.stopPropagation()
           setRestoreRetryPending(true)
@@ -421,8 +444,8 @@ export function TerminalPane(props: {
         ? { onReplayComplete: props.onDiagnosticsReplayComplete }
         : {})}
       onRuntimeError={setRuntimeError}
-      onStorageFault={setStorageFault}
-      onStorageRecovered={() => setStorageFault(null)}
+      onStorageFault={handleStorageFault}
+      onStorageRecovered={handleStorageRecovered}
       onUserInput={() => {
         if (restoreNoticeKey !== null) setDismissedRestoreNotice(restoreNoticeKey)
       }}
@@ -479,19 +502,23 @@ export function TerminalPane(props: {
         {(environment!.state === 'missing' || environment!.state === 'failed') &&
           <div className="environment-card-overlay__actions">
             {environment!.kind === 'worktree' && onRestoreEnvironment && <button type="button"
-              disabled={Boolean(environmentAction)} onClick={() => void runEnvironmentAction(
+              disabled={Boolean(environmentAction) || environmentRepairBlocked}
+              title={environmentRepairBlockedReason} onClick={() => void runEnvironmentAction(
                 '正在恢复原 Worktree…', () => onRestoreEnvironment(session.id)
               )}>恢复 Worktree</button>}
             {environment!.kind === 'worktree' && onLocateEnvironment && <button type="button"
-              disabled={Boolean(environmentAction)} onClick={() => void runEnvironmentAction(
+              disabled={Boolean(environmentAction) || environmentRepairBlocked}
+              title={environmentRepairBlockedReason} onClick={() => void runEnvironmentAction(
                 '正在定位 Worktree…', () => onLocateEnvironment(session.id)
               )}>定位目录</button>}
             {environment!.kind === 'worktree' && onHandoffEnvironment && <button type="button"
-              disabled={Boolean(environmentAction)} onClick={() => void runEnvironmentAction(
+              disabled={Boolean(environmentAction) || environmentRepairBlocked}
+              title={environmentRepairBlockedReason} onClick={() => void runEnvironmentAction(
                 '正在交接到 Local…', () => onHandoffEnvironment(session.id, 'local')
               )}>交接到 Local</button>}
             {environment!.kind === 'local' && hasOwnedWorktree && onHandoffEnvironment && <button type="button"
-              disabled={Boolean(environmentAction)} onClick={() => void runEnvironmentAction(
+              disabled={Boolean(environmentAction) || environmentRepairBlocked}
+              title={environmentRepairBlockedReason} onClick={() => void runEnvironmentAction(
                 '正在交接到 Worktree…', () => onHandoffEnvironment(session.id, 'worktree')
               )}>交接到 Worktree</button>}
           </div>}
@@ -592,6 +619,7 @@ function environmentOverlayDescription(environment: SessionEnvironment): string 
 }
 
 const READ_ONLY_REASON = '数据库处于只读恢复模式'
+const STORAGE_FAULT_REASON = '终端存储异常，请先恢复或结束当前会话'
 
 function gitLabel(git: SessionGitState): string {
   if (git.state === 'unavailable') return 'Git 不可用'

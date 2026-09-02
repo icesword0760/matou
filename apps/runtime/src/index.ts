@@ -25,7 +25,7 @@ import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordina
 import type { RecoveryJob } from './recovery/runtime-session-recovery-scheduler'
 import { RuntimeRecoveryE2eObserver } from './recovery/runtime-recovery-e2e-observer'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
-import { ProviderHookServer } from './session/provider-hook-server'
+import { ProviderHookServer, providerTranscriptPath } from './session/provider-hook-server'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
@@ -312,9 +312,14 @@ async function initializeRuntime(): Promise<RuntimeState> {
     onHudPayload: ({ sessionId, payload }) => {
       sessionHuds.ingestProvider(sessionId, payload)
       for (const server of servers) void server.refreshSessionHud(sessionId)
+      const transcriptPath = providerTranscriptPath(payload)
+      if (transcriptPath) void sessionHuds.refreshTranscript(sessionId, transcriptPath).then((changed) => {
+        if (changed) for (const server of servers) void server.refreshSessionHud(sessionId)
+      }).catch((error) => console.error(`[provider-hud-history] ${errorMessage(error)}`))
     },
     onTitleObserved: ({ sessionId, providerSessionId, title, runId }) => {
       const now = Date.now()
+      sessionHuds.updateSessionName(sessionId, title)
       try {
         sessionRepository.observeProviderTitle({
           commandId: `provider-title-${runId}-${randomUUID()}`,

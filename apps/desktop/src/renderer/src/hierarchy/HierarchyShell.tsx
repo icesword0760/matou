@@ -52,8 +52,14 @@ import { useSessionRecovery } from '../runtime/useSessionRecovery'
 import { indexSceneLayout, layoutFromSnapshot } from './scene-layout-index'
 import { AppUpdateControl } from '../updates/AppUpdateControl'
 import { activeAppSessionCount } from '../updates/active-app-sessions'
+import {
+  DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+  usePersistentTerminalFontSize
+} from '../terminal/usePersistentTerminalFontSize'
 
 const DETACHED_RETURN_RETRY_DELAYS_MS = [100, 300, 900, 1_800] as const
+const STORAGE_FAULT_MUTATION_REASON = '终端存储异常，请先恢复或结束当前会话'
+const RECOVERY_MUTATION_REASON = '当前终端需要先完成恢复'
 
 export interface HierarchyTerminalDiagnostics {
   onStatusChange(status: import('../terminal/TerminalSurface').RuntimeStatus): void
@@ -308,7 +314,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   }, [detachedWindowSignature, readOnly])
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
   const [themeKey, setThemeKey] = useState<TerminalThemeKey>(DEFAULT_TERMINAL_THEME)
-  const [fontSize, setFontSize] = useState(11)
+  const [fontSize, setFontSize] = usePersistentTerminalFontSize()
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [sessionLoader, setSessionLoader] = useState<{
@@ -331,6 +337,15 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   const [environmentTransitionBySession, setEnvironmentTransitionBySession] = useState<
     Record<string, 'recovering' | 'handoff' | undefined>
   >({})
+  const [storageFaultSessionIds, setStorageFaultSessionIds] = useState<Set<string>>(() => new Set())
+  const handleStorageFaultChange = useCallback((sessionId: string, faulted: boolean) => {
+    setStorageFaultSessionIds((current) => {
+      const next = new Set(current)
+      if (faulted) next.add(sessionId)
+      else next.delete(sessionId)
+      return next
+    })
+  }, [])
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
@@ -605,7 +620,12 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
     activeGraphFocused?.environment,
     focusedSessionId ? environmentTransitionBySession[focusedSessionId] : undefined
   )
-  const activeSessionMutationBlocked = readOnly || (
+  const activeRecoveryStatus = focusedSessionId
+    ? sessionRecovery.statusBySession.get(focusedSessionId)
+    : undefined
+  const activeStorageFault = focusedSessionId !== undefined && storageFaultSessionIds.has(focusedSessionId)
+  const activeRecoveryBlocked = activeRecoveryStatus !== undefined && activeRecoveryStatus.state !== 'ready'
+  const activeSessionMutationBlocked = readOnly || activeStorageFault || activeRecoveryBlocked || (
     activeEnvironment !== undefined && activeEnvironment.state !== 'ready'
   )
   const locateEnvironment = async (sessionId: string) => {
@@ -672,9 +692,9 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
       if (direction === 'right' && index < scenes.length - 1) run(commands.reorderScene(activeSceneId, scenes[index + 2]?.id))
     },
     openSearch: () => setSearchOpen(true),
-    increaseFontSize: () => setFontSize((value) => Math.min(24, value + 1)),
-    decreaseFontSize: () => setFontSize((value) => Math.max(10, value - 1)),
-    resetFontSize: () => setFontSize(11),
+    increaseFontSize: () => setFontSize((value) => Math.min(MAX_TERMINAL_FONT_SIZE, value + 1)),
+    decreaseFontSize: () => setFontSize((value) => Math.max(MIN_TERMINAL_FONT_SIZE, value - 1)),
+    resetFontSize: () => setFontSize(DEFAULT_TERMINAL_FONT_SIZE),
     cycleTheme: () => {
       setThemeKey((value) => value === 'light' ? 'dark' : 'light')
       setTerminalFocusRequest((value) => value + 1)
@@ -860,6 +880,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
                     onDiagnosticsSmokeMarker: terminalDiagnostics.onSmokeMarker,
                     onDiagnosticsReplayComplete: terminalDiagnostics.onReplayComplete
                   } : {})}
+                  onStorageFaultChange={handleStorageFaultChange}
                   resumable={sessionHud?.resumable === true}
                   {...(recoveryStatus ? {
                     recoveryState: recoveryStatus.state,
@@ -1056,13 +1077,20 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
                       {...(activeGraphFocused?.git ? { git: activeGraphFocused.git } : {})}
                       environmentActions={environmentActions}
                       onPermissionMode={commands.setPermissionMode}
-                      onModel={commands.setModel}
                       {...(activeSessionMutationBlocked ? {
                         disabledReason: readOnly
                           ? READ_ONLY_REASON
-                          : '当前运行环境需要先恢复或交接'
+                          : activeStorageFault
+                            ? STORAGE_FAULT_MUTATION_REASON
+                            : activeRecoveryBlocked
+                              ? RECOVERY_MUTATION_REASON
+                              : '当前运行环境需要先恢复或交接'
                       } : {})}
-                      {...(readOnly ? { environmentDisabledReason: READ_ONLY_REASON } : {})}
+                      {...(readOnly || activeStorageFault ? {
+                        environmentDisabledReason: readOnly
+                          ? READ_ONLY_REASON
+                          : STORAGE_FAULT_MUTATION_REASON
+                      } : {})}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />

@@ -34,6 +34,7 @@ import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
 import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracker'
+import { ClaudePermissionModeTracker } from './session/claude-permission-mode-tracker'
 import { ProviderResumeMonitor } from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
@@ -202,6 +203,7 @@ export class RuntimeServer {
   readonly #providerInputBuffers = new Map<string, string>()
   readonly #lastProviderInputs = new Map<string, string>()
   readonly #workStatusTrackers = new Map<string, TerminalWorkStatusTracker>()
+  readonly #permissionModeTrackers = new Map<string, ClaudePermissionModeTracker>()
   readonly #summaryBuffers = new Map<string, string>()
   readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
@@ -492,6 +494,7 @@ export class RuntimeServer {
     this.#lastProviderInputs.clear()
     this.#workStatusTrackers.clear()
     this.#environmentResumeDescriptors.clear()
+    this.#permissionModeTrackers.clear()
     this.#detachAll()
     this.#port.close()
   }
@@ -611,6 +614,7 @@ export class RuntimeServer {
           )
           break
         }
+        this.#assertSessionDurabilityHealthy(message.sessionId)
         const now = Date.now()
         this.#sessionInteractions.record({
           commandId: `terminal-retry-${message.sessionId}-${randomUUID()}`,
@@ -868,6 +872,9 @@ export class RuntimeServer {
         permissionSession.profile !== 'shell' &&
         this.#sessionRepository.getResumeBinding(permissionSessionId, 'claude-code') === undefined
       this.#accessPolicy.assertRpcAllowed(message.method)
+      if (permissionSessionId !== undefined) {
+        this.#assertProviderMutationAllowed(permissionSessionId)
+      }
       let result = ephemeralPermission
         ? {
             sessionId: permissionSessionId,
@@ -970,6 +977,7 @@ export class RuntimeServer {
     if (method === 'session.environment-open') {
       return this.#environmentService.open(sessionId)
     }
+    this.#assertSessionDurabilityHealthy(sessionId)
     const now = typeof input.now === 'number' && Number.isInteger(input.now) && input.now > 0
       ? input.now
       : Date.now()
@@ -1429,6 +1437,7 @@ export class RuntimeServer {
         this.#shellInputBuffers.delete(message.sessionId)
         this.#providerInputBuffers.delete(message.sessionId)
         this.#workStatusTrackers.delete(message.sessionId)
+        this.#permissionModeTrackers.delete(message.sessionId)
         existing.dispose({ notifyExit: false })
         await existing.whenClosed()
       } else {
@@ -1557,6 +1566,9 @@ export class RuntimeServer {
             message.profile === 'claude-code' ? { provider: 'claude-code' } : {}
           )
         : undefined
+      const permissionModeTracker = message.profile === 'claude-code'
+        ? new ClaudePermissionModeTracker() : undefined
+      if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
@@ -1650,6 +1662,11 @@ export class RuntimeServer {
           if (status === 'error') this.#flushSessionSummary(message.sessionId)
           this.#setWorkStatus(message.sessionId, status)
         }
+        const visiblePermissionMode = permissionModeTracker?.ingest(data)
+        if (visiblePermissionMode) {
+          this.#hud.ingestProvider(message.sessionId, { permission_mode: visiblePermissionMode })
+          this.publishSessionHud(message.sessionId)
+        }
       }
       let providerDerivationState: 'pending' | 'confirmed' | 'rejected' =
         message.profile === 'claude-code' && providerSessionId !== undefined && runId !== undefined
@@ -1659,6 +1676,7 @@ export class RuntimeServer {
       if (providerDerivationState === 'pending') {
         this.#rejectProviderDerivedOutput(message.sessionId)
         const gatedRunId = runId!
+        this.#sessions.markProviderIdentityPending(message.sessionId, gatedRunId)
         this.#providerDerivedOutputGates.set(message.sessionId, {
           runId: gatedRunId,
           confirm: () => {
@@ -1808,6 +1826,7 @@ export class RuntimeServer {
             this.#shellInputBuffers.delete(message.sessionId)
             this.#providerInputBuffers.delete(message.sessionId)
             this.#workStatusTrackers.delete(message.sessionId)
+            this.#permissionModeTrackers.delete(message.sessionId)
           }
           if (exited.runId) {
             try {
@@ -2216,6 +2235,7 @@ export class RuntimeServer {
     const gate = this.#providerDerivedOutputGates.get(sessionId)
     if (!gate || gate.runId !== runId) return
     this.#providerDerivedOutputGates.delete(sessionId)
+    this.#sessions.clearProviderIdentityPending(sessionId, runId)
     gate.confirm()
   }
 
@@ -2223,6 +2243,7 @@ export class RuntimeServer {
     const gate = this.#providerDerivedOutputGates.get(sessionId)
     if (!gate || (runId !== undefined && gate.runId !== runId)) return
     this.#providerDerivedOutputGates.delete(sessionId)
+    this.#sessions.clearProviderIdentityPending(sessionId, gate.runId)
     gate.reject()
   }
 
@@ -2479,6 +2500,7 @@ export class RuntimeServer {
     this.#lastProviderInputs.delete(sessionId)
     this.#workStatusTrackers.delete(sessionId)
     this.#environmentResumeDescriptors.delete(sessionId)
+    this.#permissionModeTrackers.delete(sessionId)
     this.#skipResumeSessionIds.delete(sessionId)
     this.#hud.delete(sessionId)
     this.publishSessionHud(sessionId)
@@ -2670,6 +2692,33 @@ export class RuntimeServer {
     this.publishSessionHud(sessionId)
   }
 
+  #assertProviderMutationAllowed(sessionId: string): void {
+    this.#assertSessionDurabilityHealthy(sessionId)
+    const recovery = this.#recoveryCoordinator?.snapshot()
+      .find((job) => job.sessionId === sessionId)
+    if (
+      (recovery !== undefined && recovery.state !== 'ready') ||
+      this.#sessions.providerIdentityPending(sessionId)
+    ) {
+      throw new RpcFault(
+        'CONFLICT',
+        'Session recovery must finish before changing permissions',
+        true
+      )
+    }
+  }
+
+  #assertSessionDurabilityHealthy(sessionId: string): void {
+    const session = this.#sessions.get(sessionId)
+    if (session && session.durabilityState !== 'healthy') {
+      throw new RpcFault(
+        'CONFLICT',
+        'terminal storage is paused; recover or end the Session before changing it',
+        true
+      )
+    }
+  }
+
   async #respawnWithPermission(sessionId: string, target: HudPermissionMode): Promise<void> {
     const session = this.#sessions.get(sessionId)
     const descriptor = this.#spawnDescriptors.get(sessionId)
@@ -2718,6 +2767,13 @@ export class RuntimeServer {
     await this.#sessions.runExclusive(sessionId, async () => {
       const session = this.#sessions.get(sessionId)
       if (!session || session.profile !== descriptor.profile) return
+      const recovery = this.#recoveryCoordinator?.snapshot()
+        .find((job) => job.sessionId === sessionId)
+      if (
+        session.durabilityState !== 'healthy' ||
+        (recovery !== undefined && recovery.state !== 'ready') ||
+        this.#sessions.providerIdentityPending(sessionId)
+      ) return
       const wasAttached = this.#attachedSessionIds.has(sessionId)
       this.#clearProviderResumeTimer(sessionId)
       this.#sessions.delete(sessionId, session)

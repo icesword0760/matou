@@ -116,22 +116,33 @@ test('operates the compact Git controller for branches, Worktrees, commits, and 
   }
 })
 
-test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass, and returns to Shell', async () => {
+test('moves from Shell to the full Agent HUD with switchable permissions and a read-only model', async () => {
   const providerRoot = await mkdtemp(join(tmpdir(), 'matou-prd02-provider-'))
   const provider = join(providerRoot, 'claude-fixture.sh')
+  const providerConfig = join(providerRoot, 'provider-config')
   const invocationLog = join(providerRoot, 'invocations.txt')
   const exitFile = join(providerRoot, 'exit-now')
+  await mkdir(providerConfig, { recursive: true })
   await writeFile(provider, providerScript())
   await chmod(provider, 0o755)
   const fixture = await launchMatou({ env: {
     MATOU_CLAUDE_COMMAND: provider,
     MATOU_PRD02_INVOCATIONS: invocationLog,
-    MATOU_PRD02_EXIT_FILE: exitFile
+    MATOU_PRD02_EXIT_FILE: exitFile,
+    CLAUDE_CONFIG_DIR: providerConfig
   } })
   try {
     await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1800, 900))
     const surface = activeSurface(fixture.page.locator('body'))
     const shellPid = await positivePid(surface)
+    await mkdir(join(fixture.workspaceDirectory, '.claude'), { recursive: true })
+    await writeFile(join(fixture.workspaceDirectory, 'CLAUDE.md'), 'project instructions\n')
+    await writeFile(join(fixture.workspaceDirectory, '.mcp.json'), JSON.stringify({
+      mcpServers: { browser_bridge: {} }
+    }))
+    await writeFile(join(fixture.workspaceDirectory, '.claude', 'settings.local.json'), JSON.stringify({
+      hooks: { Notification: [], Stop: [] }
+    }))
     await terminalCommand(surface, 'claude')
 
     const hud = fixture.page.locator('.shortcut-bar .status-info')
@@ -139,10 +150,23 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
       .toHaveText('Claude')
     await expect(hud).toHaveAttribute('data-hud-mode', 'agent')
     await expect.poll(() => positivePid(surface)).not.toBe(shellPid)
-    await expect(hud.getByRole('button', { name: /当前权限模式：Default/ })).toBeVisible()
-    await expect(hud.getByRole('button', { name: '点击切换模型' })).toHaveCount(0)
+    await expect(hud.locator('.status-perm-badge')).toHaveText('Auto')
+    await expect(hud.locator('.status-model')).toHaveText('Fable 5 (1M context)')
+    await expect(hud.getByRole('button', { name: /当前权限模式：Auto/ })).toBeVisible()
+    await expect(hud.getByRole('button', { name: /切换模型/ })).toHaveCount(0)
+    await hud.getByRole('button', { name: /当前权限模式：Auto/ }).click()
+    await expect(fixture.page.getByRole('menu', { name: '权限模式' })).toBeVisible()
+    await expect(fixture.page.getByRole('menuitem', { name: 'Plan Mode' })).toBeVisible()
+    await fixture.page.keyboard.press('Escape')
     await expect(fixture.page.getByRole('button', { name: '设置' })).toBeVisible()
     await expect(hud).toContainText('72%')
+    await expect(hud).toContainText('Weekly 8%')
+    await expect(hud).toContainText('1 CLAUDE.md')
+    await expect(hud).toContainText('1 MCPs')
+    await expect(hud).toContainText('2 hooks')
+    await expect(hud).toContainText('✓Read×1')
+    await expect(hud).toContainText('⚠ browser_bridge')
+    await expect(hud).toContainText('⚠browser_bridge: open')
     await expect(hud.locator('.context-ring-fg')).toHaveAttribute('stroke', '#d29922')
     await expect(hud).toContainText('任务中')
     await expect(hud).toContainText('Read')
@@ -193,40 +217,19 @@ test('moves from Shell to the full Agent HUD, operates controls, respawns Bypass
     })
     await providerSettings.getByRole('button', { name: '关闭设置' }).click()
 
-    await hud.getByRole('button', { name: /当前权限模式/ }).click()
-    const permissionMenu = fixture.page.getByRole('menu', { name: '权限模式' })
-    await expect(permissionMenu.getByRole('menuitem')).toHaveCount(4)
-    await permissionMenu.getByRole('menuitem', { name: 'Plan Mode' }).click()
-    await expect(hud.getByRole('button', { name: /当前权限模式：Plan Mode/ })).toBeVisible()
-
-    const beforeBypassPid = await positivePid(surface)
-    await hud.getByRole('button', { name: /当前权限模式/ }).click()
-    await fixture.page.getByRole('menuitem', { name: 'Bypass Permissions' }).click()
-    const dialog = fixture.page.getByRole('alertdialog', { name: '切换到高权限模式' })
-    await expect(dialog).toContainText('重启后会自动 resume 恢复会话历史')
-    await expect.poll(() => dialog.evaluate((element) => {
-      const rect = element.getBoundingClientRect()
-      return rect.top >= 0 && rect.bottom <= window.innerHeight
-    })).toBe(true)
-    await fixture.page.screenshot({ path: join(evidenceDirectory, 'bypass-confirmation.png') })
-    await dialog.getByRole('button', { name: '确认切换' }).click()
-    await expect(hud.getByRole('button', { name: /当前权限模式：Bypass Permissions/ })).toBeVisible()
-    await expect.poll(() => positivePid(surface)).not.toBe(beforeBypassPid)
-    await expect.poll(async () => (await import('node:fs/promises')).readFile(invocationLog, 'utf8'))
-      .toContain('--dangerously-skip-permissions')
-
     await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(700, 520))
     await expect.poll(() => hud.evaluate((element) => ({
       whiteSpace: getComputedStyle(element).whiteSpace,
       overflow: getComputedStyle(element).overflow
     }))).toEqual({ whiteSpace: 'nowrap', overflow: 'hidden' })
 
+    const beforeExitPid = await positivePid(surface)
     await writeFile(exitFile, 'exit')
     await expect(hud).toHaveAttribute('data-hud-mode', 'shell')
     await expect(fixture.page.locator('[data-testid="terminal-pane"]:visible .pane-title'))
       .toHaveText('Shell')
-    await expect(hud.getByRole('button', { name: /当前权限模式/ })).toHaveCount(0)
-    await expect.poll(() => positivePid(surface)).not.toBe(beforeBypassPid)
+    await expect(hud.locator('.status-perm-badge')).toHaveCount(0)
+    await expect.poll(() => positivePid(surface)).not.toBe(beforeExitPid)
   } finally {
     await fixture.close()
     await rm(providerRoot, { recursive: true, force: true })
@@ -302,9 +305,12 @@ url=settings['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
 def post(value):
     request=urllib.request.Request(url, data=json.dumps(value).encode(), headers={'content-type':'application/json'}, method='POST')
     urllib.request.urlopen(request, timeout=2).read()
-post({'session_id':'prd02-provider-session','cwd':os.getcwd(),'model':{'display_name':'Claude Opus 4.6'},'context_window':{'used_percentage':72}})
+post({'session_id':'prd02-provider-session','cwd':os.getcwd(),'permission_mode':'auto','model':{'display_name':'Claude Fable 5'},'cost':{'total_duration_ms':3600000},'context_window':{'used_percentage':72,'context_window_size':1000000},'rate_limits':{'seven_day':{'used_percentage':8,'resets_at':int(__import__('time').time())+424800}}})
 post({'hook_event_name':'PreToolUse','session_id':'prd02-provider-session','tool_name':'Read','tool_use_id':'read-1','tool_input':{'file_path':'src/App.tsx'}})
+post({'hook_event_name':'PostToolUse','session_id':'prd02-provider-session','tool_name':'Read','tool_use_id':'read-1','tool_input':{'file_path':'src/App.tsx'}})
 post({'hook_event_name':'PreToolUse','session_id':'prd02-provider-session','tool_name':'TodoWrite','tool_use_id':'todo-1','tool_input':{'todos':[{'content':'实现 HUD','status':'in_progress'},{'content':'完成对照','status':'completed'}]}})
+post({'hook_event_name':'PreToolUse','session_id':'prd02-provider-session','tool_name':'mcp__browser_bridge__open','tool_use_id':'mcp-1','tool_input':{'query':'open'}})
+post({'hook_event_name':'PostToolUseFailure','session_id':'prd02-provider-session','tool_name':'mcp__browser_bridge__open','tool_use_id':'mcp-1','tool_input':{'query':'open'}})
 PY
 while [ ! -f "$MATOU_PRD02_EXIT_FILE" ]; do sleep 0.1; done
 exit 0
