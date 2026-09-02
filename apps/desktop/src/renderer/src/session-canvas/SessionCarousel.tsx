@@ -100,6 +100,9 @@ export function SessionCarousel(props: {
     ? Math.min(nodes.length, renderStart + visibleCount * 5)
     : nodes.length
   const renderedNodes = nodes.slice(renderStart, renderEnd)
+  const foregroundTerminalCount = nodes.filter((node) =>
+    node.archivedAt === undefined && node.currentMode !== 'agent-team-member'
+  ).length
   const revealTargetPresent = Boolean(revealRequest && nodes.some(
     ({ sessionId }) => sessionId === revealRequest.sessionId
   ))
@@ -866,6 +869,7 @@ export function SessionCarousel(props: {
     <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
       ref={viewportRef} role="region" aria-label="同级会话列表"
       data-visible-columns={visibleCount} data-total-sessions={nodes.length}
+      data-foreground-terminals={foregroundTerminalCount}
       data-rendered-sessions={renderedNodes.length} data-edge-browse-phase={edgeBrowsePhase}
       data-edge-browse-direction={edgeBrowseDirection === -1 ? 'left' : edgeBrowseDirection === 1 ? 'right' : 'none'}
       onScroll={() => markScrolling()}

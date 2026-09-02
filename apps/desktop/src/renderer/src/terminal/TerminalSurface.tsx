@@ -9,6 +9,7 @@ import { Terminal } from '@xterm/xterm'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { ResizeCoalescer } from './resize-coalescer'
 import { quoteDroppedPath } from './shell-path-quote'
+import { foregroundTerminalModels } from './terminal-model-cache'
 import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
 import {
   DEFAULT_TERMINAL_THEME, TERMINAL_THEMES, type TerminalThemeKey
@@ -68,6 +69,15 @@ interface ArchivedSearchView {
   resultCount: number
   gapCount: number
   hasMore: boolean
+}
+
+interface CachedTerminalModel {
+  terminal: Terminal
+  fit: FitAddon
+  search: SearchAddon
+  serialize: SerializeAddon
+  opened: boolean
+  dispose(): void
 }
 
 export function TerminalSurface(props: TerminalSurfaceProps) {
@@ -160,22 +170,36 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       return
     }
     setPid(undefined)
-    const terminal = new Terminal({
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
-      fontSize,
-      scrollback: 10_000,
-      allowProposedApi: true,
-      theme: TERMINAL_THEMES[themeKey]
-    })
-    const fit = new FitAddon()
-    const search = new SearchAddon()
-    const serialize = new SerializeAddon()
-    terminal.loadAddon(fit)
-    terminal.loadAddon(search)
-    terminal.loadAddon(serialize)
-    terminal.open(container)
+    const model = foregroundTerminalModels.acquire(sessionId, () => {
+      const terminal = new Terminal({
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        fontFamily: "'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace",
+        fontSize,
+        scrollback: 10_000,
+        allowProposedApi: true,
+        theme: TERMINAL_THEMES[themeKey]
+      })
+      const fit = new FitAddon()
+      const search = new SearchAddon()
+      const serialize = new SerializeAddon()
+      terminal.loadAddon(fit)
+      terminal.loadAddon(search)
+      terminal.loadAddon(serialize)
+      return {
+        terminal, fit, search, serialize, opened: false,
+        dispose: () => terminal.dispose()
+      } satisfies CachedTerminalModel
+    }) as CachedTerminalModel
+    const { terminal, fit, search, serialize } = model
+    terminal.options.fontSize = fontSize
+    terminal.options.theme = TERMINAL_THEMES[themeKey]
+    if (!model.opened) {
+      terminal.open(container)
+      model.opened = true
+    } else if (terminal.element) {
+      container.appendChild(terminal.element)
+    }
     terminalRef.current = terminal
     fit.fit()
     const publishTerminalDimensions = () => {
@@ -464,7 +488,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       searchRef.current = null
       terminalRef.current = null
       sendInputRef.current = NOOP
-      terminal.dispose()
+      const retained = foregroundTerminalModels.release(sessionId)
+      if (retained) terminal.element?.remove()
     }
   }, [client, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, readOnly, sessionId, spawnRevision])
 

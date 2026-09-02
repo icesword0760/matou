@@ -58,6 +58,7 @@ export class RuntimeClient {
   readonly #requestTimeoutMs: number
   readonly #requests = new Map<string, PendingRequest>()
   readonly #terminals = new Map<string, TerminalConsumer>()
+  #foregroundTerminalSessions = new Set<string>()
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #terminalResizeIds = new Map<string, number>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
@@ -217,20 +218,26 @@ export class RuntimeClient {
     if (this.#ready && consumer.listeners.size === 1) this.#spawn(consumer.config)
     return () => {
       consumer.listeners.delete(listener)
-      if (consumer.listeners.size === 0) {
-        this.#terminals.delete(config.sessionId)
-        if (!this.#readOnly) {
-          this.#post({
-            type: 'terminal.view-detach', protocolVersion: PROTOCOL_VERSION,
-            sessionId: config.sessionId
-          })
-        }
-        const queue = this.#terminalCheckpoints.get(config.sessionId)
-        if (!queue?.inFlight && !queue?.pending) {
-          this.#terminalCheckpoints.delete(config.sessionId)
-        }
+      if (consumer.listeners.size === 0 && !this.#foregroundTerminalSessions.has(config.sessionId)) {
+        this.#releaseTerminalView(config.sessionId, consumer)
       }
     }
+  }
+
+  /**
+   * Keeps Runtime view bindings for the current horizontal sibling list even
+   * when carousel virtualization temporarily removes a card from the DOM.
+   * This does not eagerly spawn never-viewed Sessions; it retains only
+   * consumers whose terminal surface has already been attached.
+   */
+  setForegroundTerminalSessions(sessionIds: readonly string[]): void {
+    const next = new Set(sessionIds)
+    for (const sessionId of this.#foregroundTerminalSessions) {
+      if (next.has(sessionId)) continue
+      const consumer = this.#terminals.get(sessionId)
+      if (consumer?.listeners.size === 0) this.#releaseTerminalView(sessionId, consumer)
+    }
+    this.#foregroundTerminalSessions = next
   }
 
   updateTerminalProfile(
@@ -328,6 +335,7 @@ export class RuntimeClient {
   }
 
   disposeDeletedTerminal(sessionId: string): void {
+    this.#foregroundTerminalSessions.delete(sessionId)
     this.#terminals.delete(sessionId)
     this.#terminalCheckpoints.delete(sessionId)
     this.#terminalResizeIds.delete(sessionId)
@@ -384,8 +392,17 @@ export class RuntimeClient {
       }
     }
     if ('sessionId' in message && typeof message.sessionId === 'string') {
-      for (const listener of this.#terminals.get(message.sessionId)?.listeners ?? []) {
+      const consumer = this.#terminals.get(message.sessionId)
+      for (const listener of consumer?.listeners ?? []) {
         listener(message)
+      }
+      // A virtualized foreground card has no mounted xterm writer. Runtime's
+      // append-only Journal remains authoritative, so acknowledge the live
+      // stream here to apply backpressure while the final xterm checkpoint and
+      // later replay preserve the card's VT state.
+      if (message.type === 'terminal.data' && consumer && consumer.listeners.size === 0 &&
+        this.#foregroundTerminalSessions.has(message.sessionId)) {
+        this.acknowledgeTerminal(message.sessionId, message.sequence)
       }
     }
     if (message.type === 'events.batch' || message.type === 'terminal.hud') {
@@ -399,6 +416,18 @@ export class RuntimeClient {
       return
     }
     this.#post({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, ...config })
+  }
+
+  #releaseTerminalView(sessionId: string, consumer: TerminalConsumer): void {
+    if (this.#terminals.get(sessionId) !== consumer) return
+    this.#terminals.delete(sessionId)
+    if (!this.#readOnly) {
+      this.#post({
+        type: 'terminal.view-detach', protocolVersion: PROTOCOL_VERSION, sessionId
+      })
+    }
+    const queue = this.#terminalCheckpoints.get(sessionId)
+    if (!queue?.inFlight && !queue?.pending) this.#terminalCheckpoints.delete(sessionId)
   }
 
   #subscribeEvents(afterSequence: number): void {

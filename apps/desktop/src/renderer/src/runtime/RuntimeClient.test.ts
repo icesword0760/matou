@@ -108,6 +108,81 @@ describe('RuntimeClient', () => {
     }))
   })
 
+  it('keeps a foreground sibling terminal bound while its virtualized card is outside the DOM', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    const foregroundClient = client as RuntimeClient & {
+      setForegroundTerminalSessions(sessionIds: readonly string[]): void
+    }
+    expect(typeof foregroundClient.setForegroundTerminalSessions).toBe('function')
+    foregroundClient.setForegroundTerminalSessions(['session-1'])
+
+    const detachCard = client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1',
+      profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+    detachCard()
+
+    expect(port.sent).not.toContainEqual(expect.objectContaining({
+      type: 'terminal.view-detach', sessionId: 'session-1'
+    }))
+    port.deliver({
+      type: 'terminal.data', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', sequence: 41, data: new Uint8Array([65])
+    })
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.ack', sessionId: 'session-1', throughSequence: 41
+    }))
+
+    const previousSpawnCount = port.sent.filter(({ type }) => type === 'terminal.spawn').length
+    client.attachTerminal({
+      sessionId: 'session-1', executionContextId: 'context-1',
+      profile: 'shell', cols: 120, rows: 36
+    }, () => undefined)
+    expect(port.sent.filter(({ type }) => type === 'terminal.spawn')).toHaveLength(previousSpawnCount + 1)
+  })
+
+  it('detaches retained terminals only after their sibling list leaves foreground', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    first.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    const foregroundClient = client as RuntimeClient & {
+      setForegroundTerminalSessions(sessionIds: readonly string[]): void
+    }
+    expect(typeof foregroundClient.setForegroundTerminalSessions).toBe('function')
+    foregroundClient.setForegroundTerminalSessions(['session-a', 'session-b'])
+    const detachA = client.attachTerminal({
+      sessionId: 'session-a', executionContextId: 'context-1', profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+    const detachB = client.attachTerminal({
+      sessionId: 'session-b', executionContextId: 'context-1', profile: 'shell', cols: 80, rows: 24
+    }, () => undefined)
+    detachA()
+    detachB()
+
+    foregroundClient.setForegroundTerminalSessions(['session-b'])
+    expect(first.sent.filter(({ type }) => type === 'terminal.view-detach')).toEqual([
+      expect.objectContaining({ sessionId: 'session-a' })
+    ])
+
+    const second = new FakePort()
+    client.replacePort(second)
+    second.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2', capabilities: ['terminal-v1']
+    })
+    expect(second.sent.filter(({ type }) => type === 'terminal.spawn')).toEqual([
+      expect.objectContaining({ sessionId: 'session-b' })
+    ])
+  })
+
   it('waits for readiness and resumes the projection stream after reconnect', async () => {
     const first = new FakePort()
     const client = new RuntimeClient(first, { clientId: 'renderer-1' })

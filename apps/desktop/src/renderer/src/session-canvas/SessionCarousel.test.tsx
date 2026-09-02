@@ -136,6 +136,7 @@ describe('SessionCarousel', () => {
 
     const viewport = screen.getByRole('region', { name: '同级会话列表' })
     expect(viewport.getAttribute('data-total-sessions')).toBe('1000')
+    expect(viewport.getAttribute('data-foreground-terminals')).toBe('1000')
     expect(Number(viewport.getAttribute('data-rendered-sessions'))).toBeLessThanOrEqual(20)
     expect(document.querySelectorAll('[data-session-card]').length).toBeLessThanOrEqual(20)
     expect(document.querySelectorAll('.session-card-virtual-spacer')).toHaveLength(1)
