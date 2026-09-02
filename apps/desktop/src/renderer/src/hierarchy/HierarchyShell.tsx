@@ -40,6 +40,7 @@ import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
 import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
+import { AppFocusRestorer } from './focus-restoration'
 
 export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
   fixture?: HierarchyProjection
@@ -304,15 +305,23 @@ function HierarchyProduct({ projection, commands, readOnly }: {
     setTerminalFocusRequest((value) => value + 1)
   }, [commands, loaderSceneId, loaderSessionId])
   useEffect(() => {
-    const restoreTerminalFocus = () => setTerminalFocusRequest((value) => value + 1)
-    const restoreVisibleTerminalFocus = () => {
-      if (document.visibilityState === 'visible') restoreTerminalFocus()
+    const restorer = new AppFocusRestorer()
+    const rememberFocus = (event: FocusEvent) => restorer.remember(event.target)
+    const restoreFocus = () => restorer.scheduleRestore(() => {
+      setTerminalFocusRequest((value) => value + 1)
+    })
+    const restoreVisibleFocus = () => {
+      if (document.visibilityState === 'visible') restoreFocus()
     }
-    window.addEventListener('focus', restoreTerminalFocus)
-    document.addEventListener('visibilitychange', restoreVisibleTerminalFocus)
+    restorer.remember(document.activeElement)
+    document.addEventListener('focusin', rememberFocus, true)
+    window.addEventListener('focus', restoreFocus)
+    document.addEventListener('visibilitychange', restoreVisibleFocus)
     return () => {
-      window.removeEventListener('focus', restoreTerminalFocus)
-      document.removeEventListener('visibilitychange', restoreVisibleTerminalFocus)
+      document.removeEventListener('focusin', rememberFocus, true)
+      window.removeEventListener('focus', restoreFocus)
+      document.removeEventListener('visibilitychange', restoreVisibleFocus)
+      restorer.dispose()
     }
   }, [])
   const [branchDialog, setBranchDialog] = useState<{

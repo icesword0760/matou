@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -142,7 +142,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByTestId('xterm-session-a1').dataset.theme).toBe('dark')
   })
 
-  it('returns keyboard focus to the active terminal when a hidden main window becomes visible', () => {
+  it('falls back to the active terminal when a hidden main window has no surviving focused control', async () => {
     let visibility: DocumentVisibilityState = 'hidden'
     Object.defineProperty(document, 'visibilityState', {
       configurable: true, get: () => visibility
@@ -153,7 +153,9 @@ describe('PRD 05 hierarchy shell', () => {
     visibility = 'visible'
     fireEvent(document, new Event('visibilitychange'))
 
-    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThan(before)
+    await waitFor(() => expect(
+      Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)
+    ).toBeGreaterThan(before))
   })
 
   it('keeps ordinary navigation available when the native DAG window does not open', async () => {
@@ -355,13 +357,28 @@ describe('PRD 05 hierarchy shell', () => {
     expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThanOrEqual(1)
   })
 
-  it('returns keyboard focus to the active terminal when a hidden main window is shown again', () => {
+  it('keeps the search field focused when the app regains focus', async () => {
+    render(<HierarchyShell fixture={fixture()} />)
+    fireEvent.keyDown(document, { key: 'f', metaKey: true })
+    const search = screen.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' })
+    search.focus()
+    const before = Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)
+
+    fireEvent.focus(window)
+
+    await waitFor(() => expect(document.activeElement).toBe(search))
+    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBe(before)
+  })
+
+  it('falls back to the active terminal when the main window is shown without another control', async () => {
     render(<HierarchyShell fixture={fixture()} />)
     const before = Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)
 
     fireEvent.focus(window)
 
-    expect(Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)).toBeGreaterThan(before)
+    await waitFor(() => expect(
+      Number(screen.getByTestId('xterm-session-a1').dataset.focusRequest)
+    ).toBeGreaterThan(before))
   })
 
   it('shows only the focused Session HUD and replaces it in one render when focus changes', async () => {
