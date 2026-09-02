@@ -231,6 +231,22 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.acknowledgeTerminal).toHaveBeenCalledWith('session-1', 9)
   })
 
+  it('keeps the focused terminal visually live when viewport bookkeeping briefly marks it hidden', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible={false} foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 3,
+      data: new TextEncoder().encode('focused-output')
+    })
+
+    expect(state.terminalWrite).toHaveBeenCalledWith(
+      expect.any(Uint8Array), expect.any(Function)
+    )
+    expect(new TextDecoder().decode(state.terminalWrite.mock.calls[0]![0] as Uint8Array))
+      .toBe('focused-output')
+  })
+
   it('replays the bounded terminal tail when an offscreen foreground card returns to view', async () => {
     const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
     await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
@@ -284,6 +300,38 @@ describe('TerminalSurface focus continuity', () => {
     view.rerender(<TerminalSurface sessionId="session-1" active visible foreground viewportMoving={false} />)
 
     expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
+  })
+
+  it('resumes live painting when a hidden-terminal catch-up reports a Journal gap', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('hidden')
+    })
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground />)
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'tail',
+      fromSequence: 1, throughSequence: 4, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 4
+    })
+    state.onMessage?.({
+      type: 'terminal.gap', sessionId: 'session-1', requestedFromSequence: 0,
+      availableFromSequence: 0, reason: 'corruption'
+    })
+    state.terminalWrite.mockClear()
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 5,
+      data: new TextEncoder().encode('live-after-gap')
+    })
+
+    expect(state.terminalWrite).toHaveBeenCalledWith(
+      expect.any(Uint8Array), expect.any(Function)
+    )
+    expect(new TextDecoder().decode(state.terminalWrite.mock.calls[0]![0] as Uint8Array))
+      .toBe('live-after-gap')
   })
 
   it('replays historical terminal resize frames before continuing output', async () => {

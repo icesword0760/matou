@@ -5,6 +5,7 @@ import type { RuntimeDatabase } from '../storage/database'
 export const SHELL_HISTORY_BLOCK_LIMIT = 100
 export const SHELL_HISTORY_OUTPUT_LINE_LIMIT = 5_000
 export const SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT = 1024 * 1024
+export const SHELL_HISTORY_PENDING_CHARACTER_LIMIT = 64 * 1024
 
 export interface ShellHistoryBlock {
   id: string
@@ -129,7 +130,10 @@ export class ShellCommandBlockCollector {
       const st = source.indexOf(OSC_END_ST, markerStart + OSC_START.length)
       const markerEnd = earliestTerminator(bel, st)
       if (markerEnd < 0) {
-        this.#pending = source.slice(markerStart)
+        const pending = source.slice(markerStart)
+        this.#pending = pending.length <= SHELL_HISTORY_PENDING_CHARACTER_LIMIT
+          ? pending
+          : `${OSC_START}${pending.slice(-(SHELL_HISTORY_PENDING_CHARACTER_LIMIT - OSC_START.length))}`
         this.#pendingStartedAt = markerStart === 0 ? sourceStartedAt : now
         break
       }

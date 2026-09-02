@@ -770,7 +770,8 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                 const recoveryStatus = sessionRecovery.statusBySession.get(session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
-                  active={isFocused} visible={scene.id === activeSceneId && cardVisible}
+                  active={isFocused}
+                  visible={scene.id === activeSceneId && (cardVisible || isFocused)}
                   viewportMoving={viewportMoving}
                   foreground={scene.id === activeSceneId}
                   sceneId={scene.id} pathValid={pathValid} readOnly={readOnly}

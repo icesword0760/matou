@@ -668,7 +668,6 @@ export class RuntimeServer {
   async #enqueueTerminalInput(
     message: Extract<RendererMessage, { type: 'terminal.input' }>
   ): Promise<void> {
-    const targetSession = this.#session(message.sessionId)
     const inputAllowed = this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
       .then(() => undefined, (error: unknown) => error)
     const previous = this.#terminalInputTails.get(message.sessionId) ?? Promise.resolve()
@@ -678,7 +677,11 @@ export class RuntimeServer {
         if (inputError !== undefined) throw inputError
         if (this.#closed) return
         const session = this.#session(message.sessionId)
-        if (!session || session !== targetSession || session.durabilityState !== 'healthy') return
+        // The preceding Enter may atomically replace a Shell with Claude while
+        // later keystrokes are already queued for the same logical Session.
+        // Resolve the live instance at execution time so those bytes reach the
+        // replacement instead of being silently dropped with the old object.
+        if (!session || session.durabilityState !== 'healthy') return
         if (session && /[\r\n]/.test(message.data)) {
           this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
           this.#setWorkStatus(message.sessionId, 'running')

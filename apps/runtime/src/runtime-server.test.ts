@@ -3245,6 +3245,10 @@ describe('RuntimeServer domain RPC', () => {
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'atomic-shell-promotion', data: 'claude\r'
       })
+      firstPort.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion', data: 'AFTER_PROMOTION'
+      })
       await waitUntil(() => !sessions.has('atomic-shell-promotion'))
       secondPort.receive(spawn)
 
@@ -3258,6 +3262,7 @@ describe('RuntimeServer domain RPC', () => {
       const frames = await readSessionFrames(root, 'atomic-shell-promotion')
       expect(frames.every((frame, index) => index === 0 || frame.sequence > frames[index - 1]!.sequence))
         .toBe(true)
+      await waitUntil(() => terminalText(firstPort).includes('AFTER_PROMOTION'))
     } finally {
       firstPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,

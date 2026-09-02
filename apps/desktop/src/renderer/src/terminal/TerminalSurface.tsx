@@ -173,7 +173,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [client, profile, sessionId])
 
   useEffect(() => {
-    if (visible) {
+    if (visible || active) {
       const catchupTimer = active || viewportMoving
         ? undefined
         : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
@@ -470,7 +470,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             }
           }
         }
-        if ((!visibleRef.current || visualCatchupPending) && !replaying) {
+        if ((!visibleRef.current && !activeRef.current || visualCatchupPending) && !replaying) {
           visualCatchupPending = true
           client.acknowledgeTerminal(sessionId, message.sequence)
         } else if (visualCatchupRequested && !replaying) {
@@ -497,6 +497,20 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         onStorageFaultRef.current(message)
       } else if (message.type === 'terminal.storage-recovered') {
         onStorageRecoveredRef.current()
+      } else if (message.type === 'terminal.gap') {
+        // Runtime always reattaches the live PTY after a replay failure. End
+        // the visual replay state as well; otherwise every later live frame is
+        // acknowledged but intentionally withheld from xterm forever.
+        replaying = false
+        visualCatchupPending = false
+        visualCatchupRequested = false
+        preserveExistingModelForReplay = false
+        terminal.write(
+          message.reason === 'corruption'
+            ? '\r\n[部分终端历史损坏，已继续显示实时输出]\r\n'
+            : '\r\n[较早的终端历史已清理，已继续显示实时输出]\r\n',
+          scheduleE2eRows
+        )
       } else if (message.type === 'protocol.error') {
         visualCatchupRequested = false
         onStatusChange('error')

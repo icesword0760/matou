@@ -41,6 +41,35 @@ describe('AppFocusRestorer', () => {
     expect(frames).toHaveLength(1)
   })
 
+  it('retries when the native window is not ready to accept DOM focus on the first frame', () => {
+    const frames: FrameRequestCallback[] = []
+    const fallback = vi.fn()
+    const restorer = new AppFocusRestorer((callback) => {
+      frames.push(callback)
+      return frames.length
+    }, vi.fn())
+    const input = document.createElement('input')
+    const other = document.createElement('button')
+    document.body.append(input, other)
+    other.focus()
+    restorer.remember(input)
+    const focus = input.focus.bind(input)
+    let attempts = 0
+    input.focus = () => {
+      attempts += 1
+      if (attempts > 1) focus()
+    }
+
+    restorer.scheduleRestore(fallback)
+    frames.shift()!(0)
+    expect(document.activeElement).toBe(other)
+    expect(frames).toHaveLength(1)
+    frames.shift()!(16)
+
+    expect(document.activeElement).toBe(input)
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
   it('focuses the active terminal only after the original control has closed', () => {
     const frames: FrameRequestCallback[] = []
     const fallback = vi.fn()

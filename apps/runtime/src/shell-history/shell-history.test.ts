@@ -126,6 +126,18 @@ describe('ShellCommandBlockCollector', () => {
     expect(lines.at(-2)).toBe('line-6004')
     expect(lines.at(-1)).toBe('')
   })
+
+  it('bounds an unterminated OSC sequence and still recognizes the next completed command', () => {
+    const collector = new ShellCommandBlockCollector()
+    collector.ingest(`${encodeShellCommandMarker('first')}\u001b]title;${'x'.repeat(2 * 1024 * 1024)}`, 1)
+
+    const [completed] = collector.ingest(
+      `\u0007${encodeShellCommandMarker('second')}done\r\n\u001b]133;D;0\u0007`,
+      2
+    )
+
+    expect(completed).toMatchObject({ command: 'second', output: 'done\r\n', exitCode: 0 })
+  })
 })
 
 describe('formatShellHistoryForTerminal', () => {

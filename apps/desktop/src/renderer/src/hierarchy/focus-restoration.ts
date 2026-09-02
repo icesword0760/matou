@@ -8,6 +8,7 @@ export type AnimationFrameCanceller = (handle: number) => void
 export class AppFocusRestorer {
   #lastFocused: HTMLElement | null = null
   #pendingFrame: number | undefined
+  #pendingFallback: (() => void) | undefined
   readonly #requestFrame: AnimationFrameScheduler
   readonly #cancelFrame: AnimationFrameCanceller
 
@@ -25,22 +26,41 @@ export class AppFocusRestorer {
   }
 
   scheduleRestore(fallback: () => void): void {
+    this.#pendingFallback = fallback
     if (this.#pendingFrame !== undefined) return
+    this.#scheduleAttempt(4)
+  }
+
+  #scheduleAttempt(remainingAttempts: number): void {
     this.#pendingFrame = this.#requestFrame(() => {
       this.#pendingFrame = undefined
       const target = this.#lastFocused
       if (target && restorableFocusTarget(target)) {
         target.focus({ preventScroll: true })
-        return
+        // BrowserWindow.show() and BrowserWindow.focus() settle on separate
+        // native turns on macOS. A DOM node can already be connected while its
+        // first focus() is still ignored. Verify the result and retry for a few
+        // animation frames instead of losing the only restoration signal.
+        if (document.activeElement === target) {
+          this.#pendingFallback = undefined
+          return
+        }
+        if (remainingAttempts > 1) {
+          this.#scheduleAttempt(remainingAttempts - 1)
+          return
+        }
       }
       this.#lastFocused = null
-      fallback()
+      const fallback = this.#pendingFallback
+      this.#pendingFallback = undefined
+      fallback?.()
     })
   }
 
   dispose(): void {
     if (this.#pendingFrame !== undefined) this.#cancelFrame(this.#pendingFrame)
     this.#pendingFrame = undefined
+    this.#pendingFallback = undefined
     this.#lastFocused = null
   }
 }

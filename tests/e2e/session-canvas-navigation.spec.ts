@@ -184,7 +184,24 @@ test.describe('horizontal sibling navigation', () => {
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await carousel.evaluate((element) => { element.scrollLeft = 0 })
-      const startingCard = fixture.page.locator('.session-card[data-in-viewport="true"]').nth(1)
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBe(0)
+      // Session creation has a short focus-follow animation. Select a card by
+      // its real clipped rectangle after that motion settles; data-in-viewport
+      // is an index hint for virtualization, not a pointer hit-test oracle.
+      await fixture.page.waitForTimeout(500)
+      const startingSessionId = await carousel.evaluate((viewport) => {
+        const viewportRect = viewport.getBoundingClientRect()
+        return [...viewport.querySelectorAll<HTMLElement>('[data-session-card]')]
+          .filter((card) => {
+            const rect = card.getBoundingClientRect()
+            return Math.min(viewportRect.right, rect.right) - Math.max(viewportRect.left, rect.left) > 200
+          })[1]?.dataset.sessionCard
+      })
+      expect(startingSessionId).toBeTruthy()
+      const startingCard = fixture.page.locator(`[data-session-card="${startingSessionId}"]`)
+      await startingCard.hover()
+      await expect(startingCard).toHaveClass(/is-expanded/)
+      await fixture.page.waitForTimeout(250)
       const box = await startingCard.boundingBox()
       expect(box).not.toBeNull()
       // Anchor near the card's leading edge. Its right edge grows during the
@@ -765,7 +782,10 @@ test.describe('horizontal sibling navigation', () => {
       const active = activeSurface(fixture.page)
       const activeSessionId = await active.getAttribute('data-session-id')
       expect(activeSessionId).toBeTruthy()
-      const textarea = active.locator('.xterm-helper-textarea')
+      const stableActive = fixture.page.locator(
+        `.terminal-surface[data-session-id="${activeSessionId}"]`
+      )
+      const textarea = stableActive.locator('.xterm-helper-textarea')
       await textarea.focus()
       const dragWindow = fixture.app.evaluate(async ({ BrowserWindow }) => {
         const window = BrowserWindow.getAllWindows()[0]
@@ -787,7 +807,7 @@ test.describe('horizontal sibling navigation', () => {
       })
       await textarea.pressSequentially("printf '__RESIZE_INPUT_OK__\\n'", { delay: 8 })
       await textarea.press('Enter')
-      await expect(active.locator('.xterm-rows')).toContainText('__RESIZE_INPUT_OK__')
+      await expect(stableActive.locator('.xterm-rows')).toContainText('__RESIZE_INPUT_OK__')
       await dragWindow
       await fixture.page.waitForTimeout(250)
 
