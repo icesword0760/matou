@@ -106,6 +106,20 @@ describe('PRD 05 hierarchy shell', () => {
     expect(document.querySelector('.session-level-header')).toBeNull()
   })
 
+  it('does not offer structural removal when the branch is the final card on the canvas', () => {
+    const data = fixture()
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+        nodes: [graphNode('session-a1', '终端 A1')]
+      }
+    }
+
+    render(<HierarchyShell fixture={data} />)
+
+    expect(screen.queryByRole('button', { name: '移出节点：终端 A1' })).toBeNull()
+  })
+
   it('opens session management from the card header centered inside the workspace stage', async () => {
     render(<HierarchyShell fixture={fixture()} />)
 
@@ -602,7 +616,7 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 
-  it('opens a stopped root node from the DAG with structural removal and no process controls', async () => {
+  it('opens a stopped root node from the DAG without offering removal of the final branch', async () => {
     const data = fixture()
     data.sessionGraphs = {
       'scene-a1': {
@@ -633,7 +647,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     expect(await screen.findByText('已停止父会话')).toBeTruthy()
     expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
-    expect(screen.getByRole('button', { name: '移出节点：已停止父会话' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '移出节点：已停止父会话' })).toBeNull()
     expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
   })
 

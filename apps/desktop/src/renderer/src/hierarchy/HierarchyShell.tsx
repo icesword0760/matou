@@ -31,7 +31,7 @@ import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
 import { SessionBreadcrumb } from '../session-canvas/SessionBreadcrumb'
-import { SessionCanvas } from '../session-canvas/SessionCanvas'
+import { branchHasSurvivingCard, SessionCanvas } from '../session-canvas/SessionCanvas'
 import { SessionLoaderDialog } from '../session-canvas/SessionLoaderDialog'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
@@ -520,6 +520,9 @@ function HierarchyProduct({ projection, commands }: {
                   : undefined
                 const childNodes = graph?.nodes.filter(({ parentSessionId }) => parentSessionId === session.id) ?? []
                 const descendantNodes = graph ? sessionDescendants(graph.nodes, session.id) : []
+                const canRemoveBranch = graph
+                  ? branchHasSurvivingCard(graph.nodes, session.id)
+                  : (snapshot?.mounts.length ?? 0) > 1
                 const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
@@ -574,7 +577,7 @@ function HierarchyProduct({ projection, commands }: {
                       workStatus === 'running' || workStatus === 'starting').length,
                     needsInput: descendantNodes.filter(({ workStatus }) => workStatus === 'needs-input').length
                   }}
-                  {...(commands.removeSessionBranch ? {
+                  {...(commands.removeSessionBranch && canRemoveBranch ? {
                     onRemoveBranch: (sessionId: string, includeDescendants: boolean) =>
                       commands.removeSessionBranch?.(scene.id, sessionId, includeDescendants)
                   } : {})}
