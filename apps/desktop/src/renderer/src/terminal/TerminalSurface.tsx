@@ -9,6 +9,7 @@ import {
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { SerializeAddon } from '@xterm/addon-serialize'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
@@ -94,6 +95,7 @@ interface CachedTerminalModel {
   fit: FitAddon
   search: SearchAddon
   serialize: SerializeAddon
+  webgl: WebglAddon | undefined
   opened: boolean
   dispose(): void
 }
@@ -256,7 +258,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminal.loadAddon(search)
       terminal.loadAddon(serialize)
       return {
-        terminal, fit, search, serialize, opened: false,
+        terminal, fit, search, serialize, webgl: undefined, opened: false,
         dispose: () => terminal.dispose()
       } satisfies CachedTerminalModel
     }) as CachedTerminalModel
@@ -266,6 +268,19 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (!model.opened) {
       terminal.open(container)
       model.opened = true
+      try {
+        const webgl = new WebglAddon()
+        model.webgl = webgl
+        webgl.onContextLoss(() => {
+          webgl.dispose()
+          if (model.webgl === webgl) model.webgl = undefined
+        })
+        terminal.loadAddon(webgl)
+      } catch {
+        // xterm keeps its built-in renderer when WebGL is unavailable. This is
+        // expected on remote desktops and after Chromium exhausts GPU contexts.
+        model.webgl = undefined
+      }
     } else if (terminal.element) {
       container.appendChild(terminal.element)
     }

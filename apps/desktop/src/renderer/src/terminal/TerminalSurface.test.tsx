@@ -18,6 +18,9 @@ const state = vi.hoisted(() => ({
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
   terminalConstructed: vi.fn(),
   terminalDisposed: vi.fn(),
+  webglConstructed: vi.fn(),
+  webglDisposed: vi.fn(),
+  webglContextLossListener: undefined as undefined | (() => void),
   serialize: vi.fn(() => '\u001b[2Jserialized screen'),
   attachTerminal: vi.fn(),
   sendTerminalInput: vi.fn(),
@@ -67,6 +70,16 @@ vi.mock('@xterm/addon-search', () => ({
 vi.mock('@xterm/addon-serialize', () => ({
   SerializeAddon: class { serialize = state.serialize }
 }))
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: class {
+    constructor() { state.webglConstructed() }
+    onContextLoss = (listener: () => void) => {
+      state.webglContextLossListener = listener
+      return { dispose: vi.fn() }
+    }
+    dispose = state.webglDisposed
+  }
+}))
 vi.mock('../runtime/RuntimeProvider', () => ({
   useRuntimeClient: (() => {
     const client = {
@@ -107,6 +120,9 @@ describe('TerminalSurface focus continuity', () => {
     state.terminalWrite.mockClear()
     state.terminalConstructed.mockClear()
     state.terminalDisposed.mockClear()
+    state.webglConstructed.mockClear()
+    state.webglDisposed.mockClear()
+    state.webglContextLossListener = undefined
     state.serialize.mockClear()
     state.storeTerminalCheckpoint.mockClear()
     state.searchTerminalHistory.mockReset()
@@ -136,6 +152,15 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
 
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
+  })
+
+  it('uses WebGL after opening xterm and falls back when the GPU context is lost', async () => {
+    render(<TerminalSurface sessionId="session-webgl" active visible />)
+    await waitFor(() => expect(state.webglConstructed).toHaveBeenCalledTimes(1))
+
+    state.webglContextLossListener?.()
+
+    expect(state.webglDisposed).toHaveBeenCalledTimes(1)
   })
 
   it('reuses its xterm VT model after foreground card DOM virtualization', async () => {
