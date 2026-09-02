@@ -29,19 +29,28 @@ interface MigrationBackupService {
   rotate(maxCount?: number): Promise<void>
 }
 
+export interface MigrationRunnerObserver {
+  onPreMigrationBackupReady?(backup: DatabaseBackupDescriptor): void
+  onMigrationTransactionPrepared?(migration: Migration): void
+  onMigrationCommitted?(migration: Migration): void
+}
+
 export class MigrationRunner {
   readonly #database: RuntimeDatabase
   readonly #migrations: readonly Migration[]
   readonly #backups: MigrationBackupService | undefined
+  readonly #observer: MigrationRunnerObserver
 
   constructor(
     database: RuntimeDatabase,
     migrations: readonly Migration[],
-    backups?: DatabaseBackupService | MigrationBackupService
+    backups?: DatabaseBackupService | MigrationBackupService,
+    observer: MigrationRunnerObserver = {}
   ) {
     this.#database = database
     this.#migrations = [...migrations].sort((left, right) => left.version - right.version)
     this.#backups = backups
+    this.#observer = observer
     validateMigrationSequence(this.#migrations)
   }
 
@@ -76,6 +85,7 @@ export class MigrationRunner {
       const backup = await this.#backups.create(this.#database, 'pre-migration')
       await this.#backups.rotate()
       backupPath = backup.path
+      this.#observer.onPreMigrationBackupReady?.(backup)
     }
 
     this.#ensureHistoryTable()
@@ -83,6 +93,7 @@ export class MigrationRunner {
     for (const migration of pending) {
       this.#database.transaction((transaction) => {
         transaction.exec(migration.sql)
+        this.#observer.onMigrationTransactionPrepared?.(migration)
         transaction.run(
           'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)',
           migration.version,
@@ -92,6 +103,7 @@ export class MigrationRunner {
         )
       })
       appliedVersions.push(migration.version)
+      this.#observer.onMigrationCommitted?.(migration)
     }
 
     return {
