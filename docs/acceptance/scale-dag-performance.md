@@ -4,7 +4,8 @@
 
 - 32 个工作空间、249 个事项、1,992 个会话和 249 个画布从真实 SQLite 权威数据恢复。
 - 单一画布包含 1,000 个同级会话，可持续横向滚动并切换到其它工作空间/事项。
-- 5,000 层父子链和 10,000 节点宽 DAG 可重复布局，远层仍保留方向入口。
+- 5,000 层父子链和 10,000 节点宽 DAG 可重复布局；当前节点附近仍显示真实会话，远层按分支或层收拢，并直接显示会话总数、运行中、等待输入和异常数量。
+- 用户点击远层聚合可逐层展开；缩放/平移让目标层进入附近范围时自动换回真实会话；搜索命中远层会话时直接定位到该真实会话。
 
 ## 可重复夹具
 
@@ -18,7 +19,10 @@ DAG 算法预算：
 
 ```bash
 pnpm --filter @matou/desktop exec vitest run \
-  src/renderer/src/dag/dag-layout.test.ts --disableConsoleIntercept
+  src/renderer/src/dag/dag-layout.test.ts \
+  src/renderer/src/dag/dag-render-model.test.ts \
+  src/renderer/src/dag/DagCanvas.test.tsx \
+  --disableConsoleIntercept
 ```
 
 ## 指标
@@ -36,13 +40,20 @@ pnpm --filter @matou/desktop exec vitest run \
 | 跨工作空间事项切换 | 未覆盖 | 79 ms | 点击后快速显示目标的 4 会话画布 |
 | 10,000 节点 DAG layout p50 / p95 | 未覆盖 | 5.21 / 5.39 ms | 打开关系视图的布局计算稳定 |
 | 5,000 层 DAG | 递归深度推导存在栈溢出风险 | 12 ms，迭代完成 | 深层关系可恢复并定位 |
-| 深层 DAG 卡片 DOM | 远层 ghost 全量挂载 | 不超过 5 个 | 平移、缩放不随总节点数堆积卡片 DOM |
+| 深层 DAG 卡片 DOM | 远层 ghost 全量挂载 | 5,000 深链当前视口为 3 个真实会话 + 2 个聚合；10,000 会话 render model 的 node+aggregate `≤400`、edge `≤800` | 远层数量和关键状态仍可见，平移、缩放不随总节点数堆积 DOM |
 
 ## 稳定预算
 
 - 1,000 会话持续滚动：p95 `< 34 ms`，DOM `< 700`，测量窗 SQL `< 1,500`。
 - 完整层级目录恢复：`< 5,000 ms`；跨工作空间事项切换 `< 1,500 ms`。
 - 10,000 节点布局 p95 `< 1,500 ms`；5 次预热/测量降低单次抖动影响。
+- 10,000 会话 DAG 的真实会话卡片与聚合卡片总和 `≤400`、关系边 `≤800`；聚合状态计数必须由成员会话计算，且总数不得丢失。
 - Long Task p95 `< 100 ms`。
+
+## 远层聚合专项回归
+
+- `dag-render-model.test.ts` 使用真实的 10,000 会话深链和 1,200 会话混合分支数据，验证稳定聚合 key、总数守恒、运行中/等待输入/异常计数，以及 node+aggregate/edge 上限。
+- `DagCanvas.test.tsx` 验证聚合卡片显示真实计数，点击聚合后目标会话进入附近层并显示为真实卡片，搜索命中远层会话时同样替换聚合并定位。
+- 本节是 D-08 / Task 11 的聚合专项证据；发布结论仍以集成提交上的完整 Electron、scale 与打包门禁为准。
 
 预算显著高于本机实测值，以容纳 CI/虚拟机差异，同时仍能拦截全量 DOM、逐实体查询和重复全图布局回归。
