@@ -44,6 +44,40 @@ test('real less and vim alternate screens exit and recover across a Runtime rest
   assert.equal(result.runtimeRestart.crashed, false)
 })
 
+test('six real PTYs keep 320 MiB histories compressed, searchable, and interactive', {
+  timeout: 12 * 60_000
+}, async () => {
+  const result = await runElectronFixture('multi-session-history')
+  console.log(`[multi-session-history-baseline] ${JSON.stringify(result)}`)
+
+  assert.equal(result.windowCount, 0, 'the headless Runtime fixture must not create a visible window')
+  assert.equal(result.runtimeExitCode, 0)
+  assert.equal(result.historySessionCount, 6)
+  assert.equal(result.bytesPerHistorySession, 320 * 1024 * 1024)
+  assert.equal(result.logicalHistoryBytesBySession.length, 6)
+  assert.equal(result.coldCompressedLogicalBytesBySession.length, 6)
+  for (const bytes of result.logicalHistoryBytesBySession) {
+    assert.ok(bytes >= 320 * 1024 * 1024, `history retained only ${bytes} logical bytes`)
+  }
+  for (const bytes of result.coldCompressedLogicalBytesBySession) {
+    assert.ok(bytes >= 64 * 1024 * 1024, `cold compressed history retained only ${bytes} logical bytes`)
+  }
+  assert.ok(
+    result.compressionEventLoopDelayMaxMs < 50,
+    `Runtime compression blocked the event loop for ${result.compressionEventLoopDelayMaxMs}ms`
+  )
+  assert.ok(
+    result.firstPagePeakRssDeltaBytes < 64 * 1024 * 1024,
+    `first history page grew Runtime RSS by ${result.firstPagePeakRssDeltaBytes} bytes`
+  )
+  assert.ok(
+    result.probeInputP95Ms < 100,
+    `sibling terminal input p95 was ${result.probeInputP95Ms}ms`
+  )
+  assert.equal(result.firstPageLineCount, 100)
+  assert.equal(result.probeInputSamples >= 20, true)
+})
+
 function runElectronFixture(scenario) {
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [fixture], {

@@ -100,18 +100,21 @@ export class SegmentJournal {
   readonly #writeFrame: NormalizedSegmentJournalOptions['writeFrame']
   readonly #compressSealed: boolean
   readonly #compressor: JournalCompressor
+  readonly #compressionScanStep: number
   readonly #sealedSegments: SegmentDescriptor[]
   readonly #segmentBounds: Map<number, { firstSequence: number; lastSequence: number }>
   readonly #checkpointProtectedSequences = new Set<number>()
   readonly #tailIndex: JournalTailIndex
   readonly #tailIndexPath: string
   readonly #tailIndexWriter: LatestValueWriter<JournalTailIndexSnapshot>
+  readonly #scheduledCompressionIndexes = new Set<number>()
   #handle: FileHandle
   #segmentIndex: number
   #path: string
   #size: number
   #segmentFirstSequence: number
   #lastSequence: number
+  #lastCompressionScanSize: number
   #closed = false
 
   private constructor(
@@ -140,6 +143,11 @@ export class SegmentJournal {
     this.#writeFrame = options.writeFrame
     this.#compressSealed = options.compressSealed
     this.#compressor = options.compressor
+    this.#compressionScanStep = Math.max(128, Math.min(
+      1024 * 1024,
+      Math.floor(this.#maxSegmentBytes / 4),
+      Math.floor(this.#rawHotBytes / 16)
+    ))
     this.#sealedSegments = sealedSegments
     this.#segmentBounds = segmentBounds
     this.#replaceCheckpointProtectedSequences(options.checkpointProtectedSequences)
@@ -148,6 +156,7 @@ export class SegmentJournal {
     this.#tailIndexWriter = new LatestValueWriter((snapshot) =>
       writeJournalTailIndex(this.#tailIndexPath, snapshot)
     )
+    this.#lastCompressionScanSize = size
     this.#scheduleSealedCompression()
   }
 
@@ -400,6 +409,9 @@ export class SegmentJournal {
     if (this.#tailIndex.snapshot(this.#segmentIndex).framesRecorded % 256 === 0) {
       this.#scheduleTailIndexWrite()
     }
+    if (this.#size - this.#lastCompressionScanSize >= this.#compressionScanStep) {
+      this.#scheduleSealedCompression()
+    }
   }
 
   async #rotate(): Promise<void> {
@@ -451,6 +463,7 @@ export class SegmentJournal {
   }
 
   #scheduleSealedCompression(): void {
+    this.#lastCompressionScanSize = this.#size
     if (!this.#compressSealed) return
     for (const segment of this.compressionCandidates()) {
       const candidate = {
@@ -458,12 +471,18 @@ export class SegmentJournal {
         index: segment.index,
         path: segment.path
       }
+      if (this.#scheduledCompressionIndexes.has(candidate.index)) continue
+      this.#scheduledCompressionIndexes.add(candidate.index)
       void this.#compressor.schedule(candidate).then((result) => {
         for (const current of this.#sealedSegments.filter(({ index }) => index === result.index)) {
           current.path = result.path
           current.state = 'compressed'
         }
-      }).catch(() => undefined)
+        this.#scheduledCompressionIndexes.delete(candidate.index)
+      }).catch(() => {
+        // A later append or checkpoint update retries the candidate.
+        this.#scheduledCompressionIndexes.delete(candidate.index)
+      })
     }
   }
 

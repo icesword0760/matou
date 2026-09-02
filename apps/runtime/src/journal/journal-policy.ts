@@ -32,9 +32,18 @@ export function selectCompressionCandidates(
 
   const rawNewestFirst = [...rawByIndex.values()].sort((left, right) => right.index - left.index)
   const hotIndexes = new Set<number>()
-  let hotBytes = 0
+  // The active segment is raw user history too. Reserving the whole window for
+  // sealed segments let each Session retain up to one extra 16 MiB segment and
+  // left less than the promised cold archive after 320 MiB of output.
+  const activeBytes = segments
+    .filter(({ state }) => state === 'active')
+    .reduce((total, segment) => total + segment.bytes, 0)
+  let hotBytes = activeBytes
   for (const segment of rawNewestFirst) {
-    if (hotIndexes.size > 0 && hotBytes + segment.bytes > rawHotBytes) break
+    if (
+      (activeBytes > 0 || hotIndexes.size > 0) &&
+      hotBytes + segment.bytes > rawHotBytes
+    ) break
     hotIndexes.add(segment.index)
     hotBytes += segment.bytes
   }

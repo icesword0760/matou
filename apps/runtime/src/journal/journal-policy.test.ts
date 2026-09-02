@@ -14,9 +14,9 @@ describe('journal hot-window policy', () => {
   })
 
   it.each([
-    { sealed: 17, candidates: [1] },
-    { sealed: 18, candidates: [1, 2] },
-    { sealed: 40, candidates: Array.from({ length: 24 }, (_, index) => index + 1) }
+    { sealed: 17, candidates: [1, 2] },
+    { sealed: 18, candidates: [1, 2, 3] },
+    { sealed: 40, candidates: Array.from({ length: 25 }, (_, index) => index + 1) }
   ])('selects only sealed raw segments older than the latest 256 MiB for $sealed segments', ({
     sealed,
     candidates
@@ -36,7 +36,7 @@ describe('journal hot-window policy', () => {
       active(21)
     ]
 
-    expect(selectCompressionCandidates(segments).map(({ index }) => index)).toEqual([1, 3, 4])
+    expect(selectCompressionCandidates(segments).map(({ index }) => index)).toEqual([1, 3, 4, 5])
   })
 
   it('does not recompress a raw duplicate when the same segment index already has gzip', () => {
@@ -51,7 +51,16 @@ describe('journal hot-window policy', () => {
       active(19)
     ].reverse()
 
-    expect(selectCompressionCandidates(segments).map(({ index }) => index)).toEqual([2])
+    expect(selectCompressionCandidates(segments).map(({ index }) => index)).toEqual([2, 3])
+  })
+
+  it('counts the active segment inside the 256 MiB raw window', () => {
+    const segments = [
+      ...Array.from({ length: 16 }, (_, index) => raw(index + 1)),
+      { ...active(17), bytes: SEGMENT_BYTES / 2 }
+    ]
+
+    expect(selectCompressionCandidates(segments).map(({ index }) => index)).toEqual([1])
   })
 })
 

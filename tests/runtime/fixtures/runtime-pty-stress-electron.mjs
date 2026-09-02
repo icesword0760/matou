@@ -1,6 +1,6 @@
 import { app, BrowserWindow, MessageChannelMain, utilityProcess } from 'electron'
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, open, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 import { PROTOCOL_VERSION } from '../../../packages/contracts/dist/index.js'
@@ -88,6 +88,92 @@ async function run() {
       windowCount: BrowserWindow.getAllWindows().length,
       ansiStateChanges: observer.ansiStateChanges,
       runtimeExitCode
+    })
+    return
+  }
+
+  if (scenario === 'multi-session-history') {
+    const bytesPerHistorySession = 320 * 1024 * 1024
+    const coldCompressedBytes = 64 * 1024 * 1024
+    const historySessionIds = []
+    for (let index = 1; index <= 6; index += 1) {
+      const historySessionId = `history-${index}-${randomUUID()}`
+      await firstClient.rpc('session.create', {
+        command: command(`history-session-${index}`),
+        input: {
+          id: historySessionId,
+          taskId: session.taskId,
+          executionContextId: session.executionContextId,
+          kind: 'shell',
+          title: `History ${index}`,
+          now: Date.now()
+        }
+      })
+      const messageOffset = firstClient.checkpoint()
+      firstClient.send({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: historySessionId, executionContextId: session.executionContextId,
+        profile: 'shell', cols: 120, rows: 40
+      })
+      await firstClient.waitForMessage((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === historySessionId,
+      15_000, messageOffset)
+      firstClient.input(historySessionId, 'stty -echo\r')
+      historySessionIds.push(historySessionId)
+    }
+    await delay(250)
+
+    await firstRuntime.metrics(true)
+    const producerDurationMs = 60_000
+    const doneFiles = historySessionIds.map((historySessionId, index) =>
+      join(workspaceRoot, `history-${index + 1}.done`)
+    )
+    for (const [index, historySessionId] of historySessionIds.entries()) {
+      firstClient.input(
+        historySessionId,
+        `/usr/bin/env node ${shellQuote(producers.history)} ${bytesPerHistorySession} ` +
+          `${producerDurationMs} ${shellQuote(doneFiles[index])} ${shellQuote(String(index + 1))}\r`
+      )
+    }
+
+    const probeLatenciesPromise = measureProbeInputLatencies(
+      firstClient,
+      observer,
+      session.id,
+      40,
+      1_500
+    )
+    await Promise.all(doneFiles.map((path) => waitForFile(path, 180_000)))
+    const archives = await waitForHistoryArchives({
+      dataRoot,
+      sessionIds: historySessionIds,
+      minimumLogicalBytes: bytesPerHistorySession,
+      minimumCompressedLogicalBytes: coldCompressedBytes,
+      timeoutMs: 240_000
+    })
+    const probeLatencies = await probeLatenciesPromise
+    const compressionMetrics = await firstRuntime.metrics(false)
+
+    const firstPageMeasurement = await measureRuntimeRssPeak(
+      compressionMetrics.runtimePid,
+      () => firstClient.rpc('terminal.history-page', {
+        sessionId: historySessionIds[0],
+        lineLimit: 100
+      }, 120_000)
+    )
+    const runtimeExitCode = await firstRuntime.stop()
+    await finishResult({
+      windowCount: BrowserWindow.getAllWindows().length,
+      runtimeExitCode,
+      historySessionCount: historySessionIds.length,
+      bytesPerHistorySession,
+      logicalHistoryBytesBySession: archives.map(({ logicalBytes }) => logicalBytes),
+      coldCompressedLogicalBytesBySession: archives.map(({ compressedLogicalBytes }) => compressedLogicalBytes),
+      compressionEventLoopDelayMaxMs: compressionMetrics.eventLoopDelayMaxMs,
+      firstPagePeakRssDeltaBytes: firstPageMeasurement.peakRssDeltaBytes,
+      firstPageLineCount: firstPageMeasurement.result.lines.length,
+      probeInputSamples: probeLatencies.length,
+      probeInputP95Ms: percentile(probeLatencies, 0.95)
     })
     return
   }
@@ -195,6 +281,7 @@ async function launchRuntime() {
       ...process.env,
       SHELL: '/bin/sh',
       LESS: '',
+      MATOU_E2E_SCALE: '1',
       MATOU_DATA_DIR: dataRoot,
       MATOU_DEFAULT_WORKSPACE: workspaceRoot
     }
@@ -217,11 +304,38 @@ async function launchRuntime() {
   await waitForRuntimeReady(child, () => diagnostics)
   return {
     connect: () => connectRuntime(child),
+    metrics: (resetStatementCount = false) => requestScaleMetrics(child, resetStatementCount),
     stop: async () => {
       child.kill()
       return withTimeout(exited, 15_000, `Runtime did not stop cleanly\n${diagnostics}`)
     }
   }
+}
+
+function requestScaleMetrics(child, resetStatementCount) {
+  const requestId = `scale-${randomUUID()}`
+  return withTimeout(new Promise((resolveMetrics, reject) => {
+    const onMessage = (message) => {
+      if (message?.type !== 'runtime.scale-metrics-result' || message.requestId !== requestId) return
+      cleanup()
+      resolveMetrics(message)
+    }
+    const onExit = (code) => {
+      cleanup()
+      reject(new Error(`Runtime exited before scale metrics with code ${code}`))
+    }
+    const cleanup = () => {
+      child.off('message', onMessage)
+      child.off('exit', onExit)
+    }
+    child.on('message', onMessage)
+    child.once('exit', onExit)
+    child.postMessage({
+      type: 'runtime.scale-metrics-request',
+      requestId,
+      resetStatementCount
+    })
+  }), 15_000, 'Runtime scale metrics timed out')
 }
 
 async function connectRuntime(child) {
@@ -245,7 +359,6 @@ class RuntimeClient {
   constructor(port) {
     this.#port = port
     port.on('message', ({ data }) => {
-      this.#messages.push(data)
       if (data?.type === 'terminal.replay-start') {
         for (const observer of this.#terminalObservers) observer.replayStarted(data.sessionId)
       }
@@ -255,7 +368,9 @@ class RuntimeClient {
           type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
           sessionId: data.sessionId, throughSequence: data.sequence
         })
+        return
       }
+      this.#messages.push(data)
     })
   }
 
@@ -275,16 +390,16 @@ class RuntimeClient {
     this.send({ type: 'terminal.input', protocolVersion: PROTOCOL_VERSION, sessionId, data })
   }
 
-  async rpc(method, payload) {
+  async rpc(method, payload, timeoutMs = 30_000) {
     const requestId = `rpc-${randomUUID()}`
     this.send({
       type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
-      requestId, method, capability: 'renderer', deadlineAt: Date.now() + 30_000, payload
+      requestId, method, capability: 'renderer', deadlineAt: Date.now() + timeoutMs, payload
     })
     const response = await this.waitForMessage((message) =>
       (message.type === 'rpc.response' || message.type === 'rpc.error') &&
       message.requestId === requestId
-    )
+    , timeoutMs)
     if (response.type === 'rpc.error') {
       throw new Error(`${method}: ${response.code}: ${response.message}`)
     }
@@ -457,6 +572,7 @@ async function writeProducerFixtures(directory) {
   const singleLineDone = join(directory, 'single-line.done')
   const ansiStates = join(directory, 'ansi-state-producer.mjs')
   const ansiStatesDone = join(directory, 'ansi-states.done')
+  const history = join(directory, 'history-producer.mjs')
   const document = join(directory, 'alternate-screen-document.txt')
   await writeFile(singleLine, `
 process.stdout.write('BEGIN_SINGLE\\n')
@@ -479,11 +595,39 @@ for (let start = 0; start < 100_000; start += 1_000) {
 await new Promise((resolve) => process.stdout.write('\\nEND_ANSI\\n', resolve))
 await import('node:fs/promises').then(({ writeFile }) => writeFile(process.argv[2], 'done'))
 `)
+  await writeFile(history, `
+import { writeFile } from 'node:fs/promises'
+const target = Number(process.argv[2])
+const durationMs = Number(process.argv[3])
+const donePath = process.argv[4]
+const label = process.argv[5]
+const line = Buffer.from('H'.repeat(127) + '\\n')
+const chunk = Buffer.concat(Array.from({ length: 512 }, () => line))
+let written = 0
+const startedAt = Date.now()
+process.stdout.write('__MATOU_HISTORY_BEGIN_' + label + '__\\n')
+while (written < target) {
+  const remaining = target - written
+  const value = remaining >= chunk.byteLength ? chunk : chunk.subarray(0, remaining)
+  if (!process.stdout.write(value)) {
+    await new Promise((resolve) => process.stdout.once('drain', resolve))
+  }
+  written += value.byteLength
+  const expectedAt = startedAt + Math.floor((written / target) * durationMs)
+  const delayMs = expectedAt - Date.now()
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+}
+await new Promise((resolve) => process.stdout.write(
+  '\\n__MATOU_HISTORY_END_' + label + '__\\n',
+  resolve
+))
+await writeFile(donePath, String(written))
+`)
   await writeFile(
     document,
     Array.from({ length: 240 }, (_, index) => `alternate-screen-line-${index + 1}`).join('\n')
   )
-  return { singleLine, singleLineDone, ansiStates, ansiStatesDone, document }
+  return { singleLine, singleLineDone, ansiStates, ansiStatesDone, history, document }
 }
 
 function command(label) {
@@ -496,6 +640,96 @@ function shellQuote(value) {
 
 function runCommand(client, sessionId, data) {
   client.input(sessionId, data)
+}
+
+async function measureProbeInputLatencies(client, observer, sessionId, sampleCount, intervalMs) {
+  const latencies = []
+  for (let index = 0; index < sampleCount; index += 1) {
+    const marker = `__MATOU_PROBE_${index}_${randomUUID().replaceAll('-', '')}__`
+    const startedAt = performance.now()
+    client.input(sessionId, `printf '${marker}\\n'\r`)
+    await observer.waitForText(marker)
+    latencies.push(performance.now() - startedAt)
+    if (index + 1 < sampleCount) await delay(intervalMs)
+  }
+  return latencies
+}
+
+async function waitForHistoryArchives(input) {
+  let latest = []
+  return waitUntil(async () => {
+    latest = await Promise.all(input.sessionIds.map((sessionId) =>
+      describeJournalArchive(join(input.dataRoot, 'journal', sessionId))
+    ))
+    const ready = latest.every(({ logicalBytes, compressedLogicalBytes }) =>
+      logicalBytes >= input.minimumLogicalBytes &&
+      compressedLogicalBytes >= input.minimumCompressedLogicalBytes
+    )
+    return ready ? latest : undefined
+  }, input.timeoutMs, () => `history archives did not reach production thresholds: ${JSON.stringify(latest)}`, 250)
+}
+
+async function describeJournalArchive(directory) {
+  const entries = await readdir(directory)
+  const byIndex = new Map()
+  for (const name of entries) {
+    const match = /^segment-(\d{6})\.mtj(\.gz)?$/.exec(name)
+    if (!match) continue
+    const index = Number(match[1])
+    const compressed = match[2] === '.gz'
+    const current = byIndex.get(index)
+    if (!current || compressed) byIndex.set(index, { path: join(directory, name), compressed })
+  }
+  let logicalBytes = 0
+  let compressedLogicalBytes = 0
+  for (const segment of byIndex.values()) {
+    const bytes = segment.compressed
+      ? await gzipUncompressedBytes(segment.path)
+      : (await stat(segment.path)).size
+    logicalBytes += bytes
+    if (segment.compressed) compressedLogicalBytes += bytes
+  }
+  return { logicalBytes, compressedLogicalBytes }
+}
+
+async function gzipUncompressedBytes(path) {
+  const handle = await open(path, 'r')
+  try {
+    const info = await handle.stat()
+    if (info.size < 4) return 0
+    const footer = Buffer.allocUnsafe(4)
+    await handle.read(footer, 0, footer.byteLength, info.size - footer.byteLength)
+    return footer.readUInt32LE(0)
+  } finally {
+    await handle.close()
+  }
+}
+
+async function measureRuntimeRssPeak(runtimePid, operation) {
+  const baseline = runtimeRssBytes(runtimePid)
+  let peak = baseline
+  const timer = setInterval(() => {
+    peak = Math.max(peak, runtimeRssBytes(runtimePid))
+  }, 20)
+  try {
+    const result = await operation()
+    peak = Math.max(peak, runtimeRssBytes(runtimePid))
+    return { result, peakRssDeltaBytes: Math.max(0, peak - baseline) }
+  } finally {
+    clearInterval(timer)
+  }
+}
+
+function runtimeRssBytes(runtimePid) {
+  const runtime = app.getAppMetrics().find(({ pid }) => pid === runtimePid)
+  if (!runtime?.memory) throw new Error(`Runtime process ${runtimePid} is missing from Electron metrics`)
+  return runtime.memory.workingSetSize * 1024
+}
+
+function percentile(values, quantile) {
+  if (values.length === 0) return 0
+  const ordered = [...values].sort((left, right) => left - right)
+  return Math.round(ordered[Math.ceil(ordered.length * quantile) - 1] * 100) / 100
 }
 
 function countOccurrences(value, needle) {
@@ -548,14 +782,14 @@ function waitForEmitter(emitter, event, timeoutMs) {
   }), timeoutMs, `${event} event timed out`)
 }
 
-async function waitUntil(read, timeoutMs, message) {
+async function waitUntil(read, timeoutMs, message, intervalMs = 10) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const value = await read()
     if (value) return value
-    await delay(10)
+    await delay(intervalMs)
   }
-  throw new Error(message)
+  throw new Error(typeof message === 'function' ? message() : message)
 }
 
 function withTimeout(promise, timeoutMs, message) {

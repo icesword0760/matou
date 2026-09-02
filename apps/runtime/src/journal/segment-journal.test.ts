@@ -236,6 +236,36 @@ describe('SegmentJournal', () => {
     ])
   })
 
+  it('compresses the next cold segment when the active segment grows without another rotation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const scheduled = new Set<number>()
+    const compressor = {
+      schedule(candidate: { index: number }): Promise<never> {
+        scheduled.add(candidate.index)
+        return new Promise(() => {})
+      }
+    } as unknown as JournalCompressor
+    const journal = await SegmentJournal.open(directory, 'session-active-window', {
+      maxSegmentBytes: 4 * 1024,
+      rawHotBytes: 8 * 1024,
+      compressSealed: true,
+      compressor
+    })
+    let sequence = 0
+    let scheduledWhileActiveGrew = false
+    while (!scheduledWhileActiveGrew && sequence < 300) {
+      const activePath = journal.path
+      const scheduledBeforeAppend = scheduled.size
+      sequence += 1
+      await journal.appendOutput(sequence, new Uint8Array(64))
+      scheduledWhileActiveGrew = journal.path === activePath && scheduled.size > scheduledBeforeAppend
+    }
+
+    await journal.close()
+    expect(scheduledWhileActiveGrew).toBe(true)
+  })
+
   it('keeps a live append boundary when cold history and its tail sidecar are damaged', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
     temporaryDirectories.push(directory)
