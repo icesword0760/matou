@@ -42,6 +42,9 @@ export interface ScaleDataset {
   dagNodes?: 10000
   scenes?: number
   journalBytesPerSession?: number
+  workspaceCount?: number
+  tasksPerWorkspace?: number
+  sessionsPerTask?: number
 }
 
 export interface ScaleDatabaseCounts {
@@ -51,6 +54,8 @@ export interface ScaleDatabaseCounts {
   dagNodes: number
   dagRelations: number
   scenes: number
+  workspaces: number
+  tasks: number
 }
 
 const DATABASE_NAME = 'matou.sqlite'
@@ -118,7 +123,9 @@ export async function readScaleDatabaseCounts(
       ),
       scenes: count(
         "SELECT COUNT(*) AS count FROM scenes WHERE id GLOB 'scale-*-scene*' AND archived_at IS NULL"
-      )
+      ),
+      workspaces: count("SELECT COUNT(*) AS count FROM workspaces WHERE id GLOB 'scale-workspace*' AND archived_at IS NULL"),
+      tasks: count("SELECT COUNT(*) AS count FROM tasks WHERE id GLOB 'scale-task*' AND archived_at IS NULL")
     }
   } finally {
     database.close()
@@ -143,6 +150,19 @@ function validateDataset(dataset: ScaleDataset): void {
   ) {
     throw new Error(`scenes must be an integer >= ${minimumScenes}`)
   }
+  const hierarchyCounts = [dataset.workspaceCount, dataset.tasksPerWorkspace, dataset.sessionsPerTask]
+  if (hierarchyCounts.some((value) => value !== undefined) && hierarchyCounts.some((value) => value === undefined)) {
+    throw new Error('workspaceCount, tasksPerWorkspace, and sessionsPerTask must be supplied together')
+  }
+  for (const [label, value] of [
+    ['workspaceCount', dataset.workspaceCount],
+    ['tasksPerWorkspace', dataset.tasksPerWorkspace],
+    ['sessionsPerTask', dataset.sessionsPerTask]
+  ] as const) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+      throw new Error(`${label} must be a positive integer`)
+    }
+  }
   if (
     dataset.journalBytesPerSession !== undefined &&
     (!Number.isSafeInteger(dataset.journalBytesPerSession) || dataset.journalBytesPerSession < 0)
@@ -166,7 +186,7 @@ function removePreviousScaleSeed(database: ScaleDatabaseConnection): void {
   const statements = [
     "DELETE FROM window_scene_focus WHERE scene_id GLOB 'scale-*-scene*'",
     "DELETE FROM window_task_focus WHERE task_id = 'scale-task'",
-    "DELETE FROM window_task_placements WHERE task_id = 'scale-task'",
+    "DELETE FROM window_task_placements WHERE task_id GLOB 'scale-task*'",
     "DELETE FROM window_workspace_focus WHERE workspace_id = 'scale-workspace'",
     "DELETE FROM window_navigation WHERE active_workspace_id = 'scale-workspace'",
     "DELETE FROM workspace_path_state WHERE workspace_id = 'scale-workspace'",
@@ -187,9 +207,9 @@ function removePreviousScaleSeed(database: ScaleDatabaseConnection): void {
     "DELETE FROM scene_nodes WHERE scene_id GLOB 'scale-*-scene*'",
     "DELETE FROM scene_windows WHERE scene_id GLOB 'scale-*-scene*'",
     "DELETE FROM scenes WHERE id GLOB 'scale-*-scene*'",
-    "DELETE FROM tasks WHERE id = 'scale-task'",
-    "DELETE FROM execution_contexts WHERE id = 'scale-context'",
-    "DELETE FROM workspaces WHERE id = 'scale-workspace'"
+    "DELETE FROM tasks WHERE id GLOB 'scale-task*'",
+    "DELETE FROM execution_contexts WHERE id GLOB 'scale-context*'",
+    "DELETE FROM workspaces WHERE id GLOB 'scale-workspace*'"
   ]
   for (const statement of statements) database.exec(statement)
 }
@@ -246,6 +266,14 @@ function insertScaleAuthority(
     sceneId: SIBLING_SCENE_ID,
     workspaceDirectory
   })
+
+  if (dataset.workspaceCount && dataset.tasksPerWorkspace && dataset.sessionsPerTask) {
+    insertHierarchyCatalog(database, dataDirectory, {
+      workspaceCount: dataset.workspaceCount,
+      tasksPerWorkspace: dataset.tasksPerWorkspace,
+      sessionsPerTask: dataset.sessionsPerTask
+    })
+  }
 
   let createdScenes = 1
   if (dataset.relationshipDepth !== undefined) {
@@ -349,6 +377,9 @@ function insertSessions(database: ScaleDatabaseConnection, input: {
   sceneId: string
   workspaceDirectory: string
   parentIndex?: (index: number) => number | undefined
+  taskId?: string
+  contextId?: string
+  idPrefix?: string
 }): void {
   const insertSession = database.prepare(
     `INSERT INTO sessions (
@@ -375,25 +406,87 @@ function insertSessions(database: ScaleDatabaseConnection, input: {
      ) VALUES (?, ?, ?, ?, 'derived-from', '{}', ?, ?, ?)`
   )
   for (let index = 0; index < input.count; index += 1) {
-    const id = entityId(input.prefix, index)
+    const prefix = input.idPrefix ?? input.prefix
+    const id = entityId(prefix, index)
     const timestamp = FIXED_TIME + index
     insertSession.run(
-      id, SCALE_TASK_ID, SCALE_CONTEXT_ID, timestamp, timestamp, timestamp,
-      `${input.prefix.slice('scale-'.length)} ${index + 1}`, input.workspaceDirectory
+      id, input.taskId ?? SCALE_TASK_ID, input.contextId ?? SCALE_CONTEXT_ID, timestamp, timestamp, timestamp,
+      `${prefix.slice('scale-'.length)} ${index + 1}`, input.workspaceDirectory
     )
     insertMembership.run(id, input.sceneId, index + 1, timestamp, timestamp)
     const parentIndex = input.parentIndex?.(index)
     if (parentIndex === undefined) continue
-    const parentId = entityId(input.prefix, parentIndex)
-    const relationId = `${input.prefix}-relation-${fixedIndex(index)}`
+    const parentId = entityId(prefix, parentIndex)
+    const relationId = `${prefix}-relation-${fixedIndex(index)}`
     const result = insertRelationEvent.run(
-      `${relationId}-event`, relationId, SCALE_TASK_ID, id, parentId,
+      `${relationId}-event`, relationId, input.taskId ?? SCALE_TASK_ID, id, parentId,
       `${relationId}-command`, timestamp
     )
     insertRelation.run(
-      relationId, SCALE_TASK_ID, id, parentId, timestamp, timestamp,
+      relationId, input.taskId ?? SCALE_TASK_ID, id, parentId, timestamp, timestamp,
       Number(result.lastInsertRowid)
     )
+  }
+}
+
+function insertHierarchyCatalog(
+  database: ScaleDatabaseConnection,
+  dataDirectory: string,
+  dataset: Required<Pick<ScaleDataset, 'workspaceCount' | 'tasksPerWorkspace' | 'sessionsPerTask'>>
+): void {
+  for (let workspaceIndex = 1; workspaceIndex < dataset.workspaceCount; workspaceIndex += 1) {
+    const suffix = fixedIndex(workspaceIndex)
+    const workspaceId = `scale-workspace-${suffix}`
+    const contextId = `scale-context-${suffix}`
+    const workspaceDirectory = resolve(dirname(dataDirectory), `matou_workspace_${suffix}`)
+    const taskIds = Array.from({ length: dataset.tasksPerWorkspace }, (_, taskIndex) =>
+      `scale-task-${suffix}-${fixedIndex(taskIndex)}`)
+    database.prepare(
+      `INSERT INTO workspaces (
+         id, name, root_directory, task_order_json, created_at, updated_at,
+         archived_at, path_identity, version, is_default, is_pinned,
+         pin_sort_key, last_opened_at
+       ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 1, 0, 0, '', ?)`
+    ).run(workspaceId, `Scale Workspace ${workspaceIndex + 1}`, workspaceDirectory,
+      JSON.stringify(taskIds), FIXED_TIME + workspaceIndex, FIXED_TIME + workspaceIndex,
+      workspaceDirectory, FIXED_TIME + workspaceIndex)
+    database.prepare(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at, archived_at)
+       VALUES (?, ?, 'plain-directory', ?, ?, NULL)`
+    ).run(contextId, workspaceId, workspaceDirectory, FIXED_TIME + workspaceIndex)
+    for (let taskIndex = 0; taskIndex < dataset.tasksPerWorkspace; taskIndex += 1) {
+      const taskId = taskIds[taskIndex]!
+      const sceneId = `scale-catalog-scene-${suffix}-${fixedIndex(taskIndex)}`
+      database.prepare(
+        `INSERT INTO tasks (
+           id, workspace_id, parent_task_id, execution_context_id, title, status,
+           created_at, updated_at, archived_at, sort_key, version, is_pinned,
+           pin_sort_key, last_opened_at
+         ) VALUES (?, ?, NULL, ?, ?, 'active', ?, ?, NULL, ?, 1, 0, '', ?)`
+      ).run(taskId, workspaceId, contextId, `Scale Task ${workspaceIndex + 1}.${taskIndex + 1}`,
+        FIXED_TIME + taskIndex, FIXED_TIME + taskIndex, fixedIndex(taskIndex), FIXED_TIME + taskIndex)
+      database.prepare(
+        `INSERT INTO window_task_placements (window_id, task_id, ordinal, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(task_id) DO UPDATE SET
+           window_id = excluded.window_id, ordinal = excluded.ordinal,
+           updated_at = excluded.updated_at`
+      ).run(SCALE_WINDOW_ID, taskId,
+        workspaceIndex * dataset.tasksPerWorkspace + taskIndex,
+        FIXED_TIME + taskIndex)
+      database.prepare(
+        `INSERT INTO scenes (
+           id, task_id, name, mode, root_node_id, created_at, updated_at,
+           archived_at, title_pinned, sort_key, layout_revision
+         ) VALUES (?, ?, ?, 'card', NULL, ?, ?, NULL, 0, '000001', 1)`
+      ).run(sceneId, taskId, `Scale Catalog ${workspaceIndex + 1}.${taskIndex + 1}`,
+        FIXED_TIME + taskIndex, FIXED_TIME + taskIndex)
+      insertSessions(database, {
+        prefix: 'scale-sibling', count: dataset.sessionsPerTask, sceneId, workspaceDirectory,
+        taskId, contextId,
+        idPrefix: `scale-catalog-${suffix}-${fixedIndex(taskIndex)}`
+      })
+    }
   }
 }
 

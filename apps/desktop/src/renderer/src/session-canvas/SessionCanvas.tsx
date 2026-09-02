@@ -164,6 +164,22 @@ export function SessionCanvas(props: {
 }
 
 function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
-  const children = nodes.filter(({ parentSessionId }) => parentSessionId === sessionId)
-  return children.flatMap((child) => [child, ...sessionDescendants(nodes, child.sessionId)])
+  const byParent = new Map<string, SessionGraphNodeView[]>()
+  for (const node of nodes) {
+    if (!node.parentSessionId) continue
+    const children = byParent.get(node.parentSessionId) ?? []
+    children.push(node)
+    byParent.set(node.parentSessionId, children)
+  }
+  const descendants: SessionGraphNodeView[] = []
+  const pending = [...(byParent.get(sessionId) ?? [])]
+  const seen = new Set<string>()
+  while (pending.length > 0) {
+    const node = pending.pop()!
+    if (seen.has(node.sessionId)) continue
+    seen.add(node.sessionId)
+    descendants.push(node)
+    pending.push(...(byParent.get(node.sessionId) ?? []))
+  }
+  return descendants
 }

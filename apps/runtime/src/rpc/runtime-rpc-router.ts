@@ -830,31 +830,51 @@ export class RuntimeRpcRouter {
   }
 
   #snapshot(payload: unknown): unknown {
-    const workspaces = this.#database.all<{ id: string }>('SELECT id FROM workspaces ORDER BY created_at').map(({ id }) => this.#workspaces.getWorkspace(id)!)
-    const tasks = this.#database.all<{ id: string }>('SELECT id FROM tasks ORDER BY created_at').map(({ id }) => this.#workspaces.getTask(id)!)
-    const sessions = this.#database.all<{ id: string }>('SELECT id FROM sessions ORDER BY created_at').map(({ id }) => this.#sessions.getSession(id)!)
-    const sessionRuns = sessions.flatMap(({ id }) => this.#sessions.listRuns(id))
-    const providerBindings = sessions.flatMap(({ id }) => this.#sessions.listProviderBindings(id))
-    const relations = this.#database.all<{ relation_id: string }>('SELECT relation_id FROM session_relations_current ORDER BY created_at').map(({ relation_id }) => this.#relations.getCurrent(relation_id)!)
-    const sceneSnapshots = this.#database.all<{ id: string }>(
-      'SELECT id FROM scenes ORDER BY task_id, sort_key, created_at, id'
-    ).map(({ id }) => ({
-      ...this.#scenes.snapshot(id)!,
-      geometry: this.#geometry.list(id)
+    // Snapshot recovery is a bulk read. Per-entity repository calls turn a
+    // 1,000-Session restore into tens of thousands of SQLite statements and
+    // repeat that cost after every projection refresh.
+    const workspaces = this.#workspaces.listWorkspaces()
+    const tasks = this.#workspaces.listTasks()
+    const sessions = this.#sessions.listSessions()
+    const sessionRuns = this.#sessions.listAllRuns()
+    const providerBindings = this.#sessions.listAllProviderBindings()
+    const relations = this.#relations.listCurrent()
+    const geometryByScene = new Map<string, ReturnType<GeometryRepository['listAll']>>()
+    for (const geometry of this.#geometry.listAll()) {
+      const values = geometryByScene.get(geometry.sceneId) ?? []
+      values.push(geometry)
+      geometryByScene.set(geometry.sceneId, values)
+    }
+    const sceneSnapshots = this.#scenes.listSnapshots().map((snapshot) => ({
+      ...snapshot,
+      geometry: geometryByScene.get(snapshot.scene.id) ?? []
     }))
     const requestedWindowId = typeof payload === 'object' && payload !== null &&
       'windowId' in payload && typeof payload.windowId === 'string'
       ? payload.windowId
       : undefined
-    const sessionGraphs = Object.fromEntries(sceneSnapshots.map(({ scene }) => [
-      scene.id,
-      this.#sessionGraphs.projectSceneGraph(scene.id, requestedWindowId)
-    ]))
-    const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const windowId = requestedWindowId ?? this.#database.get<{ id: string }>(
       `SELECT id FROM app_windows WHERE kind = 'main' AND state <> 'closed'
        ORDER BY created_at LIMIT 1`
     )?.id ?? 'window-1'
+    const navigation = this.#navigation.get(windowId)
+    const activeWorkspaceId = navigation.activeWorkspaceId
+    const activeTaskId = activeWorkspaceId
+      ? navigation.taskByWorkspace[activeWorkspaceId]
+      : undefined
+    const activeSceneId = activeTaskId ? navigation.sceneByTask[activeTaskId] : undefined
+    // Large installations project the currently user-visible graph. Task or
+    // Scene activation changes navigation first and the following snapshot
+    // projects the new target. Small snapshots retain the complete historical
+    // shape used by diagnostics and compatibility tests.
+    const graphScenes = sceneSnapshots.length <= 20
+      ? sceneSnapshots
+      : sceneSnapshots.filter(({ scene }) => scene.id === activeSceneId)
+    const sessionGraphs = Object.fromEntries(graphScenes.map(({ scene }) => [
+      scene.id,
+      this.#sessionGraphs.projectSceneGraph(scene.id, windowId)
+    ]))
+    const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const activeWorkspaces = workspaces.filter(({ archivedAt }) => archivedAt === undefined)
     const activeTasks = tasks.filter(({ archivedAt }) => archivedAt === undefined)
     const activeSessions = sessions.filter(({ archivedAt }) => archivedAt === undefined)
@@ -894,7 +914,7 @@ export class RuntimeRpcRouter {
         ),
         pathStates,
         unreadByTask,
-        navigation: this.#navigation.get(windowId),
+        navigation,
         taskPlacements: this.#navigation.listTaskPlacements()
       }
     }

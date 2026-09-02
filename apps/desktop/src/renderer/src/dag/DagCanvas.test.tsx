@@ -73,6 +73,23 @@ describe('DagCanvas', () => {
     expect(document.querySelectorAll('.dag-node-card.is-ghost')).toHaveLength(2)
   })
 
+  it('keeps a deep DAG DOM bounded to viewport nodes and two directional ghosts', () => {
+    const nodes = Array.from({ length: 5000 }, (_, index) => ({
+      ...node(`depth-${index}`, `Depth ${index}`),
+      ...(index === 0 ? {} : { parentSessionId: `depth-${index - 1}` })
+    }))
+    render(<DagCanvas graph={{
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: `depth-${index}`, childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const, createdAt: index + 1
+      }))
+    }} focusedSessionId="depth-2500" onSelect={vi.fn()} />)
+
+    expect(document.querySelectorAll('.dag-node-card').length).toBeLessThanOrEqual(5)
+    expect(document.querySelectorAll('.dag-node-card.is-ghost').length).toBeLessThanOrEqual(2)
+  })
+
   it('shows full path context and labels Fork versus ordinary relation semantics', () => {
     render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()} />)
 

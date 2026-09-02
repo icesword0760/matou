@@ -130,9 +130,17 @@ async function collectBrowserFrames(
       observer?.disconnect()
     }
     const timestamps: number[] = []
+    const carousel = document.querySelector<HTMLElement>('.session-carousel')
+    let direction = 1
     await new Promise<void>((resolve) => {
       const frame = (timestamp: number) => {
         timestamps.push(timestamp)
+        if (carousel && carousel.scrollWidth > carousel.clientWidth) {
+          const maximum = carousel.scrollWidth - carousel.clientWidth
+          const next = carousel.scrollLeft + direction * Math.max(8, carousel.clientWidth / 20)
+          if (next >= maximum || next <= 0) direction *= -1
+          carousel.scrollLeft = Math.max(0, Math.min(maximum, next))
+        }
         if (timestamps.length >= frameCount + 1) resolve()
         else requestAnimationFrame(frame)
       }

@@ -359,6 +359,38 @@ describe('RuntimeRpcRouter', () => {
     }))).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 
+  it('restores hundreds of Sessions with a bounded bulk-query count', async () => {
+    const workspaceRoot = join(testRoot, 'bulk-snapshot-workspace')
+    await mkdir(workspaceRoot)
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('bulk-bootstrap', {
+      windowId: 'window-bulk', defaultRootDirectory: workspaceRoot,
+      defaultName: 'bulk-workspace', now: 1
+    })) as { session: { id: string } }
+    database.run(
+      `WITH RECURSIVE sequence(value) AS (
+         SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 500
+       )
+       INSERT INTO sessions (
+         id, task_id, execution_context_id, kind, status, created_at, updated_at,
+         last_activity_at, archived_at, title, version, cwd, work_status
+       )
+       SELECT printf('bulk-session-%04d', value), task_id, execution_context_id,
+              'shell', 'created', value + 10, value + 10, value + 10,
+              NULL, printf('Bulk Session %d', value), 1, cwd, 'idle'
+       FROM sessions, sequence WHERE sessions.id = ?`,
+      initial.session.id
+    )
+
+    database.readStatementCount(true)
+    const snapshot = await router.handle('projection.snapshot', {}) as {
+      sessions: Array<{ id: string }>
+    }
+    const statementCount = database.readStatementCount()
+
+    expect(snapshot.sessions).toHaveLength(501)
+    expect(statementCount).toBeLessThan(40)
+  })
+
   it('supports relation and Scene structural commands with synchronous event replay', async () => {
     await seedHierarchy()
     await router.handle('session.create', payload('parent', {

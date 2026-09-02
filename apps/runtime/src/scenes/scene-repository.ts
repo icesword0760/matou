@@ -307,6 +307,49 @@ export class SceneRepository {
       windows: this.#database.all<WindowRow>('SELECT * FROM scene_windows WHERE scene_id = ? ORDER BY created_at', sceneId).map(mapWindow)
     }
   }
+
+
+  listSnapshots(): SceneSnapshot[] {
+    const scenes = this.#database.all<SceneRow>(
+      'SELECT * FROM scenes ORDER BY task_id, sort_key, created_at, id'
+    )
+    const nodesByScene = groupByScene(
+      this.#database.all<NodeRow>('SELECT * FROM scene_nodes ORDER BY scene_id, created_at, ordinal'),
+      (row) => row.scene_id,
+      mapNode
+    )
+    const mountsByScene = groupByScene(
+      this.#database.all<MountRow>('SELECT * FROM session_mounts ORDER BY scene_id, created_at'),
+      (row) => row.scene_id,
+      mapMount
+    )
+    const windowsByScene = groupByScene(
+      this.#database.all<WindowRow>('SELECT * FROM scene_windows ORDER BY scene_id, created_at'),
+      (row) => row.scene_id,
+      mapWindow
+    )
+    return scenes.map((row) => ({
+      scene: mapScene(row),
+      nodes: nodesByScene.get(row.id) ?? [],
+      mounts: mountsByScene.get(row.id) ?? [],
+      windows: windowsByScene.get(row.id) ?? []
+    }))
+  }
+}
+
+function groupByScene<Row, Value>(
+  rows: Row[],
+  sceneId: (row: Row) => string,
+  map: (row: Row) => Value
+): Map<string, Value[]> {
+  const grouped = new Map<string, Value[]>()
+  for (const row of rows) {
+    const id = sceneId(row)
+    const values = grouped.get(id) ?? []
+    values.push(map(row))
+    grouped.set(id, values)
+  }
+  return grouped
 }
 
 function emitScene(
