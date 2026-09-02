@@ -10,7 +10,10 @@ import type {
 export function createHierarchyCommands(
   client: RuntimeClient,
   windowId: string,
-  afterMutation?: () => void | Promise<void>
+  afterMutation?: (
+    result: unknown,
+    context: { type: string; input: Record<string, unknown> }
+  ) => void | Promise<void>
 ): HierarchyCommands {
   let sequence = 0
   const command = async (type: string, input: Record<string, unknown>) => {
@@ -19,7 +22,7 @@ export function createHierarchyCommands(
       command: { commandId, commandType: type, requestHash: JSON.stringify(input) },
       input: { ...input, windowId, now: Date.now() }
     })
-    await afterMutation?.()
+    await afterMutation?.(result, { type, input })
     return result
   }
   const environmentCommand = async (

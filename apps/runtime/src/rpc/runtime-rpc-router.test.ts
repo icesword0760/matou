@@ -427,6 +427,21 @@ describe('RuntimeRpcRouter', () => {
     expect(snapshot.sceneSnapshots.find(({ scene }) => scene.id === 'scene-1')?.geometry)
       .toEqual([expect.objectContaining({ geometry: { ratio: 0.35 } })])
 
+    const sceneSnapshot = await router.handle('hierarchy.get-scene-snapshot', {
+      sceneId: 'scene-1'
+    }) as {
+      scene: { id: string }
+      nodes: Array<{ id: string }>
+      mounts: Array<{ id: string }>
+      geometry: Array<{ geometry: { ratio: number } }>
+    }
+    expect(sceneSnapshot).toMatchObject({
+      scene: { id: 'scene-1' },
+      nodes: expect.arrayContaining([expect.objectContaining({ id: 'root' })]),
+      mounts: expect.arrayContaining([expect.objectContaining({ id: 'mount-parent' })]),
+      geometry: [expect.objectContaining({ geometry: { ratio: 0.35 } })]
+    })
+
     const graph = await router.handle('hierarchy.get-scene-session-graph', {
       sceneId: 'scene-1', windowId: 'window-1'
     }) as {

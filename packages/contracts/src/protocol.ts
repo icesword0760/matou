@@ -160,6 +160,7 @@ export const RPC_METHODS = [
   'hierarchy.restart-stopped-session',
   'hierarchy.remove-session-branch',
   'hierarchy.reopen-scene',
+  'hierarchy.get-scene-snapshot',
   'hierarchy.get-scene-session-graph',
   'hierarchy.set-focused-session',
   'hierarchy.activate-session',

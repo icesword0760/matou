@@ -840,7 +840,12 @@ describe('PRD 05 hierarchy shell', () => {
         current = structuredClone(current)
         current.navigation.sessionByScene['scene-a1'] = 'owner-session'
         current.sessionGraphs!['scene-a1']!.focusedSessionId = 'owner-session'
-        return {}
+        return {
+          workspace: current.workspaces[0], task: current.tasks[0], scene: current.scenes[0],
+          session: current.sessions.find(({ id }) => id === 'owner-session'),
+          mount: current.sceneSnapshots?.[0]?.mounts.find(({ sessionId }) => sessionId === 'owner-session'),
+          navigation: current.navigation
+        }
       }
       throw new Error(`unexpected Runtime request: ${method}`)
     })
@@ -917,6 +922,39 @@ describe('PRD 05 hierarchy shell', () => {
     expect(await screen.findByRole('button', { name: 'Workspace Live' })).toBeTruthy()
     expect(request.mock.calls.map(([method]) => method).filter((method) => method === 'projection.snapshot'))
       .toEqual([])
+  })
+
+  it('switches workspace from the authoritative command result without a second full snapshot', async () => {
+    let data = fixture()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.activate-workspace') {
+        data = structuredClone(data)
+        data.navigation.activeWorkspaceId = 'workspace-b'
+        return {
+          workspace: data.workspaces.find(({ id }) => id === 'workspace-b'),
+          task: data.tasks.find(({ id }) => id === 'task-b1'),
+          scene: data.scenes.find(({ id }) => id === 'scene-b1'),
+          session: data.sessions.find(({ id }) => id === 'session-b1'),
+          mount: data.sceneSnapshots?.find(({ scene }) => scene.id === 'scene-b1')?.mounts[0],
+          navigation: data.navigation
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Workspace B' }))
+
+    expect(await screen.findByRole('region', { name: 'Workspace B 工作现场' })).toBeTruthy()
+    expect(request.mock.calls.map(([method]) => method).filter((method) => method === 'projection.snapshot'))
+      .toEqual(['projection.snapshot'])
   })
 
   it('browses Workspace, Task, Scene, search and copy surfaces while every mutation is disabled in read-only recovery', async () => {

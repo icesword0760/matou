@@ -6,7 +6,9 @@ import {
 import type { ForkStage, LayoutNode, SessionEnvironment } from '@matou/domain'
 import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
-import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
+import {
+  RuntimeProjectionStore, type RuntimeProjectionSnapshot, type SceneSnapshotProjection
+} from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
 import type { AgentNotificationStore } from '../notifications/AgentNotificationStore'
@@ -69,6 +71,21 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     client.startProjection(snapshot.eventSequence)
     setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
   }, [client, windowId])
+
+  const applyCommandResult = useCallback(async (
+    result: unknown,
+    context: { type: string; input: Record<string, unknown> }
+  ) => {
+    storeRef.current.applyCommandResult(result, context)
+    const sceneId = mutationSceneId(result, context)
+    if (client && sceneId && requiresFreshSceneSnapshot(context.type)) {
+      const sceneSnapshot = await client.request<SceneSnapshotProjection>(
+        'hierarchy.get-scene-snapshot', { sceneId }
+      )
+      storeRef.current.applySceneSnapshot(sceneSnapshot)
+    }
+    setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
+  }, [client])
 
   useEffect(() => {
     if (fixture || !client) return
@@ -154,7 +171,7 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     [fixture]
   )
   const commands = useMemo(() => {
-    const base = fixtureCommands ?? (client ? createHierarchyCommands(client, windowId, refresh) : null)
+    const base = fixtureCommands ?? (client ? createHierarchyCommands(client, windowId, applyCommandResult) : null)
     if (!base || !readOnly) return base
     return createReadOnlyHierarchyCommands(base, (update) => setProjection((current) => {
       if (!current) return current
@@ -162,7 +179,7 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
       update(next)
       return next
     }))
-  }, [client, fixtureCommands, readOnly, refresh, windowId])
+  }, [applyCommandResult, client, fixtureCommands, readOnly, windowId])
 
   useEffect(() => {
     if (queryValue('e2e') !== '1') return
@@ -192,14 +209,16 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
       checking = true
       const now = Date.now()
       try {
-        await client.request('hierarchy.validate-workspace-path', {
+        const result = await client.request('hierarchy.validate-workspace-path', {
           command: {
             commandId: `hierarchy.validate-workspace-path-${workspaceId}-${now}`,
             commandType: 'hierarchy.validate-workspace-path', requestHash: `${workspaceId}:${now}`
           },
           input: { workspaceId, windowId, now }
         })
-        await refresh()
+        applyCommandResult(result, {
+          type: 'hierarchy.validate-workspace-path', input: { workspaceId, windowId, now }
+        })
       } finally {
         checking = false
       }
@@ -207,7 +226,7 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     void checkPath().catch(() => {})
     const timer = window.setInterval(() => { void checkPath().catch(() => {}) }, 400)
     return () => window.clearInterval(timer)
-  }, [client, fixture, projection?.navigation.activeWorkspaceId, readOnly, refresh, windowId])
+  }, [applyCommandResult, client, fixture, projection?.navigation.activeWorkspaceId, readOnly, windowId])
 
   if (!projection || !commands) {
     return <main className="hierarchy-loading" aria-busy="true" data-load-error={loadError || undefined} />
@@ -1336,6 +1355,29 @@ function mutationSessionId(value: unknown): string | undefined {
   const session = value.session
   if (!session || typeof session !== 'object' || !('id' in session)) return undefined
   return typeof session.id === 'string' ? session.id : undefined
+}
+
+function mutationSceneId(
+  value: unknown,
+  context: { type: string; input: Record<string, unknown> }
+): string | undefined {
+  if (typeof context.input.sceneId === 'string') return context.input.sceneId
+  if (!value || typeof value !== 'object' || !('scene' in value)) return undefined
+  const scene = value.scene
+  return scene && typeof scene === 'object' && 'id' in scene && typeof scene.id === 'string'
+    ? scene.id
+    : undefined
+}
+
+function requiresFreshSceneSnapshot(type: string): boolean {
+  return [
+    'hierarchy.create-scene', 'hierarchy.create-canvas', 'hierarchy.reopen-scene',
+    'hierarchy.split-session', 'hierarchy.fork-session', 'hierarchy.create-shell-sibling',
+    'hierarchy.create-fork-child', 'hierarchy.create-fork-sibling',
+    'hierarchy.retry-fork', 'hierarchy.remove-failed-fork',
+    'hierarchy.remove-session-branch', 'hierarchy.delete-session',
+    'hierarchy.detach-session', 'hierarchy.return-session', 'hierarchy.replace-layout'
+  ].includes(type)
 }
 
 function focusedSession(projection: HierarchyProjection): string | undefined {

@@ -166,6 +166,163 @@ describe('RuntimeProjectionStore', () => {
     ])
   })
 
+  it('merges an authoritative command result without rebuilding the full projection', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-a' }, { id: 'workspace-b' }],
+      tasks: [{ id: 'task-b', workspaceId: 'workspace-b' }],
+      sessions: [{ id: 'session-b', taskId: 'task-b' }], relations: [],
+      scenes: [{ id: 'scene-b', taskId: 'task-b' }],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: {
+          windowId: 'window-1', activeWorkspaceId: 'workspace-a',
+          taskByWorkspace: { 'workspace-b': 'task-b' },
+          sceneByTask: { 'task-b': 'scene-b' }, sessionByScene: { 'scene-b': 'session-b' }
+        }
+      }
+    })
+
+    store.applyCommandResult({
+      workspace: { id: 'workspace-b', name: 'Workspace B' },
+      task: { id: 'task-b', workspaceId: 'workspace-b', title: 'Task B' },
+      scene: { id: 'scene-b', taskId: 'task-b', name: 'Scene B' },
+      session: { id: 'session-b', taskId: 'task-b', title: 'Session B' },
+      navigation: {
+        windowId: 'window-1', activeWorkspaceId: 'workspace-b',
+        taskByWorkspace: { 'workspace-b': 'task-b' },
+        sceneByTask: { 'task-b': 'scene-b' }, sessionByScene: { 'scene-b': 'session-b' }
+      },
+      graph: {
+        sceneId: 'scene-b', focusedSessionId: 'session-b',
+        nodes: [{ sessionId: 'session-b' }], edges: []
+      }
+    })
+
+    const hierarchy = store.view().hierarchy
+    expect(hierarchy.navigation).toMatchObject({ activeWorkspaceId: 'workspace-b' })
+    expect(hierarchy.workspaces).toContainEqual(expect.objectContaining({ id: 'workspace-b', name: 'Workspace B' }))
+    expect(hierarchy.sessionGraphs?.['scene-b']).toMatchObject({ focusedSessionId: 'session-b' })
+    expect(store.eventSequence).toBe(1)
+  })
+
+  it('merges ordered pin results, path validation and recency without a full projection rebuild', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [
+        { id: 'workspace-a', lastOpenedAt: 1 },
+        { id: 'workspace-b', lastOpenedAt: 2 }
+      ],
+      tasks: [
+        { id: 'task-a', workspaceId: 'workspace-a', lastOpenedAt: 1 },
+        { id: 'task-b', workspaceId: 'workspace-a', lastOpenedAt: 2 }
+      ],
+      sessions: [], relations: [], scenes: [],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: { windowId: 'window-1' }, pathStates: []
+      }
+    })
+
+    store.applyCommandResult([
+      { id: 'workspace-b', isPinned: true, pinSortKey: 'a0' },
+      { id: 'workspace-a', isPinned: true, pinSortKey: 'a1' }
+    ], { type: 'hierarchy.reorder-pinned-workspace', input: {} })
+    store.applyCommandResult([
+      { id: 'task-b', workspaceId: 'workspace-a', isPinned: true, pinSortKey: 'a0' },
+      { id: 'task-a', workspaceId: 'workspace-a', isPinned: true, pinSortKey: 'a1' }
+    ], { type: 'hierarchy.reorder-pinned-task', input: {} })
+    store.applyCommandResult({
+      workspaceId: 'workspace-a', status: 'invalid', reason: 'missing',
+      checkedAt: 20, validationGeneration: 3
+    }, { type: 'hierarchy.validate-workspace-path', input: { workspaceId: 'workspace-a' } })
+    store.applyCommandResult({
+      sessionId: 'session-a', taskId: 'task-a', workspaceId: 'workspace-a', lastOpenedAt: 40
+    }, { type: 'hierarchy.record-session-interaction', input: { sessionId: 'session-a' } })
+
+    expect(store.view().workspaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'workspace-a', pinSortKey: 'a1', lastOpenedAt: 40 }),
+      expect.objectContaining({ id: 'workspace-b', pinSortKey: 'a0' })
+    ]))
+    expect(store.view().tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'task-a', pinSortKey: 'a1', lastOpenedAt: 40 }),
+      expect.objectContaining({ id: 'task-b', pinSortKey: 'a0' })
+    ]))
+    expect(store.view().hierarchy.pathStates).toEqual([
+      expect.objectContaining({ workspaceId: 'workspace-a', status: 'invalid' })
+    ])
+  })
+
+  it('applies ordering, pin, relink, path and recency events incrementally', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-a', rootDirectory: '/old', lastOpenedAt: 1 }],
+      tasks: [{ id: 'task-a', workspaceId: 'workspace-a', lastOpenedAt: 1 }],
+      sessions: [], relations: [], scenes: [{ id: 'scene-a', taskId: 'task-a' }],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: { windowId: 'window-1' }, pathStates: []
+      }
+    })
+    const base = {
+      aggregateType: 'test', schemaVersion: 1, commandId: 'cmd', occurredAt: 2
+    }
+    store.applyBatch('generation-1', [
+      { ...base, sequence: 2, eventId: '2', eventType: 'workspace.relinked', aggregateId: 'workspace-a', payload: { rootDirectory: '/new' } },
+      { ...base, sequence: 3, eventId: '3', eventType: 'workspace.pin-changed', aggregateId: 'workspace-a', payload: { isPinned: true, pinSortKey: 'a0' } },
+      { ...base, sequence: 4, eventId: '4', eventType: 'workspace.task-order-changed', aggregateId: 'workspace-a', payload: { taskOrder: ['task-a'] } },
+      { ...base, sequence: 5, eventId: '5', eventType: 'task.pin-changed', aggregateId: 'task-a', payload: { isPinned: true, pinSortKey: 'a0' } },
+      { ...base, sequence: 6, eventId: '6', eventType: 'task.scene-order-changed', aggregateId: 'task-a', payload: { sceneOrder: ['scene-a'] } },
+      { ...base, sequence: 7, eventId: '7', eventType: 'navigation.recency-changed', aggregateId: 'task-a', payload: { workspaceId: 'workspace-a', taskId: 'task-a', lastOpenedAt: 50 } },
+      { ...base, sequence: 8, eventId: '8', eventType: 'workspace.path-status-changed', aggregateId: 'workspace-a', payload: { workspaceId: 'workspace-a', status: 'valid', reason: '', checkedAt: 50, validationGeneration: 4 } }
+    ])
+
+    expect(store.view().workspaces[0]).toMatchObject({
+      rootDirectory: '/new', isPinned: true, taskOrder: ['task-a'], lastOpenedAt: 50
+    })
+    expect(store.view().tasks[0]).toMatchObject({
+      isPinned: true, sceneOrder: ['scene-a'], lastOpenedAt: 50
+    })
+    expect(store.view().hierarchy.pathStates).toEqual([
+      expect.objectContaining({ workspaceId: 'workspace-a', status: 'valid' })
+    ])
+  })
+
+  it('replaces one changed Scene tree without rebuilding unrelated projection state', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 7,
+      workspaces: [{ id: 'workspace-a' }], tasks: [], sessions: [], relations: [],
+      scenes: [{ id: 'scene-a', layoutRevision: 1 }],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: { windowId: 'window-1' },
+        sceneSnapshots: [{
+          scene: { id: 'scene-a', layoutRevision: 1 },
+          nodes: [{ id: 'old-root' }], mounts: [], windows: []
+        }]
+      }
+    })
+
+    store.applySceneSnapshot({
+      scene: { id: 'scene-a', layoutRevision: 2 },
+      nodes: [{ id: 'split-root' }, { id: 'left' }, { id: 'right' }],
+      mounts: [{ id: 'mount-left' }, { id: 'mount-right' }], windows: [], geometry: []
+    })
+
+    expect(store.view().hierarchy.sceneSnapshots).toEqual([
+      expect.objectContaining({
+        scene: expect.objectContaining({ id: 'scene-a', layoutRevision: 2 }),
+        nodes: expect.arrayContaining([expect.objectContaining({ id: 'split-root' })])
+      })
+    ])
+    expect(store.view().workspaces).toEqual([{ id: 'workspace-a' }])
+    expect(store.eventSequence).toBe(7)
+  })
+
   it('updates the visible terminal path when a live Shell changes directory', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

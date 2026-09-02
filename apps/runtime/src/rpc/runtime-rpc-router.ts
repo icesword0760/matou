@@ -140,6 +140,12 @@ export class RuntimeRpcRouter {
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
     if (method === 'projection.snapshot') return this.#snapshot(payload)
+    if (method === 'hierarchy.get-scene-snapshot') {
+      const sceneId = text(record(payload).sceneId, 'sceneId')
+      const snapshot = this.#scenes.snapshot(sceneId)
+      if (!snapshot) throw new RpcFault('NOT_FOUND', `Scene ${sceneId} does not exist`)
+      return { ...snapshot, geometry: this.#geometry.list(sceneId) }
+    }
     if (method === 'hierarchy.get-scene-session-graph') {
       const input = record(payload)
       const sceneId = text(input.sceneId, 'sceneId')
