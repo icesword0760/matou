@@ -20,6 +20,8 @@ import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
+import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
+import type { RecoveryJob } from './recovery/runtime-session-recovery-scheduler'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionHudRegistry } from './session/session-hud-registry'
@@ -69,6 +71,7 @@ if (!parentPort) {
 }
 
 const servers = new Set<RuntimeServer>()
+const recoveryServerWaiters = new Set<(server: RuntimeServer) => void>()
 const sessions = new RuntimeSessionRegistry()
 const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
@@ -89,6 +92,7 @@ interface WritableRuntimeState extends RuntimeStateBase {
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
   forkCoordinator: ForkOperationCoordinator
+  recoveryCoordinator: RuntimeRecoveryCoordinator
 }
 
 interface ReadOnlyRuntimeState extends RuntimeStateBase {
@@ -337,10 +341,20 @@ async function initializeRuntime(): Promise<RuntimeState> {
   lifecycleCoordinator.registerProviderHooks(providerHooks)
   new DetachedSessionService(database, transactions)
     .normalizeOnStartup(Date.now())
-  const recovery = await new RuntimeRecoveryService(runtimeDataRoot, database).recoverAll()
+  const recoveryService = new RuntimeRecoveryService(runtimeDataRoot, database)
+  const recovery = await recoveryService.recoverAll()
   for (const failure of recovery.failed) {
     console.error(`[runtime.recovery] ${failure.sessionId} ${failure.code}: ${failure.message}`)
   }
+  const recoveryCoordinator = new RuntimeRecoveryCoordinator({
+    concurrency: 4,
+    jobs: recoveryService.planSessionRecovery(),
+    start: (job) => startRecoveryJob(job),
+    publish: (snapshot) => {
+      for (const server of servers) server.publishRecovery(snapshot)
+    }
+  })
+  recoveryCoordinator.start()
   telemetry.purgeStaleGenerations()
   lifecycleCoordinator.assertStartupActive()
   await hostControl.start()
@@ -414,7 +428,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     accessPolicy,
     hostControl,
     providerHooks,
-    forkCoordinator
+    forkCoordinator,
+    recoveryCoordinator
   }
 }
 
@@ -518,9 +533,15 @@ parentPort.on('message', async (event) => {
       sessions,
       providerHooks,
       undefined,
-      { hudRegistry: sessionHuds, accessPolicy: state.accessPolicy }
+      {
+        hudRegistry: sessionHuds,
+        accessPolicy: state.accessPolicy,
+        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {})
+      }
     )
     servers.add(server)
+    for (const resolve of recoveryServerWaiters) resolve(server)
+    recoveryServerWaiters.clear()
     port.once('close', () => servers.delete(server))
   } catch (error) {
     console.error('Matou Runtime schema migration failed', error)
@@ -529,6 +550,13 @@ parentPort.on('message', async (event) => {
     return
   }
 })
+
+async function startRecoveryJob(job: RecoveryJob): Promise<void> {
+  const server = [...servers][0] ?? await new Promise<RuntimeServer>((resolve) => {
+    recoveryServerWaiters.add(resolve)
+  })
+  await server.ensureSessionRunning(job)
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)

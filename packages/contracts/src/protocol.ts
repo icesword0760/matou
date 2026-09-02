@@ -78,6 +78,25 @@ const disposeSchema = z.object({
   sessionId
 })
 
+const viewDetachSchema = z.object({
+  type: z.literal('terminal.view-detach'),
+  protocolVersion,
+  sessionId
+})
+
+const recoveryPrioritizeSchema = z.object({
+  type: z.literal('session.recovery-prioritize'),
+  protocolVersion,
+  sceneId: identifier,
+  activeSessionId: sessionId.optional()
+})
+
+const recoveryRetrySchema = z.object({
+  type: z.literal('session.recovery-retry'),
+  protocolVersion,
+  sessionId
+})
+
 const ackSchema = z.object({
   type: z.literal('terminal.ack'),
   protocolVersion,
@@ -231,6 +250,9 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   userInteractionSchema,
   resizeSchema,
   disposeSchema,
+  viewDetachSchema,
+  recoveryPrioritizeSchema,
+  recoveryRetrySchema,
   ackSchema,
   replayRequestSchema,
   checkpointSchema,
@@ -272,6 +294,15 @@ type RpcErrorCode =
   | RuntimeErrorCode
 
 export type RuntimeMessage =
+  | {
+      type: 'session.recovery-status'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sceneId: string
+      priority: 'active-session' | 'foreground-scene' | 'active-task' | 'active-workspace' | 'background'
+      state: 'queued' | 'restoring' | 'ready' | 'failed'
+      error?: string
+    }
   | {
       type: 'protocol.ready'
       protocolVersion: typeof PROTOCOL_VERSION

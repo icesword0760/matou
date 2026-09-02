@@ -13,6 +13,7 @@ export type TerminalMessageType =
   | 'terminal.user-interaction'
   | 'terminal.resize'
   | 'terminal.dispose'
+  | 'terminal.view-detach'
   | 'terminal.ack'
   | 'terminal.replay-request'
   | 'terminal.checkpoint'

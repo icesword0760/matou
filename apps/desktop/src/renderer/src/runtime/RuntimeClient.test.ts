@@ -48,6 +48,29 @@ describe('RuntimeClient', () => {
       expect.objectContaining({ sessionId: 'session-b', resizeId: 1, cols: 120, rows: 40 })
     ])
   })
+
+  it('subscribes to per-card recovery status and sends authoritative recovery intent', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    const observed: string[] = []
+    client.subscribeSessionRecovery((status) => observed.push(`${status.sessionId}:${status.state}`))
+    port.deliver({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', sceneId: 'scene-1', priority: 'active-session',
+      state: 'restoring'
+    })
+
+    client.prioritizeSessionRecovery('scene-1', 'session-1')
+    client.retrySessionRecovery('session-1')
+
+    expect(observed).toEqual(['session-1:restoring'])
+    expect(port.sent.slice(-2)).toEqual([
+      expect.objectContaining({
+        type: 'session.recovery-prioritize', sceneId: 'scene-1', activeSessionId: 'session-1'
+      }),
+      expect.objectContaining({ type: 'session.recovery-retry', sessionId: 'session-1' })
+    ])
+  })
   it('correlates RPC and reattaches terminal consumers after a new port', async () => {
     const first = new FakePort()
     const client = new RuntimeClient(first, { clientId: 'renderer-1' })
@@ -80,6 +103,9 @@ describe('RuntimeClient', () => {
     expect(second.sent.map((message) => message.type)).toContain('terminal.spawn')
     detach()
     expect(second.sent.map((message) => message.type)).not.toContain('terminal.dispose')
+    expect(second.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.view-detach', sessionId: 'session-1'
+    }))
   })
 
   it('waits for readiness and resumes the projection stream after reconnect', async () => {

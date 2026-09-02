@@ -75,6 +75,11 @@ import {
   ShellHistoryRepository,
   formatShellHistoryForTerminal
 } from './shell-history/shell-history'
+import type {
+  RecoveryJob,
+  RecoveryJobSnapshot
+} from './recovery/runtime-session-recovery-scheduler'
+import type { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 
 export interface PortMessageEvent {
   data: unknown
@@ -102,6 +107,7 @@ interface ReplayState {
 interface PendingShellFallback {
   session: PtySession
   message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+  attachView: boolean
 }
 type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 
@@ -110,6 +116,7 @@ export interface RuntimeServerOptions {
   hudRegistry?: SessionHudRegistry
   accessPolicy?: RuntimeAccessPolicy
   journalOptionsForSession?(sessionId: string): SegmentJournalOptions | undefined
+  recoveryCoordinator?: RuntimeRecoveryCoordinator
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -181,6 +188,7 @@ export class RuntimeServer {
     | undefined
   readonly #accessPolicy: RuntimeAccessPolicy
   readonly #journalOptionsForSession: NonNullable<RuntimeServerOptions['journalOptionsForSession']>
+  readonly #recoveryCoordinator: RuntimeRecoveryCoordinator | undefined
   #handshakeComplete = false
   #closed = false
 
@@ -263,17 +271,18 @@ export class RuntimeServer {
     this.#control = control
     this.#sessions = sessions
     this.#execution = new SessionExecutionService(database, sessions, {
-      startOrResume: (descriptor, authority, mode) => this.#spawn({
+      startOrResume: (descriptor, authority, mode, attachView) => this.#spawn({
         ...descriptor,
         type: 'terminal.spawn',
         protocolVersion: PROTOCOL_VERSION
-      }, authority, mode)
+      }, authority, mode, attachView)
     })
     this.#providerHooks = providerHooks
     this.#accessPolicy = options.accessPolicy ?? new RuntimeAccessPolicy(
       database.readOnly ? 'read-only' : 'normal'
     )
-    this.#journalOptionsForSession = options.journalOptionsForSession ?? (() => undefined)
+  this.#journalOptionsForSession = options.journalOptionsForSession ?? (() => undefined)
+  this.#recoveryCoordinator = options.recoveryCoordinator
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
@@ -310,6 +319,40 @@ export class RuntimeServer {
     for (const consumerId of this.#subscriptions.keys()) this.#pumpSubscription(consumerId)
   }
 
+  async ensureSessionRunning(job: RecoveryJob): Promise<void> {
+    if (this.#closed) throw new Error('Runtime connection closed during Session recovery')
+    if (!job.executionContextId || !job.profile) {
+      throw new Error(`Session ${job.sessionId} is missing a recovery launch descriptor`)
+    }
+    await this.#spawnSerialized({
+      type: 'terminal.spawn',
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: job.sessionId,
+      executionContextId: job.executionContextId,
+      profile: job.profile,
+      cols: 80,
+      rows: 24
+    }, false)
+    if (!this.#sessions.has(job.sessionId)) {
+      throw new Error(`Session ${job.sessionId} did not reach a running state`)
+    }
+  }
+
+  publishRecovery(snapshot: readonly RecoveryJobSnapshot[]): void {
+    if (this.#closed || !this.#handshakeComplete) return
+    for (const job of snapshot) {
+      this.#port.postMessage({
+        type: 'session.recovery-status',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: job.sessionId,
+        sceneId: job.sceneId,
+        priority: job.priority,
+        state: job.state,
+        ...(job.error === undefined ? {} : { error: job.error })
+      })
+    }
+  }
+
   providerIdentityRecorded(sessionId: string, runId: string): void {
     const restoring = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
@@ -343,7 +386,7 @@ export class RuntimeServer {
     descriptor: SessionExecutionDescriptor,
     authority?: ForkExecutionAuthorityInput
   ): Promise<SessionExecutionResult<void>> {
-    return this.#execution.startOrResume(descriptor.sessionId, descriptor, authority)
+    return this.#execution.startOrResume(descriptor.sessionId, descriptor, authority, false)
   }
 
   close(): void {
@@ -393,6 +436,7 @@ export class RuntimeServer {
         runtimeId: this.#runtimeId,
         capabilities: this.#accessPolicy.capabilities
       })
+      if (this.#recoveryCoordinator) this.publishRecovery(this.#recoveryCoordinator.snapshot())
       return
     }
 
@@ -430,6 +474,19 @@ export class RuntimeServer {
         await this.#disposeSession(message.sessionId)
         break
       }
+      case 'terminal.view-detach': {
+        this.#sessions.get(message.sessionId)?.detach(this.#sendToPort)
+        this.#attachedSessionIds.delete(message.sessionId)
+        this.#completedReplayThrough.delete(message.sessionId)
+        this.#replays.delete(message.sessionId)
+        break
+      }
+      case 'session.recovery-prioritize':
+        this.#recoveryCoordinator?.prioritizeScene(message.sceneId, message.activeSessionId)
+        break
+      case 'session.recovery-retry':
+        this.#recoveryCoordinator?.retry(message.sessionId)
+        break
       case 'terminal.user-interaction': {
         const session = this.#session(message.sessionId)
         if (!session) break
@@ -703,6 +760,7 @@ export class RuntimeServer {
         result = withSessionRuntimeEnvironment(result, sessionHuds)
       }
       for (const sessionId of disposedSessionIds(result)) {
+        this.#recoveryCoordinator?.cancel([sessionId])
         await this.#disposeSession(sessionId)
       }
       if (this.#cancelledRequests.delete(message.requestId)) {
@@ -1106,7 +1164,8 @@ export class RuntimeServer {
   async #spawn(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     forkAuthority?: ForkExecutionAuthority,
-    executionMode?: 'attach-only'
+    executionMode?: 'attach-only',
+    attachView = true
   ): Promise<void> {
     const persistentAuthority = this.#database.get<{
       execution_context_id: string
@@ -1161,25 +1220,26 @@ export class RuntimeServer {
         existing.dispose({ notifyExit: false })
         await existing.whenClosed()
       } else {
-      existing.attach(this.#sendToPort)
-      this.#endedSessionIds.delete(message.sessionId)
-      this.#completedReplayThrough.delete(message.sessionId)
-      this.#attachedSessionIds.add(message.sessionId)
-      this.#port.postMessage({
-        type: 'terminal.spawned', protocolVersion: PROTOCOL_VERSION,
-        sessionId: message.sessionId, pid: existing.pid, reattached: true,
-        replayFromSequence: existing.replayFromSequence
-      })
-      if (!this.#hud.snapshot(message.sessionId)) {
-        this.#hud.spawn({
-          sessionId: message.sessionId, profile: existing.profile,
-          ...(shellName(existing.profile) ? { shell: shellName(existing.profile)! } : {}),
-          startedAt: Date.now()
+        if (!attachView) return
+        existing.attach(this.#sendToPort)
+        this.#endedSessionIds.delete(message.sessionId)
+        this.#completedReplayThrough.delete(message.sessionId)
+        this.#attachedSessionIds.add(message.sessionId)
+        this.#port.postMessage({
+          type: 'terminal.spawned', protocolVersion: PROTOCOL_VERSION,
+          sessionId: message.sessionId, pid: existing.pid, reattached: true,
+          replayFromSequence: existing.replayFromSequence
         })
-      }
-      this.publishSessionHud(message.sessionId)
-      void this.refreshSessionHud(message.sessionId)
-      return
+        if (!this.#hud.snapshot(message.sessionId)) {
+          this.#hud.spawn({
+            sessionId: message.sessionId, profile: existing.profile,
+            ...(shellName(existing.profile) ? { shell: shellName(existing.profile)! } : {}),
+            startedAt: Date.now()
+          })
+        }
+        this.publishSessionHud(message.sessionId)
+        void this.refreshSessionHud(message.sessionId)
+        return
       }
     }
     if (executionMode === 'attach-only') {
@@ -1241,7 +1301,7 @@ export class RuntimeServer {
       ? this.#forkIntents.claimForLaunch(message.sessionId, Date.now())
       : undefined
     if (forkDecision?.kind === 'failed') {
-      await this.#presentForkFailure(message, forkDecision.error)
+      await this.#presentForkFailure(message, forkDecision.error, undefined, attachView)
       return
     }
     const forkLaunch = forkAuthority ??
@@ -1261,7 +1321,7 @@ export class RuntimeServer {
     const persistOrdinaryShellHistory = message.profile === 'shell' &&
       persistentAuthority?.kind === 'shell' &&
       this.#preferences.get('shell.restoreHistoryEnabled')
-    if (persistOrdinaryShellHistory) {
+    if (persistOrdinaryShellHistory && attachView) {
       const blocks = this.#shellHistory.listForLaunch(message.sessionId, true)
       const restored = formatShellHistoryForTerminal(blocks)
       if (restored) {
@@ -1358,7 +1418,7 @@ export class RuntimeServer {
         }),
         ...(runId === undefined ? {} : { runId }),
         ...(controlEnvironment === undefined ? {} : { env: controlEnvironment }),
-        send: this.#sendToPort,
+        ...(attachView ? { send: this.#sendToPort } : {}),
         onOutput: (data) => {
           emittedTerminalOutput = true
           for (const block of shellBlockCollector?.ingest(data) ?? []) {
@@ -1394,7 +1454,7 @@ export class RuntimeServer {
               this.#beginForkFailure(message, activeSession, resumeFailure, forkAuthority)
             } else if (activeSession && resumeBinding) {
               hookRegistration?.retire()
-              this.#beginResumeFallback(message, activeSession, resumeBinding.id, resumeFailure)
+              this.#beginResumeFallback(message, activeSession, resumeBinding.id, resumeFailure, attachView)
             }
           }
         },
@@ -1504,7 +1564,7 @@ export class RuntimeServer {
             return false
           }
           if (resumeExitFallback) {
-            void this.#spawnShellFallback(message)
+            void this.#spawnShellFallback(message, attachView)
             return false
           }
           if (naturalAgentFallback) {
@@ -1515,7 +1575,7 @@ export class RuntimeServer {
                 commandType: 'session.agent-return-shell',
                 requestHash: `agent-return-shell:${message.sessionId}:${now}`
               }, { sessionId: message.sessionId, now })
-              void this.#spawnSerialized({ ...message, profile: 'shell' })
+              void this.#spawnSerialized({ ...message, profile: 'shell' }, attachView)
             } catch (error) {
               try {
                 this.#sessionRepository.returnAgentToShell({
@@ -1523,7 +1583,7 @@ export class RuntimeServer {
                   commandType: 'session.agent-return-shell',
                   requestHash: `agent-return-shell-legacy:${message.sessionId}:${now}`
                 }, message.sessionId, now)
-                void this.#spawnSerialized({ ...message, profile: 'shell' })
+                void this.#spawnSerialized({ ...message, profile: 'shell' }, attachView)
               } catch (fallbackError) {
                 console.error(`[session.agent-return-shell] ${errorMessage(fallbackError)}`)
               }
@@ -1533,7 +1593,7 @@ export class RuntimeServer {
           const fallback = this.#pendingShellFallbacks.get(message.sessionId)
           if (fallback?.session === exited) {
             this.#pendingShellFallbacks.delete(message.sessionId)
-            void this.#spawnShellFallback(fallback.message)
+            void this.#spawnShellFallback(fallback.message, fallback.attachView)
           }
           if (forkFailure) return false
         }
@@ -1570,28 +1630,30 @@ export class RuntimeServer {
       activeSession = session
       this.#endedSessionIds.delete(message.sessionId)
       this.#completedReplayThrough.delete(message.sessionId)
-      this.#attachedSessionIds.add(message.sessionId)
+      if (attachView) this.#attachedSessionIds.add(message.sessionId)
       this.#control?.backend.register(message.sessionId, session)
-      this.#port.postMessage({
-        type: 'terminal.spawned',
-        protocolVersion: PROTOCOL_VERSION,
-        sessionId: message.sessionId,
-        pid: session.pid
-      })
+      if (attachView) {
+        this.#port.postMessage({
+          type: 'terminal.spawned',
+          protocolVersion: PROTOCOL_VERSION,
+          sessionId: message.sessionId,
+          pid: session.pid
+        })
+      }
       this.publishSessionHud(message.sessionId)
       void this.refreshSessionHud(message.sessionId)
       if (pendingResumeFailure && forkLaunch) {
         this.#beginForkFailure(message, session, pendingResumeFailure, forkAuthority)
       } else if (pendingResumeFailure && resumeBinding) {
-        this.#beginResumeFallback(message, session, resumeBinding.id, pendingResumeFailure)
+        this.#beginResumeFallback(message, session, resumeBinding.id, pendingResumeFailure, attachView)
       } else if (resumeMonitor && resumeBinding) {
-        this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
+        this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor, attachView)
       }
     } catch (error) {
       await hookRegistration?.dispose()
       if (forkLaunch && !providerProcessStarted) {
         const reason = `Fork 会话进程启动失败：${errorMessage(error)}`
-        await this.#presentForkFailure(message, reason, forkAuthority)
+        await this.#presentForkFailure(message, reason, forkAuthority, attachView)
         return
       }
       if (resumeBinding && !providerProcessStarted) {
@@ -1600,7 +1662,7 @@ export class RuntimeServer {
           resumeBinding.id,
           `provider process could not start: ${errorMessage(error)}`
         )) {
-          await this.#spawnShellFallbackWithinCurrentSpawn(message)
+          await this.#spawnShellFallbackWithinCurrentSpawn(message, attachView)
           return
         }
       }
@@ -1633,7 +1695,8 @@ export class RuntimeServer {
   async #presentForkFailure(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     reason: string,
-    authority?: ForkExecutionAuthority
+    authority?: ForkExecutionAuthority,
+    attachView = true
   ): Promise<void> {
     if (!this.#failFork(message.sessionId, reason, authority)) return
     const banner = '[Fork 未完成，请检查上方原因后重试]'
@@ -1650,11 +1713,13 @@ export class RuntimeServer {
       ))
       await journal.close()
     }
-    this.#attachedSessionIds.add(message.sessionId)
-    this.#port.postMessage({
-      type: 'terminal.spawned', protocolVersion: PROTOCOL_VERSION,
-      sessionId: message.sessionId, pid: 0, reattached: true, replayFromSequence: 0
-    })
+    if (attachView) {
+      this.#attachedSessionIds.add(message.sessionId)
+      this.#port.postMessage({
+        type: 'terminal.spawned', protocolVersion: PROTOCOL_VERSION,
+        sessionId: message.sessionId, pid: 0, reattached: true, replayFromSequence: 0
+      })
+    }
     this.#hud.exit(message.sessionId, { fallbackToShell: false })
     this.publishSessionHud(message.sessionId)
   }
@@ -1702,7 +1767,8 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     bindingId: string,
-    reason: string
+    reason: string,
+    attachView = true
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
     this.#clearProviderResumeTimer(message.sessionId)
@@ -1710,7 +1776,7 @@ export class RuntimeServer {
     this.#sessions.delete(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
-    this.#pendingShellFallbacks.set(message.sessionId, { session, message })
+    this.#pendingShellFallbacks.set(message.sessionId, { session, message, attachView })
     session.dispose({ notifyExit: false })
   }
 
@@ -1718,7 +1784,8 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     bindingId: string,
-    monitor: ProviderResumeMonitor
+    monitor: ProviderResumeMonitor,
+    attachView = true
   ): void {
     if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     if (!monitor.isMonitoring) return
@@ -1727,7 +1794,7 @@ export class RuntimeServer {
       this.#providerResumeTimers.delete(message.sessionId)
       const reason = monitor.timeout()
       if (!reason || this.#sessions.get(message.sessionId) !== session) return
-      this.#beginResumeFallback(message, session, bindingId, reason)
+      this.#beginResumeFallback(message, session, bindingId, reason, attachView)
     }, this.#providerResumeTimeoutMs))
   }
 
@@ -1900,16 +1967,18 @@ export class RuntimeServer {
   }
 
   async #spawnShellFallback(
-    message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    attachView = true
   ): Promise<void> {
-    await this.#spawnSerialized({ ...message, profile: 'shell' })
+    await this.#spawnSerialized({ ...message, profile: 'shell' }, attachView)
     this.#displayResumeFallback(message.sessionId)
   }
 
   async #spawnShellFallbackWithinCurrentSpawn(
-    message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    attachView = true
   ): Promise<void> {
-    await this.#spawn({ ...message, profile: 'shell' })
+    await this.#spawn({ ...message, profile: 'shell' }, undefined, undefined, attachView)
     this.#displayResumeFallback(message.sessionId)
   }
 
@@ -1921,15 +1990,20 @@ export class RuntimeServer {
   }
 
   async #spawnSerialized(
-    message: Extract<RendererMessage, { type: 'terminal.spawn' }>
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    attachView = true
   ): Promise<void> {
-    await this.#execution.startOrResume(message.sessionId, message)
+    await this.#execution.startOrResume(message.sessionId, message, undefined, attachView)
   }
 
   #session(sessionId: string): PtySession | undefined {
     const session = this.#attachedSessionIds.has(sessionId) ? this.#sessions.get(sessionId) : undefined
     if (!session) {
-      this.#sendError('SESSION_FORBIDDEN', `session ${sessionId} is not attached to this connection`)
+      this.#sendError(
+        'SESSION_FORBIDDEN',
+        `session ${sessionId} is not attached to this connection`,
+        sessionId
+      )
     }
     return session
   }

@@ -28,6 +28,8 @@ export interface TerminalAttachment {
   readOnly?: boolean
 }
 
+export type SessionRecoveryStatus = Extract<RuntimeMessage, { type: 'session.recovery-status' }>
+
 interface PendingRequest {
   resolve(value: unknown): void
   reject(error: Error): void
@@ -59,6 +61,8 @@ export class RuntimeClient {
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #terminalResizeIds = new Map<string, number>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
+  readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
+  readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
@@ -168,6 +172,29 @@ export class RuntimeClient {
     return () => this.#projectionListeners.delete(listener)
   }
 
+  subscribeSessionRecovery(listener: (status: SessionRecoveryStatus) => void): () => void {
+    this.#recoveryListeners.add(listener)
+    for (const status of this.#recoveryStatuses.values()) listener(status)
+    return () => this.#recoveryListeners.delete(listener)
+  }
+
+  prioritizeSessionRecovery(sceneId: string, activeSessionId?: string): void {
+    if (this.#readOnly) return
+    this.#post({
+      type: 'session.recovery-prioritize',
+      protocolVersion: PROTOCOL_VERSION,
+      sceneId,
+      ...(activeSessionId === undefined ? {} : { activeSessionId })
+    })
+  }
+
+  retrySessionRecovery(sessionId: string): void {
+    if (this.#readOnly) return
+    this.#post({
+      type: 'session.recovery-retry', protocolVersion: PROTOCOL_VERSION, sessionId
+    })
+  }
+
   startProjection(afterSequence: number): void {
     this.#projectionAfterSequence = afterSequence
     if (this.#ready) this.#subscribeEvents(afterSequence)
@@ -192,6 +219,12 @@ export class RuntimeClient {
       consumer.listeners.delete(listener)
       if (consumer.listeners.size === 0) {
         this.#terminals.delete(config.sessionId)
+        if (!this.#readOnly) {
+          this.#post({
+            type: 'terminal.view-detach', protocolVersion: PROTOCOL_VERSION,
+            sessionId: config.sessionId
+          })
+        }
         const queue = this.#terminalCheckpoints.get(config.sessionId)
         if (!queue?.inFlight && !queue?.pending) {
           this.#terminalCheckpoints.delete(config.sessionId)
@@ -328,6 +361,11 @@ export class RuntimeClient {
       this.#requests.delete(message.requestId)
       if (message.type === 'rpc.response') pending.resolve(message.result)
       else pending.reject(Object.assign(new Error(message.message), { code: message.code }))
+      return
+    }
+    if (message.type === 'session.recovery-status') {
+      this.#recoveryStatuses.set(message.sessionId, message)
+      for (const listener of this.#recoveryListeners) listener(message)
       return
     }
     if (

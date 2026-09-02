@@ -99,6 +99,30 @@ describe('RuntimeRecoveryService', () => {
     ])
     expect(repeated.failed).toEqual([])
   })
+
+  it('plans restart recovery by current card, foreground list, task, workspace, then background', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-layered-recovery-'))
+    const database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
+    databases.push(database)
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    seedRecoveryHierarchy(database)
+
+    const jobs = new RuntimeRecoveryService(root, database).planSessionRecovery()
+
+    expect(jobs.map(({ sessionId, priority }) => [sessionId, priority])).toEqual([
+      ['current', 'active-session'],
+      ['foreground-offscreen', 'foreground-scene'],
+      ['same-task', 'active-task'],
+      ['same-workspace', 'active-workspace'],
+      ['background', 'background']
+    ])
+    expect(jobs.every(({ executionContextId, profile }) =>
+      typeof executionContextId === 'string' &&
+      executionContextId.startsWith('context-') && profile === 'shell')).toBe(true)
+    expect(jobs.some(({ sessionId }) => sessionId === 'explicitly-stopped')).toBe(false)
+    expect(jobs.some(({ sessionId }) => sessionId === 'deleted')).toBe(false)
+  })
+
 })
 
 function seed(database: RuntimeDatabase, sessionIds: string[]): void {
@@ -121,5 +145,75 @@ function seed(database: RuntimeDatabase, sessionIds: string[]): void {
         sessionId, 'task-1', 'context-1', 'shell', 'running', 1, 1, 1
       )
     }
+  })
+}
+
+
+function seedRecoveryHierarchy(database: RuntimeDatabase): void {
+  database.transaction((tx) => {
+    for (const workspaceId of ['workspace-active', 'workspace-background']) {
+      tx.run(
+        'INSERT INTO workspaces (id, name, root_directory, created_at, updated_at) VALUES (?, ?, ?, 1, 1)',
+        workspaceId, workspaceId, `/tmp/${workspaceId}`
+      )
+      tx.run(
+        'INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at) VALUES (?, ?, ?, ?, 1)',
+        `context-${workspaceId}`, workspaceId, 'plain-directory', `/tmp/${workspaceId}`
+      )
+    }
+    const tasks = [
+      ['task-active', 'workspace-active'],
+      ['task-same-workspace', 'workspace-active'],
+      ['task-background', 'workspace-background']
+    ] as const
+    for (const [taskId, workspaceId] of tasks) {
+      tx.run(
+        'INSERT INTO tasks (id, workspace_id, execution_context_id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 1)',
+        taskId, workspaceId, `context-${workspaceId}`, taskId, 'active'
+      )
+    }
+    const scenes = [
+      ['scene-active', 'task-active'],
+      ['scene-same-task', 'task-active'],
+      ['scene-same-workspace', 'task-same-workspace'],
+      ['scene-background', 'task-background']
+    ] as const
+    for (const [sceneId, taskId] of scenes) {
+      tx.run(
+        'INSERT INTO scenes (id, task_id, name, mode, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)',
+        sceneId, taskId, sceneId, 'card'
+      )
+    }
+    const sessions = [
+      ['current', 'task-active', 'scene-active', 'interrupted', null],
+      ['foreground-offscreen', 'task-active', 'scene-active', 'running', null],
+      ['same-task', 'task-active', 'scene-same-task', 'needs-input', null],
+      ['same-workspace', 'task-same-workspace', 'scene-same-workspace', 'starting', null],
+      ['background', 'task-background', 'scene-background', 'interrupted', null],
+      ['explicitly-stopped', 'task-active', 'scene-active', 'exited', null],
+      ['deleted', 'task-active', 'scene-active', 'interrupted', 9]
+    ] as const
+    let ordinal = 0
+    for (const [sessionId, taskId, sceneId, workStatus, archivedAt] of sessions) {
+      const workspaceId = taskId === 'task-background' ? 'workspace-background' : 'workspace-active'
+      tx.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, created_at, updated_at,
+           last_activity_at, archived_at, work_status
+         ) VALUES (?, ?, ?, 'shell', ?, ?, 1, ?, ?, ?)`,
+        sessionId, taskId, `context-${workspaceId}`,
+        workStatus === 'exited' ? 'exited' : 'interrupted',
+        ++ordinal, ordinal, archivedAt, workStatus
+      )
+      tx.run(
+        'INSERT INTO session_mounts (id, scene_id, session_id, created_at) VALUES (?, ?, ?, ?)',
+        `mount-${sessionId}`, sceneId, sessionId, ordinal
+      )
+    }
+    tx.run("INSERT INTO app_windows (id, kind, state, created_at, updated_at) VALUES ('window-main', 'main', 'visible', 1, 10)")
+    tx.run("INSERT INTO window_navigation (window_id, active_workspace_id, updated_at) VALUES ('window-main', 'workspace-active', 10)")
+    tx.run("INSERT INTO window_workspace_focus (window_id, workspace_id, active_task_id, updated_at) VALUES ('window-main', 'workspace-active', 'task-active', 10)")
+    tx.run("INSERT INTO window_task_focus (window_id, task_id, active_scene_id, updated_at) VALUES ('window-main', 'task-active', 'scene-active', 10)")
+    tx.run("INSERT INTO window_scene_focus (window_id, scene_id, active_session_id, updated_at) VALUES ('window-main', 'scene-active', 'current', 10)")
   })
 }

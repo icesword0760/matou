@@ -28,7 +28,8 @@ export interface SessionExecutionBackend<T = void> {
   startOrResume(
     descriptor: SessionExecutionDescriptor,
     authority?: ForkExecutionAuthority,
-    mode?: 'attach-only'
+    mode?: 'attach-only',
+    attachView?: boolean
   ): Promise<T>
 }
 
@@ -76,7 +77,8 @@ export class SessionExecutionService<T = void> {
   startOrResume(
     sessionId: string,
     descriptor: SessionExecutionDescriptor,
-    authority?: ForkExecutionAuthorityInput
+    authority?: ForkExecutionAuthorityInput,
+    attachView = true
   ): Promise<SessionExecutionResult<T>> {
     if (descriptor.sessionId !== sessionId) {
       return Promise.reject(new Error('Session execution descriptor identity does not match'))
@@ -88,14 +90,14 @@ export class SessionExecutionService<T = void> {
         if (row?.stage === 'failed' && !live) {
           return { kind: 'deferred', operationId: row.operation_id, stage: row.stage }
         }
-        const value = await this.#backend.startOrResume(descriptor)
+        const value = await this.#backend.startOrResume(descriptor, undefined, undefined, attachView)
         return { kind: 'started', value }
       }
 
       // A Renderer may only attach an existing process. It never becomes the
       // executor for an accepted durable Fork merely by mounting an xterm view.
       if (live && authority === undefined) {
-        const value = await this.#backend.startOrResume(descriptor, undefined, 'attach-only')
+        const value = await this.#backend.startOrResume(descriptor, undefined, 'attach-only', attachView)
         return { kind: 'started', value }
       }
       if (!authority) {
@@ -109,7 +111,7 @@ export class SessionExecutionService<T = void> {
         sourceSessionId: row.source_session_id,
         sourceProviderSessionId: row.source_provider_session_id
       }
-      const value = await this.#backend.startOrResume(descriptor, bound)
+      const value = await this.#backend.startOrResume(descriptor, bound, undefined, attachView)
       return { kind: 'started', value, authority: bound }
     })
   }

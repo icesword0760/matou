@@ -1484,6 +1484,60 @@ describe('RuntimeServer domain RPC', () => {
     await settle()
   })
 
+  it('starts queued recovery without a view, then attaches and detaches the active card independently', async () => {
+    const sessions = new RuntimeSessionRegistry()
+    registerSession(database, 'layered-session')
+    const executable = join(root, 'layered-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "ready\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    server.close()
+    port = new MockPort()
+    server = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'layered' })
+    await settle()
+
+    try {
+      await server.ensureSessionRunning({
+        sessionId: 'layered-session', sceneId: 'scene-layered',
+        priority: 'active-session', enqueueSequence: 1,
+        executionContextId: 'replay-context', profile: 'shell'
+      })
+
+      expect(sessions.size).toBe(1)
+      expect(port.sent.some((message) =>
+        message.type === 'terminal.spawned' && message.sessionId === 'layered-session')).toBe(false)
+
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'layered-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned')?.sessionId === 'layered-session')
+      expect(port.last('terminal.spawned')).toMatchObject({ reattached: true })
+
+      port.receive({
+        type: 'terminal.view-detach', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'layered-session'
+      })
+      await settle()
+      expect(sessions.size).toBe(1)
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'layered-session', data: 'detached input'
+      })
+      await settle()
+      expect(port.sent.some((message) =>
+        message.type === 'protocol.error' &&
+        message.code === 'SESSION_FORBIDDEN' &&
+        message.sessionId === 'layered-session'
+      )).toBe(true)
+    } finally {
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('serializes duplicate attach requests so one persisted Session owns one live PTY', async () => {
     registerSession(database, 'duplicate-spawn-session')
     const message = {
