@@ -1344,7 +1344,7 @@ function mutationSceneId(
 function requiresFreshSceneSnapshot(type: string): boolean {
   return [
     'hierarchy.activate-workspace', 'hierarchy.activate-task', 'hierarchy.activate-scene',
-    'hierarchy.create-scene', 'hierarchy.create-canvas', 'hierarchy.reopen-scene',
+    'hierarchy.create-task', 'hierarchy.create-scene', 'hierarchy.create-canvas', 'hierarchy.reopen-scene',
     'hierarchy.split-session', 'hierarchy.fork-session', 'hierarchy.create-shell-sibling',
     'hierarchy.create-fork-child', 'hierarchy.create-fork-sibling',
     'hierarchy.retry-fork', 'hierarchy.remove-failed-fork',

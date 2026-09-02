@@ -1,7 +1,11 @@
+import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
+
+const execFileAsync = promisify(execFile)
 
 export interface MatouFixture {
   app: ElectronApplication
@@ -50,6 +54,7 @@ export async function restartMatouGracefully(
 }
 
 async function startMatou(root: string, options: LaunchMatouOptions = {}): Promise<MatouFixture> {
+  await assertSecondaryAcceptanceDisplay(options.env)
   const dataDirectory = join(root, 'data')
   const workspaceDirectory = join(root, 'matou_workspace')
   const electronUserDataDirectory = join(root, 'electron-user-data')
@@ -78,6 +83,34 @@ async function startMatou(root: string, options: LaunchMatouOptions = {}): Promi
       await app.close().catch(() => {})
       await rm(root, { recursive: true, force: true })
     }
+  }
+}
+
+async function assertSecondaryAcceptanceDisplay(env: Record<string, string> | undefined): Promise<void> {
+  if (process.platform !== 'darwin' || env?.MATOU_E2E_DISPLAY === 'primary') return
+  const { stdout } = await execFileAsync(
+    '/usr/sbin/system_profiler',
+    ['SPDisplaysDataType', '-json'],
+    { maxBuffer: 4 * 1024 * 1024 }
+  )
+  const report = JSON.parse(stdout) as {
+    SPDisplaysDataType?: Array<{
+      spdisplays_ndrvs?: Array<Record<string, unknown>>
+    }>
+  }
+  const displays = report.SPDisplaysDataType?.flatMap(
+    ({ spdisplays_ndrvs }) => spdisplays_ndrvs ?? []
+  ) ?? []
+  const secondaryBuiltIn = displays.find((display) =>
+    display.spdisplays_online === 'spdisplays_yes' &&
+    display.spdisplays_main !== 'spdisplays_yes' &&
+    typeof display.spdisplays_display_type === 'string' &&
+    display.spdisplays_display_type.includes('built-in')
+  )
+  if (!secondaryBuiltIn) {
+    throw new Error(
+      'Visible Electron acceptance requires the connected built-in secondary display; no app window was opened.'
+    )
   }
 }
 

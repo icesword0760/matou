@@ -969,6 +969,60 @@ describe('PRD 05 hierarchy shell', () => {
     ]))
   })
 
+  it('shows a newly created Task only after its initial Scene and Session graph are ready', async () => {
+    let data = fixture()
+    const createdSnapshot = snapshot(
+      'scene-new', 'task-new', 'Shell · /tmp/a', 'node-new', 'mount-new', 'session-new'
+    )
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.create-task') {
+        data = structuredClone(data)
+        const task = { id: 'task-new', workspaceId: 'workspace-a', title: '新事项' }
+        const scene = createdSnapshot.scene
+        const session = {
+          id: 'session-new', taskId: 'task-new', title: 'Shell', executionContextId: 'context-a'
+        }
+        data.tasks.push(task)
+        data.scenes.push(scene)
+        data.sessions.push(session)
+        data.sceneSnapshots!.push(createdSnapshot)
+        data.navigation.taskByWorkspace['workspace-a'] = task.id
+        data.navigation.sceneByTask[task.id] = scene.id
+        data.navigation.sessionByScene[scene.id] = session.id
+        return {
+          workspace: data.workspaces[0], task, scene, session,
+          mount: createdSnapshot.mounts[0], navigation: data.navigation
+        }
+      }
+      if (method === 'hierarchy.get-scene-snapshot') return createdSnapshot
+      if (method === 'hierarchy.get-scene-session-graph') {
+        return {
+          sceneId: 'scene-new', focusedSessionId: 'session-new', edges: [],
+          nodes: [{ ...graphNode('session-new', 'Shell'), sceneId: 'scene-new' }]
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await userEvent.setup().click(await screen.findByRole('button', {
+      name: '在 Workspace A 中新增事项'
+    }))
+
+    expect((await screen.findByTestId('active-task')).textContent).toBe('新事项')
+    expect(screen.getByTestId('xterm-session-new')).toBeTruthy()
+    expect(request.mock.calls.map(([method]) => method)).toEqual(expect.arrayContaining([
+      'hierarchy.get-scene-snapshot', 'hierarchy.get-scene-session-graph'
+    ]))
+  })
+
   it('browses Workspace, Task, Scene, search and copy surfaces while every mutation is disabled in read-only recovery', async () => {
     const data = fixture()
     data.sessions[0] = { ...data.sessions[0]!, kind: 'claude-code' }

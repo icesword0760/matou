@@ -207,6 +207,42 @@ describe('RuntimeProjectionStore', () => {
     expect(store.eventSequence).toBe(1)
   })
 
+  it('makes a Task created in the current window visible before the next full projection', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-1' }],
+      tasks: [{ id: 'task-1', workspaceId: 'workspace-1' }],
+      sessions: [], relations: [], scenes: [],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: {
+          windowId: 'window-1', activeWorkspaceId: 'workspace-1',
+          taskByWorkspace: { 'workspace-1': 'task-1' }, sceneByTask: {}, sessionByScene: {}
+        },
+        taskPlacements: [{ windowId: 'window-1', taskId: 'task-1', ordinal: 0, updatedAt: 1 }]
+      }
+    })
+
+    store.applyCommandResult({
+      task: {
+        id: 'task-2', workspaceId: 'workspace-1', title: '新事项', updatedAt: 2
+      },
+      navigation: {
+        windowId: 'window-1', activeWorkspaceId: 'workspace-1',
+        taskByWorkspace: { 'workspace-1': 'task-2' }, sceneByTask: {}, sessionByScene: {}
+      }
+    }, { type: 'hierarchy.create-task', input: { workspaceId: 'workspace-1' } })
+
+    expect(store.view().hierarchy.taskPlacements).toEqual([
+      expect.objectContaining({ windowId: 'window-1', taskId: 'task-1', ordinal: 0 }),
+      expect.objectContaining({ windowId: 'window-1', taskId: 'task-2', ordinal: 1 })
+    ])
+    expect(store.view().hierarchy.navigation).toMatchObject({
+      taskByWorkspace: { 'workspace-1': 'task-2' }
+    })
+  })
+
   it('merges ordered pin results, path validation and recency without a full projection rebuild', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

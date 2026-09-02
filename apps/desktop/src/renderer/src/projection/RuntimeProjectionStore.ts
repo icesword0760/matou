@@ -145,6 +145,13 @@ export class RuntimeProjectionStore {
         }
       }
     }
+    const returnedTask = asEntity(object.task)
+    if (
+      returnedTask &&
+      (context?.type === 'hierarchy.create-task' || context?.type === 'hierarchy.create-workspace')
+    ) {
+      this.#ensureTaskPlacement(returnedTask)
+    }
     const graph = asSessionGraph(object.graph) ?? asSessionGraph(object)
     if (graph) {
       this.#sessionGraphs[graph.sceneId] = structuredClone(graph)
@@ -306,6 +313,33 @@ export class RuntimeProjectionStore {
     if (index >= 0) pathStates[index] = structuredClone(pathState)
     else pathStates.push(structuredClone(pathState))
     this.#hierarchyMeta = { ...this.#hierarchyMeta, pathStates }
+  }
+
+  #ensureTaskPlacement(task: Entity): void {
+    const navigation = asObject(this.#hierarchyMeta.navigation)
+    const windowId = typeof navigation?.windowId === 'string'
+      ? navigation.windowId
+      : this.#hierarchyMeta.windowId
+    const placements = Array.isArray(this.#hierarchyMeta.taskPlacements)
+      ? [...this.#hierarchyMeta.taskPlacements]
+      : []
+    if (placements.some((candidate) => {
+      const placement = asObject(candidate)
+      return placement?.windowId === windowId && placement.taskId === task.id
+    })) return
+    const ordinals = placements.flatMap((candidate) => {
+      const placement = asObject(candidate)
+      return placement?.windowId === windowId && typeof placement.ordinal === 'number'
+        ? [placement.ordinal]
+        : []
+    })
+    placements.push({
+      windowId,
+      taskId: task.id,
+      ordinal: ordinals.length === 0 ? 0 : Math.max(...ordinals) + 1,
+      updatedAt: typeof task.updatedAt === 'number' ? task.updatedAt : Date.now()
+    })
+    this.#hierarchyMeta = { ...this.#hierarchyMeta, taskPlacements: placements }
   }
 
   #applyOrder(target: Map<string, Entity>, ids: unknown, key: string): void {
