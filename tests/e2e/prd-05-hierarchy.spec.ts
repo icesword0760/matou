@@ -74,7 +74,8 @@ test('creates and renames a Task, adds a Scene, appends a sibling, and deletes o
 
     const visiblePane = page.locator('[data-testid="terminal-pane"]:visible').last()
     await visiblePane.locator('.pane-title').click({ button: 'right' })
-    await page.getByRole('menuitem', { name: '删除会话' }).click()
+    await page.getByRole('menuitem', { name: '移除节点…' }).click()
+    await page.getByRole('button', { name: '移除' }).click()
     await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(1)
   } finally { await fixture.close() }
 })

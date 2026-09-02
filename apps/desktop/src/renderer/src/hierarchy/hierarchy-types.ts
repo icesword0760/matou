@@ -40,13 +40,16 @@ export interface SessionGraphNodeView {
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
   forkAttempt?: number
+  forkProgress?: import('@matou/domain').ForkProgress
   providerSpawnRevision?: number
   canFork: boolean
   title: string
   cwd: string
-  git?: { branch: string; dirty: boolean }
+  git?: SessionGitState
   sharedWorkingDirectory?: boolean
   worktree?: { branch: string; path: string; shared: boolean }
+  environment?: SessionEnvironment
+  hasOwnedWorktree?: boolean
   activeChildCount: number
   stoppedChildCount: number
   childModeCounts: { shell: number; claudeCode: number }
@@ -59,6 +62,8 @@ export interface SessionGraphNodeView {
 }
 export interface SessionGraphView {
   sceneId: string
+  runtimeGeneration?: string
+  eventSequence?: number
   layoutRevision?: number
   focusedSessionId?: string
   nodes: SessionGraphNodeView[]
@@ -175,27 +180,45 @@ export interface HierarchyCommands {
   forkSession(sceneId: string, sessionId: string): unknown
   createCanvas(taskId: string): unknown
   createShellSibling(sceneId: string, sessionId: string, parentSessionId?: string): unknown
-  createForkChild(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
-  createForkSibling(sceneId: string, sessionId: string, name: string, worktreeMode: 'current' | 'new'): unknown
+  createForkChild(
+    sceneId: string, sessionId: string, name: string,
+    worktreeMode: 'current' | 'new', submissionKey: string
+  ): unknown
+  createForkSibling(
+    sceneId: string, sessionId: string, name: string,
+    worktreeMode: 'current' | 'new', submissionKey: string
+  ): unknown
   retryFork(sceneId: string, sessionId: string): unknown
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
+  startFreshProvider(sessionId: string): unknown
   listClaudeSessions(sessionId: string, query: string, providerSessionId?: string): Promise<ClaudeSessionListResult>
   getClaudeSessionDetail(sessionId: string, providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
   loadClaudeSession(sessionId: string, providerSessionId: string): Promise<ClaudeSessionLoadResult>
   restartStoppedSession?(sessionId: string): unknown
-  removeSessionBranch?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown
+  removeSessionBranch?(sceneId: string, sessionId: string, scope: RemoveNodeScope): unknown
   getSceneSessionGraph(sceneId: string): unknown
   recordSessionInteraction(sessionId: string, interactionKind: 'submit' | 'control' | 'provider-action'): unknown
   setFocusedSession(sceneId: string, sessionId: string): unknown
   putGeometry(sceneId: string, ownerKey: string, layoutRevision: number, geometry: unknown): unknown
   activateSession(sessionId: string): unknown
-  deleteSession(sessionId: string, confirmed?: boolean, preserveSceneOnLastSession?: boolean): unknown
+  openSessionEnvironment(sessionId: string): Promise<SessionEnvironmentOpenResult>
+  restoreSessionEnvironment(sessionId: string): Promise<SessionEnvironmentActionResult>
+  locateSessionEnvironment(sessionId: string, path: string): Promise<SessionEnvironmentActionResult>
+  handoffSessionEnvironment(
+    sessionId: string,
+    target: SessionEnvironmentTarget
+  ): Promise<SessionEnvironmentActionResult>
   detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
   returnSession(sceneWindowId: string): unknown
   setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown
   setModel(sessionId: string, modelStrategy: HudModelStrategy): unknown
 }
+import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 import type {
-  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult,
+  RemoveNodeScope,
+  SessionEnvironmentActionResult, SessionEnvironmentOpenResult,
+  SessionEnvironmentTarget
 } from '@matou/contracts'
+export type { RemoveNodeScope } from '@matou/contracts'

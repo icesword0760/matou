@@ -7,6 +7,7 @@ import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
 import { TerminalHud } from './TerminalHud'
 import type { GitRequestClient } from './GitControlMenu'
 import type { SessionHudView } from '../hierarchy/hierarchy-types'
+import type { SessionEnvironmentActions } from './EnvironmentControlMenu'
 
 afterEach(cleanup)
 
@@ -200,6 +201,190 @@ describe('PRD 02 bottom HUD', () => {
 
     expect(await screen.findByText('切换失败：进程启动失败')).toBeTruthy()
     expect(screen.getByRole('button', { name: /当前权限模式：Default/ })).toBeTruthy()
+  })
+
+  it('closes open agent controls immediately when read-only recovery starts', async () => {
+    const user = userEvent.setup()
+    const onPermissionMode = vi.fn()
+    const onModel = vi.fn()
+    const view = render(<TerminalHud hud={agent({ resumable: true })}
+      onPermissionMode={onPermissionMode} onModel={onModel} />)
+
+    await user.click(screen.getByRole('button', { name: /当前权限模式/ }))
+    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
+    expect(screen.getByRole('alertdialog')).toBeTruthy()
+
+    view.rerender(<TerminalHud hud={agent({ resumable: true })}
+      disabledReason="数据库处于只读恢复模式"
+      onPermissionMode={onPermissionMode} onModel={onModel} />)
+
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.getByRole('button', { name: /当前权限模式/ }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: /当前权限模式/ }).title).toBe('数据库处于只读恢复模式')
+    expect(onPermissionMode).not.toHaveBeenCalled()
+    expect(onModel).not.toHaveBeenCalled()
+  })
+
+  it('closes an open repository control immediately when read-only recovery starts', async () => {
+    const user = userEvent.setup()
+    const request = vi.fn(async (
+      _method: RpcMethod, _payload: unknown, _options?: { timeoutMs?: number }
+    ) => ({
+      repositoryRoot: '/tmp/project', cwd: '/tmp/project', currentBranch: 'main',
+      defaultBranch: 'main', dirty: false, stagedCount: 0, unstagedCount: 0,
+      untrackedCount: 0, additions: 0, deletions: 0, ahead: 0, behind: 0,
+      hasRemote: false, canPush: false, branches: [], worktrees: []
+    }))
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
+    }
+    const hud: SessionHudView = {
+      sessionId: 'session-1', mode: 'shell', cwd: '/tmp/project', gitBranch: 'main', startedAt: Date.now()
+    }
+    const view = render(<TerminalHud hud={hud} runtimeClient={runtimeClient}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await user.click(screen.getByRole('button', { name: '打开 Git' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    request.mockClear()
+
+    view.rerender(<TerminalHud hud={hud} runtimeClient={runtimeClient}
+      disabledReason="数据库处于只读恢复模式"
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.queryByRole('dialog', { name: 'Git 与 Worktree' })).toBeNull()
+    expect(screen.getByRole('button', { name: '打开 Git' }).hasAttribute('disabled')).toBe(true)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('keeps Environment and detached Git as separate right-side controls without a live HUD', async () => {
+    const actions = environmentActions()
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      environment={{
+        kind: 'local', state: 'ready', path: '/repo', localExecutionContextId: 'local-context'
+      }}
+      git={{ state: 'ready', detachedHead: '1234567890abcdef', dirty: true }}
+      environmentActions={actions} runtimeClient={{ request: vi.fn() }}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('HEAD 1234567*')
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' }).textContent).toBe('Local')
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开运行环境：Local' }))
+    expect(screen.getByRole('dialog', { name: '运行环境' })).toBeTruthy()
+  })
+
+  it('shows unavailable Git independently instead of hiding it behind an environment error', () => {
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      environment={{
+        kind: 'worktree', state: 'missing', path: '/missing', error: 'path-missing',
+        localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+        worktreeExecutionContextId: 'worktree-context'
+      }}
+      git={{ state: 'unavailable', dirty: false }}
+      environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '打开 Git' })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('Git 不可用')
+    expect(screen.getByRole('button', { name: '打开运行环境：待恢复' }).textContent).toBe('待恢复')
+  })
+
+  it('keeps recovery actions enabled when only the current Environment blocks normal Session mutations', async () => {
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      disabledReason="当前运行环境需要先恢复或交接"
+      environment={{
+        kind: 'worktree', state: 'missing', path: '/missing', error: 'path-missing',
+        localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+        worktreeExecutionContextId: 'worktree-context'
+      }}
+      git={{ state: 'unavailable', dirty: false }}
+      environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开运行环境：待恢复' }))
+
+    expect(screen.getByRole('button', { name: '恢复原 Worktree' })).toHaveProperty('disabled', false)
+    expect(screen.getByRole('button', { name: '定位已移动的 Worktree' })).toHaveProperty('disabled', false)
+    expect(screen.getByRole('button', { name: '交接到 Local' })).toHaveProperty('disabled', false)
+  })
+
+  it('clears the Git badge when a live Shell leaves its repository', () => {
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', shell: 'zsh', cwd: '/outside', startedAt: Date.now()
+    }} sessionId="session-1"
+      environment={{
+        kind: 'local', state: 'ready', path: '/outside', localExecutionContextId: 'local-context'
+      }}
+      git={{ state: 'ready', branch: 'stale-main', dirty: true }}
+      environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.queryByRole('button', { name: '打开 Git' })).toBeNull()
+    expect(screen.queryByText('Git 不可用')).toBeNull()
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' })).toBeTruthy()
+  })
+
+  it('opens Git from the authoritative Environment path instead of a stale HUD cwd', async () => {
+    const request = vi.fn(async (
+      _method: RpcMethod, _payload: unknown, _options?: { timeoutMs?: number }
+    ) => ({
+      repositoryRoot: '/authoritative/worktree', cwd: '/authoritative/worktree',
+      currentBranch: 'main', defaultBranch: 'main', dirty: false,
+      stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+      additions: 0, deletions: 0, ahead: 0, behind: 0,
+      hasRemote: false, canPush: false, branches: [], worktrees: []
+    }))
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
+    }
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/stale/local',
+      gitBranch: 'main', startedAt: Date.now()
+    }} environment={{
+      kind: 'worktree', state: 'ready', path: '/authoritative/worktree',
+      localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+      worktreeExecutionContextId: 'worktree-context'
+    }} git={{ state: 'ready', branch: 'main', dirty: false }}
+      environmentActions={environmentActions()} runtimeClient={runtimeClient}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开 Git' }))
+    expect(await screen.findByRole('dialog', { name: 'Git 与 Worktree' })).toBeTruthy()
+    expect(request).toHaveBeenCalledWith(
+      'git.status', expect.objectContaining({ input: expect.objectContaining({
+        cwd: '/authoritative/worktree'
+      }) }), { timeoutMs: 120_000 }
+    )
+    expect(request.mock.calls.some(([, payload]) =>
+      (payload as { input?: { cwd?: string } }).input?.cwd === '/stale/local'
+    )).toBe(false)
+  })
+
+  it('still renders an explicit unavailable Git projection when Environment has no Git state', () => {
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      environment={{
+        kind: 'local', state: 'ready', path: '/repo', localExecutionContextId: 'local-context'
+      }} environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    const git = screen.getByRole('button', { name: '打开 Git' })
+    expect(git.textContent).toBe('Git 不可用')
+    expect(git).toHaveProperty('disabled', true)
+  })
+
+  it('keeps Git outside narrow-width priority hiding', () => {
+    const { container } = render(<div style={{ width: 240 }}><TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', cwd: '/repo', gitBranch: 'main',
+      gitDirty: false, startedAt: Date.now()
+    }} onPermissionMode={vi.fn()} onModel={vi.fn()} /></div>)
+
+    const git = screen.getByRole('button', { name: '打开 Git' })
+    expect(git.className).not.toMatch(/status-priority-/)
+    expect(container.querySelector('.status-git')).toBe(git)
   })
 })
 

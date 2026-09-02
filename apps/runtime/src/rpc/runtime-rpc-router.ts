@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 
-import type { RpcMethod } from '@matou/contracts'
+import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
 import type {
   DomainCommandMetadata,
   LayoutNode,
@@ -32,6 +32,7 @@ import { ProviderModeService } from '../session-canvas/provider-mode-service'
 import { ForkWorkflowError, ForkWorkflowService } from '../session-canvas/fork-workflow-service'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
+import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
@@ -77,6 +78,7 @@ export class RuntimeRpcRouter {
   readonly #providerModes: ProviderModeService
   readonly #forkWorkflows: ForkWorkflowService
   readonly #git: GitWorkspaceService
+  readonly #gitStates: SessionGitStateRepository
   readonly #claudeSessions: ClaudeSessionCatalog
   readonly #providerConfigs: ProviderConfigStore
 
@@ -105,9 +107,15 @@ export class RuntimeRpcRouter {
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#providerModes = new ProviderModeService(database, transactions)
     this.#forkWorkflows = new ForkWorkflowService(
-      dirname(database.path), database, transactions, { stopRuns: async () => undefined }
+      dirname(database.path), database, transactions, {
+        stopRuns: async () => undefined,
+        ...(options.setupPolicyForWorkspace ? {
+          setupPolicyForWorkspace: options.setupPolicyForWorkspace
+        } : {})
+      }
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
+    this.#gitStates = new SessionGitStateRepository(database)
     this.#claudeSessions = new ClaudeSessionCatalog(
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
@@ -116,6 +124,7 @@ export class RuntimeRpcRouter {
   }
 
   async handle(method: RpcMethod, payload: unknown): Promise<unknown> {
+    this.#accessPolicy.assertRpcAllowed(method)
     try {
       return await this.#dispatch(method, payload)
     } catch (error) {
@@ -153,12 +162,27 @@ export class RuntimeRpcRouter {
       )
     }
     if (method === 'projection.snapshot') return this.#snapshot(payload)
+    if (method === 'hierarchy.get-scene-snapshot') {
+      const sceneId = text(record(payload).sceneId, 'sceneId')
+      const snapshot = this.#scenes.snapshot(sceneId)
+      if (!snapshot) throw new RpcFault('NOT_FOUND', `Scene ${sceneId} does not exist`)
+      return { ...snapshot, geometry: this.#geometry.list(sceneId) }
+    }
     if (method === 'hierarchy.get-scene-session-graph') {
       const input = record(payload)
-      return this.#sessionGraphs.projectSceneGraph(
-        text(input.sceneId, 'sceneId'),
+      const sceneId = text(input.sceneId, 'sceneId')
+      const graph = this.#sessionGraphs.projectSceneGraph(
+        sceneId,
         optionalText(input.windowId, 'windowId')
       )
+      const eventSequence = this.#database.get<{ maximum: number }>(
+        'SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events'
+      )?.maximum ?? 0
+      return {
+        ...graph,
+        runtimeGeneration: this.#database.runtimeGeneration,
+        eventSequence
+      }
     }
     if (method === 'events.replay') {
       const value = record(payload)
@@ -168,10 +192,13 @@ export class RuntimeRpcRouter {
     }
     if (method === 'events.ack') {
       const value = record(payload)
-      this.#events.acknowledge(
-        text(value.consumerId, 'consumerId'),
-        integer(value.throughSequence, 'throughSequence', 0)
-      )
+      const consumerId = text(value.consumerId, 'consumerId')
+      const throughSequence = integer(value.throughSequence, 'throughSequence', 0)
+      // A read-only renderer still needs flow-control acknowledgements, but
+      // persisting its cursor would violate the storage recovery fence.
+      if (!this.#accessPolicy.readOnly) {
+        this.#events.acknowledge(consumerId, throughSequence)
+      }
       return { acknowledged: true }
     }
     if (method === 'geometry.put') {
@@ -287,6 +314,8 @@ export class RuntimeRpcRouter {
           }
         )
         const sceneId = text(input.sceneId, 'sceneId')
+        const now = integer(input.now, 'now', 0)
+        await this.#gitStates.refresh(context.executionContextId, now)
         const existing = this.#database.get<{ id: string }>(
           `SELECT sessions.id FROM sessions
            JOIN session_canvas_memberships AS membership
@@ -296,7 +325,6 @@ export class RuntimeRpcRouter {
            ORDER BY sessions.last_activity_at DESC, sessions.created_at DESC LIMIT 1`,
           sceneId, context.executionContextId
         )
-        const now = integer(input.now, 'now', 0)
         if (existing) {
           return {
             created: false,
@@ -559,6 +587,11 @@ export class RuntimeRpcRouter {
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.start-fresh-provider':
+        return this.#providerModes.startFreshClaude(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.restart-stopped-session':
         return this.#sessionCanvas.restartStoppedSession(command, {
           windowId: text(input.windowId, 'windowId'),
@@ -570,7 +603,7 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sessionId: text(input.sessionId, 'sessionId'),
-          includeDescendants: flag(input.includeDescendants, 'includeDescendants'),
+          scope: enumeration(input.scope, REMOVE_NODE_SCOPES, 'scope'),
           now: integer(input.now, 'now', 0)
         })
       case 'hierarchy.reopen-scene':
@@ -584,6 +617,7 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          submissionKey: text(input.submissionKey, 'submissionKey'),
           name: text(input.name, 'name'),
           worktreeMode: enumeration(input.worktreeMode, ['current', 'new'] as const, 'worktreeMode'),
           now: integer(input.now, 'now', 0)
@@ -593,6 +627,7 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           sceneId: text(input.sceneId, 'sceneId'),
           sourceSessionId: text(input.sourceSessionId, 'sourceSessionId'),
+          submissionKey: text(input.submissionKey, 'submissionKey'),
           name: text(input.name, 'name'),
           worktreeMode: enumeration(input.worktreeMode, ['current', 'new'] as const, 'worktreeMode'),
           now: integer(input.now, 'now', 0)
@@ -872,31 +907,51 @@ export class RuntimeRpcRouter {
   }
 
   #snapshot(payload: unknown): unknown {
-    const workspaces = this.#database.all<{ id: string }>('SELECT id FROM workspaces ORDER BY created_at').map(({ id }) => this.#workspaces.getWorkspace(id)!)
-    const tasks = this.#database.all<{ id: string }>('SELECT id FROM tasks ORDER BY created_at').map(({ id }) => this.#workspaces.getTask(id)!)
-    const sessions = this.#database.all<{ id: string }>('SELECT id FROM sessions ORDER BY created_at').map(({ id }) => this.#sessions.getSession(id)!)
-    const sessionRuns = sessions.flatMap(({ id }) => this.#sessions.listRuns(id))
-    const providerBindings = sessions.flatMap(({ id }) => this.#sessions.listProviderBindings(id))
-    const relations = this.#database.all<{ relation_id: string }>('SELECT relation_id FROM session_relations_current ORDER BY created_at').map(({ relation_id }) => this.#relations.getCurrent(relation_id)!)
-    const sceneSnapshots = this.#database.all<{ id: string }>(
-      'SELECT id FROM scenes ORDER BY task_id, sort_key, created_at, id'
-    ).map(({ id }) => ({
-      ...this.#scenes.snapshot(id)!,
-      geometry: this.#geometry.list(id)
+    // Snapshot recovery is a bulk read. Per-entity repository calls turn a
+    // 1,000-Session restore into tens of thousands of SQLite statements and
+    // repeat that cost after every projection refresh.
+    const workspaces = this.#workspaces.listWorkspaces()
+    const tasks = this.#workspaces.listTasks()
+    const sessions = this.#sessions.listSessions()
+    const sessionRuns = this.#sessions.listAllRuns()
+    const providerBindings = this.#sessions.listAllProviderBindings()
+    const relations = this.#relations.listCurrent()
+    const geometryByScene = new Map<string, ReturnType<GeometryRepository['listAll']>>()
+    for (const geometry of this.#geometry.listAll()) {
+      const values = geometryByScene.get(geometry.sceneId) ?? []
+      values.push(geometry)
+      geometryByScene.set(geometry.sceneId, values)
+    }
+    const sceneSnapshots = this.#scenes.listSnapshots().map((snapshot) => ({
+      ...snapshot,
+      geometry: geometryByScene.get(snapshot.scene.id) ?? []
     }))
     const requestedWindowId = typeof payload === 'object' && payload !== null &&
       'windowId' in payload && typeof payload.windowId === 'string'
       ? payload.windowId
       : undefined
-    const sessionGraphs = Object.fromEntries(sceneSnapshots.map(({ scene }) => [
-      scene.id,
-      this.#sessionGraphs.projectSceneGraph(scene.id, requestedWindowId)
-    ]))
-    const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const windowId = requestedWindowId ?? this.#database.get<{ id: string }>(
       `SELECT id FROM app_windows WHERE kind = 'main' AND state <> 'closed'
        ORDER BY created_at LIMIT 1`
     )?.id ?? 'window-1'
+    const navigation = this.#navigation.get(windowId)
+    const activeWorkspaceId = navigation.activeWorkspaceId
+    const activeTaskId = activeWorkspaceId
+      ? navigation.taskByWorkspace[activeWorkspaceId]
+      : undefined
+    const activeSceneId = activeTaskId ? navigation.sceneByTask[activeTaskId] : undefined
+    // Large installations project the currently user-visible graph. Task or
+    // Scene activation changes navigation first and the following snapshot
+    // projects the new target. Small snapshots retain the complete historical
+    // shape used by diagnostics and compatibility tests.
+    const graphScenes = sceneSnapshots.length <= 20
+      ? sceneSnapshots
+      : sceneSnapshots.filter(({ scene }) => scene.id === activeSceneId)
+    const sessionGraphs = Object.fromEntries(graphScenes.map(({ scene }) => [
+      scene.id,
+      this.#sessionGraphs.projectSceneGraph(scene.id, windowId)
+    ]))
+    const eventSequence = this.#database.get<{ maximum: number }>('SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events')?.maximum ?? 0
     const activeWorkspaces = workspaces.filter(({ archivedAt }) => archivedAt === undefined)
     const activeTasks = tasks.filter(({ archivedAt }) => archivedAt === undefined)
     const activeSessions = sessions.filter(({ archivedAt }) => archivedAt === undefined)
@@ -936,7 +991,7 @@ export class RuntimeRpcRouter {
         ),
         pathStates,
         unreadByTask,
-        navigation: this.#navigation.get(windowId),
+        navigation,
         taskPlacements: this.#navigation.listTaskPlacements()
       }
     }

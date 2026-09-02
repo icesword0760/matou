@@ -10,9 +10,11 @@
 @keyframes session-edge-confirm { from { opacity: .2; transform: scaleY(.08); } to { opacity: .82; transform: scaleY(1); } }
 @keyframes session-edge-cruise { 0% { opacity: .22; transform: scaleY(.18); } 55% { opacity: .85; transform: scaleY(1); } 100% { opacity: .32; transform: scaleY(1); } }
 .session-card-slot { position: relative; box-sizing: border-box; flex: 0 0 calc((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns)); min-width: 0; min-height: 0; transition: flex-basis 380ms cubic-bezier(.2,.8,.2,1); }
-.session-card-slot.is-expanded { flex-basis: min(48%,620px); }
+.session-card-virtual-spacer { flex: 0 0 calc(var(--virtual-count) * (((100% - (var(--session-visible-columns) - 1) * 12px) / var(--session-visible-columns)) + 12px) - 12px); min-width: 0; pointer-events: none; }
+.session-card-slot.is-focused,.session-card-slot.is-expanded { flex-basis: min(48%,620px); }
 .session-compact-summary { display: none; }
 .session-carousel.is-narrow .session-card-slot:not(.is-focused) { flex: 0 0 clamp(112px,28%,176px); }
+.session-carousel.is-narrow .session-card-virtual-spacer { flex-basis: calc(var(--virtual-count) * (clamp(112px,28%,176px) + 12px) - 12px); }
 .session-carousel.is-narrow .session-card-slot.is-focused { flex: 0 0 clamp(260px,68%,560px); }
 .session-carousel.is-narrow .session-card-slot:not(.is-focused) > .session-card > :not(.session-compact-summary) { display: none; }
 .session-carousel.is-narrow .session-card-slot:not(.is-focused) .session-compact-summary { display: grid; height: 100%; box-sizing: border-box; align-content: start; gap: 9px; padding: 14px 12px; overflow: hidden; border: 0; color: rgba(255,255,255,.56); background: var(--terminal-chrome-bg); box-shadow: 0 2px 8px rgba(0,0,0,.18),0 12px 28px rgba(0,0,0,.12); }

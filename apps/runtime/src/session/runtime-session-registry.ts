@@ -7,6 +7,20 @@ export class RuntimeSessionRegistry {
 
   get(sessionId: string): PtySession | undefined { return this.#sessions.get(sessionId) }
   has(sessionId: string): boolean { return this.#sessions.has(sessionId) }
+  get size(): number { return this.#sessions.size }
+  pids(): number[] { return [...this.#sessions.values()].map(({ pid }) => pid) }
+  sessionPids(): Array<{ sessionId: string; pid: number }> {
+    return [...this.#sessions.values()].map(({ sessionId, pid }) => ({ sessionId, pid }))
+  }
+  maxUnackedBytes(): number {
+    return Math.max(0, ...[...this.#sessions.values()].map(({ maximumUnackedBytes }) => maximumUnackedBytes))
+  }
+  retainedDurabilityBytes(): number {
+    return [...this.#sessions.values()].reduce(
+      (total, session) => total + session.retainedDurabilityBytes,
+      0
+    )
+  }
   set(session: PtySession): void { this.#sessions.set(session.sessionId, session) }
   delete(sessionId: string, expected?: PtySession): boolean {
     if (expected && this.#sessions.get(sessionId) !== expected) return false

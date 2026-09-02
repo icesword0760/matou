@@ -173,23 +173,16 @@ describe('GitControlMenu', () => {
       ]
     })
     const { client, request } = clientFor(withWorktree)
-    const onClose = vi.fn()
     render(<GitControlMenu client={client} cwd="/repo" sessionId="session-1"
-      context={{ windowId: 'window-1', sceneId: 'scene-1' }} onClose={onClose} />)
+      context={{ windowId: 'window-1', sceneId: 'scene-1' }} onClose={vi.fn()} />)
 
     await screen.findByRole('dialog', { name: 'Git 控制' })
     await user.click(screen.getByRole('button', { name: '管理 Worktree… 1' }))
     await user.click(screen.getByRole('button', { name: 'feature/one 更多操作' }))
     await user.click(screen.getByRole('button', { name: '在 Finder 中显示' }))
     expect(revealDirectory).toHaveBeenCalledWith('/repo-worktrees/feature')
-    await user.click(screen.getByRole('button', { name: '进入' }))
-    expect(request).toHaveBeenCalledWith('git.worktree-open', expect.objectContaining({
-      input: expect.objectContaining({
-        sessionId: 'session-1', windowId: 'window-1', sceneId: 'scene-1',
-        path: '/repo-worktrees/feature', branch: 'feature/one'
-      })
-    }), { timeoutMs: 120_000 })
-    expect(onClose).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '进入' })).toBeNull()
+    expect(request.mock.calls.some(([method]) => method === 'git.worktree-open')).toBe(false)
   })
 
   it('returns from a second-level view on the first Escape and closes on the second', async () => {

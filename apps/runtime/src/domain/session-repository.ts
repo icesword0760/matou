@@ -13,6 +13,19 @@ import type {
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 
+export interface ProviderIdentityForkAuthority {
+  operationId: string
+  runId: string
+  lease: { token: string; fence: number }
+}
+
+export class StaleForkProviderIdentityError extends Error {
+  constructor(operationId: string) {
+    super(`Fork provider identity authority is stale for operation ${operationId}`)
+    this.name = 'StaleForkProviderIdentityError'
+  }
+}
+
 interface SessionRow {
   id: string
   task_id: string
@@ -291,6 +304,7 @@ export class SessionRepository {
       metadata: unknown
       provisional?: boolean
       now: number
+      forkAuthority?: ProviderIdentityForkAuthority
     }
   ): DomainCommit<ProviderBinding> {
     const providerSessionId = input.providerSessionId.trim()
@@ -303,6 +317,28 @@ export class SessionRepository {
       if (session.archived_at !== null) {
         throw new Error('archived Session cannot record a provider identity')
       }
+      if (input.forkAuthority) {
+        const authoritative = tx.get<{ operation_id: string }>(
+          `SELECT operation_id FROM session_fork_intents
+           WHERE operation_id = ? AND session_id = ?
+             AND state IN ('pending', 'starting') AND stage = 'restoring-provider'
+             AND lease_token = ? AND lease_fence = ?
+             AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+          input.forkAuthority.operationId,
+          input.sessionId,
+          input.forkAuthority.lease.token,
+          input.forkAuthority.lease.fence,
+          input.now
+        )
+        if (!authoritative) {
+          throw new StaleForkProviderIdentityError(input.forkAuthority.operationId)
+        }
+      }
+      const authorityMetadata: Record<string, unknown> = input.forkAuthority === undefined ? {} : {
+        forkOperationId: input.forkAuthority.operationId,
+        forkRunId: input.forkAuthority.runId,
+        forkLeaseFence: input.forkAuthority.lease.fence
+      }
       const existing = tx.get<BindingRow>(
         `SELECT * FROM provider_bindings
          WHERE session_id = ? AND provider = ? AND provider_session_id = ?`,
@@ -312,9 +348,10 @@ export class SessionRepository {
       )
       if (existing) {
         const previousMetadata = parseMetadata(existing.metadata_json)
-        const metadata = {
+        const metadata: Record<string, unknown> = {
           ...(isObject(previousMetadata) ? previousMetadata : {}),
-          ...(isObject(input.metadata) ? input.metadata : {})
+          ...(isObject(input.metadata) ? input.metadata : {}),
+          ...authorityMetadata
         }
         delete metadata.invalidationReason
         if (input.provisional) metadata.provisional = true
@@ -331,8 +368,9 @@ export class SessionRepository {
           existing.id
         )
       } else {
-        const metadata = {
+        const metadata: Record<string, unknown> = {
           ...(isObject(input.metadata) ? input.metadata : {}),
+          ...authorityMetadata,
           ...(input.provisional ? { provisional: true } : {})
         }
         tx.run(
@@ -362,12 +400,53 @@ export class SessionRepository {
         'ProviderBinding'
       ))
       if (!input.provisional) {
-        tx.run(
+        if (input.forkAuthority) {
+          const startingWindow = tx.run(
+            `UPDATE session_fork_intents
+             SET state = 'starting', stage = 'starting-window',
+                 completed_steps = MAX(completed_steps, total_steps - 1), updated_at = ?
+             WHERE operation_id = ? AND session_id = ? AND stage = 'restoring-provider'
+               AND lease_token = ? AND lease_fence = ?
+               AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+            input.now,
+            input.forkAuthority.operationId,
+            input.sessionId,
+            input.forkAuthority.lease.token,
+            input.forkAuthority.lease.fence,
+            input.now
+          )
+          if (startingWindow.changes !== 1) {
+            throw new StaleForkProviderIdentityError(input.forkAuthority.operationId)
+          }
+          const completed = tx.run(
+            `UPDATE session_fork_intents
+             SET state = 'succeeded', stage = 'succeeded', completed_steps = total_steps,
+                 error_message = NULL, completed_at = ?, updated_at = ?
+             WHERE operation_id = ? AND session_id = ? AND stage = 'starting-window'
+               AND lease_token = ? AND lease_fence = ?
+               AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+            input.now,
+            input.now,
+            input.forkAuthority.operationId,
+            input.sessionId,
+            input.forkAuthority.lease.token,
+            input.forkAuthority.lease.fence,
+            input.now
+          )
+          if (completed.changes !== 1) {
+            throw new StaleForkProviderIdentityError(input.forkAuthority.operationId)
+          }
+        } else tx.run(
           `UPDATE session_fork_intents
-           SET state = 'succeeded', error_message = NULL, completed_at = ?
-           WHERE session_id = ? AND state IN ('pending', 'starting')`,
+           SET state = 'succeeded', stage = 'succeeded',
+               completed_steps = total_steps, error_message = NULL, completed_at = ?, updated_at = ?
+           WHERE session_id = ? AND state IN ('pending', 'starting')
+             AND (operation_id = '' OR operation_id LIKE 'legacy-operation:%')
+             AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
           input.now,
-          input.sessionId
+          input.now,
+          input.sessionId,
+          input.now
         )
       }
       emitSessionEvent(
@@ -627,7 +706,7 @@ export class SessionRepository {
     return this.#changeBinding(command, bindingId, 'failed', now, reason)
   }
 
-  failResumeToShell(
+  failResume(
     command: DomainCommandMetadata,
     sessionId: string,
     bindingId: string,
@@ -649,8 +728,10 @@ export class SessionRepository {
       const metadata = parseMetadata(binding.metadata_json)
       tx.run(
         `UPDATE provider_bindings
-         SET resume_state = 'failed', metadata_json = ?, updated_at = ?, invalidated_at = ?
+         SET resume_state = 'failed', restore_state = 'failed', restore_error = ?,
+             metadata_json = ?, updated_at = ?, invalidated_at = ?
          WHERE id = ?`,
+        reason,
         JSON.stringify({
           ...(isObject(metadata) ? metadata : {}),
           invalidationReason: reason
@@ -661,9 +742,7 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell',
-             title = CASE WHEN title IN ('Claude', 'Codex') OR title = id THEN 'Shell' ELSE title END,
-             work_status = 'error',
+         SET work_status = 'error',
              updated_at = ?, last_activity_at = ?,
              version = version + 1
          WHERE id = ?`,
@@ -673,8 +752,6 @@ export class SessionRepository {
       )
       const session = mapSession({
         ...before,
-        kind: 'shell',
-        title: genericShellTitle(before.title, before.id),
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1
@@ -769,16 +846,37 @@ export class SessionRepository {
     return row ? mapSession(row) : undefined
   }
 
+
+  listSessions(): Session[] {
+    return this.#database.all<SessionRow>(
+      'SELECT * FROM sessions ORDER BY created_at, id'
+    ).map(mapSession)
+  }
+
   listRuns(sessionId: string): SessionRun[] {
     return this.#database
       .all<RunRow>('SELECT * FROM session_runs WHERE session_id = ? ORDER BY ordinal', sessionId)
       .map(mapRun)
   }
 
+
+  listAllRuns(): SessionRun[] {
+    return this.#database.all<RunRow>(
+      'SELECT * FROM session_runs ORDER BY session_id, ordinal'
+    ).map(mapRun)
+  }
+
   listProviderBindings(sessionId: string): ProviderBinding[] {
     return this.#database
       .all<BindingRow>('SELECT * FROM provider_bindings WHERE session_id = ? ORDER BY created_at', sessionId)
       .map(mapBinding)
+  }
+
+
+  listAllProviderBindings(): ProviderBinding[] {
+    return this.#database.all<BindingRow>(
+      'SELECT * FROM provider_bindings ORDER BY session_id, created_at, id'
+    ).map(mapBinding)
   }
 
   getResumeBinding(

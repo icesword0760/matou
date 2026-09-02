@@ -13,12 +13,21 @@ import type {
   DomainMutationContext,
   DomainTransactionManager
 } from '../storage/domain-transaction'
+import { SessionEnvironmentRepository } from '../session/session-environment-repository'
 
 const exec = promisify(execFile)
 
 export interface WorktreeSetupStep {
+  idempotencyKey?: string
   command: string
   args: string[]
+}
+
+interface WorktreeSetupCheckpoint {
+  idempotencyKey: string
+  command: string
+  status: 'running' | 'succeeded' | 'failed'
+  output: string
 }
 
 interface WorktreeRow {
@@ -27,6 +36,7 @@ interface WorktreeRow {
   repository_root: string
   worktree_path: string
   branch_name: string
+  base_ref: string | null
   base_revision: string | null
   state: WorktreeState
   setup_policy_json: string
@@ -41,6 +51,7 @@ export class WorktreeService {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
   readonly #stopRuns: (runIds: string[]) => Promise<void>
+  readonly #environments: SessionEnvironmentRepository
 
   constructor(
     database: RuntimeDatabase,
@@ -50,6 +61,7 @@ export class WorktreeService {
     this.#database = database
     this.#transactions = transactions
     this.#stopRuns = dependencies.stopRuns
+    this.#environments = new SessionEnvironmentRepository(database)
   }
 
   async create(
@@ -64,8 +76,14 @@ export class WorktreeService {
       baseRef: string
       setupPolicy: WorktreeSetupStep[]
       now: number
+      beforeExternalSideEffect?: () => void
+      onSetupStarted?: () => Promise<void> | void
+      onCheckpoint?: (
+        point: 'branch-created' | 'path-created' | 'setup-completed'
+      ) => Promise<void> | void
     }
   ): Promise<Worktree> {
+    validateSetupPolicy(input.setupPolicy)
     let worktree = this.get(input.id)
     if (!worktree) {
       worktree = this.#transactions.execute(command, ({ tx, emit }) => {
@@ -83,13 +101,14 @@ export class WorktreeService {
         tx.run(
           `INSERT INTO worktrees (
              id, execution_context_id, repository_root, worktree_path, branch_name,
-             state, setup_policy_json, setup_result_json, cleanup_policy, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
+             base_ref, state, setup_policy_json, setup_result_json, cleanup_policy, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
           input.id,
           input.executionContextId,
           input.repositoryRoot,
           input.path,
           input.branch,
+          input.baseRef,
           JSON.stringify(input.setupPolicy),
           input.now,
           input.now
@@ -105,8 +124,11 @@ export class WorktreeService {
     }
 
     try {
+      input.beforeExternalSideEffect?.()
       const repository = (await exec('git', ['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).stdout.trim()
+      input.beforeExternalSideEffect?.()
       const baseRevision = (await exec('git', ['-C', repository, 'rev-parse', input.baseRef])).stdout.trim()
+      input.beforeExternalSideEffect?.()
       if (!(await pathIsGitWorktree(input.path))) {
         // `git worktree add -b` creates the branch before it creates the target
         // directory. A permission or disk failure can therefore leave the ref
@@ -117,18 +139,65 @@ export class WorktreeService {
         const args = await localBranchExists(repository, input.branch)
           ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
           : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
+        input.beforeExternalSideEffect?.()
         await exec('git', args)
+        input.beforeExternalSideEffect?.()
       }
-      const setupResult: Array<{ command: string; ok: boolean; output: string }> = []
+      await input.onCheckpoint?.('branch-created')
+      await input.onCheckpoint?.('path-created')
+      if (input.setupPolicy.length > 0) await input.onSetupStarted?.()
+      const setupResult = setupCheckpoints(this.get(input.id)?.setupResult ?? [])
       for (const step of input.setupPolicy) {
+        const idempotencyKey = step.idempotencyKey!
+        if (setupResult.some((entry) =>
+          entry.idempotencyKey === idempotencyKey && entry.status === 'succeeded'
+        )) continue
+        replaceCheckpoint(setupResult, {
+          idempotencyKey, command: step.command, status: 'running', output: ''
+        })
+        input.beforeExternalSideEffect?.()
+        this.#persistSetupCheckpoints(
+          derivedCommand(command, `setup:${idempotencyKey}:running`),
+          input.id,
+          setupResult,
+          input.now
+        )
         try {
+          input.beforeExternalSideEffect?.()
           const result = await exec(step.command, step.args, { cwd: input.path })
-          setupResult.push({ command: step.command, ok: true, output: `${result.stdout}${result.stderr}`.slice(-8192) })
+          input.beforeExternalSideEffect?.()
+          replaceCheckpoint(setupResult, {
+            idempotencyKey,
+            command: step.command,
+            status: 'succeeded',
+            output: `${result.stdout}${result.stderr}`.slice(-8192)
+          })
+          input.beforeExternalSideEffect?.()
+          this.#persistSetupCheckpoints(
+            derivedCommand(command, `setup:${idempotencyKey}:succeeded`),
+            input.id,
+            setupResult,
+            input.now
+          )
         } catch (error) {
-          setupResult.push({ command: step.command, ok: false, output: errorMessage(error).slice(-8192) })
+          replaceCheckpoint(setupResult, {
+            idempotencyKey,
+            command: step.command,
+            status: 'failed',
+            output: errorMessage(error).slice(-8192)
+          })
+          input.beforeExternalSideEffect?.()
+          this.#persistSetupCheckpoints(
+            derivedCommand(command, `setup:${idempotencyKey}:failed`),
+            input.id,
+            setupResult,
+            input.now
+          )
           throw error
         }
       }
+      await input.onCheckpoint?.('setup-completed')
+      input.beforeExternalSideEffect?.()
 
       return this.#transactions.execute(derivedCommand(command, 'ready'), ({ tx, emit }) => {
         tx.run(
@@ -145,6 +214,7 @@ export class WorktreeService {
         return mapWorktree(ready)
       }).result
     } catch (error) {
+      input.beforeExternalSideEffect?.()
       this.#transactions.execute(derivedCommand(command, 'failed'), ({ tx, emit }) => {
         tx.run("UPDATE worktrees SET state = 'failed', updated_at = ? WHERE id = ?", input.now, input.id)
         const failed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', input.id))
@@ -155,54 +225,75 @@ export class WorktreeService {
     }
   }
 
+  #persistSetupCheckpoints(
+    command: DomainCommandMetadata,
+    worktreeId: string,
+    checkpoints: WorktreeSetupCheckpoint[],
+    now: number
+  ): void {
+    this.#transactions.execute(command, ({ tx }) => {
+      tx.run(
+        `UPDATE worktrees SET setup_result_json = ?, updated_at = ? WHERE id = ?`,
+        JSON.stringify(checkpoints), now, worktreeId
+      )
+      return null
+    })
+  }
+
   async remove(command: DomainCommandMetadata, worktreeId: string, now: number): Promise<Worktree> {
     const worktree = this.get(worktreeId)
     if (!worktree) throw new Error(`Worktree ${worktreeId} does not exist`)
     if (worktree.state === 'removed') return worktree
-    const status = await exec('git', ['-C', worktree.path, 'status', '--porcelain'])
-    if (status.stdout.trim() !== '') {
-      return this.#transactions.execute(command, ({ tx, emit }) => {
-        tx.run(
-          "UPDATE worktrees SET state = 'retained', retained_at = ?, updated_at = ? WHERE id = ?",
-          now,
-          now,
-          worktreeId
-        )
-        const retained = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
-        emitWorktree(emit, command.commandId, 'worktree.retained-dirty', retained, undefined, now)
-        return mapWorktree(retained)
-      }).result
-    }
-
-    const runIds = this.#database
-      .all<{ id: string }>(
-        `SELECT session_runs.id
-         FROM session_runs
-         JOIN sessions ON sessions.id = session_runs.session_id
-         WHERE sessions.execution_context_id = ?
-           AND session_runs.status IN ('starting', 'running')`,
-        worktree.executionContextId
-      )
-      .map(({ id }) => id)
-    await this.#stopRuns(runIds)
-    this.#transactions.execute(command, ({ tx, emit }) => {
-      tx.run("UPDATE worktrees SET state = 'removing', updated_at = ? WHERE id = ?", now, worktreeId)
-      const removing = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
-      emitWorktree(emit, command.commandId, 'worktree.removal-started', removing, undefined, now)
-      return null
-    })
     try {
+      if (!(await pathExists(worktree.path))) {
+        await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'prune'])
+        return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
+      }
+      const status = await exec('git', ['-C', worktree.path, 'status', '--porcelain'])
+      if (status.stdout.trim() !== '') {
+        return this.#transactions.execute(command, ({ tx, emit }) => {
+          tx.run(
+            "UPDATE worktrees SET state = 'retained', retained_at = ?, updated_at = ? WHERE id = ?",
+            now,
+            now,
+            worktreeId
+          )
+          const retained = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
+          emitWorktree(emit, command.commandId, 'worktree.retained-dirty', retained, undefined, now)
+          return mapWorktree(retained)
+        }).result
+      }
+
+      const runIds = this.#database
+        .all<{ id: string }>(
+          `SELECT session_runs.id
+           FROM session_runs
+           JOIN sessions ON sessions.id = session_runs.session_id
+           WHERE sessions.execution_context_id = ?
+             AND session_runs.status IN ('starting', 'running')`,
+          worktree.executionContextId
+        )
+        .map(({ id }) => id)
+      await this.#stopRuns(runIds)
+      this.#transactions.execute(command, ({ tx, emit }) => {
+        tx.run("UPDATE worktrees SET state = 'removing', updated_at = ? WHERE id = ?", now, worktreeId)
+        const removing = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
+        emitWorktree(emit, command.commandId, 'worktree.removal-started', removing, undefined, now)
+        return null
+      })
       await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'remove', worktree.path])
-      return this.#transactions.execute(derivedCommand(command, 'removed'), ({ tx, emit }) => {
-        tx.run("UPDATE worktrees SET state = 'removed', updated_at = ? WHERE id = ?", now, worktreeId)
-        tx.run('UPDATE execution_contexts SET archived_at = ? WHERE id = ?', now, worktree.executionContextId)
-        const removed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
-        emitWorktree(emit, `${command.commandId}:removed`, 'worktree.removed', removed, undefined, now)
-        return mapWorktree(removed)
-      }).result
+      return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
     } catch (error) {
       this.#transactions.execute(derivedCommand(command, 'remove-failed'), ({ tx, emit }) => {
         tx.run("UPDATE worktrees SET state = 'failed', updated_at = ? WHERE id = ?", now, worktreeId)
+        const sessions = tx.all<{ session_id: string }>(
+          `SELECT session_id FROM session_environment_bindings
+           WHERE managed_worktree_id = ? AND active_target = 'worktree'`,
+          worktreeId
+        )
+        for (const { session_id: sessionId } of sessions) {
+          this.#environments.markFailed(sessionId, `worktree-removal-failed:${errorMessage(error)}`, now, tx)
+        }
         const failed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
         emitWorktree(emit, `${command.commandId}:remove-failed`, 'worktree.removal-failed', failed, undefined, now, { error: errorMessage(error) })
         return null
@@ -269,6 +360,29 @@ export class WorktreeService {
     )
     return row ? mapWorktree(row) : undefined
   }
+
+  #completeRemoval(
+    command: DomainCommandMetadata,
+    worktreeId: string,
+    executionContextId: string,
+    now: number
+  ): Worktree {
+    return this.#transactions.execute(derivedCommand(command, 'removed'), ({ tx, emit }) => {
+      tx.run("UPDATE worktrees SET state = 'removed', updated_at = ? WHERE id = ?", now, worktreeId)
+      tx.run('UPDATE execution_contexts SET archived_at = ? WHERE id = ?', now, executionContextId)
+      const sessions = tx.all<{ session_id: string }>(
+        `SELECT session_id FROM session_environment_bindings
+         WHERE managed_worktree_id = ? AND active_target = 'worktree'`,
+        worktreeId
+      )
+      for (const { session_id: sessionId } of sessions) {
+        this.#environments.markMissing(sessionId, 'worktree:removed', now, tx)
+      }
+      const removed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', worktreeId))
+      emitWorktree(emit, `${command.commandId}:removed`, 'worktree.removed', removed, undefined, now)
+      return mapWorktree(removed)
+    }).result
+  }
 }
 
 function emitWorktree(
@@ -329,6 +443,15 @@ async function pathIsGitWorktree(path: string): Promise<boolean> {
   }
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function localBranchExists(repository: string, branch: string): Promise<boolean> {
   try {
     await exec('git', [
@@ -350,4 +473,34 @@ function requireWorktreeRow(row: WorktreeRow | undefined): WorktreeRow {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function validateSetupPolicy(policy: WorktreeSetupStep[]): void {
+  const keys = new Set<string>()
+  for (const step of policy) {
+    const key = step.idempotencyKey?.trim()
+    if (!key) throw new Error(`Worktree setup command ${step.command} requires idempotencyKey`)
+    if (keys.has(key)) throw new Error(`Duplicate Worktree setup idempotencyKey: ${key}`)
+    keys.add(key)
+  }
+}
+
+function setupCheckpoints(value: unknown[]): WorktreeSetupCheckpoint[] {
+  return value.filter((entry): entry is WorktreeSetupCheckpoint => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const candidate = entry as Partial<WorktreeSetupCheckpoint>
+    return typeof candidate.idempotencyKey === 'string' &&
+      typeof candidate.command === 'string' &&
+      (candidate.status === 'running' || candidate.status === 'succeeded' || candidate.status === 'failed') &&
+      typeof candidate.output === 'string'
+  })
+}
+
+function replaceCheckpoint(
+  checkpoints: WorktreeSetupCheckpoint[],
+  next: WorktreeSetupCheckpoint
+): void {
+  const index = checkpoints.findIndex(({ idempotencyKey }) => idempotencyKey === next.idempotencyKey)
+  if (index === -1) checkpoints.push(next)
+  else checkpoints[index] = next
 }

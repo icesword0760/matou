@@ -5,20 +5,30 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
+import type { DagWindowContext } from '../../../shared/desktop-api'
 import { DagWindowApp } from './DagWindowApp'
 
-const runtime = vi.hoisted(() => ({ current: null as null | { request: ReturnType<typeof vi.fn> } }))
+const runtime = vi.hoisted(() => ({ current: null as null | {
+  request: ReturnType<typeof vi.fn>
+  startProjection?: ReturnType<typeof vi.fn>
+  subscribeProjection?: ReturnType<typeof vi.fn>
+} }))
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
 let runtimeConnectionListener: ((state: 'reconnecting' | 'ready') => void) | undefined
 let dagNotificationListener: ((sessionIds: string[]) => void) | undefined
+let dagContextListener: ((context: DagWindowContext) => void) | undefined
 
 beforeEach(() => {
   runtime.current = null
   runtimeConnectionListener = undefined
   dagNotificationListener = undefined
+  dagContextListener = undefined
   window.history.replaceState({}, '', '/?kind=dag&mainWindowId=main-1&sceneId=scene-1&sessionId=child&theme=light')
   Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
-    selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn(() => () => {}),
+    selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn((listener) => {
+      dagContextListener = listener
+      return () => { dagContextListener = undefined }
+    }),
     onDagNotifications: vi.fn((listener) => {
       dagNotificationListener = listener
       return () => { dagNotificationListener = undefined }
@@ -53,7 +63,7 @@ describe('DagWindowApp', () => {
   it('shows Git branch, dirty state and shared-worktree impact on a node card', () => {
     const data = graph()
     data.nodes[1] = {
-      ...data.nodes[1]!, git: { branch: 'feature/dag', dirty: true },
+      ...data.nodes[1]!, git: { state: 'ready', branch: 'feature/dag', dirty: true },
       sharedWorkingDirectory: true
     }
     render(<DagWindowApp fixtureGraph={data} />)
@@ -84,6 +94,99 @@ describe('DagWindowApp', () => {
     expect(screen.getByRole('status').textContent).toContain('正在重新连接')
   })
 
+  it('updates the open DAG from semantic events without polling the complete graph', async () => {
+    let projectionListener: ((message: unknown) => void) | undefined
+    const data = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    const startProjection = vi.fn()
+    const subscribeProjection = vi.fn((listener) => {
+      projectionListener = listener
+      return () => { projectionListener = undefined }
+    })
+    const interval = vi.spyOn(window, 'setInterval')
+    runtime.current = { request, startProjection, subscribeProjection }
+
+    render(<DagWindowApp />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+
+    expect(startProjection).toHaveBeenCalledWith(7)
+    expect(interval.mock.calls.some(([, delay]) => delay === 500)).toBe(false)
+    act(() => projectionListener?.({
+      type: 'events.batch', runtimeGeneration: 'runtime-1', events: [{
+        sequence: 8, eventType: 'session.graph-summary-changed', aggregateId: 'scene-1',
+        payload: { graph: { ...graph(), nodes: [node('root', 'Root'), node('child', 'Live Child')] } }
+      }]
+    }))
+
+    expect(await screen.findByRole('button', { name: '打开会话：Live Child' })).toBeTruthy()
+    expect(request.mock.calls.filter(([method]) => method === 'hierarchy.get-scene-session-graph')).toHaveLength(1)
+  })
+
+  it('publishes only the latest graph-bearing event burst on the next animation frame', async () => {
+    let projectionListener: ((message: unknown) => void) | undefined
+    const data = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn((listener) => {
+        projectionListener = listener
+        return () => { projectionListener = undefined }
+      })
+    }
+
+    render(<DagWindowApp />)
+    await screen.findByRole('button', { name: '打开会话：Child' })
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    }))
+
+    for (const [sequence, title] of [[8, 'Burst 1'], [9, 'Burst 2'], [10, 'Burst final']] as const) {
+      act(() => projectionListener?.({
+        type: 'events.batch', runtimeGeneration: 'runtime-1', events: [{
+          sequence, eventType: 'session.graph-summary-changed', aggregateId: 'scene-1',
+          payload: { graph: { ...graph(), nodes: [node('root', 'Root'), node('child', title)] } }
+        }]
+      }))
+    }
+
+    expect(screen.getByRole('button', { name: '打开会话：Child' })).toBeTruthy()
+    expect(frames).toHaveLength(1)
+    act(() => frames.shift()?.(performance.now()))
+    expect(screen.getByRole('button', { name: '打开会话：Burst final' })).toBeTruthy()
+  })
+
+  it('renders a large authoritative graph handoff before the scoped Runtime refresh completes', async () => {
+    const handedOffGraph = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return new Promise(() => {})
+      return undefined
+    })
+    const startProjection = vi.fn()
+    runtime.current = { request, startProjection, subscribeProjection: vi.fn(() => () => {}) }
+
+    render(<DagWindowApp />)
+    act(() => dagContextListener?.({
+      mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'child', theme: 'light',
+      requestedAt: Date.now() - 20, initialGraph: JSON.stringify(handedOffGraph)
+    }))
+
+    expect(await screen.findByRole('application', { name: '会话 DAG 画布' })).toBeTruthy()
+    expect(document.querySelector('.dag-window')?.getAttribute('data-first-operable-ms')).not.toBeNull()
+    expect(startProjection).toHaveBeenCalledWith(7)
+  })
+
   it('persists every changed viewport before the short-lived native DAG can close', async () => {
     const data = graph()
     const request = vi.fn(async (method: string) => {
@@ -103,6 +206,48 @@ describe('DagWindowApp', () => {
       sceneId: 'scene-1', ownerKey: 'dag-viewport:scene-1',
       geometry: expect.objectContaining({ zoom: 1.1 })
     }))
+  })
+
+  it('keeps DAG browsing active but never persists viewport geometry in read-only recovery', async () => {
+    const data = graph()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = { request }
+
+    render(<DagWindowApp runtimeMode="read-only" />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+    request.mockClear()
+    await userEvent.setup().click(screen.getByRole('button', { name: '放大' }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开会话：Child' }))
+
+    expect(screen.getByRole('status').textContent).toContain('数据库处于只读恢复模式')
+    expect(request).not.toHaveBeenCalledWith('geometry.put', expect.anything())
+    expect(window.matouDesktop.selectDagNode).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'child'
+    }))
+  })
+
+  it('does not flush a pending viewport change while entering read-only recovery', async () => {
+    const data = graph()
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = { request }
+
+    const view = render(<DagWindowApp />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+    await userEvent.setup().click(screen.getByRole('button', { name: '放大' }))
+    request.mockClear()
+
+    view.rerender(<DagWindowApp runtimeMode="read-only" />)
+    await screen.findByText('数据库处于只读恢复模式')
+
+    expect(request).not.toHaveBeenCalledWith('geometry.put', expect.anything())
   })
 })
 

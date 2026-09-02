@@ -16,20 +16,23 @@ export class ProviderResumeMonitor {
     return !this.#failed && !this.#settled
   }
 
+  get isSettled(): boolean {
+    return this.#settled
+  }
+
   ingest(data: string): string | undefined {
     if (this.#failed || this.#settled) return undefined
     this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
       .slice(-8_192)
+    if (RESUME_FAILURE_PATTERNS.some((pattern) => pattern.test(this.#recentOutput))) {
+      this.#failed = true
+      return 'provider session not found'
+    }
     if (this.#recentOutput.length > 2_000) {
       this.#settled = true
       this.#recentOutput = ''
-      return undefined
     }
-    if (!RESUME_FAILURE_PATTERNS.some((pattern) => pattern.test(this.#recentOutput))) {
-      return undefined
-    }
-    this.#failed = true
-    return 'provider session not found'
+    return undefined
   }
 
   timeout(): string | undefined {

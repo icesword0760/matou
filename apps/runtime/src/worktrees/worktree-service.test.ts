@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, realpath, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -128,6 +128,49 @@ describe('WorktreeService', () => {
     await expect(exec('git', ['-C', path, 'branch', '--show-current'])).resolves.toMatchObject({
       stdout: 'retry-partial\n'
     })
+  })
+
+  it('checkpoints idempotent setup and skips a completed step after restart', async () => {
+    const path = join(root, 'worktrees', 'checkpointed')
+    const counter = join(root, 'setup-counter')
+    const input = {
+      id: 'worktree-checkpointed', executionContextId: 'context-checkpointed',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch: 'checkpointed', baseRef: 'HEAD',
+      setupPolicy: [{
+        idempotencyKey: 'write-counter', command: '/bin/sh',
+        args: ['-c', `echo setup >> ${JSON.stringify(counter)}`]
+      }],
+      now: 30
+    }
+
+    await expect(service.create(command('checkpoint-crash'), {
+      ...input,
+      onCheckpoint: (point) => {
+        if (point === 'setup-completed') throw new Error('simulated restart')
+      }
+    })).rejects.toThrow('simulated restart')
+    expect(JSON.parse(database.get<{ setup_result_json: string }>(
+      'SELECT setup_result_json FROM worktrees WHERE id = ?', input.id
+    )!.setup_result_json)).toEqual([{
+      idempotencyKey: 'write-counter', command: '/bin/sh',
+      status: 'succeeded', output: ''
+    }])
+
+    await expect(service.create(command('checkpoint-resume'), input)).resolves.toMatchObject({
+      state: 'ready'
+    })
+    expect(await readFile(counter, 'utf8')).toBe('setup\n')
+  })
+
+  it('rejects a production setup command without an idempotency key', async () => {
+    await expect(service.create(command('missing-idempotency'), {
+      id: 'worktree-invalid-setup', executionContextId: 'context-invalid-setup',
+      workspaceId: 'workspace-1', repositoryRoot,
+      path: join(root, 'worktrees', 'invalid-setup'), branch: 'invalid-setup',
+      baseRef: 'HEAD', setupPolicy: [{ command: '/usr/bin/true', args: [] }], now: 40
+    })).rejects.toThrow('requires idempotencyKey')
+    expect(service.get('worktree-invalid-setup')).toBeUndefined()
   })
 })
 

@@ -54,6 +54,35 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('keeps restoring while responsive card offsets are still changing', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      initialScrollLeft={563} initialAnchor={{ sessionId: 'session-3', viewportOffset: 60 }}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const focusedSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    let position = 0
+    let offsetReads = 0
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 720 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: {
+        configurable: true,
+        get: () => position,
+        set: (value: number) => { position = Math.max(0, Math.min(1_280, value)) }
+      }
+    })
+    Object.defineProperty(focusedSlot, 'offsetLeft', {
+      configurable: true,
+      get: () => 800 + Math.min(++offsetReads, 25) * 4
+    })
+
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(viewport.scrollLeft).toBe(840)
+    vi.useRealTimers()
+  })
+
   it('does not replay refreshed persisted geometry over the live viewport', () => {
     vi.useFakeTimers()
     const nodes = fixtures(5)
@@ -99,6 +128,18 @@ describe('SessionCarousel', () => {
     expect(screen.getAllByLabelText(/^会话：/)).toHaveLength(7)
     expect(document.querySelectorAll('[data-in-viewport="true"]')).toHaveLength(4)
     expect(screen.getByRole('region', { name: '同级会话列表' }).getAttribute('data-visible-columns')).toBe('4')
+  })
+
+  it('virtualizes a 1000-Session strip while preserving its logical size', () => {
+    render(<SessionCarousel nodes={fixtures(1000)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    expect(viewport.getAttribute('data-total-sessions')).toBe('1000')
+    expect(viewport.getAttribute('data-foreground-terminals')).toBe('1000')
+    expect(Number(viewport.getAttribute('data-rendered-sessions'))).toBeLessThanOrEqual(20)
+    expect(document.querySelectorAll('[data-session-card]').length).toBeLessThanOrEqual(20)
+    expect(document.querySelectorAll('.session-card-virtual-spacer')).toHaveLength(1)
   })
 
   it('does not reserve a bottom status bar inside Session cards', () => {
@@ -393,6 +434,75 @@ describe('SessionCarousel', () => {
     fireEvent.pointerLeave(viewport)
     expect(other.classList.contains('is-expanded')).toBe(false)
     expect(active.classList.contains('is-expanded')).toBe(true)
+  })
+
+  it('uses slot expansion only for transient hover while focus remains independently visible', () => {
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-2"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    const activeSlot = document.querySelector<HTMLElement>('[data-session-id="session-2"]')!
+    const otherSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+
+    expect(activeSlot.classList.contains('is-focused')).toBe(true)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(false)
+    fireEvent.mouseEnter(activeSlot.querySelector('[data-session-card]')!)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(true)
+    fireEvent.pointerLeave(viewport)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(false)
+    fireEvent.mouseEnter(otherSlot.querySelector('[data-session-card]')!)
+    expect(otherSlot.classList.contains('is-expanded')).toBe(true)
+
+    fireEvent.pointerLeave(viewport)
+    expect(otherSlot.classList.contains('is-expanded')).toBe(false)
+    expect(activeSlot.classList.contains('is-focused')).toBe(true)
+  })
+
+  it('marks an explicit DAG reveal as the single selected slot expansion', () => {
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-2"
+      revealRequest={{ sessionId: 'session-2', sequence: 1 }}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    const activeSlot = document.querySelector<HTMLElement>('[data-session-id="session-2"]')!
+
+    fireEvent.pointerLeave(viewport)
+
+    expect(document.querySelectorAll('.session-card-slot.is-expanded')).toHaveLength(1)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(true)
+  })
+
+  it('does not recenter a preview that the user activates in place', () => {
+    vi.useFakeTimers()
+    const nodes = fixtures(5)
+    let focused = 'session-1'
+    let view: ReturnType<typeof render>
+    const renderCarousel = () => <SessionCarousel nodes={nodes} focusedSessionId={focused}
+      onActivate={(sessionId) => {
+        focused = sessionId
+        view.rerender(renderCarousel())
+      }} renderSession={(node) => <span className="terminal-surface">{node.title}</span>} />
+    view = render(renderCarousel())
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const targetSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const target = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 120, writable: true }
+    })
+    Object.defineProperties(targetSlot, {
+      offsetLeft: { configurable: true, value: 780 },
+      offsetWidth: { configurable: true, value: 420 }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 120
+
+    fireEvent.mouseEnter(target)
+    fireEvent.pointerDown(target.querySelector('.terminal-surface')!)
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(focused).toBe('session-3')
+    expect(viewport.scrollLeft).toBe(120)
+    vi.useRealTimers()
   })
 
   it('keeps bringing the active card into view while its layout settles', () => {
@@ -913,6 +1023,20 @@ describe('SessionCarousel', () => {
     expect(sibling.getAttribute('aria-hidden')).toBe('false')
     expect(sibling.textContent).toContain('恢复失败')
     expect(sibling.textContent).toContain('子会话 3')
+  })
+
+  it('activates a compact sibling summary in a narrow window with one pointer press', () => {
+    const onActivate = vi.fn()
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-1"
+      onActivate={onActivate} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 600 })
+    fireEvent(window, new Event('resize'))
+
+    const summary = document.querySelector('[data-session-id="session-2"] .session-compact-summary')!
+    fireEvent.pointerDown(summary, { button: 0 })
+
+    expect(onActivate).toHaveBeenCalledWith('session-2')
   })
 
   it('finishes restoring at the browser-clamped reachable position', () => {

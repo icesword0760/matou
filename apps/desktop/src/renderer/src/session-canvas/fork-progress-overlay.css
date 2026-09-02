@@ -1,0 +1,81 @@
+.fork-progress-overlay {
+  position: absolute;
+  z-index: 94;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 24px;
+  background: rgba(17, 18, 20, .78);
+  backdrop-filter: blur(5px);
+}
+
+.fork-progress-overlay__content {
+  display: flex;
+  width: min(420px, calc(100% - 24px));
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  padding: 22px;
+  border: 1px solid rgba(120, 171, 239, .34);
+  border-radius: 12px;
+  color: #e7eef9;
+  background: rgba(29, 34, 43, .96);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, .34);
+  gap: 9px;
+  text-align: center;
+}
+
+.fork-progress-overlay__spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(126, 177, 242, .28);
+  border-top-color: #7eb1f2;
+  border-radius: 50%;
+  animation: fork-progress-spin .8s linear infinite;
+}
+
+.fork-progress-overlay__content p,
+.fork-progress-overlay__content small {
+  margin: 0;
+  color: #aebdd1;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.fork-progress-overlay__bar {
+  width: min(280px, 100%);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(126, 177, 242, .16);
+}
+
+.fork-progress-overlay__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #7eb1f2;
+  transition: width 180ms ease;
+}
+
+.hierarchy-shell[data-theme="light"] .fork-progress-overlay {
+  background: rgba(246, 249, 253, .82);
+}
+
+.hierarchy-shell[data-theme="light"] .fork-progress-overlay__content {
+  border-color: #c7d9f2;
+  color: #23364f;
+  background: rgba(255, 255, 255, .97);
+  box-shadow: 0 16px 44px rgba(32, 68, 112, .13);
+}
+
+.hierarchy-shell[data-theme="light"] .fork-progress-overlay__content p,
+.hierarchy-shell[data-theme="light"] .fork-progress-overlay__content small { color: #60748d; }
+
+@keyframes fork-progress-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fork-progress-overlay__spinner { animation: none; }
+  .fork-progress-overlay__bar > span { transition: none; }
+}

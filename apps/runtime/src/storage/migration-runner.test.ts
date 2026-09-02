@@ -1,4 +1,4 @@
-import { access, mkdtemp } from 'node:fs/promises'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -44,6 +44,9 @@ describe('MigrationRunner', () => {
         'session_runs',
         'provider_bindings',
         'session_fork_intents',
+        'session_environment_bindings',
+        'session_environment_transitions',
+        'execution_context_git_states',
         'session_canvas_memberships',
         'session_graph_summaries',
         'shell_history_blocks',
@@ -97,6 +100,9 @@ describe('MigrationRunner', () => {
       .toEqual(expect.arrayContaining(['restore_state', 'restore_error', 'user_exited_at']))
     expect(database.all<{ name: string }>('PRAGMA table_info(session_canvas_memberships)').map(({ name }) => name))
       .toEqual(expect.arrayContaining(['pending_user_interaction_seq']))
+    expect(database.get<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'session_relations_structural_lookup_idx'"
+    )).toEqual({ name: 'session_relations_structural_lookup_idx' })
   })
 
   it('is idempotent when every migration is already applied', async () => {
@@ -192,6 +198,238 @@ describe('MigrationRunner', () => {
        ) VALUES ('binding-a-duplicate', 'card-a', 'claude-code', 'provider-shared',
                  'available', '{}', 3, 3)`
     )).toThrow()
+  })
+
+  it('upgrades a real v21 database with independent local and owned Worktree bindings', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 21)).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('local-context', 'workspace', 'plain-directory', '/tmp/workspace', 1),
+              ('worktree-context', 'workspace', 'git-worktree', '/tmp/worktree', 2)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES ('worktree', 'worktree-context', '/tmp/workspace', '/tmp/worktree',
+                 'codex/task-6', 'ready', 2, 2)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at
+       ) VALUES ('task', 'workspace', 'local-context', 'Task', 'active', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO scenes (id, task_id, name, mode, created_at, updated_at)
+       VALUES ('scene', 'task', 'Scene', 'tile', 1, 1)`
+    )
+    for (const [id, context, cwd, createdAt] of [
+      ['local-session', 'local-context', '/tmp/workspace', 3],
+      ['worktree-session', 'worktree-context', '/tmp/worktree', 4]
+    ] as const) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', ?, 'shell', 'created', ?, ?, ?, ?, ?)`,
+        id, context, id, cwd, createdAt, createdAt, createdAt
+      )
+      database.run(
+        `INSERT INTO session_mounts (id, scene_id, session_id, created_at)
+         VALUES (?, 'scene', ?, ?)`,
+        `mount-${id}`, id, createdAt
+      )
+    }
+    const relationEvent = database.run(
+      `INSERT INTO session_relation_events (
+         event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+         relation_kind, metadata_json, command_id, occurred_at
+       ) VALUES ('event', 'relation', 'created', 'task', 'worktree-session',
+                 'local-session', 'derived-from', '{}', 'command', 5)`
+    )
+    database.run(
+      `INSERT INTO session_relations_current (
+         relation_id, task_id, from_session_id, to_session_id, relation_kind,
+         metadata_json, created_at, updated_at, source_event_sequence
+       ) VALUES ('relation', 'task', 'worktree-session', 'local-session',
+                 'derived-from', '{}', 5, 5, ?)`,
+      Number(relationEvent.lastInsertRowid)
+    )
+    const before = {
+      sessions: database.get<{ count: number }>('SELECT COUNT(*) AS count FROM sessions')!.count,
+      relations: database.get<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM session_relations_current'
+      )!.count
+    }
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26])
+    expect(result.currentVersion).toBe(26)
+    expect(database.all(
+      `SELECT session_id, local_execution_context_id, managed_worktree_id,
+              active_target, state, error_message, updated_at
+       FROM session_environment_bindings ORDER BY session_id`
+    )).toEqual([
+      {
+        session_id: 'local-session', local_execution_context_id: 'local-context',
+        managed_worktree_id: null, active_target: 'local', state: 'ready',
+        error_message: null, updated_at: 3
+      },
+      {
+        session_id: 'worktree-session', local_execution_context_id: 'local-context',
+        managed_worktree_id: 'worktree', active_target: 'worktree', state: 'ready',
+        error_message: null, updated_at: 4
+      }
+    ])
+    expect(database.get<{ count: number }>('SELECT COUNT(*) AS count FROM sessions')!.count)
+      .toBe(before.sessions)
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM session_relations_current'
+    )!.count).toBe(before.relations)
+  })
+
+  it('enforces v22 ownership, state, foreign-key, and cascade constraints', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('local', 'workspace', 'plain-directory', '/tmp/workspace', 1),
+              ('worktree-context', 'workspace', 'git-worktree', '/tmp/worktree', 1)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES ('worktree', 'worktree-context', '/tmp/workspace', '/tmp/worktree',
+                 'codex/task-6', 'ready', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at
+       ) VALUES ('task', 'workspace', 'local', 'Task', 'active', 1, 1)`
+    )
+    for (const id of ['first', 'second']) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', 'local', 'shell', 'created', ?, 1, 1, 1)`,
+        id, id
+      )
+    }
+    database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'worktree', active_target = 'worktree'
+       WHERE session_id = 'first'`
+    )
+
+    expect(() => database.run(
+      `UPDATE session_environment_bindings
+       SET managed_worktree_id = 'worktree', active_target = 'worktree'
+       WHERE session_id = 'second'`
+    )).toThrow()
+    expect(() => database.run(
+      `UPDATE session_environment_bindings
+       SET active_target = 'invalid' WHERE session_id = 'second'`
+    )).toThrow()
+    expect(() => database.run(
+      `UPDATE session_environment_bindings
+       SET active_target = 'local', state = 'missing' WHERE session_id = 'second'`
+    )).toThrow()
+    expect(() => database.run("DELETE FROM worktrees WHERE id = 'worktree'")).toThrow()
+
+    database.run("DELETE FROM sessions WHERE id = 'first'")
+    expect(database.get(
+      "SELECT session_id FROM session_environment_bindings WHERE session_id = 'first'"
+    )).toBeUndefined()
+    expect(() => database.run("DELETE FROM worktrees WHERE id = 'worktree'"))
+      .not.toThrow()
+  })
+
+  it('backfills registered Worktree Git state when upgrading a real v22 database', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 22)).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('branch-context', 'workspace', 'git-worktree', '/tmp/branch', 1),
+              ('detached-context', 'workspace', 'git-worktree', '/tmp/detached', 1)`
+    )
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         base_revision, state, created_at, updated_at
+       ) VALUES
+         ('branch-worktree', 'branch-context', '/tmp/workspace', '/tmp/branch',
+          'feature/shared', 'abc123', 'dirty', 1, 2),
+         ('detached-worktree', 'detached-context', '/tmp/workspace', '/tmp/detached',
+          '(detached)', 'def456', 'ready', 1, 3)`
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.appliedVersions).toEqual([23, 24, 25, 26])
+    expect(database.all(
+      `SELECT execution_context_id, repository_root, state, branch, detached_head,
+              dirty, error_message, updated_at
+       FROM execution_context_git_states ORDER BY execution_context_id`
+    )).toEqual([
+      {
+        execution_context_id: 'branch-context', repository_root: '/tmp/workspace',
+        state: 'ready', branch: 'feature/shared', detached_head: null,
+        dirty: 1, error_message: null, updated_at: 2
+      },
+      {
+        execution_context_id: 'detached-context', repository_root: '/tmp/workspace',
+        state: 'ready', branch: null, detached_head: 'def456',
+        dirty: 0, error_message: null, updated_at: 3
+      }
+    ])
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('constraint-ready', 'workspace', 'plain-directory', '/tmp/ready', 4),
+              ('constraint-unavailable', 'workspace', 'plain-directory', '/tmp/unavailable', 4)`
+    )
+    expect(() => database.run(
+      `INSERT INTO execution_context_git_states (
+         execution_context_id, repository_root, state, branch, detached_head,
+         dirty, updated_at
+       ) VALUES ('constraint-ready', '/tmp/workspace', 'ready', NULL, NULL, 0, 4)`
+    )).toThrow()
+    expect(() => database.run(
+      `INSERT INTO execution_context_git_states (
+         execution_context_id, repository_root, state, branch, detached_head,
+         dirty, updated_at
+       ) VALUES ('constraint-unavailable', '/tmp/workspace', 'unavailable', NULL, NULL, 1, 4)`
+    )).toThrow()
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('cascade-context', 'workspace', 'plain-directory', '/tmp/cascade', 4)`
+    )
+    database.run(
+      `INSERT INTO execution_context_git_states (
+         execution_context_id, repository_root, state, branch, detached_head,
+         dirty, error_message, updated_at
+       ) VALUES ('cascade-context', NULL, 'unavailable', NULL, NULL, 0, 'path-missing', 4)`
+    )
+    database.run("DELETE FROM execution_contexts WHERE id = 'cascade-context'")
+    expect(database.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM execution_context_git_states
+       WHERE execution_context_id = 'cascade-context'`
+    )).toEqual({ count: 0 })
   })
 
   it('rejects an edited migration whose stored checksum differs', async () => {
@@ -451,8 +689,8 @@ describe('MigrationRunner', () => {
     expect(database.all('SELECT * FROM schema_migrations')).toEqual([])
   })
 
-  it('creates a consistent backup before applying an upgrade', async () => {
-    const { database, path } = await createDatabase()
+  it('waits for the pre-migration backup before applying the first pending migration', async () => {
+    const { database } = await createDatabase()
     const first: Migration = {
       version: 1,
       name: 'first',
@@ -465,14 +703,90 @@ describe('MigrationRunner', () => {
       sql: 'CREATE TABLE second_table (id TEXT PRIMARY KEY) STRICT;'
     }
 
-    const result = await new MigrationRunner(database, [first, second]).migrate()
+    let completeBackup!: () => void
+    const backupComplete = new Promise<void>((resolve) => { completeBackup = resolve })
+    const events: string[] = []
+    const backupService = {
+      async create(_database: RuntimeDatabase, reason: 'pre-migration') {
+        events.push(`backup:${reason}`)
+        await backupComplete
+        return {
+          id: 'pre-migration', path: '/backups/pre-migration.sqlite', createdAt: 1,
+          reason, schemaVersion: 1, size: 1, sha256: 'a'.repeat(64)
+        }
+      },
+      async rotate() { events.push('rotate') }
+    }
+    const migrating = new MigrationRunner(database, [first, second], backupService).migrate()
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(events).toEqual(['backup:pre-migration'])
+    expect(database.get(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'second_table'"
+    )).toBeUndefined()
+    completeBackup()
+    const result = await migrating
 
     expect(result.appliedVersions).toEqual([2])
-    expect(result.backupPath).toMatch(new RegExp(`${escapeRegExp(path)}\\.pre-v2-\\d+\\.sqlite$`))
-    await expect(access(result.backupPath!)).resolves.toBeUndefined()
+    expect(result.backupPath).toBe('/backups/pre-migration.sqlite')
+    expect(events).toEqual(['backup:pre-migration', 'rotate'])
+  })
+
+  it('publishes deterministic interruption points around a durable migration', async () => {
+    const { database } = await createDatabase()
+    const first: Migration = {
+      version: 1,
+      name: 'observable-migration',
+      sql: 'CREATE TABLE observable_table (id TEXT PRIMARY KEY) STRICT;'
+    }
+    const events: string[] = []
+    const backups = {
+      async create(_database: RuntimeDatabase, reason: 'pre-migration') {
+        events.push(`backup:${reason}`)
+        return {
+          id: 'observable-backup', path: '/backups/observable.sqlite', createdAt: 1,
+          reason, schemaVersion: 0, size: 1, sha256: 'a'.repeat(64)
+        }
+      },
+      async rotate() { events.push('rotate') }
+    }
+
+    await new MigrationRunner(database, [first], backups, {
+      onPreMigrationBackupReady: (backup) => events.push(`ready:${backup.id}`),
+      onMigrationTransactionPrepared: (migration) => {
+        events.push(`prepared:${migration.version}`)
+        expect(database.get(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'observable_table'"
+        )).toEqual({ name: 'observable_table' })
+        expect(database.all('SELECT * FROM schema_migrations')).toEqual([])
+      },
+      onMigrationCommitted: (migration) => events.push(`committed:${migration.version}`)
+    }).migrate()
+
+    expect(events).toEqual([
+      'backup:pre-migration',
+      'rotate',
+      'ready:observable-backup',
+      'prepared:1',
+      'committed:1'
+    ])
   })
 })
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function durableLegacyRow(
+  sessionId: string,
+  stage: string,
+  completedSteps: number,
+  totalSteps: number
+) {
+  return {
+    session_id: sessionId,
+    operation_id: `legacy-operation:${sessionId}`,
+    submission_key: `legacy-submission:${sessionId}`,
+    stage,
+    completed_steps: completedSteps,
+    total_steps: totalSteps,
+    attempt: 2,
+    lease_fence: 0
+  }
 }

@@ -11,6 +11,7 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { ProviderHookServer } from './provider-hook-server'
+import { SessionForkIntentRepository } from './session-fork-intent-repository'
 
 let root: string
 let database: RuntimeDatabase
@@ -242,6 +243,91 @@ describe('ProviderHookServer', () => {
     }])
   })
 
+  it('rejects a different statusline identity while restoring one specific conversation', async () => {
+    const mismatches: unknown[] = []
+    const rejectedHudEvents: unknown[] = []
+    const rejectedNotificationEvents: unknown[] = []
+    const rejectedTeamObservations: unknown[] = []
+    const strictHooks = new ProviderHookServer(root, sessions, {
+      onIdentityMismatch: (event) => { mismatches.push(event) },
+      onHudPayload: (event) => { rejectedHudEvents.push(event) },
+      onNotification: (event) => { rejectedNotificationEvents.push(event) },
+      onTeamObservations: (events) => { rejectedTeamObservations.push(...events) }
+    })
+    await strictHooks.start()
+    try {
+      const registration = await strictHooks.registerClaudeSession({
+        runId: 'run-strict-resume', sessionId: 'session-1',
+        acceptStatuslineIdentity: true,
+        expectedProviderSessionId: 'provider-old'
+      })
+      const transcriptPath = join(root, 'provider-wrong-team.jsonl')
+      await writeFile(transcriptPath, JSON.stringify({
+        type: 'user',
+        toolUseResult: {
+          status: 'teammate_spawned',
+          teammate_id: 'WRONG_TEAMMATE@wrong-team',
+          name: 'WRONG_TEAMMATE',
+          team_name: 'wrong-team',
+          prompt: 'This observation belongs to another conversation'
+        }
+      }))
+
+      expect((await postHook(registration.hookUrl, {
+        hook_event_name: 'Stop', session_id: 'provider-new', cwd: root,
+        model: { display_name: 'Claude Opus 4.6' },
+        transcript_path: transcriptPath,
+        last_assistant_message: 'Wrong conversation completed'
+      })).status).toBe(200)
+      expect((await postHook(registration.hookUrl, {
+        hook_event_name: 'PermissionRequest', session_id: 'provider-new', cwd: root,
+        tool_name: 'Write', tool_input: { file_path: '/tmp/wrong-conversation' }
+      })).status).toBe(200)
+
+      expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+      expect(rejectedHudEvents).toEqual([])
+      expect(rejectedNotificationEvents).toEqual([])
+      expect(rejectedTeamObservations).toEqual([])
+      expect(mismatches).toEqual([{
+        runId: 'run-strict-resume', sessionId: 'session-1', provider: 'claude-code',
+        expectedProviderSessionId: 'provider-old', actualProviderSessionId: 'provider-new',
+        eventName: 'Stop'
+      }])
+    } finally {
+      await strictHooks.stop()
+    }
+  })
+
+  it('limits the expected identity gate to resume confirmation so later conversation changes remain valid', async () => {
+    const mismatches: unknown[] = []
+    const strictHooks = new ProviderHookServer(root, sessions, {
+      onIdentityMismatch: (event) => { mismatches.push(event) }
+    })
+    await strictHooks.start()
+    try {
+      const registration = await strictHooks.registerClaudeSession({
+        runId: 'run-confirmed-resume', sessionId: 'session-1',
+        acceptStatuslineIdentity: true,
+        expectedProviderSessionId: 'provider-old'
+      })
+
+      await postHook(registration.hookUrl, {
+        session_id: 'provider-old', cwd: root,
+        model: { display_name: 'Claude Opus 4.6' }
+      })
+      await postHook(registration.hookUrl, {
+        hook_event_name: 'UserPromptSubmit', session_id: 'provider-next', cwd: root
+      })
+
+      expect(mismatches).toEqual([])
+      expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+        providerSessionId: 'provider-next', resumeState: 'available'
+      })
+    } finally {
+      await strictHooks.stop()
+    }
+  })
+
   it('accepts a Fork statusline identity as an immediately forkable inherited conversation', async () => {
     sessions.createSession(command('fork-source'), {
       id: 'session-source', taskId: 'task-1', executionContextId: 'context-1',
@@ -273,6 +359,114 @@ describe('ProviderHookServer', () => {
     expect(database.get<{ state: string }>(
       'SELECT state FROM session_fork_intents WHERE session_id = ?', 'session-1'
     )).toEqual({ state: 'succeeded' })
+  })
+
+  it('ignores a provider identity from a durable Fork run whose lease fence was replaced', async () => {
+    sessions.createSession(command('fork-source-fenced'), {
+      id: 'session-source-fenced', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    const now = Date.now()
+    intents.accept({
+      operationId: 'operation-fenced', submissionKey: 'submission-fenced',
+      sessionId: 'session-1', sourceSessionId: 'session-source-fenced',
+      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      worktreeMode: 'current', totalSteps: 2, now
+    })
+    const first = intents.acquireLease({
+      operationId: 'operation-fenced', owner: 'runtime-old', now, ttlMs: 1
+    })
+    if (first.kind !== 'acquired') throw new Error('first lease missing')
+    intents.advanceStage({
+      operationId: 'operation-fenced', lease: first.lease,
+      stage: 'restoring-provider', now
+    })
+    const oldRegistration = await hooks.registerClaudeSession({
+      runId: 'run-old-fork', sessionId: 'session-1',
+      acceptStatuslineIdentity: true, inheritedConversation: true,
+      forkAuthority: {
+        operationId: 'operation-fenced', runId: 'run-old-fork', lease: first.lease
+      }
+    })
+    const second = intents.acquireLease({
+      operationId: 'operation-fenced', owner: 'runtime-new', now: now + 2, ttlMs: 60_000
+    })
+    if (second.kind !== 'acquired') throw new Error('takeover lease missing')
+
+    const staleTranscript = join(root, 'provider-stale-team.jsonl')
+    await writeFile(staleTranscript, JSON.stringify({
+      type: 'user',
+      toolUseResult: {
+        status: 'teammate_spawned', teammate_id: 'STALE@stale-team',
+        name: 'STALE', team_name: 'stale-team', prompt: 'stale fork observation'
+      }
+    }))
+    expect((await postHook(oldRegistration.hookUrl, {
+      hook_event_name: 'SessionEnd', session_id: 'provider-stale', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' },
+      transcript_path: staleTranscript,
+      last_assistant_message: 'Stale Fork completed'
+    })).status).toBe(200)
+    expect(hudEvents).toEqual([])
+    expect(notificationEvents).toEqual([])
+    expect(teamObservations).toEqual([])
+    expect((await postHook(oldRegistration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-stale', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' },
+      transcript_path: staleTranscript,
+      last_assistant_message: 'Stale Fork completed'
+    })).status).toBe(200)
+    expect((await postHook(oldRegistration.hookUrl, {
+      hook_event_name: 'PermissionRequest', session_id: 'provider-stale', cwd: root,
+      tool_name: 'Write', tool_input: { file_path: '/tmp/stale-fork' }
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(identityEvents).toEqual([])
+    expect(hudEvents).toEqual([])
+    expect(notificationEvents).toEqual([])
+    expect(teamObservations).toEqual([])
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE operation_id = ?', 'operation-fenced'
+    )).toEqual({ state: 'starting', stage: 'restoring-provider' })
+
+    const currentRegistration = await hooks.registerClaudeSession({
+      runId: 'run-current-fork', sessionId: 'session-1',
+      acceptStatuslineIdentity: true, inheritedConversation: true,
+      forkAuthority: {
+        operationId: 'operation-fenced', runId: 'run-current-fork', lease: second.lease
+      }
+    })
+    expect((await postHook(currentRegistration.hookUrl, {
+      session_id: 'provider-current', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' }
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-current'
+    })
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE operation_id = ?', 'operation-fenced'
+    )).toEqual({ state: 'succeeded', stage: 'succeeded' })
+    expect(identityEvents).toContainEqual(expect.objectContaining({
+      runId: 'run-current-fork',
+      forkAuthority: expect.objectContaining({
+        operationId: 'operation-fenced', runId: 'run-current-fork',
+        lease: expect.objectContaining({ fence: second.lease.fence })
+      })
+    }))
+
+    await postHook(currentRegistration.hookUrl, {
+      hook_event_name: 'UserPromptSubmit', session_id: 'provider-current', cwd: root
+    })
+    await postHook(currentRegistration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-current', cwd: root
+    })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')?.metadata)
+      .toMatchObject({ lastHookEvent: 'Stop', inheritedConversation: true, canFork: true })
+    expect(identityEvents.at(-1)).toEqual(expect.objectContaining({
+      runId: 'run-current-fork', eventName: 'Stop'
+    }))
+    expect(identityEvents.at(-1)).not.toHaveProperty('forkAuthority')
   })
 
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {

@@ -25,7 +25,7 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RetentionManager', () => {
-  it('creates a dry-run quota plan that preserves active journals and the latest checkpoint pairs', async () => {
+  it('creates a dry-run quota plan that preserves all queryable journals and the latest checkpoint pairs', async () => {
     const journal = join(root, 'journal', 'session-1')
     const checkpoints = join(root, 'checkpoints', 'session-1')
     await mkdir(journal, { recursive: true })
@@ -47,29 +47,46 @@ describe('RetentionManager', () => {
     const plan = await retention.planQuota({ globalBytes: 220, perSessionBytes: 180, checkpointGenerations: 2 })
 
     expect(plan.dryRun).toBe(true)
-    expect(plan.actions.map(({ path }) => path)).toContain(join(journal, 'segment-000001.bin.gz'))
+    expect(plan.actions.map(({ path }) => path)).not.toContain(join(journal, 'segment-000001.bin.gz'))
+    expect(plan.actions.map(({ path }) => path)).not.toContain(join(journal, 'segment-000002.bin.gz'))
     expect(plan.actions.map(({ path }) => path)).toContain(join(checkpoints, 'checkpoint-000001.bin'))
     expect(plan.actions.map(({ path }) => path)).not.toContain(join(journal, 'segment-000003.bin'))
     expect(await stat(join(journal, 'segment-000001.bin.gz'))).toBeDefined()
   })
 
-  it('executes quota cleanup, degrades affected anchors, and emits an audit event', async () => {
+  it('executes checkpoint cleanup without deleting compressed history or degrading anchors', async () => {
     const journal = join(root, 'journal', 'session-1')
+    const checkpoints = join(root, 'checkpoints', 'session-1')
     await mkdir(journal, { recursive: true })
+    await mkdir(checkpoints, { recursive: true })
     const old = join(journal, 'segment-000001.bin.gz')
     const active = join(journal, 'segment-000002.bin')
     await writeFile(old, Buffer.alloc(100))
     await writeFile(active, Buffer.alloc(100))
+    for (let generation = 1; generation <= 3; generation += 1) {
+      const path = join(checkpoints, `checkpoint-00000${generation}.bin`)
+      await writeFile(path, Buffer.alloc(20))
+      database.run(
+        `INSERT INTO journal_checkpoints (id, session_id, generation, terminal_sequence,
+         domain_event_sequence, screen_epoch, file_path, checksum, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, 'sum', ?)`,
+        `cp-${generation}`, 'session-1', generation, generation * 10, generation, path, generation
+      )
+    }
     database.run(
       `INSERT INTO annotations (id, task_id, session_id, kind, text_snapshot, anchor_json,
        status, created_at, updated_at) VALUES (?, ?, ?, 'todo', 'captured', ?, 'active', 1, 1)`,
       'annotation-1', 'task-1', 'session-1', JSON.stringify({ kind: 'screen-capture', sessionId: 'session-1', sequence: 1, screenEpoch: 0, capturedText: 'captured' })
     )
-    const plan = await retention.planQuota({ globalBytes: 120, perSessionBytes: 120, checkpointGenerations: 2 })
+    const plan = await retention.planQuota({ globalBytes: 220, perSessionBytes: 220, checkpointGenerations: 2 })
     await retention.executeQuota(command('quota'), plan, 10)
 
-    await expect(stat(old)).rejects.toThrow()
-    expect(database.get<{ status: string }>('SELECT status FROM annotations WHERE id = ?', 'annotation-1')?.status).toBe('degraded')
+    expect(plan.actions).toEqual([
+      expect.objectContaining({ kind: 'checkpoint', path: join(checkpoints, 'checkpoint-000001.bin') })
+    ])
+    expect(await stat(old)).toBeDefined()
+    expect(await stat(active)).toBeDefined()
+    expect(database.get<{ status: string }>('SELECT status FROM annotations WHERE id = ?', 'annotation-1')?.status).toBe('active')
     expect(database.get<{ event_type: string }>("SELECT event_type FROM domain_events WHERE event_type = 'retention.executed'")?.event_type).toBe('retention.executed')
   })
 

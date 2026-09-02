@@ -225,9 +225,7 @@ export class ProviderModeService {
         binding = requested
       }
       tx.run(
-        `UPDATE sessions SET kind = 'shell',
-           title = CASE WHEN title = 'Claude' OR title = id THEN 'Shell' ELSE title END,
-           work_status = 'error',
+        `UPDATE sessions SET work_status = 'error',
            updated_at = ?, last_activity_at = ?, version = version + 1 WHERE id = ?`,
         input.now, input.now, session.id
       )
@@ -249,6 +247,8 @@ export class ProviderModeService {
       if (binding.restore_state !== 'failed') {
         throw new Error('只有恢复失败的 Claude Code 会话需要重试')
       }
+      const metadata = asMetadata(binding.metadata_json)
+      metadata.spawnRevision = input.now
       tx.run(
         `UPDATE sessions SET kind = 'claude-code',
            title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
@@ -260,9 +260,9 @@ export class ProviderModeService {
       tx.run(
         `UPDATE provider_bindings
          SET resume_state = 'available', restore_state = 'restoring', restore_error = NULL,
-             user_exited_at = NULL, invalidated_at = NULL, updated_at = ?
+             user_exited_at = NULL, metadata_json = ?, invalidated_at = NULL, updated_at = ?
          WHERE id = ?`,
-        input.now, binding.id
+        JSON.stringify(metadata), input.now, binding.id
       )
     }, 'session.restore-state-changed', undefined, true)
   }
@@ -399,6 +399,39 @@ export class ProviderModeService {
       return result
     }).result
   }
+}
+
+function emitRecoveryNotificationFailure(
+  emit: Parameters<typeof emitTransition>[0],
+  commandId: string,
+  owner: SessionOwner,
+  result: ProviderModeTransitionResult,
+  now: number
+): void {
+  const replacementKey = `provider-restore:${result.session.id}`
+  emit({
+    eventId: `${commandId}:agent.notification`,
+    eventType: 'agent.notification',
+    aggregateType: 'session',
+    aggregateId: result.session.id,
+    workspaceId: owner.workspace_id,
+    taskId: owner.task_id,
+    sessionId: result.session.id,
+    payload: {
+      targetSessionId: result.session.id,
+      provider: 'claude-code',
+      runId: `restore:${result.binding.id}`,
+      event: {
+        operation: 'upsert',
+        replacementKey,
+        eventType: 'error',
+        title: 'Claude Code 恢复失败',
+        body: result.binding.restoreError ?? 'Claude Code 会话恢复未完成',
+        sound: true
+      }
+    },
+    occurredAt: now
+  })
 }
 
 function providerWorkStatus(eventName: string, current: SessionWorkStatus): SessionWorkStatus {

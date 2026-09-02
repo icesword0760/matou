@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import type { ConfirmStep } from './terminal-close-flow'
 
 export function ConfirmDialog(props: {
   title: string
-  body: string
+  body: ReactNode
   confirmLabel: string
   confirmTone?: 'default' | 'danger'
   cancelLabel?: string
@@ -19,8 +19,8 @@ export function ConfirmDialog(props: {
 
   useEffect(() => {
     const dialog = dialogRef.current
-    const firstButton = dialog?.querySelector<HTMLButtonElement>('button')
-    firstButton?.focus()
+    const firstControl = dialog?.querySelector<HTMLElement>('button, input')
+    firstControl?.focus()
   }, [])
 
   const overlay = <div className={`dialog-overlay${props.scope === 'session' ? ' is-session-scoped' : ''}`} onPointerDown={(event) => {
@@ -30,17 +30,17 @@ export function ConfirmDialog(props: {
     onKeyDown={(event) => {
       if (event.key === 'Escape' && !composing) props.onCancel()
       if (event.key !== 'Tab') return
-      const buttons = [...(dialogRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
-      if (buttons.length === 0) return
-      const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+      const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button, input') ?? [])]
+      if (controls.length === 0) return
+      const index = controls.indexOf(document.activeElement as HTMLElement)
       const next = event.shiftKey
-        ? buttons[(index - 1 + buttons.length) % buttons.length]
-        : buttons[(index + 1) % buttons.length]
+        ? controls[(index - 1 + controls.length) % controls.length]
+        : controls[(index + 1) % controls.length]
       event.preventDefault()
       next?.focus()
     }}>
     <header><h2>{props.title}</h2><button className="dialog-close" aria-label="关闭" onClick={props.onCancel}>×</button></header>
-    <p>{props.body}</p>
+    {typeof props.body === 'string' ? <p>{props.body}</p> : <div className="dialog-content">{props.body}</div>}
     <footer>
       {props.showCancel !== false && <button onClick={props.onCancel}>{props.cancelLabel ?? '取消'}</button>}
       <button className={`dialog-primary${props.confirmTone === 'danger' ? ' is-danger' : ''}`}

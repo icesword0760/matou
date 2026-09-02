@@ -408,9 +408,22 @@ export class WorkspaceTaskRepository {
     return row ? mapWorkspace(row) : undefined
   }
 
+  listWorkspaces(): Workspace[] {
+    return this.#database.all<WorkspaceRow>(
+      'SELECT * FROM workspaces ORDER BY created_at, id'
+    ).map(mapWorkspace)
+  }
+
   getTask(id: string): Task | undefined {
     const row = this.#database.get<TaskRow>('SELECT * FROM tasks WHERE id = ?', id)
     return row ? mapTask(row) : undefined
+  }
+
+
+  listTasks(): Task[] {
+    return this.#database.all<TaskRow>(
+      'SELECT * FROM tasks ORDER BY created_at, id'
+    ).map(mapTask)
   }
 }
 

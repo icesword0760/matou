@@ -1,16 +1,18 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
-import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
+import type { RemoveNodeScope, SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
 import { SessionCarousel } from './SessionCarousel'
 import { StoppedSessionCard } from './StoppedSessionCard'
+import { indexSessionGraph } from './session-graph-index'
 
 export function SessionCanvas(props: {
   graph: SessionGraphView
   levelParentSessionId?: string | null
   disabled?: boolean
-  renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
+  disabledReason?: string
+  renderSession(node: SessionGraphNodeView, inViewport: boolean, viewportMoving: boolean): ReactNode
   onActivate(sessionId: string): void
-  onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
+  onRemoveBranch?(sessionId: string, scope: RemoveNodeScope): unknown
   onNavigateToChildren?(sessionId: string): void
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
@@ -19,7 +21,7 @@ export function SessionCanvas(props: {
   onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): unknown
 }) {
   const {
-    graph, levelParentSessionId, renderSession, onActivate,
+    graph, levelParentSessionId, disabled = false, disabledReason, renderSession, onActivate,
     onRemoveBranch, onNavigateToChildren,
     onReturnParent,
     onEnsureSessionVisible, revealRequest, geometry, onPutGeometry
@@ -34,13 +36,16 @@ export function SessionCanvas(props: {
   const onPutGeometryRef = useRef(onPutGeometry)
   const [geometryPending, setGeometryPending] = useState(false)
   const [lastSavedScrollLeft, setLastSavedScrollLeft] = useState<number | undefined>(undefined)
-  const focused = graph.nodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? graph.nodes[0]
+  const graphIndex = useMemo(() => indexSessionGraph(graph.nodes), [graph.nodes])
+  const focused = graph.focusedSessionId
+    ? graphIndex.byId.get(graph.focusedSessionId) ?? graph.nodes[0]
+    : graph.nodes[0]
   const parentId = levelParentSessionId !== undefined
     ? levelParentSessionId ?? undefined
     : focused?.parentSessionId
-  const direct = graph.nodes.filter((node) => node.parentSessionId === parentId)
+  const direct = graphIndex.childrenOf(parentId)
   const siblings = direct
-  const parent = parentId ? graph.nodes.find(({ sessionId }) => sessionId === parentId) : undefined
+  const parent = parentId ? graphIndex.byId.get(parentId) : undefined
   const ownerKey = `session-group:${graph.sceneId}:${parentId ?? 'root'}`
   const storedGeometry = geometry?.find((item) => item.ownerKey === ownerKey)?.geometry
   const initialScrollLeft = typeof storedGeometry?.scrollLeft === 'number' ? storedGeometry.scrollLeft : 0
@@ -52,7 +57,14 @@ export function SessionCanvas(props: {
       }
     : undefined
   const levelFocus = focused && focused.parentSessionId === parentId ? focused : direct[0]
-  useEffect(() => { onPutGeometryRef.current = onPutGeometry }, [onPutGeometry])
+  useEffect(() => {
+    onPutGeometryRef.current = disabled ? undefined : onPutGeometry
+    if (!disabled) return
+    if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
+    geometryTimer.current = undefined
+    pendingGeometry.current = undefined
+    setGeometryPending(false)
+  }, [disabled, onPutGeometry])
   useEffect(() => () => {
     if (geometryTimer.current !== undefined) window.clearTimeout(geometryTimer.current)
     const pending = pendingGeometry.current
@@ -100,6 +112,7 @@ export function SessionCanvas(props: {
     },
     options?: { continuous?: boolean }
   ) => {
+    if (disabled) return
     geometryRetryCount.current = 0
     setGeometryPending(true)
     pendingGeometry.current = { ownerKey, geometry: next }
@@ -124,10 +137,9 @@ export function SessionCanvas(props: {
     data-last-saved-scroll-left={lastSavedScrollLeft}
     data-parent-session-id={parentId ?? ''}>
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
-      renderSession={(node, inViewport) => {
-        if (node.archivedAt === undefined) return renderSession(node, inViewport)
-        const directChildren = graph.nodes.filter(({ parentSessionId }) => parentSessionId === node.sessionId)
-        const descendants = sessionDescendants(graph.nodes, node.sessionId)
+      renderSession={(node, inViewport, viewportMoving) => {
+        if (node.archivedAt === undefined) return renderSession(node, inViewport, viewportMoving)
+        const descendantNodes = graphIndex.descendantsOf(node.sessionId)
         return <StoppedSessionCard node={node}
           directChildCount={directChildren.length} descendantCount={descendants.length}
           descendantImpact={{
@@ -140,7 +152,7 @@ export function SessionCanvas(props: {
             : {})} />
       }}
       onActivate={(sessionId) => {
-        const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
+        const node = graphIndex.byId.get(sessionId)
         if (node?.archivedAt === undefined) onActivate(sessionId)
       }}
       {...(parent ? { parent } : {})}
@@ -150,7 +162,7 @@ export function SessionCanvas(props: {
       geometryKey={ownerKey} initialScrollLeft={initialScrollLeft}
       {...(initialAnchor ? { initialAnchor } : {})}
       {...(revealRequest ? { revealRequest } : {})}
-      onGeometryChange={putGeometry}
+      {...(disabled ? {} : { onGeometryChange: putGeometry })}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
 }

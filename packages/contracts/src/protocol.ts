@@ -1,6 +1,9 @@
 import { z } from 'zod'
 
+import type { RuntimeErrorCode, StorageFaultCode } from './runtime-lifecycle'
+
 export const PROTOCOL_VERSION = 1 as const
+export const MAX_CHECKPOINT_SNAPSHOT_BYTES = 16 * 1024 * 1024
 
 const protocolVersion = z.literal(PROTOCOL_VERSION)
 const identifier = z
@@ -40,6 +43,18 @@ const retryLastInputSchema = z.object({
   sessionId
 })
 
+const retryStorageSchema = z.object({
+  type: z.literal('terminal.storage-retry'),
+  protocolVersion,
+  sessionId
+})
+
+const endStorageFaultSchema = z.object({
+  type: z.literal('terminal.storage-end'),
+  protocolVersion,
+  sessionId
+})
+
 const userInteractionSchema = z.object({
   type: z.literal('terminal.user-interaction'),
   protocolVersion,
@@ -52,12 +67,33 @@ const resizeSchema = z.object({
   type: z.literal('terminal.resize'),
   protocolVersion,
   sessionId,
+  resizeId: z.number().int().nonnegative(),
   cols: z.number().int().min(2).max(1000),
   rows: z.number().int().min(1).max(500)
 })
 
 const disposeSchema = z.object({
   type: z.literal('terminal.dispose'),
+  protocolVersion,
+  sessionId
+})
+
+const viewDetachSchema = z.object({
+  type: z.literal('terminal.view-detach'),
+  protocolVersion,
+  sessionId
+})
+
+const recoveryPrioritizeSchema = z.object({
+  type: z.literal('session.recovery-prioritize'),
+  protocolVersion,
+  sceneId: identifier,
+  activeSessionId: sessionId.optional(),
+  foregroundSessionIds: z.array(sessionId).max(10_000).optional()
+})
+
+const recoveryRetrySchema = z.object({
+  type: z.literal('session.recovery-retry'),
   protocolVersion,
   sessionId
 })
@@ -73,7 +109,20 @@ const replayRequestSchema = z.object({
   type: z.literal('terminal.replay-request'),
   protocolVersion,
   sessionId,
-  fromSequence: z.number().int().nonnegative()
+  fromSequence: z.number().int().nonnegative(),
+  preserveExistingModel: z.boolean().optional()
+})
+
+const checkpointSchema = z.object({
+  type: z.literal('terminal.checkpoint'),
+  protocolVersion,
+  sessionId,
+  throughSequence: z.number().int().nonnegative(),
+  screenEpoch: z.number().int().nonnegative(),
+  snapshot: z.string().refine(
+    (value) => new TextEncoder().encode(value).byteLength <= MAX_CHECKPOINT_SNAPSHOT_BYTES,
+    'checkpoint snapshot exceeds the transport limit'
+  )
 })
 
 export const RPC_METHODS = [
@@ -112,9 +161,11 @@ export const RPC_METHODS = [
   'hierarchy.remove-failed-fork',
   'hierarchy.record-session-interaction',
   'hierarchy.retry-provider-restore',
+  'hierarchy.start-fresh-provider',
   'hierarchy.restart-stopped-session',
   'hierarchy.remove-session-branch',
   'hierarchy.reopen-scene',
+  'hierarchy.get-scene-snapshot',
   'hierarchy.get-scene-session-graph',
   'hierarchy.set-focused-session',
   'hierarchy.activate-session',
@@ -141,6 +192,10 @@ export const RPC_METHODS = [
   'session.update',
   'session.set-permission-mode',
   'session.set-model',
+  'session.environment-open',
+  'session.environment-restore',
+  'session.environment-locate',
+  'session.environment-handoff',
   'session.archive',
   'relation.create',
   'relation.revoke',
@@ -156,6 +211,8 @@ export const RPC_METHODS = [
   'scene.archive',
   'geometry.put',
   'geometry.list',
+  'terminal.history-page',
+  'terminal.history-search',
   'git.status',
   'git.checkout',
   'git.create-branch',
@@ -199,11 +256,17 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   spawnSchema,
   inputSchema,
   retryLastInputSchema,
+  retryStorageSchema,
+  endStorageFaultSchema,
   userInteractionSchema,
   resizeSchema,
   disposeSchema,
+  viewDetachSchema,
+  recoveryPrioritizeSchema,
+  recoveryRetrySchema,
   ackSchema,
   replayRequestSchema,
+  checkpointSchema,
   rpcRequestSchema,
   rpcCancelSchema,
   eventsSubscribeSchema
@@ -223,7 +286,41 @@ export type RuntimeCapability =
   | 'projection-v1'
   | 'hud-v1'
 
+type ProtocolErrorCode =
+  | 'VERSION_MISMATCH'
+  | 'INVALID_MESSAGE'
+  | 'SESSION_FORBIDDEN'
+  | 'WORKSPACE_PATH_INVALID'
+  | 'INTERNAL_ERROR'
+  | RuntimeErrorCode
+
+type RpcErrorCode =
+  | 'INVALID_REQUEST'
+  | 'NOT_FOUND'
+  | 'CONFLICT'
+  | 'TIMEOUT'
+  | 'CANCELLED'
+  | 'CAPABILITY_DENIED'
+  | 'INTERNAL_ERROR'
+  | RuntimeErrorCode
+
+export type SessionRecoveryStatusWire = {
+      type: 'session.recovery-status'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sceneId: string
+      priority: 'active-session' | 'foreground-scene' | 'active-task' | 'active-workspace' | 'background'
+      state: 'queued' | 'restoring' | 'ready' | 'failed'
+      error?: string
+}
+
 export type RuntimeMessage =
+  | SessionRecoveryStatusWire
+  | {
+      type: 'session.recovery-snapshot'
+      protocolVersion: typeof PROTOCOL_VERSION
+      statuses: Array<Omit<SessionRecoveryStatusWire, 'type' | 'protocolVersion'>>
+    }
   | {
       type: 'protocol.ready'
       protocolVersion: typeof PROTOCOL_VERSION
@@ -233,14 +330,24 @@ export type RuntimeMessage =
   | {
       type: 'protocol.error'
       protocolVersion: typeof PROTOCOL_VERSION
-      code:
-        | 'VERSION_MISMATCH'
-        | 'INVALID_MESSAGE'
-        | 'SESSION_FORBIDDEN'
-        | 'WORKSPACE_PATH_INVALID'
-        | 'INTERNAL_ERROR'
+      code: ProtocolErrorCode
       message: string
       sessionId?: string
+    }
+  | {
+      type: 'terminal.storage-fault'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
+      code: StorageFaultCode
+      message: string
+      retainedBytes: number
+    }
+  | {
+      type: 'terminal.storage-recovered'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      sequence: number
     }
   | {
       type: 'terminal.hud'
@@ -279,6 +386,14 @@ export type RuntimeMessage =
       signal?: number
     }
   | {
+      type: 'terminal.resized'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      resizeId: number
+      cols: number
+      rows: number
+    }
+  | {
       type: 'terminal.replay-start'
       protocolVersion: typeof PROTOCOL_VERSION
       sessionId: string
@@ -291,6 +406,10 @@ export type RuntimeMessage =
       }
       availableFromSequence: number
       liveSequence: number
+      source: 'checkpoint' | 'tail'
+      fromSequence: number
+      throughSequence: number
+      instantLineLimit: 10_000
     }
   | {
       type: 'terminal.replay-resize'
@@ -314,6 +433,19 @@ export type RuntimeMessage =
       throughSequence: number
     }
   | {
+      type: 'terminal.checkpoint-stored'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      throughSequence: number
+    }
+  | {
+      type: 'terminal.checkpoint-rejected'
+      protocolVersion: typeof PROTOCOL_VERSION
+      sessionId: string
+      throughSequence: number
+      reason: string
+    }
+  | {
       type: 'terminal.gap'
       protocolVersion: typeof PROTOCOL_VERSION
       sessionId: string
@@ -333,14 +465,7 @@ export type RuntimeMessage =
       protocolVersion: typeof PROTOCOL_VERSION
       requestId: string
       runtimeGeneration: string
-      code:
-        | 'INVALID_REQUEST'
-        | 'NOT_FOUND'
-        | 'CONFLICT'
-        | 'TIMEOUT'
-        | 'CANCELLED'
-        | 'CAPABILITY_DENIED'
-        | 'INTERNAL_ERROR'
+      code: RpcErrorCode
       message: string
       retryable: boolean
     }

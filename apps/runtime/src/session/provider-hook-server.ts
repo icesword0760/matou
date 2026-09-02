@@ -16,7 +16,10 @@ interface HookRegistrationRecord {
   sessionId: string
   permissionMode?: string
   acceptStatuslineIdentity: boolean
+  expectedProviderSessionId?: string
+  identityRejected?: boolean
   inheritedConversation: boolean
+  forkAuthority?: ProviderIdentityForkAuthority
   acceptIdentity: boolean
   settingsPath: string
   statusScriptPath: string
@@ -37,6 +40,15 @@ export interface ProviderHookNotification {
   sessionId: string
   provider: 'claude-code'
   event: ProviderNotificationEvent
+}
+
+export interface ProviderIdentityMismatch {
+  runId: string
+  sessionId: string
+  provider: 'claude-code'
+  expectedProviderSessionId: string
+  actualProviderSessionId: string
+  eventName: string
 }
 
 export interface AgentTeamObservation {
@@ -63,6 +75,7 @@ export interface ProviderHookServerOptions {
     provider: 'claude-code'
     providerSessionId: string
     eventName: string
+    forkAuthority?: ProviderIdentityForkAuthority
   }) => void
   onTitleObserved?: (event: {
     runId: string
@@ -146,9 +159,14 @@ export class ProviderHookServer {
     sessionId: string
     permissionMode?: string
     acceptStatuslineIdentity?: boolean
+    expectedProviderSessionId?: string
     inheritedConversation?: boolean
+    forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
+    if (input.forkAuthority && input.forkAuthority.runId !== input.runId) {
+      throw new Error('Fork provider hook run identity does not match its authority')
+    }
     const token = randomBytes(32).toString('base64url')
     const hookUrl = `http://127.0.0.1:${this.#port}/hooks/${token}`
     const directory = join(this.#dataRoot, 'provider-hooks')
@@ -169,7 +187,11 @@ export class ProviderHookServer {
       sessionId: input.sessionId,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
+      ...(input.expectedProviderSessionId === undefined
+        ? {}
+        : { expectedProviderSessionId: input.expectedProviderSessionId }),
       inheritedConversation: input.inheritedConversation === true,
+      ...(input.forkAuthority === undefined ? {} : { forkAuthority: input.forkAuthority }),
       acceptIdentity: true,
       settingsPath,
       statusScriptPath
@@ -215,19 +237,12 @@ export class ProviderHookServer {
     }
     try {
       const payload = await readJsonBody(request)
-      this.#onHudPayload({
-        runId: registration.runId,
-        sessionId: registration.sessionId,
-        provider: 'claude-code',
-        payload
-      })
-      const transcriptPath = providerTranscriptPath(payload)
-      if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
-        const observations = await readAgentTeamObservations(transcriptPath, {
-          runId: registration.runId,
-          leadSessionId: registration.sessionId
-        })
-        if (observations.length > 0) await this.#onTeamObservations(observations)
+      // A provider run that failed the restore handshake no longer owns this
+      // Session. Acknowledge later hooks so the provider is not stalled, but do
+      // not let them mutate the original card's HUD, notifications or DAG.
+      if (registration.identityRejected) {
+        sendJson(response, 200, {})
+        return
       }
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
@@ -242,6 +257,39 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
+      // A durable Fork launch owns no user-visible state until one hook both
+      // confirms its conversation and proves the current lease fence. In
+      // particular, SessionEnd may be the first event from a superseded child;
+      // acknowledging it here prevents that old process from clearing the new
+      // owner's HUD or importing its transcript into the current Team DAG.
+      if (registration.forkAuthority !== undefined && (
+        !registration.acceptIdentity || !providerSessionId || !confirmsConversation
+      )) {
+        sendJson(response, 200, {})
+        return
+      }
+      if (registration.expectedProviderSessionId !== undefined) {
+        // During a targeted restore, no provider-owned side effect is trusted
+        // until one authoritative payload confirms the requested conversation.
+        if (!registration.acceptIdentity || !providerSessionId || !confirmsConversation) {
+          sendJson(response, 200, {})
+          return
+        }
+        if (providerSessionId !== registration.expectedProviderSessionId) {
+          registration.acceptIdentity = false
+          registration.identityRejected = true
+          this.#onIdentityMismatch({
+            runId: registration.runId,
+            sessionId: registration.sessionId,
+            provider: 'claude-code',
+            expectedProviderSessionId: registration.expectedProviderSessionId,
+            actualProviderSessionId: providerSessionId,
+            eventName
+          })
+          sendJson(response, 200, {})
+          return
+        }
+      }
       if (providerSessionId && confirmsConversation && registration.acceptIdentity) {
         const cwd = nonEmptyText(payload.cwd)
         const hookPermissionMode = nonEmptyText(payload.permission_mode) ??
@@ -257,32 +305,72 @@ export class ProviderHookServer {
         const permissionMode = hookPermissionMode ??
           (isKnownIdentity ? undefined : registration.permissionMode)
         const now = Date.now()
-        this.#sessions.recordResumableProviderIdentity({
-          commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
-          commandType: 'provider-hook.identity',
-          requestHash: `${registration.sessionId}:${providerSessionId}:${eventName}:${now}`
-        }, {
-          id: `provider-binding-${randomUUID()}`,
-          sessionId: registration.sessionId,
-          provider: 'claude-code',
-          providerSessionId,
-          metadata: {
-            ...(permissionMode === undefined ? {} : { permissionMode }),
-            ...(cwd === undefined ? {} : { cwd }),
-            lastHookEvent: eventName,
-            ...(registration.inheritedConversation
-              ? { inheritedConversation: true, canFork: true }
-              : {})
-          },
-          now
-        })
-        this.#onIdentityRecorded({
+        const forkAuthority = registration.forkAuthority
+        try {
+          this.#sessions.recordResumableProviderIdentity({
+            commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
+            commandType: 'provider-hook.identity',
+            requestHash: `${registration.sessionId}:${providerSessionId}:${eventName}:${now}`
+          }, {
+            id: `provider-binding-${randomUUID()}`,
+            sessionId: registration.sessionId,
+            provider: 'claude-code',
+            providerSessionId,
+            metadata: {
+              ...(permissionMode === undefined ? {} : { permissionMode }),
+              ...(cwd === undefined ? {} : { cwd }),
+              lastHookEvent: eventName,
+              ...(registration.inheritedConversation
+                ? { inheritedConversation: true, canFork: true }
+                : {})
+            },
+            now,
+            ...(forkAuthority === undefined
+              ? {}
+              : { forkAuthority })
+          })
+          // The expected identity protects only the restore handshake. Once the
+          // requested conversation is confirmed, later intentional conversation
+          // changes from this same provider process follow the ordinary hook path.
+          delete registration.expectedProviderSessionId
+          // The first accepted provider identity atomically completes the
+          // durable Fork. Later lifecycle hooks belong to the now ordinary
+          // live Session and must not reuse the expired launch lease.
+          if (forkAuthority !== undefined) delete registration.forkAuthority
+          this.#onIdentityRecorded({
+            runId: registration.runId,
+            sessionId: registration.sessionId,
+            provider: 'claude-code',
+            providerSessionId,
+            eventName,
+            ...(forkAuthority === undefined
+              ? {}
+              : { forkAuthority })
+          })
+        } catch (error) {
+          // An old provider process may report its identity after lease takeover.
+          // Acknowledge its endpoint, but revoke the complete hook stream: the
+          // old process no longer owns this Session's HUD, notifications or DAG.
+          if (!(error instanceof StaleForkProviderIdentityError)) throw error
+          registration.acceptIdentity = false
+          registration.identityRejected = true
+          sendJson(response, 200, {})
+          return
+        }
+      }
+      this.#onHudPayload({
+        runId: registration.runId,
+        sessionId: registration.sessionId,
+        provider: 'claude-code',
+        payload
+      })
+      const transcriptPath = providerTranscriptPath(payload)
+      if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
+        const observations = await readAgentTeamObservations(transcriptPath, {
           runId: registration.runId,
-          sessionId: registration.sessionId,
-          provider: 'claude-code',
-          providerSessionId,
-          eventName
+          leadSessionId: registration.sessionId
         })
+        if (observations.length > 0) await this.#onTeamObservations(observations)
       }
       const notificationEvent = toProviderNotificationEvent(payload)
       if (notificationEvent) {

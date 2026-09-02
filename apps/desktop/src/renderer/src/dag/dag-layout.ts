@@ -21,6 +21,8 @@ export interface DagLayoutEdge {
 export interface DagLayout {
   nodes: DagLayoutNode[]
   edges: DagLayoutEdge[]
+  nodeById: Map<string, DagLayoutNode>
+  nodesByDepth: Map<number, DagLayoutNode[]>
   width: number
   height: number
   depthCount: number
@@ -36,17 +38,33 @@ const Y_GAP = 26
 export function layoutGraph(graph: SessionGraphView): DagLayout {
   const byId = new Map(graph.nodes.map((node) => [node.sessionId, node]))
   const depthMemo = new Map<string, number>()
-  const depthFor = (node: SessionGraphNodeView, visiting = new Set<string>()): number => {
-    const memo = depthMemo.get(node.sessionId)
-    if (memo !== undefined) return memo
-    if (!node.parentSessionId || visiting.has(node.sessionId)) return 0
-    const parent = byId.get(node.parentSessionId)
-    if (!parent) return 0
-    visiting.add(node.sessionId)
-    const depth = depthFor(parent, visiting) + 1
-    visiting.delete(node.sessionId)
-    depthMemo.set(node.sessionId, depth)
-    return depth
+  const depthFor = (node: SessionGraphNodeView): number => {
+    const known = depthMemo.get(node.sessionId)
+    if (known !== undefined) return known
+    const path: SessionGraphNodeView[] = []
+    const visiting = new Set<string>()
+    let cursor: SessionGraphNodeView | undefined = node
+    let baseDepth = 0
+    while (cursor) {
+      const memo = depthMemo.get(cursor.sessionId)
+      if (memo !== undefined) {
+        baseDepth = memo
+        break
+      }
+      if (visiting.has(cursor.sessionId)) {
+        baseDepth = 0
+        break
+      }
+      visiting.add(cursor.sessionId)
+      path.push(cursor)
+      cursor = cursor.parentSessionId ? byId.get(cursor.parentSessionId) : undefined
+    }
+    if (!cursor) baseDepth = -1
+    for (let index = path.length - 1; index >= 0; index -= 1) {
+      baseDepth += 1
+      depthMemo.set(path[index]!.sessionId, baseDepth)
+    }
+    return depthMemo.get(node.sessionId) ?? 0
   }
   const groups = new Map<number, SessionGraphNodeView[]>()
   for (const node of graph.nodes) {
@@ -76,6 +94,12 @@ export function layoutGraph(graph: SessionGraphView): DagLayout {
     })
   })
   const positioned = new Map(nodes.map((node) => [node.sessionId, node]))
+  const nodesByDepth = new Map<number, DagLayoutNode[]>()
+  for (const node of nodes) {
+    const peers = nodesByDepth.get(node.depth) ?? []
+    peers.push(node)
+    nodesByDepth.set(node.depth, peers)
+  }
   const edges = graph.edges.flatMap((edge) => {
     const parent = positioned.get(edge.parentSessionId)
     const child = positioned.get(edge.childSessionId)
@@ -89,7 +113,7 @@ export function layoutGraph(graph: SessionGraphView): DagLayout {
   })
   const depthCount = Math.max(1, ...nodes.map(({ depth }) => depth + 1))
   return {
-    nodes, edges, depthCount,
+    nodes, edges, nodeById: positioned, nodesByDepth, depthCount,
     width: 100 + depthCount * NODE_WIDTH + Math.max(0, depthCount - 1) * X_GAP,
     height: 100 + maxColumnHeight
   }
@@ -109,7 +133,7 @@ export function visibleLayers(layout: DagLayout, focusSessionId: string, radius 
   fullDepths: number[]
   ghostDepths: number[]
 } {
-  const focusDepth = layout.nodes.find(({ sessionId }) => sessionId === focusSessionId)?.depth ?? 0
+  const focusDepth = layout.nodeById.get(focusSessionId)?.depth ?? 0
   const all = Array.from({ length: layout.depthCount }, (_, depth) => depth)
   const fullDepths = all.filter((depth) => Math.abs(depth - focusDepth) <= radius)
   return { fullDepths, ghostDepths: all.filter((depth) => !fullDepths.includes(depth)) }

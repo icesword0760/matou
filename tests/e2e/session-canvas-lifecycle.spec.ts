@@ -51,7 +51,8 @@ test.describe('session canvas lifecycle', () => {
       const removableId = await removable.getAttribute('data-session-id')
       const pane = removable.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]')
 
-      await pane.getByRole('button', { name: /移出节点/ }).click()
+      await pane.locator('.terminal-pane-header').click({ button: 'right' })
+      await fixture.page.getByRole('menuitem', { name: '移除节点…' }).click()
       const dialog = fixture.page.getByRole('alertdialog')
       const centers = await Promise.all([
         dialog.boundingBox(),
@@ -67,7 +68,7 @@ test.describe('session canvas lifecycle', () => {
         (centers[0]!.y + centers[0]!.height / 2) -
         (centers[1]!.y + centers[1]!.height / 2)
       )).toBeLessThan(3)
-      await fixture.page.getByRole('button', { name: '移除整个分支', exact: true }).click()
+      await fixture.page.getByRole('button', { name: '移除', exact: true }).click()
 
       await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       await expect(activeSurface(fixture.page)).toHaveAttribute('data-session-id', parentId!)

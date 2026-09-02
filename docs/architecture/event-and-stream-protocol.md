@@ -83,6 +83,16 @@ interface TerminalResize {
   type: 'terminal.resize'
   protocolVersion: 1
   sessionId: string
+  resizeId: number
+  cols: number
+  rows: number
+}
+
+interface TerminalResized {
+  type: 'terminal.resized'
+  protocolVersion: 1
+  sessionId: string
+  resizeId: number
   cols: number
   rows: number
 }
@@ -97,6 +107,7 @@ interface TerminalDispose {
 限制：
 
 - `cols` 范围 `2..1000`，`rows` 范围 `1..500`；
+- `resizeId` 在单个 Session 内递增；Runtime 仅在 node-pty 应用该尺寸后回传同 ID 的 `terminal.resized`，用于最终尺寸屏障；
 - 单条 input 默认上限 1 MiB；粘贴大文本由 Renderer 分片；
 - Runtime 根据 profile 和 ExecutionContext 选择可执行文件与 cwd；
 - Renderer 不传 shell path、任意 argv 或任意 cwd。

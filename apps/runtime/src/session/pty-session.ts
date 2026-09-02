@@ -2,7 +2,7 @@ import os from 'node:os'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type { RuntimeMessage } from '@matou/contracts'
+import type { RuntimeMessage, StorageFaultCode } from '@matou/contracts'
 import { PROTOCOL_VERSION } from '@matou/contracts'
 import * as pty from 'node-pty'
 
@@ -12,7 +12,7 @@ import { SegmentJournal } from '../journal/segment-journal'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
 
-interface PtySessionOptions {
+export interface PtySessionOptions {
   sessionId: string
   executionContextId: string
   cols: number
@@ -27,14 +27,17 @@ interface PtySessionOptions {
   controlAssetRoot?: string
   model?: string
   env?: Record<string, string>
-  send: (message: RuntimeMessage) => void
+  send?: (message: RuntimeMessage) => void
   onExit?: (
     session: PtySession,
     exitCode: number,
     signal?: number,
-    reason?: 'runtime-shutdown'
+    reason?: 'runtime-shutdown' | 'environment-transition'
   ) => boolean | void
   onOutput?: (data: string) => void
+  onDurabilityFault?: (event: SessionDurabilityFaultEvent) => void
+  onDurabilityRecovered?: (event: SessionDurabilityRecoveredEvent) => void
+  journalOptions?: SegmentJournalOptions
   runId?: string
 }
 
@@ -48,13 +51,14 @@ export class PtySession {
 
   readonly #pty: pty.IPty
   readonly #journal: SegmentJournal
+  readonly #durabilityGate: SessionDurabilityGate
   #send: ((message: RuntimeMessage) => void) | undefined
   #creditWindow: CreditWindow
   readonly #onExit: ((
     session: PtySession,
     exitCode: number,
     signal?: number,
-    reason?: 'runtime-shutdown'
+    reason?: 'runtime-shutdown' | 'environment-transition'
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
@@ -64,14 +68,30 @@ export class PtySession {
   #writeChain = Promise.resolve()
   #disposed = false
   #notifyExit = true
-  #exitReason: 'runtime-shutdown' | undefined
+  #exitReason: 'runtime-shutdown' | 'environment-transition' | undefined
   #forceFinalized = false
   #closedResolved = false
+  #exitFinalized = false
+  #ending: Promise<void> | undefined
   #pendingReplayFrom: number | undefined
+  #durabilityFault: SessionDurabilityFaultEvent | undefined
+  #maximumUnackedBytes = 0
+  #lastCols: number
+  #lastRows: number
   readonly #closed: Promise<void>
   #resolveClosed: () => void = () => {}
 
   get lastSequence(): number { return this.#sequence }
+  get durabilityState(): SessionDurabilityState { return this.#durabilityGate.state }
+  get retainedDurabilityBytes(): number { return this.#durabilityGate.retainedBytes }
+  get maximumUnackedBytes(): number { return this.#maximumUnackedBytes }
+  tailStart(maxLines = 10_000): number { return this.#journal.tailStart(maxLines) }
+  domainEventSequenceAtOrBefore(sequence: number): number {
+    return this.#journal.domainEventSequenceAtOrBefore(sequence)
+  }
+  protectCheckpointSequences(sequences: readonly number[]): Promise<void> {
+    return this.#journal.protectCheckpointSequences(sequences)
+  }
 
   private constructor(options: PtySessionOptions, journal: SegmentJournal, terminal: pty.IPty) {
     this.sessionId = options.sessionId
@@ -82,6 +102,8 @@ export class PtySession {
     this.#pty = terminal
     this.#journal = journal
     this.#sequence = journal.lastSequence
+    this.#lastCols = options.cols
+    this.#lastRows = options.rows
     this.replayFromSequence = journal.lastSequence + 1
     this.#send = options.send
     this.#creditWindow = this.#newCreditWindow()
@@ -89,13 +111,34 @@ export class PtySession {
     this.#onOutput = options.onOutput
     this.#screen = new TerminalScreenProjector(options.cols, options.rows)
     this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
+    this.#durabilityGate = new SessionDurabilityGate({
+      sessionId: options.sessionId,
+      initialSequence: journal.lastSequence,
+      pauser: new PtyExecutionPauser(terminal),
+      onFault: (event) => {
+        this.#durabilityFault = event
+        this.#sendDurabilityFault(event)
+        options.onDurabilityFault?.(event)
+      },
+      onRecovered: (event) => {
+        this.#durabilityFault = undefined
+        this.#send?.({
+          type: 'terminal.storage-recovered',
+          protocolVersion: PROTOCOL_VERSION,
+          sessionId: this.sessionId,
+          sequence: event.throughSequence
+        })
+        options.onDurabilityRecovered?.(event)
+      }
+    })
+    this.#outputBatcher = new PtyOutputBatcher((data) => this.#enqueueOutputNow(data))
 
-    terminal.onData((data) => this.#enqueueOutput(data))
+    terminal.onData((data) => this.#outputBatcher.offer(data))
     terminal.onExit(({ exitCode, signal }) => this.#enqueueExit(exitCode, signal))
   }
 
   static async create(options: PtySessionOptions): Promise<PtySession> {
-    const journal = await SegmentJournal.open(options.dataRoot, options.sessionId)
+    const journal = await SegmentJournal.open(options.dataRoot, options.sessionId, options.journalOptions)
     const profile = options.profile ?? 'shell'
     const codexDeveloperInstructions = profile === 'codex' && options.controlAssetRoot
       ? await readProviderInstructions(options.controlAssetRoot)
@@ -141,18 +184,25 @@ export class PtySession {
     if (this.#disposed) {
       throw new Error('session is disposed')
     }
+    if (this.#durabilityGate.state !== 'healthy') {
+      throw new Error('session storage is paused')
+    }
     this.#pty.write(data)
   }
 
   display(data: string): void {
     if (this.#disposed) return
-    this.#enqueueOutput(data)
+    // Runtime-authored notices and screen resets are control feedback rather
+    // than PTY transport bursts; publish them immediately.
+    this.#enqueueOutputNow(data)
   }
 
   resize(cols: number, rows: number): void {
     if (this.#disposed) {
       throw new Error('session is disposed')
     }
+    if (cols === this.#lastCols && rows === this.#lastRows) return
+    this.#outputBatcher.flush()
     this.#pty.resize(cols, rows)
     void this.#screen.resize(cols, rows)
     const sequence = ++this.#sequence
@@ -164,6 +214,7 @@ export class PtySession {
   }
 
   readFrames() {
+    this.#outputBatcher.flush()
     return this.#writeChain.then(() => this.#journal.readFrames())
   }
 
@@ -173,10 +224,29 @@ export class PtySession {
 
   whenClosed(): Promise<void> { return this.#closed }
 
+  async retryDurability(): Promise<void> {
+    this.#outputBatcher.flush()
+    const operation = this.#durabilityGate.retry()
+    this.#trackWrite(operation)
+    await operation
+  }
+
+  endDurability(): Promise<void> {
+    if (this.#ending !== undefined) return this.#ending
+    this.#ending = this.#endDurability()
+    return this.#ending
+  }
+
   async shutdownForRuntime(options: {
     gracePeriodMs?: number
     hardKillWaitMs?: number
   } = {}): Promise<void> {
+    this.#notifyExit = false
+    this.#exitReason = 'runtime-shutdown'
+    if (this.#durabilityGate.state !== 'healthy') {
+      await this.endDurability()
+      return
+    }
     this.dispose({ notifyExit: false, reason: 'runtime-shutdown' })
     if (await settlesWithin(this.#closed, options.gracePeriodMs ?? 1_500)) return
     try {
@@ -194,7 +264,7 @@ export class PtySession {
     try {
       await this.#writeChain
     } finally {
-      await this.#journal.close()
+      await this.#closeJournalIgnoringStorageFault()
       this.#resolveClosedOnce()
     }
   }
@@ -203,6 +273,7 @@ export class PtySession {
     this.#send = send
     this.#pendingReplayFrom = undefined
     this.#creditWindow = this.#newCreditWindow()
+    if (this.#durabilityFault) this.#sendDurabilityFault(this.#durabilityFault)
   }
 
   detach(send: (message: RuntimeMessage) => void): void {
@@ -215,7 +286,7 @@ export class PtySession {
 
   dispose(options: {
     notifyExit?: boolean
-    reason?: 'runtime-shutdown'
+    reason?: 'runtime-shutdown' | 'environment-transition'
   } = {}): void {
     if (this.#disposed) {
       return
@@ -223,32 +294,78 @@ export class PtySession {
     this.#notifyExit = options.notifyExit ?? true
     this.#exitReason = options.reason
     this.#disposed = true
+    this.#outputBatcher.flush()
+    if (this.#durabilityGate.state !== 'healthy') {
+      void this.endDurability()
+      return
+    }
     this.#pty.kill()
   }
 
-  #enqueueOutput(data: string): void {
+  #enqueueOutputNow(data: string): void {
     if (this.#forceFinalized) return
     this.#onOutput?.(data)
     void this.#screen.write(data)
     const bytes = this.#encoder.encode(data)
-    const sequence = ++this.#sequence
-    this.#writeChain = this.#writeChain.then(async () => {
-      await this.#journal.appendOutput(sequence, bytes)
-      if (!this.#send) return
-      if (this.#creditWindow.isPaused) {
-        this.#pendingReplayFrom ??= sequence
-        return
-      }
-      this.#sendOutput(sequence, bytes)
-    })
+    const sequence = this.#sequence + 1
+    let operation: Promise<void>
+    try {
+      operation = this.#durabilityGate.append({
+        sequence,
+        kind: 'output',
+        bytes,
+        persist: () => this.#journal.appendOutput(sequence, bytes),
+        afterPersist: () => {
+          this.#onOutput?.(data)
+          if (!this.#send) return
+          if (this.#creditWindow.isPaused) {
+            this.#pendingReplayFrom ??= sequence
+            return
+          }
+          this.#sendOutput(sequence, bytes)
+        }
+      })
+    } catch {
+      // No sequence is consumed and no output was published. Terminating the
+      // affected execution prevents further output after the bounded FIFO is full.
+      void this.endDurability()
+      return
+    }
+    this.#sequence = sequence
+    this.#trackWrite(operation)
   }
 
   #enqueueExit(exitCode: number, signal?: number): void {
     if (this.#forceFinalized) return
-    const sequence = ++this.#sequence
-    this.#writeChain = this.#writeChain.then(async () => {
-      await this.#journal.appendExit(sequence, exitCode, signal)
-      await this.#journal.close()
+    this.#outputBatcher.flush()
+    const sequence = this.#sequence + 1
+    let operation: Promise<void>
+    try {
+      operation = this.#durabilityGate.append({
+        sequence,
+        kind: 'exit',
+        bytes: this.#encoder.encode(`${exitCode}:${signal ?? ''}`),
+        persist: () => this.#journal.appendExit(sequence, exitCode, signal),
+        afterPersist: () => { void this.#finalizeExit(sequence, exitCode, signal) }
+      })
+    } catch {
+      this.#resolveClosedOnce()
+      return
+    }
+    this.#sequence = sequence
+    this.#trackWrite(operation)
+    void operation.then(() => {
+      if (this.#durabilityGate.state !== 'paused') return
+      if (this.#disposed) void this.endDurability()
+      else this.#resolveClosedOnce()
+    })
+  }
+
+  async #finalizeExit(sequence: number, exitCode: number, signal?: number): Promise<void> {
+    if (this.#exitFinalized) return
+    this.#exitFinalized = true
+    try {
+      await this.#closeJournalIgnoringStorageFault()
       const allowNotification = this.#onExit?.(
         this, exitCode, signal, this.#exitReason
       ) !== false
@@ -269,7 +386,44 @@ export class PtySession {
         exitCode,
         ...(signal === undefined ? {} : { signal })
       })
-    }).finally(() => this.#resolveClosedOnce())
+    } finally {
+      this.#resolveClosedOnce()
+    }
+  }
+
+  async #endDurability(): Promise<void> {
+    this.#disposed = true
+    this.#forceFinalized = true
+    try {
+      await this.#durabilityGate.end()
+    } catch {
+      // Ending remains authoritative even if a dead process group rejects resume.
+    } finally {
+      try {
+        if (process.platform === 'win32') this.#pty.kill()
+        else this.#pty.kill('SIGKILL')
+      } catch {
+        // The process may have already exited while storage was paused.
+      }
+      await this.#closeJournalIgnoringStorageFault()
+      this.#resolveClosedOnce()
+    }
+  }
+
+  async #closeJournalIgnoringStorageFault(): Promise<void> {
+    try {
+      await this.#journal.close()
+    } catch {
+      // Closing must release the file handle even when sync reports the same
+      // storage fault that paused this Session.
+    }
+  }
+
+  #trackWrite(operation: Promise<void>): void {
+    this.#writeChain = this.#writeChain.then(
+      () => operation,
+      () => operation
+    ).catch(() => undefined)
   }
 
   #resolveClosedOnce(): void {
@@ -287,6 +441,19 @@ export class PtySession {
       data: bytes
     })
     this.#creditWindow.recordSent(sequence, bytes.byteLength)
+    this.#maximumUnackedBytes = Math.max(this.#maximumUnackedBytes, this.#creditWindow.unackedBytes)
+  }
+
+  #sendDurabilityFault(event: SessionDurabilityFaultEvent): void {
+    this.#send?.({
+      type: 'terminal.storage-fault',
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId: this.sessionId,
+      sequence: event.failedSequence,
+      code: storageFaultCode(event.error),
+      message: storageFaultMessage(event.error),
+      retainedBytes: event.retainedBytes
+    })
   }
 
   #newCreditWindow(): CreditWindow {
@@ -307,11 +474,11 @@ export class PtySession {
         return
       }
       this.#pendingReplayFrom = undefined
-      const frames = await this.#journal.readFrames()
-      for (const frame of frames) {
-        if (frame.sequence < replayFrom) {
-          continue
-        }
+      const throughSequence = this.#sequence
+      for await (const frame of this.#journal.iterateFrames({
+        fromSequence: replayFrom,
+        throughSequence
+      })) {
         if (this.#creditWindow.isPaused) {
           this.#pendingReplayFrom = frame.sequence
           return

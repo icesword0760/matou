@@ -4,7 +4,10 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
+import type { RuntimeMessage } from '@matou/contracts'
+
 import { PtySession } from './pty-session'
+import { readSessionJournalBounds } from '../journal/journal-range-reader'
 
 const roots: string[] = []
 

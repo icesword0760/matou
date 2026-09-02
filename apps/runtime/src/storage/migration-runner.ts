@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import type { RuntimeDatabase } from './database'
+import type { DatabaseBackupDescriptor, DatabaseBackupService } from './database-backup-service'
 
 export interface Migration {
   version: number
@@ -20,21 +21,49 @@ interface AppliedMigration {
   checksum: string
 }
 
+interface MigrationBackupService {
+  create(
+    database: RuntimeDatabase,
+    reason: 'pre-migration'
+  ): Promise<DatabaseBackupDescriptor>
+  rotate(maxCount?: number): Promise<void>
+}
+
+export interface MigrationRunnerObserver {
+  onPreMigrationBackupReady?(backup: DatabaseBackupDescriptor): void
+  onMigrationTransactionPrepared?(migration: Migration): void
+  onMigrationCommitted?(migration: Migration): void
+}
+
 export class MigrationRunner {
   readonly #database: RuntimeDatabase
   readonly #migrations: readonly Migration[]
+  readonly #backups: MigrationBackupService | undefined
+  readonly #observer: MigrationRunnerObserver
 
-  constructor(database: RuntimeDatabase, migrations: readonly Migration[]) {
+  constructor(
+    database: RuntimeDatabase,
+    migrations: readonly Migration[],
+    backups?: DatabaseBackupService | MigrationBackupService,
+    observer: MigrationRunnerObserver = {}
+  ) {
     this.#database = database
     this.#migrations = [...migrations].sort((left, right) => left.version - right.version)
+    this.#backups = backups
+    this.#observer = observer
     validateMigrationSequence(this.#migrations)
   }
 
   async migrate(): Promise<MigrationResult> {
-    this.#ensureHistoryTable()
-    const applied = this.#database.all<AppliedMigration>(
-      'SELECT version, name, checksum FROM schema_migrations ORDER BY version'
-    )
+    const historyExists = this.#database.get<{ present: number }>(
+      `SELECT 1 AS present FROM sqlite_master
+       WHERE type = 'table' AND name = 'schema_migrations'`
+    ) !== undefined
+    const applied = historyExists
+      ? this.#database.all<AppliedMigration>(
+        'SELECT version, name, checksum FROM schema_migrations ORDER BY version'
+      )
+      : []
     const supportedVersion = this.#migrations.at(-1)?.version ?? 0
     const currentVersion = applied.at(-1)?.version ?? 0
     if (currentVersion > supportedVersion) {
@@ -52,15 +81,19 @@ export class MigrationRunner {
 
     const pending = this.#migrations.filter(({ version }) => version > currentVersion)
     let backupPath: string | undefined
-    if (currentVersion > 0 && pending.length > 0) {
-      backupPath = `${this.#database.path}.pre-v${pending[0]!.version}-${Date.now()}.sqlite`
-      await this.#database.backupTo(backupPath)
+    if (pending.length > 0 && this.#backups) {
+      const backup = await this.#backups.create(this.#database, 'pre-migration')
+      await this.#backups.rotate()
+      backupPath = backup.path
+      this.#observer.onPreMigrationBackupReady?.(backup)
     }
 
+    this.#ensureHistoryTable()
     const appliedVersions: number[] = []
     for (const migration of pending) {
       this.#database.transaction((transaction) => {
         transaction.exec(migration.sql)
+        this.#observer.onMigrationTransactionPrepared?.(migration)
         transaction.run(
           'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)',
           migration.version,
@@ -70,6 +103,7 @@ export class MigrationRunner {
         )
       })
       appliedVersions.push(migration.version)
+      this.#observer.onMigrationCommitted?.(migration)
     }
 
     return {

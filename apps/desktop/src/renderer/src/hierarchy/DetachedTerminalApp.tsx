@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import type { RuntimeMessage } from '@matou/contracts'
+import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
-import { TerminalSurface } from '../terminal/TerminalSurface'
+import {
+  TerminalSurface,
+  type TerminalStorageFaultMessage
+} from '../terminal/TerminalSurface'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { TerminalHud } from '../hud/TerminalHud'
 import type { HudModelStrategy, HudPermissionMode, SessionGraphNodeView, SessionHudView } from './hierarchy-types'
@@ -12,9 +15,12 @@ import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeKey } from '../terminal/terminal-themes'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
+import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
+import { StorageFaultOverlay } from './StorageFaultOverlay'
 
-export function DetachedTerminalApp() {
+export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: RuntimeMode }) {
   const client = useRuntimeClient()
+  const readOnly = runtimeMode === 'read-only'
   const query = new URLSearchParams(window.location.search)
   const sessionId = query.get('sessionId') ?? ''
   const mainWindowId = query.get('mainWindowId') ?? ''
@@ -45,6 +51,7 @@ export function DetachedTerminalApp() {
     direction: 'next' as 'next' | 'previous', sequence: 0
   })
   const [teamMemberNode, setTeamMemberNode] = useState<SessionGraphNodeView>()
+  const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const sequence = useRef(0)
   useEffect(() => {
     if (!client) return
@@ -76,7 +83,7 @@ export function DetachedTerminalApp() {
     return unsubscribe
   }, [client, isTeamMember, sceneId, sessionId])
   const command = (method: 'session.set-permission-mode' | 'session.set-model', input: Record<string, unknown>) => {
-    if (!client) return
+    if (!client || readOnly) return
     const commandId = `${method}-${Date.now()}-${++sequence.current}`
     return client.request(method, {
       command: { commandId, commandType: method, requestHash: JSON.stringify(input) },
@@ -126,7 +133,11 @@ export function DetachedTerminalApp() {
     }
   }, [themeKey])
   return <main className="detached-terminal-app" data-theme={themeKey}>
-    <header><strong>{title}</strong><span>{isTeamMember ? '独立窗口 · 队友摘要' : '独立窗口 · 会话保持运行'}</span></header>
+    <header><strong>{title}</strong><span>{isTeamMember
+      ? '独立窗口 · 队友摘要'
+      : readOnly ? '独立窗口 · 只读历史' : '独立窗口 · 会话保持运行'}</span></header>
+    {readOnly && <ReadOnlyRecoveryBanner onSearch={() => setSearchOpen(true)} exportBundle={() =>
+      window.matouDesktop.exportDatabaseRecoveryBundle()} />}
     {!isTeamMember && <TerminalSearchBar open={searchOpen} themeKey={themeKey}
       resultIndex={searchResults.resultIndex} resultCount={searchResults.resultCount}
       onSearch={(query, options) => search(query, options)}
@@ -140,16 +151,24 @@ export function DetachedTerminalApp() {
     {isTeamMember ? <AgentTeamMemberSummary
       workStatus={teamMemberNode?.workStatus ?? 'starting'}
       latestLines={teamMemberNode?.latestLines ?? []} /> : <TerminalSurface sessionId={sessionId} executionContextId={executionContextId}
-      profile={profile} visible themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
+      profile={profile} visible readOnly={readOnly} inputDisabled={readOnly || storageFault !== null}
+      themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
       {...(searchOpen ? { searchRequest } : {})} onSearchResults={setSearchResults}
-      focusRequest={focusRequest} />}
+      focusRequest={focusRequest}
+      onStorageFault={setStorageFault}
+      onStorageRecovered={() => setStorageFault(null)} />}
+    {storageFault && <StorageFaultOverlay sessionTitle={title}
+      fault={{ code: storageFault.code, retainedBytes: storageFault.retainedBytes }}
+      onRetry={() => client?.retryTerminalStorage(sessionId)}
+      onEnd={() => client?.endTerminalAfterStorageFault(sessionId)} />}
     {!isTeamMember && <div className="shortcut-bar" aria-label="快捷指令栏">
       <TerminalHud hud={hud} onPermissionMode={(_sessionId: string, permissionMode: HudPermissionMode, respawn: boolean) =>
         command('session.set-permission-mode', {
           sessionId, provider: 'claude-code', permissionMode, respawn
         })}
         onModel={(_sessionId: string, modelStrategy: HudModelStrategy) =>
-          command('session.set-model', { sessionId, modelStrategy })} />
+          command('session.set-model', { sessionId, modelStrategy })}
+        {...(readOnly ? { disabledReason: READ_ONLY_REASON } : {})} />
     </div>}
     {!isTeamMember && <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}
       onClose={() => {

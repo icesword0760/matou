@@ -4,7 +4,10 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { CheckpointManager } from './checkpoint-manager'
+import {
+  CheckpointManager,
+  MAX_CHECKPOINT_SNAPSHOT_BYTES
+} from './checkpoint-manager'
 import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
@@ -119,6 +122,31 @@ describe('CheckpointManager', () => {
       )
     ).toEqual([{ generation: 2 }, { generation: 3 }])
     expect((await readdir(join(root, 'checkpoints', 'session-1'))).sort()).toHaveLength(2)
+    expect(checkpoints.protectedTerminalSequences('session-1')).toEqual([2, 3])
+  })
+
+  it('rejects unsafe identities, oversized snapshots, and backwards watermarks', async () => {
+    expect(() => checkpoints.create({
+      sessionId: '../outside', terminalSequence: 1, domainEventSequence: 0,
+      screenEpoch: 0, snapshot: Uint8Array.from([1])
+    })).toThrow(/sessionId/)
+    expect(() => checkpoints.create({
+      sessionId: 'session-1', terminalSequence: 1, domainEventSequence: 0,
+      screenEpoch: 0, snapshot: new Uint8Array(MAX_CHECKPOINT_SNAPSHOT_BYTES + 1)
+    })).toThrow(/storage limit/)
+
+    await checkpoints.create({
+      sessionId: 'session-1', terminalSequence: 10, domainEventSequence: 4,
+      screenEpoch: 1, snapshot: Uint8Array.from([1])
+    })
+    await expect(checkpoints.create({
+      sessionId: 'session-1', terminalSequence: 9, domainEventSequence: 4,
+      screenEpoch: 1, snapshot: Uint8Array.from([2])
+    })).rejects.toThrow(/must not move backwards/)
+    await expect(checkpoints.create({
+      sessionId: 'session-1', terminalSequence: 10, domainEventSequence: 3,
+      screenEpoch: 1, snapshot: Uint8Array.from([2])
+    })).rejects.toThrow(/must not move backwards/)
   })
 })
 

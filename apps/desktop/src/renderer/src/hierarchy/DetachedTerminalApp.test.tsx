@@ -6,9 +6,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DetachedTerminalApp } from './DetachedTerminalApp'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, themeKey, fontSize }: {
-    sessionId: string; themeKey?: string; fontSize?: number
-  }) => <div data-testid={`terminal-${sessionId}`} data-theme={themeKey} data-font-size={fontSize} />
+  TerminalSurface: ({ sessionId, themeKey, fontSize, readOnly, inputDisabled }: {
+    sessionId: string; themeKey?: string; fontSize?: number; readOnly?: boolean; inputDisabled?: boolean
+  }) => <div data-testid={`terminal-${sessionId}`} data-theme={themeKey} data-font-size={fontSize}
+    data-read-only={readOnly} data-input-disabled={inputDisabled} />
 }))
 const runtime = vi.hoisted(() => ({
   request: vi.fn(async (method: string) => method === 'projection.snapshot' ? { hierarchy: {} } : {}),

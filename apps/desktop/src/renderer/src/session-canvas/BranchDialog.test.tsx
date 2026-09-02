@@ -30,7 +30,7 @@ describe('BranchDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: '创建分支' }))
 
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
-      name: '修复登录', worktreeMode: 'new'
+      name: '修复登录', worktreeMode: 'new', submissionKey: expect.any(String)
     }))
   })
 
@@ -65,5 +65,43 @@ describe('BranchDialog', () => {
     expect(await screen.findByText('同一层已存在“修复登录”')).toBeTruthy()
     expect((input as HTMLInputElement).value).toBe('修复登录')
     expect((screen.getByRole('button', { name: '创建分支' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('reuses one submission key when a timed-out intent is confirmed again', async () => {
+    const onConfirm = vi.fn()
+      .mockRejectedValueOnce(new Error('请求超时'))
+      .mockResolvedValueOnce(undefined)
+    render(<BranchDialog relationMode="child" sourceTitle="Claude"
+      gitAvailable onCancel={() => undefined} onConfirm={onConfirm} />)
+    fireEvent.change(screen.getByRole('textbox', { name: '分支名称' }), {
+      target: { value: '稳定重试' }
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '创建分支' }))
+    expect(await screen.findByText('请求超时')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '创建分支' }))
+
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(2))
+    const first = onConfirm.mock.calls[0]![0]
+    const second = onConfirm.mock.calls[1]![0]
+    expect(first.submissionKey).toBe(second.submissionKey)
+    expect(first.submissionKey).toEqual(expect.any(String))
+  })
+
+  it('coalesces synchronous click and Enter into one authoritative submission', async () => {
+    let settle!: () => void
+    const pending = new Promise<void>((resolve) => { settle = resolve })
+    const onConfirm = vi.fn(() => pending)
+    render(<BranchDialog relationMode="sibling" sourceTitle="Claude"
+      gitAvailable onCancel={() => undefined} onConfirm={onConfirm} />)
+    const input = screen.getByRole('textbox', { name: '分支名称' })
+    fireEvent.change(input, { target: { value: '单次提交' } })
+
+    fireEvent.click(screen.getByRole('button', { name: '创建分支' }))
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    settle()
+    await pending
   })
 })

@@ -10,6 +10,8 @@ import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import {
   ShellCommandBlockCollector,
   ShellHistoryRepository,
+  SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT,
+  SHELL_HISTORY_OUTPUT_LINE_LIMIT,
   encodeShellCommandMarker,
   formatShellHistoryForTerminal
 } from './shell-history'
@@ -66,6 +68,20 @@ describe('ShellHistoryRepository', () => {
     expect(history.listForLaunch('session-1', false)).toEqual([])
     expect(history.list('session-1')).toHaveLength(1)
   })
+
+  it('caps a single completed command by retained characters as well as lines', () => {
+    const history = new ShellHistoryRepository(database)
+    history.complete({
+      sessionId: 'session-1', command: 'large', cwd: '/tmp/workspace',
+      output: `old-${'x'.repeat(SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT)}-new`,
+      exitCode: 0, startedAt: 1, completedAt: 2
+    })
+
+    const output = history.list('session-1')[0]!.output
+    expect(output).toHaveLength(SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT)
+    expect(output).not.toContain('old-')
+    expect(output).toContain('-new')
+  })
 })
 
 describe('ShellCommandBlockCollector', () => {
@@ -94,6 +110,33 @@ describe('ShellCommandBlockCollector', () => {
       command: 'echo next', output: 'next\r\n', exitCode: 0,
       startedAt: 2, completedAt: 2
     }])
+  })
+
+  it('retains only the newest launch-history lines while a command is still streaming', () => {
+    const collector = new ShellCommandBlockCollector()
+    collector.ingest(encodeShellCommandMarker('large output'), 1)
+    collector.ingest(Array.from({ length: 3_000 }, (_, index) => `line-${index}`).join('\n') + '\n', 2)
+    collector.ingest(Array.from({ length: 3_005 }, (_, index) => `line-${index + 3_000}`).join('\n') + '\n', 3)
+
+    const [completed] = collector.ingest('\u001b]133;D;0\u0007', 4)
+    const lines = completed!.output.split('\n')
+
+    expect(lines).toHaveLength(SHELL_HISTORY_OUTPUT_LINE_LIMIT)
+    expect(lines[0]).toBe('line-1006')
+    expect(lines.at(-2)).toBe('line-6004')
+    expect(lines.at(-1)).toBe('')
+  })
+
+  it('bounds an unterminated OSC sequence and still recognizes the next completed command', () => {
+    const collector = new ShellCommandBlockCollector()
+    collector.ingest(`${encodeShellCommandMarker('first')}\u001b]title;${'x'.repeat(2 * 1024 * 1024)}`, 1)
+
+    const [completed] = collector.ingest(
+      `\u0007${encodeShellCommandMarker('second')}done\r\n\u001b]133;D;0\u0007`,
+      2
+    )
+
+    expect(completed).toMatchObject({ command: 'second', output: 'done\r\n', exitCode: 0 })
   })
 })
 

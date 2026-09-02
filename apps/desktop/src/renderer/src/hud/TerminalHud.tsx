@@ -4,9 +4,15 @@ import { createPortal } from 'react-dom'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { GitControlMenu, type GitControlContext, type GitRequestClient } from './GitControlMenu'
+import {
+  EnvironmentControlMenu,
+  environmentLabel,
+  type SessionEnvironmentActions
+} from './EnvironmentControlMenu'
 import type {
   HudPermissionMode, SessionHudView
 } from '../hierarchy/hierarchy-types'
+import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 
 const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
   { value: 'default', label: 'Default' },
@@ -16,14 +22,22 @@ const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string }> = [
 ]
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
+  sessionId?: string
   onPermissionMode(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
   onModel?(sessionId: string, strategy: string): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
+  disabledReason?: string
+  environmentDisabledReason?: string
+  environment?: SessionEnvironment
+  git?: SessionGitState
+  hasOwnedWorktree?: boolean
+  environmentActions?: SessionEnvironmentActions
 }) {
   const { hud } = props
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
+  const disabled = Boolean(props.disabledReason)
   const [permissionMode, setPermissionMode] = useState<HudPermissionMode>(hud?.permissionMode ?? 'default')
   const [menu, setMenu] = useState<'permission' | null>(null)
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({})
@@ -31,6 +45,7 @@ export function TerminalHud(props: {
   const [switching, setSwitching] = useState(false)
   const [switchError, setSwitchError] = useState('')
   const [gitOpen, setGitOpen] = useState(false)
+  const [environmentOpen, setEnvironmentOpen] = useState(false)
   const [elapsed, setElapsed] = useState(() => formatElapsed(hud?.startedAt))
   const rootRef = useRef<HTMLDivElement>(null)
 
@@ -40,6 +55,12 @@ export function TerminalHud(props: {
     const timer = window.setInterval(() => setElapsed(formatElapsed(hud?.startedAt)), 10_000)
     return () => window.clearInterval(timer)
   }, [hud?.startedAt])
+  useEffect(() => {
+    if (!disabled) return
+    setMenu(null)
+    setConfirmTarget(null)
+    setGitOpen(false)
+  }, [disabled])
   useEffect(() => {
     const closeOutside = (event: Event) => {
       const target = event.target
@@ -73,10 +94,11 @@ export function TerminalHud(props: {
     setMenu('permission')
   }
 
-  return <div className="status-info" data-hud-mode={hud.mode} data-session-id={hud.sessionId} ref={rootRef}>
-    {hud.mode === 'agent' ? <>
+  return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
+    {hud?.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
-        disabled={switching} title={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
+        disabled={disabled || switching}
+        title={props.disabledReason ?? `当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         aria-label={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
         onClick={openMenu}>{permissionLabel(permissionMode)}</button>
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
@@ -118,20 +140,20 @@ export function TerminalHud(props: {
           const respawn = option.value === 'bypassPermissions' || permissionMode === 'bypassPermissions'
           if (respawn) { setConfirmTarget(option.value); return }
           setPermissionMode(option.value)
-          void Promise.resolve(props.onPermissionMode(hud.sessionId, option.value, false)).catch(() => {})
+          void Promise.resolve(props.onPermissionMode(sessionId, option.value, false)).catch(() => {})
         }}><span className={`perm-menu__dot perm-${option.value}`} />
         <span className="perm-menu__label">{option.label}</span>
         {permissionMode === option.value && <span className="perm-menu__check">✓</span>}
       </button>)}
     </div></div>, document.body)}
-    {confirmTarget && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
+    {confirmTarget && hud && !disabled && createPortal(<ConfirmDialog title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
       body={bypassCopy(confirmTarget, hud.resumable === true)}
       confirmLabel={confirmTarget === 'bypassPermissions' ? '确认切换' : '确认退出'} onCancel={() => setConfirmTarget(null)}
       onConfirm={() => {
         const target = confirmTarget
         setConfirmTarget(null)
         setSwitching(true)
-        void Promise.resolve(props.onPermissionMode(hud.sessionId, target, true)).then(() => {
+        void Promise.resolve(props.onPermissionMode(sessionId, target, true)).then(() => {
           setPermissionMode(target)
         }).catch((error: unknown) => {
           setSwitchError(`切换失败：${error instanceof Error ? error.message : '未知错误'}`)
@@ -143,6 +165,18 @@ export function TerminalHud(props: {
       cwd={hud.cwd} sessionId={hud.sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
       onClose={() => setGitOpen(false)} />, document.body)}
   </div>
+}
+
+function EnvironmentButton(props: {
+  environment: SessionEnvironment
+  disabled: boolean
+  onClick(): void
+}) {
+  const label = environmentLabel(props.environment)
+  return <button type="button"
+    className={`status-field status-environment is-clickable state-${props.environment.state}`}
+    disabled={props.disabled} aria-label={`打开运行环境：${label}`} title="运行环境"
+    onClick={props.onClick}>{label}</button>
 }
 
 function ContextRing({ percent }: { percent: number }) {
@@ -169,6 +203,20 @@ function formatElapsed(startedAt: number | undefined): string {
 function cwdShortName(cwd: string | undefined): string {
   const tail = cwd?.split(/[\\/]/).filter(Boolean).at(-1)
   return tail ? `~/${tail}` : ''
+}
+function legacyGitState(hud: SessionHudView | undefined): SessionGitState | undefined {
+  return hud?.gitBranch
+    ? { state: 'ready', branch: hud.gitBranch, dirty: hud.gitDirty === true }
+    : undefined
+}
+function gitStateLabel(git: SessionGitState): string {
+  if (git.state === 'unavailable') return 'Git 不可用'
+  const reference = git.branch ?? `HEAD ${git.detachedHead.slice(0, 7)}`
+  return `${reference}${git.dirty ? '*' : ''}`
+}
+function gitStateTitle(git: SessionGitState): string {
+  if (git.state === 'unavailable') return '当前目录不是可用的 Git 工作区'
+  return git.branch ? `Git 分支：${git.branch}` : `Git detached HEAD：${git.detachedHead}`
 }
 function permissionLabel(mode: HudPermissionMode): string {
   return PERMISSION_MODES.find(({ value }) => value === mode)?.label ?? 'Default'

@@ -1,54 +1,142 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { DagWindowContext, RuntimeConnectionState } from '../../../shared/desktop-api'
+import type { DomainEventWireEnvelope, RuntimeMessage, RuntimeMode } from '@matou/contracts'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagCanvas, type DagTransform } from './DagCanvas'
+import { DagGraphFrameQueue } from './DagGraphFrameQueue'
 import './dag.css'
+import { READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 
-export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView }) {
+export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
+  fixtureGraph?: SessionGraphView
+  runtimeMode?: RuntimeMode
+}) {
   const client = useRuntimeClient()
+  const readOnly = runtimeMode === 'read-only'
   const [context, setContext] = useState(readContext)
   const [graph, setGraph] = useState<SessionGraphView | null>(fixtureGraph ?? null)
   const [initialTransform, setInitialTransform] = useState<DagTransform | undefined>(undefined)
   const [geometryReady, setGeometryReady] = useState(Boolean(fixtureGraph))
   const latestTransform = useRef<DagTransform | undefined>(undefined)
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const layoutRevision = useRef(0)
-  const graphSignature = useRef('')
+  const graphRef = useRef<SessionGraphView | null>(fixtureGraph ?? null)
+  const graphEventSequence = useRef(fixtureGraph?.eventSequence ?? -1)
+  const runtimeGeneration = useRef(fixtureGraph?.runtimeGeneration ?? '')
+  const projectionStarted = useRef(false)
+  const refreshInFlight = useRef(false)
+  const firstOperableMs = useRef<number | undefined>(undefined)
   const [error, setError] = useState('')
   const [runtimeConnection, setRuntimeConnection] = useState<RuntimeConnectionState>('ready')
   const [notifiedSessionIds, setNotifiedSessionIds] = useState<string[]>(
     context.notificationSessionIds ?? []
   )
+  const applyGraph = useCallback((next: SessionGraphView, eventSequence?: number, generation?: string) => {
+    const nextGeneration = generation ?? next.runtimeGeneration
+    if (nextGeneration && runtimeGeneration.current && nextGeneration !== runtimeGeneration.current) {
+      graphEventSequence.current = -1
+    }
+    if (nextGeneration) runtimeGeneration.current = nextGeneration
+    const nextSequence = eventSequence ?? next.eventSequence
+    if (nextSequence !== undefined && nextSequence < graphEventSequence.current) return
+    if (nextSequence !== undefined) graphEventSequence.current = nextSequence
+    graphRef.current = next
+    setGraph(next)
+    layoutRevision.current = next.layoutRevision ?? layoutRevision.current
+  }, [])
+  const applyGraphRef = useRef(applyGraph)
+  applyGraphRef.current = applyGraph
+  const graphFrameQueue = useRef<DagGraphFrameQueue | null>(null)
+  if (!graphFrameQueue.current) {
+    graphFrameQueue.current = new DagGraphFrameQueue(({ graph: next, sequence, runtimeGeneration: generation }) => {
+      applyGraphRef.current(next, sequence, generation)
+    })
+  }
   const refresh = useCallback(async () => {
-    if (fixtureGraph || !client) return
+    if (fixtureGraph || !client || refreshInFlight.current) return
+    refreshInFlight.current = true
     try {
       const next = await client.request<SessionGraphView>('hierarchy.get-scene-session-graph', {
         sceneId: context.sceneId,
         windowId: context.mainWindowId
       })
-      const signature = sessionGraphSignature(next)
-      if (signature !== graphSignature.current) {
-        graphSignature.current = signature
-        setGraph(next)
+      applyGraph(next)
+      if (next.eventSequence !== undefined) {
+        const afterSequence = Math.max(next.eventSequence, graphEventSequence.current)
+        if (!projectionStarted.current || next.runtimeGeneration !== runtimeGeneration.current) {
+          client.startProjection(afterSequence)
+          projectionStarted.current = true
+        }
       }
-      layoutRevision.current = next.layoutRevision ?? layoutRevision.current
       setError('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      refreshInFlight.current = false
     }
-  }, [client, context.mainWindowId, context.sceneId, fixtureGraph])
+  }, [applyGraph, client, context.mainWindowId, context.sceneId, fixtureGraph])
 
   useEffect(() => window.matouDesktop?.onDagContext?.((next) => {
-    setContext(next)
-    setGraph(null)
-    graphSignature.current = ''
+    graphFrameQueue.current?.cancel()
+    const initialGraph = graphFromContext(next.initialGraph, next.sceneId)
+    setContext({
+      mainWindowId: next.mainWindowId,
+      sceneId: next.sceneId,
+      sessionId: next.sessionId,
+      theme: next.theme,
+      ...(next.notificationSessionIds ? { notificationSessionIds: next.notificationSessionIds } : {}),
+      ...(next.requestedAt === undefined ? {} : { requestedAt: next.requestedAt })
+    })
+    setGraph(initialGraph ?? null)
+    graphRef.current = initialGraph ?? null
+    graphEventSequence.current = initialGraph?.eventSequence ?? -1
+    runtimeGeneration.current = initialGraph?.runtimeGeneration ?? ''
+    projectionStarted.current = false
+    firstOperableMs.current = undefined
     setInitialTransform(undefined)
     setGeometryReady(false)
     setNotifiedSessionIds(next.notificationSessionIds ?? [])
   }), [])
   useEffect(() => window.matouDesktop?.onDagNotifications?.(setNotifiedSessionIds), [])
   useEffect(() => window.matouDesktop?.onRuntimeConnectionState?.(setRuntimeConnection), [])
+  useEffect(() => {
+    if (fixtureGraph || !client || typeof client.subscribeProjection !== 'function') return
+    return client.subscribeProjection((message: RuntimeMessage) => {
+      if (message.type !== 'events.batch') return
+      if (runtimeGeneration.current && message.runtimeGeneration !== runtimeGeneration.current) {
+        graphFrameQueue.current?.cancel()
+        runtimeGeneration.current = message.runtimeGeneration
+        graphEventSequence.current = -1
+        projectionStarted.current = false
+        void refresh()
+        return
+      }
+      let latest: { graph: SessionGraphView; sequence: number } | undefined
+      let requiresScopedRefresh = false
+      for (const event of message.events) {
+        if (event.sequence <= graphEventSequence.current) continue
+        const eventGraph = graphFromEvent(event)
+        if (eventGraph?.sceneId === context.sceneId) {
+          latest = { graph: eventGraph, sequence: event.sequence }
+        } else if (eventTouchesGraph(event, context.sceneId, graphRef.current)) {
+          requiresScopedRefresh = true
+        }
+      }
+      if (latest) {
+        graphFrameQueue.current?.enqueue({
+          graph: latest.graph,
+          sequence: latest.sequence,
+          runtimeGeneration: message.runtimeGeneration
+        })
+      } else if (requiresScopedRefresh) {
+        void refresh()
+      }
+    })
+  }, [applyGraph, client, context.sceneId, fixtureGraph, refresh])
+  useEffect(() => () => graphFrameQueue.current?.cancel(), [])
   useEffect(() => {
     if (fixtureGraph || !client) return
     setGeometryReady(false)
@@ -68,11 +156,26 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     }).catch(() => {}).finally(() => setGeometryReady(true))
   }, [client, context.sceneId, fixtureGraph])
   useEffect(() => {
-    void refresh()
-    if (fixtureGraph) return
-    const timer = window.setInterval(() => { void refresh() }, 500)
-    return () => window.clearInterval(timer)
+    if (!graphRef.current) void refresh()
   }, [fixtureGraph, refresh])
+  useEffect(() => {
+    if (fixtureGraph || !client || projectionStarted.current || graphEventSequence.current < 0) return
+    client.startProjection(graphEventSequence.current)
+    projectionStarted.current = true
+  }, [client, fixtureGraph, graph])
+  const wasReconnecting = useRef(false)
+  useEffect(() => {
+    if (runtimeConnection === 'reconnecting') {
+      wasReconnecting.current = true
+      return
+    }
+    if (!wasReconnecting.current) return
+    wasReconnecting.current = false
+    graphFrameQueue.current?.cancel()
+    projectionStarted.current = false
+    graphEventSequence.current = -1
+    void refresh()
+  }, [refresh, runtimeConnection])
   useEffect(() => {
     document.documentElement.dataset.theme = context.theme
     document.body.classList.toggle('light-theme', context.theme === 'light')
@@ -89,7 +192,7 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
     return () => window.removeEventListener('keydown', keyDown)
   }, [context.mainWindowId])
   const flushGeometry = useCallback((value = latestTransform.current) => {
-    if (!client || !value || fixtureGraph) return Promise.resolve()
+    if (!client || !value || fixtureGraph || readOnlyRef.current) return Promise.resolve()
     return client.request('geometry.put', {
       sceneId: context.sceneId,
       ownerKey: `dag-viewport:${context.sceneId}`,
@@ -142,8 +245,13 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
       const target = graph.nodes.find((node) => node.sessionId === sessionId)
       if (!target) return
       void window.matouDesktop?.selectDagNode?.({
-        ...context,
+        mainWindowId: context.mainWindowId,
+        sceneId: context.sceneId,
         sessionId,
+        theme: context.theme,
+        ...(context.notificationSessionIds ? {
+          notificationSessionIds: context.notificationSessionIds
+        } : {}),
         ...(target.detachedWindowId ? { targetWindowId: target.detachedWindowId } : {})
       })
     }} />
@@ -152,24 +260,52 @@ export function DagWindowApp({ fixtureGraph }: { fixtureGraph?: SessionGraphView
 
 function readContext(): DagWindowContext {
   const query = new URLSearchParams(window.location.search)
+  const requestedAt = query.get('requestedAt')
   return {
     mainWindowId: query.get('mainWindowId') ?? '',
     sceneId: query.get('sceneId') ?? '',
     sessionId: query.get('sessionId') ?? '',
-    theme: query.get('theme') === 'dark' ? 'dark' : 'light'
+    theme: query.get('theme') === 'dark' ? 'dark' : 'light',
+    ...(requestedAt !== null && Number.isFinite(Number(requestedAt)) ? {
+      requestedAt: Number(requestedAt)
+    } : {})
   }
 }
 
-function sessionGraphSignature(graph: SessionGraphView): string {
-  return JSON.stringify([
-    graph.layoutRevision,
-    graph.focusedSessionId,
-    graph.nodes.map((node) => [
-      node.sessionId, node.parentSessionId, node.currentMode, node.workStatus,
-      node.providerRestoreState, node.title, node.cwd, node.archivedAt,
-      node.detachedWindowId, node.latestLines, node.lastActivityAt,
-      node.activeChildCount, node.stoppedChildCount
-    ]),
-    graph.edges
-  ])
+function graphFromContext(value: unknown, sceneId: string): SessionGraphView | undefined {
+  if (typeof value === 'string') {
+    try {
+      return graphFromContext(JSON.parse(value), sceneId)
+    } catch {
+      return undefined
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const candidate = value as Partial<SessionGraphView>
+  if (candidate.sceneId !== sceneId || !Array.isArray(candidate.nodes) || !Array.isArray(candidate.edges)) {
+    return undefined
+  }
+  return candidate as SessionGraphView
+}
+
+function graphFromEvent(event: DomainEventWireEnvelope): SessionGraphView | undefined {
+  if (!event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) return undefined
+  const candidate = 'graph' in event.payload ? event.payload.graph : undefined
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined
+  if (!('sceneId' in candidate) || typeof candidate.sceneId !== 'string') return undefined
+  if (!('nodes' in candidate) || !Array.isArray(candidate.nodes)) return undefined
+  if (!('edges' in candidate) || !Array.isArray(candidate.edges)) return undefined
+  return candidate as SessionGraphView
+}
+
+function eventTouchesGraph(
+  event: DomainEventWireEnvelope,
+  sceneId: string,
+  current: SessionGraphView | null
+): boolean {
+  if (event.aggregateId === sceneId) return true
+  if (event.sessionId && current?.nodes.some(({ sessionId: candidate }) => candidate === event.sessionId)) {
+    return event.eventType.startsWith('session.') || event.eventType.startsWith('scene.')
+  }
+  return false
 }

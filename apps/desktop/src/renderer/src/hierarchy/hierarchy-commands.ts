@@ -1,13 +1,19 @@
 import type { RuntimeClient } from '../runtime/RuntimeClient'
 import type { HierarchyCommands } from './hierarchy-types'
+import type { HierarchyProjection } from './hierarchy-types'
 import type {
-  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult,
+  SessionEnvironmentActionResult, SessionEnvironmentOpenResult,
+  SessionEnvironmentTarget
 } from '@matou/contracts'
 
 export function createHierarchyCommands(
   client: RuntimeClient,
   windowId: string,
-  afterMutation?: () => void | Promise<void>
+  afterMutation?: (
+    result: unknown,
+    context: { type: string; input: Record<string, unknown> }
+  ) => void | Promise<void>
 ): HierarchyCommands {
   let sequence = 0
   const command = async (type: string, input: Record<string, unknown>) => {
@@ -91,17 +97,18 @@ export function createHierarchyCommands(
       }
       return result
     },
-    createForkChild: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-child', {
-      sceneId, sourceSessionId, name, worktreeMode
+    createForkChild: (sceneId, sourceSessionId, name, worktreeMode, submissionKey) => command('hierarchy.create-fork-child', {
+      sceneId, sourceSessionId, name, worktreeMode, submissionKey
     }),
-    createForkSibling: (sceneId, sourceSessionId, name, worktreeMode) => command('hierarchy.create-fork-sibling', {
-      sceneId, sourceSessionId, name, worktreeMode
+    createForkSibling: (sceneId, sourceSessionId, name, worktreeMode, submissionKey) => command('hierarchy.create-fork-sibling', {
+      sceneId, sourceSessionId, name, worktreeMode, submissionKey
     }),
     retryFork: (sceneId, sessionId) => command('hierarchy.retry-fork', { sceneId, sessionId }),
     removeFailedFork: (sceneId, sessionId) => command('hierarchy.remove-failed-fork', {
       sceneId, sessionId
     }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
+    startFreshProvider: (sessionId) => command('hierarchy.start-fresh-provider', { sessionId }),
     listClaudeSessions: (sessionId, query, providerSessionId) => client.request<ClaudeSessionListResult>(
       'claude-sessions.list', { sessionId, query, ...(providerSessionId ? { providerSessionId } : {}) }
     ),
@@ -117,8 +124,8 @@ export function createHierarchyCommands(
     restartStoppedSession: (sessionId) => command('hierarchy.restart-stopped-session', {
       windowId, sessionId
     }),
-    removeSessionBranch: (sceneId, sessionId, includeDescendants) => command(
-      'hierarchy.remove-session-branch', { sceneId, sessionId, includeDescendants }
+    removeSessionBranch: (sceneId, sessionId, scope) => command(
+      'hierarchy.remove-session-branch', { sceneId, sessionId, scope }
     ),
     getSceneSessionGraph: (sceneId) => client.request('hierarchy.get-scene-session-graph', {
       sceneId, windowId
@@ -133,10 +140,18 @@ export function createHierarchyCommands(
       sceneId, ownerKey, layoutRevision, geometry, now: Date.now()
     }),
     activateSession: (sessionId) => command('hierarchy.activate-session', { sessionId }),
-    deleteSession: (sessionId, confirmed = false, preserveSceneOnLastSession = false) => command('hierarchy.delete-session', {
-      sessionId, ...(confirmed ? { confirmedIntent: `delete-session:${sessionId}` } : {}),
-      ...(preserveSceneOnLastSession ? { preserveSceneOnLastSession: true } : {})
-    }),
+    openSessionEnvironment: (sessionId) => client.request<SessionEnvironmentOpenResult>(
+      'session.environment-open', { sessionId }
+    ),
+    restoreSessionEnvironment: (sessionId) => environmentCommand(
+      'session.environment-restore', { sessionId }
+    ),
+    locateSessionEnvironment: (sessionId, path) => environmentCommand(
+      'session.environment-locate', { sessionId, path }
+    ),
+    handoffSessionEnvironment: (sessionId, target: SessionEnvironmentTarget) => environmentCommand(
+      'session.environment-handoff', { sessionId, target }
+    ),
     detachSession: (sceneId, mountId, sessionId, sceneWindowId) => command('hierarchy.detach-session', {
       sceneId, mountId, sessionId, sceneWindowId, nativeWindowKey: sceneWindowId
     }),

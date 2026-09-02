@@ -1,4 +1,5 @@
-import { gzipSync, gunzipSync } from 'node:zlib'
+import { createReadStream } from 'node:fs'
+import { createGunzip } from 'node:zlib'
 import {
   chmod,
   mkdir,
@@ -6,16 +7,37 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
+  stat,
   truncate,
-  unlink,
-  writeFile
 } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import {
+  defaultJournalCompressor,
+  type JournalCompressor
+} from './journal-compressor'
+
+import {
+  RAW_HOT_BYTES,
+  SEGMENT_BYTES,
+  selectCompressionCandidates,
+  type SegmentDescriptor
+} from './journal-policy'
+import {
+  JournalTailIndex,
+  loadJournalTailIndex,
+  writeJournalTailIndex,
+  type JournalTailIndexSnapshot
+} from './journal-tail-index'
+import { LatestValueWriter } from './latest-value-writer'
+import type { JournalReplayMetadata } from './journal-range-reader'
+
 const MAGIC = Buffer.from('MTJRNL2\n', 'ascii')
 const FRAME_PREFIX_BYTES = 8
 const MAX_FRAME_BYTES = 64 * 1024 * 1024
+const READ_CHUNK_BYTES = 1024 * 1024
 
 type StoredHeader =
   | { kind: 'output'; sequence: number; timestamp: number; dataLength: number }
@@ -35,14 +57,22 @@ export type DecodedJournalFrame =
 
 export interface SegmentJournalOptions {
   maxSegmentBytes?: number
+  /** Override only for deterministic tests; production keeps 256 MiB raw. */
+  rawHotBytes?: number
   compressSealed?: boolean
+  compressor?: JournalCompressor
+  /** Retained recovery checkpoints whose containing raw segments must stay uncompressed. */
+  checkpointProtectedSequences?: readonly number[]
   /** Fault-injectable frame boundary; production callers use the default durable file writer. */
   writeFrame?: (handle: FileHandle, encoded: Buffer) => Promise<void>
 }
 
 type NormalizedSegmentJournalOptions = {
   maxSegmentBytes: number
+  rawHotBytes: number
   compressSealed: boolean
+  compressor: JournalCompressor
+  checkpointProtectedSequences: readonly number[]
   writeFrame: (handle: FileHandle, encoded: Buffer) => Promise<void>
 }
 
@@ -66,13 +96,25 @@ export class JournalCorruptionError extends Error {
 export class SegmentJournal {
   readonly directory: string
   readonly #maxSegmentBytes: number
-  readonly #compressSealed: boolean
+  readonly #rawHotBytes: number
   readonly #writeFrame: NormalizedSegmentJournalOptions['writeFrame']
+  readonly #compressSealed: boolean
+  readonly #compressor: JournalCompressor
+  readonly #compressionScanStep: number
+  readonly #sealedSegments: SegmentDescriptor[]
+  readonly #segmentBounds: Map<number, { firstSequence: number; lastSequence: number }>
+  readonly #checkpointProtectedSequences = new Set<number>()
+  readonly #tailIndex: JournalTailIndex
+  readonly #tailIndexPath: string
+  readonly #tailIndexWriter: LatestValueWriter<JournalTailIndexSnapshot>
+  readonly #scheduledCompressionIndexes = new Set<number>()
   #handle: FileHandle
   #segmentIndex: number
   #path: string
   #size: number
+  #segmentFirstSequence: number
   #lastSequence: number
+  #lastCompressionScanSize: number
   #closed = false
 
   private constructor(
@@ -81,7 +123,12 @@ export class SegmentJournal {
     segmentIndex: number,
     path: string,
     size: number,
+    segmentFirstSequence: number,
     lastSequence: number,
+    sealedSegments: SegmentDescriptor[],
+    segmentBounds: Map<number, { firstSequence: number; lastSequence: number }>,
+    tailIndex: JournalTailIndex,
+    tailIndexPath: string,
     options: NormalizedSegmentJournalOptions
   ) {
     this.directory = directory
@@ -89,10 +136,28 @@ export class SegmentJournal {
     this.#segmentIndex = segmentIndex
     this.#path = path
     this.#size = size
+    this.#segmentFirstSequence = segmentFirstSequence
     this.#lastSequence = lastSequence
     this.#maxSegmentBytes = options.maxSegmentBytes
-    this.#compressSealed = options.compressSealed
+    this.#rawHotBytes = options.rawHotBytes
     this.#writeFrame = options.writeFrame
+    this.#compressSealed = options.compressSealed
+    this.#compressor = options.compressor
+    this.#compressionScanStep = Math.max(128, Math.min(
+      1024 * 1024,
+      Math.floor(this.#maxSegmentBytes / 4),
+      Math.floor(this.#rawHotBytes / 16)
+    ))
+    this.#sealedSegments = sealedSegments
+    this.#segmentBounds = segmentBounds
+    this.#replaceCheckpointProtectedSequences(options.checkpointProtectedSequences)
+    this.#tailIndex = tailIndex
+    this.#tailIndexPath = tailIndexPath
+    this.#tailIndexWriter = new LatestValueWriter((snapshot) =>
+      writeJournalTailIndex(this.#tailIndexPath, snapshot)
+    )
+    this.#lastCompressionScanSize = size
+    this.#scheduleSealedCompression()
   }
 
   get path(): string {
@@ -103,17 +168,51 @@ export class SegmentJournal {
     return this.#lastSequence
   }
 
+  tailStart(maxLines = 10_000): number {
+    return this.#tailIndex.tailStart(maxLines)
+  }
+
+  tailIndexSnapshot(): JournalTailIndexSnapshot {
+    return this.#tailIndex.snapshot(this.#segmentIndex)
+  }
+
+  domainEventSequenceAtOrBefore(sequence: number): number {
+    return this.#tailIndex.domainEventSequenceAtOrBefore(sequence)
+  }
+
+  replayMetadata(maxLines = 10_000): JournalReplayMetadata {
+    const snapshot = this.#tailIndex.snapshot(this.#segmentIndex)
+    return {
+      firstSequence: snapshot.firstSequence,
+      lastSequence: snapshot.lastSequence,
+      tailFromSequence: this.#tailIndex.tailStart(maxLines),
+      domainEventSequence: this.#tailIndex.domainEventSequenceAtOrBefore(snapshot.lastSequence)
+    }
+  }
+
+  async *iterateFrames(options: {
+    fromSequence: number
+    throughSequence?: number
+  }): AsyncGenerator<DecodedJournalFrame> {
+    if (this.#segmentFirstSequence > 0) await this.#recordCurrentSegmentBounds()
+    const { iterateSessionFrames } = await import('./journal-range-reader')
+    yield* iterateSessionFrames(this.directoryDataRoot(), this.sessionId(), options)
+  }
+
   static async open(
     dataRoot: string,
     sessionId: string,
     options: SegmentJournalOptions = {}
   ): Promise<SegmentJournal> {
     const normalizedOptions: NormalizedSegmentJournalOptions = {
-      maxSegmentBytes: options.maxSegmentBytes ?? 16 * 1024 * 1024,
+      maxSegmentBytes: options.maxSegmentBytes ?? SEGMENT_BYTES,
+      rawHotBytes: options.rawHotBytes ?? RAW_HOT_BYTES,
       compressSealed: options.compressSealed ?? true,
-      writeFrame: options.writeFrame ?? (async (handle, encoded) => {
-        await handle.write(encoded)
-      })
+      compressor: options.compressor ?? defaultJournalCompressor,
+      checkpointProtectedSequences: normalizeCheckpointSequences(
+        options.checkpointProtectedSequences ?? []
+      ),
+      writeFrame: options.writeFrame ?? writeEntireFrame
     }
     if (normalizedOptions.maxSegmentBytes < 128) {
       throw new Error('maxSegmentBytes must be at least 128 bytes')
@@ -123,25 +222,20 @@ export class SegmentJournal {
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
     const entries = await readdir(directory)
-    const active = entries
-      .map(parseActiveSegmentIndex)
-      .filter((value): value is number => value !== undefined)
-      .sort((left, right) => left - right)
-      .at(-1)
-    const sealedMaximum = entries
-      .map(parseSealedSegmentIndex)
-      .filter((value): value is number => value !== undefined)
-      .sort((left, right) => left - right)
-      .at(-1)
-    const segmentIndex = active ?? (sealedMaximum === undefined ? 1 : sealedMaximum + 1)
-    const path = segmentPath(directory, segmentIndex)
+    const existingSegments = await describeExistingSegments(directory, entries)
+    const activeSegment = chooseActiveRawSegment(existingSegments)
+    const maximumIndex = existingSegments.map(({ index }) => index).sort((left, right) => left - right).at(-1)
+    const segmentIndex = activeSegment?.index ?? (maximumIndex === undefined ? 1 : maximumIndex + 1)
+    const path = activeSegment?.path ?? segmentPath(directory, segmentIndex)
 
     let size = 0
     let lastSequence = 0
-    if (active !== undefined) {
+    let activeFrames: DecodedJournalFrame[] = []
+    if (activeSegment !== undefined) {
       const repair = await repairSegmentTail(path)
-      size = (await readFile(path)).byteLength
+      size = (await stat(path)).size
       lastSequence = repair.lastSequence
+      activeFrames = await readSegmentFrames(path)
     }
 
     const handle = await open(path, 'a+', 0o600)
@@ -150,13 +244,40 @@ export class SegmentJournal {
       await handle.write(MAGIC)
       size = MAGIC.byteLength
     }
+    const tailIndexPath = join(directory, 'tail-index.json')
+    const tailIndex = await restoreTailIndex(
+      tailIndexPath,
+      directory,
+      activeFrames,
+      segmentIndex
+    )
+    const segmentBounds = new Map<number, { firstSequence: number; lastSequence: number }>()
+    if (normalizedOptions.checkpointProtectedSequences.length > 0) {
+      const { readSessionJournalBounds } = await import('./journal-range-reader')
+      const bounds = await readSessionJournalBounds(dataRoot, sessionId)
+      for (const segment of bounds.segments) {
+        segmentBounds.set(segment.index, {
+          firstSequence: segment.firstSequence,
+          lastSequence: segment.lastSequence
+        })
+      }
+    }
     return new SegmentJournal(
       directory,
       handle,
       segmentIndex,
       path,
       size,
-      Math.max(lastSequence, await lastSequenceAcrossSealed(directory)),
+      activeFrames[0]?.sequence ?? 0,
+      Math.max(lastSequence, tailIndex.snapshot(segmentIndex).lastSequence),
+      existingSegments
+        .filter((segment) => segment !== activeSegment)
+        .map((segment) => segment.state === 'active'
+          ? { ...segment, state: 'sealed-raw' as const }
+          : segment),
+      segmentBounds,
+      tailIndex,
+      tailIndexPath,
       normalizedOptions
     )
   }
@@ -204,8 +325,51 @@ export class SegmentJournal {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
-    await this.#handle.sync()
-    await this.#handle.close()
+    let storageError: unknown
+    try {
+      await this.#handle.sync()
+    } catch (error) {
+      storageError = error
+    }
+    try {
+      await this.#handle.close()
+    } catch (error) {
+      storageError ??= error
+    }
+    if (this.#segmentFirstSequence > 0) {
+      try {
+        await this.#recordCurrentSegmentBounds()
+      } catch (error) {
+        storageError ??= error
+      }
+    }
+    this.#scheduleTailIndexWrite()
+    await this.#tailIndexWriter.whenIdle()
+    if (storageError !== undefined) throw storageError
+  }
+
+  compressionCandidates(
+    checkpointProtectedIndexes: ReadonlySet<number> = this.#checkpointProtectedIndexes()
+  ): SegmentDescriptor[] {
+    const descriptors: SegmentDescriptor[] = [
+      ...this.#sealedSegments.map((segment) => ({
+        ...segment,
+        ...(checkpointProtectedIndexes.has(segment.index) ? { checkpointProtected: true } : {})
+      })),
+      {
+        index: this.#segmentIndex,
+        path: this.#path,
+        bytes: this.#size,
+        state: 'active'
+      }
+    ]
+    return selectCompressionCandidates(descriptors, this.#rawHotBytes)
+  }
+
+  async protectCheckpointSequences(sequences: readonly number[]): Promise<void> {
+    this.#assertOpen()
+    this.#replaceCheckpointProtectedSequences(normalizeCheckpointSequences(sequences))
+    this.#scheduleSealedCompression()
   }
 
   async #append(
@@ -220,42 +384,181 @@ export class SegmentJournal {
     if (this.#size > MAGIC.byteLength && this.#size + encoded.byteLength > this.#maxSegmentBytes) {
       await this.#rotate()
     }
-    await this.#writeFrame(this.#handle, encoded)
+    try {
+      await this.#writeFrame(this.#handle, encoded)
+    } catch (error) {
+      // A failed write may still have appended a prefix. Restore the exact
+      // committed boundary before returning so a live durability retry can
+      // reuse the same sequence without leaving a corrupt frame in front of it.
+      try {
+        await this.#handle.truncate(this.#size)
+      } catch {
+        // Preserve the original storage error; startup tail repair remains the
+        // final recovery boundary if the filesystem also rejects truncation.
+      }
+      throw error
+    }
     this.#size += encoded.byteLength
+    if (this.#segmentFirstSequence === 0) this.#segmentFirstSequence = header.sequence
     this.#lastSequence = header.sequence
+    this.#tailIndex.record(
+      header.sequence,
+      header.kind === 'output' ? data : EMPTY_BYTES,
+      header.kind === 'domain-cursor' ? header.domainEventSequence : undefined
+    )
+    if (this.#tailIndex.snapshot(this.#segmentIndex).framesRecorded % 256 === 0) {
+      this.#scheduleTailIndexWrite()
+    }
+    if (this.#size - this.#lastCompressionScanSize >= this.#compressionScanStep) {
+      this.#scheduleSealedCompression()
+    }
   }
 
   async #rotate(): Promise<void> {
-    await this.#handle.sync()
-    await this.#handle.close()
-    if (this.#compressSealed) {
-      const compressedPath = `${this.#path}.gz`
-      const temporaryPath = `${compressedPath}.tmp`
-      await writeFile(temporaryPath, gzipSync(await readFile(this.#path)), { mode: 0o600 })
-      const temporaryHandle = await open(temporaryPath, 'r')
-      await temporaryHandle.sync()
-      await temporaryHandle.close()
-      await rename(temporaryPath, compressedPath)
-      await unlink(this.#path)
+    const sealedHandle = this.#handle
+    const sealedSegment = {
+      index: this.#segmentIndex,
+      path: this.#path,
+      bytes: this.#size,
+      state: 'sealed-raw' as const
+    }
+    await sealedHandle.sync()
+    if (this.#segmentFirstSequence > 0) await this.#recordCurrentSegmentBounds()
+    this.#scheduleTailIndexWrite()
+    await this.#tailIndexWriter.whenIdle()
+
+    const nextSegmentIndex = this.#segmentIndex + 1
+    const nextPath = segmentPath(this.directory, nextSegmentIndex)
+    let nextHandle: FileHandle | undefined
+    try {
+      nextHandle = await open(nextPath, 'a+', 0o600)
+      await nextHandle.truncate(0)
+      await writeEntireFrame(nextHandle, MAGIC)
+      await nextHandle.sync()
+      await chmod(nextPath, 0o600)
+    } catch (error) {
+      await nextHandle?.close().catch(() => undefined)
+      await rm(nextPath, { force: true }).catch(() => undefined)
+      throw error
     }
 
-    this.#segmentIndex += 1
-    this.#path = segmentPath(this.directory, this.#segmentIndex)
-    this.#handle = await open(this.#path, 'a+', 0o600)
-    await this.#handle.write(MAGIC)
-    await chmod(this.#path, 0o600)
+    let closeError: unknown
+    try {
+      await sealedHandle.close()
+    } catch (error) {
+      closeError = error
+    }
+    this.#sealedSegments.push(sealedSegment)
+    this.#segmentBounds.set(sealedSegment.index, {
+      firstSequence: this.#segmentFirstSequence,
+      lastSequence: this.#lastSequence
+    })
+    this.#segmentIndex = nextSegmentIndex
+    this.#path = nextPath
+    this.#handle = nextHandle
     this.#size = MAGIC.byteLength
+    this.#segmentFirstSequence = 0
+    this.#scheduleSealedCompression()
+    if (closeError !== undefined) throw closeError
+  }
+
+  #scheduleSealedCompression(): void {
+    this.#lastCompressionScanSize = this.#size
+    if (!this.#compressSealed) return
+    for (const segment of this.compressionCandidates()) {
+      const candidate = {
+        sessionId: this.directory.split(/[/\\]/).at(-1)!,
+        index: segment.index,
+        path: segment.path
+      }
+      if (this.#scheduledCompressionIndexes.has(candidate.index)) continue
+      this.#scheduledCompressionIndexes.add(candidate.index)
+      void this.#compressor.schedule(candidate).then((result) => {
+        for (const current of this.#sealedSegments.filter(({ index }) => index === result.index)) {
+          current.path = result.path
+          current.state = 'compressed'
+        }
+        this.#scheduledCompressionIndexes.delete(candidate.index)
+      }).catch(() => {
+        // A later append or checkpoint update retries the candidate.
+        this.#scheduledCompressionIndexes.delete(candidate.index)
+      })
+    }
+  }
+
+  #checkpointProtectedIndexes(): Set<number> {
+    const indexes = new Set<number>()
+    for (const [index, bounds] of this.#segmentBounds) {
+      for (const sequence of this.#checkpointProtectedSequences) {
+        if (sequence >= bounds.firstSequence && sequence <= bounds.lastSequence) {
+          indexes.add(index)
+          break
+        }
+      }
+    }
+    return indexes
+  }
+
+  #replaceCheckpointProtectedSequences(sequences: readonly number[]): void {
+    this.#checkpointProtectedSequences.clear()
+    for (const sequence of sequences) this.#checkpointProtectedSequences.add(sequence)
   }
 
   #assertOpen(): void {
     if (this.#closed) throw new Error('journal is closed')
   }
+
+  #scheduleTailIndexWrite(): void {
+    const snapshot = this.#tailIndex.snapshot(this.#segmentIndex)
+    this.#tailIndexWriter.schedule(snapshot)
+  }
+
+  async #recordCurrentSegmentBounds(): Promise<void> {
+    const { recordJournalSegmentBounds } = await import('./journal-range-reader')
+    await recordJournalSegmentBounds(this.directory, {
+      index: this.#segmentIndex,
+      firstSequence: this.#segmentFirstSequence,
+      lastSequence: this.#lastSequence,
+      sourcePath: this.#path.split(/[/\\]/).at(-1)!,
+      sourceBytes: this.#size
+    })
+  }
+
+  private directoryDataRoot(): string {
+    return join(this.directory, '..', '..')
+  }
+
+  private sessionId(): string {
+    return this.directory.split(/[/\\]/).at(-1)!
+  }
+}
+
+function normalizeCheckpointSequences(sequences: readonly number[]): number[] {
+  const normalized = new Set<number>()
+  for (const sequence of sequences) {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) {
+      throw new Error('checkpoint protected sequence must be a non-negative safe integer')
+    }
+    normalized.add(sequence)
+  }
+  return [...normalized].sort((left, right) => left - right)
+}
+
+async function writeEntireFrame(handle: FileHandle, encoded: Buffer): Promise<void> {
+  let offset = 0
+  while (offset < encoded.byteLength) {
+    const { bytesWritten } = await handle.write(encoded, offset, encoded.byteLength - offset)
+    if (bytesWritten <= 0) {
+      throw Object.assign(new Error('journal frame write made no progress'), { code: 'EIO' })
+    }
+    offset += bytesWritten
+  }
 }
 
 export async function readSegmentFrames(path: string): Promise<DecodedJournalFrame[]> {
-  const stored = await readFile(path)
-  const contents = path.endsWith('.gz') ? gunzipSync(stored) : stored
-  return parseSegment(contents).frames
+  const frames: DecodedJournalFrame[] = []
+  for await (const frame of iterateSegmentFrames(path)) frames.push(frame)
+  return frames
 }
 
 export async function readSessionFrames(dataRoot: string, sessionId: string): Promise<DecodedJournalFrame[]> {
@@ -278,28 +581,126 @@ export async function repairSegmentTail(path: string): Promise<TailRepairResult>
 }
 
 async function readSessionFramesFromDirectory(directory: string): Promise<DecodedJournalFrame[]> {
-  const paths = (await readdir(directory))
-    .filter((entry) => /^segment-\d{6}\.bin(?:\.gz)?$/.test(entry))
-    .sort()
-    .map((entry) => join(directory, entry))
   const frames: DecodedJournalFrame[] = []
-  let previousSequence = 0
-  for (const path of paths) {
-    for (const frame of await readSegmentFrames(path)) {
-      if (frame.sequence <= previousSequence) {
-        throw new JournalCorruptionError('non-monotonic sequence across journal segments', 0)
-      }
-      frames.push(frame)
-      previousSequence = frame.sequence
-    }
-  }
+  for await (const frame of iterateSessionFramesFromDirectory(directory)) frames.push(frame)
   return frames
 }
 
-async function lastSequenceAcrossSealed(directory: string): Promise<number> {
-  const frames = await readSessionFramesFromDirectory(directory)
-  return frames.at(-1)?.sequence ?? 0
+async function* iterateSessionFramesFromDirectory(
+  directory: string
+): AsyncGenerator<DecodedJournalFrame> {
+  const descriptors = await describeExistingSegments(directory, await readdir(directory))
+  let previousSequence = 0
+  for (const group of selectReadableSegmentGroups(descriptors)) {
+    const frames = await readPreferredSegmentFrames(group.paths)
+    for (const frame of frames) {
+      if (frame.sequence <= previousSequence) {
+        throw new JournalCorruptionError('non-monotonic sequence across journal segments', 0)
+      }
+      previousSequence = frame.sequence
+      yield frame
+    }
+  }
 }
+
+async function restoreTailIndex(
+  path: string,
+  directory: string,
+  activeFrames: DecodedJournalFrame[],
+  activeSegmentIndex: number
+): Promise<JournalTailIndex> {
+  let index: JournalTailIndex
+  try {
+    const snapshot = await loadJournalTailIndex(path)
+    if (
+      snapshot.activeSegmentIndex < 1 ||
+      snapshot.activeSegmentIndex > activeSegmentIndex ||
+      (
+        snapshot.activeSegmentIndex === activeSegmentIndex &&
+        snapshot.lastSequence > (activeFrames.at(-1)?.sequence ?? 0)
+      )
+    ) {
+      throw new Error('tail index is ahead of the Journal')
+    }
+    index = JournalTailIndex.fromSnapshot(snapshot)
+  } catch {
+    index = await rebuildTailIndexFromHealthySuffix(directory)
+    await writeJournalTailIndex(path, index.snapshot(activeSegmentIndex))
+    return index
+  }
+  try {
+    const throughSequence = index.snapshot().lastSequence
+    const groups = selectReadableSegmentGroups(
+      await describeExistingSegments(directory, await readdir(directory))
+    ).filter(({ index: segmentIndex }) =>
+      segmentIndex >= index.snapshot().activeSegmentIndex &&
+      segmentIndex <= activeSegmentIndex
+    )
+    for (const group of groups) {
+      const frames = group.index === activeSegmentIndex
+        ? activeFrames
+        : await readPreferredSegmentFrames(group.paths)
+      for (const frame of frames) {
+        if (frame.sequence > throughSequence) recordTailFrame(index, frame)
+      }
+    }
+    return index
+  } catch {
+    index = await rebuildTailIndexFromHealthySuffix(directory)
+    await writeJournalTailIndex(path, index.snapshot(activeSegmentIndex))
+    return index
+  }
+}
+
+/**
+ * A tail sidecar is an acceleration structure, not authority over whether a
+ * Session may keep running. Rebuild it from the newest contiguous healthy
+ * suffix so one damaged cold segment remains a local history gap while later
+ * output still provides the append sequence and instant terminal tail.
+ */
+async function rebuildTailIndexFromHealthySuffix(directory: string): Promise<JournalTailIndex> {
+  const groups = selectReadableSegmentGroups(
+    await describeExistingSegments(directory, await readdir(directory))
+  )
+  let index = new JournalTailIndex()
+  let previousSegmentIndex: number | undefined
+  for (const group of groups) {
+    if (
+      previousSegmentIndex !== undefined &&
+      group.index !== previousSegmentIndex + 1
+    ) {
+      index = new JournalTailIndex()
+    }
+    previousSegmentIndex = group.index
+    let frames: DecodedJournalFrame[]
+    try {
+      frames = await readPreferredSegmentFrames(group.paths)
+    } catch {
+      index = new JournalTailIndex()
+      continue
+    }
+    try {
+      for (const frame of frames) recordTailFrame(index, frame)
+    } catch {
+      // A non-monotonic boundary is a history discontinuity just like a
+      // missing/corrupt segment. Keep only this healthy segment as the start
+      // of the newest recoverable suffix.
+      index = new JournalTailIndex()
+      for (const frame of frames) recordTailFrame(index, frame)
+    }
+  }
+  return index
+}
+
+function recordTailFrame(index: JournalTailIndex, frame: DecodedJournalFrame): void {
+  index.record(
+    frame.sequence,
+    frame.kind === 'output' ? frame.data : EMPTY_BYTES,
+    frame.kind === 'domain-cursor' ? frame.domainEventSequence : undefined
+  )
+}
+
+const EMPTY_BYTES = new Uint8Array()
 
 function encodeFrame(header: StoredHeader, data: Uint8Array<ArrayBufferLike>): Buffer {
   const encodedHeader = Buffer.from(JSON.stringify(header), 'utf8')
@@ -311,6 +712,150 @@ function encodeFrame(header: StoredHeader, data: Uint8Array<ArrayBufferLike>): B
   prefix.writeUInt32BE(body.byteLength, 0)
   prefix.writeUInt32BE(crc32(body), 4)
   return Buffer.concat([prefix, body])
+}
+
+export async function* iterateSegmentFrames(path: string): AsyncGenerator<DecodedJournalFrame> {
+  const raw = createReadStream(path, { highWaterMark: READ_CHUNK_BYTES })
+  const source = path.endsWith('.gz') ? raw.pipe(createGunzip()) : raw
+  const pending = new PendingChunks()
+  let offset = 0
+  let previousSequence = 0
+  let magicRead = false
+
+  for await (const value of source) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+    pending.push(chunk)
+    if (!magicRead) {
+      if (pending.byteLength < MAGIC.byteLength) continue
+      if (!pending.read(MAGIC.byteLength).equals(MAGIC)) {
+        throw new JournalCorruptionError('invalid Journal V2 magic', 0)
+      }
+      offset = MAGIC.byteLength
+      magicRead = true
+    }
+
+    while (pending.byteLength >= FRAME_PREFIX_BYTES) {
+      const bodyLength = pending.peekUInt32BE(0)
+      const expectedChecksum = pending.peekUInt32BE(4)
+      if (bodyLength < 4 || bodyLength > MAX_FRAME_BYTES) {
+        throw new JournalCorruptionError('invalid journal frame length', offset)
+      }
+      const encodedLength = FRAME_PREFIX_BYTES + bodyLength
+      if (pending.byteLength < encodedLength) break
+      pending.discard(FRAME_PREFIX_BYTES)
+      const body = pending.read(bodyLength)
+      if (crc32(body) !== expectedChecksum) {
+        throw new JournalCorruptionError('journal frame checksum mismatch', offset)
+      }
+      const headerLength = body.readUInt32BE(0)
+      if (headerLength < 2 || 4 + headerLength > body.byteLength) {
+        throw new JournalCorruptionError('invalid journal frame header length', offset)
+      }
+      let header: StoredHeader
+      try {
+        header = JSON.parse(body.subarray(4, 4 + headerLength).toString('utf8')) as StoredHeader
+      } catch {
+        throw new JournalCorruptionError('invalid journal frame header JSON', offset)
+      }
+      const data = body.subarray(4 + headerLength)
+      validateHeader(header, data.byteLength, previousSequence, offset)
+      previousSequence = header.sequence
+      yield decodeFrame(header, data)
+      offset += encodedLength
+    }
+  }
+
+  if (!magicRead) throw new JournalCorruptionError('invalid Journal V2 magic', 0)
+  if (pending.byteLength > 0) {
+    throw new JournalCorruptionError(
+      pending.byteLength < FRAME_PREFIX_BYTES
+        ? 'truncated journal frame prefix'
+        : 'truncated journal frame body',
+      offset
+    )
+  }
+}
+
+/**
+ * Stream queue that consumes each input byte once. Large Journal frames often
+ * cross a read boundary; repeatedly concatenating the growing partial frame
+ * retained every intermediate copy and made replay RSS scale with history.
+ */
+class PendingChunks {
+  readonly #chunks: Buffer[] = []
+  #headOffset = 0
+  #length = 0
+
+  get byteLength(): number { return this.#length }
+
+  push(chunk: Buffer): void {
+    if (chunk.byteLength === 0) return
+    this.#chunks.push(chunk)
+    this.#length += chunk.byteLength
+  }
+
+  peekUInt32BE(offset: number): number {
+    if (offset < 0 || offset + 4 > this.#length) throw new RangeError('peek is outside pending bytes')
+    let value = 0
+    for (let index = 0; index < 4; index += 1) {
+      value = (value * 256) + this.#byteAt(offset + index)
+    }
+    return value >>> 0
+  }
+
+  discard(length: number): void {
+    this.#consume(length)
+  }
+
+  read(length: number): Buffer {
+    if (length < 0 || length > this.#length) throw new RangeError('read is outside pending bytes')
+    const head = this.#chunks[0]
+    if (head && head.byteLength - this.#headOffset >= length) {
+      const value = head.subarray(this.#headOffset, this.#headOffset + length)
+      this.#consume(length)
+      return value
+    }
+    const value = Buffer.allocUnsafe(length)
+    let written = 0
+    while (written < length) {
+      const current = this.#chunks[0]!
+      const available = current.byteLength - this.#headOffset
+      const count = Math.min(available, length - written)
+      current.copy(value, written, this.#headOffset, this.#headOffset + count)
+      this.#consume(count)
+      written += count
+    }
+    return value
+  }
+
+  #byteAt(offset: number): number {
+    let remaining = offset
+    for (let index = 0; index < this.#chunks.length; index += 1) {
+      const chunk = this.#chunks[index]!
+      const start = index === 0 ? this.#headOffset : 0
+      const available = chunk.byteLength - start
+      if (remaining < available) return chunk[start + remaining]!
+      remaining -= available
+    }
+    throw new RangeError('byte is outside pending bytes')
+  }
+
+  #consume(length: number): void {
+    if (length < 0 || length > this.#length) throw new RangeError('consume is outside pending bytes')
+    this.#length -= length
+    let remaining = length
+    while (remaining > 0) {
+      const head = this.#chunks[0]!
+      const available = head.byteLength - this.#headOffset
+      if (remaining < available) {
+        this.#headOffset += remaining
+        return
+      }
+      remaining -= available
+      this.#chunks.shift()
+      this.#headOffset = 0
+    }
+  }
 }
 
 function parseSegment(contents: Buffer, tolerateTornTail = false): { frames: DecodedJournalFrame[]; lastGoodOffset: number } {
@@ -377,7 +922,11 @@ function validateHeader(header: StoredHeader, actualDataLength: number, previous
 
 function decodeFrame(header: StoredHeader, data: Buffer): DecodedJournalFrame {
   switch (header.kind) {
-    case 'output': return { kind: 'output', sequence: header.sequence, data: Uint8Array.from(data) }
+    case 'output': return {
+      kind: 'output',
+      sequence: header.sequence,
+      data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    }
     case 'resize': return { kind: 'resize', sequence: header.sequence, cols: header.cols, rows: header.rows }
     case 'reset': return { kind: 'reset', sequence: header.sequence, screenEpoch: header.screenEpoch }
     case 'encoding': return { kind: 'encoding', sequence: header.sequence, encoding: header.encoding }
@@ -387,17 +936,128 @@ function decodeFrame(header: StoredHeader, data: Buffer): DecodedJournalFrame {
 }
 
 function segmentPath(directory: string, index: number): string {
-  return join(directory, `segment-${String(index).padStart(6, '0')}.bin`)
+  return join(directory, `segment-${String(index).padStart(6, '0')}.mtj`)
 }
 
-function parseActiveSegmentIndex(name: string): number | undefined {
-  const match = /^segment-(\d{6})\.bin$/.exec(name)
-  return match ? Number(match[1]) : undefined
+interface StoredSegmentDescriptor extends SegmentDescriptor {
+  format: 'mtj' | 'legacy-bin'
 }
 
-function parseSealedSegmentIndex(name: string): number | undefined {
-  const match = /^segment-(\d{6})\.bin\.gz$/.exec(name)
-  return match ? Number(match[1]) : undefined
+export interface ReadableJournalSegment {
+  index: number
+  paths: string[]
+}
+
+export async function listReadableJournalSegments(
+  directory: string
+): Promise<ReadableJournalSegment[]> {
+  return selectReadableSegmentGroups(
+    await describeExistingSegments(directory, await readdir(directory))
+  )
+}
+
+async function describeExistingSegments(
+  directory: string,
+  entries: string[],
+  publicationRaceRetries = 4
+): Promise<StoredSegmentDescriptor[]> {
+  let publicationRace = false
+  const descriptors = await Promise.all(entries.map(async (
+    entry
+  ): Promise<StoredSegmentDescriptor | undefined> => {
+    const parsed = parseSegmentName(entry)
+    if (!parsed) return undefined
+    const path = join(directory, entry)
+    let bytes: number
+    try {
+      bytes = (await stat(path)).size
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+      publicationRace = true
+      return undefined
+    }
+    return {
+      index: parsed.index,
+      path,
+      bytes,
+      state: parsed.compressed ? 'compressed' as const : 'active' as const,
+      format: parsed.format
+    }
+  }))
+  if (publicationRace && publicationRaceRetries > 0) {
+    return describeExistingSegments(
+      directory,
+      await readdir(directory),
+      publicationRaceRetries - 1
+    )
+  }
+  return descriptors.filter((item): item is StoredSegmentDescriptor => item !== undefined)
+}
+
+function parseSegmentName(name: string): {
+  index: number
+  compressed: boolean
+  format: StoredSegmentDescriptor['format']
+} | undefined {
+  const match = /^segment-(\d{6})\.(mtj|bin)(\.gz)?$/.exec(name)
+  if (!match) return undefined
+  return {
+    index: Number(match[1]),
+    format: match[2] === 'mtj' ? 'mtj' : 'legacy-bin',
+    compressed: match[3] === '.gz'
+  }
+}
+
+function chooseActiveRawSegment(
+  descriptors: StoredSegmentDescriptor[]
+): StoredSegmentDescriptor | undefined {
+  const compressedIndexes = new Set(
+    descriptors.filter(({ state }) => state === 'compressed').map(({ index }) => index)
+  )
+  return descriptors
+    .filter(({ state, index }) => state !== 'compressed' && !compressedIndexes.has(index))
+    .sort((left, right) => right.index - left.index || formatPriority(left) - formatPriority(right))[0]
+}
+
+function selectReadableSegmentGroups(
+  descriptors: StoredSegmentDescriptor[]
+): Array<{ index: number; paths: string[] }> {
+  const grouped = new Map<number, StoredSegmentDescriptor[]>()
+  for (const descriptor of descriptors) {
+    const values = grouped.get(descriptor.index) ?? []
+    values.push(descriptor)
+    grouped.set(descriptor.index, values)
+  }
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([index, values]) => ({
+      index,
+      paths: values.sort((left, right) => readPriority(left) - readPriority(right))
+        .map(({ path }) => path)
+    }))
+}
+
+async function readPreferredSegmentFrames(paths: string[]): Promise<DecodedJournalFrame[]> {
+  let failure: unknown
+  for (const path of paths) {
+    try {
+      return await readSegmentFrames(path)
+    } catch (error) {
+      failure = error
+    }
+  }
+  throw failure ?? new JournalCorruptionError('Journal segment is unavailable', 0)
+}
+
+function readPriority(segment: StoredSegmentDescriptor): number {
+  if (segment.state !== 'compressed' && segment.format === 'mtj') return 0
+  if (segment.state !== 'compressed') return 1
+  if (segment.format === 'mtj') return 2
+  return 3
+}
+
+function formatPriority(segment: StoredSegmentDescriptor): number {
+  return segment.format === 'mtj' ? 0 : 1
 }
 
 function crc32(buffer: Buffer): number {

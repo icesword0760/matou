@@ -368,11 +368,13 @@ function commands(): HierarchyCommands {
     reorderScene: vi.fn(), closeScene: vi.fn(), reopenScene: vi.fn(), splitSession: vi.fn(), forkSession: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
     retryFork: vi.fn(), removeFailedFork: vi.fn(),
-    retryProviderRestore: vi.fn(), listClaudeSessions: vi.fn(),
+    retryProviderRestore: vi.fn(), startFreshProvider: vi.fn(), listClaudeSessions: vi.fn(),
     getClaudeSessionDetail: vi.fn(), loadClaudeSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(),
-    activateSession: vi.fn(), deleteSession: vi.fn(), detachSession: vi.fn(),
+    activateSession: vi.fn(), detachSession: vi.fn(),
+    openSessionEnvironment: vi.fn(), restoreSessionEnvironment: vi.fn(),
+    locateSessionEnvironment: vi.fn(), handoffSessionEnvironment: vi.fn(),
     returnSession: vi.fn(), setPermissionMode: vi.fn(), setModel: vi.fn()
   }
 }

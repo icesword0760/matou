@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 import {
-  activeSurface, launchSessionCanvas, terminalCommand, visibleSurfaces
+  activeSurface, launchSessionCanvas, readText, terminalCommand, visibleSurfaces
 } from './fixtures/session-canvas-fixture'
 
 test.describe('horizontal sibling navigation', () => {
@@ -183,8 +183,34 @@ test.describe('horizontal sibling navigation', () => {
         await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
-      await carousel.evaluate((element) => { element.scrollLeft = 0 })
-      const startingCard = fixture.page.locator('.session-card[data-in-viewport="true"]').nth(1)
+      const carouselBox = await carousel.boundingBox()
+      expect(carouselBox).not.toBeNull()
+      // Use the same real wheel gesture as a user. Besides moving the strip,
+      // this explicitly cancels the 440ms focus-follow started by the last
+      // created Session; assigning scrollLeft directly is correctly overruled
+      // by that still-active product animation.
+      await fixture.page.mouse.move(
+        carouselBox!.x + carouselBox!.width / 2,
+        carouselBox!.y + Math.min(20, carouselBox!.height / 2)
+      )
+      await fixture.page.mouse.wheel(-5_000, 0)
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBe(0)
+      await expect(carousel).toHaveAttribute('data-viewport-moving', 'false')
+      // Select a card by its real clipped rectangle; data-in-viewport is an
+      // index hint for virtualization, not a pointer hit-test oracle.
+      const startingSessionId = await carousel.evaluate((viewport) => {
+        const viewportRect = viewport.getBoundingClientRect()
+        return [...viewport.querySelectorAll<HTMLElement>('[data-session-card]')]
+          .filter((card) => {
+            const rect = card.getBoundingClientRect()
+            return Math.min(viewportRect.right, rect.right) - Math.max(viewportRect.left, rect.left) > 200
+          })[1]?.dataset.sessionCard
+      })
+      expect(startingSessionId).toBeTruthy()
+      const startingCard = fixture.page.locator(`[data-session-card="${startingSessionId}"]`)
+      await startingCard.hover()
+      await expect(startingCard).toHaveClass(/is-expanded/)
+      await fixture.page.waitForTimeout(250)
       const box = await startingCard.boundingBox()
       expect(box).not.toBeNull()
       // Anchor near the card's leading edge. Its right edge grows during the
@@ -703,6 +729,193 @@ test.describe('horizontal sibling navigation', () => {
       await fixture.close()
     }
   })
+
+  test('coalesces real window dragging to 60 terminal resizes per second', async () => {
+    test.setTimeout(120_000)
+    const fixture = await launchSessionCanvas()
+    try {
+      await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
+      for (let index = 1; index < 16; index += 1) {
+        await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      }
+      const foregroundSurfaces = fixture.page.locator(
+        '.scene-stage:not([hidden]) [data-testid="terminal-pane"] .terminal-surface'
+      )
+      await expect(foregroundSurfaces).toHaveCount(16)
+      await expect.poll(async () => foregroundSurfaces.evaluateAll((surfaces) =>
+        surfaces.every((surface) => /^[1-9][0-9]*$/.test(surface.getAttribute('data-pid') ?? ''))
+      )).toBe(true)
+      const identities = await foregroundSurfaces.evaluateAll((surfaces) => surfaces.map((surface) => ({
+        sessionId: surface.getAttribute('data-session-id'),
+        pid: surface.getAttribute('data-pid')
+      })))
+      expect(new Set(identities.map(({ sessionId }) => sessionId)).size).toBe(16)
+      expect(new Set(identities.map(({ pid }) => pid)).size).toBe(16)
+
+      await fixture.page.evaluate(() => {
+        type ResizeProbe = {
+          entries: Array<{ sessionId: string; resizeId: number; cols: number; rows: number; at: number }>
+          applied: Array<{ sessionId: string; resizeId: number; cols: number; rows: number; at: number }>
+        }
+        const scope = window as typeof window & { __matouResizeProbe?: ResizeProbe }
+        scope.__matouResizeProbe = { entries: [], applied: [] }
+        const observed = new WeakSet<MessagePort>()
+        const original = MessagePort.prototype.postMessage
+        MessagePort.prototype.postMessage = function(message: unknown, transferOrOptions?: unknown) {
+          if (!observed.has(this)) {
+            observed.add(this)
+            this.addEventListener('message', (event: MessageEvent<unknown>) => {
+              const value = event.data
+              if (!value || typeof value !== 'object' || !('type' in value) ||
+                value.type !== 'terminal.resized' || !('sessionId' in value) ||
+                !('resizeId' in value) || !('cols' in value) || !('rows' in value)) return
+              scope.__matouResizeProbe?.applied.push({
+                sessionId: String(value.sessionId), resizeId: Number(value.resizeId),
+                cols: Number(value.cols), rows: Number(value.rows), at: performance.now()
+              })
+            })
+          }
+          if (message && typeof message === 'object' && 'type' in message &&
+            message.type === 'terminal.resize' && 'sessionId' in message &&
+            'resizeId' in message && 'cols' in message && 'rows' in message) {
+            scope.__matouResizeProbe?.entries.push({
+              sessionId: String(message.sessionId), resizeId: Number(message.resizeId),
+              cols: Number(message.cols), rows: Number(message.rows), at: performance.now()
+            })
+          }
+          if (transferOrOptions === undefined) return original.call(this, message)
+          return original.call(this, message, transferOrOptions as StructuredSerializeOptions)
+        }
+      })
+
+      const active = activeSurface(fixture.page)
+      const activeSessionId = await active.getAttribute('data-session-id')
+      expect(activeSessionId).toBeTruthy()
+      const stableActive = fixture.page.locator(
+        `.terminal-surface[data-session-id="${activeSessionId}"]`
+      )
+      const textarea = stableActive.locator('.xterm-helper-textarea')
+      await textarea.focus()
+      const dragWindow = fixture.app.evaluate(async ({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0]
+        if (!window) throw new Error('Matou window is missing')
+        const startedAt = Date.now()
+        let step = 0
+        await new Promise<void>((resolve) => {
+          const timer = setInterval(() => {
+            if (Date.now() - startedAt >= 2_100) {
+              clearInterval(timer)
+              window.setSize(1500, 820)
+              resolve()
+              return
+            }
+            window.setSize(1200 + (step % 30) * 10, 820)
+            step += 1
+          }, 8)
+        })
+      })
+      await textarea.pressSequentially("printf '__RESIZE_INPUT_OK__\\n'", { delay: 8 })
+      await textarea.press('Enter')
+      await expect(stableActive.locator('.xterm-rows')).toContainText('__RESIZE_INPUT_OK__')
+      await dragWindow
+      await fixture.page.waitForTimeout(250)
+
+      const entries = await fixture.page.evaluate(() => (
+        window as typeof window & {
+          __matouResizeProbe?: {
+            entries: Array<{ sessionId: string; cols: number; rows: number; at: number }>
+          }
+        }
+      ).__matouResizeProbe?.entries ?? [])
+      expect(entries.length).toBeGreaterThan(0)
+      const bySession = new Map<string, typeof entries>()
+      for (const entry of entries) {
+        const sessionEntries = bySession.get(entry.sessionId) ?? []
+        sessionEntries.push(entry)
+        bySession.set(entry.sessionId, sessionEntries)
+      }
+      // Fixed-width off-screen cards may keep their exact grid dimensions and
+      // therefore correctly emit zero resize messages during a window drag.
+      expect(bySession.size).toBeLessThanOrEqual(16)
+      for (const sessionEntries of bySession.values()) {
+        expect(maximumMessagesInOneSecond(sessionEntries.map(({ at }) => at))).toBeLessThanOrEqual(60)
+      }
+
+      // Pick a card that is actually mounted in the horizontal viewport. The
+      // domain-focused Session can legitimately be outside the viewport while
+      // still counting as foreground, in which case it has no view resize to
+      // offer for this acceptance barrier.
+      const finalActive = visibleSurfaces(fixture.page).last()
+      await finalActive.click({ position: { x: 12, y: 12 } })
+      await expect(finalActive.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]'))
+        .toHaveAttribute('data-active', 'true')
+      const finalActiveSessionId = await finalActive.getAttribute('data-session-id')
+      expect(finalActiveSessionId).toBeTruthy()
+      // The Runtime may publish activity ordering while the test is typing.
+      // Bind every subsequent action to the captured Session identity instead
+      // of re-resolving the dynamic [data-active] selector.
+      const stableFinalActive = fixture.page.locator(
+        `.terminal-surface[data-session-id="${finalActiveSessionId}"]`
+      )
+      const finalTextarea = stableFinalActive.locator('.xterm-helper-textarea')
+      const evidenceId = Date.now().toString(36)
+      const marker = `R${evidenceId}`
+      const sttyResultPath = `/tmp/m-${evidenceId}`
+      await fixture.page.evaluate(() => {
+        const scope = window as typeof window & {
+          __matouResizeProbe?: { entries: unknown[]; applied: unknown[] }
+        }
+        if (scope.__matouResizeProbe) {
+          scope.__matouResizeProbe.entries = []
+          scope.__matouResizeProbe.applied = []
+        }
+      })
+      await fixture.app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()[0]?.setSize(1200, 650)
+      )
+      await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
+      // The first real command can publish activity ordering and move the
+      // selected card. Let that product behavior finish before measuring the
+      // terminal dimensions so the acceptance check observes the stable card.
+      const settleMarker = `S${evidenceId}`
+      await finalTextarea.focus()
+      await finalTextarea.pressSequentially(`printf '${settleMarker}\\n'`, { delay: 2 })
+      await finalTextarea.press('Enter')
+      await expect(stableFinalActive.locator('.xterm-rows')).toContainText(settleMarker)
+      await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
+      await finalTextarea.focus()
+      await finalTextarea.pressSequentially(
+        `stty size > '${sttyResultPath}'; printf '${marker}\\n'`,
+        { delay: 2 }
+      )
+      // Focusing and laying out a long input line can change xterm by one or
+      // two columns. Settle that final offer too, then require Runtime's exact
+      // application ACK before Enter reaches the PTY.
+      const submitResize = await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
+      await finalTextarea.press('Enter')
+      await expect.poll(async () => readText(sttyResultPath).catch(() => '')).toMatch(/^\d+ \d+\n$/)
+      await expect(stableFinalActive.locator('.xterm-rows')).toContainText(marker)
+      const appliedAfterSubmit = await waitForCurrentXtermResizeApplied(
+        fixture.page, stableFinalActive, finalActiveSessionId!
+      )
+      const size = (await readText(sttyResultPath)).trim().match(/^(\d+) (\d+)$/)
+      expect(size).not.toBeNull()
+      expect({ rows: submitResize.rows, cols: submitResize.cols }).toEqual({
+        rows: appliedAfterSubmit.rows, cols: appliedAfterSubmit.cols
+      })
+      expect({ rows: Number(size![1]), cols: Number(size![2]) }).toEqual({
+        rows: appliedAfterSubmit.rows, cols: appliedAfterSubmit.cols
+      })
+    } finally {
+      await fixture.close()
+    }
+  })
 })
 
 function directionReversals(values: number[], tolerance: number): number {
@@ -716,4 +929,72 @@ function directionReversals(values: number[], tolerance: number): number {
     direction = nextDirection
   }
   return reversals
+}
+
+function maximumMessagesInOneSecond(timestamps: number[]): number {
+  let left = 0
+  let maximum = 0
+  for (let right = 0; right < timestamps.length; right += 1) {
+    while (timestamps[left] !== undefined && timestamps[left]! <= timestamps[right]! - 1_000) {
+      left += 1
+    }
+    maximum = Math.max(maximum, right - left + 1)
+  }
+  return maximum
+}
+
+type ResizeProbeEntry = {
+  sessionId: string
+  resizeId: number
+  cols: number
+  rows: number
+  at: number
+}
+
+async function readResizeEntries(page: import('@playwright/test').Page): Promise<ResizeProbeEntry[]> {
+  return page.evaluate(() => (
+    window as typeof window & {
+      __matouResizeProbe?: { entries: ResizeProbeEntry[] }
+    }
+  ).__matouResizeProbe?.entries ?? [])
+}
+
+async function readAppliedResizeEntries(
+  page: import('@playwright/test').Page
+): Promise<ResizeProbeEntry[]> {
+  return page.evaluate(() => (
+    window as typeof window & {
+      __matouResizeProbe?: { applied: ResizeProbeEntry[] }
+    }
+  ).__matouResizeProbe?.applied ?? [])
+}
+
+async function waitForCurrentXtermResizeApplied(
+  page: import('@playwright/test').Page,
+  surface: import('@playwright/test').Locator,
+  sessionId: string
+): Promise<ResizeProbeEntry> {
+  const deadline = Date.now() + 15_000
+  let previous = ''
+  let stableFrames = 0
+  while (Date.now() < deadline) {
+    const last = (await readResizeEntries(page))
+      .filter((entry) => entry.sessionId === sessionId).at(-1)
+    const current = await surface.locator('.terminal-surface__viewport').evaluate((element) => ({
+      cols: Number((element as HTMLElement).dataset.terminalCols),
+      rows: Number((element as HTMLElement).dataset.terminalRows)
+    }))
+    const applied = last !== undefined && (await readAppliedResizeEntries(page)).some((entry) =>
+      entry.sessionId === last.sessionId && entry.resizeId === last.resizeId &&
+      entry.cols === last.cols && entry.rows === last.rows
+    )
+    const signature = last && applied && current.cols === last.cols && current.rows === last.rows
+      ? `${last.resizeId}:${last.cols}x${last.rows}`
+      : ''
+    stableFrames = signature !== '' && signature === previous ? stableFrames + 1 : 0
+    previous = signature
+    if (stableFrames >= 4 && last) return last
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())))
+  }
+  throw new Error(`xterm and Runtime did not settle on one applied resize for ${sessionId}`)
 }

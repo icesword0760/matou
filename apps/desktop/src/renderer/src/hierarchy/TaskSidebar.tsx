@@ -49,6 +49,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
   projection: HierarchyProjection
   commands: HierarchyCommands
   pathValid?: boolean
+  readOnly?: boolean
   onRevealSession?(sceneId: string, sessionId: string): void
   boardActive?: boolean
   onBoardActiveChange?(active: boolean): void
@@ -95,8 +96,8 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { setMenuTask(null); setMenuWorkspace(null); setNotificationCenterOpen(false) }
     }
-    window.addEventListener('pointerdown', closeMenus); window.addEventListener('keydown', onEscape)
-    return () => { window.removeEventListener('pointerdown', closeMenus); window.removeEventListener('keydown', onEscape) }
+    window.addEventListener('pointerdown', closeMenus); window.addEventListener('keydown', onEscape, true)
+    return () => { window.removeEventListener('pointerdown', closeMenus); window.removeEventListener('keydown', onEscape, true) }
   }, [notificationCenterOpen])
   useEffect(() => {
     if (!toast) return
@@ -202,15 +203,15 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
         return <section key={workspace.id} role="group" aria-label={`${workspace.name} 工作空间`}
           data-testid="workspace-group" data-workspace-id={workspace.id}
           className={`workspace-group${workspace.id === activeWorkspaceId ? ' is-active' : ''}${dragWorkspaceId === workspace.id ? ' is-dragging' : ''}${dragOverId === `workspace:${workspace.id}` ? ' drag-over' : ''}`}
-          draggable={Boolean(workspace.isPinned)}
+          draggable={!readOnly && Boolean(workspace.isPinned)}
           onDragStart={(event) => {
-            if (!workspace.isPinned) return
+            if (readOnly || !workspace.isPinned) return
             setDragWorkspaceId(workspace.id); event.dataTransfer.setData(WORKSPACE_TRANSFER, workspace.id); event.dataTransfer.effectAllowed = 'move'
           }}
-          onDragOver={(event) => { if (dragWorkspaceId && workspace.isPinned && dragWorkspaceId !== workspace.id) { event.preventDefault(); setDragOverId(`workspace:${workspace.id}`) } }}
+          onDragOver={(event) => { if (!readOnly && dragWorkspaceId && workspace.isPinned && dragWorkspaceId !== workspace.id) { event.preventDefault(); setDragOverId(`workspace:${workspace.id}`) } }}
           onDrop={(event) => {
             const sourceId = event.dataTransfer.getData(WORKSPACE_TRANSFER)
-            if (sourceId && workspace.isPinned) void commands.reorderPinnedWorkspace(sourceId, workspace.id)
+            if (!readOnly && sourceId && workspace.isPinned) void commands.reorderPinnedWorkspace(sourceId, workspace.id)
             resetDrag()
           }} onDragEnd={resetDrag}>
           <div className="workspace-group__header" aria-current={workspace.id === activeWorkspaceId ? 'location' : undefined}>
@@ -232,10 +233,12 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
                 {invalid && <span className="workspace-invalid">路径失效</span>}
               </span>
             </button>
-            <button className="workspace-group__add" aria-label={`在 ${workspace.name} 中新增事项`} title={invalid ? WORKSPACE_PATH_MESSAGE : '新增事项'}
-              disabled={invalid} onClick={() => void commands.createTask(workspace.id)}><PlusIcon /></button>
+            <button className="workspace-group__add" aria-label={`在 ${workspace.name} 中新增事项`}
+              title={readOnly ? READ_ONLY_REASON : invalid ? WORKSPACE_PATH_MESSAGE : '新增事项'}
+              disabled={readOnly || invalid} onClick={() => void commands.createTask(workspace.id)}><PlusIcon /></button>
             {invalid && !workspace.isDefault && <button className="workspace-group__relink"
-              aria-label={`重新关联工作空间目录：${workspace.name}`} title="选择工作空间的新位置"
+              aria-label={`重新关联工作空间目录：${workspace.name}`}
+              disabled={readOnly} title={readOnly ? READ_ONLY_REASON : '选择工作空间的新位置'}
               onClick={(event) => { event.stopPropagation(); void relinkDirectory(workspace) }}>恢复目录</button>}
             <button className="workspace-group__more" aria-label={`工作空间菜单：${workspace.name}`}
               onClick={(event) => openWorkspaceMenu(workspace, event)}><AppIcon name="ellipsis" /></button>
@@ -243,15 +246,16 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
           {!isCollapsed && <div className="workspace-group__tasks" role="list">
             {tasks.map((task) => <div role="listitem" key={task.id} data-testid={`task-${task.id}`}
               className={`workbench-item${task.id === activeTaskId ? ' is-active' : ''}${task.id === dragTaskId ? ' is-dragging' : ''}${dragOverId === `task:${task.id}` ? ' drag-over' : ''}`}
-              tabIndex={0} aria-current={task.id === activeTaskId ? 'true' : undefined} draggable={Boolean(task.isPinned)}
+              tabIndex={0} aria-current={task.id === activeTaskId ? 'true' : undefined}
+              draggable={!readOnly && Boolean(task.isPinned)}
               onDragStart={(event) => {
-                if (!task.isPinned) return
+                if (readOnly || !task.isPinned) return
                 setDragTaskId(task.id); event.dataTransfer.setData(TASK_TRANSFER, JSON.stringify({ workspaceId: workspace.id, taskId: task.id })); event.dataTransfer.effectAllowed = 'move'
               }}
-              onDragOver={(event) => { if (dragTaskId && task.isPinned && dragTaskId !== task.id) { event.preventDefault(); setDragOverId(`task:${task.id}`) } }}
+              onDragOver={(event) => { if (!readOnly && dragTaskId && task.isPinned && dragTaskId !== task.id) { event.preventDefault(); setDragOverId(`task:${task.id}`) } }}
               onDrop={(event) => {
                 const source = parseTransfer(event.dataTransfer.getData(TASK_TRANSFER))
-                if (source?.workspaceId === workspace.id && task.isPinned) void commands.reorderPinnedTask(workspace.id, source.taskId, task.id)
+                if (!readOnly && source?.workspaceId === workspace.id && task.isPinned) void commands.reorderPinnedTask(workspace.id, source.taskId, task.id)
                 resetDrag()
               }} onDragEnd={resetDrag}
               onClick={() => {
@@ -300,12 +304,13 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
     </footer>
     {menuWorkspace && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
       {projection.pathStates.find(({ workspaceId }) => workspaceId === menuWorkspace.id)?.status === 'invalid' &&
-        !menuWorkspace.isDefault && <button role="menuitem" onClick={() => {
+        !menuWorkspace.isDefault && <button role="menuitem" disabled={readOnly}
+          title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
           const target = menuWorkspace
           setMenuWorkspace(null)
           void relinkDirectory(target)
         }}>重新关联工作空间目录</button>}
-      <button role="menuitem" onClick={() => {
+      <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
         const pinned = !menuWorkspace.isPinned
         const workspaceId = menuWorkspace.id
         setMenuWorkspace(null)
@@ -316,7 +321,9 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
         <PinIcon />{menuWorkspace.isPinned ? '取消置顶' : '置顶'}</button>
       <button role="menuitem" onClick={() => { void window.matouDesktop?.revealDirectory(menuWorkspace.rootDirectory); setMenuWorkspace(null) }}>在 Finder 中显示</button>
       <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(menuWorkspace.rootDirectory); setToast('路径已复制'); setMenuWorkspace(null) }}>复制路径</button>
-      {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
+      {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" disabled={readOnly}
+        title={readOnly ? READ_ONLY_REASON : undefined}
+        onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
     </div>}
     {menuTask && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
         <button role="menuitem" onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
@@ -367,6 +374,7 @@ function TrashIcon() { return <AppIcon name="trash-2" size={14} /> }
 function KanbanIcon() { return <AppIcon name="columns-3" /> }
 function SettingsIcon() { return <AppIcon name="settings-2" /> }
 const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
+const READ_ONLY_REASON = '数据库处于只读恢复模式'
 function NOOP(): void {}
 function parseTransfer(value: string): { workspaceId: string; taskId: string } | undefined {
   try {

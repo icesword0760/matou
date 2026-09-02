@@ -1481,9 +1481,11 @@ export class HierarchyApplicationService {
       tx.run(
         `INSERT INTO session_fork_intents (
            session_id, source_session_id, source_provider, source_provider_session_id,
-           state, created_at
-         ) VALUES (?, ?, 'claude-code', ?, 'pending', ?)`,
-        ids.sessionId, source.id, sourceBinding.provider_session_id, input.now
+           state, created_at, updated_at, operation_id, submission_key, stage,
+           completed_steps, total_steps, attempt, lease_fence
+         ) VALUES (?, ?, 'claude-code', ?, 'pending', ?, ?, ?, ?, 'queued', 0, 2, 0, 0)`,
+        ids.sessionId, source.id, sourceBinding.provider_session_id, input.now, input.now,
+        `legacy-operation:${randomUUID()}`, `legacy-fork:${command.commandId}`
       )
       const relationInsertion = tx.run(
         `INSERT INTO session_relation_events (
@@ -2373,6 +2375,43 @@ export function readHierarchyResult(
     session: session ? mapSession(session) : null,
     mount: mount ? mapMount(mount) : null,
     navigation
+  }
+}
+
+/** Read-only replay projection for an already accepted operation. */
+export function readHierarchyResultForSession(
+  tx: DatabaseTransaction,
+  windowId: string,
+  sessionId: string
+): WorkspaceHierarchyResult {
+  const session = requireRow<SessionRow>(tx.get(
+    'SELECT * FROM sessions WHERE id = ? AND archived_at IS NULL', sessionId
+  ), 'Session')
+  const mount = requireRow<MountRow>(tx.get(
+    `SELECT * FROM session_mounts
+     WHERE session_id = ? ORDER BY created_at, id LIMIT 1`, sessionId
+  ), 'SessionMount')
+  const scene = requireRow<SceneRow>(tx.get(
+    'SELECT * FROM scenes WHERE id = ? AND archived_at IS NULL', mount.scene_id
+  ), 'Scene')
+  const task = requireRow<TaskRow>(tx.get(
+    'SELECT * FROM tasks WHERE id = ? AND archived_at IS NULL', session.task_id
+  ), 'Task')
+  const workspace = requireRow<WorkspaceRow>(tx.get(
+    'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL', task.workspace_id
+  ), 'Workspace')
+  const context = tx.get<ContextRow>(
+    `SELECT id, workspace_id, cwd, created_at, archived_at FROM execution_contexts
+     WHERE id = ? AND kind = 'plain-directory'`, task.execution_context_id
+  )
+  return {
+    workspace: mapWorkspace(workspace),
+    executionContext: context ? mapPlainContext(context) : null,
+    task: mapTask(task),
+    scene: mapScene(scene),
+    session: mapSession(session),
+    mount: mapMount(mount),
+    navigation: readNavigation(tx, windowId)
   }
 }
 

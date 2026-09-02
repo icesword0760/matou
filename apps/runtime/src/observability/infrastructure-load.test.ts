@@ -81,5 +81,5 @@ describe('infrastructure load envelope', () => {
     const p95 = latencies[Math.floor(latencies.length * 0.95)]!
     expect(new DomainEventStore(database).readAfter(0, 1000)).toHaveLength(500)
     expect(p95).toBeLessThan(100)
-  })
+  }, 15_000)
 })

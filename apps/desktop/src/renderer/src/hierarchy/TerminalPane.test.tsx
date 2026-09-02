@@ -2,35 +2,118 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { SessionEnvironment } from '@matou/domain'
 
 import { TerminalPane } from './TerminalPane'
 
 vi.mock('../terminal/TerminalSurface', () => ({
   TerminalSurface: (props: {
     sessionId: string; visible: boolean; inputDisabled: boolean; spawnRevision?: number
+    readOnly?: boolean
     onStatusChange?(status: string): void; onRuntimeError?(message: string): void
     onUserInput?(): void
+    onStorageFault?(fault: {
+      type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
+      code: 'STORAGE_WRITE_FAILED'; message: string; retainedBytes: number
+    }): void
   }) =>
     <div data-testid={`surface-${props.sessionId}`} data-visible={props.visible}
-      data-input-disabled={props.inputDisabled} data-spawn-revision={props.spawnRevision}>
+      data-input-disabled={props.inputDisabled} data-read-only={props.readOnly}
+      data-spawn-revision={props.spawnRevision}>
       <textarea className="xterm-helper-textarea" aria-label="Terminal input"
         onInput={() => props.onUserInput?.()} />
       <button type="button" aria-label="触发启动失败" onClick={() => {
         props.onRuntimeError?.('spawn ENOENT: /missing/SHELL')
         props.onStatusChange?.('error')
       }} />
+      <button type="button" aria-label="触发存储异常" onClick={() => props.onStorageFault?.({
+        type: 'terminal.storage-fault', protocolVersion: 1, sessionId: props.sessionId,
+        sequence: 1, code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
+      })} />
     </div>
 }))
 
 afterEach(cleanup)
 
 describe('Terminal pane', () => {
-  it('keeps the Session surface mounted while its Scene is inactive', () => {
+  it('keeps every Session in the foreground list bound even when a card scrolls offscreen', () => {
     const props = fixture()
     const view = render(<TerminalPane {...props} visible />)
-    view.rerender(<TerminalPane {...props} active={false} visible={false} />)
+    view.rerender(<TerminalPane {...props} active={false} visible={false} foreground />)
 
     expect(screen.getByTestId('surface-session-1').dataset.visible).toBe('false')
+  })
+
+  it('releases the terminal surface when its list moves to the background', () => {
+    render(<TerminalPane {...fixture()} active={false} visible={false} foreground={false} />)
+
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    expect(screen.getByTestId('background-session-session-1')).toBeTruthy()
+  })
+
+  it.each(['queued', 'restoring'] as const)('covers the whole card while recovery is %s', (recoveryState) => {
+    render(<TerminalPane {...fixture()} recoveryState={recoveryState} />)
+
+    const pane = screen.getByTestId('terminal-pane')
+    expect(pane.getAttribute('aria-busy')).toBe('true')
+    expect(screen.getByRole('status', { name: '正在恢复终端：Claude 主会话' })).toBeTruthy()
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+  })
+
+  it('isolates a failed card and lets the user retry only that recovery', async () => {
+    const onRetryRecovery = vi.fn()
+    render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="进程恢复失败"
+      onRetryRecovery={onRetryRecovery} />)
+
+    expect(screen.getByRole('status', { name: '终端恢复失败：Claude 主会话' }).textContent)
+      .toContain('进程恢复失败')
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：Claude 主会话' }))
+    expect(onRetryRecovery).toHaveBeenCalledWith('session-1')
+  })
+
+  it('keeps Worktree repair actions above a concurrent recovery failure', async () => {
+    const restore = vi.fn()
+    render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="启动未完成"
+      environment={worktreeEnvironment('missing')} onRestoreEnvironment={restore}
+      onLocateEnvironment={vi.fn()} onHandoffEnvironment={vi.fn()} />)
+
+    expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '恢复 Worktree' }))
+    expect(restore).toHaveBeenCalledWith('session-1')
+  })
+
+  it('keeps storage repair actions above a recovery failure after a reconnect race', async () => {
+    const props = fixture()
+    const view = render(<TerminalPane {...props} />)
+    await userEvent.setup().click(screen.getByRole('button', { name: '触发存储异常' }))
+
+    view.rerender(<TerminalPane {...props} recoveryState="failed" recoveryError="重连恢复失败" />)
+
+    expect(screen.getByRole('status', { name: '终端记录写入异常：Claude 主会话' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重试写入' })).toBeTruthy()
+    expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
+  })
+
+  it('keeps durable Fork progress authoritative while generic recovery is still restoring', () => {
+    render(<TerminalPane {...fixture()} recoveryState="restoring" forkProgress={{
+      operationId: 'operation-1', sessionId: 'session-1', submissionKey: 'submission-1',
+      stage: 'restoring-provider', completedSteps: 3, totalSteps: 5, attempt: 1
+    }} />)
+
+    expect(screen.getByRole('status', { name: '正在创建分支：正在恢复智能体会话' })).toBeTruthy()
+    expect(screen.queryByRole('status', { name: '正在恢复终端：Claude 主会话' })).toBeNull()
+  })
+
+  it('keeps durable Fork retry actions visible when both authorities report failure', async () => {
+    const retryFork = vi.fn()
+    render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="restore failed"
+      forkState="failed" forkError="setup failed" onRetryFork={retryFork}
+      onRemoveBranch={vi.fn()} />)
+
+    expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试创建分支' }))
+    expect(retryFork).toHaveBeenCalledWith('session-1')
   })
 
   it('keeps programmatic terminal focus from stealing the active Session', async () => {
@@ -73,7 +156,7 @@ describe('Terminal pane', () => {
       { ...childNode('child-1'), workStatus: 'running' as const },
       childNode('child-2')
     ]
-    render(<TerminalPane {...fixture()} resumable git={{ branch: 'feat/notification', dirty: false }}
+    render(<TerminalPane {...fixture()} resumable git={{ state: 'ready', branch: 'feat/notification', dirty: false }}
       childNodes={children} onOpenChildren={vi.fn()} onLoadSession={vi.fn()}
       onFork={onFork} onForkSibling={onForkSibling} onRemoveBranch={vi.fn()} />)
 
@@ -134,26 +217,39 @@ describe('Terminal pane', () => {
     expect(onForkSibling).toHaveBeenCalledWith('session-1')
   })
 
-  it('keeps only structural actions in the card header without process controls', async () => {
+  it('offers both removal scopes with projected Session and owned Worktree impact', async () => {
     const user = userEvent.setup()
     const onRemoveBranch = vi.fn()
-    render(<TerminalPane {...fixture()} workStatus="running"
-      childNodes={[childNode('child-1'), childNode('child-2')]}
-      descendantCount={4} descendantImpact={{ running: 2, needsInput: 1 }}
+    render(<TerminalPane {...fixture()} workStatus="running" parentSessionId="grandparent"
+      hasOwnedWorktree childNodes={[childNode('child-1'), childNode('child-2')]}
+      descendantNodes={[
+        { ...childNode('child-1'), hasOwnedWorktree: true },
+        childNode('child-2'),
+        { ...childNode('grandchild-1'), parentSessionId: 'child-1', workStatus: 'running' },
+        { ...childNode('grandchild-2'), parentSessionId: 'child-2', workStatus: 'needs-input' }
+      ]}
       onRemoveBranch={onRemoveBranch} />)
 
+    expect(screen.queryByRole('button', { name: '移出节点：Claude 主会话' })).toBeNull()
     expect(screen.queryByRole('button', { name: '更多会话操作：Claude 主会话' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '停止运行' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '重新启动' })).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
-    const dialog = screen.getByRole('alertdialog', { name: '移除“Claude 主会话”及其整个分支？' })
-    expect(dialog.textContent).toContain('2 个直接子节点')
-    expect(dialog.textContent).toContain('共 4 个后代节点')
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    const dialog = screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })
+    const nodeOnly = screen.getByRole('radio', { name: /仅移除当前节点/ })
+    const branch = screen.getByRole('radio', { name: /移除当前节点及全部后代/ })
+    expect(nodeOnly).toHaveProperty('checked', true)
+    expect(nodeOnly.closest('label')?.textContent).toContain('影响 1 个会话')
+    expect(nodeOnly.closest('label')?.textContent).toContain('1 个自有 Worktree')
+    expect(nodeOnly.closest('label')?.textContent).toContain('后代会话将重连到当前节点的父级')
+    expect(branch.closest('label')?.textContent).toContain('影响 5 个会话')
+    expect(branch.closest('label')?.textContent).toContain('2 个自有 Worktree')
     expect(dialog.textContent).toContain('2 个运行中、1 个待输入')
-    expect(dialog.textContent).toContain('项目文件和工作树不会被删除')
-    await user.click(screen.getByRole('button', { name: '停止 3 个会话并移除' }))
-    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', true)
+
+    await user.click(screen.getByRole('button', { name: '移除当前节点' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('presents a leaf Session as one direct removal instead of an entire branch', async () => {
@@ -284,15 +380,22 @@ describe('Terminal pane', () => {
     expect(screen.queryByText('原 Claude Code 对话已失效')).toBeNull()
   })
 
-  it('does not describe a live Claude card as Shell when an older failure projection arrives', () => {
+  it('keeps a failed Claude card visible with retry and explicit fresh-start actions', async () => {
+    const onRetryRestore = vi.fn()
+    const onStartFreshProvider = vi.fn()
+    const user = userEvent.setup()
     const props = fixture()
     render(<TerminalPane {...props}
       session={{ ...props.session, kind: 'claude-code', title: '测试1' }}
-      providerRestoreState="failed" restoreError="provider session not found" />)
+      providerRestoreState="failed" restoreError="provider session not found"
+      onRetryRestore={onRetryRestore} onStartFreshProvider={onStartFreshProvider} />)
 
-    expect(screen.queryByText('原 Claude Code 对话已失效')).toBeNull()
-    expect(screen.queryByText('当前已切换到 Shell，可继续使用终端')).toBeNull()
-    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toContain('Claude Code 恢复失败')
+    expect(screen.getByRole('status').textContent).toContain('provider session not found')
+    expect(screen.getByRole('button', { name: '重试恢复' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '新开 Claude Code' }))
+    expect(onStartFreshProvider).toHaveBeenCalledWith('session-1')
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
   })
 
   it('shows immediate progress while retrying a transient Claude restore failure', async () => {
@@ -343,23 +446,25 @@ describe('Terminal pane', () => {
   it('keeps a failed Fork as a retryable card without starting a terminal process', async () => {
     const user = userEvent.setup()
     const onRetryFork = vi.fn()
-    const onRemoveFailedFork = vi.fn()
+    const onRemoveBranch = vi.fn()
     render(<TerminalPane {...fixture()} forkState="failed" forkError="依赖安装失败"
-      onRetryFork={onRetryFork} onRemoveFailedFork={onRemoveFailedFork} />)
+      onRetryFork={onRetryFork} onRemoveBranch={onRemoveBranch} />)
 
     expect(screen.getByRole('status').textContent).toContain('分支创建失败')
     expect(screen.getByText('依赖安装失败')).toBeTruthy()
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
     await user.click(screen.getByRole('button', { name: '重试创建分支' }))
     expect(onRetryFork).toHaveBeenCalledWith('session-1')
-    await user.click(screen.getByRole('button', { name: '移除失败分支' }))
-    expect(onRemoveFailedFork).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '移除节点…' }))
+    expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('explains an invalidated Fork parent in user terms with a concrete next step', () => {
     render(<TerminalPane {...fixture()} forkState="failed"
       forkError="provider session not found"
-      onRetryFork={vi.fn()} onRemoveFailedFork={vi.fn()} />)
+      onRetryFork={vi.fn()} onRemoveBranch={vi.fn()} />)
 
     const status = screen.getByRole('status')
     expect(status.textContent).toContain('父会话已失效')
@@ -388,7 +493,7 @@ describe('Terminal pane', () => {
   it('keeps the full working path discoverable while prioritizing Git and shared-worktree status', () => {
     const longPath = `/repo/${'nested-directory/'.repeat(16)}project`
     render(<TerminalPane {...fixture()} cwd={longPath}
-      git={{ branch: 'feature/dag', dirty: true }} sharedWorkingDirectory />)
+      git={{ state: 'ready', branch: 'feature/dag', dirty: true }} sharedWorkingDirectory />)
 
     expect(screen.getByTitle(longPath).textContent).toBe(longPath)
     expect(screen.getByText('feature/dag*')).toBeTruthy()
@@ -397,8 +502,8 @@ describe('Terminal pane', () => {
 
   it('keeps a real startup failure actionable without removing sibling Sessions', async () => {
     const user = userEvent.setup()
-    const onDelete = vi.fn()
-    render(<TerminalPane {...fixture()} onDelete={onDelete} />)
+    const onRemoveBranch = vi.fn()
+    render(<TerminalPane {...fixture()} onRemoveBranch={onRemoveBranch} />)
 
     await user.click(screen.getByRole('button', { name: '触发启动失败' }))
     expect(screen.getByRole('status').textContent).toContain('会话启动失败')
@@ -408,8 +513,10 @@ describe('Terminal pane', () => {
     await user.click(screen.getByRole('button', { name: '重试启动' }))
     expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('1')
     await user.click(screen.getByRole('button', { name: '触发启动失败' }))
-    await user.click(screen.getByRole('button', { name: '移除失败会话' }))
-    expect(onDelete).toHaveBeenCalledWith('session-1', true)
+    await user.click(screen.getByRole('button', { name: '移除节点…' }))
+    expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('automatically restarts a failed Session after its Workspace is relinked', async () => {
@@ -427,6 +534,59 @@ describe('Terminal pane', () => {
       expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('1')
     })
   })
+
+  it.each([
+    ['missing', 'Worktree 需要恢复'],
+    ['recovering', '正在恢复运行环境'],
+    ['handoff', '正在交接运行环境'],
+    ['failed', '运行环境需要处理']
+  ] as const)('keeps history visible but locks the whole card while its Worktree is %s', (state, title) => {
+    render(<TerminalPane {...fixture()} environment={worktreeEnvironment(state)}
+      onLoadSession={vi.fn()}
+      onRestoreEnvironment={vi.fn()} onLocateEnvironment={vi.fn()}
+      onHandoffEnvironment={vi.fn()} />)
+
+    const surface = screen.getByTestId('surface-session-1')
+    expect(surface.dataset.readOnly).toBe('true')
+    expect(surface.dataset.inputDisabled).toBe('true')
+    expect(screen.getByRole('status', { name: `运行环境${title}` })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '载入 Claude Code 会话到“Claude 主会话”' }))
+      .toHaveProperty('disabled', true)
+  })
+
+  it('offers real recovery actions from a missing Worktree card', async () => {
+    const restore = vi.fn()
+    const locate = vi.fn()
+    const handoff = vi.fn()
+    render(<TerminalPane {...fixture()} environment={worktreeEnvironment('missing')}
+      onRestoreEnvironment={restore} onLocateEnvironment={locate}
+      onHandoffEnvironment={handoff} />)
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: '恢复 Worktree' }))
+    expect(restore).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '定位目录' }))
+    expect(locate).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '交接到 Local' }))
+    expect(handoff).toHaveBeenCalledWith('session-1', 'local')
+  })
+
+  it('consumes a close shortcut while recovery blocks the card instead of replaying it after recovery', () => {
+    const onRemoveBranch = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} closeRequest={1}
+      environment={worktreeEnvironment('missing')} />)
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} closeRequest={1}
+      environment={worktreeEnvironment('ready')} />)
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} closeRequest={2}
+      environment={worktreeEnvironment('ready')} />)
+    expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
+  })
 })
 
 function fixture() {
@@ -436,11 +596,8 @@ function fixture() {
       kind: 'claude-code' as const, executionContextId: 'context-1'
     },
     active: true,
-    workspaceSessionCount: 2,
-    taskName: '修复登录',
     pathValid: true,
-    onActivate: vi.fn(),
-    onDelete: vi.fn()
+    onActivate: vi.fn()
   }
 }
 
@@ -449,7 +606,22 @@ function childNode(sessionId: string) {
     sessionId, sceneId: 'scene-1', parentSessionId: 'session-1',
     currentMode: 'shell' as const, workStatus: 'idle' as const,
     providerRestoreState: 'none' as const, canFork: false, title: sessionId,
-    cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
+    cwd: '/tmp', hasOwnedWorktree: false, activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
+}
+
+function worktreeEnvironment(
+  state: 'ready' | 'missing' | 'recovering' | 'handoff' | 'failed'
+): SessionEnvironment {
+  const base = {
+    kind: 'worktree' as const,
+    path: '/tmp/matou-worktree',
+    localExecutionContextId: 'context-1',
+    worktreeId: 'worktree-1',
+    worktreeExecutionContextId: 'worktree-context-1'
+  }
+  if (state === 'ready') return { ...base, state }
+  if (state === 'missing' || state === 'failed') return { ...base, state, error: 'path-missing' }
+  return { ...base, state }
 }

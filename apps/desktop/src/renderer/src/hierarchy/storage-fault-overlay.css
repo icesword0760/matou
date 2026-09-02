@@ -1,0 +1,94 @@
+.storage-fault-overlay {
+  position: absolute;
+  z-index: 92;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding: 24px;
+  color: #f4dedb;
+  background: rgba(20, 14, 15, .82);
+  backdrop-filter: blur(5px);
+}
+
+.storage-fault-overlay__content {
+  display: flex;
+  width: min(430px, calc(100% - 24px));
+  box-sizing: border-box;
+  flex-direction: column;
+  align-items: center;
+  padding: 22px;
+  border: 1px solid rgba(228, 112, 102, .34);
+  border-radius: 12px;
+  background: rgba(42, 25, 27, .96);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, .36);
+  gap: 9px;
+  text-align: center;
+}
+
+.storage-fault-overlay__icon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid #e58f87;
+  border-radius: 50%;
+  color: #f2b1ab;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.storage-fault-overlay__content p,
+.storage-fault-overlay__content small {
+  margin: 0;
+  color: #c79e9b;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.storage-fault-overlay__content small { color: #d9b7b4; }
+.storage-fault-overlay__content [role="alert"] { color: #ffaaa2; }
+
+.storage-fault-overlay__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+}
+
+.storage-fault-overlay__actions button {
+  padding: 6px 10px;
+  border: 1px solid #6c4648;
+  border-radius: 7px;
+  color: #f4dedb;
+  background: #422b2e;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.storage-fault-overlay__actions button:hover:not(:disabled) { border-color: #e58f87; }
+.storage-fault-overlay__actions button:disabled { cursor: default; opacity: .5; }
+
+.hierarchy-shell[data-theme="light"] .storage-fault-overlay,
+.detached-terminal-app[data-theme="light"] .storage-fault-overlay {
+  color: #672d2a;
+  background: rgba(255, 247, 246, .84);
+}
+
+.hierarchy-shell[data-theme="light"] .storage-fault-overlay__content,
+.detached-terminal-app[data-theme="light"] .storage-fault-overlay__content {
+  border-color: #edc4c0;
+  background: rgba(255, 255, 255, .97);
+  box-shadow: 0 16px 44px rgba(87, 39, 35, .14);
+}
+
+.hierarchy-shell[data-theme="light"] .storage-fault-overlay__content p,
+.hierarchy-shell[data-theme="light"] .storage-fault-overlay__content small,
+.detached-terminal-app[data-theme="light"] .storage-fault-overlay__content p,
+.detached-terminal-app[data-theme="light"] .storage-fault-overlay__content small { color: #8f5f5b; }
+.hierarchy-shell[data-theme="light"] .storage-fault-overlay__actions button,
+.detached-terminal-app[data-theme="light"] .storage-fault-overlay__actions button {
+  border-color: #d9b5b2;
+  color: #672d2a;
+  background: #fff2f1;
+}

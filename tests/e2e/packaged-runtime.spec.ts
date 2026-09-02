@@ -5,9 +5,10 @@ import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { _electron as electron, expect, test } from '@playwright/test'
+import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
 
 import { FOUNDATION_MIGRATIONS } from '../../apps/runtime/src/storage/migrations'
+import { terminalCommand } from './fixtures/session-canvas-fixture'
 
 test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema compatibility', async () => {
   // Four independent packaged launches exercise durable replay, torn-tail
@@ -16,6 +17,7 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
   test.setTimeout(60_000)
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-packaged-e2e-'))
   const executablePath = await packagedExecutable()
+  const historyMarker = 'PACKAGED_HISTORY_SURVIVES_READ_ONLY'
   try {
     await expectPackagedHostControlResources(executablePath)
     await runPackagedSmoke(executablePath, dataDirectory, true)
@@ -35,13 +37,16 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
     database.close()
 
     const journalDirectory = join(dataDirectory, 'journal', 'foundation-shell')
-    const activeName = (await readdir(journalDirectory)).filter((name) => name.endsWith('.bin')).sort().at(-1)!
+    const activeName = (await readdir(journalDirectory))
+      .filter((name) => name.endsWith('.mtj') || name.endsWith('.bin'))
+      .sort()
+      .at(-1)!
     const activePath = join(journalDirectory, activeName)
     const before = await readFile(activePath)
     expect(before.byteLength).toBeGreaterThan(16)
     await truncate(activePath, before.byteLength - 3)
 
-    await runPackagedSmoke(executablePath, dataDirectory, false)
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal', historyMarker)
     const after = await readFile(activePath)
     expect(after.byteLength).toBeGreaterThan(before.byteLength - 3)
 
@@ -50,13 +55,13 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
       'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)'
     ).run(999, 'future-version', 'future-checksum', Date.now())
     newer.close()
-    await runPackagedSmoke(executablePath, dataDirectory, false)
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'read-only', historyMarker)
     const untouched = new DatabaseSync(databasePath)
     expect(untouched.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
       .toEqual({ version: 999 })
     untouched.prepare('DELETE FROM schema_migrations WHERE version = 999').run()
     untouched.close()
-    await runPackagedSmoke(executablePath, dataDirectory, false)
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal', historyMarker)
   } finally {
     await rm(dataDirectory, { recursive: true, force: true })
   }
@@ -65,7 +70,9 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
 async function runPackagedSmoke(
   executablePath: string,
   dataDirectory: string,
-  exerciseProduct: boolean
+  exerciseProduct: boolean,
+  expectedMode: 'normal' | 'read-only',
+  historyMarker: string
 ): Promise<void> {
   await chmod(executablePath, 0o755)
   // MATOU_DEFAULT_WORKSPACE models the directory a normal macOS Terminal opens
@@ -94,6 +101,7 @@ async function runPackagedSmoke(
   })
   try {
     const page = await app.firstWindow()
+    await expectAllVisibleWindowsOnSecondaryDisplay(app)
     await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 3)
@@ -101,7 +109,9 @@ async function runPackagedSmoke(
     await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
     await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
     await page.waitForTimeout(200)
-    await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+    if (expectedMode === 'normal') {
+      await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+    }
     if (exerciseProduct) {
       const packagedSurface = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
       const packagedSessionId = await packagedSurface.getAttribute('data-session-id')
@@ -123,12 +133,15 @@ async function runPackagedSmoke(
 
       const embedded = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
       await expect(embedded).toHaveAttribute('data-pid', /\d+/)
+      await terminalCommand(embedded, `printf '${historyMarker}\\n'`)
+      await expect(embedded.locator('.xterm-rows')).toContainText(historyMarker)
       const pid = await embedded.getAttribute('data-pid')
       const detachedSessionId = await embedded.getAttribute('data-session-id')
       await page.locator('.terminal-pane-header').first()
         .dispatchEvent('dragend', { screenX: -1, screenY: -1 })
       await expect(page.getByTestId('detached-placeholder')).toContainText('已脱出')
       await expect.poll(async () => (await app.windows()).length).toBe(2)
+      await expectAllVisibleWindowsOnSecondaryDisplay(app)
       const detached = (await app.windows()).find((candidate) => candidate !== page)!
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid', pid!)
       await detached.close()

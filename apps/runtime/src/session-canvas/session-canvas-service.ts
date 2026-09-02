@@ -5,6 +5,7 @@ import type {
   SceneSessionGraph,
   SessionCanvasMembership
 } from '@matou/domain'
+import type { RemoveNodeScope } from '@matou/contracts'
 
 import {
   activateSessionInTransaction,
@@ -94,7 +95,7 @@ export interface RemoveSessionBranchInput {
   windowId: string
   sceneId: string
   sessionId: string
-  includeDescendants: boolean
+  scope: RemoveNodeScope
   now: number
 }
 
@@ -540,10 +541,8 @@ export class SessionCanvasService {
          SELECT session_id FROM branch`,
         input.sessionId, input.sceneId
       ).map(({ session_id }) => session_id)
-      if (!input.includeDescendants && descendants.length > 1) {
-        throw new Error('Session has descendants')
-      }
-      const removedSessionIds = input.includeDescendants
+      const includeDescendants = input.scope === 'node-and-descendants'
+      const removedSessionIds = includeDescendants
         ? descendants
         : [input.sessionId]
       const placeholders = removedSessionIds.map(() => '?').join(', ')
@@ -572,7 +571,22 @@ export class SessionCanvasService {
          LIMIT 1`,
         input.sessionId, input.sceneId
       ) : undefined
-      const survivingPeer = removesFocus && !survivingParent ? tx.get<{ id: string }>(
+      const survivingChild = removesFocus && !survivingParent && !includeDescendants
+        ? tx.get<{ id: string }>(
+          `SELECT child.id
+           FROM session_relations_current AS relation
+           JOIN sessions AS child ON child.id = relation.from_session_id
+           JOIN session_canvas_memberships AS membership
+             ON membership.session_id = child.id AND membership.scene_id = ?
+           WHERE relation.to_session_id = ?
+             AND relation.relation_kind IN ('derived-from', 'forked-from')
+             AND child.archived_at IS NULL
+           ORDER BY membership.sibling_created_seq, child.id
+           LIMIT 1`,
+          input.sceneId, input.sessionId
+        )
+        : undefined
+      const survivingPeer = removesFocus && !survivingParent && !survivingChild ? tx.get<{ id: string }>(
         `SELECT sessions.id
          FROM session_canvas_memberships AS membership
          JOIN sessions ON sessions.id = membership.session_id
@@ -583,7 +597,7 @@ export class SessionCanvasService {
          LIMIT 1`,
         input.sceneId, ...removedSessionIds
       ) : undefined
-      const replacementSessionId = survivingParent?.id ?? survivingPeer?.id
+      const replacementSessionId = survivingParent?.id ?? survivingChild?.id ?? survivingPeer?.id
       const disposedSessionIds = tx.all<{ id: string }>(
         `SELECT id FROM sessions WHERE id IN (${placeholders}) AND archived_at IS NULL
          ORDER BY created_at, id`,
@@ -599,11 +613,57 @@ export class SessionCanvasService {
         `DELETE FROM session_mounts WHERE session_id IN (${placeholders})`,
         ...removedSessionIds
       )
-      tx.run(
-        `DELETE FROM session_relations_current
-         WHERE from_session_id IN (${placeholders}) OR to_session_id IN (${placeholders})`,
+      const revokedRelations = tx.all<{
+        relation_id: string
+        task_id: string
+        from_session_id: string
+        to_session_id: string
+        relation_kind: string
+        metadata_json: string
+      }>(
+        `SELECT relation_id, task_id, from_session_id, to_session_id,
+                relation_kind, metadata_json
+         FROM session_relations_current
+         WHERE from_session_id IN (${placeholders}) OR to_session_id IN (${placeholders})
+         ORDER BY relation_id`,
         ...removedSessionIds, ...removedSessionIds
       )
+      for (const relation of revokedRelations) {
+        tx.run(
+          `INSERT INTO session_relation_events (
+             event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+             relation_kind, metadata_json, command_id, occurred_at
+           ) VALUES (?, ?, 'revoked', ?, ?, ?, ?, ?, ?, ?)`,
+          `${command.commandId}:relation-revoked:${relation.relation_id}`,
+          relation.relation_id, relation.task_id, relation.from_session_id,
+          relation.to_session_id, relation.relation_kind, relation.metadata_json,
+          command.commandId, input.now
+        )
+        tx.run('DELETE FROM session_relations_current WHERE relation_id = ?', relation.relation_id)
+      }
+      if (structuralParent) {
+        for (const child of directChildren) {
+          const relationId = randomUUID()
+          const insertion = tx.run(
+            `INSERT INTO session_relation_events (
+               event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+               relation_kind, metadata_json, command_id, occurred_at
+             ) VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?)`,
+            `${command.commandId}:relation-reconnected:${child.relation_id}`,
+            relationId, child.task_id, child.from_session_id, structuralParent.to_session_id,
+            child.relation_kind, child.metadata_json, command.commandId, input.now
+          )
+          tx.run(
+            `INSERT INTO session_relations_current (
+               relation_id, task_id, from_session_id, to_session_id, relation_kind,
+               metadata_json, created_at, updated_at, source_event_sequence
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            relationId, child.task_id, child.from_session_id, structuralParent.to_session_id,
+            child.relation_kind, child.metadata_json, input.now, input.now,
+            Number(insertion.lastInsertRowid)
+          )
+        }
+      }
       tx.run(
         `DELETE FROM session_canvas_memberships WHERE session_id IN (${placeholders})`,
         ...removedSessionIds

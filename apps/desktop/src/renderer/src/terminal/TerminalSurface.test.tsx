@@ -4,6 +4,7 @@ import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TerminalSurface } from './TerminalSurface'
+import { foregroundTerminalModels } from './terminal-model-cache'
 
 const state = vi.hoisted(() => ({
   focus: vi.fn(),
@@ -19,21 +20,36 @@ const state = vi.hoisted(() => ({
   scrollToBottom: vi.fn(),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
+  terminalReset: vi.fn(),
+  terminalConstructed: vi.fn(),
+  terminalDisposed: vi.fn(),
+  webglConstructed: vi.fn(),
+  webglDisposed: vi.fn(),
+  webglContextLossListener: undefined as undefined | (() => void),
+  serialize: vi.fn(() => '\u001b[2Jserialized screen'),
   attachTerminal: vi.fn(),
   sendTerminalInput: vi.fn(),
   updateTerminalProfile: vi.fn(),
-  recordTerminalInteraction: vi.fn()
+  recordTerminalInteraction: vi.fn(),
+  storeTerminalCheckpoint: vi.fn(),
+  searchTerminalHistory: vi.fn(),
+  historyAroundTerminalCursor: vi.fn(),
+  acknowledgeTerminal: vi.fn(),
+  requestTerminalReplay: vi.fn()
 }))
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
+    element = document.createElement('div')
+    options: Record<string, unknown> = {}
     cols = 80
     rows = 24
     options = { fontSize: 11, theme: {} }
     buffer = { active: { baseY: 20, viewportY: 20 } }
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
     loadAddon = vi.fn()
-    open = vi.fn()
+    constructor() { state.terminalConstructed() }
+    open = vi.fn((container: HTMLElement) => container.appendChild(this.element))
     focus = state.focus
     scrollToBottom = state.scrollToBottom
     write = state.terminalWrite
@@ -42,8 +58,8 @@ vi.mock('@xterm/xterm', () => ({
       state.onData = listener
       return { dispose: vi.fn() }
     })
-    reset = vi.fn()
-    dispose = vi.fn()
+    reset = state.terminalReset
+    dispose = state.terminalDisposed
   }
 }))
 vi.mock('@xterm/addon-fit', () => ({
@@ -60,6 +76,19 @@ vi.mock('@xterm/addon-search', () => ({
     }
   }
 }))
+vi.mock('@xterm/addon-serialize', () => ({
+  SerializeAddon: class { serialize = state.serialize }
+}))
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: class {
+    constructor() { state.webglConstructed() }
+    onContextLoss = (listener: () => void) => {
+      state.webglContextLossListener = listener
+      return { dispose: vi.fn() }
+    }
+    dispose = state.webglDisposed
+  }
+}))
 vi.mock('../runtime/RuntimeProvider', () => ({
   useRuntimeClient: (() => {
     const client = {
@@ -73,7 +102,10 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     resizeTerminal: state.resizeTerminal,
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
-    recordTerminalInteraction: state.recordTerminalInteraction
+    recordTerminalInteraction: state.recordTerminalInteraction,
+    storeTerminalCheckpoint: state.storeTerminalCheckpoint,
+    searchTerminalHistory: state.searchTerminalHistory,
+    historyAroundTerminalCursor: state.historyAroundTerminalCursor
     }
     return () => client
   })()
@@ -81,6 +113,8 @@ vi.mock('../runtime/RuntimeProvider', () => ({
 
 describe('TerminalSurface focus continuity', () => {
   beforeEach(() => {
+    window.history.replaceState({}, '', '/')
+    foregroundTerminalModels.setForegroundSessions([])
     state.focus.mockClear()
     state.searchNext.mockClear()
     state.searchPrevious.mockClear()
@@ -98,6 +132,21 @@ describe('TerminalSurface focus continuity', () => {
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
     state.terminalWrite.mockClear()
+    state.terminalReset.mockClear()
+    state.terminalConstructed.mockClear()
+    state.terminalDisposed.mockClear()
+    state.webglConstructed.mockClear()
+    state.webglDisposed.mockClear()
+    state.webglContextLossListener = undefined
+    state.serialize.mockClear()
+    state.storeTerminalCheckpoint.mockClear()
+    state.searchTerminalHistory.mockReset()
+    state.historyAroundTerminalCursor.mockReset()
+    state.historyAroundTerminalCursor.mockResolvedValue({
+      lines: [], gaps: [], hasMore: false
+    })
+    state.acknowledgeTerminal.mockClear()
+    state.requestTerminalReplay.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       constructor(callback: ResizeObserverCallback) {
         state.resizeObserverCallback = callback
@@ -112,6 +161,7 @@ describe('TerminalSurface focus continuity', () => {
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
   })
   afterEach(() => {
+    vi.useRealTimers()
     cleanup()
     vi.useRealTimers()
     Reflect.deleteProperty(window, 'matouDesktop')
@@ -122,6 +172,196 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
 
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
+  })
+
+  it('uses WebGL after opening xterm and falls back when the GPU context is lost', async () => {
+    window.history.replaceState({}, '', '/?e2e=1')
+    render(<TerminalSurface sessionId="session-webgl" active visible />)
+    await waitFor(() => expect(state.webglConstructed).toHaveBeenCalledTimes(1))
+    expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
+      .toBe(true)
+
+    state.webglContextLossListener?.()
+
+    expect(state.webglDisposed).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
+      .toBe(false)
+  })
+
+  it('reuses its xterm VT model after foreground card DOM virtualization', async () => {
+    foregroundTerminalModels.setForegroundSessions(['session-1'])
+    const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(1))
+
+    first.unmount()
+    expect(state.terminalDisposed).not.toHaveBeenCalled()
+    render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+
+    expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps cached history when a restarted Runtime reattaches the foreground terminal', async () => {
+    foregroundTerminalModels.setForegroundSessions(['session-1'])
+    const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('history before Runtime restart')
+    })
+    first.unmount()
+
+    render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+    state.onMessage?.({
+      type: 'terminal.spawned', sessionId: 'session-1', pid: 456,
+      reattached: true, replayFromSequence: 2
+    })
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'tail',
+      fromSequence: 2, throughSequence: 3, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 3
+    })
+
+    expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
+    expect(state.terminalReset).not.toHaveBeenCalled()
+  })
+
+  it('continues replay after the last painted frame when a cached terminal remounts', async () => {
+    foregroundTerminalModels.setForegroundSessions(['session-1'])
+    const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 7,
+      data: new TextEncoder().encode('already painted once')
+    })
+    first.unmount()
+
+    state.requestTerminalReplay.mockClear()
+    render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+    state.onMessage?.({
+      type: 'terminal.spawned', sessionId: 'session-1', pid: 456,
+      reattached: true, replayFromSequence: 1
+    })
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 8, true)
+  })
+
+  it('keeps an offscreen foreground terminal live without parsing every hidden output frame', async () => {
+    render(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    const hiddenBytes = new TextEncoder().encode('hidden sustained output')
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 9, data: hiddenBytes
+    })
+
+    expect(state.terminalWrite).not.toHaveBeenCalled()
+    expect(state.acknowledgeTerminal).toHaveBeenCalledWith('session-1', 9)
+  })
+
+  it('keeps the focused terminal visually live when viewport bookkeeping briefly marks it hidden', async () => {
+    render(<TerminalSurface sessionId="session-1" active visible={false} foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 3,
+      data: new TextEncoder().encode('focused-output')
+    })
+
+    expect(state.terminalWrite).toHaveBeenCalledWith(
+      expect.any(Uint8Array), expect.any(Function)
+    )
+    expect(new TextDecoder().decode(state.terminalWrite.mock.calls[0]![0] as Uint8Array))
+      .toBe('focused-output')
+  })
+
+  it('replays the bounded terminal tail when an offscreen foreground card returns to view', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('visible')
+    })
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 2,
+      data: new TextEncoder().encode('hidden')
+    })
+    state.requestTerminalReplay.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground />)
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 2, true)
+  })
+
+  it('waits for an inactive preview to settle before replaying its offscreen tail', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('hidden')
+    })
+    state.requestTerminalReplay.mockClear()
+    vi.useFakeTimers()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible foreground />)
+    await act(() => vi.advanceTimersByTimeAsync(499))
+    expect(state.requestTerminalReplay).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(1))
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 0, false)
+  })
+
+  it('defers even the focused terminal catch-up while the horizontal viewport is moving', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('hidden')
+    })
+    state.requestTerminalReplay.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground viewportMoving />)
+    expect(state.requestTerminalReplay).not.toHaveBeenCalled()
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground viewportMoving={false} />)
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 0, false)
+  })
+
+  it('resumes live painting when a hidden-terminal catch-up reports a Journal gap', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('hidden')
+    })
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground />)
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-1', source: 'tail',
+      fromSequence: 1, throughSequence: 4, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 4
+    })
+    state.onMessage?.({
+      type: 'terminal.gap', sessionId: 'session-1', requestedFromSequence: 0,
+      availableFromSequence: 0, reason: 'corruption'
+    })
+    state.terminalWrite.mockClear()
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 5,
+      data: new TextEncoder().encode('live-after-gap')
+    })
+
+    expect(state.terminalWrite).toHaveBeenCalledWith(
+      expect.any(Uint8Array), expect.any(Function)
+    )
+    expect(new TextDecoder().decode(state.terminalWrite.mock.calls[0]![0] as Uint8Array))
+      .toBe('live-after-gap')
   })
 
   it('replays historical terminal resize frames before continuing output', async () => {
@@ -274,6 +514,179 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.clearDecorations).toHaveBeenCalled())
   })
 
+  it('falls back to archived history when the xterm buffer has no match', async () => {
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [
+        { sequence: 3, cursor: { sequence: 3, lineIndex: 0 }, text: 'archived needle' }
+      ],
+      gaps: [{ segmentIndex: 1, code: 'CORRUPT_SEGMENT', message: 'damaged' }],
+      hasMore: false
+    })
+    const onSearchResults = vi.fn()
+    render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'needle', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} onSearchResults={onSearchResults} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+
+    await waitFor(() => expect(state.searchTerminalHistory).toHaveBeenCalledWith(
+      'session-1', 'needle',
+      { caseSensitive: false, regex: false, wholeWord: false }
+    ))
+    expect((await screen.findByRole('status', { name: '归档历史搜索结果' })).textContent)
+      .toContain('archived needle')
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('1 处历史缺口')
+    expect(onSearchResults).toHaveBeenLastCalledWith({ resultIndex: 0, resultCount: 1 })
+  })
+
+  it('opens a read-only context window around a cold-history result without replacing the live terminal', async () => {
+    const cursor = { sequence: 3, lineIndex: 0 }
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [{ sequence: 3, cursor, text: 'archived needle' }],
+      gaps: [],
+      hasMore: false
+    })
+    state.historyAroundTerminalCursor.mockResolvedValue({
+      lines: [
+        { sequence: 2, cursor: { sequence: 2, lineIndex: 0 }, text: 'line before' },
+        { sequence: 3, cursor, text: 'archived needle' },
+        { sequence: 4, cursor: { sequence: 4, lineIndex: 0 }, text: 'line after' }
+      ],
+      gaps: [],
+      hasMore: false,
+      anchorIndex: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false
+    })
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'needle', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+
+    const history = await screen.findByRole('region', { name: '终端历史记录' })
+    expect(state.historyAroundTerminalCursor).toHaveBeenCalledWith('session-1', cursor, 250)
+    expect(history.textContent).toContain('line before')
+    expect(history.textContent).toContain('archived needle')
+    expect(history.textContent).toContain('line after')
+    expect(history.querySelector('[data-current-match="true"]')?.textContent)
+      .toContain('archived needle')
+    const liveViewport = view.container.querySelector('.terminal-surface__viewport')
+    expect(liveViewport?.childElementCount).toBe(1)
+    expect(liveViewport?.getAttribute('aria-hidden')).toBe('true')
+
+    state.onData?.('blocked while reading')
+    expect(state.sendTerminalInput).not.toHaveBeenCalledWith('session-1', 'blocked while reading')
+    const liveBytes = new Uint8Array([76, 73, 86, 69])
+    state.onMessage?.({ type: 'terminal.data', sequence: 9, data: liveBytes })
+    expect(state.terminalWrite).toHaveBeenCalledWith(liveBytes, expect.any(Function))
+    expect(state.acknowledgeTerminal).toHaveBeenCalledWith('session-1', 9)
+
+    await act(async () => state.searchResultsListener?.({ resultIndex: 0, resultCount: 1 }))
+    expect(screen.getByRole('region', { name: '终端历史记录' })).toBe(history)
+
+    state.focus.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: '返回实时终端' }))
+    expect(screen.queryByRole('region', { name: '终端历史记录' })).toBeNull()
+    expect(liveViewport?.getAttribute('aria-hidden')).toBe('false')
+    await waitFor(() => expect(state.focus).toHaveBeenCalled())
+    state.onData?.('live input')
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', 'live input')
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await act(async () => {})
+    expect(screen.queryByRole('region', { name: '终端历史记录' })).toBeNull()
+  })
+
+  it('returns from the read-only history context with Escape', async () => {
+    const cursor = { sequence: 3, lineIndex: 0 }
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [{ sequence: 3, cursor, text: 'archived needle' }], gaps: [], hasMore: false
+    })
+    state.historyAroundTerminalCursor.mockResolvedValue({
+      lines: [{ sequence: 3, cursor, text: 'archived needle' }], gaps: [], hasMore: false,
+      anchorIndex: 0, hasMoreBefore: false, hasMoreAfter: false
+    })
+    render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'needle', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await screen.findByRole('region', { name: '终端历史记录' })
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(screen.queryByRole('region', { name: '终端历史记录' })).toBeNull()
+  })
+
+  it('walks multiple archived matches from newest to older with Previous', async () => {
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [
+        { sequence: 3, cursor: { sequence: 3, lineIndex: 0 }, text: 'newest needle' },
+        { sequence: 2, cursor: { sequence: 2, lineIndex: 0 }, text: 'middle needle' },
+        { sequence: 1, cursor: { sequence: 1, lineIndex: 0 }, text: 'oldest needle' }
+      ],
+      gaps: [],
+      hasMore: false
+    })
+    const options = { caseSensitive: false, regex: false, wholeWord: false }
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'previous', sequence: 1, options }} />)
+    await waitFor(() => expect(state.searchPrevious).toHaveBeenCalled())
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    expect((await screen.findByRole('status', { name: '归档历史搜索结果' })).textContent)
+      .toContain('newest needle')
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('3/3')
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'previous', sequence: 2, options }} />)
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await waitFor(() => expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('middle needle'))
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('2/3')
+  })
+
+  it('walks multiple archived matches from oldest to newer with Next', async () => {
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [
+        { sequence: 3, cursor: { sequence: 3, lineIndex: 0 }, text: 'newest needle' },
+        { sequence: 2, cursor: { sequence: 2, lineIndex: 0 }, text: 'middle needle' },
+        { sequence: 1, cursor: { sequence: 1, lineIndex: 0 }, text: 'oldest needle' }
+      ],
+      gaps: [],
+      hasMore: false
+    })
+    const options = { caseSensitive: false, regex: false, wholeWord: false }
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'next', sequence: 1, options }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    expect((await screen.findByRole('status', { name: '归档历史搜索结果' })).textContent)
+      .toContain('oldest needle')
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('1/3')
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'next', sequence: 2, options }} />)
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await waitFor(() => expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('middle needle'))
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('2/3')
+  })
+
   it('focuses the active terminal when its owner requests focus restoration', async () => {
     const view = render(<TerminalSurface sessionId="session-1" active visible focusRequest={0} />)
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
@@ -334,9 +747,16 @@ describe('TerminalSurface focus continuity', () => {
     const dataTransfer = {
       types: ['text/plain', 'application/x-file-tree-nodes'],
       dropEffect: 'none',
-      getData: vi.fn((type: string) => type === 'text/plain'
-        ? '/tmp/plain.txt "/tmp/with space.txt"'
-        : '')
+      getData: vi.fn((type: string) => {
+        if (type === 'application/x-file-tree-nodes') {
+          return JSON.stringify([
+            { path: '/tmp/plain.txt', name: 'plain.txt', type: 'file' },
+            { path: '/tmp/with space.txt', name: 'with space.txt', type: 'file' },
+            { path: "/tmp/quote'and$(touch PWN).txt", name: 'special', type: 'file' }
+          ])
+        }
+        return type === 'text/plain' ? '$(touch SHOULD_NOT_RUN)\nsecond-command' : ''
+      })
     }
     const surface = document.querySelector<HTMLElement>('[data-session-id="session-1"]')!
 
@@ -348,7 +768,7 @@ describe('TerminalSurface focus continuity', () => {
     fireEvent.drop(surface, { dataTransfer })
 
     expect(state.sendTerminalInput).toHaveBeenCalledWith(
-      'session-1', ' /tmp/plain.txt "/tmp/with space.txt"'
+      'session-1', ` /tmp/plain.txt "/tmp/with space.txt" '/tmp/quote'\\''and$(touch PWN).txt'`
     )
     expect(state.sendTerminalInput).not.toHaveBeenCalledWith(
       'session-1', expect.stringContaining('\r')
@@ -368,7 +788,11 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
     await waitFor(() => expect(state.onData).toBeTypeOf('function'))
     state.onMessage?.({ type: 'terminal.spawned', pid: 123 })
-    const files = [new File(['a'], 'plain.txt'), new File(['b'], 'with space.txt')]
+    const files = [
+      new File(['a'], 'plain.txt'),
+      new File(['b'], 'with space.txt'),
+      new File(['c'], 'special.txt')
+    ]
     const dataTransfer = {
       types: ['Files'], files, dropEffect: 'none', getData: vi.fn(() => '')
     }
@@ -380,7 +804,7 @@ describe('TerminalSurface focus continuity', () => {
 
     expect(getPathForFile.mock.calls.map(([file]) => file)).toEqual(files)
     expect(state.sendTerminalInput).toHaveBeenCalledWith(
-      'session-1', ' /tmp/plain.txt "/tmp/with space.txt"'
+      'session-1', ` /tmp/plain.txt "/tmp/with space.txt" '/tmp/a$(touch PWN).txt'`
     )
   })
 

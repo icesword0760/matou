@@ -52,4 +52,13 @@ describe('ProviderResumeMonitor', () => {
     expect(monitor.timeout()).toBeUndefined()
     expect(monitor.ingest('The user wrote: session not found in a log file')).toBeUndefined()
   })
+
+  it('does not let a large startup frame hide a failure contained in that same frame', () => {
+    const monitor = new ProviderResumeMonitor()
+
+    expect(monitor.ingest(`${'a'.repeat(2_001)} No session found with session ID`))
+      .toBe('provider session not found')
+    expect(monitor.isSettled).toBe(false)
+    expect(monitor.isMonitoring).toBe(false)
+  })
 })

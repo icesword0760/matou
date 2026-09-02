@@ -52,19 +52,40 @@ describe('SessionCanvas', () => {
   it('keeps only structural removal on a stopped card without process controls', async () => {
     const data = graph()
     data.nodes.push(
-      { ...node('stopped', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' },
-      { ...node('stopped-child', '已停止子节点', 'stopped'), archivedAt: 21, workStatus: 'exited' }
+      { ...node('stopped', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited', hasOwnedWorktree: true },
+      { ...node('stopped-child', '已停止子节点', 'stopped'), archivedAt: 21, workStatus: 'exited', hasOwnedWorktree: true }
     )
     const onRemoveBranch = vi.fn()
     renderCanvas(data, { onRemoveBranch })
     const user = userEvent.setup()
 
     expect(screen.queryByRole('button', { name: '重新启动' })).toBeNull()
-    await user.click(screen.getByRole('button', { name: '移出节点：已停止 Shell' }))
+    await user.click(screen.getByRole('button', { name: '移除节点…：已停止 Shell' }))
 
-    expect(screen.getByRole('alertdialog').textContent).toContain('共 1 个后代节点')
-    await user.click(screen.getByRole('button', { name: '移除整个分支' }))
-    expect(onRemoveBranch).toHaveBeenCalledWith('stopped', true)
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog.textContent).toContain('影响 1 个会话、1 个自有 Worktree')
+    expect(dialog.textContent).toContain('影响 2 个会话、2 个自有 Worktree')
+    await user.click(screen.getByRole('radio', { name: /移除当前节点及全部后代/ }))
+    await user.click(screen.getByRole('button', { name: '移除 2 个会话' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('stopped', 'node-and-descendants')
+  })
+
+  it('keeps stopped-session navigation visible but disables removal with the recovery reason', async () => {
+    const data = graph()
+    data.nodes.push(
+      { ...node('stopped', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' }
+    )
+    const onRemoveBranch = vi.fn()
+    render(<SessionCanvas graph={data} disabled disabledReason="数据库处于只读恢复模式"
+      onActivate={() => undefined} onRemoveBranch={onRemoveBranch}
+      renderSession={(item) => <div>{item.title}</div>} />)
+
+    const remove = screen.getByRole('button', { name: '移除节点…：已停止 Shell' })
+    expect(remove.hasAttribute('disabled')).toBe(true)
+    expect(remove.getAttribute('title')).toBe('数据库处于只读恢复模式')
+    await userEvent.setup().click(remove)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
   })
 
   it('does not offer removal when a stopped branch is the final card on the canvas', () => {
@@ -127,6 +148,24 @@ describe('SessionCanvas', () => {
     vi.useRealTimers()
   })
 
+  it('keeps canvas browsing local without persisting geometry while recovery is read-only', () => {
+    vi.useFakeTimers()
+    const onPutGeometry = vi.fn()
+    const onActivate = vi.fn()
+    render(<SessionCanvas graph={graph()} disabled disabledReason="数据库处于只读恢复模式"
+      onActivate={onActivate} onPutGeometry={onPutGeometry}
+      renderSession={(item) => <div>{item.title}</div>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+
+    viewport.scrollLeft = 128
+    fireEvent.focus(screen.getByLabelText('会话：Shell 子会话'))
+    vi.advanceTimersByTime(500)
+
+    expect(onPutGeometry).not.toHaveBeenCalled()
+    expect(onActivate).toHaveBeenCalledWith('child-shell')
+    vi.useRealTimers()
+  })
+
   it('retries a geometry write that races the latest authoritative layout revision', async () => {
     vi.useFakeTimers()
     const onPutGeometry = vi.fn()
@@ -179,7 +218,7 @@ describe('SessionCanvas', () => {
 })
 
 function renderCanvas(data: SessionGraphView, handlers?: {
-  onRemoveBranch?: (sessionId: string, includeDescendants: boolean) => void
+  onRemoveBranch?: (sessionId: string, scope: 'node-only' | 'node-and-descendants') => void
 }) {
   return render(<SessionCanvas graph={data} onActivate={() => undefined}
     {...(handlers?.onRemoveBranch ? { onRemoveBranch: handlers.onRemoveBranch } : {})}
@@ -211,7 +250,7 @@ function node(
   return {
     sessionId, sceneId: 'scene-1', ...(parentSessionId ? { parentSessionId } : {}),
     currentMode, workStatus: 'idle', providerRestoreState: 'none', canFork,
-    title, cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
+    title, cwd: '/tmp', hasOwnedWorktree: false, activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }

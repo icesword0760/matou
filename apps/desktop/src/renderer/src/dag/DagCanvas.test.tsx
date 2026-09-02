@@ -8,7 +8,7 @@ import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagCanvas, clampDagScale, zoomAt } from './DagCanvas'
 
 beforeEach(() => { Element.prototype.scrollIntoView = vi.fn() })
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('DagCanvas', () => {
   it('clamps zoom to the PRD range and preserves the world point under the pointer', () => {
@@ -26,17 +26,23 @@ describe('DagCanvas', () => {
     Object.defineProperty(canvas, 'clientHeight', { configurable: true, value: 700 })
 
     fireEvent.wheel(canvas, { deltaX: 40, deltaY: 30 })
-    expect(canvas.getAttribute('data-pan')).not.toBe('0,0')
+    await waitFor(() => expect(canvas.getAttribute('data-pan')).not.toBe('0,0'))
     fireEvent.wheel(canvas, { deltaY: -100, ctrlKey: true, clientX: 500, clientY: 350 })
-    expect(Number(canvas.getAttribute('data-scale'))).toBeGreaterThan(1)
+    await waitFor(() => expect(Number(canvas.getAttribute('data-scale'))).toBeGreaterThan(1))
+    fireEvent.wheel(canvas, { deltaX: 80, deltaY: 40 })
+    const displaced = canvas.getAttribute('data-pan')
+    await waitFor(() => expect(canvas.getAttribute('data-pan')).not.toBe(displaced))
+    const panned = canvas.getAttribute('data-pan')
     await userEvent.setup().click(screen.getByRole('button', { name: '恢复 100%' }))
     expect(canvas.getAttribute('data-scale')).toBe('1')
+    expect(canvas.getAttribute('data-pan')).not.toBe(panned)
+    expect(canvas.getAttribute('data-pan')).toBe('70,40')
 
     await userEvent.setup().click(screen.getByRole('button', { name: '打开会话：Child' }))
     expect(onSelect).toHaveBeenCalledWith('child')
   })
 
-  it('restores a persisted viewport before rendering and reports later canvas movement', () => {
+  it('restores a persisted viewport before rendering and reports later canvas movement', async () => {
     const onTransformChange = vi.fn()
     render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()}
       initialTransform={{ x: 123, y: -45, scale: 1.4 }} onTransformChange={onTransformChange} />)
@@ -45,10 +51,34 @@ describe('DagCanvas', () => {
     expect(canvas.getAttribute('data-pan')).toBe('123,-45')
     expect(canvas.getAttribute('data-scale')).toBe('1.4')
     fireEvent.wheel(canvas, { deltaX: 20, deltaY: 10 })
-    expect(onTransformChange).toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 })
+    await waitFor(() => expect(onTransformChange)
+      .toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 }))
   })
 
-  it('renders parent, focused, and child depths fully while farther nodes stay as directional ghosts', () => {
+  it('coalesces a burst of continuous pan events into one visual frame', () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const onTransformChange = vi.fn()
+    render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()}
+      initialTransform={{ x: 100, y: 40, scale: 1 }} onTransformChange={onTransformChange} />)
+    const canvas = screen.getByRole('application', { name: '会话 DAG 画布' })
+
+    fireEvent.wheel(canvas, { deltaX: 10 })
+    fireEvent.wheel(canvas, { deltaX: 10 })
+    fireEvent.wheel(canvas, { deltaX: 10 })
+
+    expect(frames).toHaveLength(1)
+    expect(onTransformChange).not.toHaveBeenCalled()
+    frames[0]!(0)
+    expect(onTransformChange).toHaveBeenCalledTimes(1)
+    expect(onTransformChange).toHaveBeenCalledWith({ x: 70, y: 40, scale: 1 })
+  })
+
+  it('renders near depths as sessions and farther branches as truthful aggregates that drill in on click', async () => {
     const nodes = [
       node('depth-0', 'Depth 0'),
       { ...node('depth-1', 'Depth 1'), parentSessionId: 'depth-0' },
@@ -64,13 +94,85 @@ describe('DagCanvas', () => {
       }))
     }} focusedSessionId="depth-2" onSelect={vi.fn()} />)
 
-    expect(screen.getByRole('button', { name: '远层会话：Depth 0' }).getAttribute('data-ghost')).toBe('true')
+    expect(screen.getAllByRole('button', { name: '展开远层会话：共 1 个会话，运行中 0，等待输入 0，异常 0' }))
+      .toHaveLength(2)
     expect(screen.getByRole('button', { name: '打开会话：Depth 1' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '打开会话：Depth 2' })).toBeTruthy()
     expect(screen.getByRole('button', { name: '打开会话：Depth 3' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '远层会话：Depth 4' }).getAttribute('data-ghost')).toBe('true')
-    expect(document.querySelectorAll('.dag-node-card')).toHaveLength(5)
-    expect(document.querySelectorAll('.dag-node-card.is-ghost')).toHaveLength(2)
+    expect(document.querySelectorAll('.dag-node-card')).toHaveLength(3)
+    expect(document.querySelectorAll('.dag-aggregate-card')).toHaveLength(2)
+
+    const canvas = screen.getByRole('application', { name: '会话 DAG 画布' })
+    await waitFor(() => expect(canvas.getAttribute('data-pan')).not.toBe('70,40'))
+    const afterAggregate = document.querySelector<HTMLButtonElement>('.dag-aggregate-card[data-direction="after"]')!
+    await userEvent.setup().click(afterAggregate)
+    expect(screen.getByRole('button', { name: '打开会话：Depth 4' })).toBeTruthy()
+  })
+
+  it('keeps a deep DAG DOM bounded while aggregates account for every far session', () => {
+    const nodes = Array.from({ length: 5000 }, (_, index) => ({
+      ...node(`depth-${index}`, `Depth ${index}`),
+      ...(index === 0 ? {} : { parentSessionId: `depth-${index - 1}` })
+    }))
+    render(<DagCanvas graph={{
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: `depth-${index}`, childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const, createdAt: index + 1
+      }))
+    }} focusedSessionId="depth-2500" onSelect={vi.fn()} />)
+
+    expect(document.querySelectorAll('.dag-node-card').length).toBeLessThanOrEqual(3)
+    expect(document.querySelectorAll('.dag-aggregate-card').length).toBeLessThanOrEqual(2)
+    const aggregateTotal = [...document.querySelectorAll<HTMLElement>('.dag-aggregate-card')]
+      .reduce((total, item) => total + Number(item.dataset.aggregateCount), 0)
+    expect(aggregateTotal).toBe(4_997)
+  })
+
+  it('shows exact running, waiting-input, and error totals from the aggregated sessions', () => {
+    const nodes = [
+      node('root', 'Root'),
+      { ...node('running', 'Running'), parentSessionId: 'root', workStatus: 'running' as const },
+      { ...node('waiting', 'Waiting'), parentSessionId: 'running', workStatus: 'needs-input' as const },
+      { ...node('failed', 'Failed'), parentSessionId: 'waiting', workStatus: 'error' as const },
+      { ...node('starting', 'Starting'), parentSessionId: 'failed', workStatus: 'starting' as const }
+    ]
+    render(<DagCanvas graph={{
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: nodes[index]!.sessionId,
+        childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const,
+        createdAt: index + 1
+      }))
+    }} focusedSessionId="root" onSelect={vi.fn()} />)
+
+    expect(screen.getByRole('button', {
+      name: '展开远层会话：共 3 个会话，运行中 1，等待输入 1，异常 1'
+    }).textContent).toContain('共 3 个会话')
+  })
+
+  it('replaces a far aggregate with the exact session when search locates it', () => {
+    const nodes = Array.from({ length: 7 }, (_, index) => ({
+      ...node(`depth-${index}`, `Depth ${index}`),
+      ...(index === 0 ? {} : { parentSessionId: `depth-${index - 1}` })
+    }))
+    render(<DagCanvas graph={{
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: `depth-${index}`,
+        childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const,
+        createdAt: index + 1
+      }))
+    }} focusedSessionId="depth-0" onSelect={vi.fn()} />)
+
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), {
+      target: { value: 'Depth 6' }
+    })
+    fireEvent.click(screen.getByRole('option', { name: /Depth 6/ }))
+
+    expect(screen.getByRole('button', { name: '打开会话：Depth 6' })).toBeTruthy()
   })
 
   it('shows full path context and labels Fork versus ordinary relation semantics', () => {

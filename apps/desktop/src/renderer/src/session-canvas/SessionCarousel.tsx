@@ -16,7 +16,7 @@ import { SessionCard } from './SessionCard'
 export function SessionCarousel(props: {
   nodes: SessionGraphNodeView[]
   focusedSessionId?: string
-  renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
+  renderSession(node: SessionGraphNodeView, inViewport: boolean, viewportMoving: boolean): ReactNode
   onActivate(sessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
   parent?: SessionGraphNodeView
@@ -78,16 +78,32 @@ export function SessionCarousel(props: {
   const restoringGeometry = useRef(false)
   const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0 || initialAnchor !== undefined)
   const previousFocusedSessionId = useRef(focusedSessionId)
-  const [firstVisible, setFirstVisible] = useState(0)
+  const initialFocusedIndex = Math.max(0, nodes.findIndex(({ sessionId }) => sessionId === focusedSessionId))
+  const [firstVisible, setFirstVisible] = useState(() => Math.max(0, initialFocusedIndex - 1))
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [edgeBrowsePhase, setEdgeBrowsePhase] = useState<'idle' | 'confirming' | 'cruising'>('idle')
   const [edgeBrowseDirection, setEdgeBrowseDirection] = useState<-1 | 0 | 1>(0)
   const [pull, setPull] = useState({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
   const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
   const [narrow, setNarrow] = useState(false)
+  const [viewportMoving, setViewportMoving] = useState(false)
   const inViewport = useMemo(() => new Set(
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
+  const virtualized = nodes.length > VIRTUALIZE_THRESHOLD
+  const focusChangedForRender = previousFocusedSessionId.current !== focusedSessionId
+  const focusedIndex = nodes.findIndex(({ sessionId }) => sessionId === focusedSessionId)
+  const defaultRenderStart = virtualized ? Math.max(0, firstVisible - visibleCount * 2) : 0
+  const renderStart = virtualized && focusChangedForRender && focusedIndex >= 0
+    ? Math.max(0, focusedIndex - visibleCount * 2)
+    : defaultRenderStart
+  const renderEnd = virtualized
+    ? Math.min(nodes.length, renderStart + visibleCount * 5)
+    : nodes.length
+  const renderedNodes = nodes.slice(renderStart, renderEnd)
+  const foregroundTerminalCount = nodes.filter((node) =>
+    node.archivedAt === undefined && node.currentMode !== 'agent-team-member'
+  ).length
   const revealTargetPresent = Boolean(revealRequest && nodes.some(
     ({ sessionId }) => sessionId === revealRequest.sessionId
   ))
@@ -145,13 +161,20 @@ export function SessionCarousel(props: {
     let frame = 0
     let attempts = 0
     let reachedFrames = 0
+    let previousRequested = Number.NaN
+    let previousMaxScrollLeft = Number.NaN
     const restore = () => {
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
       const anchorCard = initialAnchor
         ? cardsRef.current.get(initialAnchor.sessionId)
         : undefined
+      const anchorIndex = initialAnchor
+        ? nodes.findIndex(({ sessionId }) => sessionId === initialAnchor.sessionId)
+        : -1
       const requested = anchorCard
         ? anchoredCardScrollLeft(anchorCard.offsetLeft, initialAnchor!.viewportOffset, maxScrollLeft)
+        : anchorIndex >= 0
+          ? anchoredCardScrollLeft(estimatedCardOffset(anchorIndex, viewport, visibleCount), initialAnchor!.viewportOffset, maxScrollLeft)
         : Math.max(0, initialScrollLeft)
       viewport.scrollLeft = requested
       updateVisibleWindow()
@@ -169,8 +192,12 @@ export function SessionCarousel(props: {
       attempts += 1
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
       target.expected = Math.min(target.requested, maxScrollLeft)
-      reachedFrames = Math.abs(viewport.scrollLeft - target.expected) < 1
+      const layoutStable = Math.abs(target.requested - previousRequested) < 0.5 &&
+        Math.abs(maxScrollLeft - previousMaxScrollLeft) < 0.5
+      reachedFrames = Math.abs(viewport.scrollLeft - target.expected) < 1 && layoutStable
         ? reachedFrames + 1 : 0
+      previousRequested = target.requested
+      previousMaxScrollLeft = maxScrollLeft
       // Terminal surfaces and responsive columns settle over multiple frames.
       // Keep applying a persisted non-zero viewport until its full scroll range
       // exists instead of permanently accepting the first clamped value.
@@ -226,6 +253,7 @@ export function SessionCarousel(props: {
   useEffect(() => {
     if (!focusedSessionId) return
     const focusChanged = previousFocusedSessionId.current !== focusedSessionId
+    const activatedFromPreview = focusChanged && hoverIntentSessionId.current === focusedSessionId
     previousFocusedSessionId.current = focusedSessionId
     if (focusChanged) {
       // Activation is a durable navigation choice; any pointer-only preview
@@ -248,6 +276,11 @@ export function SessionCarousel(props: {
       // A user-selected Session supersedes a stale viewport restore. The
       // restoration loop observes this flag on its next frame and exits.
       restoringGeometry.current = false
+    }
+    if (activatedFromPreview) {
+      ensureVisibleRef.current?.(focusedSessionId)
+      if (!pageClosing.current) onGeometryChange?.(currentGeometry())
+      return
     }
     focusVisibilitySessionId.current = focusedSessionId
     const followThrough = performance.now() + 440
@@ -311,10 +344,19 @@ export function SessionCarousel(props: {
     if (!revealRequest) return
     restoringGeometry.current = false
     skipFocusScrollAfterRestore.current = false
-    const frame = requestAnimationFrame(() => {
+    let frame = 0
+    const reveal = () => {
       const card = cardsRef.current.get(revealRequest.sessionId)
       const viewport = viewportRef.current
-      if (!card || !viewport) return
+      if (!viewport) return
+      if (!card) {
+        const index = nodes.findIndex(({ sessionId }) => sessionId === revealRequest.sessionId)
+        if (index < 0) return
+        viewport.scrollLeft = estimatedCardOffset(index, viewport, visibleCount)
+        updateVisibleWindow()
+        frame = requestAnimationFrame(reveal)
+        return
+      }
       // DAG and notification navigation may select the already-focused Session.
       // In that case React has no focus-ID change to observe, so force the
       // carousel position from this explicit navigation request. Directly
@@ -330,7 +372,8 @@ export function SessionCarousel(props: {
         updateVisibleWindow()
         onGeometryChange?.(currentGeometry(revealRequest.sessionId))
       }, reducedMotion() ? 1 : 320)
-    })
+    }
+    frame = requestAnimationFrame(reveal)
     return () => cancelAnimationFrame(frame)
     // The sequence is an explicit product navigation request. It must override
     // persisted geometry even when the target Session ID did not change.
@@ -516,6 +559,12 @@ export function SessionCarousel(props: {
     edgeBrowseTimer.current = window.setTimeout(edgeBrowseStep, EDGE_INTENT_DWELL_MS)
   }
   const markScrolling = (userInitiated = false) => {
+    setViewportMoving(true)
+    if (viewportSettleTimer.current !== undefined) window.clearTimeout(viewportSettleTimer.current)
+    viewportSettleTimer.current = window.setTimeout(() => {
+      viewportSettleTimer.current = undefined
+      setViewportMoving(false)
+    }, VIEWPORT_SETTLE_MS)
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
     // point onward and must not be mistaken for a programmatic restore event.
@@ -578,7 +627,10 @@ export function SessionCarousel(props: {
       hoverVisibilitySessionId.current = null
       if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
       hoverVisibilityFrame.current = undefined
-      setHoveredSessionId(null)
+      // Keep the visual width owned by focus, but still expose pointer entry
+      // as a transient preview state. Pointer leave clears `is-expanded`
+      // without collapsing the active card or polluting persisted geometry.
+      setHoveredSessionId(sessionId)
       // The active card owns the viewport. Pointer entry may reveal a clipped
       // edge, but pointer exit must never restore it to a partially hidden
       // position as if this were a temporary preview.
@@ -829,7 +881,10 @@ export function SessionCarousel(props: {
       pullDistance={pull.distance} progress={pull.progress} effectIntensity={pull.effectIntensity} />}
     <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
       ref={viewportRef} role="region" aria-label="同级会话列表"
-      data-visible-columns={visibleCount} data-edge-browse-phase={edgeBrowsePhase}
+      data-visible-columns={visibleCount} data-total-sessions={nodes.length}
+      data-foreground-terminals={foregroundTerminalCount}
+      data-viewport-moving={viewportMoving ? 'true' : 'false'}
+      data-rendered-sessions={renderedNodes.length} data-edge-browse-phase={edgeBrowsePhase}
       data-edge-browse-direction={edgeBrowseDirection === -1 ? 'left' : edgeBrowseDirection === 1 ? 'right' : 'none'}
       onScroll={() => markScrolling()}
       onPointerDownCapture={() => stopEdgeBrowse(true)}
@@ -846,11 +901,15 @@ export function SessionCarousel(props: {
         hover(null)
       }}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
-      {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
+      {renderStart > 0 && <div className="session-card-virtual-spacer" aria-hidden="true"
+        style={{ '--virtual-count': renderStart } as React.CSSProperties} />}
+      {renderedNodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
-      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${node.sessionId === focusedSessionId || hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${hoveredSessionId === node.sessionId ||
+        (hoveredSessionId === null && revealRequest?.sessionId === node.sessionId && node.sessionId === focusedSessionId)
+        ? ' is-expanded' : ''}`}
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return
@@ -874,10 +933,18 @@ export function SessionCarousel(props: {
             if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
             hoverRestoreTimer.current = undefined
             hoverBaselineScrollLeft.current = undefined
+            // Commit the exact preview position under the pointer. Waiting for
+            // the focus projection to render leaves one animation frame in
+            // which edge-follow can still nudge the strip after the click.
+            hoverVisibilitySessionId.current = null
+            if (hoverVisibilityFrame.current !== undefined) {
+              cancelAnimationFrame(hoverVisibilityFrame.current)
+              hoverVisibilityFrame.current = undefined
+            }
             onGeometryChange?.(currentGeometry(sessionId))
             onActivate(sessionId)
           }} onHover={hover}>
-          {renderSession(node, inViewport.has(node.sessionId))}
+          {renderSession(node, inViewport.has(node.sessionId), viewportMoving)}
           {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
             <strong>{node.title}</strong>
             <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
@@ -890,6 +957,8 @@ export function SessionCarousel(props: {
           </div>}
         </SessionCard>
       </div>)}
+      {renderEnd < nodes.length && <div className="session-card-virtual-spacer" aria-hidden="true"
+        style={{ '--virtual-count': nodes.length - renderEnd } as React.CSSProperties} />}
     </div>
     {edgeBrowsePhase !== 'idle' && <div className="session-edge-intent" aria-hidden="true" />}
   </div>
@@ -945,10 +1014,17 @@ export function fullyVisibleCardScrollLeft(
 }
 
 const CARD_EDGE_INSET = 10
+const VIRTUALIZE_THRESHOLD = 80
+const VIEWPORT_SETTLE_MS = 300
 const EDGE_INTENT_WIDTH = 84
 const EDGE_INTENT_DWELL_MS = 180
 const EDGE_BROWSE_INTERVAL_MS = 900
 const EDGE_DIRECTION_CANCEL_DISTANCE = 2
+
+function estimatedCardOffset(index: number, viewport: HTMLElement, visibleCount: number): number {
+  const unit = viewport.clientWidth > 0 ? viewport.clientWidth / visibleCount : 292
+  return CARD_EDGE_INSET + index * unit
+}
 
 function centerCardInViewport(viewport: HTMLElement, card: HTMLElement): void {
   const target = centeredCardScrollLeft(

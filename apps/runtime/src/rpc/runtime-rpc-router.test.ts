@@ -11,6 +11,7 @@ import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { encodeClaudeProjectPath } from '../session/claude-session-catalog'
+import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 
 let database: RuntimeDatabase
 let router: RuntimeRpcRouter
@@ -237,7 +238,12 @@ describe('RuntimeRpcRouter', () => {
       cwd: repositoryRoot, sessionId: initial.session.id,
       windowId: 'window-worktree', sceneId: initial.scene.id,
       repositoryRoot, path: worktreePath, branch: 'feature/open', now: 2
-    })) as { created: boolean; focusedSessionId: string; session: { cwd: string } }
+    })) as {
+      created: boolean
+      focusedSessionId: string
+      session: { cwd: string }
+      graph: { nodes: Array<Record<string, unknown>> }
+    }
     const actualWorktreePath = await realpath(worktreePath)
 
     expect(opened).toMatchObject({ created: true, session: { cwd: actualWorktreePath } })
@@ -247,6 +253,11 @@ describe('RuntimeRpcRouter', () => {
        JOIN execution_contexts ON execution_contexts.id = sessions.execution_context_id
        WHERE sessions.id = ?`, opened.focusedSessionId
     )).toEqual({ kind: 'git-worktree', cwd: actualWorktreePath })
+    expect(opened.graph.nodes.find(({ sessionId }) => sessionId === opened.focusedSessionId))
+      .toMatchObject({
+        environment: { kind: 'local', state: 'ready', path: actualWorktreePath },
+        git: { state: 'ready', branch: 'feature/open', dirty: false }
+      })
   })
 
   it('routes atomic Workspace hierarchy workflows', async () => {
@@ -401,6 +412,38 @@ describe('RuntimeRpcRouter', () => {
     }))).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 
+  it('restores hundreds of Sessions with a bounded bulk-query count', async () => {
+    const workspaceRoot = join(testRoot, 'bulk-snapshot-workspace')
+    await mkdir(workspaceRoot)
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('bulk-bootstrap', {
+      windowId: 'window-bulk', defaultRootDirectory: workspaceRoot,
+      defaultName: 'bulk-workspace', now: 1
+    })) as { session: { id: string } }
+    database.run(
+      `WITH RECURSIVE sequence(value) AS (
+         SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 500
+       )
+       INSERT INTO sessions (
+         id, task_id, execution_context_id, kind, status, created_at, updated_at,
+         last_activity_at, archived_at, title, version, cwd, work_status
+       )
+       SELECT printf('bulk-session-%04d', value), task_id, execution_context_id,
+              'shell', 'created', value + 10, value + 10, value + 10,
+              NULL, printf('Bulk Session %d', value), 1, cwd, 'idle'
+       FROM sessions, sequence WHERE sessions.id = ?`,
+      initial.session.id
+    )
+
+    database.readStatementCount(true)
+    const snapshot = await router.handle('projection.snapshot', {}) as {
+      sessions: Array<{ id: string }>
+    }
+    const statementCount = database.readStatementCount()
+
+    expect(snapshot.sessions).toHaveLength(501)
+    expect(statementCount).toBeLessThan(40)
+  })
+
   it('supports relation and Scene structural commands with synchronous event replay', async () => {
     await seedHierarchy()
     await router.handle('session.create', payload('parent', {
@@ -437,9 +480,30 @@ describe('RuntimeRpcRouter', () => {
     expect(snapshot.sceneSnapshots.find(({ scene }) => scene.id === 'scene-1')?.geometry)
       .toEqual([expect.objectContaining({ geometry: { ratio: 0.35 } })])
 
+    const sceneSnapshot = await router.handle('hierarchy.get-scene-snapshot', {
+      sceneId: 'scene-1'
+    }) as {
+      scene: { id: string }
+      nodes: Array<{ id: string }>
+      mounts: Array<{ id: string }>
+      geometry: Array<{ geometry: { ratio: number } }>
+    }
+    expect(sceneSnapshot).toMatchObject({
+      scene: { id: 'scene-1' },
+      nodes: expect.arrayContaining([expect.objectContaining({ id: 'root' })]),
+      mounts: expect.arrayContaining([expect.objectContaining({ id: 'mount-parent' })]),
+      geometry: [expect.objectContaining({ geometry: { ratio: 0.35 } })]
+    })
+
     const graph = await router.handle('hierarchy.get-scene-session-graph', {
       sceneId: 'scene-1', windowId: 'window-1'
-    }) as { nodes: Array<{ sessionId: string; parentSessionId?: string }> }
+    }) as {
+      runtimeGeneration: string
+      eventSequence: number
+      nodes: Array<{ sessionId: string; parentSessionId?: string }>
+    }
+    expect(graph.runtimeGeneration).toBe(database.runtimeGeneration)
+    expect(graph.eventSequence).toBeGreaterThan(0)
     expect(graph.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ sessionId: 'parent' }),
       expect.objectContaining({ sessionId: 'child', parentSessionId: 'parent' })
@@ -511,14 +575,22 @@ describe('RuntimeRpcRouter', () => {
 
     const child = await router.handle('hierarchy.create-fork-child', payload('fork-child', {
       windowId: 'window-fork', sceneId: initial.scene.id,
-      sourceSessionId: initial.session.id, name: '第一分支', worktreeMode: 'current', now: 4
+      sourceSessionId: initial.session.id, name: '第一分支', worktreeMode: 'current', now: 4,
+      submissionKey: 'router-child-submission'
     })) as { session: { id: string; title: string }; graph: { nodes: Array<{ title: string }> } }
+    const duplicate = await router.handle('hierarchy.create-fork-child', payload('fork-child-retry', {
+      windowId: 'window-fork', sceneId: initial.scene.id,
+      sourceSessionId: initial.session.id, name: '超时重发', worktreeMode: 'current', now: 5,
+      submissionKey: 'router-child-submission'
+    })) as { session: { id: string } }
     const sibling = await router.handle('hierarchy.create-fork-sibling', payload('fork-sibling', {
       windowId: 'window-fork', sceneId: initial.scene.id,
-      sourceSessionId: child.session.id, name: '第二分支', worktreeMode: 'current', now: 5
+      sourceSessionId: child.session.id, name: '第二分支', worktreeMode: 'current', now: 6,
+      submissionKey: 'router-sibling-submission'
     })) as { session: { id: string }; graph: { nodes: Array<{ title: string }> } }
 
     expect(child.session.title).toBe('第一分支')
+    expect(duplicate.session.id).toBe(child.session.id)
     expect(sibling.graph.nodes.map(({ title }) => title)).toEqual(['Claude', '第一分支', '第二分支'])
     expect(database.get(
       'SELECT source_session_id FROM session_fork_intents WHERE session_id = ?', sibling.session.id
@@ -529,6 +601,10 @@ describe('RuntimeRpcRouter', () => {
     await expect(router.handle('workspace.create', { command: {}, input: { name: '' } })).rejects.toMatchObject({
       code: 'INVALID_REQUEST'
     })
+    await expect(router.handle('hierarchy.create-fork-child', payload('missing-submission', {
+      windowId: 'window-1', sceneId: 'scene-1', sourceSessionId: 'session-1',
+      name: 'Fork', worktreeMode: 'current', now: 1
+    }))).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 
   it('projects Task unread counts and clears only the newly visible focused panel', async () => {

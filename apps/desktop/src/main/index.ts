@@ -88,9 +88,12 @@ async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
   const { rootDirectory: defaultRootDirectory, name: defaultName } =
     resolveDefaultWorkspacePath(process.env.MATOU_DEFAULT_WORKSPACE, app.getPath('home'))
+  const width = 1200
+  const height = 780
   const window = new BrowserWindow({
-    width: 1200,
-    height: 780,
+    width,
+    height,
+    ...automatedWindowPlacement(width, height),
     minWidth: 720,
     minHeight: 480,
     show: false,
@@ -135,6 +138,9 @@ async function createWindow(): Promise<BrowserWindow> {
     rendererUrl.searchParams.set('defaultName', defaultName)
     if (process.env.MATOU_E2E === '1') {
       rendererUrl.searchParams.set('e2e', '1')
+      if (process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0') {
+        rendererUrl.searchParams.set('terminalDiagnostics', '0')
+      }
     }
     await window.loadURL(rendererUrl.toString())
   } else {
@@ -143,7 +149,12 @@ async function createWindow(): Promise<BrowserWindow> {
         windowId,
         defaultRootDirectory,
         defaultName,
-        ...(process.env.MATOU_E2E === '1' ? { e2e: '1' } : {})
+        ...(process.env.MATOU_E2E === '1' ? {
+          e2e: '1',
+          ...(process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0'
+            ? { terminalDiagnostics: '0' }
+            : {})
+        } : {})
       }
     })
   }
@@ -156,8 +167,10 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
     windows.showWindow(input.windowId)
     return
   }
+  const width = 760
+  const height = 520
   const window = new BrowserWindow({
-    width: 760, height: 520, minWidth: 420, minHeight: 260,
+    width, height, ...automatedWindowPlacement(width, height), minWidth: 420, minHeight: 260,
     show: false, backgroundColor: '#F7F8FA',
     title: input.title,
     webPreferences: {
@@ -170,10 +183,10 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
   installNativeDagShortcut(window)
-  window.on('closed', () => {
-    windows.unregister(input.windowId)
-    browserWindows.delete(input.windowId)
-    if (quitting) return
+  let closeNotified = false
+  const notifyOwner = () => {
+    if (quitting || closeNotified) return
+    closeNotified = true
     const event: DetachedWindowClosedEvent = {
       windowId: input.windowId, mainWindowId: input.mainWindowId,
       sceneId: input.sceneId, mountId: input.mountId, sessionId: input.sessionId
@@ -181,13 +194,28 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
     browserWindows.get(input.mainWindowId)?.webContents.send(
       DESKTOP_CHANNELS.detachedWindowClosed, event
     )
+  }
+  // Notify while the native window is entering its close transaction. Waiting
+  // for `closed` makes the owning Renderer race BrowserWindow teardown and can
+  // leave a stale detached placeholder until the next app restart.
+  window.on('close', notifyOwner)
+  window.on('closed', () => {
+    windows.unregister(input.windowId)
+    browserWindows.delete(input.windowId)
+    notifyOwner()
   })
   const query = {
     kind: 'detached-terminal', windowId: input.windowId,
     mainWindowId: input.mainWindowId, sceneId: input.sceneId,
     mountId: input.mountId, sessionId: input.sessionId,
     executionContextId: input.executionContextId,
-    profile: input.profile, title: input.title
+    profile: input.profile, title: input.title,
+    ...(process.env.MATOU_E2E === '1' ? {
+      e2e: '1',
+      ...(process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0'
+        ? { terminalDiagnostics: '0' }
+        : {})
+    } : {})
   }
   if (process.env.ELECTRON_RENDERER_URL) {
     const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)
@@ -196,6 +224,17 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   } else {
     await window.loadFile(join(__dirname, '../renderer/index.html'), { query })
   }
+}
+
+function automatedWindowPlacement(width: number, height: number): { x?: number; y?: number } {
+  const placement = secondaryDisplayWindowBounds({
+    enabled: process.env.MATOU_E2E === '1' && process.env.MATOU_E2E_DISPLAY !== 'primary',
+    width,
+    height,
+    primaryDisplayId: screen.getPrimaryDisplay().id,
+    displays: screen.getAllDisplays()
+  })
+  return placement ?? {}
 }
 
 function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): DagWindowAdapter {
@@ -231,7 +270,8 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
   })
   const query = {
     kind: 'dag', mainWindowId: context.mainWindowId,
-    sceneId: context.sceneId, sessionId: context.sessionId, theme: context.theme
+    sceneId: context.sceneId, sessionId: context.sessionId, theme: context.theme,
+    requestedAt: String(context.requestedAt ?? Date.now())
   }
   if (process.env.ELECTRON_RENDERER_URL) {
     const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)
@@ -258,6 +298,16 @@ function installNativeDagShortcut(window: BrowserWindow): void {
     event.preventDefault()
     if (input.type !== 'keyDown' || input.isAutoRepeat || window.isDestroyed()) return
     window.webContents.send(DESKTOP_CHANNELS.dagShortcut, 'long')
+  })
+}
+
+function installNativeScrollGesture(window: BrowserWindow): void {
+  window.webContents.on('input-event', (_event, input) => {
+    const phase = input.type === 'gestureScrollBegin'
+      ? 'begin'
+      : input.type === 'gestureScrollEnd' ? 'end' : undefined
+    if (!phase || window.isDestroyed()) return
+    window.webContents.send(DESKTOP_CHANNELS.scrollGesture, phase)
   })
 }
 
@@ -368,7 +418,18 @@ ipcMain.handle(DESKTOP_CHANNELS.selectWorkspaceDirectory, async () => {
   })
   return result.canceled ? null : result.filePaths[0] ?? null
 })
+ipcMain.handle(DESKTOP_CHANNELS.selectSessionEnvironmentDirectory, async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+  return result.canceled ? null : result.filePaths[0] ?? null
+})
 ipcMain.handle(DESKTOP_CHANNELS.revealDirectory, async (_event, path: string) => {
+  await shell.openPath(path)
+})
+ipcMain.handle(DESKTOP_CHANNELS.openDirectoryInTerminal, async (_event, path: string) => {
+  if (process.platform === 'darwin') {
+    await execFileAsync('/usr/bin/open', ['-a', 'Terminal', path])
+    return
+  }
   await shell.openPath(path)
 })
 ipcMain.handle(DESKTOP_CHANNELS.hideWindow, (_event, windowId: string) => {
@@ -382,6 +443,10 @@ ipcMain.handle(DESKTOP_CHANNELS.createDetachedTerminalWindow, (
 ) => createDetachedTerminalWindow(input))
 ipcMain.handle(DESKTOP_CHANNELS.closeDetachedTerminalWindow, (_event, windowId: string) => {
   browserWindows.get(windowId)?.close()
+})
+ipcMain.handle(DESKTOP_CHANNELS.detachedTerminalWindowExists, (_event, windowId: string) => {
+  const window = browserWindows.get(windowId)
+  return Boolean(window && !window.isDestroyed())
 })
 ipcMain.handle(DESKTOP_CHANNELS.openDagWindow, (_event, input: DagWindowContext) => {
   dagWindows.open(input)

@@ -5,11 +5,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { WorkspaceTaskRepository } from './workspace-task-repository'
-import { SessionRepository } from './session-repository'
+import { SessionRepository, StaleForkProviderIdentityError } from './session-repository'
 import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { SessionForkIntentRepository } from '../session/session-fork-intent-repository'
 
 let database: RuntimeDatabase
 let sessions: SessionRepository
@@ -223,6 +224,153 @@ describe('SessionRepository', () => {
     )).toEqual({ state: 'succeeded', completed_at: 4 })
   })
 
+  it('does not let an unfenced provider identity settle a durable Fork operation', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-durable'), {
+      id: 'source-durable', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at, operation_id, submission_key,
+         stage, completed_steps, total_steps
+       ) VALUES ('session-1', 'source-durable', 'claude-code', 'provider-source',
+                 'starting', 2, 3, 3, 'operation-durable', 'submission-durable',
+                 'restoring-provider', 3, 5)`
+    )
+
+    sessions.recordResumableProviderIdentity(command('fork-durable-identity'), {
+      id: 'binding-forked-durable', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 4
+    })
+
+    expect(database.get(
+      `SELECT state, stage, completed_steps, completed_at
+       FROM session_fork_intents WHERE session_id = ?`, 'session-1'
+    )).toEqual({
+      state: 'starting', stage: 'restoring-provider', completed_steps: 3, completed_at: null
+    })
+  })
+
+  it('settles a durable Fork only from the provider run holding its current lease', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-authoritative'), {
+      id: 'source-authoritative', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    intents.accept({
+      operationId: 'operation-authoritative', submissionKey: 'submission-authoritative',
+      sessionId: 'session-1', sourceSessionId: 'source-authoritative',
+      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      worktreeMode: 'current', totalSteps: 2, now: 2
+    })
+    const decision = intents.acquireLease({
+      operationId: 'operation-authoritative', owner: 'runtime-a', now: 10, ttlMs: 20
+    })
+    if (decision.kind !== 'acquired') throw new Error('lease missing')
+    intents.advanceStage({
+      operationId: 'operation-authoritative', lease: decision.lease,
+      stage: 'restoring-provider', now: 11
+    })
+
+    sessions.recordResumableProviderIdentity(command('fork-authoritative-identity'), {
+      id: 'binding-authoritative', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 12,
+      forkAuthority: {
+        operationId: 'operation-authoritative', runId: 'run-authoritative',
+        lease: decision.lease
+      }
+    })
+
+    expect(database.get(
+      `SELECT state, stage, completed_steps, completed_at
+       FROM session_fork_intents WHERE operation_id = ?`, 'operation-authoritative'
+    )).toEqual({ state: 'succeeded', stage: 'succeeded', completed_steps: 2, completed_at: 12 })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-derived',
+      metadata: expect.objectContaining({
+        forkOperationId: 'operation-authoritative', forkRunId: 'run-authoritative',
+        forkLeaseFence: decision.lease.fence
+      })
+    })
+  })
+
+  it('rolls back a late provider identity after the durable Fork lease is replaced', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-takeover'), {
+      id: 'source-takeover', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    intents.accept({
+      operationId: 'operation-takeover', submissionKey: 'submission-takeover',
+      sessionId: 'session-1', sourceSessionId: 'source-takeover',
+      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      worktreeMode: 'current', totalSteps: 2, now: 2
+    })
+    const first = intents.acquireLease({
+      operationId: 'operation-takeover', owner: 'runtime-a', now: 10, ttlMs: 5
+    })
+    if (first.kind !== 'acquired') throw new Error('first lease missing')
+    intents.advanceStage({
+      operationId: 'operation-takeover', lease: first.lease,
+      stage: 'restoring-provider', now: 11
+    })
+    const second = intents.acquireLease({
+      operationId: 'operation-takeover', owner: 'runtime-b', now: 20, ttlMs: 20
+    })
+    if (second.kind !== 'acquired') throw new Error('takeover lease missing')
+
+    expect(() => sessions.recordResumableProviderIdentity(command('fork-stale-identity'), {
+      id: 'binding-stale', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-stale', metadata: {}, now: 21,
+      forkAuthority: {
+        operationId: 'operation-takeover', runId: 'run-stale', lease: first.lease
+      }
+    })).toThrow(StaleForkProviderIdentityError)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(database.get(
+      'SELECT state, stage, lease_fence FROM session_fork_intents WHERE operation_id = ?',
+      'operation-takeover'
+    )).toEqual({ state: 'starting', stage: 'restoring-provider', lease_fence: second.lease.fence })
+  })
+
+  it('settles a legacy Fork from provider identity only after its active lease expires', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-leased-legacy'), {
+      id: 'source-leased-legacy', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, started_at, updated_at, operation_id, submission_key,
+         stage, lease_owner, lease_token, lease_expires_at, lease_fence
+       ) VALUES ('session-1', 'source-leased-legacy', 'claude-code', 'provider-source',
+                 'starting', 2, 3, 3,
+                 'legacy-operation:leased', 'legacy-submission:leased',
+                 'restoring-provider', 'runtime-a', 'legacy-token', 5, 1)`
+    )
+
+    sessions.recordResumableProviderIdentity(command('legacy-identity-before-expiry'), {
+      id: 'binding-legacy-leased', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 4
+    })
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'starting', stage: 'restoring-provider' })
+
+    sessions.recordResumableProviderIdentity(command('legacy-identity-after-expiry'), {
+      id: 'binding-unused', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 5
+    })
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE session_id = ?', 'session-1'
+    )).toEqual({ state: 'succeeded', stage: 'succeeded' })
+  })
+
   it('does not settle a Fork intent from a provisional statusline identity', () => {
     seedSession()
     sessions.createSession(command('fork-source-provisional'), {
@@ -362,7 +510,7 @@ describe('SessionRepository', () => {
     expect(sessions.getResumeBinding('session-2', 'codex')).toMatchObject({ id: 'binding-2' })
   })
 
-  it('clears a failed resume identity and degrades only that Session to Shell atomically', () => {
+  it('clears a failed resume identity while preserving the original Claude Session atomically', () => {
     seedSession()
     sessions.bindProvider(command('binding'), {
       id: 'binding-1', sessionId: 'session-1', provider: 'claude-code',
@@ -370,7 +518,7 @@ describe('SessionRepository', () => {
     })
     sessions.validateProviderBinding(command('validate'), 'binding-1', 4)
 
-    sessions.failResumeToShell(
+    sessions.failResume(
       command('resume-failed'),
       'session-1',
       'binding-1',
@@ -378,7 +526,11 @@ describe('SessionRepository', () => {
       5
     )
 
-    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: 'Shell' })
+    expect(sessions.getSession('session-1')).toMatchObject({
+      kind: 'claude-code', title: 'Claude'
+    })
+    expect(database.get(`SELECT work_status FROM sessions WHERE id = 'session-1'`))
+      .toEqual({ work_status: 'error' })
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
     expect(sessions.listProviderBindings('session-1')).toEqual([
       expect.objectContaining({
@@ -396,11 +548,11 @@ describe('SessionRepository', () => {
       providerSessionId: 'named-provider-1', metadata: {}, now: 3
     })
 
-    sessions.failResumeToShell(
+    sessions.failResume(
       command('named-resume-failed'), 'session-1', 'named-binding-1', 'missing', 4
     )
 
-    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: '修复登录' })
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'claude-code', title: '修复登录' })
   })
 
   it('persists the last confirmed working directory independently per Session', () => {

@@ -110,11 +110,14 @@ export class RetentionManager {
     const staged = await this.#stage(plan.id, plan.actions.map(({ path }) => path))
     try {
       const affectedSessions = [...new Set(plan.actions.map(({ sessionId }) => sessionId))]
+      const journalAffectedSessions = [...new Set(plan.actions
+        .filter(({ kind }) => kind === 'journal-segment')
+        .map(({ sessionId }) => sessionId))]
       const commit = this.#transactions.execute(command, ({ tx, emit }) => {
         for (const action of plan.actions) {
           if (action.kind === 'checkpoint') tx.run('DELETE FROM journal_checkpoints WHERE file_path = ?', action.path)
         }
-        for (const sessionId of affectedSessions) {
+        for (const sessionId of journalAffectedSessions) {
           const rows = tx.all<{ id: string; anchor_json: string }>(
             "SELECT id, anchor_json FROM annotations WHERE session_id = ? AND status = 'active'", sessionId
           )
@@ -241,11 +244,11 @@ export class RetentionManager {
     for (const sessionId of await safeReadDir(journalRoot)) {
       const sessionRoot = join(journalRoot, sessionId)
       for (const entry of await safeReadDir(sessionRoot)) {
-        if (!/^segment-\d{6}\.bin(?:\.gz)?$/.test(entry)) continue
+        if (!/^segment-\d{6}\.(?:mtj|bin)(?:\.gz)?$/.test(entry)) continue
         const info = await stat(join(sessionRoot, entry))
         candidates.push({
           kind: 'journal-segment', sessionId, path: join(sessionRoot, entry), bytes: info.size,
-          modifiedAt: info.mtimeMs, protected: entry.endsWith('.bin')
+          modifiedAt: info.mtimeMs, protected: true
         })
       }
     }

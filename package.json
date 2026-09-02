@@ -21,6 +21,8 @@
     "package:dir": "MATOU_UPDATE_BASE_URL=${MATOU_UPDATE_BASE_URL:-https://updates.example.invalid/matou/stable} pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir",
     "package:mac": "test -n \"$MATOU_UPDATE_BASE_URL\" && pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --mac dmg zip --${MATOU_MAC_ARCH:-arm64} --publish never",
     "test:packaged": "pnpm package:dir && playwright test tests/e2e/packaged-runtime.spec.ts",
+    "test:e2e:recovery-scale": "node tooling/run-recovery-scale-gate.mjs",
+    "test:e2e:fork-crash-recovery": "pnpm build && playwright test tests/e2e/fork-runtime-crash-recovery.spec.ts --workers=1 --reporter=line",
     "clean": "pnpm -r --if-present run clean"
   },
   "devDependencies": {

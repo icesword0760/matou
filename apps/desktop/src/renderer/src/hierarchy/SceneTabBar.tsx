@@ -23,6 +23,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
   projection: HierarchyProjection
   commands: SceneCommands
   pathValid?: boolean
+  readOnly?: boolean
   onOpenDag?(): void
   trailingControl?: ReactNode
 }) {
@@ -139,6 +140,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
     })
   }
   const close = (sceneId: string) => {
+    if (readOnly) return
     const closeFlow = closeFlowFor(sceneId)
     if (closeFlow.action === 'hide-window') {
       setClosingSceneId(sceneId)
@@ -149,7 +151,7 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
     }
   }
   return <div className="scene-bar tab-bar" role="tablist" onKeyDown={(event) => {
-    if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || !activeSceneId) return
+    if (readOnly || !(event.metaKey || event.ctrlKey) || !event.shiftKey || !activeSceneId) return
     const index = scenes.findIndex(({ id }) => id === activeSceneId)
     if (event.key === 'PageUp' && index > 0) void commands.reorderScene(activeSceneId, scenes[index - 1]!.id)
     if (event.key === 'PageDown' && index >= 0 && index < scenes.length - 1) {
