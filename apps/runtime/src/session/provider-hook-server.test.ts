@@ -352,6 +352,15 @@ describe('ProviderHookServer', () => {
       }
     }))
     expect((await postHook(oldRegistration.hookUrl, {
+      hook_event_name: 'SessionEnd', session_id: 'provider-stale', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' },
+      transcript_path: staleTranscript,
+      last_assistant_message: 'Stale Fork completed'
+    })).status).toBe(200)
+    expect(hudEvents).toEqual([])
+    expect(notificationEvents).toEqual([])
+    expect(teamObservations).toEqual([])
+    expect((await postHook(oldRegistration.hookUrl, {
       hook_event_name: 'Stop', session_id: 'provider-stale', cwd: root,
       model: { display_name: 'Claude Opus 4.6' },
       transcript_path: staleTranscript,

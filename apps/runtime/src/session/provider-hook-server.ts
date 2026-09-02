@@ -231,6 +231,17 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
+      // A durable Fork launch owns no user-visible state until one hook both
+      // confirms its conversation and proves the current lease fence. In
+      // particular, SessionEnd may be the first event from a superseded child;
+      // acknowledging it here prevents that old process from clearing the new
+      // owner's HUD or importing its transcript into the current Team DAG.
+      if (registration.forkAuthority !== undefined && (
+        !registration.acceptIdentity || !providerSessionId || !confirmsConversation
+      )) {
+        sendJson(response, 200, {})
+        return
+      }
       if (registration.expectedProviderSessionId !== undefined) {
         // During a targeted restore, no provider-owned side effect is trusted
         // until one authoritative payload confirms the requested conversation.
