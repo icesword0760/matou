@@ -735,6 +735,20 @@ export class RuntimeServer {
     }, 180))
   }
 
+  #publishShellHistory(sessionId: string): void {
+    if (!this.#preferences.get('shell.restoreHistoryEnabled')) return
+    const blocks = this.#shellHistory.listForLaunch(sessionId, true)
+    const restored = formatShellHistoryForTerminal(blocks)
+    if (!restored) return
+    this.#port.postMessage({
+      type: 'terminal.restored-history',
+      protocolVersion: PROTOCOL_VERSION,
+      sessionId,
+      blockCount: blocks.length,
+      data: new TextEncoder().encode(restored)
+    })
+  }
+
   #flushSessionSummary(sessionId: string): void {
     const raw = this.#summaryBuffers.get(sessionId)
     if (raw === undefined) return
@@ -1343,6 +1357,7 @@ export class RuntimeServer {
         this.#endedSessionIds.delete(message.sessionId)
         this.#completedReplayThrough.delete(message.sessionId)
         this.#attachedSessionIds.add(message.sessionId)
+        if (existing.profile === 'shell') this.#publishShellHistory(message.sessionId)
         this.#port.postMessage({
           type: 'terminal.spawned', protocolVersion: PROTOCOL_VERSION,
           sessionId: message.sessionId, pid: existing.pid, reattached: true,
@@ -1447,17 +1462,7 @@ export class RuntimeServer {
       persistentAuthority?.kind === 'shell' &&
       this.#preferences.get('shell.restoreHistoryEnabled')
     if (persistOrdinaryShellHistory && attachView) {
-      const blocks = this.#shellHistory.listForLaunch(message.sessionId, true)
-      const restored = formatShellHistoryForTerminal(blocks)
-      if (restored) {
-        this.#port.postMessage({
-          type: 'terminal.restored-history',
-          protocolVersion: PROTOCOL_VERSION,
-          sessionId: message.sessionId,
-          blockCount: blocks.length,
-          data: new TextEncoder().encode(restored)
-        })
-      }
+      this.#publishShellHistory(message.sessionId)
     }
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
@@ -1543,6 +1548,8 @@ export class RuntimeServer {
         ...(attachView ? { send: this.#sendToPort } : {}),
         onOutput: (data) => {
           emittedTerminalOutput = true
+          this.#recordSessionSummary(message.sessionId, data)
+          let completedShellBlock = false
           for (const block of shellBlockCollector?.ingest(data) ?? []) {
             if (!this.#closed) {
               try {
@@ -1551,6 +1558,7 @@ export class RuntimeServer {
                   cwd,
                   ...block
                 })
+                completedShellBlock = true
               } catch (error) {
                 // PTY output can race a Runtime teardown by one event-loop turn.
                 // History is supplementary; never crash or corrupt the live
@@ -1561,7 +1569,10 @@ export class RuntimeServer {
               }
             }
           }
-          this.#recordSessionSummary(message.sessionId, data)
+          // A completed command Block is already a durable user-visible fact.
+          // Persist its DAG summary in the same output turn so an immediate app
+          // restart cannot restore the Block while leaving its graph card blank.
+          if (completedShellBlock) this.#flushSessionSummary(message.sessionId)
           const reportedCwd = cwdTracker.ingest(data)
           if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
           for (const status of workStatusTracker?.ingest(data) ?? []) {
@@ -2767,6 +2778,7 @@ export function terminalSummaryLines(raw: string): string[] {
 function looksLikeShellPrompt(line: string): boolean {
   const value = line.trim()
   if (/^[%$#>]$/.test(value)) return true
+  if (/^(?:\([^)]*\)\s*)?➜\s+\S+(?:\s+git:\([^)]+\)\s*\S*)?$/.test(value)) return true
   return /^[^\s@]+@[^\s]+\s+.+\s+[%$#>]$/.test(value)
 }
 

@@ -282,6 +282,7 @@ test('opens the real database in read-only recovery mode for browse, search, cop
       await fixture.page.getByRole('button', { name: /^在 .* 中新增事项$/ }).click()
       await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
       await fixture.page.getByRole('button', { name: '新建页签' }).click()
+      await expect(fixture.page.getByRole('tab')).toHaveCount(2)
       sceneNames = (await fixture.page.getByRole('tab').allTextContents())
         .map((name) => name.trim())
       expect(sceneNames).toHaveLength(2)

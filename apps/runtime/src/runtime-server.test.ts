@@ -358,6 +358,7 @@ describe('RuntimeServer domain RPC', () => {
   it('drops shell prompts before choosing the latest four meaningful DAG lines', () => {
     expect(terminalSummaryLines([
       'RED', '中文_码头 😀', 'LONG', 'ALT_SCREEN', 'FINAL', '%',
+      '(base) ➜  matou_workspace git:(main) ✗',
       'icesword@MacBook workspace %'
     ].join('\n'))).toEqual(['中文_码头 😀', 'LONG', 'ALT_SCREEN', 'FINAL'])
   })
@@ -553,6 +554,10 @@ describe('RuntimeServer domain RPC', () => {
       expect(new ShellHistoryRepository(database).list('block-capture-session')[0]).toMatchObject({
         command: 'printf captured', output: 'captured\r\n', exitCode: 0, cwd: root
       })
+      expect(database.get<{ latest_lines_json: string }>(
+        'SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?',
+        'block-capture-session'
+      )?.latest_lines_json).toContain('captured')
     } finally {
       port.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -1658,6 +1663,7 @@ describe('RuntimeServer domain RPC', () => {
   })
 
   it('keeps a live PTY in the Runtime registry across Renderer disconnect and reattach', async () => {
+    registerSession(database, 'reload-session')
     const priorRun = await SegmentJournal.open(root, 'reload-session')
     await priorRun.appendOutput(1, new TextEncoder().encode('output from an earlier app run'))
     await priorRun.close()
@@ -1667,25 +1673,31 @@ describe('RuntimeServer domain RPC', () => {
     firstPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'reload-1' })
     firstPort.receive({
       type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'reload-session',
-      executionContextId: 'local-default', profile: 'shell', cols: 80, rows: 24
+      executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
     })
     await settle()
     const firstPid = firstPort.last('terminal.spawned')?.pid
     expect(firstPid).toBeTypeOf('number')
     firstPort.disconnect()
+    new ShellHistoryRepository(database).complete({
+      sessionId: 'reload-session', command: 'printf completed-before-reattach', cwd: root,
+      output: 'completed-before-reattach\r\n', exitCode: 0, startedAt: 1, completedAt: 2
+    })
 
     const secondPort = new MockPort()
     new RuntimeServer(secondPort, root, database, undefined, undefined, sessions)
     secondPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'reload-2' })
     secondPort.receive({
       type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'reload-session',
-      executionContextId: 'local-default', profile: 'shell', cols: 80, rows: 24
+      executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
     })
     await settle()
 
     expect(secondPort.last('terminal.spawned')).toMatchObject({
       pid: firstPid, reattached: true, replayFromSequence: 2
     })
+    expect(new TextDecoder().decode(secondPort.last('terminal.restored-history')?.data))
+      .toContain('completed-before-reattach')
     secondPort.receive({
       type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'reload-session', fromSequence: 2

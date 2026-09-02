@@ -1362,6 +1362,58 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getAllByTestId('xterm-session-a1').length).toBeGreaterThan(0)
     expect(screen.getAllByTestId('xterm-session-a2').length).toBeGreaterThan(0)
   })
+
+  it('refreshes the owning Scene when Runtime returns a detached Session', async () => {
+    let data = fixture()
+    data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId = 'detached-runtime'
+    data.sceneSnapshots![0]!.windows.push({
+      id: 'detached-runtime', sceneId: 'scene-a1', state: 'detached'
+    })
+    let closeListener: ((event: {
+      windowId: string; mainWindowId: string; sceneId: string; mountId: string; sessionId: string
+    }) => void) | undefined
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      onDetachedWindowClosed: vi.fn((listener) => { closeListener = listener; return vi.fn() }),
+      onDagShortcut: vi.fn(() => vi.fn()), onDagNodeSelected: vi.fn(() => vi.fn())
+    } })
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.return-session') {
+        data = structuredClone(data)
+        delete data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId
+        data.sceneSnapshots![0]!.windows[0]!.state = 'closed'
+        return {
+          sceneWindowId: 'detached-runtime', sessionId: 'session-a1',
+          mountId: 'mount-a1', sceneId: 'scene-a1', state: 'returned'
+        }
+      }
+      if (method === 'hierarchy.get-scene-snapshot') return data.sceneSnapshots![0]
+      if (method === 'hierarchy.get-scene-session-graph') {
+        return {
+          sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+          nodes: [graphNode('session-a1', '终端 A1')]
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request, startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    expect(await screen.findByTestId('detached-placeholder')).toBeTruthy()
+    await act(async () => closeListener?.({
+      windowId: 'detached-runtime', mainWindowId: 'window-1', sceneId: 'scene-a1',
+      mountId: 'mount-a1', sessionId: 'session-a1'
+    }))
+
+    await waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull())
+    expect(screen.getByTestId('xterm-session-a1')).toBeTruthy()
+    expect(request.mock.calls.map(([method]) => method)).toEqual(expect.arrayContaining([
+      'hierarchy.get-scene-snapshot', 'hierarchy.get-scene-session-graph'
+    ]))
+  })
 })
 
 function fixture(): HierarchyProjection {

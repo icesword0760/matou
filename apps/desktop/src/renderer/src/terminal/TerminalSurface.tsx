@@ -406,7 +406,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         markSpawned()
         setPid(message.pid)
         onStatusChange('streaming')
-        const replayFromSequence = replayFromSequenceForSpawn(message, reusedTerminalModel)
+        const replayFromSequence = replayFromSequenceForSpawn(
+          message, reusedTerminalModel, profileRef.current
+        )
         if (replayFromSequence !== undefined && !replayRequested) {
           preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
           replayRequested = true
@@ -443,6 +445,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         }
         output.offer(bytes, message.sequence, visibleRef.current || replaying)
       } else if (message.type === 'terminal.restored-history') {
+        if (reusedTerminalModel) return
         const bytes = message.data instanceof Uint8Array
           ? message.data
           : new Uint8Array(message.data)
