@@ -593,33 +593,33 @@ function encodeFrame(header: StoredHeader, data: Uint8Array<ArrayBufferLike>): B
 export async function* iterateSegmentFrames(path: string): AsyncGenerator<DecodedJournalFrame> {
   const raw = createReadStream(path, { highWaterMark: READ_CHUNK_BYTES })
   const source = path.endsWith('.gz') ? raw.pipe(createGunzip()) : raw
-  let pending = Buffer.alloc(0)
+  const pending = new PendingChunks()
   let offset = 0
   let previousSequence = 0
   let magicRead = false
 
   for await (const value of source) {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
-    pending = pending.byteLength === 0 ? chunk : Buffer.concat([pending, chunk])
+    pending.push(chunk)
     if (!magicRead) {
       if (pending.byteLength < MAGIC.byteLength) continue
-      if (!pending.subarray(0, MAGIC.byteLength).equals(MAGIC)) {
+      if (!pending.read(MAGIC.byteLength).equals(MAGIC)) {
         throw new JournalCorruptionError('invalid Journal V2 magic', 0)
       }
-      pending = pending.subarray(MAGIC.byteLength)
       offset = MAGIC.byteLength
       magicRead = true
     }
 
     while (pending.byteLength >= FRAME_PREFIX_BYTES) {
-      const bodyLength = pending.readUInt32BE(0)
-      const expectedChecksum = pending.readUInt32BE(4)
+      const bodyLength = pending.peekUInt32BE(0)
+      const expectedChecksum = pending.peekUInt32BE(4)
       if (bodyLength < 4 || bodyLength > MAX_FRAME_BYTES) {
         throw new JournalCorruptionError('invalid journal frame length', offset)
       }
       const encodedLength = FRAME_PREFIX_BYTES + bodyLength
       if (pending.byteLength < encodedLength) break
-      const body = pending.subarray(FRAME_PREFIX_BYTES, encodedLength)
+      pending.discard(FRAME_PREFIX_BYTES)
+      const body = pending.read(bodyLength)
       if (crc32(body) !== expectedChecksum) {
         throw new JournalCorruptionError('journal frame checksum mismatch', offset)
       }
@@ -637,7 +637,6 @@ export async function* iterateSegmentFrames(path: string): AsyncGenerator<Decode
       validateHeader(header, data.byteLength, previousSequence, offset)
       previousSequence = header.sequence
       yield decodeFrame(header, data)
-      pending = pending.subarray(encodedLength)
       offset += encodedLength
     }
   }
@@ -650,6 +649,88 @@ export async function* iterateSegmentFrames(path: string): AsyncGenerator<Decode
         : 'truncated journal frame body',
       offset
     )
+  }
+}
+
+/**
+ * Stream queue that consumes each input byte once. Large Journal frames often
+ * cross a read boundary; repeatedly concatenating the growing partial frame
+ * retained every intermediate copy and made replay RSS scale with history.
+ */
+class PendingChunks {
+  readonly #chunks: Buffer[] = []
+  #headOffset = 0
+  #length = 0
+
+  get byteLength(): number { return this.#length }
+
+  push(chunk: Buffer): void {
+    if (chunk.byteLength === 0) return
+    this.#chunks.push(chunk)
+    this.#length += chunk.byteLength
+  }
+
+  peekUInt32BE(offset: number): number {
+    if (offset < 0 || offset + 4 > this.#length) throw new RangeError('peek is outside pending bytes')
+    let value = 0
+    for (let index = 0; index < 4; index += 1) {
+      value = (value * 256) + this.#byteAt(offset + index)
+    }
+    return value >>> 0
+  }
+
+  discard(length: number): void {
+    this.#consume(length)
+  }
+
+  read(length: number): Buffer {
+    if (length < 0 || length > this.#length) throw new RangeError('read is outside pending bytes')
+    const head = this.#chunks[0]
+    if (head && head.byteLength - this.#headOffset >= length) {
+      const value = head.subarray(this.#headOffset, this.#headOffset + length)
+      this.#consume(length)
+      return value
+    }
+    const value = Buffer.allocUnsafe(length)
+    let written = 0
+    while (written < length) {
+      const current = this.#chunks[0]!
+      const available = current.byteLength - this.#headOffset
+      const count = Math.min(available, length - written)
+      current.copy(value, written, this.#headOffset, this.#headOffset + count)
+      this.#consume(count)
+      written += count
+    }
+    return value
+  }
+
+  #byteAt(offset: number): number {
+    let remaining = offset
+    for (let index = 0; index < this.#chunks.length; index += 1) {
+      const chunk = this.#chunks[index]!
+      const start = index === 0 ? this.#headOffset : 0
+      const available = chunk.byteLength - start
+      if (remaining < available) return chunk[start + remaining]!
+      remaining -= available
+    }
+    throw new RangeError('byte is outside pending bytes')
+  }
+
+  #consume(length: number): void {
+    if (length < 0 || length > this.#length) throw new RangeError('consume is outside pending bytes')
+    this.#length -= length
+    let remaining = length
+    while (remaining > 0) {
+      const head = this.#chunks[0]!
+      const available = head.byteLength - this.#headOffset
+      if (remaining < available) {
+        this.#headOffset += remaining
+        return
+      }
+      remaining -= available
+      this.#chunks.shift()
+      this.#headOffset = 0
+    }
   }
 }
 
