@@ -235,6 +235,36 @@ describe('SegmentJournal', () => {
     ])
   })
 
+  it('keeps a live append boundary when cold history and its tail sidecar are damaged', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const compressor = new JournalCompressor()
+    const options = {
+      maxSegmentBytes: 150,
+      rawHotBytes: 160,
+      compressSealed: true,
+      compressor
+    }
+    const journal = await SegmentJournal.open(directory, 'session-cold-gap', options)
+    for (let sequence = 1; sequence <= 18; sequence += 1) {
+      await journal.appendOutput(sequence, new TextEncoder().encode(`line-${sequence}\n`.repeat(4)))
+    }
+    await journal.close()
+    await compressor.whenIdle()
+
+    const sessionDirectory = join(directory, 'journal', 'session-cold-gap')
+    const coldArchive = (await readdir(sessionDirectory)).filter((file) => file.endsWith('.gz')).sort()[0]
+    expect(coldArchive).toBeDefined()
+    await writeFile(join(sessionDirectory, coldArchive!), 'damaged cold archive')
+    await writeFile(join(sessionDirectory, 'tail-index.json'), '{damaged')
+
+    const reopened = await SegmentJournal.open(directory, 'session-cold-gap', options)
+    expect(reopened.lastSequence).toBe(18)
+    await reopened.appendOutput(19, new TextEncoder().encode('live-after-gap\n'))
+    expect(reopened.lastSequence).toBe(19)
+    await reopened.close()
+  })
+
   it('reads a segment index only once while raw and gzip copies overlap during compression commit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
     temporaryDirectories.push(directory)

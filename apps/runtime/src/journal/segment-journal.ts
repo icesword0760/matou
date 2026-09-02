@@ -543,26 +543,69 @@ async function restoreTailIndex(
     }
     index = JournalTailIndex.fromSnapshot(snapshot)
   } catch {
-    index = new JournalTailIndex()
-    for await (const frame of iterateSessionFramesFromDirectory(directory)) {
-      recordTailFrame(index, frame)
-    }
+    index = await rebuildTailIndexFromHealthySuffix(directory)
     await writeJournalTailIndex(path, index.snapshot(activeSegmentIndex))
     return index
   }
-  const throughSequence = index.snapshot().lastSequence
+  try {
+    const throughSequence = index.snapshot().lastSequence
+    const groups = selectReadableSegmentGroups(
+      await describeExistingSegments(directory, await readdir(directory))
+    ).filter(({ index: segmentIndex }) =>
+      segmentIndex >= index.snapshot().activeSegmentIndex &&
+      segmentIndex <= activeSegmentIndex
+    )
+    for (const group of groups) {
+      const frames = group.index === activeSegmentIndex
+        ? activeFrames
+        : await readPreferredSegmentFrames(group.paths)
+      for (const frame of frames) {
+        if (frame.sequence > throughSequence) recordTailFrame(index, frame)
+      }
+    }
+    return index
+  } catch {
+    index = await rebuildTailIndexFromHealthySuffix(directory)
+    await writeJournalTailIndex(path, index.snapshot(activeSegmentIndex))
+    return index
+  }
+}
+
+/**
+ * A tail sidecar is an acceleration structure, not authority over whether a
+ * Session may keep running. Rebuild it from the newest contiguous healthy
+ * suffix so one damaged cold segment remains a local history gap while later
+ * output still provides the append sequence and instant terminal tail.
+ */
+async function rebuildTailIndexFromHealthySuffix(directory: string): Promise<JournalTailIndex> {
   const groups = selectReadableSegmentGroups(
     await describeExistingSegments(directory, await readdir(directory))
-  ).filter(({ index: segmentIndex }) =>
-    segmentIndex >= index.snapshot().activeSegmentIndex &&
-    segmentIndex <= activeSegmentIndex
   )
+  let index = new JournalTailIndex()
+  let previousSegmentIndex: number | undefined
   for (const group of groups) {
-    const frames = group.index === activeSegmentIndex
-      ? activeFrames
-      : await readPreferredSegmentFrames(group.paths)
-    for (const frame of frames) {
-      if (frame.sequence > throughSequence) recordTailFrame(index, frame)
+    if (
+      previousSegmentIndex !== undefined &&
+      group.index !== previousSegmentIndex + 1
+    ) {
+      index = new JournalTailIndex()
+    }
+    previousSegmentIndex = group.index
+    let frames: DecodedJournalFrame[]
+    try {
+      frames = await readPreferredSegmentFrames(group.paths)
+    } catch {
+      index = new JournalTailIndex()
+      continue
+    }
+    try {
+      for (const frame of frames) recordTailFrame(index, frame)
+    } catch {
+      // A non-monotonic boundary is a history discontinuity just like a
+      // missing/corrupt segment. Keep only this healthy segment as the start
+      // of the newest recoverable suffix.
+      index = new JournalTailIndex()
+      for (const frame of frames) recordTailFrame(index, frame)
     }
   }
   return index

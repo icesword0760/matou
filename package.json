@@ -23,6 +23,7 @@
     "test:robustness": "pnpm build && playwright test tests/e2e/runtime-robustness-scale.spec.ts --workers=1 --reporter=line",
     "test:e2e:journal-fault-isolation": "pnpm build && playwright test tests/e2e/runtime-journal-fault-isolation.spec.ts --workers=1 --reporter=line",
     "test:e2e:long-terminal-history": "pnpm build && playwright test tests/e2e/terminal-long-history.spec.ts --workers=1 --reporter=line",
+    "test:e2e:history-corruption": "pnpm build && playwright test tests/e2e/terminal-corrupt-history-live.spec.ts --workers=1 --reporter=line",
     "test:e2e:background-scene-pty": "pnpm build && playwright test tests/e2e/runtime-background-scene-pty.spec.ts --workers=1 --reporter=line",
     "test:e2e:claude-provider-recovery": "node tooling/run-claude-provider-recovery-gate.mjs",
     "test:runtime:pty-stress": "pnpm build:packages && pnpm build:runtime && node --test tests/runtime/pty-stress.test.mjs",

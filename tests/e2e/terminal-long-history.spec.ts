@@ -140,8 +140,9 @@ test.describe('real PTY long terminal history gate', () => {
       await searchVisibleHistory(fixture.page, 'B_RESPONSIVE_AFTER_BAD_ARCHIVE')
       await closeHistorySearch(fixture.page)
 
-      // Keep the healthy sibling focused for the corrupt restart. The damaged
-      // session is expected to be the sole recovery unit held back.
+      // Keep the healthy sibling focused for the corrupt restart. A damaged
+      // cold history range must stay local to history browsing: the affected
+      // Session still gets a live PTY and can continue from its healthy tail.
       await activateSession(cleanB)
       const isolatedRestartStartedAt = performance.now()
       fixture = await restartMatou(fixture, { env: E2E_ENV })
@@ -158,10 +159,17 @@ test.describe('real PTY long terminal history gate', () => {
       await searchVisibleHistory(fixture.page, 'B_RESPONSIVE_AFTER_BAD_ARCHIVE')
       await closeHistorySearch(fixture.page)
 
-      const isolatedA = sessionCard(fixture.page, sessionA)
-      await expect(isolatedA.locator('.terminal-surface'))
-        .not.toHaveAttribute('data-pid', /[1-9][0-9]*/)
-      await expect(isolatedA.locator('.session-start-failure-card')).toContainText('会话启动失败')
+      const isolatedA = surface(fixture.page, sessionA)
+      await waitForShell(isolatedA)
+      await expect(isolatedA.locator('.xterm-rows')).toContainText('MATOU_POST_CORRUPTION_DONE')
+      const isolatedAInputStartedAt = performance.now()
+      await terminalCommand(isolatedA, encodedPrintCommand('A_INPUT_AFTER_BAD_ARCHIVE_RESTART'))
+      await expect(isolatedA.locator('.xterm-rows')).toContainText('A_INPUT_AFTER_BAD_ARCHIVE_RESTART')
+      metrics.damagedSessionInputEchoMs = round(performance.now() - isolatedAInputStartedAt)
+      metrics.damagedSessionSearchMs = await searchArchivedHistory(
+        fixture.page, 'MATOU_HEALTHY_AFTER_BAD_ARCHIVE', 1
+      )
+      await closeHistorySearch(fixture.page)
 
       await activateTask(fixture.page, '新事项')
       await waitForShell(surface(fixture.page, otherTaskSession))
