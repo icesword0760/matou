@@ -157,6 +157,8 @@ export function SessionCarousel(props: {
     let frame = 0
     let attempts = 0
     let reachedFrames = 0
+    let previousRequested = Number.NaN
+    let previousMaxScrollLeft = Number.NaN
     const restore = () => {
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
       const anchorCard = initialAnchor
@@ -186,8 +188,12 @@ export function SessionCarousel(props: {
       attempts += 1
       const maxScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth)
       target.expected = Math.min(target.requested, maxScrollLeft)
-      reachedFrames = Math.abs(viewport.scrollLeft - target.expected) < 1
+      const layoutStable = Math.abs(target.requested - previousRequested) < 0.5 &&
+        Math.abs(maxScrollLeft - previousMaxScrollLeft) < 0.5
+      reachedFrames = Math.abs(viewport.scrollLeft - target.expected) < 1 && layoutStable
         ? reachedFrames + 1 : 0
+      previousRequested = target.requested
+      previousMaxScrollLeft = maxScrollLeft
       // Terminal surfaces and responsive columns settle over multiple frames.
       // Keep applying a persisted non-zero viewport until its full scroll range
       // exists instead of permanently accepting the first clamped value.

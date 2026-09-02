@@ -54,6 +54,35 @@ describe('SessionCarousel', () => {
     vi.useRealTimers()
   })
 
+  it('keeps restoring while responsive card offsets are still changing', () => {
+    vi.useFakeTimers()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-3"
+      initialScrollLeft={563} initialAnchor={{ sessionId: 'session-3', viewportOffset: 60 }}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const focusedSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    let position = 0
+    let offsetReads = 0
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 720 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: {
+        configurable: true,
+        get: () => position,
+        set: (value: number) => { position = Math.max(0, Math.min(1_280, value)) }
+      }
+    })
+    Object.defineProperty(focusedSlot, 'offsetLeft', {
+      configurable: true,
+      get: () => 800 + Math.min(++offsetReads, 25) * 4
+    })
+
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(viewport.scrollLeft).toBe(840)
+    vi.useRealTimers()
+  })
+
   it('does not replay refreshed persisted geometry over the live viewport', () => {
     vi.useFakeTimers()
     const nodes = fixtures(5)
