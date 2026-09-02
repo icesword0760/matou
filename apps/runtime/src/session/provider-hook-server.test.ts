@@ -189,6 +189,65 @@ describe('ProviderHookServer', () => {
     }])
   })
 
+  it('rejects a different statusline identity while restoring one specific conversation', async () => {
+    const mismatches: unknown[] = []
+    const strictHooks = new ProviderHookServer(root, sessions, {
+      onIdentityMismatch: (event) => { mismatches.push(event) }
+    })
+    await strictHooks.start()
+    try {
+      const registration = await strictHooks.registerClaudeSession({
+        runId: 'run-strict-resume', sessionId: 'session-1',
+        acceptStatuslineIdentity: true,
+        expectedProviderSessionId: 'provider-old'
+      })
+
+      expect((await postHook(registration.hookUrl, {
+        session_id: 'provider-new', cwd: root,
+        model: { display_name: 'Claude Opus 4.6' }
+      })).status).toBe(200)
+
+      expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+      expect(mismatches).toEqual([{
+        runId: 'run-strict-resume', sessionId: 'session-1', provider: 'claude-code',
+        expectedProviderSessionId: 'provider-old', actualProviderSessionId: 'provider-new',
+        eventName: 'unknown'
+      }])
+    } finally {
+      await strictHooks.stop()
+    }
+  })
+
+  it('limits the expected identity gate to resume confirmation so later conversation changes remain valid', async () => {
+    const mismatches: unknown[] = []
+    const strictHooks = new ProviderHookServer(root, sessions, {
+      onIdentityMismatch: (event) => { mismatches.push(event) }
+    })
+    await strictHooks.start()
+    try {
+      const registration = await strictHooks.registerClaudeSession({
+        runId: 'run-confirmed-resume', sessionId: 'session-1',
+        acceptStatuslineIdentity: true,
+        expectedProviderSessionId: 'provider-old'
+      })
+
+      await postHook(registration.hookUrl, {
+        session_id: 'provider-old', cwd: root,
+        model: { display_name: 'Claude Opus 4.6' }
+      })
+      await postHook(registration.hookUrl, {
+        hook_event_name: 'UserPromptSubmit', session_id: 'provider-next', cwd: root
+      })
+
+      expect(mismatches).toEqual([])
+      expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+        providerSessionId: 'provider-next', resumeState: 'available'
+      })
+    } finally {
+      await strictHooks.stop()
+    }
+  })
+
   it('accepts a Fork statusline identity as an immediately forkable inherited conversation', async () => {
     sessions.createSession(command('fork-source'), {
       id: 'session-source', taskId: 'task-1', executionContextId: 'context-1',

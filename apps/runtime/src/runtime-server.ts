@@ -46,7 +46,8 @@ import {
 import { SessionGitStateRepository } from './session/session-git-state-repository'
 import type {
   ProviderHookRegistration,
-  ProviderHookServer
+  ProviderHookServer,
+  ProviderIdentityMismatch
 } from './session/provider-hook-server'
 import { SessionRepository } from './domain/session-repository'
 import { SessionEnvironmentRepository } from './session/session-environment-repository'
@@ -174,6 +175,7 @@ export class RuntimeServer {
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerLaunchRunIds = new Map<string, string>()
   readonly #confirmedProviderRunIds = new Set<string>()
+  readonly #providerIdentityMismatches = new Map<string, ProviderIdentityMismatch>()
   readonly #providerRecoveryWaiters = new Map<string, Set<ProviderRecoveryWaiter>>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #environmentResumeDescriptors = new Map<string, TerminalSpawnMessage>()
@@ -387,6 +389,7 @@ export class RuntimeServer {
   }
 
   providerIdentityRecorded(sessionId: string, runId: string): void {
+    this.#providerIdentityMismatches.delete(sessionId)
     const restoring = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
        WHERE session_id = ? AND provider = 'claude-code' AND restore_state = 'restoring'
@@ -420,6 +423,14 @@ export class RuntimeServer {
     this.#settleProviderRecovery(sessionId)
   }
 
+  providerIdentityMismatch(event: ProviderIdentityMismatch): void {
+    const activeRunId = this.#providerLaunchRunIds.get(event.sessionId) ??
+      this.#sessions.get(event.sessionId)?.runId
+    if (activeRunId !== event.runId) return
+    this.#providerIdentityMismatches.set(event.sessionId, event)
+    this.#applyProviderIdentityMismatch(event.sessionId)
+  }
+
   startOrResumeSession(
     descriptor: SessionExecutionDescriptor,
     authority?: ForkExecutionAuthorityInput
@@ -439,6 +450,7 @@ export class RuntimeServer {
     this.#providerResumeTimers.clear()
     this.#providerLaunchRunIds.clear()
     this.#confirmedProviderRunIds.clear()
+    this.#providerIdentityMismatches.clear()
     this.#rejectAllProviderRecoveries(
       new Error('Runtime connection closed during provider recovery')
     )
@@ -1549,6 +1561,9 @@ export class RuntimeServer {
           // A fresh Claude process that replaces an invalid resume is already live
           // when its statusline arrives. Accept that new identity immediately.
           acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
+          ...(resumeBinding === undefined || forkLaunch !== undefined
+            ? {}
+            : { expectedProviderSessionId: resumeBinding.providerSessionId }),
           inheritedConversation: forkLaunch !== undefined,
           ...(forkAuthority === undefined ? {} : { forkAuthority }),
           ...(permissionMode === undefined ? {} : { permissionMode })
@@ -1792,6 +1807,7 @@ export class RuntimeServer {
       this.#permissionOverrides.delete(message.sessionId)
       this.#spawnDescriptors.set(message.sessionId, message)
       activeSession = session
+      if (this.#applyProviderIdentityMismatch(message.sessionId)) return
       this.#endedSessionIds.delete(message.sessionId)
       this.#completedReplayThrough.delete(message.sessionId)
       if (attachView) this.#attachedSessionIds.add(message.sessionId)
@@ -2025,6 +2041,31 @@ export class RuntimeServer {
     session.dispose({ notifyExit: false })
   }
 
+  #applyProviderIdentityMismatch(sessionId: string): boolean {
+    const mismatch = this.#providerIdentityMismatches.get(sessionId)
+    const session = this.#sessions.get(sessionId)
+    const message = this.#spawnDescriptors.get(sessionId)
+    if (!mismatch || !session || !message || session.runId !== mismatch.runId) return false
+    const binding = this.#database.get<{ id: string }>(
+      `SELECT id FROM provider_bindings
+       WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?
+         AND resume_state NOT IN ('failed', 'expired')
+       ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      sessionId,
+      mismatch.expectedProviderSessionId
+    )
+    this.#providerIdentityMismatches.delete(sessionId)
+    if (!binding) return false
+    this.#parkResumeFailure(
+      message,
+      session,
+      binding.id,
+      'Claude Code 返回的会话与待恢复会话不一致，请重试恢复'
+    )
+    this.flushSemanticEvents()
+    return true
+  }
+
   #scheduleProviderResumeTimeout(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
@@ -2058,6 +2099,7 @@ export class RuntimeServer {
   }
 
   #forgetProviderLaunch(sessionId: string, runId: string | undefined): void {
+    this.#providerIdentityMismatches.delete(sessionId)
     if (!runId) return
     this.#confirmedProviderRunIds.delete(runId)
     if (this.#providerLaunchRunIds.get(sessionId) === runId) {

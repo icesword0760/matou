@@ -359,6 +359,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
           forkAuthority.operationId
         )
       }
+    },
+    onIdentityMismatch: (event) => {
+      for (const server of servers) server.providerIdentityMismatch(event)
     }
   })
   lifecycleCoordinator.registerProviderHooks(providerHooks)

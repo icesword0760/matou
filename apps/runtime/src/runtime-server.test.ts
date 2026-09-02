@@ -2170,6 +2170,100 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('parks a restored Claude card when its statusline belongs to a different conversation', async () => {
+    const executable = join(root, 'provider-mismatched-resume-fixture.sh')
+    const argumentFile = join(root, 'provider-mismatched-resume-arguments.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let resumeServer: RuntimeServer | undefined
+    const providerHooks = new ProviderHookServer(root, repository, {
+      onIdentityRecorded: ({ sessionId, runId }) => {
+        resumeServer?.providerIdentityRecorded(sessionId, runId)
+      },
+      onIdentityMismatch: (event) => {
+        resumeServer?.providerIdentityMismatch(event)
+      }
+    })
+    await providerHooks.start()
+    try {
+      registerCanvasSession(database, 'mismatched-resume-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           metadata_json, created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', 'restoring', '{}', 1, 1, 1)`,
+        'binding-mismatched-resume', 'mismatched-resume-session', 'provider-old'
+      )
+      const sessions = new RuntimeSessionRegistry()
+      const resumePort = new MockPort()
+      resumeServer = new RuntimeServer(
+        resumePort, root, database, undefined, undefined, sessions,
+        providerHooks, undefined, { providerResumeTimeoutMs: 5_000 }
+      )
+      resumePort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'mismatched-resume-renderer'
+      })
+      resumePort.receive({
+        type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+        consumerId: 'mismatched-resume-renderer', afterSequence: 0, batchSize: 100
+      })
+      await settle()
+      resumePort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'mismatched-resume-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      expect(arguments_).toContain('provider-old')
+      const settingsIndex = arguments_.indexOf('--settings')
+      const settings = JSON.parse(await readFile(arguments_[settingsIndex + 1]!, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const hookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+      expect((await fetch(hookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session_id: 'provider-new', cwd: root })
+      })).status).toBe(200)
+
+      await waitUntil(() => repository.listProviderBindings('mismatched-resume-session')
+        .some((binding) => binding.restoreState === 'failed'))
+      expect(sessions.has('mismatched-resume-session')).toBe(false)
+      expect(repository.listProviderBindings('mismatched-resume-session')).toContainEqual(expect.objectContaining({
+        providerSessionId: 'provider-old', resumeState: 'failed', restoreState: 'failed',
+        restoreError: expect.stringContaining('待恢复会话不一致')
+      }))
+      expect(database.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM provider_bindings
+         WHERE session_id = ? AND provider_session_id = ?`,
+        'mismatched-resume-session', 'provider-new'
+      )).toEqual({ count: 0 })
+      expect(resumePort.sent.some((message) =>
+        message.type === 'events.batch' && message.events.some((event) =>
+          event.eventType === 'session.restore-state-changed' &&
+          event.sessionId === 'mismatched-resume-session'
+        )
+      )).toBe(true)
+    } finally {
+      resumeServer?.close()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
   it('keeps recovery pending until the resumed Claude conversation confirms its identity', async () => {
     const executable = join(root, 'provider-recovery-ready-fixture.sh')
     await writeFile(executable, '#!/bin/sh\nsleep 30\n')

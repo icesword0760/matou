@@ -18,6 +18,7 @@ interface HookRegistrationRecord {
   sessionId: string
   permissionMode?: string
   acceptStatuslineIdentity: boolean
+  expectedProviderSessionId?: string
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
   acceptIdentity: boolean
@@ -32,6 +33,15 @@ export interface ProviderHookNotification {
   sessionId: string
   provider: 'claude-code'
   event: ProviderNotificationEvent
+}
+
+export interface ProviderIdentityMismatch {
+  runId: string
+  sessionId: string
+  provider: 'claude-code'
+  expectedProviderSessionId: string
+  actualProviderSessionId: string
+  eventName: string
 }
 
 export interface AgentTeamObservation {
@@ -60,6 +70,7 @@ export interface ProviderHookServerOptions {
     eventName: string
     forkAuthority?: ProviderIdentityForkAuthority
   }) => void
+  onIdentityMismatch?: (event: ProviderIdentityMismatch) => void
   onTeamObservations?: (observations: AgentTeamObservation[]) => void | Promise<void>
 }
 
@@ -79,6 +90,7 @@ export class ProviderHookServer {
   readonly #onNotification: (notification: ProviderHookNotification) => void
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
+  readonly #onIdentityMismatch: NonNullable<ProviderHookServerOptions['onIdentityMismatch']>
   readonly #onTeamObservations: NonNullable<ProviderHookServerOptions['onTeamObservations']>
   #server: Server | undefined
   #port: number | undefined
@@ -89,6 +101,7 @@ export class ProviderHookServer {
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
+    this.#onIdentityMismatch = options.onIdentityMismatch ?? (() => {})
     this.#onTeamObservations = options.onTeamObservations ?? (() => {})
   }
 
@@ -128,6 +141,7 @@ export class ProviderHookServer {
     sessionId: string
     permissionMode?: string
     acceptStatuslineIdentity?: boolean
+    expectedProviderSessionId?: string
     inheritedConversation?: boolean
     forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
@@ -155,6 +169,9 @@ export class ProviderHookServer {
       sessionId: input.sessionId,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
+      ...(input.expectedProviderSessionId === undefined
+        ? {}
+        : { expectedProviderSessionId: input.expectedProviderSessionId }),
       inheritedConversation: input.inheritedConversation === true,
       ...(input.forkAuthority === undefined ? {} : { forkAuthority: input.forkAuthority }),
       acceptIdentity: true,
@@ -220,6 +237,21 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
+      if (
+        providerSessionId && confirmsConversation && registration.acceptIdentity &&
+        registration.expectedProviderSessionId !== undefined &&
+        providerSessionId !== registration.expectedProviderSessionId
+      ) {
+        registration.acceptIdentity = false
+        this.#onIdentityMismatch({
+          runId: registration.runId,
+          sessionId: registration.sessionId,
+          provider: 'claude-code',
+          expectedProviderSessionId: registration.expectedProviderSessionId,
+          actualProviderSessionId: providerSessionId,
+          eventName
+        })
+      }
       if (providerSessionId && confirmsConversation && registration.acceptIdentity) {
         const cwd = nonEmptyText(payload.cwd)
         const hookPermissionMode = nonEmptyText(payload.permission_mode) ??
@@ -259,6 +291,10 @@ export class ProviderHookServer {
               ? {}
               : { forkAuthority })
           })
+          // The expected identity protects only the restore handshake. Once the
+          // requested conversation is confirmed, later intentional conversation
+          // changes from this same provider process follow the ordinary hook path.
+          delete registration.expectedProviderSessionId
           // The first accepted provider identity atomically completes the
           // durable Fork. Later lifecycle hooks belong to the now ordinary
           // live Session and must not reuse the expired launch lease.
