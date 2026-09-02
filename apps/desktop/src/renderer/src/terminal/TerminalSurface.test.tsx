@@ -218,6 +218,27 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.terminalReset).not.toHaveBeenCalled()
   })
 
+  it('continues replay after the last painted frame when a cached terminal remounts', async () => {
+    foregroundTerminalModels.setForegroundSessions(['session-1'])
+    const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 7,
+      data: new TextEncoder().encode('already painted once')
+    })
+    first.unmount()
+
+    state.requestTerminalReplay.mockClear()
+    render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+    state.onMessage?.({
+      type: 'terminal.spawned', sessionId: 'session-1', pid: 456,
+      reattached: true, replayFromSequence: 1
+    })
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 8, true)
+  })
+
   it('keeps an offscreen foreground terminal live without parsing every hidden output frame', async () => {
     render(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
     await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
@@ -263,7 +284,7 @@ describe('TerminalSurface focus continuity', () => {
 
     view.rerender(<TerminalSurface sessionId="session-1" active visible foreground />)
 
-    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 2, true)
   })
 
   it('waits for an inactive preview to settle before replaying its offscreen tail', async () => {
@@ -282,7 +303,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.requestTerminalReplay).not.toHaveBeenCalled()
     await act(() => vi.advanceTimersByTimeAsync(1))
 
-    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 0, false)
   })
 
   it('defers even the focused terminal catch-up while the horizontal viewport is moving', async () => {
@@ -299,7 +320,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.requestTerminalReplay).not.toHaveBeenCalled()
     view.rerender(<TerminalSurface sessionId="session-1" active visible foreground viewportMoving={false} />)
 
-    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1', 0, false)
   })
 
   it('resumes live painting when a hidden-terminal catch-up reports a Journal gap', async () => {

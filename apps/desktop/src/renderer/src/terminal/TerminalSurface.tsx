@@ -99,6 +99,9 @@ interface CachedTerminalModel {
   serialize: SerializeAddon
   webgl: WebglAddon | undefined
   opened: boolean
+  lastAppliedSequence: number
+  lastCheckpointSequence: number
+  screenEpoch: number
   dispose(): void
 }
 
@@ -271,6 +274,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminal.loadAddon(serialize)
       return {
         terminal, fit, search, serialize, webgl: undefined, opened: false,
+        lastAppliedSequence: 0, lastCheckpointSequence: -1, screenEpoch: 0,
         dispose: () => terminal.dispose()
       } satisfies CachedTerminalModel
     }) as CachedTerminalModel
@@ -324,9 +328,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let replaying = false
     let preserveExistingModelForReplay = false
     let spawned = false
-    let lastAppliedSequence = 0
-    let screenEpoch = 0
-    let lastCheckpointSequence = -1
     let visualCatchupPending = false
     let visualCatchupRequested = false
     let surfaceDisposed = false
@@ -360,31 +361,31 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const storeCheckpoint = () => {
       clearCheckpointTimer()
       if (
-        readOnly || replaying || lastAppliedSequence <= 0 ||
-        lastAppliedSequence <= lastCheckpointSequence
+        readOnly || replaying || model.lastAppliedSequence <= 0 ||
+        model.lastAppliedSequence <= model.lastCheckpointSequence
       ) return
       const snapshot = serializeCheckpoint(serialize)
       if (snapshot === undefined) return
-      lastCheckpointSequence = lastAppliedSequence
+      model.lastCheckpointSequence = model.lastAppliedSequence
       client.storeTerminalCheckpoint(
         sessionId,
-        lastAppliedSequence,
-        screenEpoch,
+        model.lastAppliedSequence,
+        model.screenEpoch,
         snapshot
       )
     }
     const scheduleCheckpoint = (delay = CHECKPOINT_QUIET_MS) => {
       clearCheckpointTimer()
       if (
-        readOnly || replaying || lastAppliedSequence <= 0 ||
-        lastAppliedSequence <= lastCheckpointSequence
+        readOnly || replaying || model.lastAppliedSequence <= 0 ||
+        model.lastAppliedSequence <= model.lastCheckpointSequence
       ) return
       checkpointTimer = setTimeout(storeCheckpoint, delay)
     }
     checkpointNowRef.current = storeCheckpoint
     const writeLiveOutput = (bytes: Uint8Array, sequence: number) => {
       terminal.write(bytes, () => {
-        lastAppliedSequence = Math.max(lastAppliedSequence, sequence)
+        model.lastAppliedSequence = Math.max(model.lastAppliedSequence, sequence)
         client.acknowledgeTerminal(sessionId, sequence)
         if (surfaceDisposed) return
         scheduleE2eRows()
@@ -403,7 +404,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       // Rebuild from Runtime's bounded tail rather than parsing an unbounded
       // offscreen byte stream. Runtime and its Journal stay live throughout;
       // only hidden xterm painting is suspended.
-      client.requestTerminalReplay(sessionId)
+      const fromSequence = model.lastAppliedSequence > 0
+        ? model.lastAppliedSequence + 1
+        : 0
+      preserveExistingModelForReplay = fromSequence > 0
+      client.requestTerminalReplay(sessionId, fromSequence, preserveExistingModelForReplay)
     }
     resumeVisualRef.current = requestVisualCatchup
     const markSpawned = () => {
@@ -430,7 +435,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         setPid(message.pid)
         onStatusChange('streaming')
         const replayFromSequence = replayFromSequenceForSpawn(
-          message, reusedTerminalModel, profileRef.current
+          message, reusedTerminalModel, profileRef.current, model.lastAppliedSequence
         )
         if (replayFromSequence !== undefined && !replayRequested) {
           if (visibleRef.current) {
@@ -490,7 +495,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         terminal.write(bytes, scheduleE2eRows)
       } else if (message.type === 'terminal.exited') {
         spawned = false
-        lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
+        model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         scheduleCheckpoint()
         onStatusChange('exited')
       } else if (message.type === 'terminal.storage-fault') {
@@ -519,11 +524,14 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         clearCheckpointTimer()
         replaying = true
         visualCatchupPending = false
-        if (!preserveExistingModelForReplay || message.checkpoint) terminal.reset()
+        const preservingExistingModel = preserveExistingModelForReplay && !message.checkpoint
+        if (!preservingExistingModel) {
+          terminal.reset()
+          model.lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
+          model.lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
+          model.screenEpoch = message.checkpoint?.screenEpoch ?? 0
+        }
         preserveExistingModelForReplay = false
-        lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
-        lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
-        screenEpoch = message.checkpoint?.screenEpoch ?? 0
         if (message.checkpoint) {
           const snapshot = message.checkpoint.snapshot instanceof Uint8Array
             ? message.checkpoint.snapshot
@@ -538,20 +546,20 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           terminal.resize(message.cols, message.rows)
           scheduleE2eRows()
           publishTerminalDimensions()
-          lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
+          model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-reset') {
         terminal.write('', () => {
           terminal.reset()
           scheduleE2eRows()
-          screenEpoch = message.screenEpoch
-          lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
+          model.screenEpoch = message.screenEpoch
+          model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-complete') {
         terminal.write('', () => {
           replaying = false
           visualCatchupRequested = false
-          lastAppliedSequence = Math.max(lastAppliedSequence, message.throughSequence)
+          model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.throughSequence)
           fit.fit()
           publishTerminalDimensions()
           if (validTerminalDimensions(terminal.cols, terminal.rows)) {

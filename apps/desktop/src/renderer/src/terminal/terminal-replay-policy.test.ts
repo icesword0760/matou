@@ -7,6 +7,12 @@ describe('PRD 04 terminal replay policy', () => {
     expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, true, 'shell')).toBe(41)
   })
 
+  it('continues a reusable VT model after its own visual watermark', () => {
+    expect(replayFromSequenceForSpawn(
+      { reattached: true, replayFromSequence: 1 }, true, 'shell', 41
+    )).toBe(42)
+  })
+
   it('keeps a fresh Shell model out of raw interrupted history', () => {
     expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, false, 'shell')).toBe(41)
   })
