@@ -12,10 +12,20 @@ export function createHierarchyCommands(
   let sequence = 0
   const command = async (type: string, input: Record<string, unknown>) => {
     const commandId = `${type}-${Date.now()}-${++sequence}`
-    const result = await client.request(type as Parameters<RuntimeClient['request']>[0], {
+    const payload = {
       command: { commandId, commandType: type, requestHash: JSON.stringify(input) },
       input: { ...input, windowId, now: Date.now() }
-    })
+    }
+    let result: unknown
+    try {
+      result = await client.request(type as Parameters<RuntimeClient['request']>[0], payload)
+    } catch (error) {
+      if (type !== 'hierarchy.create-workspace' || !isTransientRuntimeError(error)) throw error
+      // Workspace creation is path-idempotent and Runtime commands are deduplicated
+      // by commandId. Replaying the same envelope covers a port handoff or a lost
+      // response without creating a second Workspace.
+      result = await client.request(type as Parameters<RuntimeClient['request']>[0], payload)
+    }
     await afterMutation?.()
     return result
   }
@@ -139,6 +149,12 @@ export function createHierarchyCommands(
       sessionId, modelStrategy
     })
   }
+}
+
+function isTransientRuntimeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return error.message === 'Runtime channel replaced before the request completed' ||
+    error.message.startsWith('Runtime request hierarchy.create-workspace timed out')
 }
 
 function mutationSessionId(value: unknown): string | undefined {

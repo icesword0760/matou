@@ -37,6 +37,22 @@ describe('Workspace and Task navigation', () => {
     expect(target.createTask).toHaveBeenCalledWith('workspace-home')
   })
 
+  it('shows a visible error when adding a selected Workspace still fails', async () => {
+    const user = userEvent.setup()
+    const target = commands()
+    vi.mocked(target.createWorkspace).mockRejectedValue(new Error('temporary Runtime failure'))
+    const selectWorkspaceDirectory = vi.fn().mockResolvedValue('/Users/demo/projects/first-add')
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true, value: { selectWorkspaceDirectory }
+    })
+    render(<TaskSidebar projection={fixture()} commands={target} />)
+
+    await user.click(screen.getByRole('button', { name: '新增工作空间' }))
+
+    expect(target.createWorkspace).toHaveBeenCalledWith('/Users/demo/projects/first-add')
+    expect((await screen.findByRole('status')).textContent).toBe('工作空间添加失败，请重试')
+  })
+
   it('keeps settings at the bottom of the sidebar beside the board entry', async () => {
     const onSettingsActiveChange = vi.fn()
     render(<TaskSidebar projection={fixture()} commands={commands()}

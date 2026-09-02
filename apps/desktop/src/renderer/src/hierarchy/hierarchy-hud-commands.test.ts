@@ -3,6 +3,21 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHierarchyCommands } from './hierarchy-commands'
 
 describe('PRD 02 HUD commands', () => {
+  it('replays an idempotent Workspace creation once when the first Runtime response is lost', async () => {
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error('Runtime channel replaced before the request completed'))
+      .mockResolvedValueOnce({ workspace: { id: 'workspace-new' } })
+    const afterMutation = vi.fn()
+    const commands = createHierarchyCommands({ request } as never, 'window-1', afterMutation)
+
+    await commands.createWorkspace('/Users/demo/new-workspace')
+
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(request.mock.calls[1]?.[0]).toBe('hierarchy.create-workspace')
+    expect(request.mock.calls[1]?.[1]).toEqual(request.mock.calls[0]?.[1])
+    expect(afterMutation).toHaveBeenCalledTimes(1)
+  })
+
   it('sends permission and model changes through the authoritative Runtime', async () => {
     const request = vi.fn().mockResolvedValue({})
     const commands = createHierarchyCommands({ request } as never, 'window-1')

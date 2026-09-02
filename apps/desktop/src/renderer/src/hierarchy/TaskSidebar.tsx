@@ -73,6 +73,7 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 })
   const [toast, setToast] = useState('')
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false)
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false)
   const notificationStore = useNotificationStore()
   const notificationSnapshot = useNotificationSnapshot()
@@ -106,7 +107,15 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
 
   const chooseDirectory = async () => {
     const path = await window.matouDesktop?.selectWorkspaceDirectory()
-    if (path) await commands.createWorkspace(path)
+    if (!path) return
+    setCreatingWorkspace(true)
+    try {
+      await Promise.resolve(commands.createWorkspace(path))
+    } catch {
+      setToast('工作空间添加失败，请重试')
+    } finally {
+      setCreatingWorkspace(false)
+    }
   }
   const relinkDirectory = async (workspace: WorkspaceView) => {
     const path = await window.matouDesktop?.selectWorkspaceDirectory()
@@ -174,8 +183,9 @@ export function TaskSidebar({ projection, commands, onRevealSession, boardActive
     onPointerMove={moveGlassLight} onPointerLeave={resetGlassLight}>
     <SidebarGlassMaterial />
     <header className="flat-sidebar__topbar">
-      <button className="flat-sidebar__new-workspace" aria-label="新增工作空间" onClick={() => void chooseDirectory()}>
-        <ComposeIcon /><span>新增工作空间</span>
+      <button className="flat-sidebar__new-workspace" aria-label="新增工作空间"
+        disabled={creatingWorkspace} onClick={() => void chooseDirectory()}>
+        <ComposeIcon /><span>{creatingWorkspace ? '正在添加…' : '新增工作空间'}</span>
       </button>
       <button className="flat-sidebar__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
         onClick={() => setNotificationCenterOpen((value) => !value)}>
