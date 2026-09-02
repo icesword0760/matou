@@ -124,6 +124,46 @@ describe('DagWindowApp', () => {
     expect(request.mock.calls.filter(([method]) => method === 'hierarchy.get-scene-session-graph')).toHaveLength(1)
   })
 
+  it('publishes only the latest graph-bearing event burst on the next animation frame', async () => {
+    let projectionListener: ((message: unknown) => void) | undefined
+    const data = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn((listener) => {
+        projectionListener = listener
+        return () => { projectionListener = undefined }
+      })
+    }
+
+    render(<DagWindowApp />)
+    await screen.findByRole('button', { name: '打开会话：Child' })
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    }))
+
+    for (const [sequence, title] of [[8, 'Burst 1'], [9, 'Burst 2'], [10, 'Burst final']] as const) {
+      act(() => projectionListener?.({
+        type: 'events.batch', runtimeGeneration: 'runtime-1', events: [{
+          sequence, eventType: 'session.graph-summary-changed', aggregateId: 'scene-1',
+          payload: { graph: { ...graph(), nodes: [node('root', 'Root'), node('child', title)] } }
+        }]
+      }))
+    }
+
+    expect(screen.getByRole('button', { name: '打开会话：Child' })).toBeTruthy()
+    expect(frames).toHaveLength(1)
+    act(() => frames.shift()?.(performance.now()))
+    expect(screen.getByRole('button', { name: '打开会话：Burst final' })).toBeTruthy()
+  })
+
   it('renders a large authoritative graph handoff before the scoped Runtime refresh completes', async () => {
     const handedOffGraph = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
     const request = vi.fn(async (method: string) => {
