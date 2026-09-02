@@ -259,6 +259,13 @@ export class SessionRelationRepository {
     return row ? mapCurrent(row) : undefined
   }
 
+
+  listCurrent(): SessionRelation[] {
+    return this.#database.all<CurrentRow>(
+      'SELECT * FROM session_relations_current ORDER BY created_at, relation_id'
+    ).map(mapCurrent)
+  }
+
   appendStructuralRelation(
     command: DomainCommandMetadata,
     input: {

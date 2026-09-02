@@ -1273,15 +1273,22 @@ function forkStateFromStage(stage: ForkStage): 'pending' | 'starting' | 'succeed
 }
 
 function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
+  const byParent = new Map<string, SessionGraphNodeView[]>()
+  for (const node of nodes) {
+    if (!node.parentSessionId) continue
+    const children = byParent.get(node.parentSessionId) ?? []
+    children.push(node)
+    byParent.set(node.parentSessionId, children)
+  }
   const found: SessionGraphNodeView[] = []
-  const queue = nodes.filter(({ parentSessionId }) => parentSessionId === sessionId)
+  const queue = [...(byParent.get(sessionId) ?? [])]
   const seen = new Set<string>()
   while (queue.length > 0) {
     const current = queue.shift()!
     if (seen.has(current.sessionId)) continue
     seen.add(current.sessionId)
     found.push(current)
-    queue.push(...nodes.filter(({ parentSessionId }) => parentSessionId === current.sessionId))
+    queue.push(...(byParent.get(current.sessionId) ?? []))
   }
   return found
 }

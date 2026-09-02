@@ -78,7 +78,8 @@ export function SessionCarousel(props: {
   const restoringGeometry = useRef(false)
   const skipFocusScrollAfterRestore = useRef(initialScrollLeft > 0 || initialAnchor !== undefined)
   const previousFocusedSessionId = useRef(focusedSessionId)
-  const [firstVisible, setFirstVisible] = useState(0)
+  const initialFocusedIndex = Math.max(0, nodes.findIndex(({ sessionId }) => sessionId === focusedSessionId))
+  const [firstVisible, setFirstVisible] = useState(() => Math.max(0, initialFocusedIndex - 1))
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [edgeBrowsePhase, setEdgeBrowsePhase] = useState<'idle' | 'confirming' | 'cruising'>('idle')
   const [edgeBrowseDirection, setEdgeBrowseDirection] = useState<-1 | 0 | 1>(0)
@@ -88,6 +89,17 @@ export function SessionCarousel(props: {
   const inViewport = useMemo(() => new Set(
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
+  const virtualized = nodes.length > VIRTUALIZE_THRESHOLD
+  const focusChangedForRender = previousFocusedSessionId.current !== focusedSessionId
+  const focusedIndex = nodes.findIndex(({ sessionId }) => sessionId === focusedSessionId)
+  const defaultRenderStart = virtualized ? Math.max(0, firstVisible - visibleCount * 2) : 0
+  const renderStart = virtualized && focusChangedForRender && focusedIndex >= 0
+    ? Math.max(0, focusedIndex - visibleCount * 2)
+    : defaultRenderStart
+  const renderEnd = virtualized
+    ? Math.min(nodes.length, renderStart + visibleCount * 5)
+    : nodes.length
+  const renderedNodes = nodes.slice(renderStart, renderEnd)
   const revealTargetPresent = Boolean(revealRequest && nodes.some(
     ({ sessionId }) => sessionId === revealRequest.sessionId
   ))
@@ -150,8 +162,13 @@ export function SessionCarousel(props: {
       const anchorCard = initialAnchor
         ? cardsRef.current.get(initialAnchor.sessionId)
         : undefined
+      const anchorIndex = initialAnchor
+        ? nodes.findIndex(({ sessionId }) => sessionId === initialAnchor.sessionId)
+        : -1
       const requested = anchorCard
         ? anchoredCardScrollLeft(anchorCard.offsetLeft, initialAnchor!.viewportOffset, maxScrollLeft)
+        : anchorIndex >= 0
+          ? anchoredCardScrollLeft(estimatedCardOffset(anchorIndex, viewport, visibleCount), initialAnchor!.viewportOffset, maxScrollLeft)
         : Math.max(0, initialScrollLeft)
       viewport.scrollLeft = requested
       updateVisibleWindow()
@@ -311,10 +328,19 @@ export function SessionCarousel(props: {
     if (!revealRequest) return
     restoringGeometry.current = false
     skipFocusScrollAfterRestore.current = false
-    const frame = requestAnimationFrame(() => {
+    let frame = 0
+    const reveal = () => {
       const card = cardsRef.current.get(revealRequest.sessionId)
       const viewport = viewportRef.current
-      if (!card || !viewport) return
+      if (!viewport) return
+      if (!card) {
+        const index = nodes.findIndex(({ sessionId }) => sessionId === revealRequest.sessionId)
+        if (index < 0) return
+        viewport.scrollLeft = estimatedCardOffset(index, viewport, visibleCount)
+        updateVisibleWindow()
+        frame = requestAnimationFrame(reveal)
+        return
+      }
       // DAG and notification navigation may select the already-focused Session.
       // In that case React has no focus-ID change to observe, so force the
       // carousel position from this explicit navigation request. Directly
@@ -330,7 +356,8 @@ export function SessionCarousel(props: {
         updateVisibleWindow()
         onGeometryChange?.(currentGeometry(revealRequest.sessionId))
       }, reducedMotion() ? 1 : 320)
-    })
+    }
+    frame = requestAnimationFrame(reveal)
     return () => cancelAnimationFrame(frame)
     // The sequence is an explicit product navigation request. It must override
     // persisted geometry even when the target Session ID did not change.
@@ -829,7 +856,8 @@ export function SessionCarousel(props: {
       pullDistance={pull.distance} progress={pull.progress} effectIntensity={pull.effectIntensity} />}
     <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
       ref={viewportRef} role="region" aria-label="同级会话列表"
-      data-visible-columns={visibleCount} data-edge-browse-phase={edgeBrowsePhase}
+      data-visible-columns={visibleCount} data-total-sessions={nodes.length}
+      data-rendered-sessions={renderedNodes.length} data-edge-browse-phase={edgeBrowsePhase}
       data-edge-browse-direction={edgeBrowseDirection === -1 ? 'left' : edgeBrowseDirection === 1 ? 'right' : 'none'}
       onScroll={() => markScrolling()}
       onPointerDownCapture={() => stopEdgeBrowse(true)}
@@ -846,7 +874,9 @@ export function SessionCarousel(props: {
         hover(null)
       }}
       style={{ '--session-visible-columns': visibleCount } as React.CSSProperties}>
-      {nodes.map((node) => <div key={node.sessionId} ref={(element) => {
+      {renderStart > 0 && <div className="session-card-virtual-spacer" aria-hidden="true"
+        style={{ '--virtual-count': renderStart } as React.CSSProperties} />}
+      {renderedNodes.map((node) => <div key={node.sessionId} ref={(element) => {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
@@ -890,6 +920,8 @@ export function SessionCarousel(props: {
           </div>}
         </SessionCard>
       </div>)}
+      {renderEnd < nodes.length && <div className="session-card-virtual-spacer" aria-hidden="true"
+        style={{ '--virtual-count': nodes.length - renderEnd } as React.CSSProperties} />}
     </div>
     {edgeBrowsePhase !== 'idle' && <div className="session-edge-intent" aria-hidden="true" />}
   </div>
@@ -936,10 +968,16 @@ export function fullyVisibleCardScrollLeft(
 }
 
 const CARD_EDGE_INSET = 10
+const VIRTUALIZE_THRESHOLD = 80
 const EDGE_INTENT_WIDTH = 84
 const EDGE_INTENT_DWELL_MS = 180
 const EDGE_BROWSE_INTERVAL_MS = 900
 const EDGE_DIRECTION_CANCEL_DISTANCE = 2
+
+function estimatedCardOffset(index: number, viewport: HTMLElement, visibleCount: number): number {
+  const unit = viewport.clientWidth > 0 ? viewport.clientWidth / visibleCount : 292
+  return CARD_EDGE_INSET + index * unit
+}
 
 function centerCardInViewport(viewport: HTMLElement, card: HTMLElement): void {
   const target = centeredCardScrollLeft(

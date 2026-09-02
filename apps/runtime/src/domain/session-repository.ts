@@ -756,16 +756,37 @@ export class SessionRepository {
     return row ? mapSession(row) : undefined
   }
 
+
+  listSessions(): Session[] {
+    return this.#database.all<SessionRow>(
+      'SELECT * FROM sessions ORDER BY created_at, id'
+    ).map(mapSession)
+  }
+
   listRuns(sessionId: string): SessionRun[] {
     return this.#database
       .all<RunRow>('SELECT * FROM session_runs WHERE session_id = ? ORDER BY ordinal', sessionId)
       .map(mapRun)
   }
 
+
+  listAllRuns(): SessionRun[] {
+    return this.#database.all<RunRow>(
+      'SELECT * FROM session_runs ORDER BY session_id, ordinal'
+    ).map(mapRun)
+  }
+
   listProviderBindings(sessionId: string): ProviderBinding[] {
     return this.#database
       .all<BindingRow>('SELECT * FROM provider_bindings WHERE session_id = ? ORDER BY created_at', sessionId)
       .map(mapBinding)
+  }
+
+
+  listAllProviderBindings(): ProviderBinding[] {
+    return this.#database.all<BindingRow>(
+      'SELECT * FROM provider_bindings ORDER BY session_id, created_at, id'
+    ).map(mapBinding)
   }
 
   getResumeBinding(

@@ -24,7 +24,7 @@ export function DagCanvas(props: {
   const baseVisibility = visibleLayers(layout, previewSessionId)
   const centerWorldX = ((viewportRef.current?.clientWidth ?? 1000) / 2 - transform.x) / transform.scale
   const centerDepth = Math.max(0, Math.min(layout.depthCount - 1, Math.round((centerWorldX - 50) / 370)))
-  const previewDepth = layout.nodes.find(({ sessionId }) => sessionId === previewSessionId)?.depth ?? 0
+  const previewDepth = layout.nodeById.get(previewSessionId)?.depth ?? 0
   const viewportVisibility = Math.abs(centerDepth - previewDepth) > 1
     ? depthsAround(centerDepth, layout.depthCount)
     : baseVisibility.fullDepths
@@ -37,13 +37,24 @@ export function DagCanvas(props: {
     top: -transform.y / transform.scale - 260,
     bottom: (viewportHeight - transform.y) / transform.scale + 260
   }
-  const renderedNodes = layout.nodes.filter(({ depth, x, y, width, height, sessionId }) =>
-    fullDepths.has(depth) && (
+  const renderedNodes = [...fullDepths].flatMap((depth) => layout.nodesByDepth.get(depth) ?? [])
+    .filter(({ x, y, width, height, sessionId }) =>
       sessionId === previewSessionId ||
       (x + width >= worldBounds.left && x <= worldBounds.right &&
         y + height >= worldBounds.top && y <= worldBounds.bottom)
-    ))
-  const ghostNodes = layout.nodes.filter(({ depth }) => !fullDepths.has(depth))
+    )
+  // Far layers remain discoverable as one directional affordance on each
+  // side. Rendering every off-screen node as a ghost defeats DAG
+  // virtualization for deep or wide graphs.
+  const ghostDepths = boundaryGhostDepths(fullDepths, layout.depthCount)
+  const ghostNodes = ghostDepths.flatMap((depth) => {
+    const peers = layout.nodesByDepth.get(depth) ?? []
+    if (peers.length === 0) return []
+    const centerWorldY = (viewportHeight / 2 - transform.y) / transform.scale
+    return [peers.reduce((nearest, node) =>
+      Math.abs(node.y - centerWorldY) < Math.abs(nearest.y - centerWorldY) ? node : nearest
+    )]
+  })
   const renderedNodeIds = new Set([...renderedNodes, ...ghostNodes].map(({ sessionId }) => sessionId))
   const update = (next: DagTransform) => {
     setTransform(next)
@@ -53,7 +64,7 @@ export function DagCanvas(props: {
     if (initialTransform) setTransform(initialTransform)
   }, [initialTransform])
   const focusNode = (sessionId: string, animate = true) => {
-    const node = layout.nodes.find((candidate) => candidate.sessionId === sessionId)
+    const node = layout.nodeById.get(sessionId)
     const viewport = viewportRef.current
     if (!node || !viewport) return
     setPreviewSessionId(sessionId)
@@ -143,12 +154,14 @@ export function DagCanvas(props: {
         <defs><marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
           <path d="M 0 0 L 10 5 L 0 10 z" className="dag-arrow-head" />
         </marker></defs>
-        {layout.nodes.filter(({ depth }) => depth === 0).map((root) =>
+        {(layout.nodesByDepth.get(0) ?? []).filter(({ y, height }) =>
+          y + height >= worldBounds.top && y <= worldBounds.bottom
+        ).map((root) =>
           <path key={`root:${root.sessionId}`} className="dag-root-guide"
             d={`M 12 ${layout.height / 2} C 28 ${layout.height / 2}, 32 ${root.y + root.height / 2}, ${root.x} ${root.y + root.height / 2}`} />)}
         {layout.edges.filter((edge) => {
-          const fromDepth = layout.nodes.find(({ sessionId }) => sessionId === edge.fromSessionId)?.depth
-          const toDepth = layout.nodes.find(({ sessionId }) => sessionId === edge.toSessionId)?.depth
+          const fromDepth = layout.nodeById.get(edge.fromSessionId)?.depth
+          const toDepth = layout.nodeById.get(edge.toSessionId)?.depth
           return fromDepth !== undefined && toDepth !== undefined &&
             (fullDepths.has(fromDepth) || fullDepths.has(toDepth)) &&
             (renderedNodeIds.has(edge.fromSessionId) || renderedNodeIds.has(edge.toSessionId))
@@ -262,4 +275,12 @@ function compactPath(value: string): string {
 function depthsAround(centerDepth: number, depthCount: number): number[] {
   return [centerDepth - 1, centerDepth, centerDepth + 1]
     .filter((depth) => depth >= 0 && depth < depthCount)
+}
+
+function boundaryGhostDepths(fullDepths: Set<number>, depthCount: number): number[] {
+  if (fullDepths.size === 0) return []
+  const depths = [...fullDepths]
+  const minimum = Math.min(...depths)
+  const maximum = Math.max(...depths)
+  return [minimum - 1, maximum + 1].filter((depth) => depth >= 0 && depth < depthCount)
 }

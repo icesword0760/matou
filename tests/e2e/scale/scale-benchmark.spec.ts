@@ -35,7 +35,11 @@ test.describe('real Electron scale benchmark', () => {
 
         fixture = await restartMatou(fixture, { env: { MATOU_E2E_SCALE: '1' } })
         await expect(fixture.page.locator('.hierarchy-shell')).toBeVisible()
-        await expect(fixture.page.locator('[data-session-card]')).toHaveCount(siblingSessions)
+        const carousel = fixture.page.locator('.session-carousel')
+        await expect(carousel).toHaveAttribute('data-total-sessions', String(siblingSessions))
+        if (siblingSessions === 1000) {
+          expect(await fixture.page.locator('[data-session-card]').count()).toBeLessThanOrEqual(20)
+        }
 
         const sample = await collectScaleSample(fixture, {
           name: `siblings-${siblingSessions}`,
@@ -66,6 +70,12 @@ test.describe('real Electron scale benchmark', () => {
         expect(sample.ptyCount).toBeGreaterThan(0)
         expect(sample.domNodes).toBeGreaterThan(0)
         expect(sample.statementCount).toBeGreaterThanOrEqual(0)
+        if (siblingSessions === 1000) {
+          expect(sample.p95).toBeLessThan(34)
+          expect(sample.domNodes).toBeLessThan(700)
+          expect(sample.statementCount).toBeLessThan(1_500)
+          expect(sample.longTaskP95).toBeLessThan(100)
+        }
         measuredProcessIds = [
           sample.electronPid,
           sample.rendererPid,
@@ -109,6 +119,82 @@ test.describe('real Electron scale benchmark', () => {
         dagRelations: 9999,
         scenes: 3
       })
+    } finally {
+      await fixture?.close()
+    }
+  })
+
+  test('seed contract creates dozens of Workspaces, hundreds of Tasks, and 1000+ Sessions', async () => {
+    let fixture: MatouFixture | undefined
+    try {
+      fixture = await launchMatou({ env: { MATOU_E2E_SCALE: '1' } })
+      await expect(fixture.page.locator('.hierarchy-shell')).toBeVisible()
+      await stopMatouPreservingData(fixture)
+      const dataset: ScaleDataset = {
+        siblingSessions: 1000,
+        workspaceCount: 32,
+        tasksPerWorkspace: 8,
+        sessionsPerTask: 4
+      }
+
+      await seedScaleDatabase(fixture.dataDirectory, dataset)
+      const counts = await readScaleDatabaseCounts(fixture.dataDirectory)
+      expect(counts.workspaces).toBe(32)
+      expect(counts.tasks).toBeGreaterThanOrEqual(200)
+      expect(counts.siblingSessions).toBe(1000)
+      await seedScaleDatabase(fixture.dataDirectory, dataset)
+      expect(await readScaleDatabaseCounts(fixture.dataDirectory)).toEqual(counts)
+    } finally {
+      await fixture?.close()
+    }
+  })
+
+  test('restores and scrolls the full hierarchy catalog inside stable budgets', async () => {
+    let fixture: MatouFixture | undefined
+    try {
+      fixture = await launchMatou({ env: { MATOU_E2E_SCALE: '1' } })
+      await expect(fixture.page.locator('.hierarchy-shell')).toBeVisible()
+      await stopMatouPreservingData(fixture)
+      await seedScaleDatabase(fixture.dataDirectory, {
+        siblingSessions: 1000,
+        workspaceCount: 32,
+        tasksPerWorkspace: 8,
+        sessionsPerTask: 4
+      })
+
+      const recoveryStartedAt = performance.now()
+      fixture = await restartMatou(fixture, { env: { MATOU_E2E_SCALE: '1' } })
+      await expect(fixture.page.locator('.hierarchy-shell')).toBeVisible()
+      await expect(fixture.page.locator('.session-carousel'))
+        .toHaveAttribute('data-total-sessions', '1000')
+      await expect(fixture.page.locator('[data-testid^="task-scale-task"]'))
+        .toHaveCount(249)
+      const recoveryMs = performance.now() - recoveryStartedAt
+      const sample = await collectScaleSample(fixture, {
+        name: 'hierarchy-catalog', minimumFrameCount: 60, warmupRuns: 1, measuredRuns: 3
+      })
+      console.log(`[scale-recovery] ${JSON.stringify({ recoveryMs, ...sample })}`)
+
+      expect(recoveryMs).toBeLessThan(5_000)
+      expect(sample.p95).toBeLessThan(34)
+      // The sidebar intentionally keeps all 249 Task entries keyboard- and
+      // screen-reader-addressable; the 1,000-Session canvas itself remains
+      // virtualized. Leave headroom for platform-specific accessibility DOM.
+      expect(sample.domNodes).toBeLessThan(3_500)
+      expect(sample.statementCount).toBeLessThan(750)
+      expect(sample.longTaskP95).toBeLessThan(100)
+
+      const switchStartedAt = performance.now()
+      await fixture.page.locator(
+        '[data-workspace-id="scale-workspace-00002"] .workspace-group__toggle'
+      ).click()
+      await fixture.page.getByTestId('task-scale-task-00002-00001').click()
+      await expect(fixture.page.getByTestId('active-task')).toHaveText('Scale Task 2.1')
+      await expect(fixture.page.locator('.session-carousel'))
+        .toHaveAttribute('data-total-sessions', '4')
+      const switchMs = performance.now() - switchStartedAt
+      console.log(`[scale-switch] ${JSON.stringify({ switchMs })}`)
+      expect(switchMs).toBeLessThan(1_500)
     } finally {
       await fixture?.close()
     }

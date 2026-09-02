@@ -72,6 +72,16 @@ export class GeometryRepository {
     })
   }
 
+
+  listAll(): StoredGeometry[] {
+    return this.#database.all<GeometryRow>(
+      'SELECT * FROM scene_geometry ORDER BY scene_id, owner_key'
+    ).flatMap((row) => {
+      const value = mapGeometry(row)
+      return value ? [value] : []
+    })
+  }
+
   discardInvalid(sceneId: string): number {
     const rows = this.#database.all<GeometryRow>('SELECT * FROM scene_geometry WHERE scene_id = ?', sceneId)
     let removed = 0

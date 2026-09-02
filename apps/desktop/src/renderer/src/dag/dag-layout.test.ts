@@ -31,6 +31,39 @@ describe('DAG layout', () => {
     expect(results[0]?.title).toBe('Deploy Agent')
     expect(results.map(({ sessionId }) => sessionId)).toContain('summary-hit')
   })
+
+  it('lays out a 5000-deep chain iteratively without overflowing the stack', () => {
+    const nodes = Array.from({ length: 5000 }, (_, index) => node(
+      `deep-${index}`, `Deep ${index}`, index === 0 ? undefined : `deep-${index - 1}`, index + 1
+    ))
+    const graph: SessionGraphView = {
+      sceneId: 'scene', nodes,
+      edges: nodes.slice(1).map((item, index) => ({
+        parentSessionId: `deep-${index}`, childSessionId: item.sessionId,
+        relationKind: 'derived-from' as const, createdAt: index + 1
+      }))
+    }
+    const layout = layoutGraph(graph)
+
+    expect(layout.depthCount).toBe(5000)
+    expect(layout.nodeById.get('deep-4999')?.depth).toBe(4999)
+    expect(layout.nodes).toHaveLength(5000)
+  })
+
+  it('keeps a repeatable 10000-node wide DAG layout inside a stable budget', () => {
+    const graph = fixture(10000)
+    const durations = Array.from({ length: 5 }, () => {
+      const startedAt = performance.now()
+      const layout = layoutGraph(graph)
+      expect(layout.nodes).toHaveLength(10001)
+      return performance.now() - startedAt
+    }).sort((left, right) => left - right)
+    const p95 = durations[Math.ceil(durations.length * .95) - 1]!
+
+    console.log(`[scale-dag-layout] ${JSON.stringify({ durations, p95 })}`)
+
+    expect(p95).toBeLessThan(1500)
+  })
 })
 
 function fixture(count?: number): SessionGraphView {
