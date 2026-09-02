@@ -493,11 +493,6 @@ export function TerminalPane(props: {
           setContextMenu(null)
           void onDetach(session.id)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>↗ 独立窗口</button>}
-        <button className="detach-menu-item is-danger" role="menuitem" disabled={actionBlocked}
-          title={actionBlockedReason} onClick={() => {
-          setContextMenu(null)
-          requestRemove()
-        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>删除会话</button>
         {onRemoveBranch && <button className="detach-menu-item is-danger" role="menuitem" disabled={actionBlocked}
           title={actionBlockedReason} onClick={() => {
           setContextMenu(null)
