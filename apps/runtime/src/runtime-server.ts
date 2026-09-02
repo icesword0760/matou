@@ -122,6 +122,7 @@ export interface RuntimeServerOptions {
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
 const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
+const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const execFileAsync = promisify(execFile)
@@ -133,6 +134,12 @@ interface InteractiveClaudeLaunch {
 interface ProviderRecoveryWaiter {
   resolve(): void
   reject(error: Error): void
+}
+
+interface ProviderDerivedOutputGate {
+  runId: string
+  confirm(): void
+  reject(): void
 }
 
 // Resolving an interactive alias starts the user's login shell and may execute
@@ -178,6 +185,7 @@ export class RuntimeServer {
   readonly #providerLaunchRunIds = new Map<string, string>()
   readonly #confirmedProviderRunIds = new Set<string>()
   readonly #providerIdentityMismatches = new Map<string, ProviderIdentityMismatch>()
+  readonly #providerDerivedOutputGates = new Map<string, ProviderDerivedOutputGate>()
   readonly #providerRecoveryWaiters = new Map<string, Set<ProviderRecoveryWaiter>>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #environmentResumeDescriptors = new Map<string, TerminalSpawnMessage>()
@@ -419,6 +427,7 @@ export class RuntimeServer {
     const launchMatches = this.#providerLaunchRunIds.get(sessionId) === runId ||
       this.#sessions.get(sessionId)?.runId === runId
     if (!launchMatches) return
+    this.#confirmProviderDerivedOutput(sessionId, runId)
     this.#confirmedProviderRunIds.add(runId)
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
@@ -434,6 +443,7 @@ export class RuntimeServer {
     const activeRunId = this.#providerLaunchRunIds.get(event.sessionId) ??
       this.#sessions.get(event.sessionId)?.runId
     if (activeRunId !== event.runId) return
+    this.#rejectProviderDerivedOutput(event.sessionId, event.runId)
     this.#providerIdentityMismatches.set(event.sessionId, event)
     this.#applyProviderIdentityMismatch(event.sessionId)
   }
@@ -458,6 +468,8 @@ export class RuntimeServer {
     this.#providerLaunchRunIds.clear()
     this.#confirmedProviderRunIds.clear()
     this.#providerIdentityMismatches.clear()
+    for (const gate of this.#providerDerivedOutputGates.values()) gate.reject()
+    this.#providerDerivedOutputGates.clear()
     this.#rejectAllProviderRecoveries(
       new Error('Runtime connection closed during provider recovery')
     )
@@ -1525,7 +1537,6 @@ export class RuntimeServer {
             message.profile === 'claude-code' ? { provider: 'claude-code' } : {}
           )
         : undefined
-      if (workStatusTracker) this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
@@ -1579,6 +1590,67 @@ export class RuntimeServer {
           this.#providerLaunchRunIds.set(message.sessionId, runId)
         }
       }
+      const applyDerivedOutput = (data: string) => {
+        this.#recordSessionSummary(message.sessionId, data)
+        let completedShellBlock = false
+        for (const block of shellBlockCollector?.ingest(data) ?? []) {
+          if (!this.#closed) {
+            try {
+              this.#shellHistory.complete({
+                sessionId: message.sessionId,
+                cwd,
+                ...block
+              })
+              completedShellBlock = true
+            } catch (error) {
+              // PTY output can race a Runtime teardown by one event-loop turn.
+              // History is supplementary; never crash or corrupt the live
+              // terminal because storage has already closed.
+              if (!/database is closed/i.test(errorMessage(error))) {
+                console.error(`[shell.history] ${errorMessage(error)}`)
+              }
+            }
+          }
+        }
+        // A completed command Block is already a durable user-visible fact.
+        // Persist its DAG summary in the same output turn so an immediate app
+        // restart cannot restore the Block while leaving its graph card blank.
+        if (completedShellBlock) this.#flushSessionSummary(message.sessionId)
+        const reportedCwd = cwdTracker.ingest(data)
+        if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
+        for (const status of workStatusTracker?.ingest(data) ?? []) {
+          if (status === 'error') this.#flushSessionSummary(message.sessionId)
+          this.#setWorkStatus(message.sessionId, status)
+        }
+      }
+      let providerDerivationState: 'pending' | 'confirmed' | 'rejected' =
+        message.profile === 'claude-code' && providerSessionId !== undefined && runId !== undefined
+          ? 'pending'
+          : 'confirmed'
+      let pendingProviderOutput = ''
+      if (providerDerivationState === 'pending') {
+        this.#rejectProviderDerivedOutput(message.sessionId)
+        const gatedRunId = runId!
+        this.#providerDerivedOutputGates.set(message.sessionId, {
+          runId: gatedRunId,
+          confirm: () => {
+            if (providerDerivationState !== 'pending') return
+            providerDerivationState = 'confirmed'
+            if (workStatusTracker) {
+              this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
+            }
+            const acceptedOutput = pendingProviderOutput
+            pendingProviderOutput = ''
+            if (acceptedOutput) applyDerivedOutput(acceptedOutput)
+          },
+          reject: () => {
+            providerDerivationState = 'rejected'
+            pendingProviderOutput = ''
+          }
+        })
+      } else if (workStatusTracker) {
+        this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
+      }
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -1599,36 +1671,11 @@ export class RuntimeServer {
         ...(attachView ? { send: this.#sendToPort } : {}),
         onOutput: (data) => {
           emittedTerminalOutput = true
-          this.#recordSessionSummary(message.sessionId, data)
-          let completedShellBlock = false
-          for (const block of shellBlockCollector?.ingest(data) ?? []) {
-            if (!this.#closed) {
-              try {
-                this.#shellHistory.complete({
-                  sessionId: message.sessionId,
-                  cwd,
-                  ...block
-                })
-                completedShellBlock = true
-              } catch (error) {
-                // PTY output can race a Runtime teardown by one event-loop turn.
-                // History is supplementary; never crash or corrupt the live
-                // terminal because storage has already closed.
-                if (!/database is closed/i.test(errorMessage(error))) {
-                  console.error(`[shell.history] ${errorMessage(error)}`)
-                }
-              }
-            }
-          }
-          // A completed command Block is already a durable user-visible fact.
-          // Persist its DAG summary in the same output turn so an immediate app
-          // restart cannot restore the Block while leaving its graph card blank.
-          if (completedShellBlock) this.#flushSessionSummary(message.sessionId)
-          const reportedCwd = cwdTracker.ingest(data)
-          if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
-          for (const status of workStatusTracker?.ingest(data) ?? []) {
-            if (status === 'error') this.#flushSessionSummary(message.sessionId)
-            this.#setWorkStatus(message.sessionId, status)
+          if (providerDerivationState === 'pending') {
+            pendingProviderOutput = (pendingProviderOutput + data)
+              .slice(-MAX_PENDING_PROVIDER_DERIVATION_BYTES)
+          } else if (providerDerivationState === 'confirmed') {
+            applyDerivedOutput(data)
           }
           const resumeFailure = resumeMonitor?.ingest(data)
           if (resumeFailure) {
@@ -1649,6 +1696,7 @@ export class RuntimeServer {
           }
         },
         onExit: (exited, exitCode, signal, exitReason) => {
+          this.#rejectProviderDerivedOutput(message.sessionId, exited.runId)
           this.#flushSessionSummary(message.sessionId)
           this.#clearProviderResumeTimer(message.sessionId)
           const providerIdentityConfirmed = exited.runId !== undefined &&
@@ -1839,6 +1887,7 @@ export class RuntimeServer {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
     } catch (error) {
+      this.#rejectProviderDerivedOutput(message.sessionId)
       await hookRegistration?.dispose()
       if (forkLaunch && !providerProcessStarted) {
         const reason = `Fork 会话进程启动失败：${errorMessage(error)}`
@@ -1866,6 +1915,7 @@ export class RuntimeServer {
     authority?: ForkExecutionAuthority
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
+    this.#rejectProviderDerivedOutput(message.sessionId, session.runId)
     this.#clearProviderResumeTimer(message.sessionId)
     if (!this.#failFork(message.sessionId, reason, authority)) {
       this.#sessions.delete(message.sessionId, session)
@@ -2034,6 +2084,7 @@ export class RuntimeServer {
     reason: string
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
+    this.#rejectProviderDerivedOutput(message.sessionId, session.runId)
     this.#clearProviderResumeTimer(message.sessionId)
     this.#settleProviderRecovery(message.sessionId, new Error(reason))
     if (!this.#markResumeFailed(message.sessionId, bindingId, reason)) return
@@ -2127,8 +2178,23 @@ export class RuntimeServer {
     return true
   }
 
+  #confirmProviderDerivedOutput(sessionId: string, runId: string): void {
+    const gate = this.#providerDerivedOutputGates.get(sessionId)
+    if (!gate || gate.runId !== runId) return
+    this.#providerDerivedOutputGates.delete(sessionId)
+    gate.confirm()
+  }
+
+  #rejectProviderDerivedOutput(sessionId: string, runId?: string): void {
+    const gate = this.#providerDerivedOutputGates.get(sessionId)
+    if (!gate || (runId !== undefined && gate.runId !== runId)) return
+    this.#providerDerivedOutputGates.delete(sessionId)
+    gate.reject()
+  }
+
   #forgetProviderLaunch(sessionId: string, runId: string | undefined): void {
     this.#providerIdentityMismatches.delete(sessionId)
+    this.#rejectProviderDerivedOutput(sessionId, runId)
     if (!runId) return
     this.#confirmedProviderRunIds.delete(runId)
     if (this.#providerLaunchRunIds.get(sessionId) === runId) {

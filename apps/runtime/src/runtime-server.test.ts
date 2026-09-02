@@ -2170,20 +2170,97 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('applies buffered Claude output to durable projections only after identity confirmation', async () => {
+    const executable = join(root, 'provider-confirmed-derivation-fixture.sh')
+    const confirmedCwd = join(root, 'confirmed-provider-cwd')
+    await mkdir(confirmedCwd)
+    await writeFile(executable, [
+      '#!/bin/sh',
+      "printf 'CONFIRMED_PROVIDER_DAG_SUMMARY\\n'",
+      "printf '\\033]7;file://host%s\\033\\\\' \"$MATOU_TEST_CONFIRMED_CWD\"",
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousConfirmedCwd = process.env.MATOU_TEST_CONFIRMED_CWD
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_CONFIRMED_CWD = confirmedCwd
+    const sessions = new RuntimeSessionRegistry()
+    const confirmedPort = new MockPort()
+    const confirmedServer = new RuntimeServer(
+      confirmedPort, root, database, undefined, undefined, sessions
+    )
+    try {
+      registerCanvasSession(database, 'confirmed-derivation-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           metadata_json, created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', 'restoring', '{}', 1, 1, 1)`,
+        'binding-confirmed-derivation', 'confirmed-derivation-session', 'provider-confirmed'
+      )
+      const originalCwd = database.get<{ cwd: string }>(
+        'SELECT cwd FROM sessions WHERE id = ?', 'confirmed-derivation-session'
+      )
+      confirmedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'confirmed-derivation-renderer'
+      })
+      confirmedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'confirmed-derivation-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => terminalText(confirmedPort).includes('CONFIRMED_PROVIDER_DAG_SUMMARY'))
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      expect(database.get(
+        'SELECT cwd FROM sessions WHERE id = ?', 'confirmed-derivation-session'
+      )).toEqual(originalCwd)
+      expect(database.get(
+        'SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?',
+        'confirmed-derivation-session'
+      )).toBeUndefined()
+
+      const runId = sessions.get('confirmed-derivation-session')?.runId
+      expect(runId).toEqual(expect.any(String))
+      confirmedServer.providerIdentityRecorded('confirmed-derivation-session', runId!)
+      await waitUntil(() => database.get<{ cwd: string }>(
+        'SELECT cwd FROM sessions WHERE id = ?', 'confirmed-derivation-session'
+      )?.cwd === confirmedCwd)
+      await waitUntil(() => database.get<{ latest_lines_json: string }>(
+        'SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?',
+        'confirmed-derivation-session'
+      )?.latest_lines_json.includes('CONFIRMED_PROVIDER_DAG_SUMMARY') === true)
+    } finally {
+      confirmedServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_CONFIRMED_CWD', previousConfirmedCwd)
+    }
+  })
+
   it('parks a restored Claude card when its statusline belongs to a different conversation', async () => {
     const executable = join(root, 'provider-mismatched-resume-fixture.sh')
     const argumentFile = join(root, 'provider-mismatched-resume-arguments.txt')
+    const wrongProviderCwd = join(root, 'wrong-provider-cwd')
+    await mkdir(wrongProviderCwd)
     await writeFile(executable, [
       '#!/bin/sh',
       'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+      "printf 'WRONG_PROVIDER_DAG_SUMMARY\\n'",
+      "printf '\\033]7;file://host%s\\033\\\\' \"$MATOU_TEST_WRONG_CWD\"",
+      "printf 'API Error: wrong provider must not own status\\n'",
       'sleep 30',
       ''
     ].join('\n'))
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    const previousWrongCwd = process.env.MATOU_TEST_WRONG_CWD
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    process.env.MATOU_TEST_WRONG_CWD = wrongProviderCwd
     const repository = new SessionRepository(database, new DomainTransactionManager(database))
     let resumeServer: RuntimeServer | undefined
     const providerHooks = new ProviderHookServer(root, repository, {
@@ -2197,6 +2274,14 @@ describe('RuntimeServer domain RPC', () => {
     await providerHooks.start()
     try {
       registerCanvasSession(database, 'mismatched-resume-session', 'claude-code')
+      database.run(
+        `INSERT INTO session_graph_summaries (session_id, latest_lines_json, updated_at)
+         VALUES (?, ?, ?)`,
+        'mismatched-resume-session', JSON.stringify(['TRUSTED_PREVIOUS_SUMMARY']), 1
+      )
+      const trustedCwd = database.get<{ cwd: string }>(
+        'SELECT cwd FROM sessions WHERE id = ?', 'mismatched-resume-session'
+      )
       database.run(
         `INSERT INTO provider_bindings (
            id, session_id, provider, provider_session_id, resume_state, restore_state,
@@ -2226,6 +2311,7 @@ describe('RuntimeServer domain RPC', () => {
       })
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      await waitUntil(() => terminalText(resumePort).includes('WRONG_PROVIDER_DAG_SUMMARY'))
       const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
       expect(arguments_).toContain('provider-old')
       const settingsIndex = arguments_.indexOf('--settings')
@@ -2240,6 +2326,7 @@ describe('RuntimeServer domain RPC', () => {
 
       await waitUntil(() => repository.listProviderBindings('mismatched-resume-session')
         .some((binding) => binding.restoreState === 'failed'))
+      await new Promise((resolve) => setTimeout(resolve, 250))
       expect(sessions.has('mismatched-resume-session')).toBe(false)
       expect(repository.listProviderBindings('mismatched-resume-session')).toContainEqual(expect.objectContaining({
         providerSessionId: 'provider-old', resumeState: 'failed', restoreState: 'failed',
@@ -2249,6 +2336,18 @@ describe('RuntimeServer domain RPC', () => {
         `SELECT COUNT(*) AS count FROM provider_bindings
          WHERE session_id = ? AND provider_session_id = ?`,
         'mismatched-resume-session', 'provider-new'
+      )).toEqual({ count: 0 })
+      expect(database.get(
+        'SELECT cwd FROM sessions WHERE id = ?', 'mismatched-resume-session'
+      )).toEqual(trustedCwd)
+      expect(database.get(
+        'SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?',
+        'mismatched-resume-session'
+      )).toEqual({ latest_lines_json: JSON.stringify(['TRUSTED_PREVIOUS_SUMMARY']) })
+      expect(database.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM domain_events
+         WHERE session_id = ? AND event_type = 'session.work-status-changed'`,
+        'mismatched-resume-session'
       )).toEqual({ count: 0 })
       expect(resumePort.sent.some((message) =>
         message.type === 'events.batch' && message.events.some((event) =>
@@ -2261,6 +2360,7 @@ describe('RuntimeServer domain RPC', () => {
       await providerHooks.stop()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+      restoreEnv('MATOU_TEST_WRONG_CWD', previousWrongCwd)
     }
   })
 

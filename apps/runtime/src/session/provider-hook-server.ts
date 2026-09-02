@@ -312,9 +312,13 @@ export class ProviderHookServer {
           })
         } catch (error) {
           // An old provider process may report its identity after lease takeover.
-          // Its hook remains a valid HTTP endpoint for final notifications, but
-          // it no longer owns the durable Fork or its resumable binding.
+          // Acknowledge its endpoint, but revoke the complete hook stream: the
+          // old process no longer owns this Session's HUD, notifications or DAG.
           if (!(error instanceof StaleForkProviderIdentityError)) throw error
+          registration.acceptIdentity = false
+          registration.identityRejected = true
+          sendJson(response, 200, {})
+          return
         }
       }
       this.#onHudPayload({

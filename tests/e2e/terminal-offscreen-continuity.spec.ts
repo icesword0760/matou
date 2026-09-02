@@ -106,6 +106,12 @@ test.describe('real foreground terminal continuity outside the carousel viewport
       }
 
       const finalSurface = terminalSurface(fixture, TARGET_SESSION_ID)
+      const finalText = await finalSurface.locator('.xterm-rows').textContent() ?? ''
+      expect(occurrences(finalText, 'VIEWPORT_OUTPUT_READY')).toBe(1)
+      expect(occurrences(finalText, 'VIEWPORT_OUTPUT_DONE')).toBe(1)
+      for (let cycle = 1; cycle <= 3; cycle += 1) {
+        expect(occurrences(finalText, `VIEWPORT_CYCLE_${cycle}_DONE`)).toBe(1)
+      }
       await terminalCommand(finalSurface, "printf 'VIEWPORT_INPUT_AFTER_RETURN\\n'")
       await expect(finalSurface.locator('.xterm-rows')).toContainText('VIEWPORT_INPUT_AFTER_RETURN')
       expect(await processExists(fixture, targetPid)).toBe(true)

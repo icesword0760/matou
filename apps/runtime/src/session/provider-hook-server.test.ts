@@ -20,6 +20,7 @@ let hooks: ProviderHookServer
 let notificationEvents: unknown[]
 let hudEvents: unknown[]
 let identityEvents: unknown[]
+let teamObservations: unknown[]
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'matou-provider-hooks-'))
@@ -45,10 +46,12 @@ beforeEach(async () => {
   notificationEvents = []
   hudEvents = []
   identityEvents = []
+  teamObservations = []
   hooks = new ProviderHookServer(root, sessions, {
     onNotification: (event) => { notificationEvents.push(event) },
     onHudPayload: (event) => { hudEvents.push(event) },
-    onIdentityRecorded: (event) => { identityEvents.push(event) }
+    onIdentityRecorded: (event) => { identityEvents.push(event) },
+    onTeamObservations: (events) => { teamObservations.push(...events) }
   })
   await hooks.start()
 })
@@ -340,12 +343,29 @@ describe('ProviderHookServer', () => {
     })
     if (second.kind !== 'acquired') throw new Error('takeover lease missing')
 
+    const staleTranscript = join(root, 'provider-stale-team.jsonl')
+    await writeFile(staleTranscript, JSON.stringify({
+      type: 'user',
+      toolUseResult: {
+        status: 'teammate_spawned', teammate_id: 'STALE@stale-team',
+        name: 'STALE', team_name: 'stale-team', prompt: 'stale fork observation'
+      }
+    }))
     expect((await postHook(oldRegistration.hookUrl, {
-      session_id: 'provider-stale', cwd: root,
-      model: { display_name: 'Claude Opus 4.6' }
+      hook_event_name: 'Stop', session_id: 'provider-stale', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' },
+      transcript_path: staleTranscript,
+      last_assistant_message: 'Stale Fork completed'
+    })).status).toBe(200)
+    expect((await postHook(oldRegistration.hookUrl, {
+      hook_event_name: 'PermissionRequest', session_id: 'provider-stale', cwd: root,
+      tool_name: 'Write', tool_input: { file_path: '/tmp/stale-fork' }
     })).status).toBe(200)
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
     expect(identityEvents).toEqual([])
+    expect(hudEvents).toEqual([])
+    expect(notificationEvents).toEqual([])
+    expect(teamObservations).toEqual([])
     expect(database.get(
       'SELECT state, stage FROM session_fork_intents WHERE operation_id = ?', 'operation-fenced'
     )).toEqual({ state: 'starting', stage: 'restoring-provider' })
