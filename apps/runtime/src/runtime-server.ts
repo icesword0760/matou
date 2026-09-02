@@ -2019,14 +2019,23 @@ function shellName(profile: 'shell' | 'claude-code' | 'codex'): string | undefin
   return shell ? basename(shell) : process.platform === 'win32' ? 'PowerShell' : undefined
 }
 
-async function gitEnvironment(cwd: string): Promise<{ gitBranch: string; gitDirty: boolean } | undefined> {
+async function gitEnvironment(cwd: string): Promise<{
+  gitBranch: string
+  gitDirty: boolean
+  gitDirectory: string
+} | undefined> {
   try {
-    const [{ stdout: branchOutput }, { stdout: statusOutput }] = await Promise.all([
-      execFileAsync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']),
-      execFileAsync('git', ['-C', cwd, 'status', '--porcelain', '--untracked-files=normal'])
+    const gitEnvironment = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
+    const [{ stdout: branchOutput }, { stdout: statusOutput }, { stdout: directoryOutput }] = await Promise.all([
+      execFileAsync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { env: gitEnvironment }),
+      execFileAsync('git', ['-C', cwd, 'status', '--porcelain', '--untracked-files=normal'], { env: gitEnvironment }),
+      execFileAsync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], { env: gitEnvironment })
     ])
     const gitBranch = branchOutput.trim()
-    return gitBranch ? { gitBranch, gitDirty: statusOutput.trim().length > 0 } : undefined
+    const gitDirectory = directoryOutput.trim()
+    return gitBranch && gitDirectory
+      ? { gitBranch, gitDirty: statusOutput.trim().length > 0, gitDirectory }
+      : undefined
   } catch {
     return undefined
   }

@@ -39,6 +39,7 @@ import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { AppUpdateControl } from '../updates/AppUpdateControl'
 import { activeAppSessionCount } from '../updates/active-app-sessions'
 import { WorkspaceOpenRequestConsumer } from './workspace-open-request-consumer'
+import { VisibleHudRefreshLoop } from '../hud/visible-hud-refresh-loop'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
@@ -316,6 +317,23 @@ function HierarchyProduct({ projection, commands }: {
   ]))
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
+  useEffect(() => {
+    if (!client || !focusedSessionId || typeof client.refreshTerminalHud !== 'function') return
+    const loop = new VisibleHudRefreshLoop(
+      () => client.refreshTerminalHud(focusedSessionId),
+      () => document.visibilityState === 'visible'
+    )
+    const onFocus = () => loop.focus()
+    const onVisibility = () => loop.visibilityChanged()
+    loop.start()
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      loop.stop()
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [client, focusedSessionId])
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
   const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
   const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
