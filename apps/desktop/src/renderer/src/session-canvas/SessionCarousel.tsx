@@ -5,7 +5,12 @@ import {
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import { ParentProjection } from './ParentProjection'
-import { ParentPullController } from './ParentPullController'
+import {
+  ParentPullController,
+  parentPullThreshold,
+  parentReturnSpringAtRest,
+  stepParentReturnSpring
+} from './ParentPullController'
 import { SessionCard } from './SessionCard'
 
 export function SessionCarousel(props: {
@@ -36,6 +41,7 @@ export function SessionCarousel(props: {
     revealRequest, onGeometryChange
   } = props
   const sessionOrderKey = JSON.stringify(nodes.map((node) => node.sessionId))
+  const shellRef = useRef<HTMLDivElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const cardsRef = useRef(new Map<string, HTMLElement>())
   const previousOffsetsRef = useRef(new Map<string, number>())
@@ -47,6 +53,8 @@ export function SessionCarousel(props: {
   const focusVisibilityFrame = useRef<number | undefined>(undefined)
   const focusVisibilitySessionId = useRef<string | null>(null)
   const wheelTimer = useRef<number | undefined>(undefined)
+  const parentCommitTimer = useRef<number | undefined>(undefined)
+  const pullSpringFrame = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
   const edgeBrowseTimer = useRef<number | undefined>(undefined)
   const edgeBrowseBlocked = useRef(false)
@@ -57,6 +65,7 @@ export function SessionCarousel(props: {
   const hoverRef = useRef<(sessionId: string | null) => void>(() => undefined)
   const pointerPosition = useRef<{ x: number; y: number } | null>(null)
   const wheelGesture = useRef(false)
+  const nativeScrollGestureActive = useRef(false)
   const pageClosing = useRef(false)
   const pointerGesture = useRef<{
     id: number
@@ -73,7 +82,7 @@ export function SessionCarousel(props: {
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const [edgeBrowsePhase, setEdgeBrowsePhase] = useState<'idle' | 'confirming' | 'cruising'>('idle')
   const [edgeBrowseDirection, setEdgeBrowseDirection] = useState<-1 | 0 | 1>(0)
-  const [pull, setPull] = useState({ distance: 0, progress: 0, springBack: false })
+  const [pull, setPull] = useState({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
   const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
   const [narrow, setNarrow] = useState(false)
   const inViewport = useMemo(() => new Set(
@@ -106,6 +115,8 @@ export function SessionCarousel(props: {
       if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
       if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
+      if (parentCommitTimer.current !== undefined) window.clearTimeout(parentCommitTimer.current)
+      if (pullSpringFrame.current !== undefined) cancelAnimationFrame(pullSpringFrame.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
       if (edgeBrowseTimer.current !== undefined) window.clearTimeout(edgeBrowseTimer.current)
     }
@@ -589,28 +600,99 @@ export function SessionCarousel(props: {
     if (!wheelGesture.current && !edgeBrowseBlocked.current) keepHoveredCardFullyVisible(sessionId)
   }
   hoverRef.current = hover
-  const finishPullGesture = () => {
+  const cancelPullSpring = () => {
+    if (pullSpringFrame.current === undefined) return
+    cancelAnimationFrame(pullSpringFrame.current)
+    pullSpringFrame.current = undefined
+  }
+  const cancelParentCommit = () => {
+    if (parentCommitTimer.current === undefined) return
+    window.clearTimeout(parentCommitTimer.current)
+    parentCommitTimer.current = undefined
+  }
+  const springParentPullHome = (distance: number, releaseVelocity: number, viewportWidth: number) => {
+    cancelPullSpring()
+    if (reducedMotion() || distance <= 0) {
+      setPull({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
+      return
+    }
+    const threshold = parentPullThreshold(viewportWidth)
+    let state = { position: distance, velocity: releaseVelocity }
+    let previousTime = performance.now()
+    setPull({
+      distance,
+      progress: Math.min(1, distance / threshold),
+      effectIntensity: Math.min(1, Math.abs(releaseVelocity) / 1_600),
+      springBack: true
+    })
+    const settle = (time: number) => {
+      const elapsedSeconds = Math.max(0, (time - previousTime) / 1_000)
+      previousTime = time
+      state = stepParentReturnSpring(state, elapsedSeconds)
+      if (parentReturnSpringAtRest(state)) {
+        pullSpringFrame.current = undefined
+        setPull({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
+        return
+      }
+      setPull({
+        distance: state.position,
+        progress: Math.max(0, Math.min(1, state.position / threshold)),
+        effectIntensity: Math.min(1, Math.abs(state.velocity) / 1_600),
+        springBack: true
+      })
+      pullSpringFrame.current = requestAnimationFrame(settle)
+    }
+    pullSpringFrame.current = requestAnimationFrame(settle)
+  }
+  const finishPullGesture = (timeMs = performance.now()) => {
     const viewport = viewportRef.current
     if (!viewport) return
     const result = pullController.current.end({
       scrollLeft: viewport.scrollLeft,
-      viewportWidth: viewport.clientWidth
+      viewportWidth: viewport.clientWidth,
+      timeMs
     })
     wheelGesture.current = false
     if (result.commit && parent) {
-      setPull({ distance: 0, progress: 0, springBack: false })
-      onCommitParent?.(parent.sessionId)
+      cancelPullSpring()
+      const commit = () => {
+        parentCommitTimer.current = undefined
+        setPull({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
+        onCommitParent?.(parent.sessionId)
+      }
+      if (result.commitDelayMs > 0) {
+        setPull((current) => ({ ...current, progress: 1, effectIntensity: Math.max(.32, current.effectIntensity) }))
+        parentCommitTimer.current = window.setTimeout(commit, result.commitDelayMs)
+      } else {
+        commit()
+      }
       return
     }
     if (result.springBack) {
-      setPull((current) => ({ ...current, distance: 0, progress: 0, springBack: true }))
-      window.setTimeout(() => setPull({ distance: 0, progress: 0, springBack: false }), reducedMotion() ? 1 : 260)
+      springParentPullHome(result.pullDistance, result.releaseVelocity, viewport.clientWidth)
     } else {
-      setPull({ distance: 0, progress: 0, springBack: false })
+      setPull({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
     }
   }
+  useEffect(() => window.matouDesktop?.onScrollGesture?.((phase) => {
+    if (phase === 'begin') {
+      cancelParentCommit()
+      nativeScrollGestureActive.current = true
+      if (wheelTimer.current !== undefined) {
+        window.clearTimeout(wheelTimer.current)
+        wheelTimer.current = undefined
+      }
+      return
+    }
+    nativeScrollGestureActive.current = false
+    if (wheelGesture.current) finishPullGesture(performance.now())
+  }))
   const scheduleWheelEnd = () => {
     if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
+    if (nativeScrollGestureActive.current) {
+      wheelTimer.current = undefined
+      return
+    }
     wheelTimer.current = window.setTimeout(() => {
       wheelTimer.current = undefined
       finishPullGesture()
@@ -632,17 +714,29 @@ export function SessionCarousel(props: {
     if (delta === 0) return
     stopEdgeBrowse(true)
     if (!wheelGesture.current) {
+      cancelPullSpring()
+      cancelParentCommit()
       wheelGesture.current = true
-      pullController.current.begin({ scrollLeft: viewport.scrollLeft, hasParent: Boolean(parent) })
+      pullController.current.begin({
+        scrollLeft: viewport.scrollLeft,
+        hasParent: Boolean(parent),
+        timeMs: event.timeStamp
+      })
     }
     const movement = pullController.current.move({
       deltaTowardParent: -delta,
       viewportWidth: viewport.clientWidth,
-      verticalDominant: !horizontal
+      verticalDominant: !horizontal,
+      timeMs: event.timeStamp
     })
     if (movement.consume) {
       event.preventDefault()
-      setPull({ distance: movement.pullDistance, progress: movement.progress, springBack: false })
+      setPull({
+        distance: movement.pullDistance,
+        progress: movement.progress,
+        effectIntensity: movement.effectIntensity,
+        springBack: false
+      })
       scheduleWheelEnd()
       return
     }
@@ -652,13 +746,16 @@ export function SessionCarousel(props: {
     scheduleWheelEnd()
   }
   useEffect(() => {
-    const viewport = viewportRef.current
-    if (!viewport) return
+    const shell = shellRef.current
+    if (!shell) return
     // React registers wheel handlers passively in Chromium. This interaction
     // must cancel the browser's native scroll because Matou applies the same
-    // delta itself and reserves edge movement for the parent-pull gesture.
-    viewport.addEventListener('wheel', wheel, { passive: false, capture: true })
-    return () => viewport.removeEventListener('wheel', wheel, { capture: true })
+    // delta itself and reserves edge movement for the parent-pull gesture. The
+    // listener belongs to the stationary shell: while pulling, the translated
+    // card strip can move out from under the pointer, but the gesture must keep
+    // receiving deltas over the newly revealed parent preview.
+    shell.addEventListener('wheel', wheel, { passive: false, capture: true })
+    return () => shell.removeEventListener('wheel', wheel, { capture: true })
   })
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
@@ -668,11 +765,17 @@ export function SessionCarousel(props: {
     )) return
     const viewport = viewportRef.current
     if (!viewport) return
+    cancelPullSpring()
+    cancelParentCommit()
     pointerGesture.current = {
       id: event.pointerId, startX: event.clientX, startY: event.clientY,
       lastX: event.clientX, initialScrollLeft: viewport.scrollLeft
     }
-    pullController.current.begin({ scrollLeft: viewport.scrollLeft, hasParent: Boolean(parent) })
+    pullController.current.begin({
+      scrollLeft: viewport.scrollLeft,
+      hasParent: Boolean(parent),
+      timeMs: event.timeStamp
+    })
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
@@ -692,12 +795,18 @@ export function SessionCarousel(props: {
     const movement = pullController.current.move({
       deltaTowardParent: event.clientX - gesture.lastX,
       viewportWidth: viewport.clientWidth,
-      verticalDominant: Math.abs(totalY) > Math.abs(totalX)
+      verticalDominant: Math.abs(totalY) > Math.abs(totalX),
+      timeMs: event.timeStamp
     })
     gesture.lastX = event.clientX
     if (movement.consume) {
       event.preventDefault()
-      setPull({ distance: movement.pullDistance, progress: movement.progress, springBack: false })
+      setPull({
+        distance: movement.pullDistance,
+        progress: movement.progress,
+        effectIntensity: movement.effectIntensity,
+        springBack: false
+      })
       return
     }
     if (Math.abs(totalX) > Math.abs(totalY)) {
@@ -710,13 +819,14 @@ export function SessionCarousel(props: {
     if (pointerGesture.current?.id !== event.pointerId) return
     pointerGesture.current = null
     event.currentTarget.releasePointerCapture?.(event.pointerId)
-    finishPullGesture()
+    finishPullGesture(event.timeStamp)
   }
 
   return <div className={`session-carousel-shell${pull.springBack ? ' is-springing' : ''}${edgeBrowsePhase === 'confirming' ? ' is-edge-confirming' : ''}${edgeBrowsePhase === 'cruising' ? ' is-edge-cruising' : ''}${edgeBrowseDirection === -1 ? ' is-edge-left' : ''}${edgeBrowseDirection === 1 ? ' is-edge-right' : ''}`}
+    ref={shellRef}
     style={{ '--parent-pull-distance': `${pull.distance}px` } as React.CSSProperties}>
     {parent && pull.distance > 0 && <ParentProjection parent={parent}
-      pullDistance={pull.distance} progress={pull.progress} />}
+      pullDistance={pull.distance} progress={pull.progress} effectIntensity={pull.effectIntensity} />}
     <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
       ref={viewportRef} role="region" aria-label="同级会话列表"
       data-visible-columns={visibleCount} data-edge-browse-phase={edgeBrowsePhase}

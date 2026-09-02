@@ -87,11 +87,14 @@ async function createWindow(): Promise<BrowserWindow> {
     minWidth: 720,
     minHeight: 480,
     show: false,
-    backgroundColor: '#F7F8FA',
     ...(process.platform === 'darwin' ? {
+      transparent: true,
+      backgroundColor: '#00000000',
+      vibrancy: 'sidebar' as const,
+      visualEffectState: 'active' as const,
       titleBarStyle: 'hiddenInset' as const,
       trafficLightPosition: { x: 14, y: 16 }
-    } : {}),
+    } : { backgroundColor: '#F7F8FA' }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       nodeIntegration: false,
@@ -112,6 +115,7 @@ async function createWindow(): Promise<BrowserWindow> {
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
   installNativeDagShortcut(window)
+  installNativeScrollGesture(window)
   window.webContents.setWindowOpenHandler(() => {
     void createWindow()
     return { action: 'deny' }
@@ -265,6 +269,16 @@ function installNativeDagShortcut(window: BrowserWindow): void {
   window.on('closed', () => {
     if (timer !== undefined) clearTimeout(timer)
     timer = undefined
+  })
+}
+
+function installNativeScrollGesture(window: BrowserWindow): void {
+  window.webContents.on('input-event', (_event, input) => {
+    const phase = input.type === 'gestureScrollBegin'
+      ? 'begin'
+      : input.type === 'gestureScrollEnd' ? 'end' : undefined
+    if (!phase || window.isDestroyed()) return
+    window.webContents.send(DESKTOP_CHANNELS.scrollGesture, phase)
   })
 }
 

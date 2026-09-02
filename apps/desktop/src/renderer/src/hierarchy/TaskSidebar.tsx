@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { Glass } from '@samasante/liquid-glass'
 
 import { ConfirmDialog, ConfirmationSequence } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
@@ -13,6 +14,36 @@ import workbenchIcon from '../assets/kooky/terminal/dark_lujing.svg'
 
 const TASK_TRANSFER = 'application/x-matou-pinned-task'
 const WORKSPACE_TRANSFER = 'application/x-matou-pinned-workspace'
+const SIDEBAR_GLASS_OPTICS = {
+  strength: 0.015,
+  scaleX: 0.011,
+  scaleY: 0.004,
+  depth: 0.12,
+  dispersion: 0.022,
+  frost: 18,
+  saturate: 1.12,
+  brightness: 0.008,
+  specular: 0.72,
+  sheenAngle: 270,
+  glow: 0.1,
+  glowSpread: 0.16,
+  glowFalloff: 3.2,
+  sheen: 0.7,
+  sheenWidth: 1.25,
+  sheenFalloff: 3.6,
+  curvature: 0.032,
+  splay: 0.38,
+  bend: 0.48,
+  bendWidth: 0.045
+} as const
+
+function SidebarGlassMaterial() {
+  const supported = typeof ResizeObserver !== 'undefined' && typeof CSS !== 'undefined' && typeof CSS.supports === 'function' &&
+    (CSS.supports('backdrop-filter', 'blur(1px)') || CSS.supports('-webkit-backdrop-filter', 'blur(1px)'))
+  if (!supported) return <div className="flat-sidebar__glass-material" aria-hidden="true" />
+  return <Glass className="flat-sidebar__glass-material" aria-hidden="true"
+    optics={SIDEBAR_GLASS_OPTICS} radius={0} />
+}
 
 export function TaskSidebar({ projection, commands, readOnly = false, onRevealSession }: {
   projection: HierarchyProjection
@@ -42,6 +73,7 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false)
   const notificationStore = useNotificationStore()
   const notificationSnapshot = useNotificationSnapshot()
+  const sidebarRef = useRef<HTMLElement>(null)
   const activeRef = useRef<HTMLSpanElement>(null)
   const activeWorkspaceId = projection.navigation.activeWorkspaceId
   const activeTaskId = activeWorkspaceId ? projection.navigation.taskByWorkspace[activeWorkspaceId] : undefined
@@ -99,6 +131,15 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
   // badge and the Session pulse. Mixing in a second aggregate count leaves an
   // orphan red badge after the visible Session indicator has been dismissed.
   const unreadCount = (taskId: string) => notificationStore.unreadForTask(taskId)
+  const moveGlassLight = (event: ReactPointerEvent<HTMLElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    event.currentTarget.style.setProperty('--sidebar-glass-x', `${event.clientX - rect.left}px`)
+    event.currentTarget.style.setProperty('--sidebar-glass-y', `${event.clientY - rect.top}px`)
+  }
+  const resetGlassLight = () => {
+    sidebarRef.current?.style.setProperty('--sidebar-glass-x', '44%')
+    sidebarRef.current?.style.setProperty('--sidebar-glass-y', '118px')
+  }
   const resetDrag = () => { setDragTaskId(null); setDragWorkspaceId(null); setDragOverId(null) }
   const navigateNotification = async (notification: AgentNotification) => {
     const workspace = projection.workspaces.find(({ id }) => id === notification.workspaceId)
@@ -126,7 +167,9 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
     setNotificationCenterOpen(false)
   }
 
-  return <aside className="workbench-sidebar flat-sidebar" aria-label="事项列表">
+  return <aside ref={sidebarRef} className="workbench-sidebar flat-sidebar" aria-label="事项列表"
+    onPointerMove={moveGlassLight} onPointerLeave={resetGlassLight}>
+    <SidebarGlassMaterial />
     <header className="flat-sidebar__topbar">
       <button className="flat-sidebar__new-workspace" aria-label="新增工作空间"
         disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
@@ -191,7 +234,8 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
           {!isCollapsed && <div className="workspace-group__tasks" role="list">
             {tasks.map((task) => <div role="listitem" key={task.id} data-testid={`task-${task.id}`}
               className={`workbench-item${task.id === activeTaskId ? ' is-active' : ''}${task.id === dragTaskId ? ' is-dragging' : ''}${dragOverId === `task:${task.id}` ? ' drag-over' : ''}`}
-              tabIndex={0} aria-current={task.id === activeTaskId ? 'true' : undefined} draggable={!readOnly && Boolean(task.isPinned)}
+              tabIndex={0} aria-current={task.id === activeTaskId ? 'true' : undefined}
+              draggable={!readOnly && Boolean(task.isPinned)}
               onDragStart={(event) => {
                 if (readOnly || !task.isPinned) return
                 setDragTaskId(task.id); event.dataTransfer.setData(TASK_TRANSFER, JSON.stringify({ workspaceId: workspace.id, taskId: task.id })); event.dataTransfer.effectAllowed = 'move'
@@ -245,7 +289,8 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
       <button role="menuitem" onClick={() => { void window.matouDesktop?.revealDirectory(menuWorkspace.rootDirectory); setMenuWorkspace(null) }}>在 Finder 中显示</button>
       <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(menuWorkspace.rootDirectory); setToast('路径已复制'); setMenuWorkspace(null) }}>复制路径</button>
       {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" disabled={readOnly}
-        title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
+        title={readOnly ? READ_ONLY_REASON : undefined}
+        onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
     </div>}
     {menuTask && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
       {closedTaskId === menuTask.id ? <>

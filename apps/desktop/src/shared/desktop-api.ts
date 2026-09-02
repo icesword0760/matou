@@ -23,6 +23,7 @@ export interface MatouDesktopApi {
   onDagNotifications(listener: (sessionIds: string[]) => void): () => void
   onDagNodeSelected(listener: (selection: DagNodeSelection) => void): () => void
   onDagShortcut(listener: (kind: 'short' | 'long') => void): () => void
+  onScrollGesture(listener: (phase: 'begin' | 'end') => void): () => void
   onRuntimeConnectionState(listener: (state: RuntimeConnectionState) => void): () => void
   getRuntimeLifecycle(): Promise<RuntimeLifecyclePresentation>
   onRuntimeLifecycle(listener: (state: RuntimeLifecyclePresentation) => void): () => void
@@ -123,6 +124,7 @@ export const DESKTOP_CHANNELS = {
   dagNotifications: 'matou:dag-notifications',
   dagNodeSelected: 'matou:dag-node-selected',
   dagShortcut: 'matou:dag-shortcut',
+  scrollGesture: 'matou:scroll-gesture',
   runtimeConnectionState: 'matou:runtime-connection-state',
   runtimeLifecycle: 'matou:runtime-lifecycle',
   getRuntimeLifecycle: 'matou:get-runtime-lifecycle',

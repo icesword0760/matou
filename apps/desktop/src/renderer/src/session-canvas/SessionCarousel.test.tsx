@@ -249,6 +249,47 @@ describe('SessionCarousel', () => {
     expect(viewport.scrollLeft).toBe(240)
   })
 
+  it('scrolls toward later sibling cards from the left edge even when a parent exists', () => {
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      parent={{ ...fixtures(1)[0]!, sessionId: 'parent', title: '父会话' }}
+      onCommitParent={() => undefined} onActivate={() => undefined}
+      renderSession={(node) => <div className="terminal-surface" data-testid={`edge-surface-${node.sessionId}`} />} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 1_800 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+
+    fireEvent.wheel(screen.getByTestId('edge-surface-session-1'), { deltaX: 240, deltaY: 0 })
+
+    expect(viewport.scrollLeft).toBe(240)
+    expect(screen.queryByTestId('parent-projection')).toBeNull()
+  })
+
+  it('continues a parent pull after the moving card strip leaves the pointer', () => {
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      parent={{ ...fixtures(1)[0]!, sessionId: 'parent', title: '父会话' }}
+      onCommitParent={() => undefined} onActivate={() => undefined}
+      renderSession={(node) => <div className="terminal-surface" data-testid={`pull-surface-${node.sessionId}`} />} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 800 },
+      scrollWidth: { configurable: true, value: 1_800 },
+      scrollLeft: { configurable: true, value: 0, writable: true }
+    })
+
+    fireEvent.wheel(screen.getByTestId('pull-surface-session-1'), { deltaX: -160, deltaY: 0 })
+    const projection = screen.getByTestId('parent-projection')
+    expect(projection.getAttribute('data-ready')).toBe('false')
+
+    // Once the strip has translated right, the same stationary pointer is over
+    // the revealed parent projection rather than over the moving card.
+    fireEvent.wheel(projection, { deltaX: -160, deltaY: 0 })
+
+    expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
+  })
+
   it('expands the card under a stationary pointer on the next frame while scrolling', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
@@ -892,6 +933,9 @@ describe('SessionCarousel', () => {
     fireEvent.wheel(viewport, { deltaX: -500, deltaY: 0 })
     expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
     vi.advanceTimersByTime(240)
+    expect(screen.getByText('已到达 · 松手返回父会话')).toBeTruthy()
+    expect(onCommitParent).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(450)
     expect(onCommitParent).toHaveBeenCalledWith('parent')
     vi.useRealTimers()
   })
@@ -907,13 +951,53 @@ describe('SessionCarousel', () => {
     Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 800 })
     viewport.scrollLeft = 0
 
-    for (const deltaX of [-36, -42, -38, -36]) {
+    for (const deltaX of [-78, -82, -80, -80]) {
       fireEvent.wheel(viewport, { deltaX, deltaY: 0 })
     }
 
     expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
     vi.advanceTimersByTime(240)
+    expect(onCommitParent).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(450)
     expect(onCommitParent).toHaveBeenCalledWith('parent')
+    vi.useRealTimers()
+  })
+
+  it('holds a ready trackpad pull until Electron reports the physical gesture end', () => {
+    vi.useFakeTimers()
+    let nativeGesture: ((phase: 'begin' | 'end') => void) | undefined
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      onScrollGesture: (listener: typeof nativeGesture) => {
+        nativeGesture = listener
+        return () => { nativeGesture = undefined }
+      }
+    } })
+    const onCommitParent = vi.fn()
+    render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-1"
+      parent={{ ...fixtures(1)[0]!, sessionId: 'parent', title: '父会话' }}
+      onCommitParent={onCommitParent} onActivate={() => undefined}
+      renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 800 })
+    viewport.scrollLeft = 0
+    const shell = document.querySelector<HTMLElement>('.session-carousel-shell')!
+
+    act(() => nativeGesture?.('begin'))
+    for (const deltaX of [-78, -82, -80, -80]) fireEvent.wheel(viewport, { deltaX, deltaY: 0 })
+    const fixedDistance = shell.style.getPropertyValue('--parent-pull-distance')
+    fireEvent.wheel(viewport, { deltaX: -240, deltaY: 0 })
+    expect(shell.style.getPropertyValue('--parent-pull-distance')).toBe(fixedDistance)
+
+    act(() => vi.advanceTimersByTime(1_000))
+    expect(screen.getByTestId('parent-projection').getAttribute('data-ready')).toBe('true')
+    expect(onCommitParent).not.toHaveBeenCalled()
+
+    act(() => nativeGesture?.('end'))
+    expect(onCommitParent).not.toHaveBeenCalled()
+    expect(screen.getByText('已到达 · 松手返回父会话')).toBeTruthy()
+    act(() => vi.advanceTimersByTime(450))
+    expect(onCommitParent).toHaveBeenCalledWith('parent')
+    Reflect.deleteProperty(window, 'matouDesktop')
     vi.useRealTimers()
   })
 

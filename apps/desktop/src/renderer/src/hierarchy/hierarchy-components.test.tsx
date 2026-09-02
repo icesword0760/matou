@@ -28,6 +28,7 @@ describe('Workspace and Task navigation', () => {
     const target = commands()
     render(<TaskSidebar projection={data} commands={target} />)
 
+    expect(document.querySelector('.flat-sidebar__glass-material')).toBeTruthy()
     expect(screen.getByRole('button', { name: '新增工作空间' })).toBeTruthy()
     expect(screen.getByRole('group', { name: 'icesword 工作空间' })).toBeTruthy()
     expect(screen.getByRole('group', { name: 'Frontend 工作空间' })).toBeTruthy()
