@@ -168,7 +168,11 @@ async function registeredWorktreePaths(repositoryRoot: string): Promise<Set<stri
 
 async function symbolicBranch(path: string): Promise<string | undefined> {
   try {
-    return (await git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim()
+    const symbolicRef = (await git(path, ['symbolic-ref', '--quiet', 'HEAD'])).trim()
+    const localBranchPrefix = 'refs/heads/'
+    return symbolicRef.startsWith(localBranchPrefix)
+      ? symbolicRef.slice(localBranchPrefix.length)
+      : symbolicRef
   } catch (error) {
     if (commandExitCode(error) === 1) return undefined
     throw error

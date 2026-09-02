@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test'
 
-import { launchMatou } from './matou-fixture'
+import { launchMatou, primaryAcceptanceDisplayRequested } from './matou-fixture'
 
 test('keeps the main, detached terminal, and DAG acceptance windows on the internal display', async () => {
   test.skip(process.platform !== 'darwin', 'the accepted display names are macOS-specific')
+  test.skip(primaryAcceptanceDisplayRequested(), 'primary-display acceptance does not assert secondary placement')
   const fixture = await launchMatou()
   try {
     const target = await fixture.app.evaluate(({ screen }) => {

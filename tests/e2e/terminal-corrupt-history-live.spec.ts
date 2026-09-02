@@ -4,7 +4,12 @@ import { join } from 'node:path'
 import { expect, test } from '@playwright/test'
 
 import { JournalHistoryReader } from '../../apps/runtime/src/journal/journal-history-reader'
-import { launchMatou, restartMatou } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  restartMatou
+} from './matou-fixture'
 import { terminalCommand, visibleSurfaces, waitForShell } from './fixtures/session-canvas-fixture'
 
 const E2E_ENV = {
@@ -56,6 +61,10 @@ test('keeps a real PTY usable when one cold history segment is corrupt', async (
 })
 
 async function expectOnlySecondaryWindow(fixture: Awaited<ReturnType<typeof launchMatou>>): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())

@@ -6,7 +6,13 @@ import { promisify } from 'node:util'
 
 import { expect, test } from '@playwright/test'
 
-import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  restartMatou,
+  type MatouFixture
+} from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 
@@ -313,7 +319,8 @@ test('opens the real database in read-only recovery mode for browse, search, cop
         env: { MATOU_RECOVERY_EXPORT_DIR: exportDirectory }
       })
       await assertVisibleWindowsOnSecondaryColorLcd(fixture)
-      await expect(fixture.page.getByRole('status')).toContainText('数据库处于只读恢复模式')
+      await expect(fixture.page.locator('.read-only-recovery-banner'))
+        .toContainText('数据库处于只读恢复模式')
       await expect(fixture.page.getByTestId('active-task')).toHaveText('新事项')
       await expect(activeSurfaceFor(fixture)).not.toHaveAttribute('data-pid', /\d+/)
       await expect(activeSurfaceFor(fixture).locator('.xterm-rows')).toContainText(historyMarker)
@@ -672,6 +679,10 @@ async function restoreWritableTree(root: string): Promise<void> {
 }
 
 async function assertVisibleWindowsOnSecondaryColorLcd(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const colorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>

@@ -25,6 +25,19 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('PreferenceRepository', () => {
+  it('reads each preference once per Runtime repository and updates the cache after persistence', () => {
+    const preferences = new PreferenceRepository(database)
+
+    database.readStatementCount(true)
+    expect(preferences.get('shell.restoreHistoryEnabled')).toBe(true)
+    expect(preferences.get('shell.restoreHistoryEnabled')).toBe(true)
+    expect(database.readStatementCount(true)).toBe(1)
+
+    preferences.set('shell.restoreHistoryEnabled', false, 2)
+    expect(preferences.get('shell.restoreHistoryEnabled')).toBe(false)
+    expect(database.readStatementCount()).toBe(1)
+  })
+
   it('persists only typed allow-listed preferences with safe defaults', () => {
     const preferences = new PreferenceRepository(database)
 

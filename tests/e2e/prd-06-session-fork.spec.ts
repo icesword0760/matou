@@ -4,7 +4,13 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
-import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  restartMatou,
+  type MatouFixture
+} from './matou-fixture'
 
 const evidenceDirectory = resolve(import.meta.dirname, '../../docs/acceptance/evidence/prd-06/matou')
 
@@ -256,6 +262,10 @@ async function expectOnlySecondaryColorLcd(
   fixture: MatouFixture,
   visibleCount = 1
 ): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture, visibleCount)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const colorLcd = screen.getAllDisplays().find(({ id, internal, label }) =>

@@ -41,6 +41,21 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('SessionGitStateRepository', () => {
+  it('shares one real Git probe and persistence pass across concurrent refresh requests', async () => {
+    database.readStatementCount(true)
+    await states.refresh('local', 9)
+    const singleRefreshStatements = database.readStatementCount(true)
+
+    const [first, second] = await Promise.all([
+      states.refresh('local', 10),
+      states.refresh('local', 11)
+    ])
+
+    expect(first).toEqual(second)
+    expect(first.updatedAt).toBe(10)
+    expect(database.readStatementCount()).toBe(singleRefreshStatements)
+  })
+
   it('persists Local repository branch and dirty state by execution context', async () => {
     expect(await states.refresh('local', 10)).toMatchObject({
       executionContextId: 'local', repositoryRoot,

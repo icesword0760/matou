@@ -2,10 +2,14 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-import { expect, test, type ElectronApplication, type Page } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 import {
-  launchMatou, stopMatouPreservingData, type MatouFixture
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  stopMatouPreservingData,
+  type MatouFixture
 } from './matou-fixture'
 import {
   launchSessionCanvas, visibleSurfaces
@@ -32,7 +36,7 @@ test.describe('session node removal scopes', () => {
       const graph = seedTwoRemovalBranches(dataDirectory)
       fixture = await launchMatou({ root })
 
-      await expectVisibleWindowsOnColorLcd(fixture.app)
+      await expectVisibleWindowsOnColorLcd(fixture)
       const firstChild = fixture.page.locator(
         `.terminal-surface[data-session-id="${graph.firstChild}"]`
       )
@@ -53,7 +57,7 @@ test.describe('session node removal scopes', () => {
         .toBe(graph.root)
 
       fixture = await restartWithRoot(fixture)
-      await expectVisibleWindowsOnColorLcd(fixture.app)
+      await expectVisibleWindowsOnColorLcd(fixture)
       let dag = await openDag(fixture)
       await expect(dag.locator(`.dag-node-card[data-session-id="${graph.firstChild}"]`))
         .toHaveCount(0)
@@ -72,7 +76,7 @@ test.describe('session node removal scopes', () => {
       await expect.poll(() => membershipIds(dataDirectory)).not.toContain(graph.secondGrandchild)
 
       fixture = await restartWithRoot(fixture)
-      await expectVisibleWindowsOnColorLcd(fixture.app)
+      await expectVisibleWindowsOnColorLcd(fixture)
       dag = await openDag(fixture)
       await expect(dag.locator(`.dag-node-card[data-session-id="${graph.firstChild}"]`))
         .toHaveCount(0)
@@ -105,12 +109,19 @@ async function openRemovalDialog(page: Page, sessionId: string): Promise<void> {
 async function openDag(fixture: MatouFixture): Promise<Page> {
   await fixture.page.getByRole('button', { name: '打开会话 DAG' }).click()
   await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
-  await expectVisibleWindowsOnColorLcd(fixture.app)
+  await expectVisibleWindowsOnColorLcd(fixture, 2)
   return (await fixture.app.windows()).find((page) => page !== fixture.page)!
 }
 
-async function expectVisibleWindowsOnColorLcd(app: ElectronApplication): Promise<void> {
-  await expect.poll(() => app.evaluate(({ BrowserWindow, screen }) => {
+async function expectVisibleWindowsOnColorLcd(
+  fixture: MatouFixture,
+  visibleCount = 1
+): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture, visibleCount)
+    return
+  }
+  await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primaryId = screen.getPrimaryDisplay().id
     const target = screen.getAllDisplays().filter(({ id }) => id !== primaryId)
       .find(({ internal, label }) => internal || /color\s*lcd/i.test(label))

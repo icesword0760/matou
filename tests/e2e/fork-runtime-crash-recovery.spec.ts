@@ -7,7 +7,13 @@ import { promisify } from 'node:util'
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { readSessionFrames } from '../../apps/runtime/src/journal/segment-journal'
-import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  restartMatou,
+  type MatouFixture
+} from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 const killPoints = [
@@ -352,6 +358,10 @@ async function activateWorkspace(page: Page, name: string): Promise<void> {
 }
 
 async function assertVisibleWindowsOnlyOnSecondaryColorLcd(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const secondary = screen.getAllDisplays().find(({ id, internal, label }) =>
@@ -373,6 +383,7 @@ async function assertVisibleWindowsOnlyOnSecondaryColorLcd(fixture: MatouFixture
 }
 
 async function assertAcceptanceDisplaysBeforeLaunch(): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) return
   if (process.platform !== 'darwin') return
   const { stdout } = await execFileAsync(
     '/usr/sbin/system_profiler', ['SPDisplaysDataType', '-json']

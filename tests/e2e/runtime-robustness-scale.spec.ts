@@ -25,7 +25,7 @@ test.describe('real terminal robustness scale gate', () => {
       const last = samples.at(-1)!
       expect(last.runtimeRssMb - first.runtimeRssMb).toBeLessThan(256)
       expect(last.rendererRssMb - first.rendererRssMb).toBeLessThan(512)
-      await expect(stress.surface(stress.sessionIds[0]!).locator('.xterm-rows'))
+      await expect(stress.surface(stress.sessionIds[0]!).locator('.xterm-screen .xterm-rows'))
         .toContainText(`MATOU_STRESS_DONE_${stress.sessionIds[0]}`, { timeout: 20_000 })
       await expect(stress.fixture.page.locator('.session-carousel'))
         .toHaveAttribute('data-foreground-terminals', '20')

@@ -184,13 +184,6 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
       document.body.classList.remove('light-theme')
     }
   }, [context.theme])
-  useEffect(() => {
-    const keyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') void window.matouDesktop?.closeDagWindow?.(context.mainWindowId)
-    }
-    window.addEventListener('keydown', keyDown)
-    return () => window.removeEventListener('keydown', keyDown)
-  }, [context.mainWindowId])
   const flushGeometry = useCallback((value = latestTransform.current) => {
     if (!client || !value || fixtureGraph || readOnlyRef.current) return Promise.resolve()
     return client.request('geometry.put', {
@@ -217,6 +210,21 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
     // Geometry is deliberately outside the domain outbox, so this stays UI-only.
     void flushGeometry(value)
   }
+  const closeAfterGeometryFlush = useCallback(async () => {
+    // A transform write may still be crossing the renderer-to-Runtime channel
+    // when the user closes this short-lived window. Re-submit the latest value
+    // and wait for Runtime's acknowledgement before destroying the renderer;
+    // otherwise the next open can restore the previous zoom/pan observation.
+    await flushGeometry()
+    await window.matouDesktop?.closeDagWindow?.(context.mainWindowId)
+  }, [context.mainWindowId, flushGeometry])
+  useEffect(() => {
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') void closeAfterGeometryFlush()
+    }
+    window.addEventListener('keydown', keyDown)
+    return () => window.removeEventListener('keydown', keyDown)
+  }, [closeAfterGeometryFlush])
 
   if (!graph || !geometryReady) return <main className="dag-window dag-window-state" aria-label="会话 DAG">
     <strong>{runtimeConnection === 'reconnecting' || error
@@ -250,19 +258,19 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
       notifiedSessionIds={notifiedSessionIds}
       {...(initialTransform ? { initialTransform } : {})} onTransformChange={persistTransform}
       onSelect={(sessionId) => {
-      const target = graph.nodes.find((node) => node.sessionId === sessionId)
-      if (!target) return
-      void window.matouDesktop?.selectDagNode?.({
-        mainWindowId: context.mainWindowId,
-        sceneId: context.sceneId,
-        sessionId,
-        theme: context.theme,
-        ...(context.notificationSessionIds ? {
-          notificationSessionIds: context.notificationSessionIds
-        } : {}),
-        ...(target.detachedWindowId ? { targetWindowId: target.detachedWindowId } : {})
-      })
-    }} />
+        const target = graph.nodes.find((node) => node.sessionId === sessionId)
+        if (!target) return
+        void flushGeometry().then(() => window.matouDesktop?.selectDagNode?.({
+          mainWindowId: context.mainWindowId,
+          sceneId: context.sceneId,
+          sessionId,
+          theme: context.theme,
+          ...(context.notificationSessionIds ? {
+            notificationSessionIds: context.notificationSessionIds
+          } : {}),
+          ...(target.detachedWindowId ? { targetWindowId: target.detachedWindowId } : {})
+        }))
+      }} />
   </main>
 }
 

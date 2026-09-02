@@ -3,7 +3,11 @@ import { join } from 'node:path'
 
 import { expect, test, type Locator } from '@playwright/test'
 
-import { launchMatou } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested
+} from './matou-fixture'
 import {
   terminalCommand, visibleSurfaces, waitForShell
 } from './fixtures/session-canvas-fixture'
@@ -114,6 +118,10 @@ async function setFaultControl(path: string, value: unknown): Promise<void> {
 async function expectWindowOnColorLcd(
   fixture: Awaited<ReturnType<typeof launchMatou>>
 ): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const window = BrowserWindow.getAllWindows().find((candidate) => candidate.isVisible())
     if (!window) return { internal: false, primary: true }

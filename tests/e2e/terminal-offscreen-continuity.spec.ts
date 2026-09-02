@@ -6,7 +6,9 @@ import { expect, test, type Locator } from '@playwright/test'
 
 import { readSessionFrames } from '../../apps/runtime/src/journal/segment-journal'
 import {
+  expectVisibleWindowsOnPrimaryDisplay,
   launchMatou,
+  primaryAcceptanceDisplayRequested,
   restartMatou,
   stopMatouPreservingData,
   type MatouFixture
@@ -219,12 +221,17 @@ function processExistsLocally(pid: number): boolean {
 }
 
 function assertAcceptanceDisplaysBeforeLaunch(): void {
+  if (primaryAcceptanceDisplayRequested()) return
   const displays = execFileSync('system_profiler', ['SPDisplaysDataType'], { encoding: 'utf8' })
   expect(displays).toContain('XV272U:')
   expect(displays).toContain('Color LCD:')
 }
 
 async function expectOnlyColorLcdWindows(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible()).map((window) => {

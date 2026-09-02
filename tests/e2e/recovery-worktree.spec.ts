@@ -7,7 +7,9 @@ import { expect, test } from '@playwright/test'
 
 import { RuntimeDatabase } from '../../apps/runtime/src/storage/database'
 import {
+  expectVisibleWindowsOnPrimaryDisplay,
   launchMatou,
+  primaryAcceptanceDisplayRequested,
   restartMatou,
   stopMatouPreservingData,
   type MatouFixture
@@ -534,6 +536,10 @@ async function setNextEnvironmentDirectory(fixture: MatouFixture, path: string):
 }
 
 async function assertVisibleWindowsOnSecondaryColorLcd(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const colorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>

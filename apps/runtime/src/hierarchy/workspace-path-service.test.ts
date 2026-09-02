@@ -27,6 +27,25 @@ afterEach(() => {
 })
 
 describe('WorkspacePathService', () => {
+  it('shares one real path inspection and persistence pass across concurrent validation requests', async () => {
+    const baselineDirectory = await mkdtemp(join(root, 'baseline-'))
+    const concurrentDirectory = await mkdtemp(join(root, 'concurrent-'))
+    seedWorkspace('workspace-baseline', baselineDirectory)
+    seedWorkspace('workspace-concurrent', concurrentDirectory)
+
+    database.readStatementCount(true)
+    await service.validateWorkspace('workspace-baseline')
+    const singleValidationStatements = database.readStatementCount(true)
+
+    const [first, second] = await Promise.all([
+      service.validateWorkspace('workspace-concurrent'),
+      service.validateWorkspace('workspace-concurrent')
+    ])
+
+    expect(first).toEqual(second)
+    expect(database.readStatementCount()).toBe(singleValidationStatements)
+  })
+
   it('derives missing and not-directory states without changing Workspace ownership', async () => {
     const missingPath = join(root, 'missing')
     const filePath = join(root, 'file.txt')

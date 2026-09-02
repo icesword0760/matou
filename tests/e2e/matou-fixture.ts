@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
-import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
+import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test'
 
 const execFileAsync = promisify(execFile)
 
@@ -87,7 +87,8 @@ async function startMatou(root: string, options: LaunchMatouOptions = {}): Promi
 }
 
 async function assertSecondaryAcceptanceDisplay(env: Record<string, string> | undefined): Promise<void> {
-  if (process.platform !== 'darwin' || env?.MATOU_E2E_DISPLAY === 'primary') return
+  const requestedDisplay = env?.MATOU_E2E_DISPLAY ?? process.env.MATOU_E2E_DISPLAY
+  if (process.platform !== 'darwin' || requestedDisplay === 'primary') return
   const { stdout } = await execFileAsync(
     '/usr/sbin/system_profiler',
     ['SPDisplaysDataType', '-json'],
@@ -112,6 +113,25 @@ async function assertSecondaryAcceptanceDisplay(env: Record<string, string> | un
       'Visible Electron acceptance requires the connected built-in secondary display; no app window was opened.'
     )
   }
+}
+
+export function primaryAcceptanceDisplayRequested(): boolean {
+  return process.env.MATOU_E2E_DISPLAY === 'primary'
+}
+
+export async function expectVisibleWindowsOnPrimaryDisplay(
+  fixture: MatouFixture,
+  visibleCount = 1
+): Promise<void> {
+  await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
+    const primary = screen.getPrimaryDisplay()
+    const visibleWindows = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
+    const displays = visibleWindows.map((window) => screen.getDisplayMatching(window.getBounds()))
+    return {
+      visibleCount: visibleWindows.length,
+      allOnPrimary: visibleWindows.length > 0 && displays.every(({ id }) => id === primary.id)
+    }
+  })).toEqual({ visibleCount, allOnPrimary: true })
 }
 
 export function windowId(page: Page): string {

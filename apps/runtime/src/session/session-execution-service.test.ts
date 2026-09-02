@@ -59,6 +59,20 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('SessionExecutionService', () => {
+  it('starts a Shell without consulting Claude-only durable Fork authority', async () => {
+    database.run("UPDATE sessions SET kind = 'shell' WHERE id = 'child-1'")
+    const shellDescriptor: SessionExecutionDescriptor = { ...descriptor, profile: 'shell' }
+    const backend = backendFixture()
+    const service = new SessionExecutionService(database, registry, backend)
+
+    database.readStatementCount(true)
+    await expect(service.startOrResume('child-1', shellDescriptor)).resolves.toEqual({
+      kind: 'started', value: 'launched'
+    })
+    expect(database.readStatementCount()).toBe(0)
+    expect(backend.startOrResume).toHaveBeenCalledWith(shellDescriptor)
+  })
+
   it('defers a Renderer launch while a durable Fork has no live process', async () => {
     const lease = durableForkAtProviderStage()
     const backend = backendFixture()

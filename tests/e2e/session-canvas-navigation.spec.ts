@@ -420,19 +420,39 @@ test.describe('horizontal sibling navigation', () => {
         await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
-      const visibleCards = fixture.page.locator('.session-card[data-in-viewport="true"]')
-      await expect(visibleCards).toHaveCount(3)
-      const firstId = await visibleCards.nth(0).getAttribute('data-session-card')
-      const nextId = await visibleCards.nth(1).getAttribute('data-session-card')
+      await fixture.page.mouse.move(2, 2)
+      // Session creation focuses the newest card and follows it for 440ms. Let
+      // that product navigation settle before arranging this hover-only case.
+      await fixture.page.waitForTimeout(500)
+      await carousel.evaluate((element) => { element.scrollLeft = 0 })
+      await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBe(0)
+      const pair = await carousel.evaluate((viewport) => {
+        const viewportRect = viewport.getBoundingClientRect()
+        const cards = [...viewport.querySelectorAll<HTMLElement>('.session-card:not(.is-focused)')]
+        return cards.filter((card) => {
+          const rect = card.getBoundingClientRect()
+          return rect.left >= viewportRect.left && rect.right <= viewportRect.right
+        }).slice(0, 2).map((card) => card.dataset.sessionCard)
+      })
+      expect(pair).toHaveLength(2)
+      const [firstId, nextId] = pair
       expect(firstId).toBeTruthy()
       expect(nextId).toBeTruthy()
-      // Freeze identity before expansion updates the derived in-viewport set.
       const first = fixture.page.locator(`[data-session-card="${firstId}"]`)
       const next = fixture.page.locator(`[data-session-card="${nextId}"]`)
       await first.hover()
       await expect(first).toHaveClass(/is-expanded/)
+      // The test used to read the next card while the first card was still
+      // moving, so a busy renderer could leave the saved coordinate outside
+      // the window. A person targets the card at its visible, settled position.
+      await fixture.page.waitForTimeout(450)
       const nextBox = await next.boundingBox()
       expect(nextBox).not.toBeNull()
+      const point = { x: nextBox!.x + nextBox!.width / 2, y: nextBox!.y + 90 }
+      const hit = await fixture.page.evaluate(({ x, y }) =>
+        (document.elementFromPoint(x, y)?.closest('[data-session-card]') as HTMLElement | null)
+          ?.dataset.sessionCard, point)
+      expect(hit).toBe(nextId)
 
       const samplesPromise = next.evaluate(async (target) => {
         const cards = [...target.closest('[aria-label="同级会话列表"]')!
@@ -449,7 +469,7 @@ test.describe('horizontal sibling navigation', () => {
         }
         return samples
       })
-      await fixture.page.mouse.move(nextBox!.x + nextBox!.width / 2, nextBox!.y + 90)
+      await fixture.page.mouse.move(point.x, point.y)
       const samples = await samplesPromise
 
       expect(samples.every(({ expandedCount }) => expandedCount >= 1)).toBe(true)

@@ -44,21 +44,24 @@ let root: string
 let database: RuntimeDatabase
 let port: MockPort
 let server: RuntimeServer
+let testSessionRegistries: Set<RuntimeSessionRegistry>
 const execFileAsync = promisify(execFile)
 
 beforeEach(async () => {
+  testSessionRegistries = new Set()
   root = await mkdtemp(join(tmpdir(), 'matou-server-'))
   database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
   await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
   seedReplayAuthority(database, root)
   port = new MockPort()
-  server = new RuntimeServer(port, root, database)
+  server = new RuntimeServer(port, root, database, undefined, undefined, createTestSessionRegistry())
   port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-1' })
   await settle()
 })
 
-afterEach(() => {
+afterEach(async () => {
   server.close()
+  await Promise.all([...testSessionRegistries].map((sessions) => sessions.shutdownAll()))
   database.close()
 })
 
@@ -80,7 +83,7 @@ sleep 30
     const previousShell = process.env.SHELL
     process.env.SHELL = executable
     const controlledPort = new MockPort()
-    const registry = new RuntimeSessionRegistry()
+    const registry = createTestSessionRegistry()
     const tokens = new CapabilityTokenService(database.runtimeGeneration)
     const backend = new RuntimeControlBackend(
       database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
@@ -211,7 +214,7 @@ sleep 30
     process.env.MATOU_CLAUDE_COMMAND = executable
     registerSession(database, 'provider-config-background', 'claude-code')
     const providerConfigs = new ProviderConfigStore(root)
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const backgroundPort = new MockPort()
     const backgroundServer = new RuntimeServer(
       backgroundPort, root, database, undefined, undefined, sessions,
@@ -292,7 +295,7 @@ sleep 30
     registerSession(database, 'provider-config-faulted', 'claude-code')
     registerSession(database, 'provider-config-healthy', 'claude-code')
     let writable = false
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const providerConfigs = new ProviderConfigStore(root)
     const providerPort = new MockPort()
     const providerRouter = new RuntimeRpcRouter(database, undefined, { providerConfigs })
@@ -635,7 +638,7 @@ sleep 30
       database,
       router,
       undefined,
-      new RuntimeSessionRegistry(),
+      createTestSessionRegistry(),
       undefined,
       workspacePaths,
       { accessPolicy: policy }
@@ -849,9 +852,11 @@ sleep 30
     const hud = new SessionHudRegistry(Date.now, configDir)
     hud.spawn({ sessionId: 'live-config-session', profile: 'claude-code', cwd })
     port = new MockPort()
-    server = new RuntimeServer(port, root, database, undefined, undefined, undefined, undefined, undefined, {
+    server = new RuntimeServer(
+      port, root, database, undefined, undefined, createTestSessionRegistry(), undefined, undefined, {
       hudRegistry: hud
-    })
+      }
+    )
     port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'live-config-client' })
     port.receive({
       type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
@@ -1093,7 +1098,7 @@ sleep 30
     await rm(worktreePath, { recursive: true, force: true })
 
     server.close()
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     port = new MockPort()
     server = new RuntimeServer(port, root, database, undefined, undefined, sessions)
     port.receive({
@@ -1354,9 +1359,11 @@ sleep 30
     server.close()
     port = new MockPort()
     const compressor = new JournalCompressor()
-    server = new RuntimeServer(port, root, database, undefined, undefined, undefined, undefined, undefined, {
+    server = new RuntimeServer(
+      port, root, database, undefined, undefined, createTestSessionRegistry(), undefined, undefined, {
       journalOptionsForSession: () => ({ maxSegmentBytes: 150, rawHotBytes: 1, compressor })
-    })
+      }
+    )
     port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-2' })
     await settle()
 
@@ -1825,7 +1832,7 @@ sleep 30
   })
 
   it('treats an ACK for a just-disposed attached PTY as a harmless shutdown callback', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const shutdownPort = new MockPort()
     new RuntimeServer(shutdownPort, root, database, undefined, undefined, sessions)
     registerSession(database, 'shutdown-session')
@@ -2110,7 +2117,7 @@ sleep 30
     const priorRun = await SegmentJournal.open(root, 'reload-session')
     await priorRun.appendOutput(1, new TextEncoder().encode('output from an earlier app run'))
     await priorRun.close()
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const firstPort = new MockPort()
     new RuntimeServer(firstPort, root, database, undefined, undefined, sessions)
     firstPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'reload-1' })
@@ -2161,7 +2168,7 @@ sleep 30
   })
 
   it('starts queued recovery without a view, then attaches and detaches the active card independently', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     registerSession(database, 'layered-session')
     const executable = join(root, 'layered-shell.sh')
     await writeFile(executable, '#!/bin/sh\nprintf "ready\\n"\nsleep 30\n')
@@ -2280,7 +2287,7 @@ sleep 30
   })
 
   it('rejects input for an invalid Workspace while keeping the PTY alive', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const guardedPort = new MockPort()
     new RuntimeServer(guardedPort, root, database, undefined, undefined, sessions)
     guardedPort.receive({
@@ -2322,7 +2329,7 @@ sleep 30
   })
 
   it('records each Shell working directory after a completed command', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const cwdPort = new MockPort()
     new RuntimeServer(cwdPort, root, database, undefined, undefined, sessions)
     cwdPort.receive({
@@ -2356,7 +2363,7 @@ sleep 30
   }, 10_000)
 
   it('changes Workspace and Task order only after submitted terminal input', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const interactionPort = new MockPort()
     new RuntimeServer(interactionPort, root, database, undefined, undefined, sessions)
     interactionPort.receive({
@@ -2402,7 +2409,7 @@ sleep 30
   })
 
   it('publishes the Shell HUD after a chained relative cd command', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const cwdPort = new MockPort()
     new RuntimeServer(cwdPort, root, database, undefined, undefined, sessions)
     cwdPort.receive({
@@ -2433,7 +2440,7 @@ sleep 30
   }, 10_000)
 
   it('starts a restored Shell in that Session own last working directory', async () => {
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const restorePort = new MockPort()
     new RuntimeServer(restorePort, root, database, undefined, undefined, sessions)
     restorePort.receive({
@@ -2482,7 +2489,7 @@ sleep 30
         'binding-resume', 'provider-resume-session', 'provider-session-42',
         JSON.stringify({ permissionMode: 'default' })
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const providerPort = new MockPort()
       new RuntimeServer(providerPort, root, database, undefined, undefined, sessions)
       providerPort.receive({
@@ -2563,7 +2570,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
         'binding-quiet-resume', 'quiet-resume-session', 'provider-quiet-resume'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const resumePort = new MockPort()
       resumeServer = new RuntimeServer(
         resumePort, root, database, undefined, undefined, sessions,
@@ -2628,7 +2635,7 @@ sleep 30
     const previousConfirmedCwd = process.env.MATOU_TEST_CONFIRMED_CWD
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_CONFIRMED_CWD = confirmedCwd
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const confirmedPort = new MockPort()
     const confirmedServer = new RuntimeServer(
       confirmedPort, root, database, undefined, undefined, sessions
@@ -2745,7 +2752,7 @@ sleep 30
         `UPDATE provider_bindings SET metadata_json = ? WHERE id = ?`,
         JSON.stringify({ permissionMode: 'default' }), 'binding-mismatched-resume'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const resumePort = new MockPort()
       resumeServer = new RuntimeServer(
         resumePort, root, database, undefined, undefined, sessions,
@@ -2842,7 +2849,7 @@ sleep 30
       'binding-provider-recovery-ready', 'provider-recovery-ready',
       'provider-recovery-ready-identity'
     )
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     port = new MockPort()
     server = new RuntimeServer(port, root, database, undefined, undefined, sessions)
     port.receive({
@@ -2891,7 +2898,7 @@ sleep 30
       'binding-provider-detached-recovery', 'provider-detached-recovery',
       'provider-detached-recovery-identity'
     )
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const recoveryPort = new MockPort()
     const recoveryServer = new RuntimeServer(
       recoveryPort, root, database, undefined, undefined, sessions
@@ -2964,7 +2971,7 @@ sleep 30
                    'provider-missing', 'failed', 'failed', 'provider session not found',
                    '{}', 1, 1, 1, 1)`
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       replacementPort = new MockPort()
       replacementServer = new RuntimeServer(
         replacementPort, root, database, undefined, undefined, sessions,
@@ -3033,7 +3040,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
         'fork-derived', 'fork-source', 'provider-source-42'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const forkPort = new MockPort()
       const forkServer = new RuntimeServer(
         forkPort, root, database, undefined, undefined, sessions,
@@ -3075,7 +3082,7 @@ sleep 30
       forkServer.close()
 
       await writeFile(argumentFile, '')
-      const restoredRegistry = new RuntimeSessionRegistry()
+      const restoredRegistry = createTestSessionRegistry()
       const restoredPort = new MockPort()
       const restoredServer = new RuntimeServer(
         restoredPort, root, database, undefined, undefined, restoredRegistry
@@ -3118,7 +3125,7 @@ sleep 30
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
     const forkPort = new MockPort()
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const forkServer = new RuntimeServer(
       forkPort, root, database, undefined, undefined, sessions,
       undefined, undefined, { providerResumeTimeoutMs: 1_000 }
@@ -3209,7 +3216,7 @@ sleep 30
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
     const forkPort = new MockPort()
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const forkServer = new RuntimeServer(
       forkPort, root, database, undefined, undefined, sessions
     )
@@ -3259,7 +3266,7 @@ sleep 30
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
     const forkPort = new MockPort()
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const forkServer = new RuntimeServer(
       forkPort, root, database, undefined, undefined, sessions,
       undefined, undefined, { forkProviderIdentityTimeoutMs: 25 }
@@ -3334,7 +3341,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
         'fork-quiet-derived', 'fork-quiet-source', 'provider-source-quiet'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const forkPort = new MockPort()
       forkServer = new RuntimeServer(
         forkPort, root, database, undefined, undefined, sessions,
@@ -3403,7 +3410,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
         'fork-failure-derived', 'fork-failure-source', 'missing-provider-42'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const forkPort = new MockPort()
       new RuntimeServer(forkPort, root, database, undefined, undefined, sessions)
       forkPort.receive({
@@ -3540,7 +3547,7 @@ sleep 30
         'corrupt-cold-history'
       )
 
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const forkPort = new MockPort()
       forkServer = new RuntimeServer(
         forkPort,
@@ -3593,7 +3600,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
         'fork-exit-derived', 'fork-exit-source', 'provider-source-exit'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const forkPort = new MockPort()
       new RuntimeServer(forkPort, root, database, undefined, undefined, sessions)
       forkPort.receive({
@@ -3630,7 +3637,7 @@ sleep 30
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const footerPort = new MockPort()
     const footerServer = new RuntimeServer(footerPort, root, database, undefined, undefined, sessions)
     try {
@@ -3677,7 +3684,7 @@ sleep 30
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
     process.env.MATOU_TEST_INPUT_FILE = inputFile
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const livePort = new MockPort()
     try {
       registerSession(database, 'provider-live-permission', 'claude-code')
@@ -3774,7 +3781,7 @@ sleep 30
       'binding-cross-window', 'provider-cross-window', 'provider-cross-window-42',
       JSON.stringify({ permissionMode: 'default' })
     )
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const providerConfigs = new ProviderConfigStore(root)
     const sharedHud = new SessionHudRegistry()
     const secondaryPort = new MockPort()
@@ -3932,7 +3939,7 @@ sleep 30
     const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const freshPort = new MockPort()
     try {
       registerSession(database, 'provider-fresh-permission', 'claude-code')
@@ -3977,7 +3984,7 @@ sleep 30
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const failedPort = new MockPort()
     try {
       registerSession(database, 'provider-failed-permission', 'claude-code')
@@ -4029,7 +4036,7 @@ sleep 30
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const completedPort = new MockPort()
     try {
       registerSession(database, 'provider-completed', 'claude-code')
@@ -4079,7 +4086,7 @@ sleep 30
     process.env.PATH = `${root}:${previousPath ?? ''}`
     process.env.SHELL = '/bin/zsh'
     process.env.ZDOTDIR = root
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const promotedPort = new MockPort()
     try {
       registerSession(database, 'shell-promoted-provider', 'shell')
@@ -4148,7 +4155,7 @@ sleep 30
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.SHELL = slowShell
     process.env.MATOU_CLAUDE_COMMAND = provider
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const firstPort = new MockPort()
     const secondPort = new MockPort()
     const firstServer = new RuntimeServer(firstPort, root, database, undefined, undefined, sessions)
@@ -4212,7 +4219,7 @@ sleep 30
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const retryPort = new MockPort()
     try {
       registerSession(database, 'provider-restore-retry', 'shell')
@@ -4277,7 +4284,7 @@ sleep 30
     await providerHooks.start()
     try {
       registerSession(database, 'provider-new-session', 'claude-code')
-      const registry = new RuntimeSessionRegistry()
+      const registry = createTestSessionRegistry()
       const providerPort = new MockPort()
       new RuntimeServer(
         providerPort, root, database, undefined, undefined, registry, providerHooks
@@ -4340,7 +4347,7 @@ sleep 30
     const repository = new SessionRepository(database, new DomainTransactionManager(database))
     const providerHooks = new ProviderHookServer(root, repository)
     await providerHooks.start()
-    const registry = new RuntimeSessionRegistry()
+    const registry = createTestSessionRegistry()
     const providerPort = new MockPort()
     const server = new RuntimeServer(
       providerPort, root, database, undefined, undefined, registry, providerHooks
@@ -4410,7 +4417,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
         'binding-fallback', 'provider-fallback-session', 'missing-provider-42'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const fallbackPort = new MockPort()
       new RuntimeServer(fallbackPort, root, database, undefined, undefined, sessions)
       fallbackPort.receive({
@@ -4466,7 +4473,7 @@ sleep 30
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     const timeoutPort = new MockPort()
     try {
       registerSession(database, 'provider-timeout-session', 'claude-code')
@@ -4524,7 +4531,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
         'binding-launch-fallback', 'provider-launch-fallback', 'provider-session-9'
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const launchPort = new MockPort()
       new RuntimeServer(launchPort, root, database, undefined, undefined, sessions)
       launchPort.receive({
@@ -4579,7 +4586,7 @@ sleep 30
         'binding-already-cleared', 'cleared-provider-session', 'provider-old',
         JSON.stringify({ invalidationReason: 'provider session not found' })
       )
-      const sessions = new RuntimeSessionRegistry()
+      const sessions = createTestSessionRegistry()
       const secondStartPort = new MockPort()
       new RuntimeServer(secondStartPort, root, database, undefined, undefined, sessions)
       secondStartPort.receive({
@@ -4663,7 +4670,7 @@ describe('RuntimeServer session-scoped journal recovery', () => {
     const previousShell = process.env.SHELL
     process.env.SHELL = executable
     let writable = false
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     port = new MockPort()
     server = new RuntimeServer(
       port, root, database, undefined, undefined, sessions, undefined, undefined,
@@ -4729,7 +4736,7 @@ describe('RuntimeServer session-scoped journal recovery', () => {
       start: () => new Promise<void>(() => {})
     })
     coordinator.start()
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     port = new MockPort()
     server = new RuntimeServer(
       port, root, database, undefined, undefined, sessions, undefined, undefined,
@@ -4794,7 +4801,7 @@ describe('RuntimeServer session-scoped journal recovery', () => {
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
     let writable = false
-    const sessions = new RuntimeSessionRegistry()
+    const sessions = createTestSessionRegistry()
     port = new MockPort()
     server = new RuntimeServer(
       port, root, database, undefined, undefined, sessions, undefined, undefined,
@@ -4893,7 +4900,7 @@ describe('RuntimeServer session-scoped journal recovery', () => {
     let writable = false
     port = new MockPort()
     server = new RuntimeServer(
-      port, root, database, undefined, undefined, undefined, undefined, undefined,
+      port, root, database, undefined, undefined, createTestSessionRegistry(), undefined, undefined,
       {
         journalOptionsForSession: (sessionId) => sessionId === 'faulted-session'
           ? {
@@ -4998,6 +5005,12 @@ class MockPort extends EventEmitter implements RuntimePort {
         message.type === 'rpc.response' && message.requestId === requestId
     )
   }
+}
+
+function createTestSessionRegistry(): RuntimeSessionRegistry {
+  const sessions = new RuntimeSessionRegistry()
+  testSessionRegistries.add(sessions)
+  return sessions
 }
 
 async function settle(): Promise<void> {

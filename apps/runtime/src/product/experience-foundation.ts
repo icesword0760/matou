@@ -22,6 +22,7 @@ const PREFERENCE_DEFAULTS: PreferenceValues = {
 
 export class PreferenceRepository {
   readonly #database: RuntimeDatabase
+  readonly #cache = new Map<keyof PreferenceValues, PreferenceValues[keyof PreferenceValues]>()
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -29,14 +30,22 @@ export class PreferenceRepository {
 
   get<K extends keyof PreferenceValues>(key: K): PreferenceValues[K] {
     this.#assertKey(key)
+    if (this.#cache.has(key)) return this.#cache.get(key) as PreferenceValues[K]
     const row = this.#database.get<{ value_json: string }>('SELECT value_json FROM preferences WHERE key = ?', key)
-    if (!row) return PREFERENCE_DEFAULTS[key]
+    if (!row) {
+      const value = PREFERENCE_DEFAULTS[key]
+      this.#cache.set(key, value)
+      return value
+    }
     try {
       const value = JSON.parse(row.value_json) as PreferenceValues[K]
       this.#validate(key, value)
+      this.#cache.set(key, value)
       return value
     } catch {
-      return PREFERENCE_DEFAULTS[key]
+      const value = PREFERENCE_DEFAULTS[key]
+      this.#cache.set(key, value)
+      return value
     }
   }
 
@@ -48,6 +57,7 @@ export class PreferenceRepository {
        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
       key, JSON.stringify(value), now
     )
+    this.#cache.set(key, value)
   }
 
   snapshot(): PreferenceValues {

@@ -32,6 +32,7 @@ export class WorkspacePathService {
   readonly #database: RuntimeDatabase
   readonly #transactions: DomainTransactionManager
   readonly #generations = new Map<string, number>()
+  readonly #validations = new Map<string, Promise<WorkspacePathState>>()
   readonly #pollIntervalMs: number
   #pollTimer: NodeJS.Timeout | undefined
 
@@ -45,7 +46,19 @@ export class WorkspacePathService {
     this.#pollIntervalMs = pollIntervalMs
   }
 
-  async validateWorkspace(workspaceId: string): Promise<WorkspacePathState> {
+  validateWorkspace(workspaceId: string): Promise<WorkspacePathState> {
+    const current = this.#validations.get(workspaceId)
+    if (current) return current
+    const validation = this.#validateWorkspace(workspaceId)
+    this.#validations.set(workspaceId, validation)
+    return validation.finally(() => {
+      if (this.#validations.get(workspaceId) === validation) {
+        this.#validations.delete(workspaceId)
+      }
+    })
+  }
+
+  async #validateWorkspace(workspaceId: string): Promise<WorkspacePathState> {
     const workspace = this.#database.get<{ root_directory: string }>(
       'SELECT root_directory FROM workspaces WHERE id = ? AND archived_at IS NULL',
       workspaceId

@@ -36,6 +36,7 @@ export interface PersistedSessionGitState {
 /** Owns durable Git status for the execution context a Session actually runs in. */
 export class SessionGitStateRepository {
   readonly #database: RuntimeDatabase
+  readonly #refreshes = new Map<string, Promise<PersistedSessionGitState>>()
 
   constructor(database: RuntimeDatabase) {
     this.#database = database
@@ -52,7 +53,19 @@ export class SessionGitStateRepository {
     return row ? mapRow(row) : undefined
   }
 
-  async refresh(executionContextId: string, now = Date.now()): Promise<PersistedSessionGitState> {
+  refresh(executionContextId: string, now = Date.now()): Promise<PersistedSessionGitState> {
+    const current = this.#refreshes.get(executionContextId)
+    if (current) return current
+    const refresh = this.#refresh(executionContextId, now)
+    this.#refreshes.set(executionContextId, refresh)
+    return refresh.finally(() => {
+      if (this.#refreshes.get(executionContextId) === refresh) {
+        this.#refreshes.delete(executionContextId)
+      }
+    })
+  }
+
+  async #refresh(executionContextId: string, now: number): Promise<PersistedSessionGitState> {
     const context = requireRow(this.#database.get<ExecutionContextRow>(
       `SELECT execution_contexts.id, execution_contexts.cwd,
               worktrees.repository_root AS registered_repository_root

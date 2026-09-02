@@ -56,7 +56,11 @@ test.describe('real Claude Fork and Git worktree', () => {
       await fixture.page.getByLabel('分支名称').fill('真实工作树分支')
       await fixture.page.getByText('从新工作树创建').click()
       await fixture.page.getByRole('button', { name: '创建分支', exact: true }).click()
-      await expect(fixture.page.getByText('Claude 的子会话')).toBeVisible({ timeout: 90_000 })
+      const childPane = fixture.page.getByRole('article', { name: '会话：真实工作树分支' })
+      await expect(childPane.getByRole('status', { name: /正在创建分支/ }))
+        .toHaveCount(0, { timeout: 90_000 })
+      await expect(fixture.page.getByText(`${marker} 的子会话`)).toBeVisible()
+      await expect(childPane.locator('.terminal-surface')).toHaveAttribute('data-profile', 'claude-code')
       await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       let worktrees = await exec('git', ['worktree', 'list', '--porcelain'], { cwd: fixture.workspaceDirectory })
       await expect.poll(async () => {

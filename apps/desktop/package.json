@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "node ../../tooling/run-desktop-dev.mjs",
     "build": "electron-vite build",
-    "test": "vitest run",
+    "test": "vitest run && vitest run --config vitest.performance.config.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf out"
   },

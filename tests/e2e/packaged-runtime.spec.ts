@@ -265,6 +265,15 @@ async function expectAllVisibleWindowsOnSecondaryDisplay(
   app: ElectronApplication
 ): Promise<void> {
   if (process.platform !== 'darwin') return
+  if (process.env.MATOU_E2E_DISPLAY === 'primary') {
+    await expect.poll(() => app.evaluate(({ BrowserWindow, screen }) => {
+      const primary = screen.getPrimaryDisplay()
+      const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
+      const placements = visible.map((window) => screen.getDisplayMatching(window.getBounds()))
+      return visible.length > 0 && placements.every(({ id }) => id === primary.id)
+    })).toBe(true)
+    return
+  }
   await expect.poll(() => app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const secondaryColorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>

@@ -6,7 +6,13 @@ import { promisify } from 'node:util'
 
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
-import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  restartMatou,
+  type MatouFixture
+} from './matou-fixture'
 import { collectScaleSample, type ScaleSample } from './scale/scale-metrics'
 import {
   terminalCommand, visibleSurfaces, waitForShell
@@ -307,6 +313,10 @@ function encodedPythonCommand(script: string): string {
 }
 
 async function expectOnlyColorLcdWindows(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
@@ -324,6 +334,7 @@ async function expectOnlyColorLcdWindows(fixture: MatouFixture): Promise<void> {
 }
 
 async function assertAcceptanceDisplays(): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) return
   if (process.platform !== 'darwin') {
     throw new Error('Visible Electron gate requires macOS display inventory before launch')
   }

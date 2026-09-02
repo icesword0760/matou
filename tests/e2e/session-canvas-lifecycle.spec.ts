@@ -21,8 +21,8 @@ test.describe('session canvas lifecycle', () => {
         button: 'right', position: { x: 72, y: 20 }
       })
       const detachItem = fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' })
-      await detachItem.focus()
-      await fixture.page.keyboard.press('Enter')
+      await expect(detachItem).toBeVisible()
+      await detachItem.click()
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
       await expect(fixture.page.getByTestId('detached-placeholder')).toBeVisible()
       const detached = (await fixture.app.windows()).find((page) => page !== fixture.page)!

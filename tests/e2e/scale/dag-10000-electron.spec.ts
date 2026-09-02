@@ -3,7 +3,9 @@ import { execFileSync } from 'node:child_process'
 import { performance } from 'node:perf_hooks'
 
 import {
+  expectVisibleWindowsOnPrimaryDisplay,
   launchMatou,
+  primaryAcceptanceDisplayRequested,
   restartMatou,
   stopMatouPreservingData,
   type MatouFixture
@@ -40,9 +42,11 @@ test.describe('real Electron 10,000-node DAG acceptance', () => {
 
   test('meets navigation, interaction, DOM, long-task, and display budgets from real SQLite authority', async () => {
     test.skip(process.platform !== 'darwin', 'the accepted dual-display names are macOS-specific')
-    const systemDisplays = execFileSync('system_profiler', ['SPDisplaysDataType'], { encoding: 'utf8' })
-    expect(systemDisplays).toContain('XV272U:')
-    expect(systemDisplays).toContain('Color LCD:')
+    if (!primaryAcceptanceDisplayRequested()) {
+      const systemDisplays = execFileSync('system_profiler', ['SPDisplaysDataType'], { encoding: 'utf8' })
+      expect(systemDisplays).toContain('XV272U:')
+      expect(systemDisplays).toContain('Color LCD:')
+    }
     let fixture: MatouFixture | undefined
     try {
       fixture = await launchMatou({ env: { MATOU_E2E_SCALE: '1' } })
@@ -228,6 +232,10 @@ async function collectDagInteractionSample(dag: Page): Promise<InteractionSample
 }
 
 async function expectVisibleWindowsOnColorLcd(fixture: MatouFixture, count: number): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture, count)
+    return
+  }
   await expect.poll(async () => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     return {

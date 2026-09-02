@@ -3,7 +3,12 @@ import { promisify } from 'node:util'
 
 import { expect, test, type Locator } from '@playwright/test'
 
-import { launchMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  type MatouFixture
+} from './matou-fixture'
 import { terminalCommand, visibleSurfaces } from './fixtures/session-canvas-fixture'
 
 const execFileAsync = promisify(execFile)
@@ -158,6 +163,10 @@ function processExists(pid: number): boolean {
 }
 
 async function expectMainWindowOnInternalDisplay(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   let result: { target: Electron.Rectangle; bounds: Electron.Rectangle } | undefined
   await expect.poll(async () => {
     result = await fixture.app.evaluate(({ BrowserWindow, screen }) => {

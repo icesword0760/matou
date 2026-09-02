@@ -5,7 +5,9 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import { readSessionFrames } from '../../apps/runtime/src/journal/segment-journal'
 import {
+  expectVisibleWindowsOnPrimaryDisplay,
   launchMatou,
+  primaryAcceptanceDisplayRequested,
   restartMatou,
   stopMatouPreservingData,
   type MatouFixture
@@ -455,6 +457,10 @@ async function readCardRecoveryProbe(page: Page) {
 }
 
 async function assertVisibleWindowsOnSecondaryColorLcd(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const colorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>

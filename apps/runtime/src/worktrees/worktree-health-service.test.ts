@@ -116,6 +116,22 @@ describe('WorktreeHealthService', () => {
     })).resolves.toEqual({ kind: 'mismatch', reason: 'wrong-branch' })
   })
 
+  it('preserves a multibyte branch name when the host locale shortens refs incorrectly', async () => {
+    const branch = 'feature/真实工作树分支'
+    await exec('git', ['-C', worktreePath, 'switch', '-c', branch])
+
+    await expect(service.check({
+      repositoryRoot,
+      path: worktreePath,
+      expectedBranch: branch
+    })).resolves.toEqual({
+      kind: 'ready',
+      canonicalPath: await realpath(worktreePath),
+      branch,
+      dirty: false
+    })
+  })
+
   it('reports a detached HEAD as a healthy detached identity', async () => {
     const head = (await exec('git', ['-C', worktreePath, 'rev-parse', 'HEAD'])).stdout.trim()
     await exec('git', ['-C', worktreePath, 'checkout', '--detach', head])

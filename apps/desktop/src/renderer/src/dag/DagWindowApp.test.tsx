@@ -57,7 +57,7 @@ describe('DagWindowApp', () => {
     }))
 
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(window.matouDesktop.closeDagWindow).toHaveBeenCalledWith('main-1')
+    await vi.waitFor(() => expect(window.matouDesktop.closeDagWindow).toHaveBeenCalledWith('main-1'))
   })
 
   it('shows Git branch, dirty state and shared-worktree impact on a node card', () => {
@@ -206,6 +206,33 @@ describe('DagWindowApp', () => {
       sceneId: 'scene-1', ownerKey: 'dag-viewport:scene-1',
       geometry: expect.objectContaining({ zoom: 1.1 })
     }))
+  })
+
+  it('waits for Runtime to acknowledge the latest viewport before closing on Escape', async () => {
+    const data = graph()
+    const geometryResolvers: Array<() => void> = []
+    const request = vi.fn((method: string) => {
+      if (method === 'geometry.list') return Promise.resolve([])
+      if (method === 'hierarchy.get-scene-session-graph') return Promise.resolve(data)
+      if (method === 'geometry.put') {
+        return new Promise<void>((resolve) => geometryResolvers.push(resolve))
+      }
+      return Promise.resolve(undefined)
+    })
+    runtime.current = { request }
+
+    render(<DagWindowApp />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+    await userEvent.setup().click(screen.getByRole('button', { name: '放大' }))
+    await vi.waitFor(() => expect(geometryResolvers.length).toBeGreaterThan(0))
+    const writesBeforeClose = geometryResolvers.length
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await vi.waitFor(() => expect(geometryResolvers).toHaveLength(writesBeforeClose + 1))
+    expect(window.matouDesktop.closeDagWindow).not.toHaveBeenCalled()
+
+    geometryResolvers.at(-1)!()
+    await vi.waitFor(() => expect(window.matouDesktop.closeDagWindow).toHaveBeenCalledWith('main-1'))
   })
 
   it('keeps DAG browsing active but never persists viewport geometry in read-only recovery', async () => {

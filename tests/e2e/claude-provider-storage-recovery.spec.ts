@@ -6,7 +6,13 @@ import { promisify } from 'node:util'
 
 import { expect, test, type Locator } from '@playwright/test'
 
-import { launchMatou, restartMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  restartMatou,
+  type MatouFixture
+} from './matou-fixture'
 
 const execFileAsync = promisify(execFile)
 
@@ -54,8 +60,8 @@ test.describe('Claude provider storage recovery', () => {
       const missingPane = paneByTitle(fixture, '缺失记录会话')
       const corruptPane = paneByTitle(fixture, '损坏记录会话')
       const healthyPane = paneByTitle(fixture, '正常会话')
-      await expect(missingPane.getByRole('status')).toContainText('Claude Code 恢复失败')
-      await expect(corruptPane.getByRole('status')).toContainText('Claude Code 恢复失败')
+      await expect(missingPane.locator('.provider-restore-banner')).toContainText('Claude Code 恢复失败')
+      await expect(corruptPane.locator('.provider-restore-banner')).toContainText('Claude Code 恢复失败')
       await expect(missingPane.getByRole('button', { name: '重试恢复' })).toBeVisible()
       await expect(missingPane.getByRole('button', { name: '新开 Claude Code' })).toBeVisible()
       await expect(missingPane.locator('.terminal-surface')).toHaveCount(0)
@@ -102,7 +108,7 @@ test.describe('Claude provider storage recovery', () => {
         kind: 'claude-code', restoreState: 'none'
       })
       expect(countInvocations(await readFile(invocationLog, 'utf8'), 'corrupt-provider')).toBe(2)
-      await expect(paneByTitle(fixture, '缺失记录会话').getByRole('status'))
+      await expect(paneByTitle(fixture, '缺失记录会话').locator('.provider-restore-banner'))
         .toContainText('Claude Code 恢复失败')
 
       const freshPane = paneByTitle(fixture, '缺失记录会话')
@@ -236,6 +242,7 @@ if (resume && !record) {
 }
 
 async function assertAcceptanceDisplaysBeforeLaunch(): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) return
   if (process.platform !== 'darwin') return
   const { stdout } = await execFileAsync('/usr/sbin/system_profiler', ['SPDisplaysDataType', '-json'])
   const report = JSON.parse(stdout) as { SPDisplaysDataType?: Array<{ spdisplays_ndrvs?: Array<Record<string, unknown>> }> }
@@ -247,6 +254,10 @@ async function assertAcceptanceDisplaysBeforeLaunch(): Promise<void> {
 }
 
 async function assertVisibleWindowsOnlyOnColorLcd(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   let placement: { primaryId: number; internalId?: number; visible: Array<{ displayId: number }> } | undefined
   await expect.poll(async () => {
     placement = await fixture.app.evaluate(({ BrowserWindow, screen }) => {

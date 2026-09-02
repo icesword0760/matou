@@ -179,6 +179,36 @@ describe('TerminalSurface focus continuity', () => {
       .toBe(false)
   })
 
+  it('spreads cold WebGL setup for inactive moving cards across animation frames', async () => {
+    const animationFrames: FrameRequestCallback[] = []
+    const activationMicrotasks: VoidFunction[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      animationFrames.push(callback)
+      return animationFrames.length
+    })
+    vi.stubGlobal('queueMicrotask', (callback: VoidFunction) => {
+      activationMicrotasks.push(callback)
+    })
+    render(<>
+      <TerminalSurface sessionId="session-moving-1" active={false} visible viewportMoving />
+      <TerminalSurface sessionId="session-moving-2" active={false} visible viewportMoving />
+    </>)
+    expect(state.terminalConstructed).toHaveBeenCalledTimes(2)
+    expect(state.webglConstructed).not.toHaveBeenCalled()
+
+    act(() => {
+      activationMicrotasks.shift()?.()
+    })
+    expect(state.webglConstructed).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      while (animationFrames.length > 0 && state.webglConstructed.mock.calls.length === 1) {
+        animationFrames.shift()?.(16)
+      }
+    })
+    expect(state.webglConstructed).toHaveBeenCalledTimes(2)
+  })
+
   it('reuses its xterm VT model after foreground card DOM virtualization', async () => {
     foregroundTerminalModels.setForegroundSessions(['session-1'])
     const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
@@ -502,6 +532,25 @@ describe('TerminalSurface focus continuity', () => {
     state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([66]), sequence: 2 })
     expect(state.focus).toHaveBeenCalledTimes(1)
   })
+
+  it.each(['dialog', 'alertdialog'] as const)(
+    'does not let delayed terminal output steal focus while a visible %s is open',
+    async (role) => {
+      const view = render(<TerminalSurface sessionId="session-1" active visible />)
+      await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+      const dialog = document.createElement('div')
+      dialog.setAttribute('role', role)
+      view.container.append(dialog)
+      document.body.focus()
+      state.focus.mockClear()
+
+      state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([65]), sequence: 1 })
+
+      expect(state.focus).not.toHaveBeenCalled()
+      view.rerender(<TerminalSurface sessionId="session-1" active visible focusRequest={1} />)
+      expect(state.focus).not.toHaveBeenCalled()
+    }
+  )
 
   it('does not let late output from a terminal that became inactive steal focus during the same commit', async () => {
     function OutputDuringCommit({ active }: { active: boolean }) {

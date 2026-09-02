@@ -7,7 +7,12 @@ import { promisify } from 'node:util'
 import { expect, test, type Locator } from '@playwright/test'
 
 import { readSessionFrames } from '../../apps/runtime/src/journal/segment-journal'
-import { launchMatou, type MatouFixture } from './matou-fixture'
+import {
+  expectVisibleWindowsOnPrimaryDisplay,
+  launchMatou,
+  primaryAcceptanceDisplayRequested,
+  type MatouFixture
+} from './matou-fixture'
 import { terminalCommand, visibleSurfaces, waitForShell } from './fixtures/session-canvas-fixture'
 
 const execFileAsync = promisify(execFile)
@@ -387,6 +392,10 @@ async function requiredAttribute(locator: Locator, name: string): Promise<string
 }
 
 async function expectOnlySecondaryColorLcd(fixture: MatouFixture): Promise<void> {
+  if (primaryAcceptanceDisplayRequested()) {
+    await expectVisibleWindowsOnPrimaryDisplay(fixture)
+    return
+  }
   await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
     const primary = screen.getPrimaryDisplay()
     const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())

@@ -84,7 +84,7 @@ export class SessionExecutionService<T = void> {
       return Promise.reject(new Error('Session execution descriptor identity does not match'))
     }
     return this.#sessions.runExclusive(sessionId, async () => {
-      const row = this.#durableFork(sessionId)
+      const row = descriptor.profile === 'shell' ? undefined : this.#durableFork(sessionId)
       const live = this.#sessions.has(sessionId)
       if (!row || terminal(row.stage)) {
         if (row?.stage === 'failed' && !live) {

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
 export interface TerminalShortcutHandlers {
   splitHorizontal?(): void
@@ -23,20 +23,20 @@ export interface TerminalShortcutHandlers {
 export function useTerminalShortcuts(handlers: TerminalShortcutHandlers): boolean {
   const isMac = typeof navigator !== 'undefined' &&
     (/Mac/.test(navigator.platform ?? '') || /Mac/.test(navigator.userAgent ?? ''))
+  const lastAltKeyDownTime = useRef(0)
   useEffect(() => {
-    let lastAltKeyDownTime = 0
     const keydown = (event: KeyboardEvent) => {
       const standaloneAlt = ['Alt', 'AltLeft', 'AltRight'].includes(event.key) && event.altKey &&
         !event.ctrlKey && !event.metaKey && !event.shiftKey
       if (standaloneAlt) {
         const now = Date.now()
-        if (now - lastAltKeyDownTime < 300) {
+        if (now - lastAltKeyDownTime.current < 300) {
           handlers.toggleShortcutPanel?.()
-          lastAltKeyDownTime = 0
+          lastAltKeyDownTime.current = 0
           event.preventDefault()
           event.stopPropagation()
         } else {
-          lastAltKeyDownTime = now
+          lastAltKeyDownTime.current = now
         }
         return
       }

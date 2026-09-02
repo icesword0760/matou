@@ -29,6 +29,46 @@ const CHECKPOINT_SCROLLBACK_LINES = 10_000
 const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const NOOP = () => {}
 
+interface QueuedWebglActivation {
+  cancelled: boolean
+  activate(): void
+}
+
+const queuedWebglActivations: QueuedWebglActivation[] = []
+let webglActivationFrameScheduled = false
+let webglActivationMicrotaskScheduled = false
+
+// Cold cards can enter the carousel in batches. Promote at most one fallback
+// renderer to WebGL per frame so GPU setup never lands as a single scroll hitch.
+function flushQueuedWebglActivation() {
+  webglActivationFrameScheduled = false
+  webglActivationMicrotaskScheduled = false
+  let next = queuedWebglActivations.shift()
+  while (next?.cancelled) next = queuedWebglActivations.shift()
+  next?.activate()
+  while (queuedWebglActivations[0]?.cancelled) queuedWebglActivations.shift()
+  if (queuedWebglActivations.length > 0) scheduleQueuedWebglActivationFrame()
+}
+
+function scheduleQueuedWebglActivationFrame() {
+  if (webglActivationFrameScheduled || webglActivationMicrotaskScheduled) return
+  webglActivationFrameScheduled = true
+  requestAnimationFrame(flushQueuedWebglActivation)
+}
+
+function scheduleInitialWebglActivation() {
+  if (webglActivationFrameScheduled || webglActivationMicrotaskScheduled) return
+  webglActivationMicrotaskScheduled = true
+  queueMicrotask(flushQueuedWebglActivation)
+}
+
+function queueWebglActivation(activate: () => void) {
+  const entry: QueuedWebglActivation = { cancelled: false, activate }
+  queuedWebglActivations.push(entry)
+  scheduleInitialWebglActivation()
+  return () => { entry.cancelled = true }
+}
+
 export type RuntimeStatus =
   | 'waiting-for-port' | 'handshaking' | 'starting-session'
   | 'streaming' | 'error' | 'exited'
@@ -99,6 +139,7 @@ interface CachedTerminalModel {
   search: SearchAddon
   serialize: SerializeAddon
   webgl: WebglAddon | undefined
+  webglAttempted: boolean
   opened: boolean
   lastAppliedSequence: number
   lastCheckpointSequence: number
@@ -144,6 +185,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const checkpointNowRef = useRef<() => void>(NOOP)
   const flushOutputRef = useRef<() => void>(NOOP)
   const resumeVisualRef = useRef<() => void>(NOOP)
+  const activateWebglRef = useRef<() => void>(NOOP)
+  const scheduleWebglRef = useRef<() => void>(NOOP)
+  const cancelWebglRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
   const historyModeRef = useRef(false)
   const historyRequestGenerationRef = useRef(0)
@@ -178,6 +222,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   useEffect(() => {
     if (visible || active) {
+      if (active) {
+        cancelWebglRef.current()
+        activateWebglRef.current()
+      } else scheduleWebglRef.current()
       const catchupTimer = active || viewportMoving
         ? undefined
         : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
@@ -243,11 +291,15 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   useEffect(() => {
     if (!active || !visible) return
+    const container = containerRef.current
+    if (!container || !terminalFocusAllowed(container)) return
     const focused = document.activeElement as HTMLElement | null
     if (focused?.closest('[role="dialog"], [role="alertdialog"]') ||
       (focused && /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName) &&
         !focused.classList.contains('xterm-helper-textarea'))) return
-    const frame = requestAnimationFrame(() => terminalRef.current?.focus())
+    const frame = requestAnimationFrame(() => {
+      if (terminalFocusAllowed(container)) terminalRef.current?.focus()
+    })
     return () => cancelAnimationFrame(frame)
   }, [active, sessionId, visible])
   useEffect(() => {
@@ -274,7 +326,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminal.loadAddon(search)
       terminal.loadAddon(serialize)
       return {
-        terminal, fit, search, serialize, webgl: undefined, opened: false,
+        terminal, fit, search, serialize, webgl: undefined, webglAttempted: false, opened: false,
         lastAppliedSequence: 0, lastCheckpointSequence: -1, screenEpoch: 0,
         dispose: () => terminal.dispose()
       } satisfies CachedTerminalModel
@@ -284,11 +336,18 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       ? e2eRowsRef.current
       : null
     const reusedTerminalModel = model.opened
-    terminal.options.fontSize = fontSize
-    terminal.options.theme = TERMINAL_THEMES[themeKey]
-    if (!model.opened) {
-      terminal.open(container)
-      model.opened = true
+    let webglScheduled = false
+    let cancelQueuedWebgl = NOOP
+    const cancelWebgl = () => {
+      if (!webglScheduled) return
+      webglScheduled = false
+      cancelQueuedWebgl()
+      cancelQueuedWebgl = NOOP
+    }
+    const activateWebgl = () => {
+      cancelWebgl()
+      if (model.webglAttempted) return
+      model.webglAttempted = true
       try {
         const webgl = new WebglAddon()
         model.webgl = webgl
@@ -304,10 +363,29 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // expected on remote desktops and after Chromium exhausts GPU contexts.
         model.webgl = undefined
       }
+    }
+    const scheduleWebgl = () => {
+      if (model.webglAttempted || webglScheduled) return
+      webglScheduled = true
+      cancelQueuedWebgl = queueWebglActivation(() => {
+        webglScheduled = false
+        cancelQueuedWebgl = NOOP
+        activateWebgl()
+      })
+    }
+    activateWebglRef.current = activateWebgl
+    scheduleWebglRef.current = scheduleWebgl
+    cancelWebglRef.current = cancelWebgl
+    terminal.options.fontSize = fontSize
+    terminal.options.theme = TERMINAL_THEMES[themeKey]
+    if (!model.opened) {
+      terminal.open(container)
+      model.opened = true
     } else if (terminal.element) {
       container.appendChild(terminal.element)
       if (model.webgl) e2eRows?.classList.add('xterm-rows')
     }
+    activeRef.current ? activateWebgl() : scheduleWebgl()
     terminalRef.current = terminal
     fit.fit()
     const publishTerminalDimensions = () => {
@@ -321,7 +399,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (!readOnly) client.resizeTerminal(sessionId, cols, rows)
     })
     if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
-      requestAnimationFrame(() => terminal.focus())
+      requestAnimationFrame(() => {
+        if (terminalFocusAllowed(container)) terminal.focus()
+      })
     }
     let replayRequested = false
     let replaying = false
@@ -725,6 +805,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       clearCheckpointTimer()
       if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
       output.dispose()
+      cancelWebgl()
+      activateWebglRef.current = NOOP
+      scheduleWebglRef.current = NOOP
+      cancelWebglRef.current = NOOP
       flushOutputRef.current = NOOP
       resumeVisualRef.current = NOOP
       storeCheckpoint()
@@ -749,7 +833,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   useEffect(() => {
     if (!active || !visible || focusRequest <= 0) return
-    const frame = requestAnimationFrame(() => terminalRef.current?.focus())
+    const container = containerRef.current
+    if (!container) return
+    const frame = requestAnimationFrame(() => {
+      if (!terminalFocusBlockedByDialog()) terminalRef.current?.focus()
+    })
     return () => cancelAnimationFrame(frame)
   }, [active, focusRequest, visible])
 
@@ -969,8 +1057,15 @@ function structuredFileTreePaths(value: string): string[] {
 }
 
 function terminalFocusAllowed(container: HTMLElement): boolean {
+  if (terminalFocusBlockedByDialog()) return false
   const focused = document.activeElement as HTMLElement | null
   return !focused || focused === document.body || container.contains(focused)
+}
+
+function terminalFocusBlockedByDialog(): boolean {
+  return Array.from(document.querySelectorAll<HTMLElement>(
+    '[role="dialog"], [role="alertdialog"]'
+  )).some((dialog) => !dialog.hidden && !dialog.closest('[hidden], [inert], [aria-hidden="true"]'))
 }
 
 function isMacPlatform(): boolean {

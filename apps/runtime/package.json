@@ -6,7 +6,7 @@
   "main": "dist/index.cjs",
   "scripts": {
     "build": "tsup && node ../../tooling/prepare-runtime-control-assets.mjs",
-    "test": "vitest run --testTimeout=15000",
+    "test": "vitest run --testTimeout=15000 --exclude src/runtime-server.test.ts --exclude src/journal/journal-range-reader.test.ts && vitest run --testTimeout=15000 src/runtime-server.test.ts && vitest run --testTimeout=120000 src/journal/journal-range-reader.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },

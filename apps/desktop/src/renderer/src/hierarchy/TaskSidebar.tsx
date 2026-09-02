@@ -243,8 +243,9 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
               aria-label={`重新关联工作空间目录：${workspace.name}`}
               disabled={readOnly} title={readOnly ? READ_ONLY_REASON : '选择工作空间的新位置'}
               onClick={(event) => { event.stopPropagation(); void relinkDirectory(workspace) }}>恢复目录</button>}
-            <button className="workspace-group__more" aria-label={`工作空间菜单：${workspace.name}`}
-              onClick={(event) => openWorkspaceMenu(workspace, event)}><AppIcon name="ellipsis" /></button>
+            <button className="workspace-group__more" data-icon="ellipsis"
+              aria-label={`工作空间菜单：${workspace.name}`}
+              onClick={(event) => openWorkspaceMenu(workspace, event)} />
           </div>
           {!isCollapsed && <div className="workspace-group__tasks" role="list">
             {tasks.map((task) => <div role="listitem" key={task.id} data-testid={`task-${task.id}`}
@@ -285,7 +286,8 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
                 </span>
                 {unreadCount(task.id) === 0 && <span className="workbench-item__actions">
                   <button className={`workbench-item__more-btn${menuTask?.id === task.id ? ' is-open' : ''}`}
-                    aria-label={`事项菜单：${task.title}`} title="更多操作" onClick={(event) => openTaskMenu(task, event)}><AppIcon name="ellipsis" /></button>
+                    data-icon="ellipsis" aria-label={`事项菜单：${task.title}`} title="更多操作"
+                    onClick={(event) => openTaskMenu(task, event)} />
                 </span>}
               </div>
             </div>)}
