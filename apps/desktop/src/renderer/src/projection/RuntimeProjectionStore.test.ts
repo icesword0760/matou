@@ -44,6 +44,7 @@ describe('RuntimeProjectionStore', () => {
   it('does not expose an authoritative snapshot export path', () => {
     const store = new RuntimeProjectionStore()
     expect('exportAuthoritativeSnapshot' in store).toBe(false)
+    expect(store.applyTerminalHud('session-a', { sessionId: 'session-a' })).toBe(false)
   })
 
   it('keeps an active hierarchy projection and removes archived entities from it', () => {
@@ -140,6 +141,46 @@ describe('RuntimeProjectionStore', () => {
     expect(store.view().hierarchy.sessionGraphs?.['scene-1']).toMatchObject({
       focusedSessionId: 'session-1'
     })
+  })
+
+  it('does not let a delayed graph event reverse newer window-local focus', () => {
+    const store = new RuntimeProjectionStore()
+    const nodes = [
+      { sessionId: 'session-1', currentMode: 'shell' },
+      { sessionId: 'session-2', currentMode: 'shell' }
+    ]
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], sessions: [], relations: [], scenes: [],
+      sessionGraphs: {
+        'scene-1': { sceneId: 'scene-1', focusedSessionId: 'session-1', nodes, edges: [] }
+      }
+    })
+    store.applyCommandResult({
+      sceneId: 'scene-1', focusedSessionId: 'session-2', nodes, edges: []
+    }, { type: 'hierarchy.set-focused-session', input: {
+      sceneId: 'scene-1', sessionId: 'session-2'
+    } })
+
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'delayed-graph', eventType: 'session.graph-summary-changed',
+      aggregateType: 'scene', aggregateId: 'scene-1', payload: {
+        graph: { sceneId: 'scene-1', focusedSessionId: 'session-1', nodes, edges: [] }
+      }, schemaVersion: 1, commandId: 'older-terminal-work', occurredAt: 2
+    }])
+
+    expect(store.view().sessionGraphs['scene-1']?.focusedSessionId).toBe('session-2')
+
+    store.applyBatch('generation-1', [{
+      sequence: 3, eventId: 'removed-focus', eventType: 'session.graph-summary-changed',
+      aggregateType: 'scene', aggregateId: 'scene-1', payload: {
+        graph: {
+          sceneId: 'scene-1', focusedSessionId: 'session-1',
+          nodes: [{ sessionId: 'session-1', currentMode: 'shell' }], edges: []
+        }
+      }, schemaVersion: 1, commandId: 'remove-session', occurredAt: 3
+    }])
+    expect(store.view().sessionGraphs['scene-1']?.focusedSessionId).toBe('session-1')
   })
 
   it('projects a Fork stage emitted while background setup is still running', () => {
@@ -429,6 +470,63 @@ describe('RuntimeProjectionStore', () => {
     ])
     expect(store.view().workspaces).toEqual([{ id: 'workspace-a' }])
     expect(store.eventSequence).toBe(7)
+  })
+
+  it('keeps live terminal HUD state through the next semantic event batch', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [{ id: 'workspace-a' }],
+      tasks: [{ id: 'task-a', workspaceId: 'workspace-a' }],
+      sessions: [], relations: [], scenes: [],
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: { windowId: 'window-1' },
+        sessionHuds: [{ sessionId: 'session-a', mode: 'shell', gitDirty: false }]
+      }
+    })
+    store.applyTerminalHud('session-a', {
+      sessionId: 'session-a', mode: 'agent', gitDirty: true, contextPercent: 72
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'interaction', eventType: 'session.user-interacted',
+      aggregateType: 'session', aggregateId: 'session-a', workspaceId: 'workspace-a',
+      taskId: 'task-a', sessionId: 'session-a', schemaVersion: 1,
+      commandId: 'cmd', occurredAt: 50,
+      payload: {
+        sessionId: 'session-a', workspaceId: 'workspace-a', taskId: 'task-a',
+        sceneId: 'scene-a', interactionKind: 'submit', sequence: 1,
+        graph: { sceneId: 'scene-a', nodes: [], edges: [] }
+      }
+    }])
+
+    expect(store.view().hierarchy.sessionHuds).toEqual([
+      expect.objectContaining({
+        sessionId: 'session-a', mode: 'agent', gitDirty: true, contextPercent: 72
+      })
+    ])
+    expect(store.view().workspaces[0]).toMatchObject({ lastOpenedAt: 50 })
+    expect(store.view().tasks[0]).toMatchObject({ lastOpenedAt: 50 })
+  })
+
+  it('reorders Scene entities when Runtime publishes the authoritative Scene order', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [{ id: 'task-a' }], sessions: [], relations: [],
+      scenes: [
+        { id: 'scene-a', taskId: 'task-a', sortKey: 'a0' },
+        { id: 'scene-b', taskId: 'task-a', sortKey: 'a1' }
+      ]
+    })
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'reorder', eventType: 'task.scene-order-changed',
+      aggregateType: 'task', aggregateId: 'task-a', taskId: 'task-a',
+      payload: { sceneOrder: ['scene-b', 'scene-a'] }, schemaVersion: 1,
+      commandId: 'cmd', occurredAt: 2
+    }])
+
+    expect(store.view().hierarchy.scenes.map(({ id }) => id)).toEqual(['scene-b', 'scene-a'])
   })
 
   it('loads the graph for a Scene selected after the initial projection', () => {

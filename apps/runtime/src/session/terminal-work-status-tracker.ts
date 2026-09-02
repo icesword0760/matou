@@ -39,9 +39,9 @@ export class TerminalWorkStatusTracker {
           : 'error')
     }
     this.#buffer = combined.slice(consumedThrough).slice(this.#provider ? -8_192 : -512)
-    const completed = statuses.some((status) =>
-      status === 'idle' || status === 'error' || status === 'interrupted'
-    )
+    const lastLifecycleStatus = statuses.at(-1)
+    const completed = lastLifecycleStatus === 'idle' ||
+      lastLifecycleStatus === 'error' || lastLifecycleStatus === 'interrupted'
     if (!completed && isExplicitBlockingPrompt(this.#buffer)) statuses.push('needs-input')
     if (
       this.#provider === 'claude-code' &&

@@ -387,6 +387,42 @@ describe('PRD 05 hierarchy shell', () => {
       .toEqual(['xterm-session-a1'])
   })
 
+  it('closes an inactive leaf without a Worktree immediately from the pane shortcut', () => {
+    const data = fixture()
+    const first = data.sceneSnapshots![0]!
+    first.scene.rootNodeId = 'split-a1'
+    first.nodes = [
+      { id: 'split-a1', sceneId: first.scene.id, kind: 'split', direction: 'horizontal', ordinal: 0 },
+      { id: 'node-a1', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 0 },
+      { id: 'node-safe-close', sceneId: first.scene.id, parentNodeId: 'split-a1', kind: 'mount', ordinal: 1 }
+    ]
+    first.mounts.push({
+      id: 'mount-safe-close', sceneId: first.scene.id,
+      sceneNodeId: 'node-safe-close', sessionId: 'session-safe-close'
+    })
+    data.sessions.push({
+      id: 'session-safe-close', taskId: 'task-a1', title: '可直接关闭',
+      executionContextId: 'context-a'
+    })
+    data.navigation.sessionByScene['scene-a1'] = 'session-safe-close'
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-safe-close', edges: [],
+        nodes: [
+          { ...graphNode('session-a1', '终端 A1'), hasOwnedWorktree: false },
+          { ...graphNode('session-safe-close', '可直接关闭'), hasOwnedWorktree: false }
+        ]
+      }
+    }
+
+    render(<HierarchyShell fixture={data} />)
+    fireEvent.keyDown(document, { key: 'w', metaKey: true })
+
+    expect(screen.queryByRole('alertdialog', { name: /移除节点/ })).toBeNull()
+    expect(screen.queryByTestId('xterm-session-safe-close')).toBeNull()
+    expect(screen.getByTestId('xterm-session-a1')).toBeTruthy()
+  })
+
   it('keeps reference product font boundaries while zooming by shortcut', () => {
     render(<HierarchyShell fixture={fixture()} />)
 

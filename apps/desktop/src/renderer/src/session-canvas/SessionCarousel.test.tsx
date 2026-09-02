@@ -413,6 +413,54 @@ describe('SessionCarousel', () => {
     expect(activeSlot.classList.contains('is-focused')).toBe(true)
   })
 
+  it('marks an explicit DAG reveal as the single selected slot expansion', () => {
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-2"
+      revealRequest={{ sessionId: 'session-2', sequence: 1 }}
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    const activeSlot = document.querySelector<HTMLElement>('[data-session-id="session-2"]')!
+
+    fireEvent.pointerLeave(viewport)
+
+    expect(document.querySelectorAll('.session-card-slot.is-expanded')).toHaveLength(1)
+    expect(activeSlot.classList.contains('is-expanded')).toBe(true)
+  })
+
+  it('does not recenter a preview that the user activates in place', () => {
+    vi.useFakeTimers()
+    const nodes = fixtures(5)
+    let focused = 'session-1'
+    let view: ReturnType<typeof render>
+    const renderCarousel = () => <SessionCarousel nodes={nodes} focusedSessionId={focused}
+      onActivate={(sessionId) => {
+        focused = sessionId
+        view.rerender(renderCarousel())
+      }} renderSession={(node) => <span className="terminal-surface">{node.title}</span>} />
+    view = render(renderCarousel())
+    const viewport = screen.getByRole('region', { name: '同级会话列表' }) as HTMLDivElement
+    const targetSlot = document.querySelector<HTMLElement>('[data-session-id="session-3"]')!
+    const target = document.querySelector<HTMLElement>('[data-session-card="session-3"]')!
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 900 },
+      scrollWidth: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 120, writable: true }
+    })
+    Object.defineProperties(targetSlot, {
+      offsetLeft: { configurable: true, value: 780 },
+      offsetWidth: { configurable: true, value: 420 }
+    })
+    act(() => vi.advanceTimersByTime(600))
+    viewport.scrollLeft = 120
+
+    fireEvent.mouseEnter(target)
+    fireEvent.pointerDown(target.querySelector('.terminal-surface')!)
+    act(() => vi.advanceTimersByTime(600))
+
+    expect(focused).toBe('session-3')
+    expect(viewport.scrollLeft).toBe(120)
+    vi.useRealTimers()
+  })
+
   it('keeps bringing the active card into view while its layout settles', () => {
     vi.useFakeTimers()
     render(<SessionCarousel nodes={fixtures(5)} focusedSessionId="session-5"

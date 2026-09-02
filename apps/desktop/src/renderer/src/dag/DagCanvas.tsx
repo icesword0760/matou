@@ -103,6 +103,12 @@ export function DagCanvas(props: {
     update(next)
     window.setTimeout(() => viewport.classList.remove('is-animating'), reducedMotion() ? 1 : 240)
   }
+  const restoreViewport = () => {
+    // Reset means returning to the stable graph origin, not merely changing
+    // scale around an arbitrary pan position. Keeping the top inset also
+    // leaves the first visible row clear of the floating toolbar.
+    update({ x: 70, y: 40, scale: 1 })
+  }
   useEffect(() => {
     if (initialTransform) return
     const frame = requestAnimationFrame(() => focusNode(focusedSessionId, false))
@@ -118,7 +124,7 @@ export function DagCanvas(props: {
       } else if (event.key === '-') {
         event.preventDefault(); update(zoomAt(transform, transform.scale - .1, center(viewportRef.current)))
       } else if (event.key === '0') {
-        event.preventDefault(); update({ ...transform, scale: 1 })
+        event.preventDefault(); restoreViewport()
       } else if (event.key.toLocaleLowerCase() === 'f') {
         event.preventDefault(); viewportRef.current?.querySelector<HTMLInputElement>('.dag-search input')?.focus()
       }
@@ -171,7 +177,7 @@ export function DagCanvas(props: {
       <DagSearch nodes={graph.nodes} onPreview={(sessionId) => focusNode(sessionId)} onChoose={onSelect} />
       <div className="dag-toolbar__zoom" aria-label="画布缩放">
         <button aria-label="缩小" onClick={() => update(zoomAt(transform, transform.scale - .1, center(viewportRef.current)))}>−</button>
-        <button aria-label="恢复 100%" onClick={() => update({ ...transform, scale: 1 })}>{Math.round(transform.scale * 100)}%</button>
+        <button aria-label="恢复 100%" onClick={restoreViewport}>{Math.round(transform.scale * 100)}%</button>
         <button aria-label="放大" onClick={() => update(zoomAt(transform, transform.scale + .1, center(viewportRef.current)))}>＋</button>
         <button aria-label="聚焦当前节点" onClick={() => focusNode(previewSessionId)}>⌖</button>
       </div>

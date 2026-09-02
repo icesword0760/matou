@@ -179,6 +179,7 @@ export class RuntimeServer {
   readonly #environmentResumeDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #permissionOverrides = new Map<string, HudPermissionMode>()
   readonly #shellInputBuffers = new Map<string, string>()
+  readonly #terminalInputTails = new Map<string, Promise<void>>()
   readonly #providerInputBuffers = new Map<string, string>()
   readonly #lastProviderInputs = new Map<string, string>()
   readonly #workStatusTrackers = new Map<string, TerminalWorkStatusTracker>()
@@ -408,6 +409,7 @@ export class RuntimeServer {
     const launchMatches = this.#providerLaunchRunIds.get(sessionId) === runId ||
       this.#sessions.get(sessionId)?.runId === runId
     if (!launchMatches) return
+    this.#confirmedProviderRunIds.add(runId)
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
       this.#providerLaunchRunIds.delete(sessionId)
@@ -552,32 +554,7 @@ export class RuntimeServer {
         break
       }
       case 'terminal.input':
-        try {
-          await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
-          if (this.#closed) break
-          const session = this.#session(message.sessionId)
-          if (session?.durabilityState !== 'healthy') break
-          if (session && /[\r\n]/.test(message.data)) {
-            this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
-            this.#setWorkStatus(message.sessionId, 'running')
-          }
-          if (session && session.profile !== 'shell') {
-            this.#observeProviderInput(message.sessionId, message.data)
-          }
-          const promoted = session?.profile === 'shell'
-            ? await this.#maybePromoteShellAgent(session, message.data)
-            : false
-          if (!promoted) session?.write(message.data)
-          if (session?.profile === 'shell' && /[\r\n]/.test(message.data)) {
-            this.#scheduleCwdCapture(session)
-          }
-        } catch (error) {
-          if (error instanceof WorkspacePathInvalidError) {
-            this.#sendError(error.code, error.message, message.sessionId)
-            break
-          }
-          throw error
-        }
+        await this.#enqueueTerminalInput(message)
         break
       case 'terminal.retry-last-input': {
         const session = this.#session(message.sessionId)
@@ -686,6 +663,52 @@ export class RuntimeServer {
         void this.#captureCwd(session)
       }, 1_050))
     }, 180))
+  }
+
+  async #enqueueTerminalInput(
+    message: Extract<RendererMessage, { type: 'terminal.input' }>
+  ): Promise<void> {
+    const targetSession = this.#session(message.sessionId)
+    const inputAllowed = this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
+      .then(() => undefined, (error: unknown) => error)
+    const previous = this.#terminalInputTails.get(message.sessionId) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(async () => {
+      try {
+        const inputError = await inputAllowed
+        if (inputError !== undefined) throw inputError
+        if (this.#closed) return
+        const session = this.#session(message.sessionId)
+        if (!session || session !== targetSession || session.durabilityState !== 'healthy') return
+        if (session && /[\r\n]/.test(message.data)) {
+          this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
+          this.#setWorkStatus(message.sessionId, 'running')
+        }
+        if (session && session.profile !== 'shell') {
+          this.#observeProviderInput(message.sessionId, message.data)
+        }
+        const promoted = session?.profile === 'shell'
+          ? await this.#maybePromoteShellAgent(session, message.data)
+          : false
+        if (!promoted) session?.write(message.data)
+        if (session?.profile === 'shell' && /[\r\n]/.test(message.data)) {
+          this.#scheduleCwdCapture(session)
+        }
+      } catch (error) {
+        if (error instanceof WorkspacePathInvalidError) {
+          this.#sendError(error.code, error.message, message.sessionId)
+          return
+        }
+        throw error
+      }
+    })
+    this.#terminalInputTails.set(message.sessionId, current)
+    try {
+      await current
+    } finally {
+      if (this.#terminalInputTails.get(message.sessionId) === current) {
+        this.#terminalInputTails.delete(message.sessionId)
+      }
+    }
   }
 
   async #captureCwd(session: PtySession): Promise<void> {
@@ -1345,8 +1368,10 @@ export class RuntimeServer {
         this.#sessions.delete(message.sessionId, existing)
         this.#control?.backend.unregister(message.sessionId, existing)
         this.#control?.tokens.revokeRun(existing.runId ?? message.sessionId)
-        this.#hud.delete(message.sessionId)
-        this.publishSessionHud(message.sessionId)
+        if (existing.profile !== message.profile) {
+          this.#hud.delete(message.sessionId)
+          this.publishSessionHud(message.sessionId)
+        }
         this.#shellInputBuffers.delete(message.sessionId)
         this.#providerInputBuffers.delete(message.sessionId)
         this.#workStatusTrackers.delete(message.sessionId)
@@ -1601,6 +1626,8 @@ export class RuntimeServer {
         onExit: (exited, exitCode, signal, exitReason) => {
           this.#flushSessionSummary(message.sessionId)
           this.#clearProviderResumeTimer(message.sessionId)
+          const providerIdentityConfirmed = exited.runId !== undefined &&
+            this.#confirmedProviderRunIds.has(exited.runId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
           hookRegistration?.retire()
           if (exitReason === 'runtime-shutdown' || exitReason === 'environment-transition') {
@@ -1633,6 +1660,7 @@ export class RuntimeServer {
           }
           const resumeExitFallback = Boolean(
             resumeBinding &&
+            !providerIdentityConfirmed &&
             resumeMonitor?.isMonitoring &&
             this.#sessions.get(message.sessionId) === exited &&
             this.#markResumeFailed(
@@ -2019,7 +2047,7 @@ export class RuntimeServer {
   }
 
   #consumeProviderIdentityConfirmation(sessionId: string, runId: string | undefined): boolean {
-    if (!runId || !this.#confirmedProviderRunIds.delete(runId)) return false
+    if (!runId || !this.#confirmedProviderRunIds.has(runId)) return false
     if (this.#providerLaunchRunIds.get(sessionId) === runId) {
       this.#providerLaunchRunIds.delete(sessionId)
     }

@@ -231,6 +231,18 @@ export class RuntimeProjectionStore {
     this.#viewCache = undefined
   }
 
+  applyTerminalHud(sessionId: string, hud: unknown | null): boolean {
+    if (!this.#runtimeGeneration) return false
+    const sessionHuds = Array.isArray(this.#hierarchyMeta.sessionHuds)
+      ? this.#hierarchyMeta.sessionHuds.filter((candidate) =>
+          asObject(candidate)?.sessionId !== sessionId)
+      : []
+    if (hud !== null) sessionHuds.push(structuredClone(hud))
+    this.#hierarchyMeta = { ...this.#hierarchyMeta, sessionHuds }
+    this.#viewCache = undefined
+    return true
+  }
+
   view(): RuntimeProjectionView {
     if (!this.#runtimeGeneration) throw new Error('projection snapshot has not been loaded')
     if (this.#viewCache) return this.#viewCache
@@ -283,6 +295,9 @@ export class RuntimeProjectionStore {
     } else if (event.eventType === 'task.renamed' || event.eventType === 'task.pin-changed' ||
       event.eventType === 'task.scene-order-changed') {
       patchEntity(this.#tasks, event.aggregateId, event.payload)
+      if (event.eventType === 'task.scene-order-changed') {
+        this.#applyOrder(this.#scenes, asObject(event.payload)?.sceneOrder, 'sortKey', true)
+      }
     } else if (event.eventType === 'task.pin-order-changed') {
       this.#applyOrder(this.#tasks, asObject(event.payload)?.taskIds, 'pinSortKey')
     } else if (event.eventType === 'task.archived') {
@@ -322,6 +337,13 @@ export class RuntimeProjectionStore {
     } else if (event.eventType === 'scene.mode-changed' || event.eventType === 'scene.archived') {
       patchEntity(this.#scenes, event.aggregateId, event.payload)
     } else if (isSessionGraphEvent(event.eventType)) {
+      if (event.eventType === 'session.user-interacted') {
+        const interaction = asObject(event.payload)
+        if (typeof interaction?.workspaceId === 'string' && typeof interaction.taskId === 'string') {
+          patchEntity(this.#workspaces, interaction.workspaceId, { lastOpenedAt: event.occurredAt })
+          patchEntity(this.#tasks, interaction.taskId, { lastOpenedAt: event.occurredAt })
+        }
+      }
       const session = asEntity(asObject(event.payload)?.session)
       if (session) this.#sessions.set(event.sessionId ?? event.aggregateId, session)
       const graph = asSessionGraph(asObject(event.payload)?.graph)
@@ -331,7 +353,19 @@ export class RuntimeProjectionStore {
 
   #flushPendingGraphs(pendingGraphs: Map<string, SessionGraphProjection>): void {
     if (pendingGraphs.size === 0) return
-    this.#replaceSessionGraphs(pendingGraphs.values())
+    this.#replaceSessionGraphs([...pendingGraphs.values()].map((graph) => {
+      const localFocusedSessionId = this.#sessionGraphs[graph.sceneId]?.focusedSessionId
+      if (!localFocusedSessionId || !graph.nodes.some((node) =>
+        node.sessionId === localFocusedSessionId && typeof node.archivedAt !== 'number')) {
+        return graph
+      }
+      // Focus is window-local navigation state. Graphs embedded in domain
+      // events may have been projected before a newer focus RPC completed (or
+      // for another window), so their sampled focus must not reverse the
+      // user's later click. Structural graph data remains authoritative; only
+      // retain the current focus while that Session is still active.
+      return { ...graph, focusedSessionId: localFocusedSessionId }
+    }))
     pendingGraphs.clear()
   }
 
@@ -442,11 +476,12 @@ export class RuntimeProjectionStore {
     this.#hierarchyMeta = { ...this.#hierarchyMeta, taskPlacements: placements }
   }
 
-  #applyOrder(target: ProjectionCollection, ids: unknown, key: string): void {
+  #applyOrder(target: ProjectionCollection, ids: unknown, key: string, reorder = false): void {
     if (!Array.isArray(ids)) return
     ids.forEach((id, index) => {
       if (typeof id === 'string') patchEntity(target, id, { [key]: projectionSortKey(index) })
     })
+    if (reorder) target.reorder(ids.filter((id): id is string => typeof id === 'string'))
   }
 
   #archiveCommandTarget(context?: { type: string; input: Record<string, unknown> }): void {
@@ -602,6 +637,21 @@ class ProjectionCollection {
     if (index === undefined) return
     this.#byId.delete(id)
     this.#values = this.#values.filter((entity) => entity.id !== id)
+    this.#rebuildIndexes()
+    this.#rebuildMembership()
+  }
+
+  reorder(ids: string[]): void {
+    const rank = new Map(ids.map((id, index) => [id, index] as const))
+    const originalRank = new Map(this.#values.map(({ id }, index) => [id, index] as const))
+    this.#values = [...this.#values].sort((left, right) => {
+      const leftRank = rank.get(left.id)
+      const rightRank = rank.get(right.id)
+      if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank
+      if (leftRank !== undefined) return -1
+      if (rightRank !== undefined) return 1
+      return originalRank.get(left.id)! - originalRank.get(right.id)!
+    })
     this.#rebuildIndexes()
     this.#rebuildMembership()
   }

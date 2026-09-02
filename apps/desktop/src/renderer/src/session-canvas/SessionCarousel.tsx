@@ -255,6 +255,7 @@ export function SessionCarousel(props: {
   useEffect(() => {
     if (!focusedSessionId) return
     const focusChanged = previousFocusedSessionId.current !== focusedSessionId
+    const activatedFromPreview = focusChanged && hoverIntentSessionId.current === focusedSessionId
     previousFocusedSessionId.current = focusedSessionId
     if (focusChanged) {
       // Activation is a durable navigation choice; any pointer-only preview
@@ -277,6 +278,11 @@ export function SessionCarousel(props: {
       // A user-selected Session supersedes a stale viewport restore. The
       // restoration loop observes this flag on its next frame and exits.
       restoringGeometry.current = false
+    }
+    if (activatedFromPreview) {
+      ensureVisibleRef.current?.(focusedSessionId)
+      if (!pageClosing.current) onGeometryChange?.(currentGeometry())
+      return
     }
     focusVisibilitySessionId.current = focusedSessionId
     const followThrough = performance.now() + 440
@@ -903,7 +909,9 @@ export function SessionCarousel(props: {
         if (element) cardsRef.current.set(node.sessionId, element)
         else cardsRef.current.delete(node.sessionId)
       }} data-session-id={node.sessionId}
-      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${hoveredSessionId === node.sessionId ? ' is-expanded' : ''}`}
+      className={`session-card-slot${node.sessionId === focusedSessionId ? ' is-focused' : ''}${hoveredSessionId === node.sessionId ||
+        (hoveredSessionId === null && revealRequest?.sessionId === node.sessionId && node.sessionId === focusedSessionId)
+        ? ' is-expanded' : ''}`}
       onTransitionEnd={(event) => {
         if (event.target !== event.currentTarget ||
           (event.propertyName !== 'flex-basis' && event.propertyName !== 'flex-grow')) return

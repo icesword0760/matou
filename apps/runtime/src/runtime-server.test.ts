@@ -1581,11 +1581,12 @@ describe('RuntimeServer domain RPC', () => {
       await waitUntil(() => terminalText(port).includes('VALUE:confirmed'), 5_000)
       await waitUntil(() => workStatus('work-status-session') === 'idle', 5_000)
 
-      port.receive({
-        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
-        sessionId: 'work-status-session',
-        data: 'read "value?STA008_WAIT> "; printf \'STA008_GOT:%s\\n\' "$value"\r'
-      })
+      for (const data of 'read "value?STA008_WAIT> "; printf \'STA008_GOT:%s\\n\' "$value"\r') {
+        port.receive({
+          type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+          sessionId: 'work-status-session', data
+        })
+      }
       await waitUntil(() => terminalText(port).includes('STA008_WAIT>'), 5_000)
       await waitUntil(() => workStatus('work-status-session') === 'needs-input', 5_000)
       port.receive({
@@ -1818,12 +1819,17 @@ describe('RuntimeServer domain RPC', () => {
     port.receive(message)
     await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.spawned').length === 1)
     const firstPid = port.last('terminal.spawned')?.pid
+    const hudClearsBeforeRestart = port.sent.filter((candidate) =>
+      candidate.type === 'terminal.hud' && candidate.hud === null).length
 
     port.receive({ ...message, spawnRevision: 2 })
     await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.spawned').length === 2)
     const secondPid = port.last('terminal.spawned')?.pid
 
     expect(secondPid).not.toBe(firstPid)
+    expect(port.last('terminal.hud')).toMatchObject({ hud: { mode: 'shell' } })
+    expect(port.sent.filter((candidate) =>
+      candidate.type === 'terminal.hud' && candidate.hud === null)).toHaveLength(hudClearsBeforeRestart)
     port.receive({
       type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'revised-spawn-session'
@@ -2083,12 +2089,20 @@ describe('RuntimeServer domain RPC', () => {
   it('keeps a quiet restored Claude conversation running when statusline confirms its launch', async () => {
     const executable = join(root, 'provider-quiet-resume-fixture.sh')
     const argumentFile = join(root, 'provider-quiet-resume-arguments.txt')
-    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nsleep 30\n')
+    const exitFile = join(root, 'provider-quiet-resume-exit')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+      'while [ ! -f "$MATOU_TEST_EXIT_FILE" ]; do sleep 0.05; done',
+      ''
+    ].join('\n'))
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    const previousExitFile = process.env.MATOU_TEST_EXIT_FILE
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    process.env.MATOU_TEST_EXIT_FILE = exitFile
     const repository = new SessionRepository(database, new DomainTransactionManager(database))
     let resumeServer: RuntimeServer | undefined
     const providerHooks = new ProviderHookServer(root, repository, {
@@ -2139,6 +2153,9 @@ describe('RuntimeServer domain RPC', () => {
       expect(repository.getResumeBinding('quiet-resume-session', 'claude-code')).toMatchObject({
         providerSessionId: 'provider-quiet-resume', resumeState: 'available'
       })
+      await writeFile(exitFile, 'exit')
+      await waitUntil(() => sessions.get('quiet-resume-session')?.profile === 'shell')
+      expect(resumePort.last('terminal.hud')).toMatchObject({ hud: { mode: 'shell' } })
 
       resumePort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'quiet-resume-session'
@@ -2149,6 +2166,7 @@ describe('RuntimeServer domain RPC', () => {
       await providerHooks.stop()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+      restoreEnv('MATOU_TEST_EXIT_FILE', previousExitFile)
     }
   })
 

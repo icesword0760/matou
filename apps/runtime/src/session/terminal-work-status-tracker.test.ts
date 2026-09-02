@@ -48,6 +48,14 @@ describe('TerminalWorkStatusTracker', () => {
     expect(tracker.ingest('STA008_WAIT> ')).toEqual(['needs-input'])
   })
 
+  it('keeps a blocking prompt when one PTY chunk also closes the previous command', () => {
+    const tracker = new TerminalWorkStatusTracker()
+
+    expect(tracker.ingest(
+      '\u001b]133;D;0\u0007\u001b]133;A\u0007\u001b]133;C\u0007STA008_WAIT> '
+    )).toEqual(['idle', 'running', 'needs-input'])
+  })
+
   it('marks only a terminal Claude provider failure as an error', () => {
     const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
 
