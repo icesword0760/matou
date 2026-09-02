@@ -16,6 +16,10 @@ export class ProviderResumeMonitor {
     return !this.#failed && !this.#settled
   }
 
+  get isSettled(): boolean {
+    return this.#settled
+  }
+
   ingest(data: string): string | undefined {
     if (this.#failed || this.#settled) return undefined
     this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)

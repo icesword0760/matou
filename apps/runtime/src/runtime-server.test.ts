@@ -2140,6 +2140,50 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('keeps recovery pending until the resumed Claude conversation confirms its identity', async () => {
+    const executable = join(root, 'provider-recovery-ready-fixture.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    server.close()
+    registerSession(database, 'provider-recovery-ready', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+      'binding-provider-recovery-ready', 'provider-recovery-ready',
+      'provider-recovery-ready-identity'
+    )
+    const sessions = new RuntimeSessionRegistry()
+    port = new MockPort()
+    server = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    port.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-recovery-ready-renderer'
+    })
+    try {
+      let settled = false
+      const recovery = server.ensureSessionRunning({
+        sessionId: 'provider-recovery-ready', sceneId: 'scene-provider-recovery-ready',
+        executionContextId: 'replay-context', profile: 'claude-code',
+        priority: 'active-session', enqueueSequence: 1
+      }).then(() => { settled = true })
+      await waitUntil(() => sessions.has('provider-recovery-ready'))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(settled).toBe(false)
+
+      const runId = sessions.get('provider-recovery-ready')?.runId
+      expect(runId).toEqual(expect.any(String))
+      server.providerIdentityRecorded('provider-recovery-ready', runId!)
+      await recovery
+      expect(settled).toBe(true)
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('accepts a fresh Claude statusline immediately when it supersedes a stale restore failure', async () => {
     const executable = join(root, 'provider-replacement-fixture.sh')
     const argumentFile = join(root, 'provider-replacement-arguments.txt')

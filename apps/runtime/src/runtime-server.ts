@@ -126,6 +126,11 @@ interface InteractiveClaudeLaunch {
   permissionMode: HudPermissionMode
 }
 
+interface ProviderRecoveryWaiter {
+  resolve(): void
+  reject(error: Error): void
+}
+
 // Resolving an interactive alias starts the user's login shell and may execute
 // a costly zsh configuration. Start it with the Runtime instead of making the
 // first Enter on `cc` pay that startup cost. The environment key keeps tests,
@@ -168,6 +173,7 @@ export class RuntimeServer {
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerLaunchRunIds = new Map<string, string>()
   readonly #confirmedProviderRunIds = new Set<string>()
+  readonly #providerRecoveryWaiters = new Map<string, Set<ProviderRecoveryWaiter>>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #environmentResumeDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #permissionOverrides = new Map<string, HudPermissionMode>()
@@ -307,6 +313,9 @@ export class RuntimeServer {
     })
     port.on('close', () => {
       this.#closed = true
+      this.#rejectAllProviderRecoveries(
+        new Error('Runtime connection closed during provider recovery')
+      )
       this.#detachAll()
     })
     port.start()
@@ -322,17 +331,26 @@ export class RuntimeServer {
     if (!job.executionContextId || !job.profile) {
       throw new Error(`Session ${job.sessionId} is missing a recovery launch descriptor`)
     }
-    await this.#spawnSerialized({
-      type: 'terminal.spawn',
-      protocolVersion: PROTOCOL_VERSION,
-      sessionId: job.sessionId,
-      executionContextId: job.executionContextId,
-      profile: job.profile,
-      cols: 80,
-      rows: 24
-    }, false)
-    if (!this.#sessions.has(job.sessionId) && !this.#hasParkedProviderRestoreFailure(job.sessionId)) {
-      throw new Error(`Session ${job.sessionId} did not reach a running state`)
+    const providerRecovery = job.profile === 'claude-code' &&
+      this.#sessionRepository.getResumeBinding(job.sessionId, 'claude-code')
+      ? this.#waitForProviderRecovery(job.sessionId)
+      : undefined
+    try {
+      await this.#spawnSerialized({
+        type: 'terminal.spawn',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: job.sessionId,
+        executionContextId: job.executionContextId,
+        profile: job.profile,
+        cols: 80,
+        rows: 24
+      }, false)
+      if (!this.#sessions.has(job.sessionId) && !this.#hasParkedProviderRestoreFailure(job.sessionId)) {
+        throw new Error(`Session ${job.sessionId} did not reach a running state`)
+      }
+      await providerRecovery?.promise
+    } finally {
+      providerRecovery?.cancel()
     }
   }
 
@@ -386,13 +404,17 @@ export class RuntimeServer {
         console.error(`[session.restore-succeeded] ${errorMessage(error)}`)
       }
     }
-    if (this.#providerLaunchRunIds.get(sessionId) !== runId) return
+    const launchMatches = this.#providerLaunchRunIds.get(sessionId) === runId ||
+      this.#sessions.get(sessionId)?.runId === runId
+    if (!launchMatches) return
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
       this.#providerLaunchRunIds.delete(sessionId)
+      this.#settleProviderRecovery(sessionId)
       return
     }
     this.#confirmedProviderRunIds.add(runId)
+    this.#settleProviderRecovery(sessionId)
   }
 
   startOrResumeSession(
@@ -414,6 +436,9 @@ export class RuntimeServer {
     this.#providerResumeTimers.clear()
     this.#providerLaunchRunIds.clear()
     this.#confirmedProviderRunIds.clear()
+    this.#rejectAllProviderRecoveries(
+      new Error('Runtime connection closed during provider recovery')
+    )
     this.#providerInputBuffers.clear()
     this.#lastProviderInputs.clear()
     this.#workStatusTrackers.clear()
@@ -1553,6 +1578,12 @@ export class RuntimeServer {
               hookRegistration?.retire()
               this.#parkResumeFailure(message, activeSession, resumeBinding.id, resumeFailure)
             }
+          } else if (resumeMonitor?.isSettled) {
+            // A full provider screen is the fallback readiness signal when a
+            // Claude release delays or omits its statusline HTTP hook. Do not
+            // remove the card-wide recovery state merely because the child PID
+            // exists; the first keystroke can otherwise land during startup.
+            this.#settleProviderRecovery(message.sessionId)
           }
         },
         onExit: (exited, exitCode, signal, exitReason) => {
@@ -1752,6 +1783,7 @@ export class RuntimeServer {
           resumeBinding.id,
           `provider process could not start: ${errorMessage(error)}`
         )) {
+          this.#settleProviderRecovery(message.sessionId, new Error(errorMessage(error)))
           return
         }
       }
@@ -1884,6 +1916,7 @@ export class RuntimeServer {
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
     this.#clearProviderResumeTimer(message.sessionId)
+    this.#settleProviderRecovery(message.sessionId, new Error(reason))
     if (!this.#markResumeFailed(message.sessionId, bindingId, reason)) return
     this.#sessions.delete(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
@@ -1936,6 +1969,57 @@ export class RuntimeServer {
     if (this.#providerLaunchRunIds.get(sessionId) === runId) {
       this.#providerLaunchRunIds.delete(sessionId)
     }
+  }
+
+  #waitForProviderRecovery(sessionId: string): {
+    promise: Promise<void>
+    cancel(): void
+  } {
+    let waiter: ProviderRecoveryWaiter
+    let settled = false
+    const promise = new Promise<void>((resolve, reject) => {
+      waiter = {
+        resolve: () => {
+          if (settled) return
+          settled = true
+          resolve()
+        },
+        reject: (error) => {
+          if (settled) return
+          settled = true
+          reject(error)
+        }
+      }
+    })
+    // The provider can fail while its PTY is still being constructed. Attach a
+    // handler immediately; ensureSessionRunning awaits the original promise
+    // once spawning settles and still receives the same rejection.
+    void promise.catch(() => undefined)
+    const waiters = this.#providerRecoveryWaiters.get(sessionId) ?? new Set()
+    waiters.add(waiter!)
+    this.#providerRecoveryWaiters.set(sessionId, waiters)
+    return {
+      promise,
+      cancel: () => {
+        waiters.delete(waiter!)
+        if (waiters.size === 0) this.#providerRecoveryWaiters.delete(sessionId)
+      }
+    }
+  }
+
+  #settleProviderRecovery(sessionId: string, error?: Error): void {
+    const waiters = this.#providerRecoveryWaiters.get(sessionId)
+    if (!waiters) return
+    this.#providerRecoveryWaiters.delete(sessionId)
+    for (const waiter of waiters) {
+      if (error) waiter.reject(error)
+      else waiter.resolve()
+    }
+  }
+
+  #rejectAllProviderRecoveries(error: Error): void {
+    const sessionIds = [...this.#providerRecoveryWaiters.keys()]
+    for (const sessionId of sessionIds) this.#settleProviderRecovery(sessionId, error)
   }
 
   #markResumeFailed(sessionId: string, bindingId: string, reason: string): boolean {
