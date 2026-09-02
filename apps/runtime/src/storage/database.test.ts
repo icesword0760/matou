@@ -38,8 +38,15 @@ describe('RuntimeDatabase', () => {
     database.all<{ value: string }>('SELECT value FROM scale_values')
 
     expect(database.readStatementCount()).toBe(4)
+    expect(database.readStatementProfile()).toEqual([
+      { statement: 'CREATE TABLE scale_values (value TEXT NOT NULL)', count: 1 },
+      { statement: 'INSERT INTO scale_values VALUES (?)', count: 1 },
+      { statement: 'SELECT value FROM scale_values', count: 1 },
+      { statement: 'SELECT value FROM scale_values LIMIT 1', count: 1 }
+    ])
     expect(database.readStatementCount(true)).toBe(4)
     expect(database.readStatementCount()).toBe(0)
+    expect(database.readStatementProfile()).toEqual([])
   })
 
   it('configures the durability and isolation pragmas', async () => {

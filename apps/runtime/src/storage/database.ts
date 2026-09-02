@@ -66,6 +66,7 @@ export class RuntimeDatabase implements DatabaseTransaction {
   readonly #queue = new StorageQueue()
   readonly #ownerPath: string | undefined
   #statementCount: number | undefined
+  #statementProfile: Map<string, number> | undefined
   #closed = false
 
   constructor(
@@ -141,34 +142,44 @@ export class RuntimeDatabase implements DatabaseTransaction {
   exec(sql: string): void {
     this.#assertOpen()
     this.#assertWritable()
-    this.#countStatement()
+    this.#countStatement(sql)
     this.#connection.exec(sql)
   }
 
   run(sql: string, ...params: SQLInputValue[]): StatementResultingChanges {
     this.#assertOpen()
     this.#assertWritable()
-    this.#countStatement()
+    this.#countStatement(sql)
     return this.#connection.prepare(sql).run(...params)
   }
 
   get<T extends object>(sql: string, ...params: SQLInputValue[]): T | undefined {
     this.#assertOpen()
-    this.#countStatement()
+    this.#countStatement(sql)
     return this.#connection.prepare(sql).get(...params) as T | undefined
   }
 
   all<T extends object>(sql: string, ...params: SQLInputValue[]): T[] {
     this.#assertOpen()
-    this.#countStatement()
+    this.#countStatement(sql)
     return this.#connection.prepare(sql).all(...params) as T[]
   }
 
   /** Enables a measurement window on reset and returns only statements executed through this authority. */
   readStatementCount(reset = false): number {
     const count = this.#statementCount ?? 0
-    if (reset) this.#statementCount = 0
+    if (reset) {
+      this.#statementCount = 0
+      this.#statementProfile = new Map()
+    }
     return count
+  }
+
+  readStatementProfile(): Array<{ statement: string; count: number }> {
+    return [...(this.#statementProfile ?? new Map())]
+      .map(([statement, count]) => ({ statement, count }))
+      .sort((left, right) => right.count - left.count || left.statement.localeCompare(right.statement))
+      .slice(0, 12)
   }
 
   transaction<T>(callback: (transaction: DatabaseTransaction) => T): T {
@@ -249,8 +260,13 @@ export class RuntimeDatabase implements DatabaseTransaction {
     if (this.readOnly) throw new StorageReadOnlyError()
   }
 
-  #countStatement(): void {
-    if (this.#statementCount !== undefined) this.#statementCount += 1
+  #countStatement(sql: string): void {
+    if (this.#statementCount === undefined) return
+    this.#statementCount += 1
+    if (this.#statementProfile) {
+      const statement = sql.replace(/\s+/g, ' ').trim().slice(0, 240)
+      this.#statementProfile.set(statement, (this.#statementProfile.get(statement) ?? 0) + 1)
+    }
   }
 }
 

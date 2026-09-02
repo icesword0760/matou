@@ -73,7 +73,14 @@ test.describe('real Electron scale benchmark', () => {
         if (siblingSessions === 1000) {
           expect(sample.p95).toBeLessThan(34)
           expect(sample.domNodes).toBeLessThan(700)
-          expect(sample.statementCount).toBeLessThan(1_500)
+          // Runtime may continue restoring real PTYs throughout this window. A
+          // fixed statement total would penalize faster recovery, so reserve
+          // the original 1,500-query UI budget plus a bounded allowance for
+          // each newly persisted PTY. If warmup already completed recovery,
+          // the original fixed budget still applies.
+          expect(sample.statementCount).toBeLessThan(
+            1_500 + sample.ptyStartedDuringMeasurement * 32
+          )
           expect(sample.longTaskP95).toBeLessThan(100)
         }
         measuredProcessIds = [

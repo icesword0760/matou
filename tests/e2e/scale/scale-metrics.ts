@@ -16,9 +16,13 @@ export interface ScaleSample {
   rendererRssMb: number
   runtimeRssMb: number
   ptyCount: number
+  ptyCountAtMeasurementStart: number
+  ptyStartedDuringMeasurement: number
   ptyPids: number[]
   domNodes: number
   statementCount: number
+  statementProfile: Array<{ statement: string; count: number }>
+  statementsPerPtyStarted: number
   eventLoopDelayP99Ms: number
   eventLoopDelayMaxMs: number
   maxUnackedBytes: number
@@ -52,6 +56,7 @@ interface RuntimeScaleMetrics {
   ptyCount: number
   ptyPids: number[]
   statementCount: number
+  statementProfile: Array<{ statement: string; count: number }>
   eventLoopDelayP99Ms: number
   eventLoopDelayMaxMs: number
   maxUnackedBytes: number
@@ -88,7 +93,7 @@ export async function collectScaleSample(
   for (let run = 0; run < warmupRuns; run += 1) {
     await collectBrowserFrames(fixture, minimumFrameCount)
   }
-  await readRuntimeMetrics(fixture, true)
+  const runtimeAtMeasurementStart = await readRuntimeMetrics(fixture, true)
 
   const frameDurations: number[] = []
   const longTasks: number[] = []
@@ -100,6 +105,10 @@ export async function collectScaleSample(
     domNodes = Math.max(domNodes, sample.domNodes)
   }
   const runtime = await readRuntimeMetrics(fixture, false)
+  const ptyStartedDuringMeasurement = Math.max(
+    0,
+    runtime.ptyCount - runtimeAtMeasurementStart.ptyCount
+  )
   const processMetrics = await readProcessMetrics(fixture, runtime.runtimePid)
   const sample: ScaleSample = {
     name: options.name,
@@ -115,9 +124,15 @@ export async function collectScaleSample(
     rendererRssMb: processMetrics.rendererRssMb,
     runtimeRssMb: processMetrics.runtimeRssMb,
     ptyCount: runtime.ptyCount,
+    ptyCountAtMeasurementStart: runtimeAtMeasurementStart.ptyCount,
+    ptyStartedDuringMeasurement,
     ptyPids: runtime.ptyPids,
     domNodes,
     statementCount: runtime.statementCount,
+    statementProfile: runtime.statementProfile,
+    statementsPerPtyStarted: ptyStartedDuringMeasurement === 0
+      ? 0
+      : round(runtime.statementCount / ptyStartedDuringMeasurement),
     eventLoopDelayP99Ms: runtime.eventLoopDelayP99Ms,
     eventLoopDelayMaxMs: runtime.eventLoopDelayMaxMs,
     maxUnackedBytes: runtime.maxUnackedBytes,

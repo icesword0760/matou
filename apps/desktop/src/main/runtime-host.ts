@@ -35,6 +35,7 @@ type RuntimeChildMessage = RuntimeLifecycleEvent | {
   ptyCount: number
   ptyPids: number[]
   statementCount: number
+  statementProfile: Array<{ statement: string; count: number }>
   eventLoopDelayP99Ms: number
   eventLoopDelayMaxMs: number
   maxUnackedBytes: number
@@ -54,6 +55,7 @@ export interface RuntimeScaleMetrics {
   ptyCount: number
   ptyPids: number[]
   statementCount: number
+  statementProfile: Array<{ statement: string; count: number }>
   eventLoopDelayP99Ms: number
   eventLoopDelayMaxMs: number
   maxUnackedBytes: number
@@ -267,6 +269,7 @@ export class RuntimeHost {
         ptyCount: candidate.ptyCount,
         ptyPids: candidate.ptyPids,
         statementCount: candidate.statementCount,
+        statementProfile: candidate.statementProfile,
         eventLoopDelayP99Ms: candidate.eventLoopDelayP99Ms,
         eventLoopDelayMaxMs: candidate.eventLoopDelayMaxMs,
         maxUnackedBytes: candidate.maxUnackedBytes,

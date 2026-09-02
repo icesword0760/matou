@@ -495,6 +495,7 @@ parentPort.on('message', async (event) => {
       ptyCount: sessions.size,
       ptyPids: sessions.pids(),
       statementCount: state.database.readStatementCount(request.resetStatementCount === true),
+      statementProfile: state.database.readStatementProfile(),
       eventLoopDelayP99Ms,
       eventLoopDelayMaxMs,
       maxUnackedBytes: sessions.maxUnackedBytes(),
