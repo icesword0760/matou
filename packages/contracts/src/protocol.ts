@@ -43,6 +43,18 @@ const retryLastInputSchema = z.object({
   sessionId
 })
 
+const retryStorageSchema = z.object({
+  type: z.literal('terminal.storage-retry'),
+  protocolVersion,
+  sessionId
+})
+
+const endStorageFaultSchema = z.object({
+  type: z.literal('terminal.storage-end'),
+  protocolVersion,
+  sessionId
+})
+
 const userInteractionSchema = z.object({
   type: z.literal('terminal.user-interaction'),
   protocolVersion,
@@ -212,6 +224,8 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   spawnSchema,
   inputSchema,
   retryLastInputSchema,
+  retryStorageSchema,
+  endStorageFaultSchema,
   userInteractionSchema,
   resizeSchema,
   disposeSchema,

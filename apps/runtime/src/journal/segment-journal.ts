@@ -141,9 +141,7 @@ export class SegmentJournal {
   ): Promise<SegmentJournal> {
     const normalizedOptions: NormalizedSegmentJournalOptions = {
       maxSegmentBytes: options.maxSegmentBytes ?? SEGMENT_BYTES,
-      writeFrame: options.writeFrame ?? (async (handle, encoded) => {
-        await handle.write(encoded)
-      })
+      writeFrame: options.writeFrame ?? writeEntireFrame
     }
     if (normalizedOptions.maxSegmentBytes < 128) {
       throw new Error('maxSegmentBytes must be at least 128 bytes')
@@ -243,10 +241,20 @@ export class SegmentJournal {
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
-    await this.#handle.sync()
-    await this.#handle.close()
+    let storageError: unknown
+    try {
+      await this.#handle.sync()
+    } catch (error) {
+      storageError = error
+    }
+    try {
+      await this.#handle.close()
+    } catch (error) {
+      storageError ??= error
+    }
     this.#scheduleTailIndexWrite()
     await this.#tailIndexWrite
+    if (storageError !== undefined) throw storageError
   }
 
   compressionCandidates(
@@ -279,7 +287,20 @@ export class SegmentJournal {
     if (this.#size > MAGIC.byteLength && this.#size + encoded.byteLength > this.#maxSegmentBytes) {
       await this.#rotate()
     }
-    await this.#writeFrame(this.#handle, encoded)
+    try {
+      await this.#writeFrame(this.#handle, encoded)
+    } catch (error) {
+      // A failed write may still have appended a prefix. Restore the exact
+      // committed boundary before returning so a live durability retry can
+      // reuse the same sequence without leaving a corrupt frame in front of it.
+      try {
+        await this.#handle.truncate(this.#size)
+      } catch {
+        // Preserve the original storage error; startup tail repair remains the
+        // final recovery boundary if the filesystem also rejects truncation.
+      }
+      throw error
+    }
     this.#size += encoded.byteLength
     this.#lastSequence = header.sequence
     this.#tailIndex.record(
@@ -322,6 +343,17 @@ export class SegmentJournal {
       () => writeJournalTailIndex(this.#tailIndexPath, snapshot),
       () => writeJournalTailIndex(this.#tailIndexPath, snapshot)
     ).catch(() => undefined)
+  }
+}
+
+async function writeEntireFrame(handle: FileHandle, encoded: Buffer): Promise<void> {
+  let offset = 0
+  while (offset < encoded.byteLength) {
+    const { bytesWritten } = await handle.write(encoded, offset, encoded.byteLength - offset)
+    if (bytesWritten <= 0) {
+      throw Object.assign(new Error('journal frame write made no progress'), { code: 'EIO' })
+    }
+    offset += bytesWritten
   }
 }
 

@@ -14,7 +14,12 @@ import {
 } from '@matou/contracts'
 
 import { DomainEventStore } from './events/domain-event-store'
-import { JournalCorruptionError, SegmentJournal, readSessionFrames } from './journal/segment-journal'
+import {
+  JournalCorruptionError,
+  SegmentJournal,
+  readSessionFrames,
+  type SegmentJournalOptions
+} from './journal/segment-journal'
 import type { DecodedJournalFrame } from './journal/segment-journal'
 import { JournalTailIndex } from './journal/journal-tail-index'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
@@ -28,6 +33,13 @@ import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracke
 import { ProviderResumeMonitor } from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
+import {
+  SessionExecutionService,
+  type ForkExecutionAuthority,
+  type ForkExecutionAuthorityInput,
+  type SessionExecutionDescriptor,
+  type SessionExecutionResult
+} from './session/session-execution-service'
 import { SessionGitStateRepository } from './session/session-git-state-repository'
 import type {
   ProviderHookRegistration,
@@ -96,6 +108,7 @@ export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
   hudRegistry?: SessionHudRegistry
   accessPolicy?: RuntimeAccessPolicy
+  journalOptionsForSession?(sessionId: string): SegmentJournalOptions | undefined
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -117,6 +130,7 @@ export class RuntimeServer {
   readonly #runtimeId = randomUUID()
   readonly #port: RuntimePort
   readonly #sessions: RuntimeSessionRegistry
+  readonly #execution: SessionExecutionService<void>
   readonly #attachedSessionIds = new Set<string>()
   readonly #endedSessionIds = new Set<string>()
   readonly #completedReplayThrough = new Map<string, number>()
@@ -164,6 +178,7 @@ export class RuntimeServer {
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
     | undefined
   readonly #accessPolicy: RuntimeAccessPolicy
+  readonly #journalOptionsForSession: NonNullable<RuntimeServerOptions['journalOptionsForSession']>
   #handshakeComplete = false
   #closed = false
 
@@ -244,10 +259,18 @@ export class RuntimeServer {
     )
     this.#control = control
     this.#sessions = sessions
+    this.#execution = new SessionExecutionService(database, sessions, {
+      startOrResume: (descriptor, authority, mode) => this.#spawn({
+        ...descriptor,
+        type: 'terminal.spawn',
+        protocolVersion: PROTOCOL_VERSION
+      }, authority, mode)
+    })
     this.#providerHooks = providerHooks
     this.#accessPolicy = options.accessPolicy ?? new RuntimeAccessPolicy(
       database.readOnly ? 'read-only' : 'normal'
     )
+    this.#journalOptionsForSession = options.journalOptionsForSession ?? (() => undefined)
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
@@ -313,6 +336,13 @@ export class RuntimeServer {
     this.#confirmedProviderRunIds.add(runId)
   }
 
+  startOrResumeSession(
+    descriptor: SessionExecutionDescriptor,
+    authority?: ForkExecutionAuthorityInput
+  ): Promise<SessionExecutionResult<void>> {
+    return this.#execution.startOrResume(descriptor.sessionId, descriptor, authority)
+  }
+
   close(): void {
     if (this.#closed) return
     for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
@@ -372,6 +402,31 @@ export class RuntimeServer {
       case 'terminal.spawn':
         await this.#spawnSerialized(message)
         break
+      case 'terminal.storage-retry': {
+        const session = this.#session(message.sessionId)
+        if (!session) break
+        try {
+          await session.retryDurability()
+        } catch {
+          // PtySession publishes the authoritative scoped fault again. Keep
+          // this connection and every other Session live while the user fixes
+          // the storage condition.
+        }
+        break
+      }
+      case 'terminal.storage-end': {
+        const session = this.#session(message.sessionId)
+        if (!session) break
+        const sequence = session.lastSequence
+        await session.endDurability()
+        this.#port.postMessage({
+          type: 'terminal.exited', protocolVersion: PROTOCOL_VERSION,
+          sessionId: message.sessionId, sequence, exitCode: 1
+        })
+        this.#setWorkStatus(message.sessionId, 'exited')
+        await this.#disposeSession(message.sessionId)
+        break
+      }
       case 'terminal.user-interaction': {
         const session = this.#session(message.sessionId)
         if (!session) break
@@ -396,6 +451,7 @@ export class RuntimeServer {
           await this.#workspacePaths.assertSessionInputAllowed(message.sessionId)
           if (this.#closed) break
           const session = this.#session(message.sessionId)
+          if (session?.durabilityState !== 'healthy') break
           if (session && /[\r\n]/.test(message.data)) {
             this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
             this.#setWorkStatus(message.sessionId, 'running')
@@ -446,7 +502,7 @@ export class RuntimeServer {
       case 'terminal.resize':
         if (this.#attachedSessionIds.has(message.sessionId)) {
           const session = this.#sessions.get(message.sessionId)
-          if (session) {
+          if (session?.durabilityState === 'healthy') {
             session.resize(message.cols, message.rows)
             this.#port.postMessage({
               type: 'terminal.resized', protocolVersion: PROTOCOL_VERSION,
@@ -1015,7 +1071,11 @@ export class RuntimeServer {
     })
   }
 
-  async #spawn(message: Extract<RendererMessage, { type: 'terminal.spawn' }>): Promise<void> {
+  async #spawn(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    forkAuthority?: ForkExecutionAuthority,
+    executionMode?: 'attach-only'
+  ): Promise<void> {
     const persistentAuthority = this.#database.get<{
       execution_context_id: string
       cwd: string
@@ -1038,7 +1098,16 @@ export class RuntimeServer {
       }
       const previousSpawnRevision = this.#spawnDescriptors.get(message.sessionId)?.spawnRevision ?? 0
       const nextSpawnRevision = message.spawnRevision ?? 0
-      const revisionReplacement = nextSpawnRevision > previousSpawnRevision
+      if (executionMode === 'attach-only' && existing.profile !== message.profile) {
+        this.#sendError(
+          'SESSION_FORBIDDEN',
+          'an in-flight Fork may only attach its existing provider process',
+          message.sessionId
+        )
+        return
+      }
+      const revisionReplacement = executionMode !== 'attach-only' &&
+        nextSpawnRevision > previousSpawnRevision
       if (existing.profile !== message.profile || revisionReplacement) {
         // A restore retry deliberately changes the same stable Session from its
         // fallback Shell process back to the authoritative provider profile.
@@ -1080,6 +1149,14 @@ export class RuntimeServer {
       void this.refreshSessionHud(message.sessionId)
       return
       }
+    }
+    if (executionMode === 'attach-only') {
+      this.#sendError(
+        'SESSION_FORBIDDEN',
+        'the in-flight Fork process is no longer available to attach',
+        message.sessionId
+      )
+      return
     }
     if (
       persistentAuthority !== undefined &&
@@ -1128,14 +1205,15 @@ export class RuntimeServer {
       }
     }
 
-    const forkDecision = message.profile === 'claude-code'
+    const forkDecision = message.profile === 'claude-code' && forkAuthority === undefined
       ? this.#forkIntents.claimForLaunch(message.sessionId, Date.now())
       : undefined
     if (forkDecision?.kind === 'failed') {
       await this.#presentForkFailure(message, forkDecision.error)
       return
     }
-    const forkLaunch = forkDecision?.kind === 'launch' ? forkDecision : undefined
+    const forkLaunch = forkAuthority ??
+      (forkDecision?.kind === 'launch' ? forkDecision : undefined)
     const skipResume = this.#skipResumeSessionIds.delete(message.sessionId)
     const resumeBinding = message.profile === 'shell' || skipResume || forkLaunch
       ? undefined
@@ -1167,7 +1245,7 @@ export class RuntimeServer {
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
     try {
-      const runId = persistentAuthority ? randomUUID() : undefined
+      const runId = persistentAuthority ? forkAuthority?.runId ?? randomUUID() : undefined
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
         : undefined
@@ -1222,6 +1300,7 @@ export class RuntimeServer {
           // so the obsolete Shell fallback state does not cover a working UI.
           acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
           inheritedConversation: forkLaunch !== undefined,
+          ...(forkAuthority === undefined ? {} : { forkAuthority }),
           ...(permissionMode === undefined ? {} : { permissionMode })
         })
         if (providerSessionId !== undefined) {
@@ -1236,6 +1315,9 @@ export class RuntimeServer {
         cwd,
         dataRoot: this.#dataRoot,
         profile: message.profile,
+        ...(this.#journalOptionsForSession(message.sessionId) === undefined ? {} : {
+          journalOptions: this.#journalOptionsForSession(message.sessionId)!
+        }),
         ...(providerSessionId === undefined ? {} : { providerSessionId }),
         ...(forkLaunch === undefined ? {} : { forkSession: true }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -1277,7 +1359,7 @@ export class RuntimeServer {
             pendingResumeFailure = resumeFailure
             if (activeSession && forkLaunch) {
               hookRegistration?.retire()
-              this.#beginForkFailure(message, activeSession, resumeFailure)
+              this.#beginForkFailure(message, activeSession, resumeFailure, forkAuthority)
             } else if (activeSession && resumeBinding) {
               hookRegistration?.retire()
               this.#beginResumeFallback(message, activeSession, resumeBinding.id, resumeFailure)
@@ -1334,9 +1416,10 @@ export class RuntimeServer {
           let forkFailure = Boolean(forkIncomplete && (!wasCurrent || forkState === 'failed'))
           if (wasCurrent && forkIncomplete && forkState !== 'failed') {
             const reason = `Fork 会话进程已退出，代码：${exitCode}`
-            this.#forkIntents.fail(message.sessionId, reason, Date.now())
-            forkFailure = true
-            void this.#appendForkExitFailure(message.sessionId, reason, exited.lastSequence + 1)
+            if (this.#failFork(message.sessionId, reason, forkAuthority)) {
+              forkFailure = true
+              void this.#appendForkExitFailure(message.sessionId, reason, exited.lastSequence + 1)
+            }
           }
           const naturalAgentFallback = wasCurrent && exited.profile !== 'shell' &&
             !resumeExitFallback && (!forkLaunch || forkState === 'succeeded')
@@ -1466,11 +1549,9 @@ export class RuntimeServer {
       this.publishSessionHud(message.sessionId)
       void this.refreshSessionHud(message.sessionId)
       if (pendingResumeFailure && forkLaunch) {
-        this.#beginForkFailure(message, session, pendingResumeFailure)
+        this.#beginForkFailure(message, session, pendingResumeFailure, forkAuthority)
       } else if (pendingResumeFailure && resumeBinding) {
         this.#beginResumeFallback(message, session, resumeBinding.id, pendingResumeFailure)
-      } else if (resumeMonitor && forkLaunch) {
-        this.#scheduleForkResumeTimeout(message, session, resumeMonitor)
       } else if (resumeMonitor && resumeBinding) {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
@@ -1478,8 +1559,7 @@ export class RuntimeServer {
       await hookRegistration?.dispose()
       if (forkLaunch && !providerProcessStarted) {
         const reason = `Fork 会话进程启动失败：${errorMessage(error)}`
-        this.#forkIntents.fail(message.sessionId, reason, Date.now())
-        await this.#presentForkFailure(message, reason)
+        await this.#presentForkFailure(message, reason, forkAuthority)
         return
       }
       if (resumeBinding && !providerProcessStarted) {
@@ -1499,11 +1579,18 @@ export class RuntimeServer {
   #beginForkFailure(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
-    reason: string
+    reason: string,
+    authority?: ForkExecutionAuthority
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
     this.#clearProviderResumeTimer(message.sessionId)
-    this.#forkIntents.fail(message.sessionId, reason, Date.now())
+    if (!this.#failFork(message.sessionId, reason, authority)) {
+      this.#sessions.delete(message.sessionId, session)
+      this.#control?.backend.unregister(message.sessionId, session)
+      this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
+      session.dispose({ notifyExit: false })
+      return
+    }
     session.display('\r\n\u001b[33m[Fork 未完成，请检查上方原因后重试]\u001b[0m\r\n')
     this.#sessions.delete(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
@@ -1511,27 +1598,12 @@ export class RuntimeServer {
     session.dispose({ notifyExit: false })
   }
 
-  #scheduleForkResumeTimeout(
-    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
-    session: PtySession,
-    monitor: ProviderResumeMonitor
-  ): void {
-    if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
-    if (!monitor.isMonitoring || this.#forkIntents.state(message.sessionId) === 'succeeded') return
-    this.#clearProviderResumeTimer(message.sessionId)
-    this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
-      this.#providerResumeTimers.delete(message.sessionId)
-      const reason = monitor.timeout()
-      if (!reason || this.#sessions.get(message.sessionId) !== session) return
-      this.#beginForkFailure(message, session, reason)
-    }, this.#providerResumeTimeoutMs))
-  }
-
   async #presentForkFailure(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
-    reason: string
+    reason: string,
+    authority?: ForkExecutionAuthority
   ): Promise<void> {
-    this.#forkIntents.fail(message.sessionId, reason, Date.now())
+    if (!this.#failFork(message.sessionId, reason, authority)) return
     const banner = '[Fork 未完成，请检查上方原因后重试]'
     const frames = await readSessionFrames(this.#dataRoot, message.sessionId).catch(() => [])
     const alreadyPresented = frames.some((frame) =>
@@ -1553,6 +1625,24 @@ export class RuntimeServer {
     })
     this.#hud.exit(message.sessionId, { fallbackToShell: false })
     this.publishSessionHud(message.sessionId)
+  }
+
+  #failFork(
+    sessionId: string,
+    reason: string,
+    authority?: ForkExecutionAuthority
+  ): boolean {
+    const now = Date.now()
+    if (authority) {
+      return this.#forkIntents.failOperation({
+        operationId: authority.operationId,
+        lease: authority.lease,
+        error: reason,
+        now
+      }).kind === 'applied'
+    }
+    this.#forkIntents.fail(sessionId, reason, now)
+    return true
   }
 
   async #appendForkExitFailure(sessionId: string, reason: string, sequence: number): Promise<void> {
@@ -1801,7 +1891,7 @@ export class RuntimeServer {
   async #spawnSerialized(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>
   ): Promise<void> {
-    await this.#sessions.runExclusive(message.sessionId, () => this.#spawn(message))
+    await this.#execution.startOrResume(message.sessionId, message)
   }
 
   #session(sessionId: string): PtySession | undefined {

@@ -4,7 +4,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 
-import type { SessionRepository } from '../domain/session-repository'
+import {
+  StaleForkProviderIdentityError,
+  type ProviderIdentityForkAuthority,
+  type SessionRepository
+} from '../domain/session-repository'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
 const MAX_HOOK_BYTES = 1024 * 1024
@@ -15,6 +19,7 @@ interface HookRegistrationRecord {
   permissionMode?: string
   acceptStatuslineIdentity: boolean
   inheritedConversation: boolean
+  forkAuthority?: ProviderIdentityForkAuthority
   acceptIdentity: boolean
   settingsPath: string
   statusScriptPath: string
@@ -53,6 +58,7 @@ export interface ProviderHookServerOptions {
     provider: 'claude-code'
     providerSessionId: string
     eventName: string
+    forkAuthority?: ProviderIdentityForkAuthority
   }) => void
   onTeamObservations?: (observations: AgentTeamObservation[]) => void | Promise<void>
 }
@@ -123,8 +129,12 @@ export class ProviderHookServer {
     permissionMode?: string
     acceptStatuslineIdentity?: boolean
     inheritedConversation?: boolean
+    forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
+    if (input.forkAuthority && input.forkAuthority.runId !== input.runId) {
+      throw new Error('Fork provider hook run identity does not match its authority')
+    }
     const token = randomBytes(32).toString('base64url')
     const hookUrl = `http://127.0.0.1:${this.#port}/hooks/${token}`
     const directory = join(this.#dataRoot, 'provider-hooks')
@@ -146,6 +156,7 @@ export class ProviderHookServer {
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
       acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
       inheritedConversation: input.inheritedConversation === true,
+      ...(input.forkAuthority === undefined ? {} : { forkAuthority: input.forkAuthority }),
       acceptIdentity: true,
       settingsPath,
       statusScriptPath
@@ -224,32 +235,45 @@ export class ProviderHookServer {
         const permissionMode = hookPermissionMode ??
           (isKnownIdentity ? undefined : registration.permissionMode)
         const now = Date.now()
-        this.#sessions.recordResumableProviderIdentity({
-          commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
-          commandType: 'provider-hook.identity',
-          requestHash: `${registration.sessionId}:${providerSessionId}:${eventName}:${now}`
-        }, {
-          id: `provider-binding-${randomUUID()}`,
-          sessionId: registration.sessionId,
-          provider: 'claude-code',
-          providerSessionId,
-          metadata: {
-            ...(permissionMode === undefined ? {} : { permissionMode }),
-            ...(cwd === undefined ? {} : { cwd }),
-            lastHookEvent: eventName,
-            ...(registration.inheritedConversation
-              ? { inheritedConversation: true, canFork: true }
-              : {})
-          },
-          now
-        })
-        this.#onIdentityRecorded({
-          runId: registration.runId,
-          sessionId: registration.sessionId,
-          provider: 'claude-code',
-          providerSessionId,
-          eventName
-        })
+        try {
+          this.#sessions.recordResumableProviderIdentity({
+            commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
+            commandType: 'provider-hook.identity',
+            requestHash: `${registration.sessionId}:${providerSessionId}:${eventName}:${now}`
+          }, {
+            id: `provider-binding-${randomUUID()}`,
+            sessionId: registration.sessionId,
+            provider: 'claude-code',
+            providerSessionId,
+            metadata: {
+              ...(permissionMode === undefined ? {} : { permissionMode }),
+              ...(cwd === undefined ? {} : { cwd }),
+              lastHookEvent: eventName,
+              ...(registration.inheritedConversation
+                ? { inheritedConversation: true, canFork: true }
+                : {})
+            },
+            now,
+            ...(registration.forkAuthority === undefined
+              ? {}
+              : { forkAuthority: registration.forkAuthority })
+          })
+          this.#onIdentityRecorded({
+            runId: registration.runId,
+            sessionId: registration.sessionId,
+            provider: 'claude-code',
+            providerSessionId,
+            eventName,
+            ...(registration.forkAuthority === undefined
+              ? {}
+              : { forkAuthority: registration.forkAuthority })
+          })
+        } catch (error) {
+          // An old provider process may report its identity after lease takeover.
+          // Its hook remains a valid HTTP endpoint for final notifications, but
+          // it no longer owns the durable Fork or its resumable binding.
+          if (!(error instanceof StaleForkProviderIdentityError)) throw error
+        }
       }
       const notificationEvent = toProviderNotificationEvent(payload)
       if (notificationEvent) {

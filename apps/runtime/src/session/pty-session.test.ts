@@ -82,3 +82,93 @@ describe('PtySession resize deduplication', () => {
     }
   })
 })
+
+describe('PtySession durability recovery', () => {
+  it('publishes output metadata only after the retained frame is durably retried', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-durability-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    let failOnce = true
+    const output: string[] = []
+    let faulted: () => void = () => {}
+    const storageFault = new Promise<void>((resolve) => { faulted = resolve })
+    let session: PtySession | undefined
+    try {
+      session = await PtySession.create({
+        sessionId: 'durability-retry', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {},
+        onOutput: (data) => { output.push(data) },
+        onDurabilityFault: () => { faulted() },
+        journalOptions: {
+          writeFrame: async (handle, encoded) => {
+            if (failOnce) {
+              failOnce = false
+              await handle.write(encoded.subarray(0, 9))
+              throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
+            }
+            await handle.write(encoded)
+          }
+        }
+      })
+
+      session.display('retained-marker')
+      await storageFault
+      expect(session.durabilityState).toBe('paused')
+      expect(output).toEqual([])
+      expect(() => session!.write('echo blocked\n')).toThrow('session storage is paused')
+      session.display('after-marker')
+
+      await session.retryDurability()
+
+      expect(session.durabilityState).toBe('healthy')
+      expect(output).toEqual(['retained-marker', 'after-marker'])
+      await expect(session.readFrames()).resolves.toMatchObject([
+        { kind: 'output', sequence: 1, data: new TextEncoder().encode('retained-marker') },
+        { kind: 'output', sequence: 2, data: new TextEncoder().encode('after-marker') }
+      ])
+    } finally {
+      await session?.endDurability()
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  })
+
+  it('finishes Runtime shutdown within its bounds while journal storage is faulted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-durability-shutdown-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    let faulted: () => void = () => {}
+    const storageFault = new Promise<void>((resolve) => { faulted = resolve })
+    try {
+      const session = await PtySession.create({
+        sessionId: 'faulted-shutdown', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: () => {},
+        onDurabilityFault: () => { faulted() },
+        journalOptions: {
+          writeFrame: async () => { throw Object.assign(new Error('read only'), { code: 'EACCES' }) }
+        }
+      })
+      session.display('fault')
+      await storageFault
+
+      const startedAt = Date.now()
+      await session.shutdownForRuntime({ gracePeriodMs: 100, hardKillWaitMs: 500 })
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000)
+      await expect(session.whenClosed()).resolves.toBeUndefined()
+    } finally {
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
+  })
+})

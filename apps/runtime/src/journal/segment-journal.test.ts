@@ -133,6 +133,35 @@ describe('SegmentJournal', () => {
     await reopened.close()
   })
 
+  it('rolls back a partial frame so the same sequence can retry on the open journal', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    let failOnce = true
+    const journal = await SegmentJournal.open(directory, 'session-live-retry', {
+      writeFrame: async (handle, encoded) => {
+        if (failOnce) {
+          failOnce = false
+          await handle.write(encoded.subarray(0, 13))
+          throw Object.assign(new Error('simulated disk full'), { code: 'ENOSPC' })
+        }
+        await handle.write(encoded)
+      }
+    })
+
+    await expect(journal.appendOutput(1, Uint8Array.from([65, 66]))).rejects.toMatchObject({
+      code: 'ENOSPC'
+    })
+    expect(journal.lastSequence).toBe(0)
+    await journal.appendOutput(1, Uint8Array.from([65, 66]))
+    await journal.appendExit(2, 0)
+
+    await expect(journal.readFrames()).resolves.toEqual([
+      { kind: 'output', sequence: 1, data: Uint8Array.from([65, 66]) },
+      { kind: 'exit', sequence: 2, exitCode: 0 }
+    ])
+    await journal.close()
+  })
+
   it('surfaces a read-only data directory without damaging another Session', async () => {
     if (process.platform === 'win32') return
     const writable = await mkdtemp(join(tmpdir(), 'matou-journal-'))

@@ -28,6 +28,7 @@ import { WorkspacePathService } from './hierarchy/workspace-path-service'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ShellHistoryRepository } from './shell-history/shell-history'
 import { PreferenceRepository } from './product/experience-foundation'
+import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
 
 let root: string
 let database: RuntimeDatabase
@@ -1997,6 +1998,153 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('lets Renderer attach but not launch an in-flight durable Fork', async () => {
+    const executable = join(root, 'provider-durable-renderer-fixture.sh')
+    const argumentFile = join(root, 'provider-durable-renderer-arguments.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+      'head -c 2101 /dev/zero | tr "\\0" x',
+      'sleep 30'
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const forkPort = new MockPort()
+    const sessions = new RuntimeSessionRegistry()
+    const forkServer = new RuntimeServer(
+      forkPort, root, database, undefined, undefined, sessions,
+      undefined, undefined, { providerResumeTimeoutMs: 25 }
+    )
+    try {
+      registerSession(database, 'fork-durable-source', 'claude-code')
+      registerSession(database, 'fork-durable-derived', 'claude-code')
+      const intents = new SessionForkIntentRepository(database)
+      const now = Date.now()
+      intents.accept({
+        operationId: 'operation-renderer-gate', submissionKey: 'submission-renderer-gate',
+        sessionId: 'fork-durable-derived', sourceSessionId: 'fork-durable-source',
+        sourceProviderSessionId: 'provider-source-durable', displayName: 'Derived',
+        worktreeMode: 'current', totalSteps: 2, now
+      })
+      const decision = intents.acquireLease({
+        operationId: 'operation-renderer-gate', owner: 'coordinator', now, ttlMs: 60_000
+      })
+      if (decision.kind !== 'acquired') throw new Error('durable lease missing')
+      intents.advanceStage({
+        operationId: 'operation-renderer-gate', lease: decision.lease,
+        stage: 'restoring-provider', now
+      })
+      forkPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'fork-durable-renderer'
+      })
+      await settle()
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-durable-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24, spawnRevision: 99
+      })
+
+      await settle()
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await readFile(argumentFile, 'utf8').catch(() => '')).toBe('')
+      expect(sessions.has('fork-durable-derived')).toBe(false)
+      expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(0)
+      expect(forkPort.last('protocol.error')).toBeUndefined()
+      expect(intents.progressByOperation('operation-renderer-gate')).toMatchObject({
+        stage: 'restoring-provider'
+      })
+
+      await expect(forkServer.startOrResumeSession({
+        sessionId: 'fork-durable-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      }, {
+        operationId: 'operation-renderer-gate', runId: 'run-renderer-gate',
+        lease: decision.lease
+      })).resolves.toMatchObject({ kind: 'started' })
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--resume', 'provider-source-durable', '--fork-session'
+      ])
+      expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
+      await new Promise((resolve) => setTimeout(resolve, 75))
+      expect(sessions.has('fork-durable-derived')).toBe(true)
+      expect(intents.progressByOperation('operation-renderer-gate')).toMatchObject({
+        stage: 'restoring-provider'
+      })
+
+      forkPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'fork-durable-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24, spawnRevision: 100
+      })
+      await waitUntil(() => forkPort.sent.some((message) =>
+        message.type === 'terminal.spawned' && message.reattached === true
+      ))
+      expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(2)
+      expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
+        '--resume', 'provider-source-durable', '--fork-session'
+      ])
+    } finally {
+      forkServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
+  it('records a durable Fork provider exit through its fenced operation authority', async () => {
+    const executable = join(root, 'provider-durable-exit-fixture.sh')
+    await writeFile(executable, '#!/bin/sh\nexit 7\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const forkPort = new MockPort()
+    const sessions = new RuntimeSessionRegistry()
+    const forkServer = new RuntimeServer(
+      forkPort, root, database, undefined, undefined, sessions
+    )
+    try {
+      registerSession(database, 'fork-durable-exit-source', 'claude-code')
+      registerSession(database, 'fork-durable-exit-derived', 'claude-code')
+      const intents = new SessionForkIntentRepository(database)
+      const now = Date.now()
+      intents.accept({
+        operationId: 'operation-durable-exit', submissionKey: 'submission-durable-exit',
+        sessionId: 'fork-durable-exit-derived', sourceSessionId: 'fork-durable-exit-source',
+        sourceProviderSessionId: 'provider-source-exit', displayName: 'Derived',
+        worktreeMode: 'current', totalSteps: 2, now
+      })
+      const decision = intents.acquireLease({
+        operationId: 'operation-durable-exit', owner: 'coordinator', now, ttlMs: 60_000
+      })
+      if (decision.kind !== 'acquired') throw new Error('durable lease missing')
+      intents.advanceStage({
+        operationId: 'operation-durable-exit', lease: decision.lease,
+        stage: 'restoring-provider', now
+      })
+
+      await forkServer.startOrResumeSession({
+        sessionId: 'fork-durable-exit-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      }, {
+        operationId: 'operation-durable-exit', runId: 'run-durable-exit',
+        lease: decision.lease
+      })
+
+      await waitUntil(() => intents.progressByOperation('operation-durable-exit')?.stage === 'failed')
+      expect(intents.progressByOperation('operation-durable-exit')).toMatchObject({
+        stage: 'failed', error: expect.stringContaining('代码：7')
+      })
+      expect(sessions.has('fork-durable-exit-derived')).toBe(false)
+    } finally {
+      forkServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('marks a quiet real-style Fork ready from its inherited statusline identity', async () => {
     const executable = join(root, 'provider-quiet-fork-fixture.sh')
     const argumentFile = join(root, 'provider-quiet-fork-arguments.txt')
@@ -2917,6 +3065,93 @@ describe('RuntimeServer domain RPC', () => {
       else process.env.MATOU_CLAUDE_COMMAND = previousCommand
       if (previousMarker === undefined) delete process.env.MATOU_TEST_LAUNCH_MARKER
       else process.env.MATOU_TEST_LAUNCH_MARKER = previousMarker
+    }
+  })
+})
+
+describe('RuntimeServer session-scoped journal recovery', () => {
+  it('pauses only the affected card, replays retained output, and lets another Session continue', async () => {
+    server.close()
+    registerSession(database, 'faulted-session')
+    registerSession(database, 'healthy-session')
+    const executable = join(root, 'journal-recovery-shell.js')
+    await writeFile(executable, [
+      '#!/usr/bin/env node',
+      "process.stdin.setEncoding('utf8')",
+      "process.stdin.on('data', (chunk) => process.stdout.write(`reply:${chunk}`))",
+      'setInterval(() => {}, 1000)',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    let writable = false
+    port = new MockPort()
+    server = new RuntimeServer(
+      port, root, database, undefined, undefined, undefined, undefined, undefined,
+      {
+        journalOptionsForSession: (sessionId) => sessionId === 'faulted-session'
+          ? {
+              writeFrame: async (handle, encoded) => {
+                if (!writable) throw Object.assign(new Error('disk quota reached'), { code: 'ENOSPC' })
+                await handle.write(encoded)
+              }
+            }
+          : undefined
+      }
+    )
+    try {
+      port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'storage-test' })
+      for (const sessionId of ['faulted-session', 'healthy-session']) {
+        port.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
+        })
+      }
+      await waitUntil(() => port.sent.filter(({ type }) => type === 'terminal.spawned').length === 2)
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-session', data: 'held\r'
+      })
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'healthy-session', data: 'live\r'
+      })
+      await waitUntil(() => port.last('terminal.storage-fault')?.sessionId === 'faulted-session')
+      await waitUntil(() => terminalText(port).includes('reply:live'))
+      expect(port.last('terminal.storage-fault')).toMatchObject({
+        code: 'STORAGE_QUOTA_EXCEEDED', retainedBytes: expect.any(Number)
+      })
+
+      writable = true
+      port.receive({
+        type: 'terminal.storage-retry', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-session'
+      })
+      await waitUntil(() => port.last('terminal.storage-recovered')?.sessionId === 'faulted-session')
+      await waitUntil(() => terminalText(port).includes('reply:held'))
+
+      writable = false
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-session', data: 'end\r'
+      })
+      await waitUntil(() => port.sent.filter((message) =>
+        message.type === 'terminal.storage-fault' && message.sessionId === 'faulted-session'
+      ).length >= 2)
+      port.receive({
+        type: 'terminal.storage-end', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'faulted-session'
+      })
+      await waitUntil(() => port.last('terminal.exited')?.sessionId === 'faulted-session')
+      port.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'healthy-session', data: 'still-live\r'
+      })
+      await waitUntil(() => terminalText(port).includes('reply:still-live'))
+    } finally {
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
     }
   })
 })

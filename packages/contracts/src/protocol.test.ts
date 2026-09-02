@@ -259,6 +259,17 @@ describe('parseRendererMessage', () => {
 })
 
 describe('runtime storage fault messages', () => {
+  it('accepts scoped retry and end commands from the affected terminal card', () => {
+    expect(parseRendererMessage({
+      type: 'terminal.storage-retry', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1'
+    })).toMatchObject({ type: 'terminal.storage-retry', sessionId: 'session-1' })
+    expect(parseRendererMessage({
+      type: 'terminal.storage-end', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1'
+    })).toMatchObject({ type: 'terminal.storage-end', sessionId: 'session-1' })
+  })
+
   it('exposes scoped storage fault and recovery messages', () => {
     const fault = {
       type: 'terminal.storage-fault',

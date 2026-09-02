@@ -18,8 +18,16 @@ import { SessionEnvironmentRepository } from '../session/session-environment-rep
 const exec = promisify(execFile)
 
 export interface WorktreeSetupStep {
+  idempotencyKey?: string
   command: string
   args: string[]
+}
+
+interface WorktreeSetupCheckpoint {
+  idempotencyKey: string
+  command: string
+  status: 'running' | 'succeeded' | 'failed'
+  output: string
 }
 
 interface WorktreeRow {
@@ -68,8 +76,13 @@ export class WorktreeService {
       baseRef: string
       setupPolicy: WorktreeSetupStep[]
       now: number
+      beforeExternalSideEffect?: () => void
+      onCheckpoint?: (
+        point: 'branch-created' | 'path-created' | 'setup-completed'
+      ) => Promise<void> | void
     }
   ): Promise<Worktree> {
+    validateSetupPolicy(input.setupPolicy)
     let worktree = this.get(input.id)
     if (!worktree) {
       worktree = this.#transactions.execute(command, ({ tx, emit }) => {
@@ -110,8 +123,11 @@ export class WorktreeService {
     }
 
     try {
+      input.beforeExternalSideEffect?.()
       const repository = (await exec('git', ['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).stdout.trim()
+      input.beforeExternalSideEffect?.()
       const baseRevision = (await exec('git', ['-C', repository, 'rev-parse', input.baseRef])).stdout.trim()
+      input.beforeExternalSideEffect?.()
       if (!(await pathIsGitWorktree(input.path))) {
         // `git worktree add -b` creates the branch before it creates the target
         // directory. A permission or disk failure can therefore leave the ref
@@ -122,18 +138,64 @@ export class WorktreeService {
         const args = await localBranchExists(repository, input.branch)
           ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
           : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
+        input.beforeExternalSideEffect?.()
         await exec('git', args)
+        input.beforeExternalSideEffect?.()
       }
-      const setupResult: Array<{ command: string; ok: boolean; output: string }> = []
+      await input.onCheckpoint?.('branch-created')
+      await input.onCheckpoint?.('path-created')
+      const setupResult = setupCheckpoints(this.get(input.id)?.setupResult ?? [])
       for (const step of input.setupPolicy) {
+        const idempotencyKey = step.idempotencyKey!
+        if (setupResult.some((entry) =>
+          entry.idempotencyKey === idempotencyKey && entry.status === 'succeeded'
+        )) continue
+        replaceCheckpoint(setupResult, {
+          idempotencyKey, command: step.command, status: 'running', output: ''
+        })
+        input.beforeExternalSideEffect?.()
+        this.#persistSetupCheckpoints(
+          derivedCommand(command, `setup:${idempotencyKey}:running`),
+          input.id,
+          setupResult,
+          input.now
+        )
         try {
+          input.beforeExternalSideEffect?.()
           const result = await exec(step.command, step.args, { cwd: input.path })
-          setupResult.push({ command: step.command, ok: true, output: `${result.stdout}${result.stderr}`.slice(-8192) })
+          input.beforeExternalSideEffect?.()
+          replaceCheckpoint(setupResult, {
+            idempotencyKey,
+            command: step.command,
+            status: 'succeeded',
+            output: `${result.stdout}${result.stderr}`.slice(-8192)
+          })
+          input.beforeExternalSideEffect?.()
+          this.#persistSetupCheckpoints(
+            derivedCommand(command, `setup:${idempotencyKey}:succeeded`),
+            input.id,
+            setupResult,
+            input.now
+          )
         } catch (error) {
-          setupResult.push({ command: step.command, ok: false, output: errorMessage(error).slice(-8192) })
+          replaceCheckpoint(setupResult, {
+            idempotencyKey,
+            command: step.command,
+            status: 'failed',
+            output: errorMessage(error).slice(-8192)
+          })
+          input.beforeExternalSideEffect?.()
+          this.#persistSetupCheckpoints(
+            derivedCommand(command, `setup:${idempotencyKey}:failed`),
+            input.id,
+            setupResult,
+            input.now
+          )
           throw error
         }
       }
+      await input.onCheckpoint?.('setup-completed')
+      input.beforeExternalSideEffect?.()
 
       return this.#transactions.execute(derivedCommand(command, 'ready'), ({ tx, emit }) => {
         tx.run(
@@ -150,6 +212,7 @@ export class WorktreeService {
         return mapWorktree(ready)
       }).result
     } catch (error) {
+      input.beforeExternalSideEffect?.()
       this.#transactions.execute(derivedCommand(command, 'failed'), ({ tx, emit }) => {
         tx.run("UPDATE worktrees SET state = 'failed', updated_at = ? WHERE id = ?", input.now, input.id)
         const failed = requireWorktreeRow(tx.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', input.id))
@@ -158,6 +221,21 @@ export class WorktreeService {
       })
       throw error
     }
+  }
+
+  #persistSetupCheckpoints(
+    command: DomainCommandMetadata,
+    worktreeId: string,
+    checkpoints: WorktreeSetupCheckpoint[],
+    now: number
+  ): void {
+    this.#transactions.execute(command, ({ tx }) => {
+      tx.run(
+        `UPDATE worktrees SET setup_result_json = ?, updated_at = ? WHERE id = ?`,
+        JSON.stringify(checkpoints), now, worktreeId
+      )
+      return null
+    })
   }
 
   async remove(command: DomainCommandMetadata, worktreeId: string, now: number): Promise<Worktree> {
@@ -393,4 +471,34 @@ function requireWorktreeRow(row: WorktreeRow | undefined): WorktreeRow {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function validateSetupPolicy(policy: WorktreeSetupStep[]): void {
+  const keys = new Set<string>()
+  for (const step of policy) {
+    const key = step.idempotencyKey?.trim()
+    if (!key) throw new Error(`Worktree setup command ${step.command} requires idempotencyKey`)
+    if (keys.has(key)) throw new Error(`Duplicate Worktree setup idempotencyKey: ${key}`)
+    keys.add(key)
+  }
+}
+
+function setupCheckpoints(value: unknown[]): WorktreeSetupCheckpoint[] {
+  return value.filter((entry): entry is WorktreeSetupCheckpoint => {
+    if (typeof entry !== 'object' || entry === null) return false
+    const candidate = entry as Partial<WorktreeSetupCheckpoint>
+    return typeof candidate.idempotencyKey === 'string' &&
+      typeof candidate.command === 'string' &&
+      (candidate.status === 'running' || candidate.status === 'succeeded' || candidate.status === 'failed') &&
+      typeof candidate.output === 'string'
+  })
+}
+
+function replaceCheckpoint(
+  checkpoints: WorktreeSetupCheckpoint[],
+  next: WorktreeSetupCheckpoint
+): void {
+  const index = checkpoints.findIndex(({ idempotencyKey }) => idempotencyKey === next.idempotencyKey)
+  if (index === -1) checkpoints.push(next)
+  else checkpoints[index] = next
 }

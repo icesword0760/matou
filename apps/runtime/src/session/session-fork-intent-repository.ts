@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto'
-
 import type { ForkProgress, ForkStage } from '@matou/domain'
 
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
@@ -39,6 +37,15 @@ export interface ForkOperationIdentity {
   executionContextId?: string
   worktreePath?: string
   branchName?: string
+}
+
+export interface ForkOperationRecord {
+  identity: ForkOperationIdentity
+  progress: ForkProgress
+  worktreeMode: ForkWorktreeMode
+  sceneId: string
+  windowId: string
+  repositoryRoot?: string
 }
 
 export interface AcceptForkIntentInput extends ForkOperationIdentity {
@@ -141,6 +148,54 @@ export class SessionForkIntentRepository {
     return row ? progress(row) : undefined
   }
 
+  operationById(operationId: string): ForkOperationRecord | undefined {
+    const row = this.#operationRow('fork.operation_id = ?', operationId)
+    return row ? operationRecord(row) : undefined
+  }
+
+  /**
+   * Returns terminal operations whose deterministic product notification has
+   * not reached the domain outbox yet. This closes the crash window between
+   * the authoritative terminal transition and notification publication.
+   */
+  terminalWithoutNotification(limit = 100): ForkOperationRecord[] {
+    const rows = this.#database.all<{ operation_id: string }>(
+      `SELECT intent.operation_id
+       FROM session_fork_intents AS intent
+       WHERE intent.stage IN ('succeeded', 'failed')
+         AND NOT EXISTS (
+           SELECT 1 FROM domain_events AS event
+           WHERE event.event_id =
+             'fork-operation:' || intent.operation_id || ':' || intent.stage
+         )
+       ORDER BY intent.updated_at ASC, intent.operation_id ASC
+       LIMIT ?`,
+      limit
+    )
+    return rows.flatMap(({ operation_id }) => {
+      const operation = this.operationById(operation_id)
+      return operation ? [operation] : []
+    })
+  }
+
+  nonTerminalBySession(sessionId: string): ForkOperationRecord | undefined {
+    const row = this.#operationRow(
+      `fork.session_id = ? AND fork.stage NOT IN ('succeeded', 'failed')`, sessionId
+    )
+    return row ? operationRecord(row) : undefined
+  }
+
+  listClaimable(now: number, limit = 100): ForkOperationRecord[] {
+    return this.#operationRows(
+      `fork.stage NOT IN ('succeeded', 'failed')
+       AND fork.operation_id <> ''
+       AND fork.operation_id NOT LIKE 'legacy-operation:%'
+       AND (fork.lease_token IS NULL OR fork.lease_expires_at IS NULL OR fork.lease_expires_at <= ?)`,
+      now,
+      Math.max(1, limit)
+    ).map(operationRecord)
+  }
+
   acquireLease(input: {
     operationId: string
     owner: string
@@ -180,7 +235,7 @@ export class SessionForkIntentRepository {
       const fence = row.lease_fence + 1
       const lease: ForkLease = {
         owner: input.owner,
-        token: `${input.operationId}:${fence}:${randomUUID()}`,
+        token: `${input.owner}:${fence}`,
         expiresAt: input.now + input.ttlMs,
         fence
       }
@@ -267,6 +322,37 @@ export class SessionForkIntentRepository {
     transaction?: DatabaseTransaction
   ): FencedMutationResult {
     return this.advanceStage({ operationId, lease, stage: 'succeeded', now }, transaction)
+  }
+
+  /**
+   * Older builds could persist `starting-window` before a provider identity was
+   * durably recorded. A new fenced owner moves only that interrupted launch
+   * back to the provider-restore boundary so it can be started idempotently.
+   */
+  recoverInterruptedProviderLaunch(input: {
+    operationId: string
+    lease: Pick<ForkLease, 'token' | 'fence'>
+    now: number
+  }, transaction?: DatabaseTransaction): FencedMutationResult {
+    return this.#mutate(transaction, (tx) => {
+      const row = this.#fencedRow(tx, input.operationId, input.lease, input.now)
+      if (!row || row.stage !== 'starting-window') return { kind: 'stale' }
+      tx.run(
+        `UPDATE session_fork_intents
+         SET stage = 'restoring-provider', state = 'starting',
+             completed_steps = MAX(0, total_steps - 2), updated_at = ?
+         WHERE operation_id = ? AND stage = 'starting-window'
+           AND lease_token = ? AND lease_fence = ? AND lease_expires_at > ?`,
+        input.now,
+        input.operationId,
+        input.lease.token,
+        input.lease.fence,
+        input.now
+      )
+      return { kind: 'applied', progress: progress(requireRow(tx.get<ForkIntentRow>(
+        'SELECT * FROM session_fork_intents WHERE operation_id = ?', input.operationId
+      ), `Fork operation ${input.operationId}`)) }
+    })
   }
 
   failOperation(input: {
@@ -366,6 +452,48 @@ export class SessionForkIntentRepository {
 
   #mutate<T>(transaction: DatabaseTransaction | undefined, operation: (tx: DatabaseTransaction) => T): T {
     return transaction ? operation(transaction) : this.#database.transaction(operation)
+  }
+
+  #operationRow(predicate: string, value: string): ForkOperationQueryRow | undefined {
+    return this.#database.get<ForkOperationQueryRow>(operationQuery(predicate), value)
+  }
+
+  #operationRows(predicate: string, now: number, limit: number): ForkOperationQueryRow[] {
+    return this.#database.all<ForkOperationQueryRow>(
+      `${operationQuery(predicate)} ORDER BY fork.created_at, fork.operation_id LIMIT ?`,
+      now,
+      limit
+    )
+  }
+}
+
+interface ForkOperationQueryRow extends ForkIntentRow {
+  scene_id: string
+  window_id: string | null
+  repository_root: string | null
+}
+
+function operationQuery(predicate: string): string {
+  return `SELECT fork.*,
+      mounts.scene_id,
+      (SELECT focus.window_id FROM window_scene_focus AS focus
+       WHERE focus.scene_id = mounts.scene_id
+       ORDER BY focus.updated_at DESC, focus.window_id LIMIT 1) AS window_id,
+      worktrees.repository_root
+    FROM session_fork_intents AS fork
+    JOIN session_mounts AS mounts ON mounts.session_id = fork.session_id
+    LEFT JOIN worktrees ON worktrees.id = fork.worktree_id
+    WHERE ${predicate}`
+}
+
+function operationRecord(row: ForkOperationQueryRow): ForkOperationRecord {
+  return {
+    identity: acceptance(row, false).identity,
+    progress: progress(row),
+    worktreeMode: row.worktree_mode,
+    sceneId: row.scene_id,
+    windowId: row.window_id ?? `fork-operation:${row.scene_id}`,
+    ...(row.repository_root === null ? {} : { repositoryRoot: row.repository_root })
   }
 }
 

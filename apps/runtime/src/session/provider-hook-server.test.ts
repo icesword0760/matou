@@ -11,6 +11,7 @@ import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { ProviderHookServer } from './provider-hook-server'
+import { SessionForkIntentRepository } from './session-fork-intent-repository'
 
 let root: string
 let database: RuntimeDatabase
@@ -219,6 +220,75 @@ describe('ProviderHookServer', () => {
     expect(database.get<{ state: string }>(
       'SELECT state FROM session_fork_intents WHERE session_id = ?', 'session-1'
     )).toEqual({ state: 'succeeded' })
+  })
+
+  it('ignores a provider identity from a durable Fork run whose lease fence was replaced', async () => {
+    sessions.createSession(command('fork-source-fenced'), {
+      id: 'session-source-fenced', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    const now = Date.now()
+    intents.accept({
+      operationId: 'operation-fenced', submissionKey: 'submission-fenced',
+      sessionId: 'session-1', sourceSessionId: 'session-source-fenced',
+      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      worktreeMode: 'current', totalSteps: 2, now
+    })
+    const first = intents.acquireLease({
+      operationId: 'operation-fenced', owner: 'runtime-old', now, ttlMs: 1
+    })
+    if (first.kind !== 'acquired') throw new Error('first lease missing')
+    intents.advanceStage({
+      operationId: 'operation-fenced', lease: first.lease,
+      stage: 'restoring-provider', now
+    })
+    const oldRegistration = await hooks.registerClaudeSession({
+      runId: 'run-old-fork', sessionId: 'session-1',
+      acceptStatuslineIdentity: true, inheritedConversation: true,
+      forkAuthority: {
+        operationId: 'operation-fenced', runId: 'run-old-fork', lease: first.lease
+      }
+    })
+    const second = intents.acquireLease({
+      operationId: 'operation-fenced', owner: 'runtime-new', now: now + 2, ttlMs: 60_000
+    })
+    if (second.kind !== 'acquired') throw new Error('takeover lease missing')
+
+    expect((await postHook(oldRegistration.hookUrl, {
+      session_id: 'provider-stale', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' }
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(identityEvents).toEqual([])
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE operation_id = ?', 'operation-fenced'
+    )).toEqual({ state: 'starting', stage: 'restoring-provider' })
+
+    const currentRegistration = await hooks.registerClaudeSession({
+      runId: 'run-current-fork', sessionId: 'session-1',
+      acceptStatuslineIdentity: true, inheritedConversation: true,
+      forkAuthority: {
+        operationId: 'operation-fenced', runId: 'run-current-fork', lease: second.lease
+      }
+    })
+    expect((await postHook(currentRegistration.hookUrl, {
+      session_id: 'provider-current', cwd: root,
+      model: { display_name: 'Claude Opus 4.6' }
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-current'
+    })
+    expect(database.get(
+      'SELECT state, stage FROM session_fork_intents WHERE operation_id = ?', 'operation-fenced'
+    )).toEqual({ state: 'succeeded', stage: 'succeeded' })
+    expect(identityEvents).toContainEqual(expect.objectContaining({
+      runId: 'run-current-fork',
+      forkAuthority: expect.objectContaining({
+        operationId: 'operation-fenced', runId: 'run-current-fork',
+        lease: expect.objectContaining({ fence: second.lease.fence })
+      })
+    }))
   })
 
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {

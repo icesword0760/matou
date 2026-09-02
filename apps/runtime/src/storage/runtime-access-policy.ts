@@ -8,6 +8,8 @@ export type TerminalMessageType =
   | 'terminal.spawn'
   | 'terminal.input'
   | 'terminal.retry-last-input'
+  | 'terminal.storage-retry'
+  | 'terminal.storage-end'
   | 'terminal.user-interaction'
   | 'terminal.resize'
   | 'terminal.dispose'

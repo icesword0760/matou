@@ -154,7 +154,7 @@ describe('WorktreeReconciler', () => {
     const healthyPath = join(root, 'worktrees', 'continues')
     seedWorktree({
       id: 'setup-fails', path: failedPath, branch: 'feature/setup-fails', state: 'creating',
-      setupPolicy: [{ command: '/usr/bin/false', args: [] }]
+      setupPolicy: [{ idempotencyKey: 'fail-setup', command: '/usr/bin/false', args: [] }]
     })
     seedBoundSession('setup-fails', 'context-setup-fails')
     seedWorktree({
@@ -270,7 +270,7 @@ function seedWorktree(input: {
   branch: string
   baseRevision?: string
   state: 'creating' | 'ready' | 'retained' | 'removing'
-  setupPolicy?: Array<{ command: string; args: string[] }>
+  setupPolicy?: Array<{ idempotencyKey?: string; command: string; args: string[] }>
 }): void {
   database.transaction((tx) => {
     tx.run(

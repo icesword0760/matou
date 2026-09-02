@@ -10,7 +10,7 @@ import {
   type RuntimeRecoveryCommand
 } from '@matou/contracts'
 
-import { RuntimeServer } from './runtime-server'
+import { RuntimeServer, type RuntimePort } from './runtime-server'
 import {
   HostControlServer,
   CapabilityTokenService,
@@ -55,6 +55,10 @@ import { WorktreeReconciler } from './worktrees/worktree-reconciler'
 import { WorktreeService } from './worktrees/worktree-service'
 import { SessionEnvironmentRepository } from './session/session-environment-repository'
 import { SessionEnvironmentService } from './session/session-environment-service'
+import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
+import type { SessionExecutionDescriptor } from './session/session-execution-service'
+import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
+import { ForkOperationCoordinator } from './session-canvas/fork-operation-coordinator'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -84,6 +88,7 @@ interface WritableRuntimeState extends RuntimeStateBase {
   controlBackend: RuntimeControlBackend
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
+  forkCoordinator: ForkOperationCoordinator
 }
 
 interface ReadOnlyRuntimeState extends RuntimeStateBase {
@@ -94,6 +99,7 @@ type RuntimeState = WritableRuntimeState | ReadOnlyRuntimeState
 
 let runtimeState: RuntimeState | undefined
 let readOnlyDatabase: RuntimeDatabase | undefined
+let forkCoordinator: ForkOperationCoordinator | undefined
 const lifecycleCoordinator = new RuntimeLifecycleCoordinator()
 const lifecyclePublisher = new RuntimeLifecyclePublisher(parentPort)
 const bootstrapObserver: RuntimeDatabaseBootstrapObserver = {
@@ -165,21 +171,20 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
   const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
-  const worktreeService = new WorktreeService(database, transactions, {
-    stopRuns: async (runIds) => {
-      for (const runId of runIds) {
-        const sessionId = database.get<{ session_id: string }>(
-          'SELECT session_id FROM session_runs WHERE id = ?', runId
-        )?.session_id
-        if (!sessionId) continue
-        const live = sessions.get(sessionId)
-        if (!live) continue
-        live.dispose({ notifyExit: false })
-        await live.whenClosed()
-        sessions.delete(sessionId, live)
-      }
+  const stopRuns = async (runIds: string[]) => {
+    for (const runId of runIds) {
+      const sessionId = database.get<{ session_id: string }>(
+        'SELECT session_id FROM session_runs WHERE id = ?', runId
+      )?.session_id
+      if (!sessionId) continue
+      const live = sessions.get(sessionId)
+      if (!live) continue
+      live.dispose({ notifyExit: false })
+      await live.whenClosed()
+      sessions.delete(sessionId, live)
     }
-  })
+  }
+  const worktreeService = new WorktreeService(database, transactions, { stopRuns })
   const worktreeReconciliation = await new WorktreeReconciler(
     database,
     transactions,
@@ -301,7 +306,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
       }
       if (changed) for (const server of servers) server.flushSemanticEvents()
     },
-    onIdentityRecorded: ({ sessionId, runId, providerSessionId, eventName }) => {
+    onIdentityRecorded: ({
+      sessionId, runId, providerSessionId, eventName, forkAuthority
+    }) => {
       sessionHuds.markResumable(sessionId)
       const now = Date.now()
       try {
@@ -318,6 +325,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
         server.flushSemanticEvents()
         void server.refreshSessionHud(sessionId)
       }
+      if (forkAuthority) {
+        void forkCoordinator?.confirmAuthoritativeIdentity(
+          sessionId,
+          providerSessionId,
+          forkAuthority.operationId
+        )
+      }
     }
   })
   lifecycleCoordinator.registerProviderHooks(providerHooks)
@@ -333,6 +347,61 @@ async function initializeRuntime(): Promise<RuntimeState> {
   lifecycleCoordinator.assertStartupActive()
   await providerHooks.start()
   lifecycleCoordinator.assertStartupActive()
+  const backgroundPort = new BackgroundRuntimePort()
+  const backgroundServer = new RuntimeServer(
+    backgroundPort,
+    runtimeDataRoot,
+    database,
+    rpcRouter,
+    { backend: controlBackend, tokens: controlTokens, endpoint: controlEndpoint },
+    sessions,
+    providerHooks,
+    undefined,
+    { hudRegistry: sessionHuds, accessPolicy }
+  )
+  servers.add(backgroundServer)
+  const forkWorkflow = new ForkWorkflowService(runtimeDataRoot, database, transactions, {
+    stopRuns
+  })
+  forkCoordinator = new ForkOperationCoordinator(
+    new SessionForkIntentRepository(database),
+    {
+      ownerId: `runtime-${database.runtimeGeneration}`,
+      executeFork: (command, input) => forkWorkflow.executeFork(command, input),
+      startOrResume: async (sessionId, authority) => {
+        const descriptor = forkExecutionDescriptor(database, sessionId)
+        if (!descriptor) throw new Error(`Fork Session ${sessionId} is unavailable`)
+        return backgroundServer.startOrResumeSession(descriptor, authority)
+      },
+      notify: (notification) => {
+        const now = Date.now()
+        agentNotifications.publish({
+          commandId: notification.eventId,
+          commandType: 'fork-operation.notification',
+          requestHash: notification.replacementKey
+        }, {
+          eventId: notification.eventId,
+          runId: notification.operationId,
+          sessionId: notification.sessionId,
+          provider: 'claude-code',
+          event: {
+            eventType: notification.status === 'succeeded' ? 'completed' : 'error',
+            title: 'Claude Code',
+            subtitle: notification.status === 'succeeded' ? '分支已就绪' : '分支创建失败',
+            body: notification.status === 'succeeded'
+              ? '新的分支会话已经可以继续工作'
+              : notification.error ?? '分支创建未完成',
+            sound: true,
+            cooldownKey: 'Notification',
+            replacementKey: notification.replacementKey
+          },
+          now
+        })
+        for (const server of servers) server.flushSemanticEvents()
+      }
+    }
+  )
+  forkCoordinator.start()
   return {
     mode: 'normal',
     dataRoot: runtimeDataRoot,
@@ -344,7 +413,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     rpcRouter,
     accessPolicy,
     hostControl,
-    providerHooks
+    providerHooks,
+    forkCoordinator
   }
 }
 
@@ -354,6 +424,8 @@ function shutdown(): Promise<void> {
   pendingDatabaseRecovery = undefined
   return lifecycleCoordinator.shutdown(runtimeReady, {
     closeIncoming: () => {
+      forkCoordinator?.stop()
+      forkCoordinator = undefined
       for (const server of servers) server.close()
       servers.clear()
     },
@@ -460,6 +532,72 @@ parentPort.on('message', async (event) => {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function forkExecutionDescriptor(
+  database: RuntimeDatabase,
+  sessionId: string
+): SessionExecutionDescriptor | undefined {
+  const row = database.get<{
+    execution_context_id: string
+    kind: string
+    cols: number | null
+    rows: number | null
+  }>(
+    `SELECT sessions.execution_context_id, sessions.kind,
+            (SELECT runs.cols FROM session_runs AS runs
+             WHERE runs.session_id = sessions.id
+             ORDER BY runs.started_at DESC, runs.id DESC LIMIT 1) AS cols,
+            (SELECT runs.rows FROM session_runs AS runs
+             WHERE runs.session_id = sessions.id
+             ORDER BY runs.started_at DESC, runs.id DESC LIMIT 1) AS rows
+     FROM sessions WHERE sessions.id = ? AND sessions.archived_at IS NULL`,
+    sessionId
+  )
+  if (!row || row.kind !== 'claude-code') return undefined
+  return {
+    sessionId,
+    executionContextId: row.execution_context_id,
+    profile: 'claude-code',
+    cols: validTerminalSize(row.cols, 120, 2, 1_000),
+    rows: validTerminalSize(row.rows, 40, 1, 500)
+  }
+}
+
+function validTerminalSize(
+  value: number | null,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number {
+  return Number.isInteger(value) && value !== null && value >= minimum && value <= maximum
+    ? value
+    : fallback
+}
+
+class BackgroundRuntimePort implements RuntimePort {
+  readonly #closeListeners = new Set<() => void>()
+  #closed = false
+
+  on(event: 'message', listener: (event: { data: unknown }) => void): this
+  on(event: 'close', listener: () => void): this
+  on(
+    event: 'message' | 'close',
+    listener: ((event: { data: unknown }) => void) | (() => void)
+  ): this {
+    if (event === 'close') this.#closeListeners.add(listener as () => void)
+    return this
+  }
+
+  postMessage(): void {}
+  start(): void {}
+
+  close(): void {
+    if (this.#closed) return
+    this.#closed = true
+    for (const listener of this.#closeListeners) listener()
+    this.#closeListeners.clear()
+  }
 }
 
 async function waitForDatabaseRecovery(

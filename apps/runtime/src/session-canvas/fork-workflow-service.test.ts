@@ -11,7 +11,11 @@ import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
-import { ForkWorkflowError, ForkWorkflowService } from './fork-workflow-service'
+import {
+  ForkWorkflowError,
+  ForkWorkflowService,
+  type ExecuteForkInput
+} from './fork-workflow-service'
 import { SessionForkIntentRepository } from '../session/session-fork-intent-repository'
 
 const exec = promisify(execFile)
@@ -280,7 +284,11 @@ describe('ForkWorkflowService', () => {
       windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
       name: '隔离修复 / API', worktreeMode: 'new', now: 30
     })
-    const result = await executeAccepted(accepted, source.sceneId, 'new-worktree-execute', 31)
+    const checkpoints: string[] = []
+    const result = await executeAccepted(
+      accepted, source.sceneId, 'new-worktree-execute', 31,
+      { reach: (point) => { checkpoints.push(point) } }
+    )
 
     expect(result.forkState).toBe('starting')
     expect(result.worktree).toMatchObject({ state: 'ready' })
@@ -305,6 +313,9 @@ describe('ForkWorkflowService', () => {
         environment: { kind: 'worktree', state: 'ready' },
         git: { state: 'ready', branch: result.worktree!.branch, dirty: false }
       })
+    expect(checkpoints).toEqual([
+      'branch-created', 'path-created', 'setup-completed', 'session-bound'
+    ])
   })
 
   it('does not start external work or mutate the accepted assets with an already expired lease', async () => {
@@ -349,7 +360,9 @@ describe('ForkWorkflowService', () => {
     service = new ForkWorkflowService(
       dataRoot, database, new DomainTransactionManager(database), {
         stopRuns: async () => undefined,
-        setupPolicyForWorkspace: () => [{ command: '/bin/sh', args: ['-c', 'sleep 0.2'] }]
+        setupPolicyForWorkspace: () => [{
+          idempotencyKey: 'slow-setup', command: '/bin/sh', args: ['-c', 'sleep 0.2']
+        }]
       }
     )
     const accepted = await service.createForkChild(command('takeover-accept'), {
@@ -414,6 +427,7 @@ describe('ForkWorkflowService', () => {
       dataRoot, database, new DomainTransactionManager(database), {
         stopRuns: async () => undefined,
         setupPolicyForWorkspace: () => [{
+          idempotencyKey: 'allow-setup',
           command: '/bin/sh', args: ['-c', `test -f ${JSON.stringify(allowSetup)}`]
         }]
       }
@@ -471,7 +485,9 @@ describe('ForkWorkflowService', () => {
     service = new ForkWorkflowService(
       dataRoot, database, new DomainTransactionManager(database), {
         stopRuns: async () => undefined,
-        setupPolicyForWorkspace: () => [{ command: '/bin/sh', args: ['-c', 'exit 19'] }]
+        setupPolicyForWorkspace: () => [{
+          idempotencyKey: 'fail-setup', command: '/bin/sh', args: ['-c', 'exit 19']
+        }]
       }
     )
     const accepted = await service.createForkChild(command('remove-failed-create'), {
@@ -551,7 +567,8 @@ async function executeAccepted(
   accepted: Awaited<ReturnType<ForkWorkflowService['createForkChild']>>,
   sceneId: string,
   commandId: string,
-  now: number
+  now: number,
+  observer?: ExecuteForkInput['observer']
 ) {
   const operationId = accepted.forkProgress!.operationId
   const decision = new SessionForkIntentRepository(database).acquireLease({
@@ -559,7 +576,8 @@ async function executeAccepted(
   })
   if (decision.kind !== 'acquired') throw new Error('Fork lease was not acquired')
   return service.executeFork(command(commandId), {
-    windowId: 'window-1', sceneId, operationId, lease: decision.lease, now
+    windowId: 'window-1', sceneId, operationId, lease: decision.lease, now,
+    ...(observer ? { observer } : {})
   })
 }
 

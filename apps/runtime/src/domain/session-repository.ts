@@ -12,6 +12,19 @@ import type {
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 
+export interface ProviderIdentityForkAuthority {
+  operationId: string
+  runId: string
+  lease: { token: string; fence: number }
+}
+
+export class StaleForkProviderIdentityError extends Error {
+  constructor(operationId: string) {
+    super(`Fork provider identity authority is stale for operation ${operationId}`)
+    this.name = 'StaleForkProviderIdentityError'
+  }
+}
+
 interface SessionRow {
   id: string
   task_id: string
@@ -285,6 +298,7 @@ export class SessionRepository {
       metadata: unknown
       provisional?: boolean
       now: number
+      forkAuthority?: ProviderIdentityForkAuthority
     }
   ): DomainCommit<ProviderBinding> {
     const providerSessionId = input.providerSessionId.trim()
@@ -297,6 +311,28 @@ export class SessionRepository {
       if (session.archived_at !== null) {
         throw new Error('archived Session cannot record a provider identity')
       }
+      if (input.forkAuthority) {
+        const authoritative = tx.get<{ operation_id: string }>(
+          `SELECT operation_id FROM session_fork_intents
+           WHERE operation_id = ? AND session_id = ?
+             AND state IN ('pending', 'starting') AND stage = 'restoring-provider'
+             AND lease_token = ? AND lease_fence = ?
+             AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+          input.forkAuthority.operationId,
+          input.sessionId,
+          input.forkAuthority.lease.token,
+          input.forkAuthority.lease.fence,
+          input.now
+        )
+        if (!authoritative) {
+          throw new StaleForkProviderIdentityError(input.forkAuthority.operationId)
+        }
+      }
+      const authorityMetadata: Record<string, unknown> = input.forkAuthority === undefined ? {} : {
+        forkOperationId: input.forkAuthority.operationId,
+        forkRunId: input.forkAuthority.runId,
+        forkLeaseFence: input.forkAuthority.lease.fence
+      }
       const existing = tx.get<BindingRow>(
         `SELECT * FROM provider_bindings
          WHERE session_id = ? AND provider = ? AND provider_session_id = ?`,
@@ -306,9 +342,10 @@ export class SessionRepository {
       )
       if (existing) {
         const previousMetadata = parseMetadata(existing.metadata_json)
-        const metadata = {
+        const metadata: Record<string, unknown> = {
           ...(isObject(previousMetadata) ? previousMetadata : {}),
-          ...(isObject(input.metadata) ? input.metadata : {})
+          ...(isObject(input.metadata) ? input.metadata : {}),
+          ...authorityMetadata
         }
         delete metadata.invalidationReason
         if (input.provisional) metadata.provisional = true
@@ -325,8 +362,9 @@ export class SessionRepository {
           existing.id
         )
       } else {
-        const metadata = {
+        const metadata: Record<string, unknown> = {
           ...(isObject(input.metadata) ? input.metadata : {}),
+          ...authorityMetadata,
           ...(input.provisional ? { provisional: true } : {})
         }
         tx.run(
@@ -356,7 +394,43 @@ export class SessionRepository {
         'ProviderBinding'
       ))
       if (!input.provisional) {
-        tx.run(
+        if (input.forkAuthority) {
+          const startingWindow = tx.run(
+            `UPDATE session_fork_intents
+             SET state = 'starting', stage = 'starting-window',
+                 completed_steps = MAX(completed_steps, total_steps - 1), updated_at = ?
+             WHERE operation_id = ? AND session_id = ? AND stage = 'restoring-provider'
+               AND lease_token = ? AND lease_fence = ?
+               AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+            input.now,
+            input.forkAuthority.operationId,
+            input.sessionId,
+            input.forkAuthority.lease.token,
+            input.forkAuthority.lease.fence,
+            input.now
+          )
+          if (startingWindow.changes !== 1) {
+            throw new StaleForkProviderIdentityError(input.forkAuthority.operationId)
+          }
+          const completed = tx.run(
+            `UPDATE session_fork_intents
+             SET state = 'succeeded', stage = 'succeeded', completed_steps = total_steps,
+                 error_message = NULL, completed_at = ?, updated_at = ?
+             WHERE operation_id = ? AND session_id = ? AND stage = 'starting-window'
+               AND lease_token = ? AND lease_fence = ?
+               AND lease_expires_at IS NOT NULL AND lease_expires_at > ?`,
+            input.now,
+            input.now,
+            input.forkAuthority.operationId,
+            input.sessionId,
+            input.forkAuthority.lease.token,
+            input.forkAuthority.lease.fence,
+            input.now
+          )
+          if (completed.changes !== 1) {
+            throw new StaleForkProviderIdentityError(input.forkAuthority.operationId)
+          }
+        } else tx.run(
           `UPDATE session_fork_intents
            SET state = 'succeeded', stage = 'succeeded',
                completed_steps = total_steps, error_message = NULL, completed_at = ?, updated_at = ?

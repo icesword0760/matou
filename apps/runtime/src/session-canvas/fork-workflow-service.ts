@@ -29,6 +29,7 @@ import {
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import { WorktreeService, type WorktreeSetupStep } from '../worktrees/worktree-service'
 import { createGitBranchName, validateDisplayName } from './branch-name'
+import type { ForkKillPointObserver } from './fork-operation-coordinator'
 import { projectSceneGraphFrom } from './session-graph-repository'
 
 export type ForkWorktreeMode = 'current' | 'new'
@@ -91,6 +92,7 @@ export interface RemoveFailedForkInput extends RetryForkInput {}
 export interface ExecuteForkInput extends MutationLocation {
   operationId: string
   lease: ForkLease
+  observer?: ForkKillPointObserver
 }
 
 type MutationLocation = Pick<RetryForkInput, 'windowId' | 'sceneId' | 'now'>
@@ -256,7 +258,12 @@ export class ForkWorkflowService {
               branch: worktree.branch,
               baseRef: worktree.baseRevision ?? 'HEAD',
               setupPolicy: worktree.setupPolicy as WorktreeSetupStep[],
-              now: input.now
+              now: input.now,
+              beforeExternalSideEffect: renew,
+              onCheckpoint: async (point) => {
+                const operation = this.#forkIntents.operationById(input.operationId)
+                if (operation) await input.observer?.reach(point, operation)
+              }
             })
         renew()
         if (progress.stage === 'creating-worktree') {
@@ -278,10 +285,13 @@ export class ForkWorkflowService {
         renew()
         await this.#gitStates.refresh(ready.executionContextId, now())
         renew()
-        return this.#bindReadyWorktree(
+        const bound = this.#bindReadyWorktree(
           derivedCommand(command, 'bind-worktree'), input, intent.session_id, ready,
           input.operationId, input.lease, now(), preserveFocus
         )
+        const boundOperation = this.#forkIntents.operationById(input.operationId)
+        if (boundOperation) await input.observer?.reach('session-bound', boundOperation)
+        return bound
       } catch (error) {
         const failed = this.#markFailed(
           derivedCommand(command, 'failed'), input, intent.session_id, input.operationId,

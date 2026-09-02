@@ -5,6 +5,7 @@ export interface ProviderNotificationEvent {
   body: string
   sound: boolean
   cooldownKey: 'Stop' | 'Notification'
+  replacementKey?: string
 }
 
 const TITLE = 'Claude Code' as const

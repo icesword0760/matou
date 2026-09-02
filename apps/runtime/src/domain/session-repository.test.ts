@@ -5,11 +5,12 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { WorkspaceTaskRepository } from './workspace-task-repository'
-import { SessionRepository } from './session-repository'
+import { SessionRepository, StaleForkProviderIdentityError } from './session-repository'
 import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { SessionForkIntentRepository } from '../session/session-fork-intent-repository'
 
 let database: RuntimeDatabase
 let sessions: SessionRepository
@@ -207,6 +208,90 @@ describe('SessionRepository', () => {
     )).toEqual({
       state: 'starting', stage: 'restoring-provider', completed_steps: 3, completed_at: null
     })
+  })
+
+  it('settles a durable Fork only from the provider run holding its current lease', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-authoritative'), {
+      id: 'source-authoritative', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    intents.accept({
+      operationId: 'operation-authoritative', submissionKey: 'submission-authoritative',
+      sessionId: 'session-1', sourceSessionId: 'source-authoritative',
+      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      worktreeMode: 'current', totalSteps: 2, now: 2
+    })
+    const decision = intents.acquireLease({
+      operationId: 'operation-authoritative', owner: 'runtime-a', now: 10, ttlMs: 20
+    })
+    if (decision.kind !== 'acquired') throw new Error('lease missing')
+    intents.advanceStage({
+      operationId: 'operation-authoritative', lease: decision.lease,
+      stage: 'restoring-provider', now: 11
+    })
+
+    sessions.recordResumableProviderIdentity(command('fork-authoritative-identity'), {
+      id: 'binding-authoritative', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-derived', metadata: {}, now: 12,
+      forkAuthority: {
+        operationId: 'operation-authoritative', runId: 'run-authoritative',
+        lease: decision.lease
+      }
+    })
+
+    expect(database.get(
+      `SELECT state, stage, completed_steps, completed_at
+       FROM session_fork_intents WHERE operation_id = ?`, 'operation-authoritative'
+    )).toEqual({ state: 'succeeded', stage: 'succeeded', completed_steps: 2, completed_at: 12 })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'provider-derived',
+      metadata: expect.objectContaining({
+        forkOperationId: 'operation-authoritative', forkRunId: 'run-authoritative',
+        forkLeaseFence: decision.lease.fence
+      })
+    })
+  })
+
+  it('rolls back a late provider identity after the durable Fork lease is replaced', () => {
+    seedSession()
+    sessions.createSession(command('fork-source-takeover'), {
+      id: 'source-takeover', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'claude-code', title: 'Source', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    intents.accept({
+      operationId: 'operation-takeover', submissionKey: 'submission-takeover',
+      sessionId: 'session-1', sourceSessionId: 'source-takeover',
+      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      worktreeMode: 'current', totalSteps: 2, now: 2
+    })
+    const first = intents.acquireLease({
+      operationId: 'operation-takeover', owner: 'runtime-a', now: 10, ttlMs: 5
+    })
+    if (first.kind !== 'acquired') throw new Error('first lease missing')
+    intents.advanceStage({
+      operationId: 'operation-takeover', lease: first.lease,
+      stage: 'restoring-provider', now: 11
+    })
+    const second = intents.acquireLease({
+      operationId: 'operation-takeover', owner: 'runtime-b', now: 20, ttlMs: 20
+    })
+    if (second.kind !== 'acquired') throw new Error('takeover lease missing')
+
+    expect(() => sessions.recordResumableProviderIdentity(command('fork-stale-identity'), {
+      id: 'binding-stale', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'provider-stale', metadata: {}, now: 21,
+      forkAuthority: {
+        operationId: 'operation-takeover', runId: 'run-stale', lease: first.lease
+      }
+    })).toThrow(StaleForkProviderIdentityError)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+    expect(database.get(
+      'SELECT state, stage, lease_fence FROM session_fork_intents WHERE operation_id = ?',
+      'operation-takeover'
+    )).toEqual({ state: 'starting', stage: 'restoring-provider', lease_fence: second.lease.fence })
   })
 
   it('settles a legacy Fork from provider identity only after its active lease expires', () => {
