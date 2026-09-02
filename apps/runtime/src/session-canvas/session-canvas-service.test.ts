@@ -244,7 +244,7 @@ describe('SessionCanvasService', () => {
 
     const result = service.removeSessionBranch(command('remove-history-leaf'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: historical.session!.id,
-      includeDescendants: false, now: 23
+      scope: 'node-only', now: 23
     })
 
     expect(result.graph.nodes.map(({ sessionId }) => sessionId)).not.toContain(historical.session!.id)
@@ -269,7 +269,7 @@ describe('SessionCanvasService', () => {
 
     const result = service.removeSessionBranch(command('remove-parent-without-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: parent.session!.id,
-      includeDescendants: false, now: 25
+      scope: 'node-only', now: 25
     })
 
     expect(result.removedSessionIds).toEqual([parent.session!.id])
@@ -306,7 +306,7 @@ describe('SessionCanvasService', () => {
 
     const result = service.removeSessionBranch(command('remove-whole-history-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: parent.session!.id,
-      includeDescendants: true, now: 26
+      scope: 'node-and-descendants', now: 26
     })
     expect(result.removedSessionIds).toEqual(expect.arrayContaining([parent.session!.id, child.session!.id]))
     expect(result.disposedSessionIds).toEqual([child.session!.id])
@@ -327,7 +327,7 @@ describe('SessionCanvasService', () => {
 
     const result = service.removeSessionBranch(command('remove-active-parent-without-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
-      includeDescendants: false, now: 22
+      scope: 'node-only', now: 22
     })
 
     expect(result.removedSessionIds).toEqual([initial.session!.id])
@@ -352,7 +352,7 @@ describe('SessionCanvasService', () => {
 
     const result = service.removeSessionBranch(command('remove-active-whole-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
-      includeDescendants: true, now: 23
+      scope: 'node-and-descendants', now: 23
     })
     expect(result.removedSessionIds).toEqual(expect.arrayContaining([
       initial.session!.id, child.session!.id, grandchild.session!.id

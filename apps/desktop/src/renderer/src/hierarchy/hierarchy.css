@@ -351,6 +351,18 @@ button { -webkit-app-region: no-drag; }
 .dialog-primary.is-danger:hover { border-color: transparent; color: #fff; background: #ad3733; }
 .rename-dialog footer button:disabled { opacity: .45; cursor: not-allowed; }
 [role="alertdialog"] > p { margin: 0; padding: 8px 24px 24px; color: rgba(255,255,255,.7); font-size: 14px; line-height: 1.6; white-space: pre-line; }
+.dialog-content { padding: 0 24px; color: rgba(255,255,255,.7); font-size: 13px; line-height: 1.5; }
+.dialog-content p { margin: 0 0 12px; }
+.remove-node-dialog fieldset { display: grid; gap: 8px; margin: 14px 0 12px; padding: 0; border: 0; }
+.remove-node-choice { display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 10px; padding: 12px; border: 1px solid rgba(255,255,255,.1); border-radius: 9px; background: rgba(255,255,255,.025); cursor: pointer; }
+.remove-node-choice.is-selected { border-color: rgba(91,157,233,.8); background: rgba(91,157,233,.1); }
+.remove-node-choice input { margin: 3px 0 0; accent-color: #5b9de9; }
+.remove-node-choice span { display: grid; gap: 3px; }
+.remove-node-choice strong { color: #f0f1f3; font-size: 13px; }
+.remove-node-choice small { color: #b8c0ca; font-size: 12px; }
+.remove-node-choice em { color: #8e98a5; font-size: 11px; font-style: normal; }
+.remove-node-dialog__warning { color: #e7aa65; }
+.remove-node-leaf-copy { padding-top: 4px; }
 
 .detached-placeholder { display: grid; height: 100%; place-content: center; justify-items: center; color: #8792a6; background: #10141b; text-align: center; }
 .detached-placeholder div { display: flex; align-items: center; gap: 9px; }
@@ -646,6 +658,12 @@ button { -webkit-app-region: no-drag; }
 .light-theme [role="alertdialog"] h2 { color: rgba(0,0,0,.85); }
 .light-theme .rename-input-wrap input { color: rgba(0,0,0,.85); background: rgba(0,0,0,.04); }
 .light-theme [role="alertdialog"] > p { color: rgba(0,0,0,.65); }
+.light-theme .dialog-content { color: rgba(0,0,0,.65); }
+.light-theme .remove-node-choice { border-color: rgba(0,0,0,.12); background: rgba(0,0,0,.02); }
+.light-theme .remove-node-choice.is-selected { border-color: #458bd7; background: #eef6ff; }
+.light-theme .remove-node-choice strong { color: #2f3547; }
+.light-theme .remove-node-choice small { color: #596273; }
+.light-theme .remove-node-choice em { color: #77808e; }
 .light-theme .rename-dialog footer button,
 .light-theme [role="alertdialog"] footer button { border-color: rgba(0,0,0,.12); color: rgba(0,0,0,.7); }
 .light-theme .rename-dialog footer .dialog-primary,

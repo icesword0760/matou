@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
-import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
+import type { RemoveNodeScope, SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
 import { SessionCarousel } from './SessionCarousel'
 import { StoppedSessionCard } from './StoppedSessionCard'
 import { indexSessionGraph } from './session-graph-index'
@@ -12,7 +12,7 @@ export function SessionCanvas(props: {
   disabledReason?: string
   renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
   onActivate(sessionId: string): void
-  onRemoveBranch?(sessionId: string, includeDescendants: boolean): unknown
+  onRemoveBranch?(sessionId: string, scope: RemoveNodeScope): unknown
   onNavigateToChildren?(sessionId: string): void
   onReturnParent?(parentSessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
@@ -139,11 +139,9 @@ export function SessionCanvas(props: {
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
       renderSession={(node, inViewport) => {
         if (node.archivedAt === undefined) return renderSession(node, inViewport)
-        const directChildren = graphIndex.childrenOf(node.sessionId)
-        const descendants = graphIndex.descendantSummaryOf(node.sessionId)
+        const descendantNodes = graphIndex.descendantsOf(node.sessionId)
         return <StoppedSessionCard node={node}
-          directChildCount={directChildren.length} descendantCount={descendants.count}
-          descendantImpact={{ running: descendants.running, needsInput: descendants.needsInput }}
+          descendantNodes={[...descendantNodes]}
           disabled={disabled} {...(disabledReason ? { disabledReason } : {})}
           {...(onRemoveBranch ? { onRemoveBranch } : {})} />
       }}

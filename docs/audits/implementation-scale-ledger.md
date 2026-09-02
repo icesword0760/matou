@@ -10,7 +10,7 @@
 | 6 Journal range/checkpoint | **待实施** | checkpoint/tail 语义已落地，但 `RuntimeServer.#replay()` 仍调用 `readFrames()` / `readSessionFrames()` 并 `filter`，会先物化完整历史 | 32/256 MiB 从 checkpoint 后按 segment 范围流式读取；额外 RSS ≤16 MiB |
 | 7 有界恢复队列 | **部分实现** | `RuntimeSessionRecoveryScheduler` 有并发上限、切换优先级、8:1 防饥饿、失败隔离 tests；Runtime 配置 concurrency=4 | reconnect 仍会直接重发 Renderer 已登记 terminal；初始前台按整个 Scene 而不是当前父级横向列表；需修正后做真实恢复门禁 |
 | 8 Scene 挂载与整卡 Loading | **部分实现** | `TerminalPane` 仅在 `foreground && ready` 挂载 xterm；queued/restoring/failed 使用整卡遮罩；组件 tests 覆盖单卡隔离 | `SessionCarousel` 在同级会话超过 80 时窗口化，导致横向列表离屏会话不再保持 xterm 绑定，与已确认前台规则冲突 |
-| 9 统一节点移除范围 | **待实施** | 当前 `removeSessionBranch` 仍在 `includeDescendants=false` 且存在后代时抛 `Session has descendants` | “仅当前节点”需事务重连直接子节点；“当前及后代”删除完整子树，并统一 UI 入口 |
+| 9 统一节点移除范围 | **已实现（专项验证）** | 明确 `node-only` / `node-and-descendants` 协议；前者事务重连直接子节点，后者移除完整子树；统一确认框展示会话与可判断的自有 Worktree 数；真实 Electron 覆盖双范围、重启不复活及副屏 Color LCD | 进入 Task 12 完整发布门禁 |
 | 10 Carousel / Resize | **部分实现（专项验证）** | Resize 已合并并有真实 16 会话 / 60Hz 验收；Carousel 具有稳定 hover/geometry 与 1,000 会话窗口化；专项报告记录滚动 p50/p95 6.9/7.7 ms | 先解决 Task 8 的前台规则冲突，再决定能同时满足“大列表 DOM 上限”和“所有同级 xterm 保持绑定”的承载方式 |
 | 11 DAG 迭代布局与可视窗口 | **部分实现（聚合专项验证）** | `layoutGraph()` 保持迭代深度推导；`buildDagRenderModel()` 将远层按分支/层聚合并计算真实会话总数、运行中/待输入/异常计数；点击、缩放/平移和搜索可把目标替换为真实卡片；10,000 会话模型 node+aggregate ≤400、edge ≤800；5,000/10,000 布局专项结果继续成立 | pan/zoom 仍逐事件 setState；`DagWindowApp` 仍 500ms 轮询并 stringify 全图；需在 Task 12 同一提交完成真实 Electron 与 scale 最终门禁 |
 | 12 发布容量收口 | **待最终门禁** | `scale-dag-performance.md` 已记录专项测量：1,000 会话 DOM 151、SQL 463、层级恢复 445–516 ms、切换 79 ms、DAG 与滚动均低于专项预算 | 需在包含全部集成修复的同一提交上完成 typecheck、unit、完整真实 E2E、scale、打包运行和清理审计，再形成发布结论 |

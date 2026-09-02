@@ -188,7 +188,7 @@ export interface HierarchyCommands {
   getClaudeSessionDetail(sessionId: string, providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
   loadClaudeSession(sessionId: string, providerSessionId: string): Promise<ClaudeSessionLoadResult>
   restartStoppedSession?(sessionId: string): unknown
-  removeSessionBranch?(sceneId: string, sessionId: string, includeDescendants: boolean): unknown
+  removeSessionBranch?(sceneId: string, sessionId: string, scope: RemoveNodeScope): unknown
   getSceneSessionGraph(sceneId: string): unknown
   recordSessionInteraction(sessionId: string, interactionKind: 'submit' | 'control' | 'provider-action'): unknown
   setFocusedSession(sceneId: string, sessionId: string): unknown
@@ -201,7 +201,6 @@ export interface HierarchyCommands {
     sessionId: string,
     target: SessionEnvironmentTarget
   ): Promise<SessionEnvironmentActionResult>
-  deleteSession(sessionId: string, confirmed?: boolean, preserveSceneOnLastSession?: boolean): unknown
   detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
   returnSession(sceneWindowId: string): unknown
   setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown
@@ -210,6 +209,8 @@ export interface HierarchyCommands {
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 import type {
   ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult,
+  RemoveNodeScope,
   SessionEnvironmentActionResult, SessionEnvironmentOpenResult,
   SessionEnvironmentTarget
 } from '@matou/contracts'
+export type { RemoveNodeScope } from '@matou/contracts'

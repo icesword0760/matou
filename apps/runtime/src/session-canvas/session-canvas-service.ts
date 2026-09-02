@@ -5,6 +5,7 @@ import type {
   SceneSessionGraph,
   SessionCanvasMembership
 } from '@matou/domain'
+import type { RemoveNodeScope } from '@matou/contracts'
 
 import {
   activateSessionInTransaction,
@@ -94,7 +95,7 @@ export interface RemoveSessionBranchInput {
   windowId: string
   sceneId: string
   sessionId: string
-  includeDescendants: boolean
+  scope: RemoveNodeScope
   now: number
 }
 
@@ -540,11 +541,12 @@ export class SessionCanvasService {
          SELECT session_id FROM branch`,
         input.sessionId, input.sceneId
       ).map(({ session_id }) => session_id)
-      const removedSessionIds = input.includeDescendants
+      const includeDescendants = input.scope === 'node-and-descendants'
+      const removedSessionIds = includeDescendants
         ? descendants
         : [input.sessionId]
       const placeholders = removedSessionIds.map(() => '?').join(', ')
-      const directChildren = input.includeDescendants ? [] : tx.all<{
+      const directChildren = includeDescendants ? [] : tx.all<{
         relation_id: string
         task_id: string
         from_session_id: string
@@ -562,7 +564,7 @@ export class SessionCanvasService {
          ORDER BY membership.sibling_created_seq, relation.from_session_id`,
         input.sceneId, input.sessionId
       )
-      const structuralParent = input.includeDescendants ? undefined : tx.get<{
+      const structuralParent = includeDescendants ? undefined : tx.get<{
         to_session_id: string
       }>(
         `SELECT relation.to_session_id
@@ -593,7 +595,7 @@ export class SessionCanvasService {
          LIMIT 1`,
         input.sessionId, input.sceneId
       ) : undefined
-      const survivingChild = removesFocus && !survivingParent && !input.includeDescendants
+      const survivingChild = removesFocus && !survivingParent && !includeDescendants
         ? tx.get<{ id: string }>(
           `SELECT child.id
            FROM session_relations_current AS relation

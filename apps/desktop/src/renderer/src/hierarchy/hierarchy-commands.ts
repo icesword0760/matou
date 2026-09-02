@@ -118,8 +118,8 @@ export function createHierarchyCommands(
     restartStoppedSession: (sessionId) => command('hierarchy.restart-stopped-session', {
       windowId, sessionId
     }),
-    removeSessionBranch: (sceneId, sessionId, includeDescendants) => command(
-      'hierarchy.remove-session-branch', { sceneId, sessionId, includeDescendants }
+    removeSessionBranch: (sceneId, sessionId, scope) => command(
+      'hierarchy.remove-session-branch', { sceneId, sessionId, scope }
     ),
     getSceneSessionGraph: (sceneId) => client.request('hierarchy.get-scene-session-graph', {
       sceneId, windowId
@@ -146,10 +146,6 @@ export function createHierarchyCommands(
     handoffSessionEnvironment: (sessionId, target: SessionEnvironmentTarget) => environmentCommand(
       'session.environment-handoff', { sessionId, target }
     ),
-    deleteSession: (sessionId, confirmed = false, preserveSceneOnLastSession = false) => command('hierarchy.delete-session', {
-      sessionId, ...(confirmed ? { confirmedIntent: `delete-session:${sessionId}` } : {}),
-      ...(preserveSceneOnLastSession ? { preserveSceneOnLastSession: true } : {})
-    }),
     detachSession: (sceneId, mountId, sessionId, sceneWindowId) => command('hierarchy.detach-session', {
       sceneId, mountId, sessionId, sceneWindowId, nativeWindowKey: sceneWindowId
     }),
@@ -258,7 +254,6 @@ export function createReadOnlyHierarchyCommands(
     recordSessionInteraction: blocked,
     // Scrolling remains local and usable. Persistence resumes after storage is writable.
     putGeometry: () => Promise.resolve(),
-    deleteSession: blocked,
     detachSession: blocked,
     returnSession: blocked,
     setPermissionMode: blocked,

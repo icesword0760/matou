@@ -53,7 +53,8 @@ test.describe('real Shell startup failure recovery', () => {
       await expect(activeSurface(fixture.page)).toHaveAttribute('data-session-id', await failedPane.locator('.terminal-surface').getAttribute('data-session-id') ?? '')
       await expect(fixture.page.locator(`.terminal-surface[data-session-id="${originalSessionId}"]`)).toHaveCount(1)
 
-      await failedPane.getByRole('button', { name: '移除失败会话' }).click()
+      await failedPane.getByRole('button', { name: '移除节点…' }).click()
+      await fixture.page.getByRole('button', { name: '移除', exact: true }).click()
       await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       await expect(activeSurface(fixture.page)).toHaveAttribute('data-session-id', originalSessionId ?? '')
     } finally {

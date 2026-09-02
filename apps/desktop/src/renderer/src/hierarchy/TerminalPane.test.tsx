@@ -109,7 +109,7 @@ describe('Terminal pane', () => {
     const retryFork = vi.fn()
     render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="restore failed"
       forkState="failed" forkError="setup failed" onRetryFork={retryFork}
-      onRemoveFailedFork={vi.fn()} />)
+      onRemoveBranch={vi.fn()} />)
 
     expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
     await userEvent.setup().click(screen.getByRole('button', { name: '重试创建分支' }))
@@ -207,26 +207,54 @@ describe('Terminal pane', () => {
     expect(onForkSibling).toHaveBeenCalledWith('session-1')
   })
 
-  it('keeps only structural actions in the card header without process controls', async () => {
+  it('offers both removal scopes with projected Session and owned Worktree impact', async () => {
     const user = userEvent.setup()
     const onRemoveBranch = vi.fn()
-    render(<TerminalPane {...fixture()} workStatus="running"
-      childNodes={[childNode('child-1'), childNode('child-2')]}
-      descendantCount={4} descendantImpact={{ running: 2, needsInput: 1 }}
+    render(<TerminalPane {...fixture()} workStatus="running" parentSessionId="grandparent"
+      hasOwnedWorktree childNodes={[childNode('child-1'), childNode('child-2')]}
+      descendantNodes={[
+        { ...childNode('child-1'), hasOwnedWorktree: true },
+        childNode('child-2'),
+        { ...childNode('grandchild-1'), parentSessionId: 'child-1', workStatus: 'running' },
+        { ...childNode('grandchild-2'), parentSessionId: 'child-2', workStatus: 'needs-input' }
+      ]}
       onRemoveBranch={onRemoveBranch} />)
 
+    expect(screen.queryByRole('button', { name: '移出节点：Claude 主会话' })).toBeNull()
     expect(screen.queryByRole('button', { name: '更多会话操作：Claude 主会话' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '停止运行' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '重新启动' })).toBeNull()
 
-    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
-    const dialog = screen.getByRole('alertdialog', { name: '移除“Claude 主会话”及其整个分支？' })
-    expect(dialog.textContent).toContain('2 个直接子节点')
-    expect(dialog.textContent).toContain('共 4 个后代节点')
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    const dialog = screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })
+    const nodeOnly = screen.getByRole('radio', { name: /仅移除当前节点/ })
+    const branch = screen.getByRole('radio', { name: /移除当前节点及全部后代/ })
+    expect(nodeOnly).toHaveProperty('checked', true)
+    expect(nodeOnly.closest('label')?.textContent).toContain('影响 1 个会话')
+    expect(nodeOnly.closest('label')?.textContent).toContain('1 个自有 Worktree')
+    expect(nodeOnly.closest('label')?.textContent).toContain('后代会话将重连到当前节点的父级')
+    expect(branch.closest('label')?.textContent).toContain('影响 5 个会话')
+    expect(branch.closest('label')?.textContent).toContain('2 个自有 Worktree')
     expect(dialog.textContent).toContain('2 个运行中、1 个待输入')
-    expect(dialog.textContent).toContain('项目文件和工作树不会被删除')
-    await user.click(screen.getByRole('button', { name: '停止 3 个会话并移除' }))
-    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', true)
+
+    await user.click(screen.getByRole('button', { name: '移除当前节点' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
+  })
+
+  it('removes the selected complete descendant branch', async () => {
+    const user = userEvent.setup()
+    const onRemoveBranch = vi.fn()
+    render(<TerminalPane {...fixture()} childNodes={[childNode('child-1')]}
+      descendantNodes={[childNode('child-1')]}
+      onRemoveBranch={onRemoveBranch} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    await user.click(screen.getByRole('radio', { name: /移除当前节点及全部后代/ }))
+    await user.click(screen.getByRole('button', { name: '移除 2 个会话' }))
+
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-and-descendants')
   })
 
   it('closes a pending structural removal when read-only recovery starts', async () => {
@@ -235,7 +263,8 @@ describe('Terminal pane', () => {
     const props = fixture()
     const view = render(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} />)
 
-    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
     expect(screen.getByRole('alertdialog')).toBeTruthy()
 
     view.rerender(<TerminalPane {...props} readOnly onRemoveBranch={onRemoveBranch} />)
@@ -249,15 +278,16 @@ describe('Terminal pane', () => {
     const onRemoveBranch = vi.fn()
     render(<TerminalPane {...fixture()} onRemoveBranch={onRemoveBranch} />)
 
-    await user.click(screen.getByRole('button', { name: '移出节点：Claude 主会话' }))
-    const dialog = screen.getByRole('alertdialog', { name: '移除“Claude 主会话”？' })
-    expect(dialog.textContent).toContain('“Claude 主会话”会从会话列表和 DAG 中消失')
-    expect(dialog.textContent).not.toContain('整个分支')
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+    await user.click(screen.getByRole('menuitem', { name: '移除节点…' }))
+    const dialog = screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })
+    expect(dialog.textContent).toContain('影响 1 个会话')
+    expect(dialog.textContent).not.toContain('移除当前节点及全部后代')
     const confirm = screen.getByRole('button', { name: '移除' })
     expect(confirm.classList.contains('is-danger')).toBe(true)
 
     await user.click(confirm)
-    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', false)
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('opens pane actions only from the card header', async () => {
@@ -409,23 +439,25 @@ describe('Terminal pane', () => {
   it('keeps a failed Fork as a retryable card without starting a terminal process', async () => {
     const user = userEvent.setup()
     const onRetryFork = vi.fn()
-    const onRemoveFailedFork = vi.fn()
+    const onRemoveBranch = vi.fn()
     render(<TerminalPane {...fixture()} forkState="failed" forkError="依赖安装失败"
-      onRetryFork={onRetryFork} onRemoveFailedFork={onRemoveFailedFork} />)
+      onRetryFork={onRetryFork} onRemoveBranch={onRemoveBranch} />)
 
     expect(screen.getByRole('status').textContent).toContain('分支创建失败')
     expect(screen.getByText('依赖安装失败')).toBeTruthy()
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
     await user.click(screen.getByRole('button', { name: '重试创建分支' }))
     expect(onRetryFork).toHaveBeenCalledWith('session-1')
-    await user.click(screen.getByRole('button', { name: '移除失败分支' }))
-    expect(onRemoveFailedFork).toHaveBeenCalledWith('session-1')
+    await user.click(screen.getByRole('button', { name: '移除节点…' }))
+    expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('explains an invalidated Fork parent in user terms with a concrete next step', () => {
     render(<TerminalPane {...fixture()} forkState="failed"
       forkError="provider session not found"
-      onRetryFork={vi.fn()} onRemoveFailedFork={vi.fn()} />)
+      onRetryFork={vi.fn()} onRemoveBranch={vi.fn()} />)
 
     const status = screen.getByRole('status')
     expect(status.textContent).toContain('父会话已失效')
@@ -463,8 +495,8 @@ describe('Terminal pane', () => {
 
   it('keeps a real startup failure actionable without removing sibling Sessions', async () => {
     const user = userEvent.setup()
-    const onDelete = vi.fn()
-    render(<TerminalPane {...fixture()} onDelete={onDelete} />)
+    const onRemoveBranch = vi.fn()
+    render(<TerminalPane {...fixture()} onRemoveBranch={onRemoveBranch} />)
 
     await user.click(screen.getByRole('button', { name: '触发启动失败' }))
     expect(screen.getByRole('status').textContent).toContain('会话启动失败')
@@ -474,8 +506,10 @@ describe('Terminal pane', () => {
     await user.click(screen.getByRole('button', { name: '重试启动' }))
     expect(screen.getByTestId('surface-session-1').dataset.spawnRevision).toBe('1')
     await user.click(screen.getByRole('button', { name: '触发启动失败' }))
-    await user.click(screen.getByRole('button', { name: '移除失败会话' }))
-    expect(onDelete).toHaveBeenCalledWith('session-1', true)
+    await user.click(screen.getByRole('button', { name: '移除节点…' }))
+    expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '移除' }))
+    expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
   it('automatically restarts a failed Session after its Workspace is relinked', async () => {
@@ -531,19 +565,20 @@ describe('Terminal pane', () => {
   })
 
   it('consumes a close shortcut while recovery blocks the card instead of replaying it after recovery', () => {
-    const onDelete = vi.fn()
+    const onRemoveBranch = vi.fn()
     const props = fixture()
-    const view = render(<TerminalPane {...props} onDelete={onDelete} closeRequest={1}
+    const view = render(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} closeRequest={1}
       environment={worktreeEnvironment('missing')} />)
-    expect(onDelete).not.toHaveBeenCalled()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
 
-    view.rerender(<TerminalPane {...props} onDelete={onDelete} closeRequest={1}
+    view.rerender(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} closeRequest={1}
       environment={worktreeEnvironment('ready')} />)
-    expect(onDelete).not.toHaveBeenCalled()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
 
-    view.rerender(<TerminalPane {...props} onDelete={onDelete} closeRequest={2}
+    view.rerender(<TerminalPane {...props} onRemoveBranch={onRemoveBranch} closeRequest={2}
       environment={worktreeEnvironment('ready')} />)
-    expect(onDelete).toHaveBeenCalledWith('session-1', false)
+    expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
+    expect(onRemoveBranch).not.toHaveBeenCalled()
   })
 })
 
@@ -554,11 +589,8 @@ function fixture() {
       kind: 'claude-code' as const, executionContextId: 'context-1'
     },
     active: true,
-    workspaceSessionCount: 2,
-    taskName: '修复登录',
     pathValid: true,
-    onActivate: vi.fn(),
-    onDelete: vi.fn()
+    onActivate: vi.fn()
   }
 }
 
@@ -567,7 +599,7 @@ function childNode(sessionId: string) {
     sessionId, sceneId: 'scene-1', parentSessionId: 'session-1',
     currentMode: 'shell' as const, workStatus: 'idle' as const,
     providerRestoreState: 'none' as const, canFork: false, title: sessionId,
-    cwd: '/tmp', activeChildCount: 0, stoppedChildCount: 0,
+    cwd: '/tmp', hasOwnedWorktree: false, activeChildCount: 0, stoppedChildCount: 0,
     childModeCounts: { shell: 0, claudeCode: 0 }, latestLines: [], lastUserInteractionSeq: 0
   }
 }
