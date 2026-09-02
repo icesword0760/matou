@@ -191,8 +191,14 @@ describe('ProviderHookServer', () => {
 
   it('rejects a different statusline identity while restoring one specific conversation', async () => {
     const mismatches: unknown[] = []
+    const rejectedHudEvents: unknown[] = []
+    const rejectedNotificationEvents: unknown[] = []
+    const rejectedTeamObservations: unknown[] = []
     const strictHooks = new ProviderHookServer(root, sessions, {
-      onIdentityMismatch: (event) => { mismatches.push(event) }
+      onIdentityMismatch: (event) => { mismatches.push(event) },
+      onHudPayload: (event) => { rejectedHudEvents.push(event) },
+      onNotification: (event) => { rejectedNotificationEvents.push(event) },
+      onTeamObservations: (events) => { rejectedTeamObservations.push(...events) }
     })
     await strictHooks.start()
     try {
@@ -201,17 +207,37 @@ describe('ProviderHookServer', () => {
         acceptStatuslineIdentity: true,
         expectedProviderSessionId: 'provider-old'
       })
+      const transcriptPath = join(root, 'provider-wrong-team.jsonl')
+      await writeFile(transcriptPath, JSON.stringify({
+        type: 'user',
+        toolUseResult: {
+          status: 'teammate_spawned',
+          teammate_id: 'WRONG_TEAMMATE@wrong-team',
+          name: 'WRONG_TEAMMATE',
+          team_name: 'wrong-team',
+          prompt: 'This observation belongs to another conversation'
+        }
+      }))
 
       expect((await postHook(registration.hookUrl, {
-        session_id: 'provider-new', cwd: root,
-        model: { display_name: 'Claude Opus 4.6' }
+        hook_event_name: 'Stop', session_id: 'provider-new', cwd: root,
+        model: { display_name: 'Claude Opus 4.6' },
+        transcript_path: transcriptPath,
+        last_assistant_message: 'Wrong conversation completed'
+      })).status).toBe(200)
+      expect((await postHook(registration.hookUrl, {
+        hook_event_name: 'PermissionRequest', session_id: 'provider-new', cwd: root,
+        tool_name: 'Write', tool_input: { file_path: '/tmp/wrong-conversation' }
       })).status).toBe(200)
 
       expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
+      expect(rejectedHudEvents).toEqual([])
+      expect(rejectedNotificationEvents).toEqual([])
+      expect(rejectedTeamObservations).toEqual([])
       expect(mismatches).toEqual([{
         runId: 'run-strict-resume', sessionId: 'session-1', provider: 'claude-code',
         expectedProviderSessionId: 'provider-old', actualProviderSessionId: 'provider-new',
-        eventName: 'unknown'
+        eventName: 'Stop'
       }])
     } finally {
       await strictHooks.stop()

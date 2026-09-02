@@ -318,6 +318,44 @@ describe('ForkWorkflowService', () => {
     ])
   })
 
+  it('forks from the revision visible when the request is accepted even if the source advances', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-parent')
+    seedReadyGitState(source.executionContextId)
+    const acceptedRevision = (await exec('git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']))
+      .stdout.trim()
+
+    const accepted = await service.createForkChild(command('frozen-worktree-base'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '固定代码版本', worktreeMode: 'new', now: 30
+    })
+    const acceptedWorktree = database.get<{ base_ref: string; base_revision: string | null }>(
+      `SELECT worktrees.base_ref, worktrees.base_revision
+       FROM worktrees
+       JOIN session_fork_intents ON session_fork_intents.worktree_id = worktrees.id
+       WHERE session_fork_intents.session_id = ?`,
+      accepted.session!.id
+    )
+    expect(acceptedWorktree).toEqual({
+      base_ref: acceptedRevision,
+      base_revision: acceptedRevision
+    })
+
+    await writeFile(join(workspaceRoot, 'README.md'), 'source advanced after Fork acceptance\n')
+    await exec('git', ['-C', workspaceRoot, 'add', 'README.md'])
+    await exec('git', ['-C', workspaceRoot, 'commit', '-m', 'advance source'])
+    const advancedRevision = (await exec('git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']))
+      .stdout.trim()
+    expect(advancedRevision).not.toBe(acceptedRevision)
+
+    const result = await executeAccepted(
+      accepted, source.sceneId, 'frozen-worktree-base-execute', 31
+    )
+    const forkRevision = (await exec('git', ['-C', result.worktree!.path, 'rev-parse', 'HEAD']))
+      .stdout.trim()
+    expect(forkRevision).toBe(acceptedRevision)
+  })
+
   it('does not start external work or mutate the accepted assets with an already expired lease', async () => {
     await initializeGitRepository(workspaceRoot)
     const source = bootstrapClaude('provider-parent')
@@ -392,6 +430,9 @@ describe('ForkWorkflowService', () => {
     })
     expect(second.kind).toBe('acquired')
     if (second.kind !== 'acquired') throw new Error('worker B lease missing')
+    const stageAtTakeover = database.get<{ stage: string }>(
+      'SELECT stage FROM session_fork_intents WHERE operation_id = ?', operationId
+    )!.stage
 
     await executing
     expect(executionError).toBeInstanceOf(Error)
@@ -404,7 +445,7 @@ describe('ForkWorkflowService', () => {
        JOIN session_environment_bindings AS environment ON environment.session_id = fork.session_id
        WHERE fork.operation_id = ?`, operationId
     )).toEqual({
-      stage: 'creating-worktree', state: 'starting', lease_token: second.lease.token,
+      stage: stageAtTakeover, state: 'starting', lease_token: second.lease.token,
       status: 'starting', environment_state: 'recovering'
     })
   })

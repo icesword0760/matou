@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import type {
   DomainCommandMetadata,
@@ -31,6 +33,8 @@ import { WorktreeService, type WorktreeSetupStep } from '../worktrees/worktree-s
 import { createGitBranchName, validateDisplayName } from './branch-name'
 import type { ForkKillPointObserver } from './fork-operation-coordinator'
 import { projectSceneGraphFrom } from './session-graph-repository'
+
+const exec = promisify(execFile)
 
 export type ForkWorktreeMode = 'current' | 'new'
 export type ForkWorkflowErrorCode =
@@ -146,6 +150,7 @@ interface SourceContext {
 interface GitPlan {
   repositoryRoot: string
   baseRef: string
+  baseRevision: string
   path: string
   branch: string
   worktreeId: string
@@ -171,6 +176,7 @@ export class ForkWorkflowService {
   readonly #forkIntents: SessionForkIntentRepository
   readonly #setupPolicyForWorkspace: (workspaceId: string) => WorktreeSetupStep[]
   readonly #onProgressCommitted: () => void
+  readonly #accepting = new Map<string, Promise<ForkWorkflowResult>>()
 
   constructor(
     dataRoot: string,
@@ -488,7 +494,7 @@ export class ForkWorkflowService {
     }).result
   }
 
-  async #accept(
+  #accept(
     command: DomainCommandMetadata,
     input: CreateForkInput,
     placement: 'child' | 'sibling'
@@ -499,12 +505,29 @@ export class ForkWorkflowService {
       const result = readAcceptedForkResult(
         this.#database, input.windowId, accepted.identity.sessionId
       )
-      return {
+      return Promise.resolve({
         ...result,
         forkState: legacyForkState(accepted.progress.stage),
         forkProgress: accepted.progress
-      }
+      })
     }
+    const accepting = this.#accepting.get(submissionKey)
+    if (accepting) return accepting
+    const pending = this.#acceptNew(command, input, placement, submissionKey)
+    this.#accepting.set(submissionKey, pending)
+    void pending.then(
+      () => { if (this.#accepting.get(submissionKey) === pending) this.#accepting.delete(submissionKey) },
+      () => { if (this.#accepting.get(submissionKey) === pending) this.#accepting.delete(submissionKey) }
+    )
+    return pending
+  }
+
+  async #acceptNew(
+    command: DomainCommandMetadata,
+    input: CreateForkInput,
+    placement: 'child' | 'sibling',
+    submissionKey: string
+  ): Promise<ForkWorkflowResult> {
     const ids = createHierarchyIds()
     const relationId = randomUUID()
     const operationId = randomUUID()
@@ -514,7 +537,7 @@ export class ForkWorkflowService {
     if (!name.ok) throw displayNameError(name.code, name.message, name.input)
 
     const gitPlan = input.worktreeMode === 'new'
-      ? this.#resolveGitPlan(source, name.displayName, ids.sessionId)
+      ? await this.#resolveGitPlan(source, name.displayName, ids.sessionId)
       : undefined
     const initial = this.#createPreparingNode(
       command, input, source, name.displayName, ids, relationId, operationId, submissionKey, gitPlan,
@@ -623,21 +646,25 @@ export class ForkWorkflowService {
     ).map(({ title }) => title)
   }
 
-  #resolveGitPlan(
+  async #resolveGitPlan(
     source: SourceContext,
     displayName: string,
     sessionId: string
-  ): GitPlan {
+  ): Promise<GitPlan> {
     const git = this.#database.get<{ repository_root: string }>(
       `SELECT repository_root FROM execution_context_git_states
        WHERE execution_context_id = ? AND state = 'ready' AND repository_root IS NOT NULL`,
       source.forkSource.execution_context_id
     )
     if (!git) throw new ForkWorkflowError('GIT_REPOSITORY_REQUIRED', '新工作树需要 Git 仓库')
+    const baseRevision = (await exec(
+      'git', ['-C', git.repository_root, 'rev-parse', 'HEAD']
+    )).stdout.trim()
     const canonicalDataRoot = this.#dataRoot
     return {
       repositoryRoot: git.repository_root,
-      baseRef: 'HEAD',
+      baseRef: baseRevision,
+      baseRevision,
       path: join(canonicalDataRoot, 'worktrees', source.task.workspace_id, sessionId),
       branch: createGitBranchName(displayName, sessionId),
       worktreeId: randomUUID(),
@@ -692,11 +719,11 @@ export class ForkWorkflowService {
         tx.run(
           `INSERT INTO worktrees (
              id, execution_context_id, repository_root, worktree_path, branch_name,
-             base_ref, state, setup_policy_json, setup_result_json, cleanup_policy,
+             base_ref, base_revision, state, setup_policy_json, setup_result_json, cleanup_policy,
              created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'creating', ?, '[]', 'retain-dirty', ?, ?)`,
           gitPlan.worktreeId, gitPlan.executionContextId, gitPlan.repositoryRoot,
-          gitPlan.path, gitPlan.branch, gitPlan.baseRef,
+          gitPlan.path, gitPlan.branch, gitPlan.baseRef, gitPlan.baseRevision,
           JSON.stringify(this.#setupPolicyForWorkspace(source.task.workspace_id)),
           input.now, input.now
         )

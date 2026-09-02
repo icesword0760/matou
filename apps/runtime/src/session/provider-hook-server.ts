@@ -19,6 +19,7 @@ interface HookRegistrationRecord {
   permissionMode?: string
   acceptStatuslineIdentity: boolean
   expectedProviderSessionId?: string
+  identityRejected?: boolean
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
   acceptIdentity: boolean
@@ -218,39 +219,39 @@ export class ProviderHookServer {
     }
     try {
       const payload = await readJsonBody(request)
-      this.#onHudPayload({
-        runId: registration.runId,
-        sessionId: registration.sessionId,
-        provider: 'claude-code',
-        payload
-      })
-      const transcriptPath = providerTranscriptPath(payload)
-      if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
-        const observations = await readAgentTeamObservations(transcriptPath, {
-          runId: registration.runId,
-          leadSessionId: registration.sessionId
-        })
-        if (observations.length > 0) await this.#onTeamObservations(observations)
+      // A provider run that failed the restore handshake no longer owns this
+      // Session. Acknowledge later hooks so the provider is not stalled, but do
+      // not let them mutate the original card's HUD, notifications or DAG.
+      if (registration.identityRejected) {
+        sendJson(response, 200, {})
+        return
       }
       const providerSessionId = providerSessionIdentity(payload)
       const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
-      if (
-        providerSessionId && confirmsConversation && registration.acceptIdentity &&
-        registration.expectedProviderSessionId !== undefined &&
-        providerSessionId !== registration.expectedProviderSessionId
-      ) {
-        registration.acceptIdentity = false
-        this.#onIdentityMismatch({
-          runId: registration.runId,
-          sessionId: registration.sessionId,
-          provider: 'claude-code',
-          expectedProviderSessionId: registration.expectedProviderSessionId,
-          actualProviderSessionId: providerSessionId,
-          eventName
-        })
+      if (registration.expectedProviderSessionId !== undefined) {
+        // During a targeted restore, no provider-owned side effect is trusted
+        // until one authoritative payload confirms the requested conversation.
+        if (!registration.acceptIdentity || !providerSessionId || !confirmsConversation) {
+          sendJson(response, 200, {})
+          return
+        }
+        if (providerSessionId !== registration.expectedProviderSessionId) {
+          registration.acceptIdentity = false
+          registration.identityRejected = true
+          this.#onIdentityMismatch({
+            runId: registration.runId,
+            sessionId: registration.sessionId,
+            provider: 'claude-code',
+            expectedProviderSessionId: registration.expectedProviderSessionId,
+            actualProviderSessionId: providerSessionId,
+            eventName
+          })
+          sendJson(response, 200, {})
+          return
+        }
       }
       if (providerSessionId && confirmsConversation && registration.acceptIdentity) {
         const cwd = nonEmptyText(payload.cwd)
@@ -315,6 +316,20 @@ export class ProviderHookServer {
           // it no longer owns the durable Fork or its resumable binding.
           if (!(error instanceof StaleForkProviderIdentityError)) throw error
         }
+      }
+      this.#onHudPayload({
+        runId: registration.runId,
+        sessionId: registration.sessionId,
+        provider: 'claude-code',
+        payload
+      })
+      const transcriptPath = providerTranscriptPath(payload)
+      if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
+        const observations = await readAgentTeamObservations(transcriptPath, {
+          runId: registration.runId,
+          leadSessionId: registration.sessionId
+        })
+        if (observations.length > 0) await this.#onTeamObservations(observations)
       }
       const notificationEvent = toProviderNotificationEvent(payload)
       if (notificationEvent) {

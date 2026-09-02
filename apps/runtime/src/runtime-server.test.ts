@@ -2559,7 +2559,7 @@ describe('RuntimeServer domain RPC', () => {
     const sessions = new RuntimeSessionRegistry()
     const forkServer = new RuntimeServer(
       forkPort, root, database, undefined, undefined, sessions,
-      undefined, undefined, { providerResumeTimeoutMs: 25 }
+      undefined, undefined, { providerResumeTimeoutMs: 1_000 }
     )
     try {
       registerSession(database, 'fork-durable-source', 'claude-code')
@@ -2684,6 +2684,60 @@ describe('RuntimeServer domain RPC', () => {
         stage: 'failed', error: expect.stringContaining('代码：7')
       })
       expect(sessions.has('fork-durable-exit-derived')).toBe(false)
+    } finally {
+      forkServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('fails a durable Fork that never confirms its provider identity without deleting the Session', async () => {
+    const executable = join(root, 'provider-durable-identity-timeout-fixture.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const forkPort = new MockPort()
+    const sessions = new RuntimeSessionRegistry()
+    const forkServer = new RuntimeServer(
+      forkPort, root, database, undefined, undefined, sessions,
+      undefined, undefined, { forkProviderIdentityTimeoutMs: 25 }
+    )
+    try {
+      registerSession(database, 'fork-timeout-source', 'claude-code')
+      registerSession(database, 'fork-timeout-derived', 'claude-code')
+      const intents = new SessionForkIntentRepository(database)
+      const now = Date.now()
+      intents.accept({
+        operationId: 'operation-identity-timeout', submissionKey: 'submission-identity-timeout',
+        sessionId: 'fork-timeout-derived', sourceSessionId: 'fork-timeout-source',
+        sourceProviderSessionId: 'provider-source-timeout', displayName: 'Identity timeout',
+        worktreeMode: 'current', totalSteps: 2, now
+      })
+      const decision = intents.acquireLease({
+        operationId: 'operation-identity-timeout', owner: 'coordinator', now, ttlMs: 60_000
+      })
+      if (decision.kind !== 'acquired') throw new Error('durable lease missing')
+      intents.advanceStage({
+        operationId: 'operation-identity-timeout', lease: decision.lease,
+        stage: 'restoring-provider', now
+      })
+
+      await forkServer.startOrResumeSession({
+        sessionId: 'fork-timeout-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      }, {
+        operationId: 'operation-identity-timeout', runId: 'run-identity-timeout',
+        lease: decision.lease
+      })
+
+      await waitUntil(() => intents.progressByOperation('operation-identity-timeout')?.stage === 'failed')
+      expect(intents.progressByOperation('operation-identity-timeout')).toMatchObject({
+        stage: 'failed', error: expect.stringContaining('身份确认超时')
+      })
+      expect(sessions.has('fork-timeout-derived')).toBe(false)
+      expect(database.get<{ id: string }>(
+        'SELECT id FROM sessions WHERE id = ?', 'fork-timeout-derived'
+      )).toEqual({ id: 'fork-timeout-derived' })
     } finally {
       forkServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)

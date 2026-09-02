@@ -62,6 +62,7 @@ export interface ForkOperationCoordinatorDependencies {
   concurrency?: number
   heartbeatMs?: number
   leaseTtlMs?: number
+  identityTimeoutMs?: number
 }
 
 interface ActiveLease {
@@ -81,8 +82,9 @@ export class ForkOperationCoordinator {
   readonly #concurrency: number
   readonly #heartbeatMs: number
   readonly #leaseTtlMs: number
+  readonly #identityTimeoutMs: number
   readonly #running = new Map<string, Promise<void>>()
-  readonly #waitingForIdentity = new Set<string>()
+  readonly #waitingForIdentity = new Map<string, number>()
   readonly #notifiedTerminal = new Set<string>()
   readonly #terminalNotificationInFlight = new Set<string>()
   readonly #leases = new Map<string, ActiveLease>()
@@ -101,6 +103,7 @@ export class ForkOperationCoordinator {
     this.#concurrency = dependencies.concurrency ?? 2
     this.#heartbeatMs = dependencies.heartbeatMs ?? 2_000
     this.#leaseTtlMs = dependencies.leaseTtlMs ?? 8_000
+    this.#identityTimeoutMs = dependencies.identityTimeoutMs ?? 65_000
   }
 
   start(): void {
@@ -234,7 +237,7 @@ export class ForkOperationCoordinator {
           lease: active.lease
         })
         if (started && started.kind !== 'started') return
-        this.#waitingForIdentity.add(operationId)
+        this.#waitingForIdentity.set(operationId, this.#now() + this.#identityTimeoutMs)
       }
       if (current.progress.stage === 'starting-window') {
         this.#assertLease(operationId, active)
@@ -253,7 +256,7 @@ export class ForkOperationCoordinator {
           lease: active.lease
         })
         if (started && started.kind !== 'started') return
-        this.#waitingForIdentity.add(operationId)
+        this.#waitingForIdentity.set(operationId, this.#now() + this.#identityTimeoutMs)
       }
     } catch (error) {
       if (error instanceof ForkKillPointCrash) return
@@ -272,7 +275,7 @@ export class ForkOperationCoordinator {
   }
 
   async #settleWaitingOperations(): Promise<void> {
-    for (const operationId of [...this.#waitingForIdentity]) {
+    for (const [operationId, deadline] of [...this.#waitingForIdentity]) {
       const operation = this.#intents.operationById(operationId)
       if (!operation || operation.progress.stage === 'failed') {
         if (operation) await this.#notifyTerminalOnce(operation, 'failed', operation.progress.error)
@@ -282,6 +285,25 @@ export class ForkOperationCoordinator {
       }
       if (operation.progress.stage === 'succeeded') {
         await this.#notifyTerminalOnce(operation, 'succeeded')
+        this.#waitingForIdentity.delete(operationId)
+        this.#releaseLease(operationId)
+        continue
+      }
+      if (this.#now() >= deadline) {
+        const active = this.#leases.get(operationId)
+        if (active && !active.stale) {
+          const reason = 'Fork 会话身份确认超时，请重试'
+          const failed = this.#intents.failOperation({
+            operationId,
+            lease: active.lease,
+            error: reason,
+            now: this.#now()
+          })
+          if (failed.kind === 'applied') {
+            const current = this.#intents.operationById(operationId) ?? operation
+            await this.#notifyTerminalOnce(current, 'failed', reason)
+          }
+        }
         this.#waitingForIdentity.delete(operationId)
         this.#releaseLease(operationId)
       }

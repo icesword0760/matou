@@ -1,6 +1,8 @@
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -23,6 +25,8 @@ import {
   type ForkKillPoint,
   type ForkOperationNotification
 } from './fork-operation-coordinator'
+
+const exec = promisify(execFile)
 
 let root: string
 let workspaceRoot: string
@@ -218,6 +222,43 @@ describe('ForkOperationCoordinator', () => {
     }])
   })
 
+  it('ends provider identity waiting at a bounded deadline while preserving the Fork Session', async () => {
+    const operation = await accept('Provider身份超时', 'provider-timeout-submission')
+    const notifications: ForkOperationNotification[] = []
+    let now = 10
+    const coordinator = createCoordinator({
+      now: () => now,
+      identityTimeoutMs: 50,
+      notify: (notification) => { notifications.push(notification) },
+      executeFork: async (_command, input) => {
+        const advanced = intents.advanceStage({
+          operationId: input.operationId, lease: input.lease,
+          stage: 'restoring-provider', now
+        })
+        return {
+          forkProgress: advanced.kind === 'applied' ? advanced.progress : undefined
+        } as ForkWorkflowResult
+      }
+    })
+    coordinator.start()
+
+    await eventually(() => expect(
+      intents.progressByOperation(operation.operationId)?.stage
+    ).toBe('restoring-provider'))
+    now = 61
+    await coordinator.reconcile()
+
+    expect(intents.progressByOperation(operation.operationId)).toMatchObject({
+      stage: 'failed', error: expect.stringContaining('身份确认超时')
+    })
+    expect(database.get<{ id: string }>(
+      'SELECT id FROM sessions WHERE id = ?', operation.sessionId
+    )).toEqual({ id: operation.sessionId })
+    expect(notifications).toEqual([expect.objectContaining({
+      status: 'failed', operationId: operation.operationId, sessionId: operation.sessionId
+    })])
+  })
+
   it('returns an interrupted legacy window launch to provider restore before restarting it', async () => {
     const operation = await accept('Provider重启', 'provider-restart-submission')
     const old = intents.acquireLease({
@@ -327,6 +368,7 @@ describe('ForkOperationCoordinator', () => {
 function createCoordinator(overrides: Partial<{
   ownerId: string
   now: () => number
+  identityTimeoutMs: number
   executeFork: (command: DomainCommandMetadata, input: ExecuteForkInput) => Promise<ForkWorkflowResult>
   startOrResume: (sessionId: string, authority: ForkStartAuthority) => Promise<void>
   notify: (notification: ForkOperationNotification) => void
@@ -343,6 +385,9 @@ function createCoordinator(overrides: Partial<{
     now: overrides.now ?? (() => 10),
     heartbeatMs: 2_000,
     leaseTtlMs: 8_000,
+    ...(overrides.identityTimeoutMs === undefined
+      ? {}
+      : { identityTimeoutMs: overrides.identityTimeoutMs }),
     ...(overrides.notify ? { notify: overrides.notify } : {}),
     ...(overrides.observer ? { observer: overrides.observer } : {}),
     ...(overrides.health ? { health: overrides.health } : {})
@@ -411,6 +456,7 @@ function stagedExecutor() {
 
 async function accept(name: string, submissionKey: string, mode: 'current' | 'new' = 'current') {
   if (mode === 'new') {
+    await ensureGitRepository(workspaceRoot)
     database.run(
       `INSERT INTO execution_context_git_states (
          execution_context_id, repository_root, state, branch, dirty, updated_at
@@ -429,6 +475,16 @@ async function accept(name: string, submissionKey: string, mode: 'current' | 'ne
     operationId: result.forkProgress!.operationId,
     sessionId: result.session!.id
   }
+}
+
+async function ensureGitRepository(path: string): Promise<void> {
+  if (await access(join(path, '.git')).then(() => true, () => false)) return
+  await exec('git', ['init', '-b', 'main'], { cwd: path })
+  await exec('git', ['config', 'user.name', 'Matou Test'], { cwd: path })
+  await exec('git', ['config', 'user.email', 'matou@example.test'], { cwd: path })
+  await writeFile(join(path, 'README.md'), 'baseline\n')
+  await exec('git', ['add', 'README.md'], { cwd: path })
+  await exec('git', ['commit', '-m', 'baseline'], { cwd: path })
 }
 
 function applied(result: ReturnType<SessionForkIntentRepository['advanceStage']>) {

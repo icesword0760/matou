@@ -113,6 +113,7 @@ type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 
 export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
+  forkProviderIdentityTimeoutMs?: number
   hudRegistry?: SessionHudRegistry
   accessPolicy?: RuntimeAccessPolicy
   journalOptionsForSession?(sessionId: string): SegmentJournalOptions | undefined
@@ -122,6 +123,7 @@ export interface RuntimeServerOptions {
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
 const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
+const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const execFileAsync = promisify(execFile)
 
 interface InteractiveClaudeLaunch {
@@ -190,6 +192,7 @@ export class RuntimeServer {
   readonly #skipResumeSessionIds = new Set<string>()
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerResumeTimeoutMs: number
+  readonly #forkProviderIdentityTimeoutMs: number
   readonly #hud: SessionHudRegistry
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
@@ -295,6 +298,10 @@ export class RuntimeServer {
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
       DEFAULT_PROVIDER_RESUME_TIMEOUT_MS
+    )
+    this.#forkProviderIdentityTimeoutMs = positiveTimeout(
+      options.forkProviderIdentityTimeoutMs,
+      DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS
     )
     this.#workspacePaths = workspacePaths
     if (this.#accessPolicy.startBackgroundServices) {
@@ -1826,6 +1833,8 @@ export class RuntimeServer {
         this.#beginForkFailure(message, session, pendingResumeFailure, forkAuthority)
       } else if (pendingResumeFailure && resumeBinding) {
         this.#parkResumeFailure(message, session, resumeBinding.id, pendingResumeFailure)
+      } else if (forkLaunch && forkAuthority) {
+        this.#scheduleForkProviderIdentityTimeout(message, session, forkAuthority)
       } else if (resumeMonitor && resumeBinding) {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
@@ -2081,6 +2090,26 @@ export class RuntimeServer {
       if (!reason || this.#sessions.get(message.sessionId) !== session) return
       this.#parkResumeFailure(message, session, bindingId, reason)
     }, this.#providerResumeTimeoutMs))
+  }
+
+  #scheduleForkProviderIdentityTimeout(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    session: PtySession,
+    authority: ForkExecutionAuthority
+  ): void {
+    if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
+    this.#clearProviderResumeTimer(message.sessionId)
+    this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
+      this.#providerResumeTimers.delete(message.sessionId)
+      if (this.#sessions.get(message.sessionId) !== session) return
+      this.#beginForkFailure(
+        message,
+        session,
+        'Fork 会话身份确认超时，请重试',
+        authority
+      )
+      this.flushSemanticEvents()
+    }, this.#forkProviderIdentityTimeoutMs))
   }
 
   #clearProviderResumeTimer(sessionId: string): void {
