@@ -11,13 +11,16 @@ export class AppFocusRestorer {
   #pendingFallback: (() => void) | undefined
   readonly #requestFrame: AnimationFrameScheduler
   readonly #cancelFrame: AnimationFrameCanceller
+  readonly #hasWindowFocus: () => boolean
 
   constructor(
     requestFrame: AnimationFrameScheduler = requestAnimationFrame,
-    cancelFrame: AnimationFrameCanceller = cancelAnimationFrame
+    cancelFrame: AnimationFrameCanceller = cancelAnimationFrame,
+    hasWindowFocus: () => boolean = () => document.hasFocus()
   ) {
     this.#requestFrame = requestFrame
     this.#cancelFrame = cancelFrame
+    this.#hasWindowFocus = hasWindowFocus
   }
 
   remember(target: EventTarget | null): void {
@@ -41,7 +44,7 @@ export class AppFocusRestorer {
         // native turns on macOS. A DOM node can already be connected while its
         // first focus() is still ignored. Verify the result and retry for a few
         // animation frames instead of losing the only restoration signal.
-        if (document.activeElement === target) {
+        if (this.#hasWindowFocus() && document.activeElement === target) {
           this.#pendingFallback = undefined
           return
         }

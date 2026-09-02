@@ -11,7 +11,7 @@ describe('AppFocusRestorer', () => {
     const restorer = new AppFocusRestorer((callback) => {
       frames.push(callback)
       return frames.length
-    }, vi.fn())
+    }, vi.fn(), () => true)
     const input = document.createElement('input')
     document.body.append(input)
     input.focus()
@@ -30,7 +30,7 @@ describe('AppFocusRestorer', () => {
     const restorer = new AppFocusRestorer((callback) => {
       frames.push(callback)
       return frames.length
-    }, vi.fn())
+    }, vi.fn(), () => true)
     const input = document.createElement('input')
     document.body.append(input)
     restorer.remember(input)
@@ -47,7 +47,7 @@ describe('AppFocusRestorer', () => {
     const restorer = new AppFocusRestorer((callback) => {
       frames.push(callback)
       return frames.length
-    }, vi.fn())
+    }, vi.fn(), () => true)
     const input = document.createElement('input')
     const other = document.createElement('button')
     document.body.append(input, other)
@@ -70,13 +70,38 @@ describe('AppFocusRestorer', () => {
     expect(fallback).not.toHaveBeenCalled()
   })
 
+  it('keeps retrying while the control is active in DOM but the native window is not focused', () => {
+    const frames: FrameRequestCallback[] = []
+    const fallback = vi.fn()
+    const hasFocus = vi.fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true)
+    const restorer = new AppFocusRestorer((callback) => {
+      frames.push(callback)
+      return frames.length
+    }, vi.fn(), hasFocus)
+    const input = document.createElement('input')
+    document.body.append(input)
+    input.focus()
+    restorer.remember(input)
+
+    restorer.scheduleRestore(fallback)
+    frames.shift()!(0)
+    expect(frames).toHaveLength(1)
+    frames.shift()!(16)
+
+    expect(hasFocus).toHaveBeenCalledTimes(2)
+    expect(document.activeElement).toBe(input)
+    expect(fallback).not.toHaveBeenCalled()
+  })
+
   it('focuses the active terminal only after the original control has closed', () => {
     const frames: FrameRequestCallback[] = []
     const fallback = vi.fn()
     const restorer = new AppFocusRestorer((callback) => {
       frames.push(callback)
       return frames.length
-    }, vi.fn())
+    }, vi.fn(), () => true)
     const forkInput = document.createElement('input')
     document.body.append(forkInput)
     restorer.remember(forkInput)
