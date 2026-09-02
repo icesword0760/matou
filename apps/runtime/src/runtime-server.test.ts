@@ -292,7 +292,7 @@ describe('RuntimeServer domain RPC', () => {
         capability: 'renderer', deadlineAt: Date.now() + 1000,
         payload: { sessionId: 'readonly-environment-session' }
       })
-      await settle()
+      await waitUntil(() => port.findRpcResponse('readonly-environment-open') !== undefined)
       expect(port.findRpcResponse('readonly-environment-open')).toMatchObject({
         result: {
           sessionId: 'readonly-environment-session', kind: 'local', path: await realpath(root)
