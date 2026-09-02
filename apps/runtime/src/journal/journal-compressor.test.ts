@@ -115,11 +115,16 @@ describe('JournalCompressor', () => {
     })
     const journal = await SegmentJournal.open(root, 'live-session', {
       maxSegmentBytes: 160,
+      rawHotBytes: 160,
       compressor
     })
 
     await journal.appendOutput(1, new TextEncoder().encode('alpha\n'.repeat(8)))
     await expect(journal.appendOutput(2, new TextEncoder().encode('beta\n'.repeat(8))))
+      .resolves.toBeUndefined()
+    // The newest sealed segment remains raw by product contract. Rotating a
+    // second sealed segment makes the older one eligible for background gzip.
+    await expect(journal.appendOutput(3, new TextEncoder().encode('gamma\n'.repeat(8))))
       .resolves.toBeUndefined()
     await compressionStarted
     expect((await readdir(join(root, 'journal', 'live-session'))).some((name) => name.endsWith('.partial')))
@@ -128,7 +133,7 @@ describe('JournalCompressor', () => {
     release()
     await compressor.whenIdle()
     await journal.close()
-    expect((await journal.readFrames()).map(({ sequence }) => sequence)).toEqual([1, 2])
+    expect((await journal.readFrames()).map(({ sequence }) => sequence)).toEqual([1, 2, 3])
   })
 })
 
