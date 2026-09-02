@@ -81,8 +81,33 @@ test.describe('real foreground terminal continuity outside the carousel viewport
       expect(occurrences(restoredText, 'VIEWPORT_OUTPUT_READY')).toBe(1)
       expect(occurrences(restoredText, 'VIEWPORT_OUTPUT_DONE')).toBe(1)
 
-      await terminalCommand(restored, "printf 'VIEWPORT_INPUT_AFTER_RETURN\\n'")
-      await expect(rows).toContainText('VIEWPORT_INPUT_AFTER_RETURN')
+      for (let cycle = 1; cycle <= 3; cycle += 1) {
+        const marker = `VIEWPORT_CYCLE_${cycle}_DONE`
+        const cycleScript = join(fixture.rootDirectory, `offscreen-cycle-${cycle}.sh`)
+        await writeFile(cycleScript, delayedMarkerScript(marker))
+        await chmod(cycleScript, 0o755)
+        await terminalCommand(terminalSurface(fixture, TARGET_SESSION_ID), shellQuote(cycleScript))
+        await scrollToCarouselEdge(carousel, 'end')
+        await expect(terminalSurface(fixture, TARGET_SESSION_ID)).toHaveCount(0)
+        await expect.poll(() => journalText(fixture!.dataDirectory, TARGET_SESSION_ID), {
+          message: `cycle ${cycle} output must remain durable while the terminal is virtualized`
+        }).toContain(marker)
+        expect(await processExists(fixture, targetPid)).toBe(true)
+
+        await scrollToCarouselEdge(carousel, 'start')
+        const returned = terminalSurface(fixture, TARGET_SESSION_ID)
+        await expect(returned).toBeVisible()
+        await expect(returned).toHaveAttribute('data-pid', String(targetPid))
+        await expect(returned.locator('.xterm-rows')).toContainText(marker)
+        const returnedText = await returned.locator('.xterm-rows').textContent() ?? ''
+        expect(occurrences(returnedText, marker)).toBe(1)
+        await expect(returned.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]'))
+          .not.toHaveAttribute('aria-busy', 'true')
+      }
+
+      const finalSurface = terminalSurface(fixture, TARGET_SESSION_ID)
+      await terminalCommand(finalSurface, "printf 'VIEWPORT_INPUT_AFTER_RETURN\\n'")
+      await expect(finalSurface.locator('.xterm-rows')).toContainText('VIEWPORT_INPUT_AFTER_RETURN')
       expect(await processExists(fixture, targetPid)).toBe(true)
       await expectOnlyColorLcdWindows(fixture)
     } finally {
@@ -134,6 +159,15 @@ function outputScript(releasePath: string, donePath: string): string {
     'done',
     "printf 'VIEWPORT_OUTPUT_DONE\\n'",
     `printf done > ${shellQuote(donePath)}`,
+    ''
+  ].join('\n')
+}
+
+function delayedMarkerScript(marker: string): string {
+  return [
+    '#!/bin/sh',
+    'sleep 0.2',
+    `printf '${marker}\\n'`,
     ''
   ].join('\n')
 }

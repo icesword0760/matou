@@ -5,9 +5,10 @@ import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { _electron as electron, expect, test } from '@playwright/test'
+import { _electron as electron, expect, test, type ElectronApplication } from '@playwright/test'
 
 import { FOUNDATION_MIGRATIONS } from '../../apps/runtime/src/storage/migrations'
+import { terminalCommand } from './fixtures/session-canvas-fixture'
 
 test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema compatibility', async () => {
   // Four independent packaged launches exercise durable replay, torn-tail
@@ -16,8 +17,9 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
   test.setTimeout(60_000)
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-packaged-e2e-'))
   const executablePath = await packagedExecutable()
+  const historyMarker = 'PACKAGED_HISTORY_SURVIVES_READ_ONLY'
   try {
-    await runPackagedSmoke(executablePath, dataDirectory, true, 'normal')
+    await runPackagedSmoke(executablePath, dataDirectory, true, 'normal', historyMarker)
 
     const databasePath = join(dataDirectory, 'matou.sqlite')
     expect(existsSync(databasePath)).toBe(true)
@@ -43,7 +45,7 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
     expect(before.byteLength).toBeGreaterThan(16)
     await truncate(activePath, before.byteLength - 3)
 
-    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal')
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal', historyMarker)
     const after = await readFile(activePath)
     expect(after.byteLength).toBeGreaterThan(before.byteLength - 3)
 
@@ -52,13 +54,13 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
       'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)'
     ).run(999, 'future-version', 'future-checksum', Date.now())
     newer.close()
-    await runPackagedSmoke(executablePath, dataDirectory, false, 'read-only')
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'read-only', historyMarker)
     const untouched = new DatabaseSync(databasePath)
     expect(untouched.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
       .toEqual({ version: 999 })
     untouched.prepare('DELETE FROM schema_migrations WHERE version = 999').run()
     untouched.close()
-    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal')
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal', historyMarker)
   } finally {
     await rm(dataDirectory, { recursive: true, force: true })
   }
@@ -68,7 +70,8 @@ async function runPackagedSmoke(
   executablePath: string,
   dataDirectory: string,
   exerciseProduct: boolean,
-  expectedMode: 'normal' | 'read-only'
+  expectedMode: 'normal' | 'read-only',
+  historyMarker: string
 ): Promise<void> {
   await chmod(executablePath, 0o755)
   // MATOU_DEFAULT_WORKSPACE models the directory a normal macOS Terminal opens
@@ -97,6 +100,7 @@ async function runPackagedSmoke(
   })
   try {
     const page = await app.firstWindow()
+    await expectAllVisibleWindowsOnSecondaryDisplay(app)
     await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 2)
@@ -111,6 +115,10 @@ async function runPackagedSmoke(
       await expect(replayOnlySurface).toBeVisible()
       await expect(replayOnlySurface).not.toHaveAttribute('data-pid', /\d+/)
     }
+    if (!exerciseProduct) {
+      await expect(page.locator('.terminal-surface').filter({ hasText: historyMarker }))
+        .toHaveCount(1)
+    }
     await page.waitForTimeout(200)
     if (expectedMode === 'normal') {
       await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
@@ -121,12 +129,15 @@ async function runPackagedSmoke(
 
       const embedded = page.getByTestId('terminal-pane').first().locator('.terminal-surface')
       await expect(embedded).toHaveAttribute('data-pid', /\d+/)
+      await terminalCommand(embedded, `printf '${historyMarker}\\n'`)
+      await expect(embedded.locator('.xterm-rows')).toContainText(historyMarker)
       const pid = await embedded.getAttribute('data-pid')
       const detachedSessionId = await embedded.getAttribute('data-session-id')
       await page.locator('.terminal-pane-header').first()
         .dispatchEvent('dragend', { screenX: -1, screenY: -1 })
       await expect(page.getByTestId('detached-placeholder')).toContainText('已脱出')
       await expect.poll(async () => (await app.windows()).length).toBe(2)
+      await expectAllVisibleWindowsOnSecondaryDisplay(app)
       const detached = (await app.windows()).find((candidate) => candidate !== page)!
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid', pid!)
       await detached.close()
@@ -167,10 +178,39 @@ async function runPackagedSmoke(
         BrowserWindow.getAllWindows()[0]?.isVisible()
       )).toBe(true)
       await expect(page.getByTestId('terminal-pane')).toHaveCount(2)
+    } else if (expectedMode === 'read-only') {
+      const databasePath = join(dataDirectory, 'matou.sqlite')
+      const databaseBeforeInput = await readFile(databasePath)
+      const replayOnlySurface = page.locator('.terminal-surface').filter({ hasText: historyMarker })
+      const textarea = replayOnlySurface.locator('.xterm-helper-textarea')
+      await textarea.focus()
+      await textarea.pressSequentially('READ_ONLY_INPUT_MUST_NOT_START_A_PROCESS')
+      await textarea.press('Enter')
+      await page.waitForTimeout(200)
+      await expect(replayOnlySurface).not.toHaveAttribute('data-pid', /\d+/)
+      await expect(replayOnlySurface.locator('.xterm-rows')).not
+        .toContainText('READ_ONLY_INPUT_MUST_NOT_START_A_PROCESS')
+      expect((await readFile(databasePath)).equals(databaseBeforeInput)).toBe(true)
     }
   } finally {
     await app.close()
   }
+}
+
+async function expectAllVisibleWindowsOnSecondaryDisplay(
+  app: ElectronApplication
+): Promise<void> {
+  if (process.platform !== 'darwin') return
+  await expect.poll(() => app.evaluate(({ BrowserWindow, screen }) => {
+    const primary = screen.getPrimaryDisplay()
+    const secondaryColorLcd = screen.getAllDisplays().filter(({ id, internal, label }) =>
+      id !== primary.id && (internal || /color\s*lcd|内建视网膜显示器/i.test(label)))
+    const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
+    const placements = visible.map((window) => screen.getDisplayMatching(window.getBounds()))
+    return primary.label === 'XV272U' && secondaryColorLcd.length === 1 && visible.length > 0 &&
+      placements.every(({ id }) => secondaryColorLcd.some((display) => display.id === id)) &&
+      placements.every(({ id }) => id !== primary.id)
+  })).toBe(true)
 }
 
 async function packagedExecutable(): Promise<string> {

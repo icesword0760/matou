@@ -48,9 +48,11 @@ test.describe('real App Journal fault isolation with two live PTYs', () => {
       await expect(paneA).toHaveAttribute('data-active', 'true')
       await inputA.focus()
       await inputA.pressSequentially(
-        'printf "A_%s\\n" "RETAINED_DURING_ENOSPC"', { delay: 2 }
+        'printf "A_RETAINED_ENOSPC\\n"', { delay: 2 }
       )
-      await expect(stableA.locator('.xterm-rows')).toContainText('RETAINED_DURING_ENOSPC')
+      // Keep the pre-fault command on one terminal row so this readiness check
+      // measures complete input delivery instead of xterm's visual line wrap.
+      await expect(stableA.locator('.xterm-rows')).toContainText('A_RETAINED_ENOSPC')
       await setFaultControl(controlPath, { sessionId: sessionA, code: 'ENOSPC' })
       await fixture.page.keyboard.press('Enter')
       const fault = paneA.getByRole('status', { name: /终端记录写入异常/ })
@@ -70,7 +72,7 @@ test.describe('real App Journal fault isolation with two live PTYs', () => {
       await fault.getByRole('button', { name: '重试写入' }).click()
       await expect(fault).toBeHidden()
       await expect(stableA).toHaveAttribute('data-pid', String(pidA))
-      await expect(stableA.locator('.xterm-rows')).toContainText('A_RETAINED_DURING_ENOSPC')
+      await expect(stableA.locator('.xterm-rows')).toContainText('A_RETAINED_ENOSPC')
       expect(await fixture.app.evaluate((_electron, pid) => {
         try { process.kill(pid, 0); return true } catch { return false }
       }, pidA)).toBe(true)

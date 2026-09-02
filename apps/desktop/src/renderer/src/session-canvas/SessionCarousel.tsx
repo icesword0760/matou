@@ -935,6 +935,14 @@ export function SessionCarousel(props: {
             if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
             hoverRestoreTimer.current = undefined
             hoverBaselineScrollLeft.current = undefined
+            // Commit the exact preview position under the pointer. Waiting for
+            // the focus projection to render leaves one animation frame in
+            // which edge-follow can still nudge the strip after the click.
+            hoverVisibilitySessionId.current = null
+            if (hoverVisibilityFrame.current !== undefined) {
+              cancelAnimationFrame(hoverVisibilityFrame.current)
+              hoverVisibilityFrame.current = undefined
+            }
             onGeometryChange?.(currentGeometry(sessionId))
             onActivate(sessionId)
           }} onHover={hover}>
