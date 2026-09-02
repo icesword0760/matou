@@ -34,6 +34,8 @@ type RuntimeChildMessage = RuntimeLifecycleEvent | {
   runtimePid: number
   ptyCount: number
   ptyPids: number[]
+  ptySessions?: Array<{ sessionId: string; pid: number }>
+  recoveryObservation?: RuntimeRecoveryScaleObservation
   statementCount: number
   statementProfile: Array<{ statement: string; count: number }>
   eventLoopDelayP99Ms: number
@@ -54,6 +56,8 @@ export interface RuntimeScaleMetrics {
   runtimePid: number
   ptyCount: number
   ptyPids: number[]
+  ptySessions: Array<{ sessionId: string; pid: number }>
+  recoveryObservation?: RuntimeRecoveryScaleObservation
   statementCount: number
   statementProfile: Array<{ statement: string; count: number }>
   eventLoopDelayP99Ms: number
@@ -63,6 +67,18 @@ export interface RuntimeScaleMetrics {
   heapUsedBytes: number
   externalBytes: number
   arrayBufferBytes: number
+}
+
+export interface RuntimeRecoveryScaleObservation {
+  maxRestoring: number
+  transitions: Array<{
+    sequence: number
+    sessionId: string
+    sceneId: string
+    priority: 'active-session' | 'foreground-scene' | 'active-task' | 'active-workspace' | 'background'
+    state: 'queued' | 'restoring' | 'ready' | 'failed'
+    restoringCount: number
+  }>
 }
 
 interface PendingScaleMetrics {
@@ -268,6 +284,10 @@ export class RuntimeHost {
         runtimePid: candidate.runtimePid,
         ptyCount: candidate.ptyCount,
         ptyPids: candidate.ptyPids,
+        ptySessions: candidate.ptySessions ?? [],
+        ...(candidate.recoveryObservation
+          ? { recoveryObservation: candidate.recoveryObservation }
+          : {}),
         statementCount: candidate.statementCount,
         statementProfile: candidate.statementProfile,
         eventLoopDelayP99Ms: candidate.eventLoopDelayP99Ms,

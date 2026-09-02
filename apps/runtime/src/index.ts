@@ -23,6 +23,7 @@ import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
 import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 import type { RecoveryJob } from './recovery/runtime-session-recovery-scheduler'
+import { RuntimeRecoveryE2eObserver } from './recovery/runtime-recovery-e2e-observer'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { SessionHudRegistry } from './session/session-hud-registry'
@@ -75,6 +76,9 @@ if (!parentPort) {
 const servers = new Set<RuntimeServer>()
 const recoveryServerWaiters = new Set<(server: RuntimeServer) => void>()
 const sessions = new RuntimeSessionRegistry()
+const recoveryE2eObserver = process.env.MATOU_E2E === '1'
+  ? new RuntimeRecoveryE2eObserver()
+  : undefined
 const scaleEventLoopDelay = process.env.MATOU_E2E_SCALE === '1'
   ? monitorEventLoopDelay({ resolution: 10 })
   : undefined
@@ -358,6 +362,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     jobs: recoveryService.planSessionRecovery(),
     start: (job) => startRecoveryJob(job),
     publish: (snapshot) => {
+      recoveryE2eObserver?.record(snapshot)
       for (const server of servers) server.publishRecovery(snapshot)
     }
   })
@@ -502,6 +507,8 @@ parentPort.on('message', async (event) => {
       runtimePid: process.pid,
       ptyCount: sessions.size,
       ptyPids: sessions.pids(),
+      ptySessions: sessions.sessionPids(),
+      recoveryObservation: recoveryE2eObserver?.snapshot(),
       statementCount: state.database.readStatementCount(request.resetStatementCount === true),
       statementProfile: state.database.readStatementProfile(),
       eventLoopDelayP99Ms,

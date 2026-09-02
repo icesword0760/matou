@@ -9,6 +9,9 @@ export class RuntimeSessionRegistry {
   has(sessionId: string): boolean { return this.#sessions.has(sessionId) }
   get size(): number { return this.#sessions.size }
   pids(): number[] { return [...this.#sessions.values()].map(({ pid }) => pid) }
+  sessionPids(): Array<{ sessionId: string; pid: number }> {
+    return [...this.#sessions.values()].map(({ sessionId, pid }) => ({ sessionId, pid }))
+  }
   maxUnackedBytes(): number {
     return Math.max(0, ...[...this.#sessions.values()].map(({ maximumUnackedBytes }) => maximumUnackedBytes))
   }
