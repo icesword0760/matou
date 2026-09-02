@@ -380,15 +380,22 @@ describe('Terminal pane', () => {
     expect(screen.queryByText('原 Claude Code 对话已失效')).toBeNull()
   })
 
-  it('does not describe a live Claude card as Shell when an older failure projection arrives', () => {
+  it('keeps a failed Claude card visible with retry and explicit fresh-start actions', async () => {
+    const onRetryRestore = vi.fn()
+    const onStartFreshProvider = vi.fn()
+    const user = userEvent.setup()
     const props = fixture()
     render(<TerminalPane {...props}
       session={{ ...props.session, kind: 'claude-code', title: '测试1' }}
-      providerRestoreState="failed" restoreError="provider session not found" />)
+      providerRestoreState="failed" restoreError="provider session not found"
+      onRetryRestore={onRetryRestore} onStartFreshProvider={onStartFreshProvider} />)
 
-    expect(screen.queryByText('原 Claude Code 对话已失效')).toBeNull()
-    expect(screen.queryByText('当前已切换到 Shell，可继续使用终端')).toBeNull()
-    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toContain('Claude Code 恢复失败')
+    expect(screen.getByRole('status').textContent).toContain('provider session not found')
+    expect(screen.getByRole('button', { name: '重试恢复' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '新开 Claude Code' }))
+    expect(onStartFreshProvider).toHaveBeenCalledWith('session-1')
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
   })
 
   it('shows immediate progress while retrying a transient Claude restore failure', async () => {

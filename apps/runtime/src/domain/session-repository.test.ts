@@ -467,7 +467,7 @@ describe('SessionRepository', () => {
     expect(sessions.getResumeBinding('session-2', 'codex')).toMatchObject({ id: 'binding-2' })
   })
 
-  it('clears a failed resume identity and degrades only that Session to Shell atomically', () => {
+  it('clears a failed resume identity while preserving the original Claude Session atomically', () => {
     seedSession()
     sessions.bindProvider(command('binding'), {
       id: 'binding-1', sessionId: 'session-1', provider: 'claude-code',
@@ -475,7 +475,7 @@ describe('SessionRepository', () => {
     })
     sessions.validateProviderBinding(command('validate'), 'binding-1', 4)
 
-    sessions.failResumeToShell(
+    sessions.failResume(
       command('resume-failed'),
       'session-1',
       'binding-1',
@@ -483,7 +483,11 @@ describe('SessionRepository', () => {
       5
     )
 
-    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: 'Shell' })
+    expect(sessions.getSession('session-1')).toMatchObject({
+      kind: 'claude-code', title: 'Claude'
+    })
+    expect(database.get(`SELECT work_status FROM sessions WHERE id = 'session-1'`))
+      .toEqual({ work_status: 'error' })
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toBeUndefined()
     expect(sessions.listProviderBindings('session-1')).toEqual([
       expect.objectContaining({
@@ -501,11 +505,11 @@ describe('SessionRepository', () => {
       providerSessionId: 'named-provider-1', metadata: {}, now: 3
     })
 
-    sessions.failResumeToShell(
+    sessions.failResume(
       command('named-resume-failed'), 'session-1', 'named-binding-1', 'missing', 4
     )
 
-    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'shell', title: '修复登录' })
+    expect(sessions.getSession('session-1')).toMatchObject({ kind: 'claude-code', title: '修复登录' })
   })
 
   it('persists the last confirmed working directory independently per Session', () => {

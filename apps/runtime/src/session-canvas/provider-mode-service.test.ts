@@ -113,7 +113,7 @@ describe('ProviderModeService', () => {
     }))
   })
 
-  it('keeps restore failure as a retryable card state without creating a global notification', () => {
+  it('keeps restore failure on the original Claude card and emits a locatable notification', () => {
     const initial = bootstrapClaudeTree()
 
     const failed = providerModes.markRestoreFailed(command('restore-failed'), {
@@ -123,7 +123,7 @@ describe('ProviderModeService', () => {
       now: 30
     })
 
-    expect(failed.session).toMatchObject({ kind: 'shell', title: 'Shell' })
+    expect(failed.session).toMatchObject({ kind: 'claude-code', title: 'Claude' })
     expect(failed.binding).toMatchObject({
       resumeState: 'failed',
       restoreState: 'failed',
@@ -131,10 +131,14 @@ describe('ProviderModeService', () => {
     })
     expect(failed.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
       .toMatchObject({
-        currentMode: 'shell', workStatus: 'error',
+        currentMode: 'claude-code', workStatus: 'error',
         providerRestoreState: 'failed', activeChildCount: 1
       })
-    expect(latestRecoveryNotification(initial.parentSessionId)).toBeUndefined()
+    expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
+      operation: 'upsert', eventType: 'error', title: 'Claude Code 恢复失败',
+      body: 'provider session not found',
+      replacementKey: `provider-restore:${initial.parentSessionId}`
+    })
 
     const retrying = providerModes.retryRestore(command('restore-retry'), {
       sessionId: initial.parentSessionId, now: 31
@@ -142,7 +146,8 @@ describe('ProviderModeService', () => {
     expect(retrying.session).toMatchObject({ kind: 'claude-code', title: 'Claude' })
     expect(retrying.binding).toMatchObject({
       id: 'binding-parent', providerSessionId: 'provider-parent',
-      resumeState: 'available', restoreState: 'restoring'
+      resumeState: 'available', restoreState: 'restoring',
+      metadata: expect.objectContaining({ spawnRevision: 31 })
     })
     expect(retrying.graph.edges).toEqual(failed.graph.edges)
     expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
@@ -156,6 +161,33 @@ describe('ProviderModeService', () => {
     expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
       operation: 'dismiss',
       replacementKey: `provider-restore:${initial.parentSessionId}`
+    })
+  })
+
+  it('starts fresh only by explicit action while keeping the same visible node', () => {
+    const initial = bootstrapClaudeTree()
+    providerModes.markRestoreFailed(command('fresh-failed'), {
+      sessionId: initial.parentSessionId, bindingId: 'binding-parent',
+      reason: 'provider session not found', now: 30
+    })
+
+    const fresh = providerModes.startFreshClaude(command('fresh-start'), {
+      sessionId: initial.parentSessionId, now: 31
+    })
+
+    expect(fresh.session).toMatchObject({ kind: 'claude-code', title: 'Claude' })
+    expect(fresh.binding).toMatchObject({
+      id: 'binding-parent', resumeState: 'expired', restoreState: 'none',
+      metadata: expect.objectContaining({ spawnRevision: 31 })
+    })
+    expect(database.get(
+      `SELECT 1 FROM provider_bindings WHERE session_id = ? AND resume_state = 'available'`,
+      initial.parentSessionId
+    )).toBeUndefined()
+    expect(fresh.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
+      .toMatchObject({ currentMode: 'claude-code', providerRestoreState: 'none' })
+    expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
+      operation: 'dismiss', replacementKey: `provider-restore:${initial.parentSessionId}`
     })
   })
 

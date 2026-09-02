@@ -58,6 +58,7 @@ export function TerminalPane(props: {
   hasOwnedWorktree?: boolean
   spawnRevision?: number
   onRetryRestore?(sessionId: string): unknown
+  onStartFreshProvider?(sessionId: string): unknown
   onRetryRecovery?(sessionId: string): unknown
   onRetryWork?(sessionId: string): unknown
   onRetryFork?(sessionId: string): unknown
@@ -82,7 +83,7 @@ export function TerminalPane(props: {
     providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
     recoveryState = 'ready', recoveryError,
     sharedWorkingDirectory = false, environment, hasOwnedWorktree,
-    spawnRevision = 0, onRetryRestore, onRetryRecovery, onRetryWork, onRetryFork,
+    spawnRevision = 0, onRetryRestore, onStartFreshProvider, onRetryRecovery, onRetryWork, onRetryFork,
     childNodes = [], descendantNodes = [], parentSessionId, workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
@@ -187,9 +188,7 @@ export function TerminalPane(props: {
     ? `${session.id}:${restoreError ?? ''}`
     : null
   const restoreNoticeVisible = restoreNoticeKey === null || dismissedRestoreNotice !== restoreNoticeKey
-  const effectiveRestoreState = providerRestoreState === 'failed' && session.kind === 'claude-code'
-    ? 'none'
-    : providerRestoreState
+  const effectiveRestoreState = providerRestoreState
   const providerWorkFailure = session.kind === 'claude-code' && workStatus === 'error'
     ? claudeWorkFailureReason(latestLines)
     : undefined
@@ -292,18 +291,27 @@ export function TerminalPane(props: {
     </div>}
     {effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && restoreNoticeVisible &&
       <div className="provider-restore-banner" role="status">
-      <div><strong>{restoreIdentityExpired ? '原 Claude Code 对话已失效' : 'Claude Code 恢复失败'}</strong>
-        <span className="provider-restore-reason">{restoreIdentityExpired
+      <div><strong>{restoreIdentityExpired && session.kind === 'shell'
+        ? '原 Claude Code 对话已失效' : 'Claude Code 恢复失败'}</strong>
+        <span className="provider-restore-reason">{restoreIdentityExpired && session.kind === 'shell'
           ? '当前已切换到 Shell，可继续使用终端'
           : restoreError}</span>
       </div>
-      {onRetryRestore && !restoreIdentityExpired && <button type="button"
+      {onRetryRestore && (!restoreIdentityExpired || session.kind === 'claude-code') && <button type="button"
         disabled={actionBlocked || restoreRetryPending} title={actionBlockedReason} onClick={(event) => {
         event.stopPropagation()
         if (restoreRetryPending) return
         setRestoreRetryPending(true)
         void Promise.resolve(onRetryRestore(session.id)).finally(() => setRestoreRetryPending(false))
       }}>{restoreRetryPending ? '正在恢复…' : '重试恢复'}</button>}
+      {session.kind === 'claude-code' && onStartFreshProvider && <button type="button"
+        disabled={restoreRetryPending}
+        onClick={(event) => {
+          event.stopPropagation()
+          setRestoreRetryPending(true)
+          void Promise.resolve(onStartFreshProvider(session.id)).finally(() => setRestoreRetryPending(false))
+        }}
+      >新开 Claude Code</button>}
     </div>}
     {effectiveRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
       <strong>正在恢复 Claude Code 会话…</strong>
@@ -339,7 +347,8 @@ export function TerminalPane(props: {
       </div>}
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
       workStatus={workStatus} latestLines={latestLines} />}
-    {!isTeamMember && forkState !== 'failed' && foreground &&
+    {!isTeamMember && forkState !== 'failed' &&
+      !(effectiveRestoreState === 'failed' && session.kind === 'claude-code') && foreground &&
       (recoveryState === 'ready' || storageFault !== null) && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}

@@ -208,7 +208,7 @@ function commands(): HierarchyCommands {
     splitSession: vi.fn(), forkSession: vi.fn(),
     createCanvas: vi.fn(), createShellSibling: vi.fn(), createForkChild: vi.fn(), createForkSibling: vi.fn(),
     retryFork: vi.fn(), removeFailedFork: vi.fn(),
-    retryProviderRestore: vi.fn(), listClaudeSessions: vi.fn(),
+    retryProviderRestore: vi.fn(), startFreshProvider: vi.fn(), listClaudeSessions: vi.fn(),
     getClaudeSessionDetail: vi.fn(), loadClaudeSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(), activateSession: vi.fn(),

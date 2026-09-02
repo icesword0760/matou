@@ -103,6 +103,7 @@ export function createHierarchyCommands(
       sceneId, sessionId
     }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
+    startFreshProvider: (sessionId) => command('hierarchy.start-fresh-provider', { sessionId }),
     listClaudeSessions: (sessionId, query, providerSessionId) => client.request<ClaudeSessionListResult>(
       'claude-sessions.list', { sessionId, query, ...(providerSessionId ? { providerSessionId } : {}) }
     ),
@@ -248,6 +249,7 @@ export function createReadOnlyHierarchyCommands(
     retryFork: blocked,
     removeFailedFork: blocked,
     retryProviderRestore: blocked,
+    startFreshProvider: blocked,
     loadClaudeSession: blocked,
     restartStoppedSession: blocked,
     removeSessionBranch: blocked,

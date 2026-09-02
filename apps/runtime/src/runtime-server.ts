@@ -108,11 +108,6 @@ interface ReplayState {
   finishing?: boolean
 }
 
-interface PendingShellFallback {
-  session: PtySession
-  message: Extract<RendererMessage, { type: 'terminal.spawn' }>
-  attachView: boolean
-}
 type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 
 export interface RuntimeServerOptions {
@@ -184,7 +179,6 @@ export class RuntimeServer {
   readonly #summaryBuffers = new Map<string, string>()
   readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
-  readonly #pendingShellFallbacks = new Map<string, PendingShellFallback>()
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerResumeTimeoutMs: number
   readonly #hud: SessionHudRegistry
@@ -338,7 +332,7 @@ export class RuntimeServer {
       cols: 80,
       rows: 24
     }, false)
-    if (!this.#sessions.has(job.sessionId)) {
+    if (!this.#sessions.has(job.sessionId) && !this.#hasParkedProviderRestoreFailure(job.sessionId)) {
       throw new Error(`Session ${job.sessionId} did not reach a running state`)
     }
   }
@@ -1296,8 +1290,8 @@ export class RuntimeServer {
       const revisionReplacement = executionMode !== 'attach-only' &&
         nextSpawnRevision > previousSpawnRevision
       if (existing.profile !== message.profile || revisionReplacement) {
-        // A restore retry deliberately changes the same stable Session from its
-        // fallback Shell process back to the authoritative provider profile.
+        // A provider-mode transition may deliberately replace the process while keeping
+        // the same stable Session.
         // Replace only when persisted domain state already authorizes the exact
         // requested profile; arbitrary Renderer profile changes stay rejected.
         if (persistentAuthority?.kind !== message.profile) {
@@ -1403,6 +1397,12 @@ export class RuntimeServer {
     const forkLaunch = forkAuthority ??
       (forkDecision?.kind === 'launch' ? forkDecision : undefined)
     const skipResume = this.#skipResumeSessionIds.delete(message.sessionId)
+    if (
+      message.profile === 'claude-code' && forkLaunch === undefined && !skipResume &&
+      this.#hasParkedProviderRestoreFailure(message.sessionId)
+    ) {
+      return
+    }
     const resumeBinding = message.profile === 'shell' || skipResume || forkLaunch
       ? undefined
       : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
@@ -1410,7 +1410,8 @@ export class RuntimeServer {
     const supersedesRestoreFailure = message.profile === 'claude-code' &&
       providerSessionId === undefined && Boolean(this.#database.get(
         `SELECT 1 FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code' AND restore_state = 'failed'
+         WHERE session_id = ? AND provider = 'claude-code'
+           AND (restore_state = 'failed' OR resume_state = 'expired')
          LIMIT 1`,
         message.sessionId
       ))
@@ -1483,9 +1484,8 @@ export class RuntimeServer {
         hookRegistration = await this.#providerHooks.registerClaudeSession({
           runId,
           sessionId: message.sessionId,
-          // A fresh Claude process that replaces an invalid resume is already
-          // live when its statusline arrives. Accept that identity immediately
-          // so the obsolete Shell fallback state does not cover a working UI.
+          // A fresh Claude process that replaces an invalid resume is already live
+          // when its statusline arrives. Accept that new identity immediately.
           acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
           inheritedConversation: forkLaunch !== undefined,
           ...(forkAuthority === undefined ? {} : { forkAuthority }),
@@ -1550,7 +1550,7 @@ export class RuntimeServer {
               this.#beginForkFailure(message, activeSession, resumeFailure, forkAuthority)
             } else if (activeSession && resumeBinding) {
               hookRegistration?.retire()
-              this.#beginResumeFallback(message, activeSession, resumeBinding.id, resumeFailure, attachView)
+              this.#parkResumeFailure(message, activeSession, resumeBinding.id, resumeFailure)
             }
           }
         },
@@ -1591,7 +1591,6 @@ export class RuntimeServer {
             resumeBinding &&
             resumeMonitor?.isMonitoring &&
             this.#sessions.get(message.sessionId) === exited &&
-            !this.#pendingShellFallbacks.has(message.sessionId) &&
             this.#markResumeFailed(
               message.sessionId,
               resumeBinding.id,
@@ -1621,7 +1620,7 @@ export class RuntimeServer {
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
             this.#hud.exit(message.sessionId, {
-              fallbackToShell: exited.profile !== 'shell' && !forkLaunch
+              fallbackToShell: exited.profile !== 'shell' && !forkLaunch && !resumeExitFallback
             })
             this.publishSessionHud(message.sessionId)
             if (!resumeExitFallback && !naturalAgentFallback) {
@@ -1660,7 +1659,6 @@ export class RuntimeServer {
             return false
           }
           if (resumeExitFallback) {
-            void this.#spawnShellFallback(message, attachView)
             return false
           }
           if (naturalAgentFallback) {
@@ -1685,11 +1683,6 @@ export class RuntimeServer {
               }
             }
             return false
-          }
-          const fallback = this.#pendingShellFallbacks.get(message.sessionId)
-          if (fallback?.session === exited) {
-            this.#pendingShellFallbacks.delete(message.sessionId)
-            void this.#spawnShellFallback(fallback.message, fallback.attachView)
           }
           if (forkFailure) return false
         }
@@ -1741,9 +1734,9 @@ export class RuntimeServer {
       if (pendingResumeFailure && forkLaunch) {
         this.#beginForkFailure(message, session, pendingResumeFailure, forkAuthority)
       } else if (pendingResumeFailure && resumeBinding) {
-        this.#beginResumeFallback(message, session, resumeBinding.id, pendingResumeFailure, attachView)
+        this.#parkResumeFailure(message, session, resumeBinding.id, pendingResumeFailure)
       } else if (resumeMonitor && resumeBinding) {
-        this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor, attachView)
+        this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
     } catch (error) {
       await hookRegistration?.dispose()
@@ -1758,7 +1751,6 @@ export class RuntimeServer {
           resumeBinding.id,
           `provider process could not start: ${errorMessage(error)}`
         )) {
-          await this.#spawnShellFallbackWithinCurrentSpawn(message, attachView)
           return
         }
       }
@@ -1859,12 +1851,11 @@ export class RuntimeServer {
     }
   }
 
-  #beginResumeFallback(
+  #parkResumeFailure(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     bindingId: string,
-    reason: string,
-    attachView = true
+    reason: string
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
     this.#clearProviderResumeTimer(message.sessionId)
@@ -1872,7 +1863,13 @@ export class RuntimeServer {
     this.#sessions.delete(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
-    this.#pendingShellFallbacks.set(message.sessionId, { session, message, attachView })
+    this.#attachedSessionIds.delete(message.sessionId)
+    this.#spawnDescriptors.delete(message.sessionId)
+    this.#shellInputBuffers.delete(message.sessionId)
+    this.#providerInputBuffers.delete(message.sessionId)
+    this.#workStatusTrackers.delete(message.sessionId)
+    this.#hud.exit(message.sessionId, { fallbackToShell: false })
+    this.publishSessionHud(message.sessionId)
     session.dispose({ notifyExit: false })
   }
 
@@ -1880,8 +1877,7 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
     bindingId: string,
-    monitor: ProviderResumeMonitor,
-    attachView = true
+    monitor: ProviderResumeMonitor
   ): void {
     if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     if (!monitor.isMonitoring) return
@@ -1890,7 +1886,7 @@ export class RuntimeServer {
       this.#providerResumeTimers.delete(message.sessionId)
       const reason = monitor.timeout()
       if (!reason || this.#sessions.get(message.sessionId) !== session) return
-      this.#beginResumeFallback(message, session, bindingId, reason, attachView)
+      this.#parkResumeFailure(message, session, bindingId, reason)
     }, this.#providerResumeTimeoutMs))
   }
 
@@ -1931,7 +1927,7 @@ export class RuntimeServer {
       return true
     } catch (graphError) {
       try {
-        this.#sessionRepository.failResumeToShell(
+        this.#sessionRepository.failResume(
           {
             commandId: `runtime-resume-failed-legacy-${sessionId}-${now}-${randomUUID()}`,
             commandType: 'session.resume-failed',
@@ -2062,27 +2058,13 @@ export class RuntimeServer {
     this.flushSemanticEvents()
   }
 
-  async #spawnShellFallback(
-    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
-    attachView = true
-  ): Promise<void> {
-    await this.#spawnSerialized({ ...message, profile: 'shell' }, attachView)
-    this.#displayResumeFallback(message.sessionId)
-  }
-
-  async #spawnShellFallbackWithinCurrentSpawn(
-    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
-    attachView = true
-  ): Promise<void> {
-    await this.#spawn({ ...message, profile: 'shell' }, undefined, undefined, attachView)
-    this.#displayResumeFallback(message.sessionId)
-  }
-
-  #displayResumeFallback(sessionId: string): void {
-    const shell = this.#sessions.get(sessionId)
-    if (shell?.profile === 'shell') {
-      shell.display('\r\n\u001b[33m[上次会话无法续接，已回到普通终端]\u001b[0m\r\n')
-    }
+  #hasParkedProviderRestoreFailure(sessionId: string): boolean {
+    return this.#database.get<{ restore_state: string }>(
+      `SELECT restore_state FROM provider_bindings
+       WHERE session_id = ? AND provider = 'claude-code'
+       ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      sessionId
+    )?.restore_state === 'failed'
   }
 
   async #spawnSerialized(

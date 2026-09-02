@@ -2085,6 +2085,11 @@ describe('RuntimeServer domain RPC', () => {
         type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
         clientId: 'provider-replacement-renderer'
       })
+      database.run(
+        `UPDATE provider_bindings
+         SET resume_state = 'expired', restore_state = 'none', restore_error = NULL, updated_at = 2
+         WHERE id = 'binding-stale-failure'`
+      )
       replacementPort.receive({
         type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'provider-replacement-session', executionContextId: 'replay-context',
@@ -2710,7 +2715,7 @@ describe('RuntimeServer domain RPC', () => {
 
       await waitUntil(() => failedPort.findRpcError('failed-permission-bypass') !== undefined)
       expect(failedPort.findRpcResponse('failed-permission-bypass')).toBeUndefined()
-      expect(failedPort.last('terminal.hud')).toMatchObject({ hud: { mode: 'shell' } })
+      expect(failedPort.last('terminal.hud')).toMatchObject({ hud: null })
     } finally {
       failedPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -2899,7 +2904,7 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
-  it('replaces the live fallback Shell when the same persisted Session retries Claude restore', async () => {
+  it('replaces an existing Shell when the same persisted Session explicitly starts Claude restore', async () => {
     const executable = join(root, 'provider-restore-retry.sh')
     await writeFile(executable, '#!/bin/sh\nstty raw -echo\ncat\n')
     await chmod(executable, 0o755)
@@ -3079,12 +3084,21 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
-  it('clears a missing AI resume identity and keeps the same panel usable as Shell', async () => {
+  it('parks a missing provider identity on its original Claude node without retrying automatically', async () => {
     const executable = join(root, 'missing-provider-session.sh')
-    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    const launchMarker = join(root, 'missing-provider-launches.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "invoked\\n" >> "$MATOU_TEST_LAUNCH_MARKER"',
+      'printf "No session found for requested id\\n"',
+      'sleep 30',
+      ''
+    ].join('\n'))
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousMarker = process.env.MATOU_TEST_LAUNCH_MARKER
     process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_LAUNCH_MARKER = launchMarker
     try {
       registerSession(database, 'provider-fallback-session', 'claude-code')
       database.run(
@@ -3107,18 +3121,29 @@ describe('RuntimeServer domain RPC', () => {
         profile: 'claude-code', cols: 80, rows: 24
       })
 
-      await waitUntil(() => sessions.get('provider-fallback-session')?.profile === 'shell')
+      await waitUntil(() => database.get<{ restore_state: string }>(
+        'SELECT restore_state FROM provider_bindings WHERE id = ?', 'binding-fallback'
+      )?.restore_state === 'failed')
+      await new Promise((resolve) => setTimeout(resolve, 100))
 
       expect(database.get<{ kind: string }>(
         'SELECT kind FROM sessions WHERE id = ?', 'provider-fallback-session'
-      )).toEqual({ kind: 'shell' })
+      )).toEqual({ kind: 'claude-code' })
       expect(database.get<{ resume_state: string; invalidated_at: number | null }>(
         'SELECT resume_state, invalidated_at FROM provider_bindings WHERE id = ?',
         'binding-fallback'
       )).toMatchObject({ resume_state: 'failed', invalidated_at: expect.any(Number) })
-      await waitUntil(() => terminalText(fallbackPort).includes('[上次会话无法续接，已回到普通终端]'))
-      expect(terminalText(fallbackPort)).toContain('[上次会话无法续接，已回到普通终端]')
+      expect(sessions.get('provider-fallback-session')).toBeUndefined()
+      expect(terminalText(fallbackPort)).not.toContain('已回到普通终端')
       expect(fallbackPort.sent.filter(({ type }) => type === 'terminal.exited')).toHaveLength(0)
+
+      fallbackPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-fallback-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect((await readFile(launchMarker, 'utf8')).trim().split('\n')).toEqual(['invoked'])
 
       fallbackPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -3128,10 +3153,12 @@ describe('RuntimeServer domain RPC', () => {
     } finally {
       if (previousCommand === undefined) delete process.env.MATOU_CLAUDE_COMMAND
       else process.env.MATOU_CLAUDE_COMMAND = previousCommand
+      if (previousMarker === undefined) delete process.env.MATOU_TEST_LAUNCH_MARKER
+      else process.env.MATOU_TEST_LAUNCH_MARKER = previousMarker
     }
   })
 
-  it('degrades an unresponsive AI resume to a usable Shell at the product deadline', async () => {
+  it('parks an unresponsive provider resume at the product deadline', async () => {
     const executable = join(root, 'unresponsive-provider-session.sh')
     await writeFile(executable, '#!/bin/sh\nsleep 30\n')
     await chmod(executable, 0o755)
@@ -3162,13 +3189,13 @@ describe('RuntimeServer domain RPC', () => {
         profile: 'claude-code', cols: 80, rows: 24
       })
 
-      await waitUntil(() => sessions.get('provider-timeout-session')?.profile === 'shell')
-      await waitUntil(() => terminalText(timeoutPort).includes(
-        '[上次会话无法续接，已回到普通终端]'
-      ))
+      await waitUntil(() => database.get<{ restore_state: string }>(
+        'SELECT restore_state FROM provider_bindings WHERE id = ?', 'binding-timeout'
+      )?.restore_state === 'failed')
       expect(database.get<{ kind: string }>(
         'SELECT kind FROM sessions WHERE id = ?', 'provider-timeout-session'
-      )).toEqual({ kind: 'shell' })
+      )).toEqual({ kind: 'claude-code' })
+      expect(sessions.get('provider-timeout-session')).toBeUndefined()
       expect(database.get<{ resume_state: string }>(
         'SELECT resume_state FROM provider_bindings WHERE id = ?', 'binding-timeout'
       )).toEqual({ resume_state: 'failed' })
@@ -3183,7 +3210,7 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
-  it('degrades to Shell when the AI resume process cannot start', async () => {
+  it('keeps the Claude node failed when its resume process cannot start', async () => {
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = join(root, 'provider-command-does-not-exist')
     try {
@@ -3208,12 +3235,14 @@ describe('RuntimeServer domain RPC', () => {
         profile: 'claude-code', cols: 80, rows: 24
       })
 
-      await waitUntil(() => sessions.get('provider-launch-fallback')?.profile === 'shell')
-      await waitUntil(() => terminalText(launchPort).includes('[上次会话无法续接，已回到普通终端]'))
+      await waitUntil(() => database.get<{ restore_state: string }>(
+        'SELECT restore_state FROM provider_bindings WHERE id = ?', 'binding-launch-fallback'
+      )?.restore_state === 'failed')
 
       expect(database.get<{ kind: string }>(
         'SELECT kind FROM sessions WHERE id = ?', 'provider-launch-fallback'
-      )).toEqual({ kind: 'shell' })
+      )).toEqual({ kind: 'claude-code' })
+      expect(sessions.get('provider-launch-fallback')).toBeUndefined()
       expect(launchPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(0)
       launchPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,

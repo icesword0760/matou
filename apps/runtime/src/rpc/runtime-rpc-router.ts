@@ -529,6 +529,11 @@ export class RuntimeRpcRouter {
           sessionId: text(input.sessionId, 'sessionId'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.start-fresh-provider':
+        return this.#providerModes.startFreshClaude(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.restart-stopped-session':
         return this.#sessionCanvas.restartStoppedSession(command, {
           windowId: text(input.windowId, 'windowId'),

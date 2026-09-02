@@ -820,6 +820,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                       commands.removeSessionBranch?.(scene.id, sessionId, scope)
                   } : {})}
                   onRetryRestore={commands.retryProviderRestore}
+                  onStartFreshProvider={commands.startFreshProvider}
                   {...(client ? { onRetryWork: (sessionId: string) => {
                     client.retryLastTerminalInput(sessionId)
                   } } : {})}
@@ -1270,7 +1271,7 @@ function createFixtureCommands(
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
     createForkChild: createFixtureForkChild, createForkSibling: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
-    retryProviderRestore: NOOP, restartStoppedSession: NOOP,
+    retryProviderRestore: NOOP, startFreshProvider: NOOP, restartStoppedSession: NOOP,
     removeSessionBranch: (_sceneId, sessionId) => removeFixtureSession(sessionId),
     listClaudeSessions: async () => ({ sessions: [], total: 0 }),
     getClaudeSessionDetail: async () => { throw new Error('fixture session is unavailable') },
