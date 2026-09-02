@@ -275,6 +275,22 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByRole('button', { name: '打开运行环境：待恢复' }).textContent).toBe('待恢复')
   })
 
+  it('clears the Git badge when a live Shell leaves its repository', () => {
+    render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'shell', shell: 'zsh', cwd: '/outside', startedAt: Date.now()
+    }} sessionId="session-1"
+      environment={{
+        kind: 'local', state: 'ready', path: '/outside', localExecutionContextId: 'local-context'
+      }}
+      git={{ state: 'ready', branch: 'stale-main', dirty: true }}
+      environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    expect(screen.queryByRole('button', { name: '打开 Git' })).toBeNull()
+    expect(screen.queryByText('Git 不可用')).toBeNull()
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' })).toBeTruthy()
+  })
+
   it('opens Git from the authoritative Environment path instead of a stale HUD cwd', async () => {
     const request = vi.fn(async (
       _method: RpcMethod, _payload: unknown, _options?: { timeoutMs?: number }

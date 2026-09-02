@@ -93,9 +93,9 @@ export function TerminalHud(props: {
   const sessionId = hud?.sessionId ?? props.sessionId
   if (!sessionId || (!hud && !props.environment && !props.git)) return null
   const shortCwd = cwdShortName(hud?.cwd)
-  const git = props.git ?? legacyGitState(hud) ?? (props.environment
-    ? { state: 'unavailable' as const, dirty: false }
-    : undefined)
+  const git = hud
+    ? legacyGitState(hud)
+    : props.git ?? (props.environment ? { state: 'unavailable' as const, dirty: false } : undefined)
   const gitDisplay = git ? gitStateLabel(git) : ''
   const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
   const openMenu = (target: 'permission' | 'model', event: React.MouseEvent<HTMLElement>) => {

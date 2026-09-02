@@ -234,7 +234,7 @@ button { -webkit-app-region: no-drag; }
 .status-model { color: #79c0ff; }
 .status-git { max-width: 150px; overflow: hidden; color: #ff6b35; text-overflow: ellipsis; }
 .status-divider { width: 1px; height: 12px; margin: 0 2px; background: #21262d; }
-.status-tool-running, .status-todos { display: inline-flex; align-items: center; gap: 3px; }
+.status-tool-running, .status-todos { display: inline-flex; flex-shrink: 1; align-items: center; min-width: 0; overflow: hidden; gap: 3px; }
 .tool-icon { font-size: 11px; line-height: 1; }
 .tool-icon-running { color: #eab308; }
 .tool-icon-done { color: #22c55e; }
