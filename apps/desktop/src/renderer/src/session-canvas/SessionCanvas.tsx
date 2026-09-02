@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
 import { SessionCarousel } from './SessionCarousel'
 import { StoppedSessionCard } from './StoppedSessionCard'
+import { indexSessionGraph } from './session-graph-index'
 
 export function SessionCanvas(props: {
   graph: SessionGraphView
@@ -35,13 +36,16 @@ export function SessionCanvas(props: {
   const onPutGeometryRef = useRef(onPutGeometry)
   const [geometryPending, setGeometryPending] = useState(false)
   const [lastSavedScrollLeft, setLastSavedScrollLeft] = useState<number | undefined>(undefined)
-  const focused = graph.nodes.find(({ sessionId }) => sessionId === graph.focusedSessionId) ?? graph.nodes[0]
+  const graphIndex = useMemo(() => indexSessionGraph(graph.nodes), [graph.nodes])
+  const focused = graph.focusedSessionId
+    ? graphIndex.byId.get(graph.focusedSessionId) ?? graph.nodes[0]
+    : graph.nodes[0]
   const parentId = levelParentSessionId !== undefined
     ? levelParentSessionId ?? undefined
     : focused?.parentSessionId
-  const direct = graph.nodes.filter((node) => node.parentSessionId === parentId)
+  const direct = graphIndex.childrenOf(parentId)
   const siblings = direct
-  const parent = parentId ? graph.nodes.find(({ sessionId }) => sessionId === parentId) : undefined
+  const parent = parentId ? graphIndex.byId.get(parentId) : undefined
   const ownerKey = `session-group:${graph.sceneId}:${parentId ?? 'root'}`
   const storedGeometry = geometry?.find((item) => item.ownerKey === ownerKey)?.geometry
   const initialScrollLeft = typeof storedGeometry?.scrollLeft === 'number' ? storedGeometry.scrollLeft : 0
@@ -135,20 +139,16 @@ export function SessionCanvas(props: {
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
       renderSession={(node, inViewport) => {
         if (node.archivedAt === undefined) return renderSession(node, inViewport)
-        const directChildren = graph.nodes.filter(({ parentSessionId }) => parentSessionId === node.sessionId)
-        const descendants = sessionDescendants(graph.nodes, node.sessionId)
+        const directChildren = graphIndex.childrenOf(node.sessionId)
+        const descendants = graphIndex.descendantSummaryOf(node.sessionId)
         return <StoppedSessionCard node={node}
-          directChildCount={directChildren.length} descendantCount={descendants.length}
-          descendantImpact={{
-            running: descendants.filter(({ workStatus }) =>
-              workStatus === 'running' || workStatus === 'starting').length,
-            needsInput: descendants.filter(({ workStatus }) => workStatus === 'needs-input').length
-          }}
+          directChildCount={directChildren.length} descendantCount={descendants.count}
+          descendantImpact={{ running: descendants.running, needsInput: descendants.needsInput }}
           disabled={disabled} {...(disabledReason ? { disabledReason } : {})}
           {...(onRemoveBranch ? { onRemoveBranch } : {})} />
       }}
       onActivate={(sessionId) => {
-        const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
+        const node = graphIndex.byId.get(sessionId)
         if (node?.archivedAt === undefined) onActivate(sessionId)
       }}
       {...(parent ? { parent } : {})}
@@ -161,25 +161,4 @@ export function SessionCanvas(props: {
       {...(disabled ? {} : { onGeometryChange: putGeometry })}
       {...(onEnsureSessionVisible ? { onEnsureSessionVisible } : {})} />
   </section>
-}
-
-function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
-  const byParent = new Map<string, SessionGraphNodeView[]>()
-  for (const node of nodes) {
-    if (!node.parentSessionId) continue
-    const children = byParent.get(node.parentSessionId) ?? []
-    children.push(node)
-    byParent.set(node.parentSessionId, children)
-  }
-  const descendants: SessionGraphNodeView[] = []
-  const pending = [...(byParent.get(sessionId) ?? [])]
-  const seen = new Set<string>()
-  while (pending.length > 0) {
-    const node = pending.pop()!
-    if (seen.has(node.sessionId)) continue
-    seen.add(node.sessionId)
-    descendants.push(node)
-    pending.push(...(byParent.get(node.sessionId) ?? []))
-  }
-  return descendants
 }
