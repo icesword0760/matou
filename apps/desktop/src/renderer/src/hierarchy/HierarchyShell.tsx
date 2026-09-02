@@ -41,6 +41,7 @@ import {
 } from '../terminal/terminal-themes'
 import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 import { AppFocusRestorer } from './focus-restoration'
+import { useSessionRecovery } from '../runtime/useSessionRecovery'
 
 export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
   fixture?: HierarchyProjection
@@ -332,7 +333,6 @@ function HierarchyProduct({ projection, commands, readOnly }: {
     gitAvailable: boolean
   } | null>(null)
   const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | null | undefined>>({})
-  const restartingStoppedSessions = useRef(new Set<string>())
   const [revealSessionByScene, setRevealSessionByScene] = useState<Record<string, {
     sessionId: string
     sequence: number
@@ -383,17 +383,6 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const task = projection.tasks.find(({ id }) => id === taskId)
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
   const scenes = projection.scenes.filter(({ taskId: owner }) => owner === taskId)
-  useEffect(() => {
-    if (readOnly || !activeSceneId || !commands.restartStoppedSession) return
-    const graph = projection.sessionGraphs?.[activeSceneId]
-    for (const node of graph?.nodes ?? []) {
-      if (node.archivedAt === undefined || restartingStoppedSessions.current.has(node.sessionId)) continue
-      restartingStoppedSessions.current.add(node.sessionId)
-      void Promise.resolve(commands.restartStoppedSession(node.sessionId)).catch(() => {
-        restartingStoppedSessions.current.delete(node.sessionId)
-      })
-    }
-  }, [activeSceneId, commands, projection.sessionGraphs, readOnly])
   const workspaceTaskIds = new Set(
     projection.tasks.filter(({ id, workspaceId: owner }) =>
       owner === workspaceId && (projection.taskPlacements.length === 0 || placedTaskIds.has(id))
@@ -402,6 +391,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
+  const sessionRecovery = useSessionRecovery(client, activeSceneId, focusedSessionId)
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
   const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
   const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
@@ -688,6 +678,7 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                 const childNodes = graph?.nodes.filter(({ parentSessionId }) => parentSessionId === session.id) ?? []
                 const descendantNodes = graph ? sessionDescendants(graph.nodes, session.id) : []
                 const sessionHud = projection.sessionHuds?.find(({ sessionId: candidate }) => candidate === session.id)
+                const recoveryStatus = sessionRecovery.statusBySession.get(session.id)
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
                   active={isFocused} visible={scene.id === activeSceneId && cardVisible}
@@ -700,6 +691,11 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                   {...(scene.id === activeSceneId && isFocused ? { onSearchResults: setSearchResults } : {})}
                   focusRequest={scene.id === activeSceneId && isFocused ? terminalFocusRequest : 0}
                   resumable={sessionHud?.resumable === true}
+                  {...(recoveryStatus ? {
+                    recoveryState: recoveryStatus.state,
+                    ...(recoveryStatus.error ? { recoveryError: recoveryStatus.error } : {}),
+                    onRetryRecovery: sessionRecovery.retry
+                  } : {})}
                   {...(graphNode ? {
                     forkReady: graphNode.canFork,
                     workStatus: graphNode.workStatus,

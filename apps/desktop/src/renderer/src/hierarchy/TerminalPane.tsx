@@ -50,6 +50,8 @@ export function TerminalPane(props: {
   forkReady?: boolean
   providerRestoreState?: 'none' | 'restoring' | 'failed'
   restoreError?: string
+  recoveryState?: 'queued' | 'restoring' | 'ready' | 'failed'
+  recoveryError?: string
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
   forkProgress?: import('@matou/domain').ForkProgress
@@ -60,6 +62,7 @@ export function TerminalPane(props: {
   hasOwnedWorktree?: boolean
   spawnRevision?: number
   onRetryRestore?(sessionId: string): unknown
+  onRetryRecovery?(sessionId: string): unknown
   onRetryWork?(sessionId: string): unknown
   onRetryFork?(sessionId: string): unknown
   onRemoveFailedFork?(sessionId: string): unknown
@@ -82,8 +85,9 @@ export function TerminalPane(props: {
     session, active, visible = true, foreground = true, workspaceSessionCount, taskName,
     pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
+    recoveryState = 'ready', recoveryError,
     sharedWorkingDirectory = false, environment, hasOwnedWorktree = false,
-    spawnRevision = 0, onRetryRestore, onRetryWork, onRetryFork, onRemoveFailedFork,
+    spawnRevision = 0, onRetryRestore, onRetryRecovery, onRetryWork, onRetryFork, onRemoveFailedFork,
     childNodes = [], workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
@@ -124,10 +128,12 @@ export function TerminalPane(props: {
   const showFork = session.kind === 'claude-code' && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
   const environmentUnavailable = environment !== undefined && environment.state !== 'ready'
-  const actionBlocked = readOnly || environmentUnavailable
+  const recoveryBlocking = recoveryState !== 'ready'
+  const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
+  const actionBlocked = readOnly || environmentUnavailable || recoveryBlocking
   const actionBlockedReason = readOnly ? READ_ONLY_REASON : environmentUnavailable
     ? '当前运行环境需要先恢复或交接'
-    : undefined
+    : recoveryBlocking ? '当前终端仍在恢复' : undefined
   const remove = useCallback((confirmed: boolean) => {
     setConfirmationOpen(false)
     void Promise.resolve(onDelete(session.id, confirmed)).catch(NOOP)
@@ -227,7 +233,7 @@ export function TerminalPane(props: {
     }
   }
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible}
+    data-active={active} hidden={!visible} aria-busy={recoveryBusy || undefined}
     onPointerDown={(event) => {
       if ((event.target as HTMLElement).closest('button,[role="menuitem"]')) return
       notificationStore.dismissSessionIndicator(session.id)
@@ -359,7 +365,7 @@ export function TerminalPane(props: {
       </div>}
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
       workStatus={workStatus} latestLines={latestLines} />}
-    {!isTeamMember && forkState !== 'failed' && <TerminalSurface sessionId={session.id}
+    {!isTeamMember && forkState !== 'failed' && foreground && recoveryState === 'ready' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}
       inputDisabled={actionBlocked || !pathValid || storageFault !== null}
@@ -386,7 +392,10 @@ export function TerminalPane(props: {
           isFocusedSession: active && visible
         })
       }} />}
-    {storageFault && visible && <StorageFaultOverlay
+    {!isTeamMember && forkState !== 'failed' && !foreground && recoveryState === 'ready' &&
+      <div className="background-session-placeholder" data-testid={`background-session-${session.id}`}
+        aria-hidden="true" />}
+    {recoveryState === 'ready' && storageFault && visible && <StorageFaultOverlay
       sessionTitle={session.title}
       fault={{
         code: storageFault.code,
@@ -395,8 +404,27 @@ export function TerminalPane(props: {
       }}
       onRetry={() => runtimeClient?.retryTerminalStorage(session.id)}
       onEnd={() => runtimeClient?.endTerminalAfterStorageFault(session.id)} />}
-    {currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
-    {environmentUnavailable && !currentForkProgress && visible && <div className={`environment-card-overlay state-${environment!.state}`}
+    {recoveryState === 'ready' && currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
+    {recoveryState !== 'ready' && <div className={`session-recovery-overlay state-${recoveryState}`}
+      role="status" aria-label={recoveryState === 'failed'
+        ? `终端恢复失败：${session.title}` : `正在恢复终端：${session.title}`}
+      onPointerDown={(event) => event.stopPropagation()}>
+      <div className="session-recovery-overlay__content">
+        {recoveryState !== 'failed' && <span className="session-recovery-overlay__spinner" aria-hidden="true" />}
+        <strong>{recoveryState === 'failed'
+          ? '终端恢复失败'
+          : recoveryState === 'queued' ? '等待恢复终端' : '正在恢复终端'}</strong>
+        <p>{recoveryState === 'failed'
+          ? (recoveryError || '本会话恢复未完成，其他会话仍可继续使用。')
+          : recoveryState === 'queued'
+            ? '已进入恢复队列，将按当前使用位置优先恢复。'
+            : '正在恢复最近的终端内容与运行状态…'}</p>
+        {recoveryState === 'failed' && onRetryRecovery && <button type="button"
+          aria-label={`重试恢复终端：${session.title}`}
+          onClick={() => void onRetryRecovery(session.id)}>重试</button>}
+      </div>
+    </div>}
+    {recoveryState === 'ready' && environmentUnavailable && !currentForkProgress && visible && <div className={`environment-card-overlay state-${environment!.state}`}
       role="status" aria-label={`运行环境${environmentOverlayTitle(environment!)}`}
       onPointerDown={(event) => event.stopPropagation()}>
       <div className="environment-card-overlay__content">

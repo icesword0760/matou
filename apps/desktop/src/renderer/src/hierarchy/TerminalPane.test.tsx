@@ -28,12 +28,40 @@ vi.mock('../terminal/TerminalSurface', () => ({
 afterEach(cleanup)
 
 describe('Terminal pane', () => {
-  it('keeps the Session surface mounted while its Scene is inactive', () => {
+  it('keeps every Session in the foreground list bound even when a card scrolls offscreen', () => {
     const props = fixture()
     const view = render(<TerminalPane {...props} visible />)
-    view.rerender(<TerminalPane {...props} active={false} visible={false} />)
+    view.rerender(<TerminalPane {...props} active={false} visible={false} foreground />)
 
     expect(screen.getByTestId('surface-session-1').dataset.visible).toBe('false')
+  })
+
+  it('releases the terminal surface when its list moves to the background', () => {
+    render(<TerminalPane {...fixture()} active={false} visible={false} foreground={false} />)
+
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    expect(screen.getByTestId('background-session-session-1')).toBeTruthy()
+  })
+
+  it.each(['queued', 'restoring'] as const)('covers the whole card while recovery is %s', (recoveryState) => {
+    render(<TerminalPane {...fixture()} recoveryState={recoveryState} />)
+
+    const pane = screen.getByTestId('terminal-pane')
+    expect(pane.getAttribute('aria-busy')).toBe('true')
+    expect(screen.getByRole('status', { name: '正在恢复终端：Claude 主会话' })).toBeTruthy()
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+  })
+
+  it('isolates a failed card and lets the user retry only that recovery', async () => {
+    const onRetryRecovery = vi.fn()
+    render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="进程恢复失败"
+      onRetryRecovery={onRetryRecovery} />)
+
+    expect(screen.getByRole('status', { name: '终端恢复失败：Claude 主会话' }).textContent)
+      .toContain('进程恢复失败')
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：Claude 主会话' }))
+    expect(onRetryRecovery).toHaveBeenCalledWith('session-1')
   })
 
   it('keeps programmatic terminal focus from stealing the active Session', async () => {

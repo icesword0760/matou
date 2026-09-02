@@ -2,9 +2,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { PROTOCOL_VERSION } from '@matou/contracts'
 
 import { HierarchyShell, preferredActiveChild } from './HierarchyShell'
 import type { HierarchyProjection } from './hierarchy-types'
+import type { SessionRecoveryStatus } from '../runtime/RuntimeClient'
 
 vi.mock('../terminal/TerminalSurface', () => ({
   TerminalSurface: ({ sessionId, inputDisabled, readOnly, themeKey, fontSize, searchRequest, focusRequest }: {
@@ -21,6 +23,9 @@ const runtime = vi.hoisted(() => ({
     request: ReturnType<typeof vi.fn>
     startProjection: ReturnType<typeof vi.fn>
     subscribeProjection: ReturnType<typeof vi.fn>
+    subscribeSessionRecovery?: ReturnType<typeof vi.fn>
+    prioritizeSessionRecovery?: ReturnType<typeof vi.fn>
+    retrySessionRecovery?: ReturnType<typeof vi.fn>
   }
 }))
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
@@ -59,6 +64,45 @@ describe('PRD 05 hierarchy shell', () => {
       .toContain('根会话 · 1 个会话')
     expect(screen.queryByRole('button', { name: '添加快捷指令' })).toBeNull()
     expect(document.querySelector('.session-level-header')).toBeNull()
+  })
+
+  it('covers only the recovering card from authoritative Runtime status and retries that card', async () => {
+    const data = fixture()
+    let recoveryListener: ((status: SessionRecoveryStatus) => void) | undefined
+    const retrySessionRecovery = vi.fn()
+    runtime.current = {
+      request: vi.fn(async (method: string) => {
+        if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+        if (method === 'projection.snapshot') return projectionSnapshot(data)
+        throw new Error(`unexpected Runtime request: ${method}`)
+      }),
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {}),
+      subscribeSessionRecovery: vi.fn((listener) => {
+        recoveryListener = listener
+        return () => { recoveryListener = undefined }
+      }),
+      prioritizeSessionRecovery: vi.fn(),
+      retrySessionRecovery
+    }
+
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    act(() => recoveryListener?.({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
+      state: 'restoring'
+    }))
+    expect(screen.getByRole('status', { name: '正在恢复终端：终端 A1' })).toBeTruthy()
+    expect(screen.queryByTestId('xterm-session-a1')).toBeNull()
+
+    act(() => recoveryListener?.({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
+      state: 'failed', error: '恢复进程退出'
+    }))
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：终端 A1' }))
+    expect(retrySessionRecovery).toHaveBeenCalledWith('session-a1')
   })
 
   it('opens session management from the card header centered inside the workspace stage', async () => {
@@ -258,9 +302,9 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('textbox', { name: '搜索当前 Tab 的终端内容' })).toBeTruthy()
 
     fireEvent.keyDown(document, { key: '+', metaKey: true })
-    expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('12')
+    expect(screen.getAllByTestId(/xterm-/).every(({ dataset }) => dataset.fontSize === '12')).toBe(true)
     fireEvent.keyDown(document, { key: '0', metaKey: true })
-    expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('11')
+    expect(screen.getAllByTestId(/xterm-/).every(({ dataset }) => dataset.fontSize === '11')).toBe(true)
   })
 
   it('switches panes by their actual split direction instead of wrapping linearly', () => {
@@ -309,9 +353,8 @@ describe('PRD 05 hierarchy shell', () => {
 
     fireEvent.keyDown(document, { key: 'w', metaKey: true })
     expect(screen.queryByTestId(splitSurface!.dataset.testid!)).toBeNull()
-    expect(screen.getAllByTestId(/xterm-/).map(({ dataset }) => dataset.testid)).toEqual([
-      'xterm-session-a2', 'xterm-session-a1'
-    ])
+    expect(screen.getAllByTestId(/xterm-/).map(({ dataset }) => dataset.testid))
+      .toEqual(['xterm-session-a1'])
   })
 
   it('keeps Kooky font boundaries while zooming by shortcut', () => {
@@ -332,7 +375,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     expect(screen.getByTestId('xterm-session-a1').dataset.searchQuery).toBe('MATOU_TOKEN')
     expect(screen.getByTestId('xterm-session-a1').dataset.searchDirection).toBe('next')
-    expect(screen.getByTestId('xterm-session-a2').dataset.searchQuery).toBeUndefined()
+    expect(screen.queryByTestId('xterm-session-a2')).toBeNull()
   })
 
   it('keeps Kooky search option shortcuts while the search field is open', () => {
@@ -935,14 +978,14 @@ describe('PRD 05 hierarchy shell', () => {
     expect(activePane?.textContent).toContain('终端 A1')
   })
 
-  it('keeps an inactive Scene terminal mounted and blocks input for an invalid path', () => {
+  it('keeps the foreground terminal bound, releases inactive Scenes and blocks input for an invalid path', () => {
     const data = fixture()
     data.pathStates = [{ workspaceId: 'workspace-a', status: 'invalid', reason: 'missing' }]
     render(<HierarchyShell fixture={data} />)
 
     expect(screen.getByText('工作区目录不可用，请先在本地恢复原路径，或移出该工作区')).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
-    expect(screen.getAllByTestId('xterm-session-a2').length).toBeGreaterThan(0)
+    expect(screen.queryByTestId('xterm-session-a2')).toBeNull()
     expect(screen.getByRole('button', { name: '在 Workspace A 中新增事项' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '新建页签' })).toHaveProperty('disabled', true)
     expect(screen.getByRole('button', { name: '横向新增 Shell' })).toHaveProperty('disabled', true)
