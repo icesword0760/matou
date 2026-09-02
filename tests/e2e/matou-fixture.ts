@@ -16,10 +16,11 @@ export interface MatouFixture {
 export interface LaunchMatouOptions {
   preserveMainWindowCloseBehavior?: boolean
   env?: Record<string, string>
+  root?: string
 }
 
 export async function launchMatou(options: LaunchMatouOptions = {}): Promise<MatouFixture> {
-  const root = await mkdtemp('/tmp/matou-e2e-')
+  const root = options.root ?? await mkdtemp('/tmp/matou-e2e-')
   return startMatou(root, options)
 }
 
