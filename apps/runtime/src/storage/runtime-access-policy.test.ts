@@ -12,6 +12,8 @@ const READ_ONLY_RPC_METHODS = [
   'claude-sessions.detail',
   'session.environment-open',
   'geometry.list',
+  'terminal.history-page',
+  'terminal.history-search',
   'events.replay',
   'events.ack'
 ] satisfies RpcMethod[]

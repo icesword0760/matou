@@ -53,6 +53,35 @@ afterEach(() => {
 })
 
 describe('RuntimeServer domain RPC', () => {
+  it('pages and searches archived terminal history through Runtime RPC', async () => {
+    const journal = await SegmentJournal.open(root, 'rpc-history', { compressSealed: false })
+    await journal.appendOutput(1, new TextEncoder().encode('older line\n'))
+    await journal.appendOutput(2, new TextEncoder().encode('needle line\nnewest line\n'))
+    await journal.close()
+
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'history-page',
+      method: 'terminal.history-page', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: { sessionId: 'rpc-history', lineLimit: 2 }
+    })
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'history-search',
+      method: 'terminal.history-search', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: {
+        sessionId: 'rpc-history', query: 'needle', limit: 10,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('history-search') !== undefined)
+
+    expect(port.findRpcResponse('history-page')?.result).toMatchObject({
+      lines: [{ text: 'needle line' }, { text: 'newest line' }], hasMore: true
+    })
+    expect(port.findRpcResponse('history-search')?.result).toMatchObject({
+      matches: [{ text: 'needle line' }], hasMore: false
+    })
+  })
+
   it('hands one real PTY from Local to its owned Worktree and keeps the Session identity', async () => {
     const repositoryRoot = join(root, 'handoff-repository')
     const worktreePath = join(root, 'handoff-worktree')

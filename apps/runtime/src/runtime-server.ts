@@ -21,6 +21,7 @@ import {
   type SegmentJournalOptions
 } from './journal/segment-journal'
 import type { DecodedJournalFrame } from './journal/segment-journal'
+import { JournalHistoryReader } from './journal/journal-history-reader'
 import { JournalTailIndex } from './journal/journal-tail-index'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import type { CapabilityTokenService } from './control/host-control-server'
@@ -138,6 +139,7 @@ export class RuntimeServer {
   readonly #dataRoot: string
   readonly #database: RuntimeDatabase
   readonly #router: RuntimeRpcRouter
+  readonly #history: JournalHistoryReader
   readonly #eventStore: DomainEventStore
   readonly #transactions: DomainTransactionManager
   readonly #sessionRepository: SessionRepository
@@ -200,6 +202,7 @@ export class RuntimeServer {
     this.#dataRoot = dataRoot
     this.#database = database
     this.#router = router
+    this.#history = new JournalHistoryReader(dataRoot)
     this.#eventStore = new DomainEventStore(database)
     const transactions = new DomainTransactionManager(database)
     this.#transactions = transactions
@@ -685,7 +688,9 @@ export class RuntimeServer {
           }
         : isSessionEnvironmentRpc(message.method)
           ? await this.#handleSessionEnvironmentRpc(message.method, message.payload)
-          : await this.#router.handle(message.method, message.payload)
+          : isTerminalHistoryRpc(message.method)
+            ? await this.#handleTerminalHistoryRpc(message.method, message.payload)
+            : await this.#router.handle(message.method, message.payload)
       if (isGitMutation(message.method)) {
         await Promise.all([...this.#attachedSessionIds].map((sessionId) =>
           this.refreshSessionHud(sessionId)
@@ -723,6 +728,33 @@ export class RuntimeServer {
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', errorMessage(error), false)
       }
     }
+  }
+
+  async #handleTerminalHistoryRpc(
+    method: Extract<RpcMethod, 'terminal.history-page' | 'terminal.history-search'>,
+    payload: unknown
+  ): Promise<unknown> {
+    const input = recordFromRpc(payload)
+    const sessionId = terminalHistorySessionId(input.sessionId)
+    const before = terminalHistoryCursor(input.before)
+    if (method === 'terminal.history-page') {
+      const lineLimit = optionalBoundedInteger(input.lineLimit, 'lineLimit', 1, 1_000)
+      return this.#history.page({
+        sessionId,
+        ...(before ? { before } : {}),
+        ...(lineLimit === undefined ? {} : { lineLimit })
+      })
+    }
+    const query = terminalHistoryQuery(input.query)
+    const options = terminalHistorySearchOptions(input.options)
+    const limit = optionalBoundedInteger(input.limit, 'limit', 1, 1_000)
+    return this.#history.search({
+      sessionId,
+      query,
+      options,
+      ...(before ? { before } : {}),
+      ...(limit === undefined ? {} : { limit })
+    })
   }
 
   async #handleSessionEnvironmentRpc(method: RpcMethod, payload: unknown): Promise<unknown> {
@@ -2413,6 +2445,69 @@ function isSessionEnvironmentRpc(method: RpcMethod): boolean {
     method === 'session.environment-restore' ||
     method === 'session.environment-locate' ||
     method === 'session.environment-handoff'
+}
+
+function isTerminalHistoryRpc(
+  method: RpcMethod
+): method is Extract<RpcMethod, 'terminal.history-page' | 'terminal.history-search'> {
+  return method === 'terminal.history-page' || method === 'terminal.history-search'
+}
+
+function recordFromRpc(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new RpcFault('INVALID_REQUEST', 'history payload must be an object')
+  return value
+}
+
+function terminalHistorySessionId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value)) {
+    throw new RpcFault('INVALID_REQUEST', 'sessionId contains unsupported characters')
+  }
+  return value
+}
+
+function terminalHistoryCursor(value: unknown): { sequence: number; lineIndex: number } | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value) || !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 0 ||
+      !Number.isSafeInteger(value.lineIndex) || Number(value.lineIndex) < 0) {
+    throw new RpcFault('INVALID_REQUEST', 'history cursor is invalid')
+  }
+  return { sequence: Number(value.sequence), lineIndex: Number(value.lineIndex) }
+}
+
+function terminalHistoryQuery(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 10_000) {
+    throw new RpcFault('INVALID_REQUEST', 'history query must be at most 10000 characters')
+  }
+  return value
+}
+
+function terminalHistorySearchOptions(value: unknown): {
+  caseSensitive: boolean
+  regex: boolean
+  wholeWord: boolean
+} {
+  if (!isRecord(value) || typeof value.caseSensitive !== 'boolean' ||
+      typeof value.regex !== 'boolean' || typeof value.wholeWord !== 'boolean') {
+    throw new RpcFault('INVALID_REQUEST', 'history search options are invalid')
+  }
+  return {
+    caseSensitive: value.caseSensitive,
+    regex: value.regex,
+    wholeWord: value.wholeWord
+  }
+}
+
+function optionalBoundedInteger(
+  value: unknown,
+  name: string,
+  minimum: number,
+  maximum: number
+): number | undefined {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+    throw new RpcFault('INVALID_REQUEST', `${name} must be between ${minimum} and ${maximum}`)
+  }
+  return Number(value)
 }
 
 export function terminalSummaryLines(raw: string): string[] {

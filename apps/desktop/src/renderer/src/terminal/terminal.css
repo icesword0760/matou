@@ -101,6 +101,36 @@ body {
   pointer-events: none;
 }
 
+.terminal-history-result {
+  position: absolute;
+  z-index: 9;
+  right: 12px;
+  bottom: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  max-width: min(720px, calc(100% - 24px));
+  padding: 7px 10px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 7px;
+  color: #d7dbe5;
+  background: rgb(19 22 29 / 94%);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 28%);
+  font: 11px "SFMono-Regular", Menlo, monospace;
+  pointer-events: none;
+}
+
+.terminal-history-result__source { color: #ff9a3d; white-space: nowrap; }
+.terminal-history-result__text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-history-result__meta { color: #8d95a7; white-space: nowrap; }
+.terminal-surface[data-theme="light"] .terminal-history-result {
+  border-color: rgb(48 56 72 / 15%);
+  color: #303848;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 8px 28px rgb(44 55 78 / 16%);
+}
+
 .terminal-surface .xterm {
   height: 100%;
   padding: var(--terminal-padding-block) var(--terminal-padding-inline);

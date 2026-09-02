@@ -62,6 +62,14 @@ interface TerminalSurfaceProps {
   onStorageRecovered?: () => void
 }
 
+interface ArchivedSearchView {
+  text: string
+  resultIndex: number
+  resultCount: number
+  gapCount: number
+  hasMore: boolean
+}
+
 export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
@@ -76,6 +84,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
   const [isDragOverTerminal, setIsDragOverTerminal] = useState(false)
+  const [archivedSearch, setArchivedSearch] = useState<ArchivedSearchView | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
@@ -87,6 +96,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const onOscNotificationRef = useRef(onOscNotification)
   const onFontSizeChangeRef = useRef(onFontSizeChange)
   const onSearchResultsRef = useRef(onSearchResults)
+  const searchRequestRef = useRef(searchRequest)
   const onUserInputRef = useRef(onUserInput)
   const onStorageFaultRef = useRef(onStorageFault)
   const onStorageRecoveredRef = useRef(onStorageRecovered)
@@ -105,6 +115,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   onUserInputRef.current = onUserInput
   onStorageFaultRef.current = onStorageFault
   onStorageRecoveredRef.current = onStorageRecovered
+  searchRequestRef.current = searchRequest
 
   useEffect(() => { pendingInputRef.current = '' }, [sessionId])
   useEffect(() => {
@@ -368,7 +379,54 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (!replaying) onOscNotificationRef.current(oscId, content)
       return false
     }))
-    const searchResults = search.onDidChangeResults((result) => onSearchResultsRef.current(result))
+    let archivedResult: {
+      key: string
+      requestSequence: number
+      index: number
+      matches: Array<{ text: string }>
+      gapCount: number
+      hasMore: boolean
+    } | undefined
+    let archiveQueryGeneration = 0
+    const searchResults = search.onDidChangeResults((result) => {
+      onSearchResultsRef.current(result)
+      const request = searchRequestRef.current
+      if (result.resultCount > 0 || !request?.query) {
+        archivedResult = undefined
+        setArchivedSearch(undefined)
+        return
+      }
+      const key = JSON.stringify([request.query, request.options])
+      if (archivedResult?.key === key && archivedResult.matches.length > 0) {
+        if (archivedResult.requestSequence !== request.sequence) {
+          archivedResult.index = request.direction === 'previous'
+            ? (archivedResult.index - 1 + archivedResult.matches.length) % archivedResult.matches.length
+            : (archivedResult.index + 1) % archivedResult.matches.length
+          archivedResult.requestSequence = request.sequence
+        }
+        publishArchivedSearch(archivedResult, setArchivedSearch, onSearchResultsRef.current)
+        return
+      }
+      const generation = ++archiveQueryGeneration
+      void client.searchTerminalHistory(sessionId, request.query, request.options).then((history) => {
+        if (generation !== archiveQueryGeneration) return
+        const current = searchRequestRef.current
+        if (!current || JSON.stringify([current.query, current.options]) !== key) return
+        archivedResult = {
+          key,
+          requestSequence: request.sequence,
+          index: request.direction === 'previous' && history.matches.length > 0
+            ? history.matches.length - 1 : 0,
+          matches: history.matches,
+          gapCount: history.gaps.length,
+          hasMore: history.hasMore
+        }
+        publishArchivedSearch(archivedResult, setArchivedSearch, onSearchResultsRef.current)
+      }).catch(() => {
+        if (generation !== archiveQueryGeneration) return
+        setArchivedSearch(undefined)
+      })
+    })
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       fit.fit()
@@ -418,9 +476,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (!search || !searchRequest) return
     if (!searchRequest.query) {
       search.clearDecorations()
+      setArchivedSearch(undefined)
       onSearchResultsRef.current({ resultIndex: 0, resultCount: 0 })
       return
     }
+    setArchivedSearch(undefined)
     const options = {
       ...searchRequest.options,
       incremental: searchRequest.direction === 'next',
@@ -474,8 +534,50 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     onDragEnter={handleTerminalDragEnter} onDragOver={handleTerminalDragOver}
     onDragLeave={handleTerminalDragLeave} onDrop={handleTerminalDrop}>
     <div className="terminal-surface__viewport" ref={containerRef} />
+    {archivedSearch && <div className="terminal-history-result" role="status"
+      aria-label="归档历史搜索结果">
+      <span className="terminal-history-result__source">归档历史</span>
+      <span className="terminal-history-result__text">{archivedSearch.text}</span>
+      <span className="terminal-history-result__meta">
+        {archivedSearch.resultIndex + 1}/{archivedSearch.resultCount}
+        {archivedSearch.hasMore ? '+' : ''}
+        {archivedSearch.gapCount > 0 ? ` · ${archivedSearch.gapCount} 处历史缺口` : ''}
+      </span>
+    </div>}
     {isDragOverTerminal && <div className="terminal-drop-overlay" data-testid="terminal-drop-overlay" />}
   </div>
+}
+
+function publishArchivedSearch(
+  result: {
+    index: number
+    matches: Array<{ text: string }>
+    gapCount: number
+    hasMore: boolean
+  },
+  publish: (value: ArchivedSearchView | undefined) => void,
+  publishCount: (value: { resultIndex: number; resultCount: number }) => void
+): void {
+  const match = result.matches[result.index]
+  if (!match) {
+    publish(result.gapCount > 0 ? {
+      text: '该范围存在不可读的历史片段',
+      resultIndex: 0,
+      resultCount: 0,
+      gapCount: result.gapCount,
+      hasMore: result.hasMore
+    } : undefined)
+    publishCount({ resultIndex: 0, resultCount: 0 })
+    return
+  }
+  publish({
+    text: match.text,
+    resultIndex: result.index,
+    resultCount: result.matches.length,
+    gapCount: result.gapCount,
+    hasMore: result.hasMore
+  })
+  publishCount({ resultIndex: result.index, resultCount: result.matches.length })
 }
 
 function serializeCheckpoint(serialize: SerializeAddon): string | undefined {

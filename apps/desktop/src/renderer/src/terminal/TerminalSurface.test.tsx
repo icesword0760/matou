@@ -20,7 +20,8 @@ const state = vi.hoisted(() => ({
   sendTerminalInput: vi.fn(),
   updateTerminalProfile: vi.fn(),
   recordTerminalInteraction: vi.fn(),
-  storeTerminalCheckpoint: vi.fn()
+  storeTerminalCheckpoint: vi.fn(),
+  searchTerminalHistory: vi.fn()
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -72,7 +73,8 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
     recordTerminalInteraction: state.recordTerminalInteraction,
-    storeTerminalCheckpoint: state.storeTerminalCheckpoint
+    storeTerminalCheckpoint: state.storeTerminalCheckpoint,
+    searchTerminalHistory: state.searchTerminalHistory
     }
     return () => client
   })()
@@ -95,6 +97,7 @@ describe('TerminalSurface focus continuity', () => {
     state.terminalWrite.mockClear()
     state.serialize.mockClear()
     state.storeTerminalCheckpoint.mockClear()
+    state.searchTerminalHistory.mockReset()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -314,6 +317,35 @@ describe('TerminalSurface focus continuity', () => {
       }} />)
 
     await waitFor(() => expect(state.clearDecorations).toHaveBeenCalled())
+  })
+
+  it('falls back to archived history when the xterm buffer has no match', async () => {
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [
+        { sequence: 3, cursor: { sequence: 3, lineIndex: 0 }, text: 'archived needle' }
+      ],
+      gaps: [{ segmentIndex: 1, code: 'CORRUPT_SEGMENT', message: 'damaged' }],
+      hasMore: false
+    })
+    const onSearchResults = vi.fn()
+    render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'needle', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} onSearchResults={onSearchResults} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+
+    await waitFor(() => expect(state.searchTerminalHistory).toHaveBeenCalledWith(
+      'session-1', 'needle',
+      { caseSensitive: false, regex: false, wholeWord: false }
+    ))
+    expect((await screen.findByRole('status', { name: '归档历史搜索结果' })).textContent)
+      .toContain('archived needle')
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('1 处历史缺口')
+    expect(onSearchResults).toHaveBeenLastCalledWith({ resultIndex: 0, resultCount: 1 })
   })
 
   it('focuses the active terminal when its owner requests focus restoration', async () => {
