@@ -412,12 +412,15 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         if (generation !== archiveQueryGeneration) return
         const current = searchRequestRef.current
         if (!current || JSON.stringify([current.query, current.options]) !== key) return
+        // Runtime history is newest-first so paging can stay bounded. The search
+        // UI navigates in terminal row order: Next moves newer and Previous older.
+        const matches = [...history.matches].reverse()
         archivedResult = {
           key,
           requestSequence: request.sequence,
-          index: request.direction === 'previous' && history.matches.length > 0
-            ? history.matches.length - 1 : 0,
-          matches: history.matches,
+          index: request.direction === 'previous' && matches.length > 0
+            ? matches.length - 1 : 0,
+          matches,
           gapCount: history.gaps.length,
           hasMore: history.hasMore
         }

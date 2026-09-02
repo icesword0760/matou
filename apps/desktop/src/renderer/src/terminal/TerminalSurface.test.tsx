@@ -348,6 +348,66 @@ describe('TerminalSurface focus continuity', () => {
     expect(onSearchResults).toHaveBeenLastCalledWith({ resultIndex: 0, resultCount: 1 })
   })
 
+  it('walks multiple archived matches from newest to older with Previous', async () => {
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [
+        { sequence: 3, cursor: { sequence: 3, lineIndex: 0 }, text: 'newest needle' },
+        { sequence: 2, cursor: { sequence: 2, lineIndex: 0 }, text: 'middle needle' },
+        { sequence: 1, cursor: { sequence: 1, lineIndex: 0 }, text: 'oldest needle' }
+      ],
+      gaps: [],
+      hasMore: false
+    })
+    const options = { caseSensitive: false, regex: false, wholeWord: false }
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'previous', sequence: 1, options }} />)
+    await waitFor(() => expect(state.searchPrevious).toHaveBeenCalled())
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    expect((await screen.findByRole('status', { name: '归档历史搜索结果' })).textContent)
+      .toContain('newest needle')
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('3/3')
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'previous', sequence: 2, options }} />)
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await waitFor(() => expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('middle needle'))
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('2/3')
+  })
+
+  it('walks multiple archived matches from oldest to newer with Next', async () => {
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [
+        { sequence: 3, cursor: { sequence: 3, lineIndex: 0 }, text: 'newest needle' },
+        { sequence: 2, cursor: { sequence: 2, lineIndex: 0 }, text: 'middle needle' },
+        { sequence: 1, cursor: { sequence: 1, lineIndex: 0 }, text: 'oldest needle' }
+      ],
+      gaps: [],
+      hasMore: false
+    })
+    const options = { caseSensitive: false, regex: false, wholeWord: false }
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'next', sequence: 1, options }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    expect((await screen.findByRole('status', { name: '归档历史搜索结果' })).textContent)
+      .toContain('oldest needle')
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('1/3')
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{ query: 'needle', direction: 'next', sequence: 2, options }} />)
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await waitFor(() => expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('middle needle'))
+    expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
+      .toContain('2/3')
+  })
+
   it('focuses the active terminal when its owner requests focus restoration', async () => {
     const view = render(<TerminalSurface sessionId="session-1" active visible focusRequest={0} />)
     await waitFor(() => expect(state.focus).toHaveBeenCalled())

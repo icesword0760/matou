@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -70,6 +70,43 @@ describe('JournalHistoryReader', () => {
     })
 
     expect(result.matches.map(({ text }) => text)).toEqual(['prefix-😀-target'])
+  })
+
+  it('pages and searches legacy raw bin history', async () => {
+    const root = await makeRoot()
+    const sessionId = 'legacy-history'
+    const journal = await SegmentJournal.open(root, sessionId, { compressSealed: false })
+    await journal.appendOutput(1, new TextEncoder().encode('legacy-visible-line\n'))
+    const modernPath = journal.path
+    await journal.close()
+    await rename(modernPath, modernPath.replace(/\.mtj$/, '.bin'))
+    const reader = new JournalHistoryReader(root)
+
+    const page = await reader.page({ sessionId, lineLimit: 10 })
+    const search = await reader.search({
+      sessionId,
+      query: 'legacy-visible',
+      limit: 10,
+      options: { caseSensitive: true, regex: false, wholeWord: false }
+    })
+
+    expect(page.lines.map(({ text }) => text)).toEqual(['legacy-visible-line'])
+    expect(search.matches.map(({ text }) => text)).toEqual(['legacy-visible-line'])
+    expect(page.gaps).toEqual([])
+  })
+
+  it('reports a corrupt legacy bin segment as a local history gap', async () => {
+    const root = await makeRoot()
+    const sessionId = 'legacy-corrupt-history'
+    const directory = join(root, 'journal', sessionId)
+    await mkdir(directory, { recursive: true })
+    await writeFile(join(directory, 'segment-000001.bin'), 'damaged-segment')
+
+    const page = await new JournalHistoryReader(root).page({ sessionId, lineLimit: 10 })
+
+    expect(page.gaps).toEqual([
+      expect.objectContaining({ segmentIndex: 1, code: 'CORRUPT_SEGMENT' })
+    ])
   })
 
   it('enforces a hard 1000-line ceiling', async () => {

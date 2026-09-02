@@ -144,13 +144,21 @@ interface SegmentGroup {
 }
 
 function groupSegments(directory: string, entries: string[]): SegmentGroup[] {
-  const groups = new Map<number, Array<{ path: string; compressed: boolean }>>()
+  const groups = new Map<number, Array<{
+    path: string
+    compressed: boolean
+    format: 'mtj' | 'legacy-bin'
+  }>>()
   for (const entry of entries) {
-    const match = /^segment-(\d{6})\.mtj(\.gz)?$/.exec(entry)
+    const match = /^segment-(\d{6})\.(mtj|bin)(\.gz)?$/.exec(entry)
     if (!match) continue
     const index = Number(match[1])
     const values = groups.get(index) ?? []
-    values.push({ path: join(directory, entry), compressed: match[2] === '.gz' })
+    values.push({
+      path: join(directory, entry),
+      format: match[2] === 'mtj' ? 'mtj' : 'legacy-bin',
+      compressed: match[3] === '.gz'
+    })
     groups.set(index, values)
   }
   return [...groups.entries()]
@@ -158,9 +166,16 @@ function groupSegments(directory: string, entries: string[]): SegmentGroup[] {
     .map(([index, values]) => ({
       index,
       paths: values
-        .sort((left, right) => Number(left.compressed) - Number(right.compressed))
+        .sort((left, right) => segmentReadPriority(left) - segmentReadPriority(right))
         .map(({ path }) => path)
     }))
+}
+
+function segmentReadPriority(segment: {
+  compressed: boolean
+  format: 'mtj' | 'legacy-bin'
+}): number {
+  return Number(segment.compressed) * 2 + Number(segment.format === 'legacy-bin')
 }
 
 function addMissingSegmentGaps(groups: SegmentGroup[], gaps: TerminalHistoryGap[]): void {
