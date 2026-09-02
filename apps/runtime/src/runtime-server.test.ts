@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/contracts'
 
 import { SegmentJournal, readSessionFrames } from './journal/segment-journal'
+import { readSessionJournalBounds } from './journal/journal-range-reader'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import {
   RuntimeServer, terminalSummaryLines, withSessionRuntimeEnvironment,
@@ -848,6 +849,85 @@ describe('RuntimeServer domain RPC', () => {
     ])
   })
 
+  it('starts checkpoint replay without decoding cold segments before its watermark', async () => {
+    registerSession(database, 'checkpoint-range-replay')
+    const journal = await SegmentJournal.open(root, 'checkpoint-range-replay', {
+      maxSegmentBytes: 360,
+      compressSealed: false
+    })
+    await journal.appendOutput(1, new TextEncoder().encode('cold-output'.repeat(30)))
+    await journal.appendDomainCursor(2, 7)
+    await journal.appendOutput(3, new TextEncoder().encode('visible-tail'.repeat(30)))
+    await journal.close()
+    await new CheckpointManager(root, database).create({
+      sessionId: 'checkpoint-range-replay', terminalSequence: 2, domainEventSequence: 7,
+      screenEpoch: 9, snapshot: Uint8Array.from([1, 3, 5])
+    })
+    const bounds = await readSessionJournalBounds(root, 'checkpoint-range-replay')
+    const cold = bounds.segments.filter(({ lastSequence }) => lastSequence <= 2)
+    expect(cold.length).toBeGreaterThan(0)
+    await Promise.all(cold.map(({ path }) => writeFile(path, 'corrupted cold segment')))
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'checkpoint-range-replay', fromSequence: 0
+    })
+    await waitUntil(() =>
+      port.last('terminal.replay-complete') !== undefined || port.last('terminal.gap') !== undefined
+    )
+
+    expect(port.last('terminal.gap')).toBeUndefined()
+    expect(port.last('terminal.replay-start')).toMatchObject({
+      source: 'checkpoint', checkpointSequence: 2, fromSequence: 3, throughSequence: 3
+    })
+    expect(port.sent.filter(({ type }) => type === 'terminal.data')).toEqual([
+      expect.objectContaining({ sequence: 3 })
+    ])
+    expect(port.last('terminal.replay-complete')).toMatchObject({ throughSequence: 3 })
+  })
+
+  it('isolates corruption discovered while streaming one Session range', async () => {
+    registerSession(database, 'stream-corruption')
+    registerSession(database, 'stream-healthy')
+    const damagedJournal = await SegmentJournal.open(root, 'stream-corruption', {
+      compressSealed: false
+    })
+    await damagedJournal.appendOutput(1, new TextEncoder().encode('damaged output'))
+    await damagedJournal.close()
+    const healthyJournal = await SegmentJournal.open(root, 'stream-healthy', {
+      compressSealed: false
+    })
+    await healthyJournal.appendOutput(1, new TextEncoder().encode('healthy output'))
+    await healthyJournal.close()
+    const damaged = await readFile(damagedJournal.path)
+    damaged[damaged.byteLength - 1] = damaged[damaged.byteLength - 1]! ^ 0xff
+    await writeFile(damagedJournal.path, damaged)
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'stream-corruption', fromSequence: 0
+    })
+    await waitUntil(() => port.last('terminal.gap') !== undefined)
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'stream-healthy', fromSequence: 0
+    })
+    await waitUntil(() => port.last('terminal.replay-complete')?.sessionId === 'stream-healthy')
+
+    expect(port.sent.find((message) =>
+      message.type === 'terminal.replay-start' && message.sessionId === 'stream-corruption'
+    )).toBeDefined()
+    expect(port.last('terminal.gap')).toMatchObject({
+      sessionId: 'stream-corruption', reason: 'corruption'
+    })
+    expect(port.sent.find((message) =>
+      message.type === 'terminal.replay-complete' && message.sessionId === 'stream-corruption'
+    )).toBeUndefined()
+    expect(port.last('terminal.replay-complete')).toMatchObject({
+      sessionId: 'stream-healthy', throughSequence: 1
+    })
+  })
+
   it('uses a current-run checkpoint on PTY reattach without dropping the requested prefix', async () => {
     registerSession(database, 'reattach-checkpoint')
     const journal = await SegmentJournal.open(root, 'reattach-checkpoint')
@@ -925,6 +1005,39 @@ describe('RuntimeServer domain RPC', () => {
       terminalSequence: 3, domainEventSequence: 7, screenEpoch: 4,
       snapshot: new TextEncoder().encode('\u001b[2Jserialized screen')
     })
+  })
+
+  it('stores a current checkpoint from indexed watermarks without materializing cold history', async () => {
+    registerSession(database, 'range-indexed-checkpoint')
+    const journal = await SegmentJournal.open(root, 'range-indexed-checkpoint', {
+      maxSegmentBytes: 360,
+      compressSealed: false
+    })
+    await journal.appendOutput(1, new TextEncoder().encode('cold-output'.repeat(30)))
+    await journal.appendDomainCursor(2, 11)
+    await journal.appendOutput(3, new TextEncoder().encode('current-output'.repeat(30)))
+    await journal.close()
+    const bounds = await readSessionJournalBounds(root, 'range-indexed-checkpoint')
+    const cold = bounds.segments.filter(({ lastSequence }) => lastSequence <= 2)
+    expect(cold.length).toBeGreaterThan(0)
+    await Promise.all(cold.map(({ path }) => writeFile(path, 'corrupted cold segment')))
+
+    port.receive({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'range-indexed-checkpoint', throughSequence: 3, screenEpoch: 4,
+      snapshot: 'indexed screen'
+    })
+    await waitUntil(() =>
+      port.last('terminal.checkpoint-stored') !== undefined ||
+      port.last('terminal.checkpoint-rejected') !== undefined
+    )
+
+    expect(port.last('terminal.checkpoint-rejected')).toBeUndefined()
+    expect(port.last('terminal.checkpoint-stored')).toMatchObject({ throughSequence: 3 })
+    await expect(new CheckpointManager(root, database).loadLatest('range-indexed-checkpoint', {
+      terminalSequence: 3,
+      domainEventSequence: 11
+    })).resolves.toMatchObject({ terminalSequence: 3, domainEventSequence: 11 })
   })
 
   it('rejects checkpoints ahead of the Journal or behind an already stored watermark', async () => {

@@ -223,6 +223,15 @@ export class PtySession {
     return this.#writeChain.then(() => this.#journal.readFrames())
   }
 
+  async replayMetadata(maxLines = 10_000) {
+    await this.#writeChain
+    return this.#journal.replayMetadata(maxLines)
+  }
+
+  iterateFrames(options: { fromSequence: number; throughSequence?: number }) {
+    return this.#journal.iterateFrames(options)
+  }
+
   whenClosed(): Promise<void> { return this.#closed }
 
   async retryDurability(): Promise<void> {
@@ -473,11 +482,11 @@ export class PtySession {
         return
       }
       this.#pendingReplayFrom = undefined
-      const frames = await this.#journal.readFrames()
-      for (const frame of frames) {
-        if (frame.sequence < replayFrom) {
-          continue
-        }
+      const throughSequence = this.#sequence
+      for await (const frame of this.#journal.iterateFrames({
+        fromSequence: replayFrom,
+        throughSequence
+      })) {
         if (this.#creditWindow.isPaused) {
           this.#pendingReplayFrom = frame.sequence
           return

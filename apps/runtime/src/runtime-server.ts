@@ -21,8 +21,11 @@ import {
   type SegmentJournalOptions
 } from './journal/segment-journal'
 import type { DecodedJournalFrame } from './journal/segment-journal'
+import {
+  iterateSessionFrames,
+  readSessionReplayMetadata
+} from './journal/journal-range-reader'
 import { JournalHistoryReader } from './journal/journal-history-reader'
-import { JournalTailIndex } from './journal/journal-tail-index'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import type { CapabilityTokenService } from './control/host-control-server'
 import type { RuntimeControlBackend } from './control/runtime-control-backend'
@@ -95,12 +98,13 @@ export interface RuntimePort {
 
 interface ReplayState {
   sessionId: string
-  frames: DecodedJournalFrame[]
-  cursor: number
+  iterator: AsyncGenerator<DecodedJournalFrame>
   pendingBytes: Map<number, number>
   unackedBytes: number
   liveSequence: number
+  requestedFromSequence: number
   activeSession?: PtySession
+  pumping?: boolean
   finishing?: boolean
 }
 
@@ -890,17 +894,14 @@ export class RuntimeServer {
         : undefined
       activeSession?.detach(this.#sendToPort)
       detachedSession = activeSession
-      const frames = activeSession
-        ? await activeSession.readFrames()
-        : await readSessionFrames(this.#dataRoot, message.sessionId)
-      const availableFromSequence = frames.at(0)?.sequence ?? 0
-      const liveSequence = frames.at(-1)?.sequence ?? 0
-      const tailFromSequence = activeSession?.tailStart(10_000) ?? tailStartFromFrames(frames)
+      const metadata = activeSession
+        ? await activeSession.replayMetadata(10_000)
+        : await readSessionReplayMetadata(this.#dataRoot, message.sessionId, 10_000)
+      const availableFromSequence = metadata.firstSequence
+      const liveSequence = metadata.lastSequence
+      const tailFromSequence = metadata.tailFromSequence
       const checkpointTerminalWatermark = liveSequence
-      const checkpointDomainWatermark = highestDomainCursorAtOrBefore(
-        frames,
-        checkpointTerminalWatermark
-      )
+      const checkpointDomainWatermark = metadata.domainEventSequence
       const candidateCheckpoint = await new CheckpointManager(this.#dataRoot, this.#database).loadLatest(
         message.sessionId,
         {
@@ -962,11 +963,19 @@ export class RuntimeServer {
         : Math.max(requestedFrom, checkpoint.terminalSequence + 1)
       this.#replays.set(message.sessionId, {
         sessionId: message.sessionId,
-        frames: frames.filter(({ sequence }) => sequence >= effectiveFrom),
-        cursor: 0,
+        iterator: activeSession
+          ? activeSession.iterateFrames({
+              fromSequence: effectiveFrom,
+              throughSequence: liveSequence
+            })
+          : iterateSessionFrames(this.#dataRoot, message.sessionId, {
+              fromSequence: effectiveFrom,
+              throughSequence: liveSequence
+            }),
         pendingBytes: new Map(),
         unackedBytes: 0,
         liveSequence,
+        requestedFromSequence: message.fromSequence,
         ...(activeSession === undefined ? {} : { activeSession })
       })
       this.#pumpReplay(message.sessionId)
@@ -1009,10 +1018,15 @@ export class RuntimeServer {
       const activeSession = this.#attachedSessionIds.has(message.sessionId)
         ? this.#sessions.get(message.sessionId)
         : undefined
-      const frames = activeSession
-        ? undefined
-        : await readSessionFrames(this.#dataRoot, message.sessionId)
-      const liveSequence = activeSession?.lastSequence ?? frames?.at(-1)?.sequence ?? 0
+      const metadata = activeSession
+        ? await activeSession.replayMetadata(10_000)
+        : await readSessionReplayMetadata(
+            this.#dataRoot,
+            message.sessionId,
+            10_000,
+            message.throughSequence
+          )
+      const liveSequence = metadata.lastSequence
       if (message.throughSequence > liveSequence) {
         this.#port.postMessage({
           type: 'terminal.checkpoint-rejected',
@@ -1028,7 +1042,7 @@ export class RuntimeServer {
         terminalSequence: message.throughSequence,
         domainEventSequence: activeSession
           ? activeSession.domainEventSequenceAtOrBefore(message.throughSequence)
-          : highestDomainCursorAtOrBefore(frames ?? [], message.throughSequence),
+          : metadata.domainEventSequence,
         screenEpoch: message.screenEpoch,
         snapshot: new TextEncoder().encode(message.snapshot)
       })
@@ -1085,26 +1099,50 @@ export class RuntimeServer {
 
   #pumpReplay(sessionId: string): void {
     const replay = this.#replays.get(sessionId)
-    if (!replay) return
-    while (replay.cursor < replay.frames.length) {
+    if (!replay || replay.pumping) return
+    replay.pumping = true
+    void this.#runReplayPump(replay).catch((error: unknown) => {
+      this.#failReplay(replay, error)
+    }).finally(() => {
+      replay.pumping = false
+      if (
+        this.#replays.get(sessionId) === replay &&
+        !replay.finishing &&
+        replay.unackedBytes <= REPLAY_LOW_WATERMARK_BYTES
+      ) {
+        this.#pumpReplay(sessionId)
+      }
+    })
+  }
+
+  async #runReplayPump(replay: ReplayState): Promise<void> {
+    while (this.#replays.get(replay.sessionId) === replay) {
       if (replay.unackedBytes > REPLAY_HIGH_WATERMARK_BYTES) return
-      const frame = replay.frames[replay.cursor++]!
+      const next = await replay.iterator.next()
+      if (next.done) {
+        if (!replay.finishing) {
+          replay.finishing = true
+          await this.#finishReplay(replay)
+        }
+        return
+      }
+      const frame = next.value
       if (frame.kind === 'output') {
         this.#port.postMessage({
           type: 'terminal.data', protocolVersion: PROTOCOL_VERSION,
-          sessionId, sequence: frame.sequence, data: frame.data
+          sessionId: replay.sessionId, sequence: frame.sequence, data: frame.data
         })
         replay.pendingBytes.set(frame.sequence, frame.data.byteLength)
         replay.unackedBytes += frame.data.byteLength
       } else if (frame.kind === 'resize') {
         this.#port.postMessage({
           type: 'terminal.replay-resize', protocolVersion: PROTOCOL_VERSION,
-          sessionId, sequence: frame.sequence, cols: frame.cols, rows: frame.rows
+          sessionId: replay.sessionId, sequence: frame.sequence, cols: frame.cols, rows: frame.rows
         })
       } else if (frame.kind === 'reset') {
         this.#port.postMessage({
           type: 'terminal.replay-reset', protocolVersion: PROTOCOL_VERSION,
-          sessionId, sequence: frame.sequence, screenEpoch: frame.screenEpoch
+          sessionId: replay.sessionId, sequence: frame.sequence, screenEpoch: frame.screenEpoch
         })
       } else if (
         frame.kind === 'exit' &&
@@ -1119,28 +1157,24 @@ export class RuntimeServer {
         // turn a successfully spawned terminal back into an inert card.
         this.#port.postMessage({
           type: 'terminal.exited', protocolVersion: PROTOCOL_VERSION,
-          sessionId, sequence: frame.sequence, exitCode: frame.exitCode,
+          sessionId: replay.sessionId, sequence: frame.sequence, exitCode: frame.exitCode,
           ...(frame.signal === undefined ? {} : { signal: frame.signal })
         })
       }
-    }
-    if (!replay.finishing) {
-      replay.finishing = true
-      void this.#finishReplay(replay)
     }
   }
 
   async #finishReplay(replay: ReplayState): Promise<void> {
     if (replay.activeSession) {
-      const missed = (await replay.activeSession.readFrames()).filter(
-        ({ sequence }) => sequence > replay.liveSequence
-      )
-      if (missed.length > 0) {
-        replay.frames = missed
-        replay.cursor = 0
-        replay.liveSequence = missed.at(-1)!.sequence
+      const metadata = await replay.activeSession.replayMetadata(10_000)
+      if (metadata.lastSequence > replay.liveSequence) {
+        const fromSequence = replay.liveSequence + 1
+        replay.liveSequence = metadata.lastSequence
+        replay.iterator = replay.activeSession.iterateFrames({
+          fromSequence,
+          throughSequence: replay.liveSequence
+        })
         replay.finishing = false
-        this.#pumpReplay(replay.sessionId)
         return
       }
       replay.activeSession.attach(this.#sendToPort)
@@ -1151,6 +1185,24 @@ export class RuntimeServer {
     })
     this.#completedReplayThrough.set(replay.sessionId, replay.liveSequence)
     this.#replays.delete(replay.sessionId)
+  }
+
+  #failReplay(replay: ReplayState, error: unknown): void {
+    if (this.#replays.get(replay.sessionId) !== replay) return
+    this.#replays.delete(replay.sessionId)
+    replay.activeSession?.attach(this.#sendToPort)
+    if (error instanceof JournalCorruptionError) {
+      this.#port.postMessage({
+        type: 'terminal.gap',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: replay.sessionId,
+        requestedFromSequence: replay.requestedFromSequence,
+        availableFromSequence: 0,
+        reason: 'corruption'
+      })
+      return
+    }
+    this.#sendError('INTERNAL_ERROR', errorMessage(error), replay.sessionId)
   }
 
   #pumpSubscription(consumerId: string): void {
@@ -2414,28 +2466,6 @@ async function firstUsableDirectory(candidates: Array<string | undefined>): Prom
   }
   return undefined
 }
-
-function highestDomainCursorAtOrBefore(frames: DecodedJournalFrame[], terminalSequence: number): number {
-  let sequence = 0
-  for (const frame of frames) {
-    if (frame.sequence > terminalSequence) break
-    if (frame.kind === 'domain-cursor') sequence = Math.max(sequence, frame.domainEventSequence)
-  }
-  return sequence
-}
-
-function tailStartFromFrames(frames: DecodedJournalFrame[]): number {
-  const index = new JournalTailIndex()
-  for (const frame of frames) {
-    index.record(
-      frame.sequence,
-      frame.kind === 'output' ? frame.data : EMPTY_JOURNAL_FRAME_DATA
-    )
-  }
-  return index.tailStart(10_000)
-}
-
-const EMPTY_JOURNAL_FRAME_DATA = new Uint8Array()
 
 function disposedSessionIds(result: unknown): string[] {
   if (typeof result !== 'object' || result === null || !('disposedSessionIds' in result)) {

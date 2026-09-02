@@ -32,10 +32,12 @@ import {
   type JournalTailIndexSnapshot
 } from './journal-tail-index'
 import { LatestValueWriter } from './latest-value-writer'
+import type { JournalReplayMetadata } from './journal-range-reader'
 
 const MAGIC = Buffer.from('MTJRNL2\n', 'ascii')
 const FRAME_PREFIX_BYTES = 8
 const MAX_FRAME_BYTES = 64 * 1024 * 1024
+const READ_CHUNK_BYTES = 1024 * 1024
 
 type StoredHeader =
   | { kind: 'output'; sequence: number; timestamp: number; dataLength: number }
@@ -103,6 +105,7 @@ export class SegmentJournal {
   #segmentIndex: number
   #path: string
   #size: number
+  #segmentFirstSequence: number
   #lastSequence: number
   #closed = false
 
@@ -112,6 +115,7 @@ export class SegmentJournal {
     segmentIndex: number,
     path: string,
     size: number,
+    segmentFirstSequence: number,
     lastSequence: number,
     sealedSegments: SegmentDescriptor[],
     tailIndex: JournalTailIndex,
@@ -123,6 +127,7 @@ export class SegmentJournal {
     this.#segmentIndex = segmentIndex
     this.#path = path
     this.#size = size
+    this.#segmentFirstSequence = segmentFirstSequence
     this.#lastSequence = lastSequence
     this.#maxSegmentBytes = options.maxSegmentBytes
     this.#rawHotBytes = options.rawHotBytes
@@ -156,6 +161,25 @@ export class SegmentJournal {
 
   domainEventSequenceAtOrBefore(sequence: number): number {
     return this.#tailIndex.domainEventSequenceAtOrBefore(sequence)
+  }
+
+  replayMetadata(maxLines = 10_000): JournalReplayMetadata {
+    const snapshot = this.#tailIndex.snapshot(this.#segmentIndex)
+    return {
+      firstSequence: snapshot.firstSequence,
+      lastSequence: snapshot.lastSequence,
+      tailFromSequence: this.#tailIndex.tailStart(maxLines),
+      domainEventSequence: this.#tailIndex.domainEventSequenceAtOrBefore(snapshot.lastSequence)
+    }
+  }
+
+  async *iterateFrames(options: {
+    fromSequence: number
+    throughSequence?: number
+  }): AsyncGenerator<DecodedJournalFrame> {
+    if (this.#segmentFirstSequence > 0) await this.#recordCurrentSegmentBounds()
+    const { iterateSessionFrames } = await import('./journal-range-reader')
+    yield* iterateSessionFrames(this.directoryDataRoot(), this.sessionId(), options)
   }
 
   static async open(
@@ -213,6 +237,7 @@ export class SegmentJournal {
       segmentIndex,
       path,
       size,
+      activeFrames[0]?.sequence ?? 0,
       Math.max(lastSequence, tailIndex.snapshot(segmentIndex).lastSequence),
       existingSegments
         .filter((segment) => segment !== activeSegment)
@@ -279,6 +304,13 @@ export class SegmentJournal {
     } catch (error) {
       storageError ??= error
     }
+    if (this.#segmentFirstSequence > 0) {
+      try {
+        await this.#recordCurrentSegmentBounds()
+      } catch (error) {
+        storageError ??= error
+      }
+    }
     this.#scheduleTailIndexWrite()
     await this.#tailIndexWriter.whenIdle()
     if (storageError !== undefined) throw storageError
@@ -329,6 +361,7 @@ export class SegmentJournal {
       throw error
     }
     this.#size += encoded.byteLength
+    if (this.#segmentFirstSequence === 0) this.#segmentFirstSequence = header.sequence
     this.#lastSequence = header.sequence
     this.#tailIndex.record(
       header.sequence,
@@ -349,6 +382,7 @@ export class SegmentJournal {
       state: 'sealed-raw' as const
     }
     await sealedHandle.sync()
+    if (this.#segmentFirstSequence > 0) await this.#recordCurrentSegmentBounds()
     this.#scheduleTailIndexWrite()
     await this.#tailIndexWriter.whenIdle()
 
@@ -378,6 +412,7 @@ export class SegmentJournal {
     this.#path = nextPath
     this.#handle = nextHandle
     this.#size = MAGIC.byteLength
+    this.#segmentFirstSequence = 0
     this.#scheduleSealedCompression()
     if (closeError !== undefined) throw closeError
   }
@@ -406,6 +441,25 @@ export class SegmentJournal {
   #scheduleTailIndexWrite(): void {
     const snapshot = this.#tailIndex.snapshot(this.#segmentIndex)
     this.#tailIndexWriter.schedule(snapshot)
+  }
+
+  async #recordCurrentSegmentBounds(): Promise<void> {
+    const { recordJournalSegmentBounds } = await import('./journal-range-reader')
+    await recordJournalSegmentBounds(this.directory, {
+      index: this.#segmentIndex,
+      firstSequence: this.#segmentFirstSequence,
+      lastSequence: this.#lastSequence,
+      sourcePath: this.#path.split(/[/\\]/).at(-1)!,
+      sourceBytes: this.#size
+    })
+  }
+
+  private directoryDataRoot(): string {
+    return join(this.directory, '..', '..')
+  }
+
+  private sessionId(): string {
+    return this.directory.split(/[/\\]/).at(-1)!
   }
 }
 
@@ -536,8 +590,8 @@ function encodeFrame(header: StoredHeader, data: Uint8Array<ArrayBufferLike>): B
   return Buffer.concat([prefix, body])
 }
 
-async function* iterateSegmentFrames(path: string): AsyncGenerator<DecodedJournalFrame> {
-  const raw = createReadStream(path, { highWaterMark: 64 * 1024 })
+export async function* iterateSegmentFrames(path: string): AsyncGenerator<DecodedJournalFrame> {
+  const raw = createReadStream(path, { highWaterMark: READ_CHUNK_BYTES })
   const source = path.endsWith('.gz') ? raw.pipe(createGunzip()) : raw
   let pending = Buffer.alloc(0)
   let offset = 0
@@ -663,7 +717,11 @@ function validateHeader(header: StoredHeader, actualDataLength: number, previous
 
 function decodeFrame(header: StoredHeader, data: Buffer): DecodedJournalFrame {
   switch (header.kind) {
-    case 'output': return { kind: 'output', sequence: header.sequence, data: Uint8Array.from(data) }
+    case 'output': return {
+      kind: 'output',
+      sequence: header.sequence,
+      data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    }
     case 'resize': return { kind: 'resize', sequence: header.sequence, cols: header.cols, rows: header.rows }
     case 'reset': return { kind: 'reset', sequence: header.sequence, screenEpoch: header.screenEpoch }
     case 'encoding': return { kind: 'encoding', sequence: header.sequence, encoding: header.encoding }
@@ -678,6 +736,19 @@ function segmentPath(directory: string, index: number): string {
 
 interface StoredSegmentDescriptor extends SegmentDescriptor {
   format: 'mtj' | 'legacy-bin'
+}
+
+export interface ReadableJournalSegment {
+  index: number
+  paths: string[]
+}
+
+export async function listReadableJournalSegments(
+  directory: string
+): Promise<ReadableJournalSegment[]> {
+  return selectReadableSegmentGroups(
+    await describeExistingSegments(directory, await readdir(directory))
+  )
 }
 
 async function describeExistingSegments(
