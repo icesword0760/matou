@@ -172,6 +172,10 @@ export class RuntimeClient {
     })
   }
 
+  refreshTerminalHud(sessionId: string): void {
+    this.#post({ type: 'terminal.hud-refresh', protocolVersion: PROTOCOL_VERSION, sessionId })
+  }
+
   disposeDeletedTerminal(sessionId: string): void {
     this.#terminals.delete(sessionId)
     this.#post({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId })

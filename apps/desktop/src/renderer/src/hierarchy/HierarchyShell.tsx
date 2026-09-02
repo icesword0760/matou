@@ -38,6 +38,7 @@ import '../session-canvas/session-canvas.css'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { AppUpdateControl } from '../updates/AppUpdateControl'
 import { activeAppSessionCount } from '../updates/active-app-sessions'
+import { WorkspaceOpenRequestConsumer } from './workspace-open-request-consumer'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
@@ -116,6 +117,20 @@ export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
     () => fixtureCommands ?? (client ? createHierarchyCommands(client, windowId, refresh) : null),
     [client, fixtureCommands, refresh, windowId]
   )
+
+  useEffect(() => {
+    if (fixture || !commands) return
+    const desktop = window.matouDesktop
+    if (!desktop?.consumeWorkspaceOpenRequests || !desktop.onWorkspaceOpenRequested) return
+    const consumer = new WorkspaceOpenRequestConsumer(
+      () => desktop.consumeWorkspaceOpenRequests(),
+      async (path) => { await Promise.resolve(commands.createWorkspace(path)) }
+    )
+    const drain = () => { void consumer.drain().catch((error: unknown) => setLoadError(errorMessage(error))) }
+    const unsubscribe = desktop.onWorkspaceOpenRequested(drain)
+    drain()
+    return unsubscribe
+  }, [commands, fixture])
 
   useEffect(() => {
     if (queryValue('e2e') !== '1') return

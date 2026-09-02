@@ -110,12 +110,14 @@ describe('PRD 02 bottom HUD', () => {
     const { container } = render(<TerminalHud hud={hud} />)
 
     const text = container.querySelector('.status-info')?.textContent ?? ''
-    expect(text).toContain('Accept EditsOpus 4.6 (1M context)86%Weekly 8%')
+    expect(text).toContain('AEOpus 4.6 (1M context)86%Weekly 8%')
     expect(text).not.toContain('adaptive-painting-hoare')
     expect(text).toContain('1 CLAUDE.md2 MCPs11 hooks')
     expect(text).toContain('⚠ browser-bridge')
-    expect(text).toContain('✓Read×9')
-    expect(text).toContain('✓Bash×9')
+    expect(text).toContain('✓Read')
+    expect(text).not.toContain('Read×9')
+    expect(text).toContain('✓Bash')
+    expect(text).not.toContain('Bash×9')
     expect(text).toContain('⚠WebFetch: example.com')
     expect(text).toContain('任务中Agent:2Leader')
     expect(text).toContain('Read')
@@ -149,7 +151,13 @@ describe('PRD 02 bottom HUD', () => {
       permissionMode: 'default', model: 'Claude Opus 4.6', contextWindowSize: 1_000_000
     })} onPermissionMode={onPermissionMode} />)
 
-    await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
+    const permission = screen.getByRole('button', { name: /当前权限模式：Default/ })
+    expect(permission.textContent).toBe('D')
+    await user.click(permission)
+    expect(screen.getByRole('menuitem', { name: /^Default/ })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'Accept Edits' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'Plan Mode' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'Bypass Permissions' })).toBeTruthy()
     await user.click(screen.getByRole('menuitem', { name: 'Plan Mode' }))
     expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'plan', false)
     expect(screen.getByText('Opus 4.6 (1M context)').tagName).toBe('SPAN')
@@ -158,21 +166,26 @@ describe('PRD 02 bottom HUD', () => {
     rerender(<TerminalHud hud={agent({
       permissionMode: 'auto', model: 'Claude Fable 5', contextWindowSize: 1_000_000
     })} onPermissionMode={onPermissionMode} />)
-    expect(screen.getByRole('button', { name: /当前权限模式：Auto/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /当前权限模式：Auto/ }).textContent).toBe('A')
     expect(screen.getByText('Fable 5 (1M context)')).toBeTruthy()
   })
 
-  it('hides a duplicate session title and the concrete Bash target while retaining its count', () => {
+  it('hides duplicate Bash activity and omits Bash and Read counts', () => {
     const { container } = render(<TerminalHud hud={agent({
       sessionName: 'duplicate-card-title',
       lastTool: { name: 'Bash', target: '/Users/demo/project/scripts/verify.sh', status: 'completed' },
-      toolCounts: [{ name: 'Bash', count: 5 }]
+      toolCounts: [{ name: 'Bash', count: 5 }, { name: 'Read', count: 2 }, { name: 'Skill', count: 2 }]
     })} onPermissionMode={vi.fn()} />)
 
     const text = container.querySelector('.status-info')?.textContent ?? ''
     expect(text).not.toContain('duplicate-card-title')
     expect(text).not.toContain('/Users/demo/project/scripts/verify.sh')
-    expect(text).toContain('Bash×5')
+    expect([...container.querySelectorAll('.tool-name')].filter((node) => node.textContent === 'Bash')).toHaveLength(1)
+    expect(text).toContain('✓Bash')
+    expect(text).not.toContain('Bash×5')
+    expect(text).toContain('✓Read')
+    expect(text).not.toContain('Read×2')
+    expect(text).toContain('✓Skill×2')
   })
 })
 

@@ -45,6 +45,10 @@
       {
         "from": "package-resources/runtime",
         "to": "runtime"
+      },
+      {
+        "from": "build/finder-quick-action/进入码头.workflow",
+        "to": "finder-quick-action/进入码头.workflow"
       }
     ],
     "mac": {
@@ -56,7 +60,19 @@
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "CFBundleDocumentTypes": [
+          {
+            "CFBundleTypeName": "Folder",
+            "CFBundleTypeRole": "Viewer",
+            "LSHandlerRank": "Alternate",
+            "LSItemContentTypes": [
+              "public.folder"
+            ]
+          }
+        ]
+      }
     },
     "linux": {
       "target": "dir"

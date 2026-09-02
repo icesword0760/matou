@@ -255,6 +255,32 @@ describe('PRD 02 authoritative Session HUD state', () => {
     expect(registry.snapshot('agent-1')).toMatchObject({ taskStatus: 'running' })
   })
 
+  it('re-reads provider configuration while an agent session is otherwise idle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-hud-live-config-'))
+    const cwd = join(root, 'project')
+    const configDir = join(root, '.claude')
+    await mkdir(cwd, { recursive: true })
+    await mkdir(configDir, { recursive: true })
+    const registry = new SessionHudRegistry(Date.now, configDir)
+    registry.spawn({ sessionId: 'agent-live', profile: 'claude-code', cwd })
+    expect(registry.snapshot('agent-live')?.configCounts).toEqual({
+      instructionFiles: 0, mcpServers: 0, hooks: 0
+    })
+
+    await writeFile(join(configDir, 'settings.json'), JSON.stringify({
+      mcpServers: { live_bridge: {} }, hooks: { Stop: [] }
+    }))
+
+    expect(registry.refreshConfig('agent-live')).toBe(true)
+    expect(registry.snapshot('agent-live')?.configCounts).toEqual({
+      instructionFiles: 0, mcpServers: 1, hooks: 1
+    })
+    expect(registry.configWatchTargets('agent-live')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ directory: configDir, names: expect.arrayContaining(['settings.json']) }),
+      expect.objectContaining({ directory: cwd, names: expect.arrayContaining(['.mcp.json']) })
+    ]))
+  })
+
   it('refreshes Git branch and dirty state and removes Git when cwd is outside a repository', () => {
     const registry = new SessionHudRegistry()
     registry.spawn({ sessionId: 'shell-1', profile: 'shell', cwd: '/tmp', startedAt: 1 })

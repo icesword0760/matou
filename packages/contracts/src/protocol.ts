@@ -76,6 +76,12 @@ const replayRequestSchema = z.object({
   fromSequence: z.number().int().nonnegative()
 })
 
+const hudRefreshSchema = z.object({
+  type: z.literal('terminal.hud-refresh'),
+  protocolVersion,
+  sessionId
+})
+
 export const RPC_METHODS = [
   'projection.snapshot',
   'hierarchy.bootstrap-window',
@@ -204,6 +210,7 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   disposeSchema,
   ackSchema,
   replayRequestSchema,
+  hudRefreshSchema,
   rpcRequestSchema,
   rpcCancelSchema,
   eventsSubscribeSchema

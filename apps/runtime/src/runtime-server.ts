@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
+import { watch, type FSWatcher } from 'node:fs'
 import { readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
 import { basename, delimiter, join } from 'node:path'
@@ -142,6 +143,8 @@ export class RuntimeServer {
   readonly #permissionModeTrackers = new Map<string, ClaudePermissionModeTracker>()
   readonly #summaryBuffers = new Map<string, string>()
   readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  readonly #hudFileWatchers = new Map<string, Map<string, FSWatcher>>()
+  readonly #hudFileRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
   readonly #pendingShellFallbacks = new Map<string, PendingShellFallback>()
   readonly #providerHooks: ProviderHookServer | undefined
@@ -265,6 +268,7 @@ export class RuntimeServer {
     this.#cwdTimers.clear()
     for (const timer of this.#providerResumeTimers.values()) clearTimeout(timer)
     this.#providerResumeTimers.clear()
+    this.#closeAllHudFileWatchers()
     this.#providerLaunchRunIds.clear()
     this.#confirmedProviderRunIds.clear()
     this.#providerInputBuffers.clear()
@@ -403,6 +407,11 @@ export class RuntimeServer {
         break
       case 'terminal.replay-request':
         await this.#replay(message)
+        break
+      case 'terminal.hud-refresh':
+        if (this.#attachedSessionIds.has(message.sessionId)) {
+          await this.refreshSessionHud(message.sessionId)
+        }
         break
       case 'rpc.cancel':
         this.#cancelledRequests.add(message.requestId)
@@ -1547,6 +1556,7 @@ export class RuntimeServer {
     this.#workStatusTrackers.delete(sessionId)
     this.#permissionModeTrackers.delete(sessionId)
     this.#skipResumeSessionIds.delete(sessionId)
+    this.#closeHudFileWatchers(sessionId)
     this.#hud.delete(sessionId)
     this.publishSessionHud(sessionId)
     this.#attachedSessionIds.delete(sessionId)
@@ -1556,6 +1566,7 @@ export class RuntimeServer {
 
   #detachAll(): void {
     this.#workspacePaths.stopPolling()
+    this.#closeAllHudFileWatchers()
     for (const sessionId of this.#attachedSessionIds) {
       this.#sessions.get(sessionId)?.detach(this.#sendToPort)
     }
@@ -1598,12 +1609,78 @@ export class RuntimeServer {
       return
     }
     const git = await gitEnvironment(current.cwd)
+    this.#hud.refreshConfig(sessionId)
     this.#hud.updateEnvironment(sessionId, {
       cwd: current.cwd,
       ...(current.shell ? { shell: current.shell } : {}),
-      ...(git ?? {})
+      ...(git ? { gitBranch: git.gitBranch, gitDirty: git.gitDirty } : {})
     })
+    this.#syncHudFileWatchers(sessionId, git?.gitDirectory)
     this.publishSessionHud(sessionId)
+  }
+
+  #syncHudFileWatchers(sessionId: string, gitDirectory?: string): void {
+    if (this.#closed || !this.#attachedSessionIds.has(sessionId)) return
+    const desired = new Map<string, () => FSWatcher>()
+    for (const target of this.#hud.configWatchTargets(sessionId)) {
+      const names = new Set(target.names)
+      const key = `config:${target.directory}:${[...names].sort().join(',')}`
+      desired.set(key, () => watch(target.directory, { persistent: false }, (_event, filename) => {
+        const changed = filename?.toString()
+        if (changed && !names.has(changed)) return
+        this.#scheduleHudFileRefresh(sessionId)
+      }))
+    }
+    if (gitDirectory) {
+      const key = `git:${gitDirectory}`
+      desired.set(key, () => watch(gitDirectory, {
+        persistent: false,
+        recursive: process.platform === 'darwin' || process.platform === 'win32'
+      }, () => this.#scheduleHudFileRefresh(sessionId)))
+    }
+
+    const current = this.#hudFileWatchers.get(sessionId) ?? new Map<string, FSWatcher>()
+    for (const [key, watcher] of current) {
+      if (desired.has(key)) continue
+      watcher.close()
+      current.delete(key)
+    }
+    for (const [key, create] of desired) {
+      if (current.has(key)) continue
+      try {
+        current.set(key, create())
+      } catch {
+        // Parent-directory watches add newly created optional config folders on the next refresh.
+      }
+    }
+    if (current.size > 0) this.#hudFileWatchers.set(sessionId, current)
+    else this.#hudFileWatchers.delete(sessionId)
+  }
+
+  #scheduleHudFileRefresh(sessionId: string): void {
+    if (this.#closed || !this.#attachedSessionIds.has(sessionId)) return
+    const pending = this.#hudFileRefreshTimers.get(sessionId)
+    if (pending) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      this.#hudFileRefreshTimers.delete(sessionId)
+      void this.refreshSessionHud(sessionId)
+    }, 300)
+    timer.unref?.()
+    this.#hudFileRefreshTimers.set(sessionId, timer)
+  }
+
+  #closeHudFileWatchers(sessionId: string): void {
+    const timer = this.#hudFileRefreshTimers.get(sessionId)
+    if (timer) clearTimeout(timer)
+    this.#hudFileRefreshTimers.delete(sessionId)
+    for (const watcher of this.#hudFileWatchers.get(sessionId)?.values() ?? []) watcher.close()
+    this.#hudFileWatchers.delete(sessionId)
+  }
+
+  #closeAllHudFileWatchers(): void {
+    for (const sessionId of new Set([
+      ...this.#hudFileWatchers.keys(), ...this.#hudFileRefreshTimers.keys()
+    ])) this.#closeHudFileWatchers(sessionId)
   }
 
   async #applyHudRpc(

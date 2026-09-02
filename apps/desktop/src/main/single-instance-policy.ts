@@ -3,7 +3,7 @@ import type { WindowManager } from './window-manager'
 export interface SingleInstanceApp {
   requestSingleInstanceLock(): boolean
   quit(): void
-  onSecondInstance(listener: () => void): void
+  onSecondInstance(listener: (argv: string[]) => void): void
 }
 
 /**
@@ -13,16 +13,25 @@ export interface SingleInstanceApp {
 export function claimSingleInstance(
   app: SingleInstanceApp,
   windows: WindowManager,
-  enabled: boolean
+  enabled: boolean,
+  openWorkspace?: (path: string) => void
 ): boolean {
   if (!enabled) return true
   if (!app.requestSingleInstanceLock()) {
     app.quit()
     return false
   }
-  app.onSecondInstance(() => {
+  app.onSecondInstance((argv) => {
+    const path = workspacePathFromArguments(argv)
+    if (path) openWorkspace?.(path)
     const windowId = windows.firstLiveWindowId()
     if (windowId) windows.showWindow(windowId)
   })
   return true
+}
+
+export function workspacePathFromArguments(argv: string[]): string | undefined {
+  const marker = argv.lastIndexOf('--open-workspace')
+  const path = marker >= 0 ? argv[marker + 1]?.trim() : undefined
+  return path || undefined
 }
