@@ -7,19 +7,19 @@
 | Task | 用户结果 | 状态 | 当前权威证据 |
 |---|---|---|---|
 | 1 大段 UTF-8 输入 | 大粘贴立即进入终端，透明分块且保持顺序 | **已闭合** | `runtime-task-1-utf8-input-chunking-report.md` |
-| 2 拖入路径 | 普通/空格路径保持既有可见形式；native 文件/目录和复杂名称只形成精确 zsh argv，拖入不执行 | **已闭合** | `runtime-task-2-dropped-paths-report.md`；runtime fix `37f080f` |
-| 3 Resize 合并 | 卡片即时适配；Runtime 更新不超过 60Hz，最终 PTY 尺寸准确 | **已闭合** | `runtime-task-3-resize-coalescing-report.md` |
-| 4 App 回焦 | 回到 App 时优先回到离开前正在编辑的控件；原控件已消失时才回到当前终端 | **已实现（定向验证）** | `focus-restoration.ts` / `.test.ts`；`HierarchyShell.test.tsx`；`9f2ebda` |
-| 5 通知容量与 TTL | 每个工作空间独立保留最新 1,000 条；未读持续保留，已读 30 天后清理 | **已闭合** | `runtime-task-5-notification-capacity-report.md` |
-| 6 Journal 策略 | 16 MiB 轮转已生效；256 MiB raw 热窗口规则已定义，但当前自动压缩链尚未按候选规则保留热窗口 | **部分实现** | `journal-policy.ts` / `.test.ts`；`segment-journal.ts` 的 `compressionCandidates()` 与 `#scheduleSealedCompression()` |
-| 7 Checkpoint / tail index | 有 checkpoint 时恢复屏幕后补尾部；无 checkpoint 时从最近 10,000 行开始 | **已实现（定向验证）** | `journal-tail-index.ts` / `.test.ts`；`checkpoint-manager.test.ts`；`runtime-server.test.ts` |
-| 8 压缩历史读取 | raw、gzip 与旧格式可统一分页和搜索；单页最多 1,000 行，单段损坏只返回该段缺口 | **已实现（定向验证）** | `journal-history-reader.ts` / `.test.ts`；`runtime-server.test.ts`；`437ea1f`、`b6349bc` |
-| 9 Journal 压缩与写入故障隔离 | gzip 在并发队列中异步生成并原子发布；单会话写入失败暂停该会话并保留最多 4 MiB 待补写输出 | **已实现（定向验证）** | `journal-compressor.ts` / `.test.ts`；`session-durability-gate.ts` / `.test.ts`；`pty-execution-pauser.test.ts` |
-| 10 前台 xterm 绑定 | 非活动 Scene 已解绑 xterm 且 PTY 保活；普通横向列表的离屏会话保持绑定，但超过 80 个同级会话时会被窗口化卸载 | **部分实现** | `terminal.view-detach` 协议；`TerminalPane.tsx`；`SessionCarousel.tsx` 的 `VIRTUALIZE_THRESHOLD = 80` |
-| 11 每卡恢复遮罩 | queued/restoring/failed 都只覆盖所属卡片；其他卡片、侧栏和画布仍可操作 | **已实现（定向验证）** | `useSessionRecovery.ts` / `.test.tsx`；`TerminalPane.tsx` / `.test.tsx`；`10415c4` |
-| 12 压缩历史搜索 | 现有终端搜索在实时 10,000 行无命中时查询归档并支持前/后切换；当前只展示命中摘要，尚未进入命中前后分页只读视图 | **部分实现** | `TerminalSurface.tsx` / `.test.tsx`；`RuntimeClient.test.ts`；`JournalHistoryReader.search()` |
-| 13 终端恢复边界 | Unicode 跨 frame、长行、alternate-screen 行计数、侧索引重建和损坏 segment gap 已覆盖；完整 alternate-screen 真实 PTY 恢复矩阵尚未闭合 | **部分实现** | `journal-tail-index.test.ts`；`journal-history-reader.test.ts`；`segment-journal.test.ts`；`b6349bc` |
-| 14 全系统门禁 | 真实规模、完整交互、打包运行与故障注入统一收口 | **待最终门禁** | Task 14 的全量命令及证据尚未在本轮统一完成 |
+| 2 拖入路径 | 路径形成精确 Shell 参数，不自动执行 | **已闭合** | `runtime-task-2-dropped-paths-report.md` |
+| 3 Resize 合并 | 卡片即时适配，Runtime 更新约 60Hz，最终尺寸准确 | **已闭合** | `runtime-task-3-resize-coalescing-report.md` |
+| 4 App 回焦 | 返回 App 时恢复离开前控件，目标消失时回到当前终端 | **已闭合** | native focus E2E；`focus-restoration.test.ts` |
+| 5 通知容量与 TTL | 每工作空间 1000 条；未读保留，已读 30 天清理 | **已闭合** | `runtime-task-5-notification-capacity-report.md` |
+| 6 Journal 策略 | 16 MiB 轮转，最近 256 MiB raw 热窗口，旧段异步压缩 | **已闭合** | `journal-policy`、`SegmentJournal.compressionCandidates()` |
+| 7 Checkpoint / tail index | checkpoint 后增量恢复；无 checkpoint 时最近 10,000 行 | **已闭合** | `journal-tail-index`、`checkpoint-manager`、长历史 E2E |
+| 8 压缩历史读取 | raw/gzip 统一分页搜索，损坏段局部隔离 | **已闭合** | 6×320 MiB 压力门禁；真实损坏冷分片 1/1 |
+| 9 压缩与写入故障隔离 | 单会话写失败暂停并可续写，其他会话继续 | **已闭合** | storage fault E2E；真实 Claude storage resume |
+| 10 前台 xterm 绑定 | 当前横向层离屏会话保留 VT model；其他 Scene 释放渲染 | **已闭合** | `terminal-model-cache`；81 会话连续离屏往返 3 次 |
+| 11 每卡恢复遮罩 | 恢复阶段只覆盖所属卡片，其他工作保持可用 | **已闭合** | 20 PTY recovery scale；组件与完整 E2E |
+| 12 压缩历史搜索 | 同一搜索入口进入命中上下文并可返回实时终端 | **已闭合** | `TerminalHistoryContextView`；长历史 E2E |
+| 13 终端恢复边界 | 长行、ANSI、alternate screen、损坏和 Unicode 均有真实/定向门禁 | **已闭合** | PTY stress 4/4；long history；corruption E2E |
+| 14 全系统门禁 | unit、type、build、E2E、scale、stress、package 同版本收口 | **已闭合** | `2f27432`；`2026-09-02-internal-hardening-final.md` |
 
 ## 状态口径
 
@@ -28,20 +28,9 @@
 - **部分实现**：已有可用能力，但仍存在与已确认产品边界或原 Task 验收合同不一致的缺口；不得据此宣称 Task 已完成。
 - **待最终门禁**：生产能力可包含多项已落地内容，但发布结论仍以最终完整命令矩阵为准。
 
-## Task 4、6–14 当前落地核对
+## Task 4、6–14 最终落地核对
 
-| Task | 用户当前能获得的结果 | 尚未闭合的用户影响 | 权威实现/测试证据 |
-|---|---|---|---|
-| 4 App 回焦 | 用户从其他 App 返回后，搜索框、重命名输入等仍保持输入位置；目标控件关闭后才把键盘交给当前终端 | 本轮尚未用真实 BrowserWindow 对终端、搜索、重命名和 Fork 弹窗做一组完整回焦验收，因此保留在最终门禁中 | `AppFocusRestorer`；`focus-restoration.test.ts`；`HierarchyShell.test.tsx` |
-| 6 Journal 热窗口 | 输出按 16 MiB segment 轮转，策略函数能识别应保留的最近 256 MiB raw 与受 checkpoint 保护的段 | 当前 `#scheduleSealedCompression()` 会调度全部 sealed raw，未调用 `compressionCandidates()`；大历史场景下“最近 256 MiB 保持 raw”尚未成为运行时事实 | `SEGMENT_BYTES`、`RAW_HOT_BYTES`、`selectCompressionCandidates()`；`journal-policy.test.ts` |
-| 7 即时恢复 | checkpoint 保存屏幕与水位，重连时只补 checkpoint 后内容；没有 checkpoint 时 tail index 将即时画面限制到最近 10,000 行 | replay 仍先物化完整 Journal，内存/恢复时延问题归入 Scale Task 6，不影响 10,000 行可见边界本身 | `JournalTailIndex`；`CheckpointManager`；`RuntimeServer.#replay()`；对应 tests |
-| 8 历史分页 | 用户可按 cursor 向前读取 raw/gzip 历史，页大小被硬限制为 1,000 行；压缩发布期间 raw/gzip 重叠不会重复读取 | 6 会话 × 320 MiB 压缩期间的事件循环、RSS 与输入延迟门槛尚无本轮统一验收记录 | `JournalHistoryReader.page()`；`journal-history-reader.test.ts`；`journal-compressor.test.ts` |
-| 9 压缩与存储故障 | 冷段压缩不阻塞 PTY 写链；单会话磁盘错误显示整卡操作，重试成功后按原 sequence 补写，其他会话继续运行 | Task 14 的真实 ENOSPC 全系统场景仍待统一门禁 | `JournalCompressor`；`SessionDurabilityGate`；`PtyExecutionPauser`；`StorageFaultOverlay` 及各自 tests |
-| 10 前台绑定 | 切到其他 Scene 后旧 Scene 不再保有 xterm，但其 PTY 仍由 Runtime 继续运行；重新进入时复用原会话 | 80 个以上同级会话会由 Carousel 窗口化，滑出渲染窗的会话 xterm 被卸载，这与“横向列表内即使滑出视野仍定义为前台并保持绑定”的已确认规则冲突 | `RuntimeClient.attachTerminal()` 的 listener 引用计数；`terminal.view-detach`；`RuntimeServer` headless/reattach tests；`SessionCarousel.tsx` |
-| 11 每卡恢复 | 每张卡分别显示等待、恢复、失败与重试；一张卡失败不会替换全局页面或遮挡其他卡 | 恢复重连后的权威快照同步仍需随恢复调度集成修复后进入最终门禁 | `useSessionRecovery`；`TerminalPane` 的 `.session-recovery-overlay`；相关 component tests |
-| 12 归档搜索 | 用户仍从原搜索入口查旧输出，支持大小写、全词、正则以及 Next/Previous；损坏段会提示历史缺口 | 原计划中的“命中前后各 250 行只读历史视图、退出后回到实时终端”尚未实现；现在只显示单条命中摘要 | `JournalHistoryReader.search()`；`TerminalSurface` 的 `terminal-history-result`；相关 tests |
-| 13 异常边界 | UTF-8 跨 frame、CRLF、超长单行的有界读取、alternate-screen 不计入 tail 行数、损坏/缺失 segment 的局部 gap 均有定向测试 | 20 MiB 单行、100k ANSI 变化及 less/vim 运行中 alternate-screen 崩溃恢复的真实 PTY 组合尚未形成完整验收矩阵 | `journal-tail-index.test.ts`；`journal-history-reader.test.ts`；`segment-journal.test.ts` |
-| 14 发布收口 | 无单独用户功能；它负责证明上述能力可同时存在且不会互相回归 | 只有 `pnpm typecheck`、`pnpm test`、`pnpm test:e2e`、`pnpm test:scale`、打包运行与故障注入在同一最终版本全部通过后才能改为已闭合 | `implementation-runtime-robustness-plan.md` Task 14 |
+此前保留的真实窗口回焦、256 MiB 热窗口、流式 Journal、恢复队列、离屏前台模型、历史上下文、alternate-screen 压力和全系统门禁均已闭合。最后一轮还增加了恢复身份副作用门：身份确认前的 Provider 输出不写摘要、cwd 和工作状态，错误身份及过期 Fork owner 不产生 HUD、通知和 Team DAG；同时增加 Fork 身份截止时间、Fork 接受时 commit 固定，以及打包只读历史的不可写验证。用户可见结果、异常边界和最终数字统一记录在 `docs/audits/2026-09-02-internal-hardening-final.md`；底层容量预算继续由 `implementation-runtime-robustness-plan.md` 作为回归门槛。
 
 ## Task 1 RED → GREEN 记录
 

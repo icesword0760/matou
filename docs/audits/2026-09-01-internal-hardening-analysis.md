@@ -430,3 +430,9 @@ SESSIONS=6 MIB=20 SEGMENT_MIB=16 node --expose-gc /tmp/matou-audit/journal-bench
 - 本轮未对 reference product 全部异常状态进行重新截图比对；凡涉及动画节奏、删除语义、拖入文本、历史截断提示的项目均列为产品决策或后续 reference product 对照项。
 - 部分风险为静态高确定性结论；报告中已单独标出实测数据。正式修复后仍需真实 Electron、真实 PTY、真实 Git worktree 和故障注入复验。
 - 审计开始后主工作区仍有其他变化；本报告固定对应审计工作树中的起始内部版快照。
+
+## 13. 2026-09-02 实施后结论
+
+本报告识别的产品决策已经在 `2026-09-01-internal-hardening-product-decisions.md` 定稿，并在独立工作树完成实现和真实验证。最终版本已闭合恢复优先级、逐卡 Loading、Worktree 环境保护、Provider identity 校验、Journal 流式恢复、离屏前台终端、DAG 远层聚合、分离窗口回归以及异常隔离。
+
+原报告中的规模数字是改造前或中途基线，不再代表当前版本。最终用户结果、完整测试矩阵、性能数据和剩余平台边界以 `docs/audits/2026-09-02-internal-hardening-final.md` 为准。
