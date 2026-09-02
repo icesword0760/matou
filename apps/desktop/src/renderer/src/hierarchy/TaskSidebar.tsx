@@ -91,8 +91,8 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { setMenuTask(null); setMenuWorkspace(null); setNotificationCenterOpen(false) }
     }
-    window.addEventListener('pointerdown', closeMenus); window.addEventListener('keydown', onEscape)
-    return () => { window.removeEventListener('pointerdown', closeMenus); window.removeEventListener('keydown', onEscape) }
+    window.addEventListener('pointerdown', closeMenus); window.addEventListener('keydown', onEscape, true)
+    return () => { window.removeEventListener('pointerdown', closeMenus); window.removeEventListener('keydown', onEscape, true) }
   }, [notificationCenterOpen])
   useEffect(() => {
     if (!toast) return
