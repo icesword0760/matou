@@ -11,6 +11,7 @@ import { resolveDefaultWorkspacePath } from './default-workspace-policy'
 import { claimSingleInstance } from './single-instance-policy'
 import { WindowManager } from './window-manager'
 import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
+import { secondaryDisplayWindowBounds } from './e2e-window-placement'
 import {
   DESKTOP_CHANNELS,
   type DagNodeSelection,
@@ -81,9 +82,12 @@ async function createWindow(): Promise<BrowserWindow> {
   const windowId = `main-window-${++mainWindowSequence}`
   const { rootDirectory: defaultRootDirectory, name: defaultName } =
     resolveDefaultWorkspacePath(process.env.MATOU_DEFAULT_WORKSPACE, app.getPath('home'))
+  const width = 1200
+  const height = 780
   const window = new BrowserWindow({
-    width: 1200,
-    height: 780,
+    width,
+    height,
+    ...automatedWindowPlacement(width, height),
     minWidth: 720,
     minHeight: 480,
     show: false,
@@ -149,8 +153,10 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
     windows.showWindow(input.windowId)
     return
   }
+  const width = 760
+  const height = 520
   const window = new BrowserWindow({
-    width: 760, height: 520, minWidth: 420, minHeight: 260,
+    width, height, ...automatedWindowPlacement(width, height), minWidth: 420, minHeight: 260,
     show: false, backgroundColor: '#F7F8FA',
     title: input.title,
     webPreferences: {
@@ -189,6 +195,17 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   } else {
     await window.loadFile(join(__dirname, '../renderer/index.html'), { query })
   }
+}
+
+function automatedWindowPlacement(width: number, height: number): { x?: number; y?: number } {
+  const placement = secondaryDisplayWindowBounds({
+    enabled: process.env.MATOU_E2E === '1' && process.env.MATOU_E2E_DISPLAY !== 'primary',
+    width,
+    height,
+    primaryDisplayId: screen.getPrimaryDisplay().id,
+    displays: screen.getAllDisplays()
+  })
+  return placement ?? {}
 }
 
 function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): DagWindowAdapter {
