@@ -8,7 +8,7 @@ import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagCanvas, clampDagScale, zoomAt } from './DagCanvas'
 
 beforeEach(() => { Element.prototype.scrollIntoView = vi.fn() })
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('DagCanvas', () => {
   it('clamps zoom to the PRD range and preserves the world point under the pointer', () => {
@@ -26,9 +26,9 @@ describe('DagCanvas', () => {
     Object.defineProperty(canvas, 'clientHeight', { configurable: true, value: 700 })
 
     fireEvent.wheel(canvas, { deltaX: 40, deltaY: 30 })
-    expect(canvas.getAttribute('data-pan')).not.toBe('0,0')
+    await waitFor(() => expect(canvas.getAttribute('data-pan')).not.toBe('0,0'))
     fireEvent.wheel(canvas, { deltaY: -100, ctrlKey: true, clientX: 500, clientY: 350 })
-    expect(Number(canvas.getAttribute('data-scale'))).toBeGreaterThan(1)
+    await waitFor(() => expect(Number(canvas.getAttribute('data-scale'))).toBeGreaterThan(1))
     await userEvent.setup().click(screen.getByRole('button', { name: '恢复 100%' }))
     expect(canvas.getAttribute('data-scale')).toBe('1')
 
@@ -36,7 +36,7 @@ describe('DagCanvas', () => {
     expect(onSelect).toHaveBeenCalledWith('child')
   })
 
-  it('restores a persisted viewport before rendering and reports later canvas movement', () => {
+  it('restores a persisted viewport before rendering and reports later canvas movement', async () => {
     const onTransformChange = vi.fn()
     render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()}
       initialTransform={{ x: 123, y: -45, scale: 1.4 }} onTransformChange={onTransformChange} />)
@@ -45,7 +45,31 @@ describe('DagCanvas', () => {
     expect(canvas.getAttribute('data-pan')).toBe('123,-45')
     expect(canvas.getAttribute('data-scale')).toBe('1.4')
     fireEvent.wheel(canvas, { deltaX: 20, deltaY: 10 })
-    expect(onTransformChange).toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 })
+    await waitFor(() => expect(onTransformChange)
+      .toHaveBeenLastCalledWith({ x: 103, y: -55, scale: 1.4 }))
+  })
+
+  it('coalesces a burst of continuous pan events into one visual frame', () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback)
+      return frames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    const onTransformChange = vi.fn()
+    render(<DagCanvas graph={graph()} focusedSessionId="child" onSelect={vi.fn()}
+      initialTransform={{ x: 100, y: 40, scale: 1 }} onTransformChange={onTransformChange} />)
+    const canvas = screen.getByRole('application', { name: '会话 DAG 画布' })
+
+    fireEvent.wheel(canvas, { deltaX: 10 })
+    fireEvent.wheel(canvas, { deltaX: 10 })
+    fireEvent.wheel(canvas, { deltaX: 10 })
+
+    expect(frames).toHaveLength(1)
+    expect(onTransformChange).not.toHaveBeenCalled()
+    frames[0]!(0)
+    expect(onTransformChange).toHaveBeenCalledTimes(1)
+    expect(onTransformChange).toHaveBeenCalledWith({ x: 70, y: 40, scale: 1 })
   })
 
   it('renders near depths as sessions and farther branches as truthful aggregates that drill in on click', async () => {

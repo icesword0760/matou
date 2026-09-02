@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagWindowApp } from './DagWindowApp'
 
-const runtime = vi.hoisted(() => ({ current: null as null | { request: ReturnType<typeof vi.fn> } }))
+const runtime = vi.hoisted(() => ({ current: null as null | {
+  request: ReturnType<typeof vi.fn>
+  startProjection?: ReturnType<typeof vi.fn>
+  subscribeProjection?: ReturnType<typeof vi.fn>
+} }))
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
 let runtimeConnectionListener: ((state: 'reconnecting' | 'ready') => void) | undefined
 let dagNotificationListener: ((sessionIds: string[]) => void) | undefined
@@ -80,6 +84,38 @@ describe('DagWindowApp', () => {
     expect(screen.getByRole('application', { name: '会话 DAG 画布' })).toBeTruthy()
     expect(screen.getByRole('status').textContent).toContain('会话信息暂时未更新')
     expect(screen.getByRole('status').textContent).toContain('正在重新连接')
+  })
+
+  it('updates the open DAG from semantic events without polling the complete graph', async () => {
+    let projectionListener: ((message: unknown) => void) | undefined
+    const data = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return data
+      return undefined
+    })
+    const startProjection = vi.fn()
+    const subscribeProjection = vi.fn((listener) => {
+      projectionListener = listener
+      return () => { projectionListener = undefined }
+    })
+    const interval = vi.spyOn(window, 'setInterval')
+    runtime.current = { request, startProjection, subscribeProjection }
+
+    render(<DagWindowApp />)
+    await screen.findByRole('application', { name: '会话 DAG 画布' })
+
+    expect(startProjection).toHaveBeenCalledWith(7)
+    expect(interval.mock.calls.some(([, delay]) => delay === 500)).toBe(false)
+    act(() => projectionListener?.({
+      type: 'events.batch', runtimeGeneration: 'runtime-1', events: [{
+        sequence: 8, eventType: 'session.graph-summary-changed', aggregateId: 'scene-1',
+        payload: { graph: { ...graph(), nodes: [node('root', 'Root'), node('child', 'Live Child')] } }
+      }]
+    }))
+
+    expect(await screen.findByRole('button', { name: '打开会话：Live Child' })).toBeTruthy()
+    expect(request.mock.calls.filter(([method]) => method === 'hierarchy.get-scene-session-graph')).toHaveLength(1)
   })
 
   it('persists every changed viewport before the short-lived native DAG can close', async () => {

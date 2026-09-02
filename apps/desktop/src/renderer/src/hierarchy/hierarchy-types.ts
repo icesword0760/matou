@@ -58,6 +58,8 @@ export interface SessionGraphNodeView {
 }
 export interface SessionGraphView {
   sceneId: string
+  runtimeGeneration?: string
+  eventSequence?: number
   layoutRevision?: number
   focusedSessionId?: string
   nodes: SessionGraphNodeView[]

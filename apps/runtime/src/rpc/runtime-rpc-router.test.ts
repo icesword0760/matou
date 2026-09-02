@@ -429,7 +429,13 @@ describe('RuntimeRpcRouter', () => {
 
     const graph = await router.handle('hierarchy.get-scene-session-graph', {
       sceneId: 'scene-1', windowId: 'window-1'
-    }) as { nodes: Array<{ sessionId: string; parentSessionId?: string }> }
+    }) as {
+      runtimeGeneration: string
+      eventSequence: number
+      nodes: Array<{ sessionId: string; parentSessionId?: string }>
+    }
+    expect(graph.runtimeGeneration).toBe(database.runtimeGeneration)
+    expect(graph.eventSequence).toBeGreaterThan(0)
     expect(graph.nodes).toEqual(expect.arrayContaining([
       expect.objectContaining({ sessionId: 'parent' }),
       expect.objectContaining({ sessionId: 'child', parentSessionId: 'parent' })

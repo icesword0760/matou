@@ -143,10 +143,18 @@ export class RuntimeRpcRouter {
     if (method === 'hierarchy.get-scene-session-graph') {
       const input = record(payload)
       const sceneId = text(input.sceneId, 'sceneId')
-      return this.#sessionGraphs.projectSceneGraph(
+      const graph = this.#sessionGraphs.projectSceneGraph(
         sceneId,
         optionalText(input.windowId, 'windowId')
       )
+      const eventSequence = this.#database.get<{ maximum: number }>(
+        'SELECT COALESCE(MAX(seq), 0) AS maximum FROM domain_events'
+      )?.maximum ?? 0
+      return {
+        ...graph,
+        runtimeGeneration: this.#database.runtimeGeneration,
+        eventSequence
+      }
     }
     if (method === 'events.replay') {
       const value = record(payload)

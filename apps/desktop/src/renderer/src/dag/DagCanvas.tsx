@@ -21,6 +21,11 @@ export function DagCanvas(props: {
   const viewportRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ id: number; x: number; y: number; originX: number; originY: number } | null>(null)
   const [transform, setTransform] = useState<DagTransform>(initialTransform ?? { x: 70, y: 40, scale: 1 })
+  const transformRef = useRef(transform)
+  const pendingTransform = useRef<DagTransform | null>(null)
+  const transformFrame = useRef<number | null>(null)
+  const onTransformChangeRef = useRef(onTransformChange)
+  onTransformChangeRef.current = onTransformChange
   const [previewSessionId, setPreviewSessionId] = useState(focusedSessionId)
   const baseVisibility = visibleLayers(layout, previewSessionId)
   const centerWorldX = ((viewportRef.current?.clientWidth ?? 1000) / 2 - transform.x) / transform.scale
@@ -43,13 +48,47 @@ export function DagCanvas(props: {
     layout, fullDepths, worldBounds, centerWorldY, previewSessionId
   })
   const renderedNodes = renderModel.realNodes
-  const update = (next: DagTransform) => {
+  const commitTransform = (next: DagTransform) => {
+    transformRef.current = next
     setTransform(next)
-    onTransformChange?.(next)
+    onTransformChangeRef.current?.(next)
+  }
+  const update = (next: DagTransform) => {
+    if (transformFrame.current !== null) {
+      cancelAnimationFrame(transformFrame.current)
+      transformFrame.current = null
+      pendingTransform.current = null
+    }
+    commitTransform(next)
+  }
+  const scheduleUpdate = (next: DagTransform) => {
+    transformRef.current = next
+    pendingTransform.current = next
+    if (transformFrame.current !== null) return
+    transformFrame.current = requestAnimationFrame(() => {
+      transformFrame.current = null
+      const pending = pendingTransform.current
+      pendingTransform.current = null
+      if (pending) commitTransform(pending)
+    })
+  }
+  const flushScheduledUpdate = () => {
+    const pending = pendingTransform.current
+    if (!pending) return
+    if (transformFrame.current !== null) cancelAnimationFrame(transformFrame.current)
+    transformFrame.current = null
+    pendingTransform.current = null
+    commitTransform(pending)
   }
   useEffect(() => {
-    if (initialTransform) setTransform(initialTransform)
+    if (initialTransform) {
+      transformRef.current = initialTransform
+      setTransform(initialTransform)
+    }
   }, [initialTransform])
+  useEffect(() => () => {
+    if (transformFrame.current !== null) cancelAnimationFrame(transformFrame.current)
+  }, [])
   const focusNode = (sessionId: string, animate = true) => {
     const node = layout.nodeById.get(sessionId)
     const viewport = viewportRef.current
@@ -90,28 +129,35 @@ export function DagCanvas(props: {
 
   const wheel = (event: WheelEvent<HTMLDivElement>) => {
     event.preventDefault()
+    const current = transformRef.current
     if (event.ctrlKey || event.metaKey) {
       const rect = event.currentTarget.getBoundingClientRect()
       const point = { x: event.clientX - rect.left, y: event.clientY - rect.top }
       const factor = Math.exp(-event.deltaY * 0.002)
-      update(zoomAt(transform, transform.scale * factor, point))
+      scheduleUpdate(zoomAt(current, current.scale * factor, point))
       return
     }
-    update({ ...transform, x: transform.x - event.deltaX, y: transform.y - event.deltaY })
+    scheduleUpdate({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY })
   }
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest('button,input,.dag-node-card,.dag-aggregate-card')) return
-    dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: transform.x, originY: transform.y }
+    const current = transformRef.current
+    dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: current.x, originY: current.y }
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current
     if (!drag || drag.id !== event.pointerId) return
-    update({ ...transform, x: drag.originX + event.clientX - drag.x, y: drag.originY + event.clientY - drag.y })
+    scheduleUpdate({
+      ...transformRef.current,
+      x: drag.originX + event.clientX - drag.x,
+      y: drag.originY + event.clientY - drag.y
+    })
   }
   const pointerEnd = (event: PointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.id !== event.pointerId) return
     dragRef.current = null
+    flushScheduledUpdate()
     event.currentTarget.releasePointerCapture?.(event.pointerId)
   }
 
