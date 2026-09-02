@@ -614,7 +614,7 @@ export class SessionRepository {
     return this.#changeBinding(command, bindingId, 'failed', now, reason)
   }
 
-  failResumeToShell(
+  failResume(
     command: DomainCommandMetadata,
     sessionId: string,
     bindingId: string,
@@ -636,8 +636,10 @@ export class SessionRepository {
       const metadata = parseMetadata(binding.metadata_json)
       tx.run(
         `UPDATE provider_bindings
-         SET resume_state = 'failed', metadata_json = ?, updated_at = ?, invalidated_at = ?
+         SET resume_state = 'failed', restore_state = 'failed', restore_error = ?,
+             metadata_json = ?, updated_at = ?, invalidated_at = ?
          WHERE id = ?`,
+        reason,
         JSON.stringify({
           ...(isObject(metadata) ? metadata : {}),
           invalidationReason: reason
@@ -648,9 +650,7 @@ export class SessionRepository {
       )
       tx.run(
         `UPDATE sessions
-         SET kind = 'shell',
-             title = CASE WHEN title IN ('Claude', 'Codex') OR title = id THEN 'Shell' ELSE title END,
-             work_status = 'error',
+         SET work_status = 'error',
              updated_at = ?, last_activity_at = ?,
              version = version + 1
          WHERE id = ?`,
@@ -660,8 +660,6 @@ export class SessionRepository {
       )
       const session = mapSession({
         ...before,
-        kind: 'shell',
-        title: genericShellTitle(before.title, before.id),
         updated_at: now,
         last_activity_at: now,
         version: before.version + 1

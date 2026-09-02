@@ -344,7 +344,7 @@ test('restores committed structure after a forced stop without presenting an unf
   }
 })
 
-test('degrades one invalid AI resume to a usable Shell and does not retry it next launch', async () => {
+test('keeps one invalid AI resume on its Claude card and does not retry it next launch', async () => {
   let fixture: MatouFixture = await launchMatou()
   const providerExecutable = join(fixture.rootDirectory, 'missing-provider-session.sh')
   const invocations = join(fixture.rootDirectory, 'provider-invocations.txt')
@@ -366,33 +366,29 @@ test('degrades one invalid AI resume to a usable Shell and does not retry it nex
       MATOU_CLAUDE_COMMAND: providerExecutable,
       MATOU_TEST_PROVIDER_INVOCATIONS: invocations
     } })
-    const fallback = visibleSurfaces(fixture).first()
-    await expect(fallback.locator('.xterm-rows')).toContainText(
-      '[上次会话无法续接，已回到普通终端]'
-    )
+    const failedPane = fixture.page.locator('[data-testid="terminal-pane"]:visible').first()
+    await expect(failedPane.getByRole('status')).toContainText('Claude Code 恢复失败')
     await expect.poll(() => readSessionKind(join(fixture.dataDirectory, 'matou.sqlite')))
-      .toBe('shell')
-    await positivePid(fallback)
+      .toBe('claude-code')
+    await expect(failedPane.locator('.terminal-surface')).toHaveCount(0)
+    await expect(failedPane.getByRole('button', { name: '重试恢复' })).toBeVisible()
+    await expect(failedPane.getByRole('button', { name: '新开 Claude Code' })).toBeVisible()
     await fixture.page.waitForTimeout(250)
-    await typeTerminalCommand(
-      visibleSurfaces(fixture).first(),
-      "printf '%s\\n' \"$((31415 + 27182))\""
-    )
-    await expect(fallback.locator('.xterm-rows')).toContainText('58597')
-    expect(readSessionKind(join(fixture.dataDirectory, 'matou.sqlite'))).toBe('shell')
+    expect(readSessionKind(join(fixture.dataDirectory, 'matou.sqlite'))).toBe('claude-code')
 
-    fixture = await restartMatou(fixture)
-    const nextLaunch = visibleSurfaces(fixture).first()
-    await positivePid(nextLaunch)
-    // The earlier recovery result remains in terminal history; the durable
-    // Shell identity and invocation count prove no second provider retry.
+    fixture = await restartMatou(fixture, { env: {
+      MATOU_CLAUDE_COMMAND: providerExecutable,
+      MATOU_TEST_PROVIDER_INVOCATIONS: invocations
+    } })
+    await expect(fixture.page.locator('[data-testid="terminal-pane"]:visible').first().getByRole('status'))
+      .toContainText('Claude Code 恢复失败')
     expect((await readFile(invocations, 'utf8')).trim().split('\n')).toHaveLength(1)
   } finally {
     await fixture.close()
   }
 })
 
-test('degrades a resumed provider that exits cleanly before becoming interactive', async () => {
+test('keeps a resumed provider failed when it exits before becoming interactive', async () => {
   let fixture: MatouFixture = await launchMatou()
   const providerExecutable = join(fixture.rootDirectory, 'early-clean-exit-provider.sh')
   try {
@@ -410,20 +406,17 @@ test('degrades a resumed provider that exits cleanly before becoming interactive
     fixture = await restartMatou(fixture, { env: {
       MATOU_CLAUDE_COMMAND: providerExecutable
     } })
-    const fallback = visibleSurfaces(fixture).first()
-    await expect(fallback.locator('.xterm-rows')).toContainText(
-      '[上次会话无法续接，已回到普通终端]'
-    )
+    const failedPane = fixture.page.locator('[data-testid="terminal-pane"]:visible').first()
+    await expect(failedPane.getByRole('status')).toContainText('Claude Code 恢复失败')
     await expect.poll(() => readSessionKind(join(fixture.dataDirectory, 'matou.sqlite')))
-      .toBe('shell')
-    await typeTerminalCommand(fallback, "printf '%s\\n' \"$((600 + 6))\"")
-    await expect(fallback.locator('.xterm-rows')).toContainText('606')
+      .toBe('claude-code')
+    await expect(failedPane.locator('.terminal-surface')).toHaveCount(0)
   } finally {
     await fixture.close()
   }
 })
 
-test('returns an unresponsive AI resume to a usable Shell after the ten-second deadline', async () => {
+test('parks an unresponsive AI resume after the ten-second deadline', async () => {
   test.setTimeout(40_000)
   let fixture: MatouFixture = await launchMatou()
   const providerExecutable = join(fixture.rootDirectory, 'unresponsive-provider.sh')
@@ -442,25 +435,14 @@ test('returns an unresponsive AI resume to a usable Shell after the ten-second d
     fixture = await restartMatou(fixture, { env: {
       MATOU_CLAUDE_COMMAND: providerExecutable
     } })
-    const fallback = visibleSurfaces(fixture).first()
-    const providerPid = await positivePid(fallback)
+    const pane = fixture.page.locator('[data-testid="terminal-pane"]:visible').first()
+    const providerPid = await positivePid(pane.locator('.terminal-surface'))
     await fixture.page.waitForTimeout(8_000)
-    await expect(fallback.locator('.xterm-rows')).not.toContainText(
-      '[上次会话无法续接，已回到普通终端]'
-    )
-    await expect(fallback.locator('.xterm-rows')).toContainText(
-      '[上次会话无法续接，已回到普通终端]',
-      { timeout: 5_000 }
-    )
+    await expect(pane.getByRole('status')).toContainText('Claude Code 恢复失败', { timeout: 5_000 })
     await expect.poll(() => readSessionKind(join(fixture.dataDirectory, 'matou.sqlite')))
-      .toBe('shell')
-    await expect(fallback).toHaveAttribute('data-profile', 'shell')
-    await expect.poll(async () => {
-      const pid = Number(await fallback.getAttribute('data-pid'))
-      return pid > 0 && pid !== providerPid ? pid : 0
-    }).toBeGreaterThan(0)
-    await typeTerminalCommand(fallback, "printf '%s\\n' \"$((800 + 8))\"")
-    await expect(fallback.locator('.xterm-rows')).toContainText('808')
+      .toBe('claude-code')
+    expect(providerPid).toBeGreaterThan(0)
+    await expect(pane.locator('.terminal-surface')).toHaveCount(0)
   } finally {
     await fixture.close()
   }

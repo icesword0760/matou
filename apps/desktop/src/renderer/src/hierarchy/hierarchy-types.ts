@@ -184,6 +184,7 @@ export interface HierarchyCommands {
   retryFork(sceneId: string, sessionId: string): unknown
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
+  startFreshProvider(sessionId: string): unknown
   listClaudeSessions(sessionId: string, query: string, providerSessionId?: string): Promise<ClaudeSessionListResult>
   getClaudeSessionDetail(sessionId: string, providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
   loadClaudeSession(sessionId: string, providerSessionId: string): Promise<ClaudeSessionLoadResult>

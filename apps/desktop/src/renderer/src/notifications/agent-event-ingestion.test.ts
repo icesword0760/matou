@@ -56,7 +56,7 @@ describe('ingestAgentNotification', () => {
     expect(store.snapshot().notifications).toHaveLength(0)
   })
 
-  it('discards legacy recovery notifications because recovery state is shown on the card', () => {
+  it('keeps recovery failures locatable and dismisses them after retry or success', () => {
     let now = 20
     const store = new AgentNotificationStore({ now: () => now })
     const failed = domainEvent()
@@ -69,7 +69,13 @@ describe('ingestAgentNotification', () => {
       }
     }
     ingestAgentNotification(failed, projection(), undefined, store)
-    expect(store.snapshot().notifications).toHaveLength(0)
+    expect(store.snapshot().notifications).toEqual([
+      expect.objectContaining({
+        eventId: 'restore-failed', eventType: 'error', sessionId: 'session-1',
+        sceneId: 'scene-1', replacementKey: 'provider-restore:session-1',
+        title: 'Claude Code 恢复失败', body: '会话不存在'
+      })
+    ])
 
     now = 21
     const retrying = domainEvent()
@@ -82,7 +88,12 @@ describe('ingestAgentNotification', () => {
       }
     }
     ingestAgentNotification(retrying, projection(), undefined, store)
-    expect(store.snapshot().notifications).toHaveLength(0)
+    expect(store.snapshot().notifications).toEqual([
+      expect.objectContaining({
+        eventId: 'restore-retrying', eventType: 'attention', sessionId: 'session-1',
+        replacementKey: 'provider-restore:session-1', title: '正在恢复 Claude Code'
+      })
+    ])
 
     const dismissed = domainEvent()
     dismissed.eventId = 'restore-succeeded'

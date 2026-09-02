@@ -157,6 +157,7 @@ export const RPC_METHODS = [
   'hierarchy.remove-failed-fork',
   'hierarchy.record-session-interaction',
   'hierarchy.retry-provider-restore',
+  'hierarchy.start-fresh-provider',
   'hierarchy.restart-stopped-session',
   'hierarchy.remove-session-branch',
   'hierarchy.reopen-scene',
