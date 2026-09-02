@@ -175,6 +175,45 @@ describe('RuntimeProjectionStore', () => {
       .toMatchObject({ stage: 'applying-setup' })
   })
 
+  it('keeps this window on its focused branch when a provider event carries a window-neutral graph', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], sessions: [], relations: [], scenes: [],
+      sessionGraphs: {
+        'scene-1': {
+          sceneId: 'scene-1', focusedSessionId: 'leaf',
+          nodes: [
+            { sessionId: 'root', currentMode: 'claude-code' },
+            { sessionId: 'leaf', parentSessionId: 'root', currentMode: 'claude-code' }
+          ], edges: [{ parentSessionId: 'root', childSessionId: 'leaf' }]
+        }
+      },
+      hierarchy: {
+        windowId: 'window-1', workspaces: [], tasks: [], sessions: [], scenes: [],
+        navigation: { windowId: 'window-1', sessionByScene: { 'scene-1': 'leaf' } }
+      }
+    })
+
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'provider-ready', eventType: 'session.mode-changed',
+      aggregateType: 'session', aggregateId: 'root', sessionId: 'root',
+      payload: {
+        session: { id: 'root', kind: 'claude-code' },
+        graph: {
+          sceneId: 'scene-1',
+          nodes: [
+            { sessionId: 'root', currentMode: 'claude-code' },
+            { sessionId: 'leaf', parentSessionId: 'root', currentMode: 'claude-code' }
+          ], edges: [{ parentSessionId: 'root', childSessionId: 'leaf' }]
+        }
+      },
+      schemaVersion: 1, commandId: 'provider-ready', occurredAt: 2
+    }])
+
+    expect(store.view().sessionGraphs['scene-1']?.focusedSessionId).toBe('leaf')
+  })
+
   it('updates both the terminal entity and graph during restore and legacy stopped-node recovery', () => {
     const store = new RuntimeProjectionStore()
     store.replace({
