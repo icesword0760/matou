@@ -51,6 +51,56 @@ describe('JournalHistoryReader', () => {
       .toEqual(['one', 'two', 'three', 'four', 'five'])
   })
 
+  it('returns an exact context window around a cold-history cursor', async () => {
+    const { root, sessionId } = await historyFixture(601, true)
+    const reader = new JournalHistoryReader(root)
+    const match = (await reader.search({
+      sessionId, query: 'line-301', limit: 1,
+      options: { caseSensitive: true, regex: false, wholeWord: true }
+    })).matches[0]!
+
+    const context = await reader.page({
+      sessionId,
+      around: match.cursor,
+      beforeLines: 250,
+      afterLines: 250
+    })
+
+    expect(context.lines).toHaveLength(501)
+    expect(context.lines[0]?.text).toBe('line-51')
+    expect(context.lines[context.anchorIndex!]?.text).toBe('line-301')
+    expect(context.lines.at(-1)?.text).toBe('line-551')
+    expect(context).toMatchObject({
+      anchorIndex: 250,
+      hasMore: true,
+      hasMoreBefore: true,
+      hasMoreAfter: true
+    })
+  })
+
+  it('stops reading after the requested newer context is complete', async () => {
+    const root = await makeRoot()
+    const sessionId = 'bounded-context'
+    const journal = await SegmentJournal.open(root, sessionId, { compressSealed: false })
+    await journal.appendOutput(1, new TextEncoder().encode('before\nanchor\nafter\nunneeded\n'))
+    await journal.close()
+    await writeFile(
+      join(root, 'journal', sessionId, 'segment-000002.mtj'),
+      'damaged-later-segment'
+    )
+
+    const context = await new JournalHistoryReader(root).page({
+      sessionId,
+      around: { sequence: 1, lineIndex: 1 },
+      beforeLines: 1,
+      afterLines: 1
+    })
+
+    expect(context.lines.map(({ text }) => text)).toEqual(['before', 'anchor', 'after'])
+    expect(context.gaps).toEqual([])
+    expect(context.hasMoreAfter).toBe(true)
+  })
+
   it('decodes UTF-8 characters split across output frames and segment boundaries', async () => {
     const root = await makeRoot()
     const sessionId = 'unicode-session'

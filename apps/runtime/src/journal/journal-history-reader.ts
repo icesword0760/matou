@@ -30,7 +30,18 @@ export class JournalHistoryReader {
     sessionId: string
     before?: TerminalHistoryCursor
     lineLimit?: number
+    around?: TerminalHistoryCursor
+    beforeLines?: number
+    afterLines?: number
   }): Promise<TerminalHistoryPage> {
+    if (input.around) {
+      return this.#contextWindow({
+        sessionId: input.sessionId,
+        around: input.around,
+        ...(input.beforeLines === undefined ? {} : { beforeLines: input.beforeLines }),
+        ...(input.afterLines === undefined ? {} : { afterLines: input.afterLines })
+      })
+    }
     const limit = boundedLimit(input.lineLimit)
     const ring: TerminalHistoryLine[] = []
     const gaps: TerminalHistoryGap[] = []
@@ -41,6 +52,53 @@ export class JournalHistoryReader {
     })
     const hasMore = ring.length > limit
     return { lines: hasMore ? ring.slice(1) : ring, gaps, hasMore }
+  }
+
+  async #contextWindow(input: {
+    sessionId: string
+    around: TerminalHistoryCursor
+    beforeLines?: number
+    afterLines?: number
+  }): Promise<TerminalHistoryPage> {
+    const beforeLimit = boundedContextLimit(input.beforeLines)
+    const afterLimit = boundedContextLimit(input.afterLines)
+    const before: TerminalHistoryLine[] = []
+    const after: TerminalHistoryLine[] = []
+    const gaps: TerminalHistoryGap[] = []
+    let anchor: TerminalHistoryLine | undefined
+    let hasMoreBefore = false
+    let hasMoreAfter = false
+    await this.#scan(input.sessionId, gaps, (line) => {
+      const position = compareCursor(line.cursor, input.around)
+      if (position < 0) {
+        before.push(line)
+        if (before.length > beforeLimit) {
+          before.shift()
+          hasMoreBefore = true
+        }
+        return
+      }
+      if (position === 0) {
+        anchor = line
+        return
+      }
+      if (after.length < afterLimit) after.push(line)
+      else {
+        hasMoreAfter = true
+        return false
+      }
+    })
+    if (!anchor) {
+      return { lines: [], gaps, hasMore: false }
+    }
+    return {
+      lines: [...before, anchor, ...after],
+      gaps,
+      hasMore: hasMoreBefore || hasMoreAfter,
+      anchorIndex: before.length,
+      hasMoreBefore,
+      hasMoreAfter
+    }
   }
 
   async search(input: {
@@ -68,7 +126,7 @@ export class JournalHistoryReader {
   async #scan(
     sessionId: string,
     gaps: TerminalHistoryGap[],
-    onLine: (line: TerminalHistoryLine) => void
+    onLine: (line: TerminalHistoryLine) => boolean | void
   ): Promise<void> {
     const directory = join(this.#dataRoot, 'journal', sessionId)
     let entries: string[]
@@ -115,11 +173,11 @@ export class JournalHistoryReader {
         let lineBreak = pending.indexOf('\n')
         while (lineBreak >= 0) {
           const cursor = { sequence: frame.sequence, lineIndex: pendingLineIndex }
-          onLine({
+          if (onLine({
             sequence: frame.sequence,
             cursor,
             text: normalizeTerminalLine(pending.slice(0, lineBreak))
-          })
+          }) === false) return
           pendingLineIndex += 1
           pending = pending.slice(lineBreak + 1)
           lineBreak = pending.indexOf('\n')
@@ -238,6 +296,11 @@ function compareCursor(left: TerminalHistoryCursor, right: TerminalHistoryCursor
 function boundedLimit(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return MAX_LINES
   return Math.max(1, Math.min(MAX_LINES, Math.floor(value)))
+}
+
+function boundedContextLimit(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 250
+  return Math.max(0, Math.min(499, Math.floor(value)))
 }
 
 function normalizeTerminalLine(value: string): string {

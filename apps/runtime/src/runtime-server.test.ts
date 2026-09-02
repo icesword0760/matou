@@ -72,13 +72,27 @@ describe('RuntimeServer domain RPC', () => {
         options: { caseSensitive: false, regex: false, wholeWord: false }
       }
     })
-    await waitUntil(() => port.findRpcResponse('history-search') !== undefined)
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'history-context',
+      method: 'terminal.history-page', capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: {
+        sessionId: 'rpc-history', around: { sequence: 2, lineIndex: 0 },
+        beforeLines: 1, afterLines: 1
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('history-context') !== undefined)
 
     expect(port.findRpcResponse('history-page')?.result).toMatchObject({
       lines: [{ text: 'needle line' }, { text: 'newest line' }], hasMore: true
     })
     expect(port.findRpcResponse('history-search')?.result).toMatchObject({
       matches: [{ text: 'needle line' }], hasMore: false
+    })
+    expect(port.findRpcResponse('history-context')?.result).toMatchObject({
+      lines: [{ text: 'older line' }, { text: 'needle line' }, { text: 'newest line' }],
+      anchorIndex: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false
     })
   })
 

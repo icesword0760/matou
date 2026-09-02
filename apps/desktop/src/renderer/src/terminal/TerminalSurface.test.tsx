@@ -24,7 +24,9 @@ const state = vi.hoisted(() => ({
   updateTerminalProfile: vi.fn(),
   recordTerminalInteraction: vi.fn(),
   storeTerminalCheckpoint: vi.fn(),
-  searchTerminalHistory: vi.fn()
+  searchTerminalHistory: vi.fn(),
+  historyAroundTerminalCursor: vi.fn(),
+  acknowledgeTerminal: vi.fn()
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -73,14 +75,15 @@ vi.mock('../runtime/RuntimeProvider', () => ({
       state.onMessage = onMessage
       return vi.fn()
     },
-    acknowledgeTerminal: vi.fn(),
+    acknowledgeTerminal: state.acknowledgeTerminal,
     requestTerminalReplay: vi.fn(),
     resizeTerminal: vi.fn(),
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
     recordTerminalInteraction: state.recordTerminalInteraction,
     storeTerminalCheckpoint: state.storeTerminalCheckpoint,
-    searchTerminalHistory: state.searchTerminalHistory
+    searchTerminalHistory: state.searchTerminalHistory,
+    historyAroundTerminalCursor: state.historyAroundTerminalCursor
     }
     return () => client
   })()
@@ -107,6 +110,11 @@ describe('TerminalSurface focus continuity', () => {
     state.serialize.mockClear()
     state.storeTerminalCheckpoint.mockClear()
     state.searchTerminalHistory.mockReset()
+    state.historyAroundTerminalCursor.mockReset()
+    state.historyAroundTerminalCursor.mockResolvedValue({
+      lines: [], gaps: [], hasMore: false
+    })
+    state.acknowledgeTerminal.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -368,6 +376,90 @@ describe('TerminalSurface focus continuity', () => {
     expect(screen.getByRole('status', { name: '归档历史搜索结果' }).textContent)
       .toContain('1 处历史缺口')
     expect(onSearchResults).toHaveBeenLastCalledWith({ resultIndex: 0, resultCount: 1 })
+  })
+
+  it('opens a read-only context window around a cold-history result without replacing the live terminal', async () => {
+    const cursor = { sequence: 3, lineIndex: 0 }
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [{ sequence: 3, cursor, text: 'archived needle' }],
+      gaps: [],
+      hasMore: false
+    })
+    state.historyAroundTerminalCursor.mockResolvedValue({
+      lines: [
+        { sequence: 2, cursor: { sequence: 2, lineIndex: 0 }, text: 'line before' },
+        { sequence: 3, cursor, text: 'archived needle' },
+        { sequence: 4, cursor: { sequence: 4, lineIndex: 0 }, text: 'line after' }
+      ],
+      gaps: [],
+      hasMore: false,
+      anchorIndex: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false
+    })
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'needle', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+
+    const history = await screen.findByRole('region', { name: '终端历史记录' })
+    expect(state.historyAroundTerminalCursor).toHaveBeenCalledWith('session-1', cursor, 250)
+    expect(history.textContent).toContain('line before')
+    expect(history.textContent).toContain('archived needle')
+    expect(history.textContent).toContain('line after')
+    expect(history.querySelector('[data-current-match="true"]')?.textContent)
+      .toContain('archived needle')
+    const liveViewport = view.container.querySelector('.terminal-surface__viewport')
+    expect(liveViewport?.childElementCount).toBe(1)
+    expect(liveViewport?.getAttribute('aria-hidden')).toBe('true')
+
+    state.onData?.('blocked while reading')
+    expect(state.sendTerminalInput).not.toHaveBeenCalledWith('session-1', 'blocked while reading')
+    const liveBytes = new Uint8Array([76, 73, 86, 69])
+    state.onMessage?.({ type: 'terminal.data', sequence: 9, data: liveBytes })
+    expect(state.terminalWrite).toHaveBeenCalledWith(liveBytes, expect.any(Function))
+    expect(state.acknowledgeTerminal).toHaveBeenCalledWith('session-1', 9)
+
+    await act(async () => state.searchResultsListener?.({ resultIndex: 0, resultCount: 1 }))
+    expect(screen.getByRole('region', { name: '终端历史记录' })).toBe(history)
+
+    state.focus.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: '返回实时终端' }))
+    expect(screen.queryByRole('region', { name: '终端历史记录' })).toBeNull()
+    expect(liveViewport?.getAttribute('aria-hidden')).toBe('false')
+    await waitFor(() => expect(state.focus).toHaveBeenCalled())
+    state.onData?.('live input')
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('session-1', 'live input')
+
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await act(async () => {})
+    expect(screen.queryByRole('region', { name: '终端历史记录' })).toBeNull()
+  })
+
+  it('returns from the read-only history context with Escape', async () => {
+    const cursor = { sequence: 3, lineIndex: 0 }
+    state.searchTerminalHistory.mockResolvedValue({
+      matches: [{ sequence: 3, cursor, text: 'archived needle' }], gaps: [], hasMore: false
+    })
+    state.historyAroundTerminalCursor.mockResolvedValue({
+      lines: [{ sequence: 3, cursor, text: 'archived needle' }], gaps: [], hasMore: false,
+      anchorIndex: 0, hasMoreBefore: false, hasMoreAfter: false
+    })
+    render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: 'needle', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+    state.searchResultsListener?.({ resultIndex: 0, resultCount: 0 })
+    await screen.findByRole('region', { name: '终端历史记录' })
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(screen.queryByRole('region', { name: '终端历史记录' })).toBeNull()
   })
 
   it('walks multiple archived matches from newest to older with Previous', async () => {
