@@ -1450,6 +1450,226 @@ describe('PRD 05 hierarchy shell', () => {
       'hierarchy.get-scene-snapshot', 'hierarchy.get-scene-session-graph'
     ]))
   })
+
+  it('retries a transient Runtime failure after the native detached window closes and restores an input-ready card', async () => {
+    let data = fixture()
+    data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId = 'detached-retry'
+    data.sceneSnapshots![0]!.windows.push({
+      id: 'detached-retry', sceneId: 'scene-a1', state: 'detached'
+    })
+    let closeListener: ((event: {
+      windowId: string; mainWindowId: string; sceneId: string; mountId: string; sessionId: string
+    }) => void) | undefined
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      onDetachedWindowClosed: vi.fn((listener) => { closeListener = listener; return vi.fn() }),
+      onDagShortcut: vi.fn(() => vi.fn()), onDagNodeSelected: vi.fn(() => vi.fn())
+    } })
+    let returnAttempts = 0
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.return-session') {
+        returnAttempts += 1
+        if (returnAttempts === 1) throw new Error('Runtime channel temporarily unavailable')
+        data = structuredClone(data)
+        delete data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId
+        data.sceneSnapshots![0]!.windows[0]!.state = 'closed'
+        return {
+          sceneWindowId: 'detached-retry', sessionId: 'session-a1',
+          mountId: 'mount-a1', sceneId: 'scene-a1', state: 'returned'
+        }
+      }
+      if (method === 'hierarchy.get-scene-snapshot') return data.sceneSnapshots![0]
+      if (method === 'hierarchy.get-scene-session-graph') {
+        return {
+          sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+          nodes: [graphNode('session-a1', '终端 A1')]
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request, startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    expect(await screen.findByTestId('detached-placeholder')).toBeTruthy()
+    await act(async () => closeListener?.({
+      windowId: 'detached-retry', mainWindowId: 'window-1', sceneId: 'scene-a1',
+      mountId: 'mount-a1', sessionId: 'session-a1'
+    }))
+
+    expect(returnAttempts).toBe(1)
+    await waitFor(() => expect(returnAttempts).toBe(2))
+    await waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull())
+    expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('false')
+  })
+
+  it('returns through the domain command when the placeholder action outlives its native window', async () => {
+    let data = fixture()
+    data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId = 'detached-missing-action'
+    data.sceneSnapshots![0]!.windows.push({
+      id: 'detached-missing-action', sceneId: 'scene-a1', state: 'detached'
+    })
+    const closeDetachedTerminalWindow = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      closeDetachedTerminalWindow,
+      onDetachedWindowClosed: vi.fn(() => vi.fn()),
+      onDagShortcut: vi.fn(() => vi.fn()), onDagNodeSelected: vi.fn(() => vi.fn())
+    } })
+    let returnAttempts = 0
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.return-session') {
+        returnAttempts += 1
+        data = structuredClone(data)
+        delete data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId
+        data.sceneSnapshots![0]!.windows[0]!.state = 'closed'
+        return {
+          sceneWindowId: 'detached-missing-action', sessionId: 'session-a1',
+          mountId: 'mount-a1', sceneId: 'scene-a1', state: 'returned'
+        }
+      }
+      if (method === 'hierarchy.get-scene-snapshot') return data.sceneSnapshots![0]
+      if (method === 'hierarchy.get-scene-session-graph') {
+        return {
+          sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+          nodes: [graphNode('session-a1', '终端 A1')]
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request, startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '归还到当前页签' }))
+
+    await waitFor(() => expect(returnAttempts).toBe(1))
+    await waitFor(() => expect(screen.queryByTestId('detached-placeholder')).toBeNull())
+    expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('false')
+    expect(closeDetachedTerminalWindow).toHaveBeenCalledWith('detached-missing-action')
+  })
+
+  it('stops pending detached-return retries when the owning hierarchy unmounts', async () => {
+    const data = fixture()
+    data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId = 'detached-unmount'
+    data.sceneSnapshots![0]!.windows.push({
+      id: 'detached-unmount', sceneId: 'scene-a1', state: 'detached'
+    })
+    let closeListener: ((event: {
+      windowId: string; mainWindowId: string; sceneId: string; mountId: string; sessionId: string
+    }) => void) | undefined
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      onDetachedWindowClosed: vi.fn((listener) => { closeListener = listener; return vi.fn() }),
+      onDagShortcut: vi.fn(() => vi.fn()), onDagNodeSelected: vi.fn(() => vi.fn())
+    } })
+    let returnAttempts = 0
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.return-session') {
+        returnAttempts += 1
+        throw new Error('Runtime channel temporarily unavailable')
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request, startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {})
+    }
+
+    const view = render(<HierarchyShell />)
+    expect(await screen.findByTestId('detached-placeholder')).toBeTruthy()
+    await act(async () => closeListener?.({
+      windowId: 'detached-unmount', mainWindowId: 'window-1', sceneId: 'scene-a1',
+      mountId: 'mount-a1', sessionId: 'session-a1'
+    }))
+    expect(returnAttempts).toBe(1)
+
+    view.unmount()
+    await new Promise((resolve) => window.setTimeout(resolve, 150))
+    expect(returnAttempts).toBe(1)
+  })
+
+  it('keeps detached-window return read-only while still closing the native presentation', async () => {
+    const data = fixture()
+    data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId = 'detached-read-only'
+    data.sceneSnapshots![0]!.windows.push({
+      id: 'detached-read-only', sceneId: 'scene-a1', state: 'detached'
+    })
+    const closeDetachedTerminalWindow = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+      closeDetachedTerminalWindow,
+      detachedTerminalWindowExists: vi.fn(async () => true),
+      exportDatabaseRecoveryBundle: vi.fn(async () => ({ exportedPath: '/tmp/export' })),
+      onDetachedWindowClosed: vi.fn(() => vi.fn()),
+      onDagShortcut: vi.fn(() => vi.fn()), onDagNodeSelected: vi.fn(() => vi.fn())
+    } })
+    const request = vi.fn(async (method: string) => {
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request, startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {})
+    }
+
+    render(<HierarchyShell runtimeMode="read-only" />)
+    await userEvent.setup().click(await screen.findByRole('button', { name: '归还到当前页签' }))
+
+    expect(closeDetachedTerminalWindow).toHaveBeenCalledWith('detached-read-only')
+    expect(request).not.toHaveBeenCalledWith('hierarchy.return-session', expect.anything())
+  })
+
+  it('bounds automatic detached-return attempts when Runtime remains unavailable', async () => {
+    vi.useFakeTimers()
+    try {
+      const data = fixture()
+      data.sceneSnapshots![0]!.mounts[0]!.sceneWindowId = 'detached-bounded'
+      data.sceneSnapshots![0]!.windows.push({
+        id: 'detached-bounded', sceneId: 'scene-a1', state: 'detached'
+      })
+      let closeListener: ((event: {
+        windowId: string; mainWindowId: string; sceneId: string; mountId: string; sessionId: string
+      }) => void) | undefined
+      Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
+        onDetachedWindowClosed: vi.fn((listener) => { closeListener = listener; return vi.fn() }),
+        onDagShortcut: vi.fn(() => vi.fn()), onDagNodeSelected: vi.fn(() => vi.fn())
+      } })
+      let returnAttempts = 0
+      const request = vi.fn(async (method: string) => {
+        if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+        if (method === 'projection.snapshot') return projectionSnapshot(data)
+        if (method === 'hierarchy.return-session') {
+          returnAttempts += 1
+          throw new Error('Runtime channel unavailable')
+        }
+        throw new Error(`unexpected Runtime request: ${method}`)
+      })
+      runtime.current = {
+        request, startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {})
+      }
+
+      render(<HierarchyShell />)
+      await act(async () => {
+        for (let index = 0; index < 8; index += 1) await Promise.resolve()
+      })
+      expect(screen.getByTestId('detached-placeholder')).toBeTruthy()
+      await act(async () => closeListener?.({
+        windowId: 'detached-bounded', mainWindowId: 'window-1', sceneId: 'scene-a1',
+        mountId: 'mount-a1', sessionId: 'session-a1'
+      }))
+      expect(returnAttempts).toBe(1)
+
+      await act(() => vi.advanceTimersByTimeAsync(20_000))
+      expect(returnAttempts).toBe(5)
+      await act(() => vi.advanceTimersByTimeAsync(20_000))
+      expect(returnAttempts).toBe(5)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 function fixture(): HierarchyProjection {

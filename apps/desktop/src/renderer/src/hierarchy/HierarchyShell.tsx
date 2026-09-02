@@ -49,6 +49,8 @@ import { AppFocusRestorer } from './focus-restoration'
 import { useSessionRecovery } from '../runtime/useSessionRecovery'
 import { indexSceneLayout, layoutFromSnapshot } from './scene-layout-index'
 
+const DETACHED_RETURN_RETRY_DELAYS_MS = [100, 300, 900, 1_800] as const
+
 export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
   fixture?: HierarchyProjection
   runtimeMode?: RuntimeMode
@@ -370,17 +372,67 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
     stopped?: boolean
   }>>({})
   const ratioTimers = useRef(new Map<string, number>())
+  const detachedReturnTimers = useRef(new Map<string, number>())
+  const detachedReturnAttempts = useRef(new Map<string, number>())
+  const detachedReturnsInFlight = useRef(new Set<string>())
+  const detachedReturnAlive = useRef(true)
+  const commandsRef = useRef(commands)
+  commandsRef.current = commands
+  const clearDetachedReturnRetries = useCallback(() => {
+    for (const timer of detachedReturnTimers.current.values()) window.clearTimeout(timer)
+    detachedReturnTimers.current.clear()
+    detachedReturnAttempts.current.clear()
+  }, [])
+  const requestDetachedReturn = useCallback(function requestDetachedReturn(sceneWindowId: string) {
+    if (
+      !detachedReturnAlive.current
+      || readOnlyRef.current
+      || detachedReturnsInFlight.current.has(sceneWindowId)
+      || detachedReturnTimers.current.has(sceneWindowId)
+    ) return
+    detachedReturnsInFlight.current.add(sceneWindowId)
+    void Promise.resolve(commandsRef.current.returnSession(sceneWindowId)).then(() => {
+      detachedReturnAttempts.current.delete(sceneWindowId)
+    }, () => {
+      if (!detachedReturnAlive.current || readOnlyRef.current) {
+        detachedReturnAttempts.current.delete(sceneWindowId)
+        return
+      }
+      const retryIndex = detachedReturnAttempts.current.get(sceneWindowId) ?? 0
+      const delay = DETACHED_RETURN_RETRY_DELAYS_MS[retryIndex]
+      if (delay === undefined) {
+        detachedReturnAttempts.current.delete(sceneWindowId)
+        return
+      }
+      detachedReturnAttempts.current.set(sceneWindowId, retryIndex + 1)
+      const timer = window.setTimeout(() => {
+        detachedReturnTimers.current.delete(sceneWindowId)
+        requestDetachedReturn(sceneWindowId)
+      }, delay)
+      detachedReturnTimers.current.set(sceneWindowId, timer)
+    }).finally(() => {
+      detachedReturnsInFlight.current.delete(sceneWindowId)
+    })
+  }, [])
   useEffect(() => () => {
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
     ratioTimers.current.clear()
   }, [])
   useEffect(() => {
+    detachedReturnAlive.current = true
+    return () => {
+      detachedReturnAlive.current = false
+      clearDetachedReturnRetries()
+    }
+  }, [clearDetachedReturnRetries])
+  useEffect(() => {
     if (!readOnly) return
     for (const timer of ratioTimers.current.values()) window.clearTimeout(timer)
     ratioTimers.current.clear()
+    clearDetachedReturnRetries()
     setSessionLoader(null)
     setBranchDialog(null)
-  }, [readOnly])
+  }, [clearDetachedReturnRetries, readOnly])
   useEffect(() => {
     const unsubscribe = window.matouDesktop?.onDetachedWindowClosed((event) => {
       if (event.mainWindowId === projection.windowId) {
@@ -395,11 +447,11 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
         }
         // Closing the independent window only closes that presentation. The
         // same Session returns to its canvas instead of becoming a dead card.
-        void Promise.resolve(commands.returnSession(event.windowId)).catch(() => {})
+        requestDetachedReturn(event.windowId)
       }
     })
     return () => { if (typeof unsubscribe === 'function') unsubscribe() }
-  }, [commands, projection.windowId])
+  }, [projection.windowId, requestDetachedReturn])
   const sessionById = useMemo(
     () => new Map(projection.sessions.map((session) => [session.id, session])),
     [projection.sessions]
@@ -750,7 +802,12 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                 const detachedWindow = mountedWindow?.state === 'detached' ? mountedWindow : undefined
                 if (detachedWindow) {
                   if (!readOnly || liveDetachedWindowIds?.has(detachedWindow.id)) {
-                    return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id} />
+                    return <DetachedPlaceholder title={session.title} windowId={detachedWindow.id}
+                      onReturn={(sceneWindowId) => {
+                        requestDetachedReturn(sceneWindowId)
+                        void window.matouDesktop?.closeDetachedTerminalWindow?.(sceneWindowId)
+                          .catch(() => {})
+                      }} />
                   }
                   if (liveDetachedWindowIds === null) {
                     return <div className="scene-recovery" role="status">正在确认历史窗口…</div>
