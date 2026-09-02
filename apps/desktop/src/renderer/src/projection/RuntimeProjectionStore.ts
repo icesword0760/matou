@@ -351,10 +351,18 @@ export class RuntimeProjectionStore {
       const previous = nextGraphs[graph.sceneId]
       const locationsUnchanged = previous !== undefined && hasSameNodeLocations(previous, graph)
       if (previous && !locationsUnchanged) this.#removeGraphLocations(previous)
+      const retainedFocusedSessionId = graph.focusedSessionId ?? previous?.focusedSessionId
+      const focusedSessionId = retainedFocusedSessionId !== undefined &&
+        graph.nodes.some(({ sessionId }) => sessionId === retainedFocusedSessionId)
+        ? retainedFocusedSessionId
+        : undefined
       // RPC and MessagePort payloads already cross a structured-clone boundary.
       // Treat their arrays as immutable and clone only the graph shell; later
       // node patches use copy-on-write so published views remain stable.
-      const next = { ...graph, nodes: graph.nodes, edges: graph.edges }
+      const next = {
+        ...graph, nodes: graph.nodes, edges: graph.edges,
+        ...(focusedSessionId === undefined ? {} : { focusedSessionId })
+      }
       nextGraphs[graph.sceneId] = next
       if (!locationsUnchanged) this.#indexGraphLocations(next)
     }

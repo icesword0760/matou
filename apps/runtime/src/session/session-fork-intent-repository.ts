@@ -415,15 +415,20 @@ export class SessionForkIntentRepository {
     })
   }
 
-  fail(sessionId: string, error: string, now: number): void {
-    this.#database.run(
+  fail(
+    sessionId: string,
+    error: string,
+    now: number,
+    transaction?: DatabaseTransaction
+  ): boolean {
+    return this.#mutate(transaction, (tx) => tx.run(
       `UPDATE session_fork_intents
        SET state = 'failed', stage = 'failed', error_message = ?, completed_at = ?, updated_at = ?
        WHERE session_id = ? AND state IN ('pending', 'starting')
          AND (operation_id = '' OR operation_id LIKE 'legacy-operation:%')
          AND (lease_token IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?)`,
       error, now, now, sessionId, now
-    )
+    ).changes === 1)
   }
 
   state(sessionId: string): ForkIntentRow['state'] | undefined {

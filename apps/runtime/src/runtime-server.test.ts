@@ -2196,6 +2196,72 @@ describe('RuntimeServer domain RPC', () => {
     }
   })
 
+  it('replays provider output produced before a recovered Claude card attaches', async () => {
+    const executable = join(root, 'provider-detached-recovery-fixture.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      "printf '%02050d\\n' 0",
+      "printf 'READY:provider-detached-recovery\\n'",
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'provider-detached-recovery', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+      'binding-provider-detached-recovery', 'provider-detached-recovery',
+      'provider-detached-recovery-identity'
+    )
+    const sessions = new RuntimeSessionRegistry()
+    const recoveryPort = new MockPort()
+    const recoveryServer = new RuntimeServer(
+      recoveryPort, root, database, undefined, undefined, sessions
+    )
+    recoveryPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-detached-recovery-background'
+    })
+    const rendererPort = new MockPort()
+    const rendererServer = new RuntimeServer(
+      rendererPort, root, database, undefined, undefined, sessions
+    )
+    rendererPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-detached-recovery-renderer'
+    })
+    try {
+      await recoveryServer.ensureSessionRunning({
+        sessionId: 'provider-detached-recovery', sceneId: 'scene-provider-detached-recovery',
+        executionContextId: 'replay-context', profile: 'claude-code',
+        priority: 'active-session', enqueueSequence: 1
+      })
+      expect(terminalText(recoveryPort)).not.toContain('READY:provider-detached-recovery')
+
+      rendererPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-detached-recovery', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => rendererPort.last('terminal.spawned')?.reattached === true)
+      rendererPort.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-detached-recovery', fromSequence: 0
+      })
+      await waitUntil(() => rendererPort.last('terminal.replay-complete') !== undefined)
+
+      expect(terminalText(rendererPort)).toContain('READY:provider-detached-recovery')
+    } finally {
+      rendererServer.close()
+      recoveryServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('accepts a fresh Claude statusline immediately when it supersedes a stale restore failure', async () => {
     const executable = join(root, 'provider-replacement-fixture.sh')
     const argumentFile = join(root, 'provider-replacement-arguments.txt')
@@ -2644,6 +2710,68 @@ describe('RuntimeServer domain RPC', () => {
           .flatMap((frame) => [...frame.data])
       ))
       expect(durableText.match(/\[Fork 未完成，请检查上方原因后重试\]/g)).toHaveLength(1)
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('publishes the failed Fork graph when the authoritative provider launch rejects its source', async () => {
+    const executable = join(root, 'provider-fork-graph-failure.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    try {
+      registerSession(database, 'fork-graph-source', 'claude-code')
+      registerCanvasSession(database, 'fork-graph-derived', 'claude-code')
+      const intents = new SessionForkIntentRepository(database)
+      intents.accept({
+        operationId: 'fork-graph-operation', submissionKey: 'fork-graph-submission',
+        sessionId: 'fork-graph-derived', sourceSessionId: 'fork-graph-source',
+        sourceProviderSessionId: 'missing-provider-graph', displayName: '失败分支',
+        worktreeMode: 'current', totalSteps: 2, now: 1
+      })
+      const leaseDecision = intents.acquireLease({
+        operationId: 'fork-graph-operation', owner: 'runtime-test',
+        now: Date.now(), ttlMs: 60_000
+      })
+      expect(leaseDecision.kind).toBe('acquired')
+      if (leaseDecision.kind !== 'acquired') throw new Error('Fork lease was not acquired')
+      expect(intents.advanceStage({
+        operationId: 'fork-graph-operation', lease: leaseDecision.lease,
+        stage: 'restoring-provider', now: Date.now()
+      }).kind).toBe('applied')
+      port.receive({
+        type: 'events.subscribe', protocolVersion: PROTOCOL_VERSION,
+        consumerId: 'fork-graph-renderer', afterSequence: 0, batchSize: 100
+      })
+
+      await server.startOrResumeSession({
+        sessionId: 'fork-graph-derived', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      }, {
+        operationId: 'fork-graph-operation', runId: 'fork-graph-run',
+        lease: leaseDecision.lease
+      })
+
+      await waitUntil(() => intents.progressByOperation('fork-graph-operation')?.stage === 'failed')
+      await waitUntil(() => port.sent.some((message) =>
+        message.type === 'events.batch' && message.events.some((event) =>
+          event.eventType === 'session.fork-failed'
+        )
+      ))
+      const event = port.sent.flatMap((message) =>
+        message.type === 'events.batch' ? message.events : []
+      ).find(({ eventType }) => eventType === 'session.fork-failed')
+      expect(event?.payload).toMatchObject({
+        graph: {
+          sceneId: 'scene-fork-graph-derived',
+          nodes: [{
+            sessionId: 'fork-graph-derived', workStatus: 'error',
+            forkProgress: { stage: 'failed', error: 'provider session not found' }
+          }]
+        }
+      })
     } finally {
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }

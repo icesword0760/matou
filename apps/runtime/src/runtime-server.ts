@@ -66,6 +66,7 @@ import { HierarchyApplicationService } from './hierarchy/hierarchy-application-s
 import { SessionInteractionService } from './session-canvas/session-interaction-service'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
+import { projectSceneGraphFrom } from './session-canvas/session-graph-repository'
 import { PreferenceRepository } from './product/experience-foundation'
 import {
   managedWorktreeIdentityExpectation,
@@ -1867,16 +1868,67 @@ export class RuntimeServer {
     authority?: ForkExecutionAuthority
   ): boolean {
     const now = Date.now()
-    if (authority) {
-      return this.#forkIntents.failOperation({
-        operationId: authority.operationId,
-        lease: authority.lease,
-        error: reason,
-        now
-      }).kind === 'applied'
+    const operation = authority
+      ? this.#forkIntents.operationById(authority.operationId)
+      : this.#forkIntents.nonTerminalBySession(sessionId)
+    if (!operation || operation.identity.sessionId !== sessionId) {
+      if (authority !== undefined) {
+        return this.#forkIntents.failOperation({
+          operationId: authority.operationId,
+          lease: authority.lease,
+          error: reason,
+          now
+        }).kind === 'applied'
+      }
+      this.#forkIntents.fail(sessionId, reason, now)
+      return true
     }
-    this.#forkIntents.fail(sessionId, reason, now)
-    return true
+    const commandId = `runtime-fork-failed:${operation.identity.operationId}:${randomUUID()}`
+    const applied = this.#transactions.execute({
+      commandId,
+      commandType: 'session.fork-failed',
+      requestHash: `${operation.identity.operationId}:${reason}:${now}`
+    }, ({ tx, emit }) => {
+      const failed = authority
+        ? this.#forkIntents.failOperation({
+            operationId: authority.operationId,
+            lease: authority.lease,
+            error: reason,
+            now
+          }, tx).kind === 'applied'
+        : this.#forkIntents.fail(sessionId, reason, now, tx)
+      if (!failed) return false
+      tx.run(
+        `UPDATE sessions SET status = 'interrupted', updated_at = ?,
+           version = version + 1 WHERE id = ?`,
+        now, sessionId
+      )
+      const owner = tx.get<{ task_id: string; workspace_id: string }>(
+        `SELECT sessions.task_id, tasks.workspace_id
+         FROM sessions JOIN tasks ON tasks.id = sessions.task_id
+         WHERE sessions.id = ?`,
+        sessionId
+      )
+      emit({
+        eventId: `${commandId}:graph`,
+        eventType: 'session.fork-failed',
+        aggregateType: 'session',
+        aggregateId: sessionId,
+        ...(owner === undefined ? {} : {
+          workspaceId: owner.workspace_id,
+          taskId: owner.task_id
+        }),
+        sessionId,
+        payload: {
+          error: reason,
+          graph: projectSceneGraphFrom(tx, operation.sceneId, operation.windowId)
+        },
+        occurredAt: now
+      })
+      return true
+    }).result
+    if (applied) this.flushSemanticEvents()
+    return applied
   }
 
   async #appendForkExitFailure(sessionId: string, reason: string, sequence: number): Promise<void> {

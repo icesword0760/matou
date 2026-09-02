@@ -29,6 +29,7 @@ test.describe('PRD 06 session fork', () => {
     }
     try {
       fixture = await restartMatou(fixture, { env: environment })
+      await expectOnlySecondaryColorLcd(fixture)
       await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1800, 900))
       const source = visibleSurfaces(fixture.page).first()
       const sourceSessionId = await requiredAttribute(source, 'data-session-id')
@@ -111,6 +112,7 @@ test.describe('PRD 06 session fork', () => {
         .filter(({ args }) => args.includes('--fork-session')).length
       expect(forkLaunchCount).toBe(2)
       fixture = await restartMatou(fixture, { env: environment })
+      await expectOnlySecondaryColorLcd(fixture)
       await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
       await expect(paneForSession(fixture.page, secondForkSessionId).locator('.xterm-rows'))
         .toContainText('READY:provider-fork-e2e-2')
@@ -141,6 +143,7 @@ test.describe('PRD 06 session fork', () => {
       await fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' }).click()
       await expect(fixture.page.getByTestId('detached-placeholder')).toContainText('已脱出')
       await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+      await expectOnlySecondaryColorLcd(fixture, 2)
       const detached = (await fixture.app.windows()).find((candidate) => candidate !== fixture.page)!
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-session-id', sourceSessionId)
       await detached.locator('.terminal-surface').dispatchEvent('contextmenu')
@@ -166,6 +169,7 @@ test.describe('PRD 06 session fork', () => {
         MATOU_PRD06_INPUT_DIR: inputDirectory,
         MATOU_PRD06_FAIL_FORK: '1'
       } })
+      await expectOnlySecondaryColorLcd(fixture)
       const source = visibleSurfaces(fixture.page).first()
       await terminalCommand(source, 'claude')
       await expect(source.locator('.xterm-rows')).toContainText('READY:provider-source-e2e')
@@ -197,6 +201,7 @@ test.describe('PRD 06 session fork', () => {
       await fixture.page.locator('.hierarchy-shell').screenshot({
         path: join(evidenceDirectory, 'fork-failure.png')
       })
+      await expectOnlySecondaryColorLcd(fixture)
     } finally {
       await fixture.close()
     }
@@ -245,6 +250,30 @@ async function requiredAttribute(locator: Locator, name: string): Promise<string
   const value = await locator.getAttribute(name)
   if (!value) throw new Error(`Expected ${name}`)
   return value
+}
+
+async function expectOnlySecondaryColorLcd(
+  fixture: MatouFixture,
+  visibleCount = 1
+): Promise<void> {
+  await expect.poll(() => fixture.app.evaluate(({ BrowserWindow, screen }) => {
+    const primary = screen.getPrimaryDisplay()
+    const colorLcd = screen.getAllDisplays().find(({ id, internal, label }) =>
+      id !== primary.id && (internal || /color\s*lcd|内建视网膜显示器/i.test(label)))
+    const visible = BrowserWindow.getAllWindows().filter((window) => window.isVisible())
+    const displays = visible.map((window) => screen.getDisplayMatching(window.getBounds()))
+    return {
+      primaryLabel: primary.label,
+      colorLcdInternal: colorLcd?.internal,
+      visible: visible.length,
+      colorLcd: displays.filter(({ id }) => id === colorLcd?.id).length,
+      primary: displays.filter(({ id }) => id === primary.id).length,
+      xv272u: displays.filter(({ label }) => label === 'XV272U').length
+    }
+  })).toEqual({
+    primaryLabel: 'XV272U', colorLcdInternal: true, visible: visibleCount,
+    colorLcd: visibleCount, primary: 0, xv272u: 0
+  })
 }
 
 async function invocationLines(path: string): Promise<Array<{ args: string[]; providerId: string }>> {
@@ -351,13 +380,17 @@ if fork and os.environ.get('MATOU_PRD06_FAIL_FORK') == '1':
 
 settings_data=json.load(open(settings))
 url=settings_data['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
-def hook(name):
-    body=json.dumps({'hook_event_name':name,'session_id':provider_id,'cwd':os.getcwd()}).encode()
+def post(payload):
+    body=json.dumps(payload).encode()
     request=urllib.request.Request(url, data=body, headers={'content-type':'application/json'}, method='POST')
     urllib.request.urlopen(request, timeout=3).read()
-hook('SessionStart')
-print('X' * 2050, flush=True)
+def hook(name):
+    post({'hook_event_name':name,'session_id':provider_id,'cwd':os.getcwd()})
 print('READY:' + provider_id, flush=True)
+# Claude's startup identity arrives through its statusline payload after the
+# first usable screen, not through an HTTP SessionStart hook. Reproduce that
+# ordering so READY means the same thing in deterministic and real-provider gates.
+post({'session_id':provider_id,'cwd':os.getcwd()})
 input_path=pathlib.Path(os.environ['MATOU_PRD06_INPUT_DIR']) / (provider_id + '.txt')
 for line in sys.stdin:
     value=line.rstrip('\\r\\n')
