@@ -183,12 +183,21 @@ test.describe('horizontal sibling navigation', () => {
         await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
       }
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
-      await carousel.evaluate((element) => { element.scrollLeft = 0 })
+      const carouselBox = await carousel.boundingBox()
+      expect(carouselBox).not.toBeNull()
+      // Use the same real wheel gesture as a user. Besides moving the strip,
+      // this explicitly cancels the 440ms focus-follow started by the last
+      // created Session; assigning scrollLeft directly is correctly overruled
+      // by that still-active product animation.
+      await fixture.page.mouse.move(
+        carouselBox!.x + carouselBox!.width / 2,
+        carouselBox!.y + Math.min(20, carouselBox!.height / 2)
+      )
+      await fixture.page.mouse.wheel(-5_000, 0)
       await expect.poll(() => carousel.evaluate((element) => element.scrollLeft)).toBe(0)
-      // Session creation has a short focus-follow animation. Select a card by
-      // its real clipped rectangle after that motion settles; data-in-viewport
-      // is an index hint for virtualization, not a pointer hit-test oracle.
-      await fixture.page.waitForTimeout(500)
+      await expect(carousel).toHaveAttribute('data-viewport-moving', 'false')
+      // Select a card by its real clipped rectangle; data-in-viewport is an
+      // index hint for virtualization, not a pointer hit-test oracle.
       const startingSessionId = await carousel.evaluate((viewport) => {
         const viewportRect = viewport.getBoundingClientRect()
         return [...viewport.querySelectorAll<HTMLElement>('[data-session-card]')]
