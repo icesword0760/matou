@@ -349,13 +349,14 @@ export class RuntimeProjectionStore {
     const nextGraphs = { ...this.#sessionGraphs }
     for (const graph of graphs) {
       const previous = nextGraphs[graph.sceneId]
-      if (previous) this.#removeGraphLocations(previous)
+      const locationsUnchanged = previous !== undefined && hasSameNodeLocations(previous, graph)
+      if (previous && !locationsUnchanged) this.#removeGraphLocations(previous)
       // RPC and MessagePort payloads already cross a structured-clone boundary.
       // Treat their arrays as immutable and clone only the graph shell; later
       // node patches use copy-on-write so published views remain stable.
       const next = { ...graph, nodes: graph.nodes, edges: graph.edges }
       nextGraphs[graph.sceneId] = next
-      this.#indexGraphLocations(next)
+      if (!locationsUnchanged) this.#indexGraphLocations(next)
     }
     this.#sessionGraphs = nextGraphs
   }
@@ -502,6 +503,17 @@ function isSessionGraphEvent(eventType: string): boolean {
     eventType === 'session.fork-removed' ||
     eventType === 'session.graph-summary-changed' ||
     eventType === 'session.stopped-state-changed'
+}
+
+function hasSameNodeLocations(
+  previous: SessionGraphProjection,
+  next: SessionGraphProjection
+): boolean {
+  if (previous.nodes.length !== next.nodes.length) return false
+  for (let index = 0; index < previous.nodes.length; index += 1) {
+    if (previous.nodes[index]?.sessionId !== next.nodes[index]?.sessionId) return false
+  }
+  return true
 }
 
 function asSessionGraph(value: unknown): SessionGraphProjection | undefined {

@@ -375,9 +375,12 @@ describe('ForkWorkflowService', () => {
       operationId, owner: 'worker-a', now: 30, ttlMs: 30
     })
     if (first.kind !== 'acquired') throw new Error('worker A lease missing')
+    let executionError: unknown
     const executing = service.executeFork(command('takeover-execute'), {
       windowId: 'window-1', sceneId: source.sceneId,
       operationId, lease: first.lease, now: 30
+    }).catch((error: unknown) => {
+      executionError = error
     })
 
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -390,7 +393,9 @@ describe('ForkWorkflowService', () => {
     expect(second.kind).toBe('acquired')
     if (second.kind !== 'acquired') throw new Error('worker B lease missing')
 
-    await expect(executing).rejects.toThrow('stale Fork lease')
+    await executing
+    expect(executionError).toBeInstanceOf(Error)
+    expect((executionError as Error).message).toContain('stale Fork lease')
     expect(database.get(
       `SELECT fork.stage, fork.state, fork.lease_token, sessions.status,
               environment.state AS environment_state
