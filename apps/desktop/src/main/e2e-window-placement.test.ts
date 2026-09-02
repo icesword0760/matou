@@ -31,12 +31,15 @@ describe('secondaryDisplayWindowBounds', () => {
     })).toEqual({ x: 2716, y: 101 })
   })
 
-  it('leaves normal product windows and single-display machines unchanged', () => {
+  it('leaves normal product windows unchanged', () => {
     expect(secondaryDisplayWindowBounds({
       enabled: false, width: 1200, height: 780, primaryDisplayId: 1, displays
     })).toBeUndefined()
-    expect(secondaryDisplayWindowBounds({
+  })
+
+  it('fails closed instead of placing an automated window on the primary display', () => {
+    expect(() => secondaryDisplayWindowBounds({
       enabled: true, width: 1200, height: 780, primaryDisplayId: 1, displays: displays.slice(0, 1)
-    })).toBeUndefined()
+    })).toThrow('secondary acceptance display is unavailable')
   })
 })

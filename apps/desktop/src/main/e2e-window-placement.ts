@@ -17,7 +17,9 @@ export function secondaryDisplayWindowBounds(input: {
   const display = candidates.find(({ internal }) => internal === true) ??
     candidates.find(({ label = '' }) => /color\s*lcd|built[- ]?in|内建/i.test(label)) ??
     candidates[0]
-  if (!display) return undefined
+  if (!display) {
+    throw new Error('secondary acceptance display is unavailable; automated window launch stopped')
+  }
   const { workArea } = display
   return {
     x: workArea.x + Math.max(0, Math.floor((workArea.width - input.width) / 2)),
