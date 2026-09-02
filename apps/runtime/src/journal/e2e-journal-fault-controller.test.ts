@@ -13,11 +13,14 @@ describe('E2E Journal fault controller', () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
   })
 
-  it('stays absent unless both the E2E gate and control path are present', () => {
+  it('stays absent unless the E2E gate and at least one Journal option are present', () => {
     expect(createE2eJournalOptionsProvider({ MATOU_E2E: '0' })).toBeUndefined()
     expect(createE2eJournalOptionsProvider({ MATOU_E2E: '1' })).toBeUndefined()
     expect(createE2eJournalOptionsProvider({
       MATOU_E2E: '0', MATOU_E2E_JOURNAL_FAULT_CONTROL: '/tmp/fault.json'
+    })).toBeUndefined()
+    expect(createE2eJournalOptionsProvider({
+      MATOU_E2E: '0', MATOU_E2E_JOURNAL_MAX_SEGMENT_BYTES: '524288'
     })).toBeUndefined()
   })
 
@@ -50,6 +53,20 @@ describe('E2E Journal fault controller', () => {
       await target.close()
       await healthy.close()
     }
+  })
+
+  it('exposes deterministic rotation limits only behind the E2E gate', () => {
+    expect(createE2eJournalOptionsProvider({
+      MATOU_E2E: '1',
+      MATOU_E2E_JOURNAL_MAX_SEGMENT_BYTES: '524288',
+      MATOU_E2E_JOURNAL_RAW_HOT_BYTES: '1048576'
+    })?.('session-a')).toMatchObject({
+      maxSegmentBytes: 524_288,
+      rawHotBytes: 1_048_576
+    })
+    expect(() => createE2eJournalOptionsProvider({
+      MATOU_E2E: '1', MATOU_E2E_JOURNAL_MAX_SEGMENT_BYTES: '127'
+    })).toThrow('MATOU_E2E_JOURNAL_MAX_SEGMENT_BYTES')
   })
 })
 
