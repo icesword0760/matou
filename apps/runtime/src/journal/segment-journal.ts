@@ -61,6 +61,8 @@ export interface SegmentJournalOptions {
   rawHotBytes?: number
   compressSealed?: boolean
   compressor?: JournalCompressor
+  /** Retained recovery checkpoints whose containing raw segments must stay uncompressed. */
+  checkpointProtectedSequences?: readonly number[]
   /** Fault-injectable frame boundary; production callers use the default durable file writer. */
   writeFrame?: (handle: FileHandle, encoded: Buffer) => Promise<void>
 }
@@ -70,6 +72,7 @@ type NormalizedSegmentJournalOptions = {
   rawHotBytes: number
   compressSealed: boolean
   compressor: JournalCompressor
+  checkpointProtectedSequences: readonly number[]
   writeFrame: (handle: FileHandle, encoded: Buffer) => Promise<void>
 }
 
@@ -98,6 +101,8 @@ export class SegmentJournal {
   readonly #compressSealed: boolean
   readonly #compressor: JournalCompressor
   readonly #sealedSegments: SegmentDescriptor[]
+  readonly #segmentBounds: Map<number, { firstSequence: number; lastSequence: number }>
+  readonly #checkpointProtectedSequences = new Set<number>()
   readonly #tailIndex: JournalTailIndex
   readonly #tailIndexPath: string
   readonly #tailIndexWriter: LatestValueWriter<JournalTailIndexSnapshot>
@@ -118,6 +123,7 @@ export class SegmentJournal {
     segmentFirstSequence: number,
     lastSequence: number,
     sealedSegments: SegmentDescriptor[],
+    segmentBounds: Map<number, { firstSequence: number; lastSequence: number }>,
     tailIndex: JournalTailIndex,
     tailIndexPath: string,
     options: NormalizedSegmentJournalOptions
@@ -135,6 +141,8 @@ export class SegmentJournal {
     this.#compressSealed = options.compressSealed
     this.#compressor = options.compressor
     this.#sealedSegments = sealedSegments
+    this.#segmentBounds = segmentBounds
+    this.#replaceCheckpointProtectedSequences(options.checkpointProtectedSequences)
     this.#tailIndex = tailIndex
     this.#tailIndexPath = tailIndexPath
     this.#tailIndexWriter = new LatestValueWriter((snapshot) =>
@@ -192,6 +200,9 @@ export class SegmentJournal {
       rawHotBytes: options.rawHotBytes ?? RAW_HOT_BYTES,
       compressSealed: options.compressSealed ?? true,
       compressor: options.compressor ?? defaultJournalCompressor,
+      checkpointProtectedSequences: normalizeCheckpointSequences(
+        options.checkpointProtectedSequences ?? []
+      ),
       writeFrame: options.writeFrame ?? writeEntireFrame
     }
     if (normalizedOptions.maxSegmentBytes < 128) {
@@ -231,6 +242,17 @@ export class SegmentJournal {
       activeFrames,
       segmentIndex
     )
+    const segmentBounds = new Map<number, { firstSequence: number; lastSequence: number }>()
+    if (normalizedOptions.checkpointProtectedSequences.length > 0) {
+      const { readSessionJournalBounds } = await import('./journal-range-reader')
+      const bounds = await readSessionJournalBounds(dataRoot, sessionId)
+      for (const segment of bounds.segments) {
+        segmentBounds.set(segment.index, {
+          firstSequence: segment.firstSequence,
+          lastSequence: segment.lastSequence
+        })
+      }
+    }
     return new SegmentJournal(
       directory,
       handle,
@@ -244,6 +266,7 @@ export class SegmentJournal {
         .map((segment) => segment.state === 'active'
           ? { ...segment, state: 'sealed-raw' as const }
           : segment),
+      segmentBounds,
       tailIndex,
       tailIndexPath,
       normalizedOptions
@@ -317,7 +340,7 @@ export class SegmentJournal {
   }
 
   compressionCandidates(
-    checkpointProtectedIndexes: ReadonlySet<number> = new Set()
+    checkpointProtectedIndexes: ReadonlySet<number> = this.#checkpointProtectedIndexes()
   ): SegmentDescriptor[] {
     const descriptors: SegmentDescriptor[] = [
       ...this.#sealedSegments.map((segment) => ({
@@ -332,6 +355,12 @@ export class SegmentJournal {
       }
     ]
     return selectCompressionCandidates(descriptors, this.#rawHotBytes)
+  }
+
+  async protectCheckpointSequences(sequences: readonly number[]): Promise<void> {
+    this.#assertOpen()
+    this.#replaceCheckpointProtectedSequences(normalizeCheckpointSequences(sequences))
+    this.#scheduleSealedCompression()
   }
 
   async #append(
@@ -408,6 +437,10 @@ export class SegmentJournal {
       closeError = error
     }
     this.#sealedSegments.push(sealedSegment)
+    this.#segmentBounds.set(sealedSegment.index, {
+      firstSequence: this.#segmentFirstSequence,
+      lastSequence: this.#lastSequence
+    })
     this.#segmentIndex = nextSegmentIndex
     this.#path = nextPath
     this.#handle = nextHandle
@@ -432,6 +465,24 @@ export class SegmentJournal {
         }
       }).catch(() => undefined)
     }
+  }
+
+  #checkpointProtectedIndexes(): Set<number> {
+    const indexes = new Set<number>()
+    for (const [index, bounds] of this.#segmentBounds) {
+      for (const sequence of this.#checkpointProtectedSequences) {
+        if (sequence >= bounds.firstSequence && sequence <= bounds.lastSequence) {
+          indexes.add(index)
+          break
+        }
+      }
+    }
+    return indexes
+  }
+
+  #replaceCheckpointProtectedSequences(sequences: readonly number[]): void {
+    this.#checkpointProtectedSequences.clear()
+    for (const sequence of sequences) this.#checkpointProtectedSequences.add(sequence)
   }
 
   #assertOpen(): void {
@@ -461,6 +512,17 @@ export class SegmentJournal {
   private sessionId(): string {
     return this.directory.split(/[/\\]/).at(-1)!
   }
+}
+
+function normalizeCheckpointSequences(sequences: readonly number[]): number[] {
+  const normalized = new Set<number>()
+  for (const sequence of sequences) {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) {
+      throw new Error('checkpoint protected sequence must be a non-negative safe integer')
+    }
+    normalized.add(sequence)
+  }
+  return [...normalized].sort((left, right) => left - right)
 }
 
 async function writeEntireFrame(handle: FileHandle, encoded: Buffer): Promise<void> {

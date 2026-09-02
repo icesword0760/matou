@@ -1043,7 +1043,8 @@ export class RuntimeServer {
         })
         return
       }
-      await new CheckpointManager(this.#dataRoot, this.#database).create({
+      const checkpoints = new CheckpointManager(this.#dataRoot, this.#database)
+      await checkpoints.create({
         sessionId: message.sessionId,
         terminalSequence: message.throughSequence,
         domainEventSequence: activeSession
@@ -1052,6 +1053,9 @@ export class RuntimeServer {
         screenEpoch: message.screenEpoch,
         snapshot: new TextEncoder().encode(message.snapshot)
       })
+      await activeSession?.protectCheckpointSequences(
+        checkpoints.protectedTerminalSequences(message.sessionId)
+      )
       this.#port.postMessage({
         type: 'terminal.checkpoint-stored',
         protocolVersion: PROTOCOL_VERSION,
@@ -1503,9 +1507,7 @@ export class RuntimeServer {
         cwd,
         dataRoot: this.#dataRoot,
         profile: message.profile,
-        ...(this.#journalOptionsForSession(message.sessionId) === undefined ? {} : {
-          journalOptions: this.#journalOptionsForSession(message.sessionId)!
-        }),
+        journalOptions: this.#journalOptions(message.sessionId),
         ...(providerSessionId === undefined ? {} : { providerSessionId }),
         ...(forkLaunch === undefined ? {} : { forkSession: true }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
@@ -1793,7 +1795,11 @@ export class RuntimeServer {
       frame.kind === 'output' && new TextDecoder().decode(frame.data).includes(banner)
     )
     if (!alreadyPresented) {
-      const journal = await SegmentJournal.open(this.#dataRoot, message.sessionId)
+      const journal = await SegmentJournal.open(
+        this.#dataRoot,
+        message.sessionId,
+        this.#journalOptions(message.sessionId)
+      )
       const sequence = journal.lastSequence + 1
       await journal.appendOutput(sequence, new TextEncoder().encode(
         `\r\n\u001b[31m${reason}\u001b[0m\r\n` +
@@ -1833,7 +1839,11 @@ export class RuntimeServer {
   async #appendForkExitFailure(sessionId: string, reason: string, sequence: number): Promise<void> {
     try {
       const banner = '[Fork 未完成，请检查上方原因后重试]'
-      const journal = await SegmentJournal.open(this.#dataRoot, sessionId)
+      const journal = await SegmentJournal.open(
+        this.#dataRoot,
+        sessionId,
+        this.#journalOptions(sessionId)
+      )
       const nextSequence = Math.max(sequence, journal.lastSequence + 1)
       const data = new TextEncoder().encode(
         `\r\n\u001b[31m${reason}\u001b[0m\r\n` +
@@ -1848,6 +1858,21 @@ export class RuntimeServer {
       })
     } catch (error) {
       if (!this.#closed) console.error(`[session.fork-failed] ${errorMessage(error)}`)
+    }
+  }
+
+  #journalOptions(sessionId: string): SegmentJournalOptions {
+    const configured = this.#journalOptionsForSession(sessionId)
+    const retained = new CheckpointManager(
+      this.#dataRoot,
+      this.#database
+    ).protectedTerminalSequences(sessionId)
+    return {
+      ...configured,
+      checkpointProtectedSequences: [
+        ...(configured?.checkpointProtectedSequences ?? []),
+        ...retained
+      ]
     }
   }
 

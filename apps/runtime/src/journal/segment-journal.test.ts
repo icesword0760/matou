@@ -14,6 +14,7 @@ import {
 } from './segment-journal'
 import { loadJournalTailIndex, writeJournalTailIndex } from './journal-tail-index'
 import { JournalCompressor } from './journal-compressor'
+import { readSessionJournalBounds } from './journal-range-reader'
 
 const temporaryDirectories: string[] = []
 
@@ -263,6 +264,88 @@ describe('SegmentJournal', () => {
     await reopened.appendOutput(19, new TextEncoder().encode('live-after-gap\n'))
     expect(reopened.lastSequence).toBe(19)
     await reopened.close()
+  })
+
+  it('keeps every retained checkpoint segment raw across rotation and restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const writer = await SegmentJournal.open(directory, 'session-checkpoint-restart', {
+      maxSegmentBytes: 150,
+      rawHotBytes: 1,
+      compressSealed: false
+    })
+    for (let sequence = 1; sequence <= 8; sequence += 1) {
+      await writer.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
+    }
+    await writer.close()
+
+    const compressor = new JournalCompressor()
+    const restarted = await SegmentJournal.open(directory, 'session-checkpoint-restart', {
+      maxSegmentBytes: 150,
+      rawHotBytes: 1,
+      checkpointProtectedSequences: [2, 4],
+      compressor
+    })
+    await compressor.whenIdle()
+
+    const bounds = await readSessionJournalBounds(directory, 'session-checkpoint-restart')
+    expect(bounds.segments.find(({ firstSequence, lastSequence }) =>
+      firstSequence <= 2 && lastSequence >= 2
+    )?.path).toMatch(/\.mtj$/)
+    expect(bounds.segments.find(({ firstSequence, lastSequence }) =>
+      firstSequence <= 4 && lastSequence >= 4
+    )?.path).toMatch(/\.mtj$/)
+    expect(bounds.segments.some(({ lastSequence, path }) =>
+      lastSequence < 7 && path.endsWith('.mtj.gz')
+    )).toBe(true)
+
+    const replayed = []
+    for await (const frame of restarted.iterateFrames({ fromSequence: 5 })) replayed.push(frame)
+    expect(replayed).toMatchObject([
+      { sequence: 5 }, { sequence: 6 }, { sequence: 7 }, { sequence: 8 }
+    ])
+    await restarted.close()
+  })
+
+  it('releases an obsolete checkpoint segment and protects its replacement', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
+    temporaryDirectories.push(directory)
+    const writer = await SegmentJournal.open(directory, 'session-checkpoint-change', {
+      maxSegmentBytes: 150,
+      rawHotBytes: 1,
+      compressSealed: false
+    })
+    for (let sequence = 1; sequence <= 5; sequence += 1) {
+      await writer.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
+    }
+    await writer.close()
+
+    const compressor = new JournalCompressor()
+    const journal = await SegmentJournal.open(directory, 'session-checkpoint-change', {
+      maxSegmentBytes: 150,
+      rawHotBytes: 1,
+      checkpointProtectedSequences: [2, 4],
+      compressor
+    })
+    await compressor.whenIdle()
+    await journal.appendOutput(6, Uint8Array.from({ length: 32 }, () => 6))
+    await journal.protectCheckpointSequences([4, 6])
+    for (let sequence = 7; sequence <= 10; sequence += 1) {
+      await journal.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
+    }
+    await compressor.whenIdle()
+
+    const bounds = await readSessionJournalBounds(directory, 'session-checkpoint-change')
+    expect(bounds.segments.find(({ firstSequence, lastSequence }) =>
+      firstSequence <= 2 && lastSequence >= 2
+    )?.path).toMatch(/\.mtj\.gz$/)
+    expect(bounds.segments.find(({ firstSequence, lastSequence }) =>
+      firstSequence <= 4 && lastSequence >= 4
+    )?.path).toMatch(/\.mtj$/)
+    expect(bounds.segments.find(({ firstSequence, lastSequence }) =>
+      firstSequence <= 6 && lastSequence >= 6
+    )?.path).toMatch(/\.mtj$/)
+    await journal.close()
   })
 
   it('reads a segment index only once while raw and gzip copies overlap during compression commit', async () => {
