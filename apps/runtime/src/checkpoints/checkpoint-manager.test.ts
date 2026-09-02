@@ -122,6 +122,7 @@ describe('CheckpointManager', () => {
       )
     ).toEqual([{ generation: 2 }, { generation: 3 }])
     expect((await readdir(join(root, 'checkpoints', 'session-1'))).sort()).toHaveLength(2)
+    expect(checkpoints.protectedTerminalSequences('session-1')).toEqual([2, 3])
   })
 
   it('rejects unsafe identities, oversized snapshots, and backwards watermarks', async () => {

@@ -189,6 +189,15 @@ export class CheckpointManager {
     return undefined
   }
 
+  protectedTerminalSequences(sessionId: string): number[] {
+    return this.#database.all<{ terminal_sequence: number }>(
+      `SELECT terminal_sequence FROM journal_checkpoints
+       WHERE session_id = ? AND valid = 1
+       ORDER BY generation ASC`,
+      sessionId
+    ).map(({ terminal_sequence }) => terminal_sequence)
+  }
+
   async #readCandidate(candidate: StoredCheckpoint): Promise<LoadedCheckpoint> {
     const encoded = await readFile(candidate.file_path)
     if (digest(encoded) !== candidate.checksum) {

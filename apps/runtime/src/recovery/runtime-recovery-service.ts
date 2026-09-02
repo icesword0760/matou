@@ -106,7 +106,9 @@ export class RuntimeRecoveryService {
       if (!persistedSessions.has(sessionId)) continue
       let journal: SegmentJournal | undefined
       try {
-        journal = await SegmentJournal.open(this.#dataRoot, sessionId)
+        journal = await SegmentJournal.open(this.#dataRoot, sessionId, {
+          checkpointProtectedSequences: checkpoints.protectedTerminalSequences(sessionId)
+        })
         const watermark = await coordinator.recover(sessionId, journal)
         const removedCheckpointOrphans = await checkpoints.removeOrphans(sessionId)
         report.recovered.push({

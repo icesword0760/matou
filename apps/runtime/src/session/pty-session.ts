@@ -92,6 +92,9 @@ export class PtySession {
   domainEventSequenceAtOrBefore(sequence: number): number {
     return this.#journal.domainEventSequenceAtOrBefore(sequence)
   }
+  protectCheckpointSequences(sequences: readonly number[]): Promise<void> {
+    return this.#journal.protectCheckpointSequences(sequences)
+  }
 
   private constructor(options: PtySessionOptions, journal: SegmentJournal, terminal: pty.IPty) {
     this.sessionId = options.sessionId

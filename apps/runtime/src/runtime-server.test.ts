@@ -11,6 +11,7 @@ import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/co
 
 import { SegmentJournal, readSessionFrames } from './journal/segment-journal'
 import { readSessionJournalBounds } from './journal/journal-range-reader'
+import { JournalCompressor } from './journal/journal-compressor'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import {
   RuntimeServer, terminalSummaryLines, withSessionRuntimeEnvironment,
@@ -884,6 +885,68 @@ describe('RuntimeServer domain RPC', () => {
       expect.objectContaining({ sequence: 3 })
     ])
     expect(port.last('terminal.replay-complete')).toMatchObject({ throughSequence: 3 })
+  })
+
+  it('protects the retained checkpoint segment when a real PTY restarts', async () => {
+    registerSession(database, 'checkpoint-protected-restart')
+    const writer = await SegmentJournal.open(root, 'checkpoint-protected-restart', {
+      maxSegmentBytes: 150,
+      rawHotBytes: 1,
+      compressSealed: false
+    })
+    for (let sequence = 1; sequence <= 8; sequence += 1) {
+      await writer.appendOutput(sequence, Uint8Array.from({ length: 32 }, () => sequence))
+    }
+    await writer.close()
+    await new CheckpointManager(root, database).create({
+      sessionId: 'checkpoint-protected-restart', terminalSequence: 2,
+      domainEventSequence: 0, screenEpoch: 1, snapshot: Uint8Array.from([2])
+    })
+
+    server.close()
+    port = new MockPort()
+    const compressor = new JournalCompressor()
+    server = new RuntimeServer(port, root, database, undefined, undefined, undefined, undefined, undefined, {
+      journalOptionsForSession: () => ({ maxSegmentBytes: 150, rawHotBytes: 1, compressor })
+    })
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-2' })
+    await settle()
+
+    const executable = join(root, 'checkpoint-restart-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'checkpoint-protected-restart', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned')?.sessionId === 'checkpoint-protected-restart')
+      await compressor.whenIdle()
+
+      const bounds = await readSessionJournalBounds(root, 'checkpoint-protected-restart')
+      expect(bounds.segments.find(({ firstSequence, lastSequence }) =>
+        firstSequence <= 2 && lastSequence >= 2
+      )?.path).toMatch(/\.mtj$/)
+
+      port.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'checkpoint-protected-restart', fromSequence: 0
+      })
+      await waitUntil(() => port.last('terminal.replay-complete')?.sessionId === 'checkpoint-protected-restart')
+      expect(port.last('terminal.replay-start')).toMatchObject({
+        sessionId: 'checkpoint-protected-restart', source: 'checkpoint', checkpointSequence: 2
+      })
+      expect(port.sent.flatMap((message) =>
+        message.type === 'terminal.data' && message.sessionId === 'checkpoint-protected-restart'
+          ? [message.sequence]
+          : []
+      )).toEqual([3, 4, 5, 6, 7, 8])
+    } finally {
+      process.env.SHELL = previousShell
+    }
   })
 
   it('isolates corruption discovered while streaming one Session range', async () => {
