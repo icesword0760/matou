@@ -3863,6 +3863,7 @@ sleep 30
       await waitUntil(() => ownerPort.findRpcResponse('cross-window-owner-bypass-again') !== undefined)
       await waitUntil(() => sessions.get('provider-cross-window')?.pid !== afterSecondaryPermissionPid)
       const secondPendingPid = sessions.get('provider-cross-window')!.pid
+      const secondPendingRunId = sessions.get('provider-cross-window')!.runId!
 
       secondaryPort.receive({
         type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
@@ -3877,6 +3878,21 @@ sleep 30
       expect(secondaryPort.findRpcError('cross-window-secondary-bypass')).toBeDefined()
       expect(afterSecondaryPermissionPid).toBe(firstPendingPid)
       expect(sessions.get('provider-cross-window')?.pid).toBe(secondPendingPid)
+
+      ownerPort.emit('close')
+      expect(sessions.providerIdentityPending('provider-cross-window')).toBe(true)
+      secondaryServer.providerIdentityRecorded('provider-cross-window', secondPendingRunId)
+      expect(sessions.providerIdentityPending('provider-cross-window')).toBe(false)
+      secondaryPort.receive(rpc('cross-window-plan-after-owner-close', 'session.set-permission-mode', {
+        sessionId: 'provider-cross-window', provider: 'claude-code',
+        permissionMode: 'plan', respawn: false, now: 6
+      }))
+      await waitUntil(() =>
+        secondaryPort.findRpcResponse('cross-window-plan-after-owner-close') !== undefined ||
+        secondaryPort.findRpcError('cross-window-plan-after-owner-close') !== undefined
+      )
+      expect(secondaryPort.findRpcResponse('cross-window-plan-after-owner-close')).toBeDefined()
+      expect(secondaryPort.findRpcError('cross-window-plan-after-owner-close')).toBeUndefined()
     } finally {
       await sessions.shutdownAll()
       ownerServer.close()

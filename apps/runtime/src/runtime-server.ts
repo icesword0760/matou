@@ -350,11 +350,7 @@ export class RuntimeServer {
       })
     })
     port.on('close', () => {
-      this.#closed = true
-      this.#rejectAllProviderRecoveries(
-        new Error('Runtime connection closed during provider recovery')
-      )
-      this.#detachAll()
+      this.#closeConnection(false)
     })
     port.start()
   }
@@ -475,6 +471,10 @@ export class RuntimeServer {
   }
 
   close(): void {
+    this.#closeConnection(true)
+  }
+
+  #closeConnection(closePort: boolean): void {
     if (this.#closed) return
     for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
     this.#summaryTimers.clear()
@@ -500,7 +500,7 @@ export class RuntimeServer {
     this.#environmentResumeDescriptors.clear()
     this.#permissionModeTrackers.clear()
     this.#detachAll()
-    this.#port.close()
+    if (closePort) this.#port.close()
   }
 
   async #receive(rawMessage: unknown): Promise<void> {
@@ -2241,14 +2241,17 @@ export class RuntimeServer {
   }
 
   #confirmProviderDerivedOutput(sessionId: string, runId: string): void {
+    this.#sessions.clearProviderIdentityPending(sessionId, runId)
     const gate = this.#providerDerivedOutputGates.get(sessionId)
     if (!gate || gate.runId !== runId) return
     this.#providerDerivedOutputGates.delete(sessionId)
-    this.#sessions.clearProviderIdentityPending(sessionId, runId)
     gate.confirm()
   }
 
   #rejectProviderDerivedOutput(sessionId: string, runId?: string): void {
+    if (runId !== undefined) {
+      this.#sessions.clearProviderIdentityPending(sessionId, runId)
+    }
     const gate = this.#providerDerivedOutputGates.get(sessionId)
     if (!gate || (runId !== undefined && gate.runId !== runId)) return
     this.#providerDerivedOutputGates.delete(sessionId)
