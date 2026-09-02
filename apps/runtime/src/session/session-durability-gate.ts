@@ -1,4 +1,8 @@
 export const DEFAULT_MAX_RETAINED_BYTES = 4 * 1024 * 1024
+// Pause the PTY well before the hard retention limit. The remaining headroom
+// absorbs data callbacks already dispatched by the native PTY read loop.
+const DEFAULT_HEALTHY_HIGH_WATERMARK_BYTES = 1024 * 1024
+const DEFAULT_HEALTHY_LOW_WATERMARK_BYTES = 512 * 1024
 
 export type SessionDurabilityState = 'healthy' | 'pausing' | 'paused' | 'recovering' | 'ended'
 
@@ -54,6 +58,8 @@ type QueuedFrame = { frame: PendingDurableFrame; retainedSize: number }
 export class SessionDurabilityGate {
   readonly #sessionId: string
   readonly #maxRetainedBytes: number
+  readonly #healthyHighWatermarkBytes: number
+  readonly #healthyLowWatermarkBytes: number
   readonly #pauser: DurabilityExecutionPauser
   readonly #onFault: SessionDurabilityGateOptions['onFault']
   readonly #onRecovered: SessionDurabilityGateOptions['onRecovered']
@@ -65,6 +71,8 @@ export class SessionDurabilityGate {
   #lastPersistedSequence: number
   #operation: Promise<void> = Promise.resolve()
   #retryOperation: Promise<void> | undefined
+  #throughputPaused = false
+  #throughputPauseOperation: Promise<void> | undefined
 
   constructor(options: SessionDurabilityGateOptions) {
     this.#sessionId = options.sessionId
@@ -72,6 +80,14 @@ export class SessionDurabilityGate {
     if (!Number.isSafeInteger(this.#maxRetainedBytes) || this.#maxRetainedBytes <= 0) {
       throw new Error('maxRetainedBytes must be a positive safe integer')
     }
+    this.#healthyHighWatermarkBytes = Math.min(
+      DEFAULT_HEALTHY_HIGH_WATERMARK_BYTES,
+      Math.max(1, Math.floor(this.#maxRetainedBytes / 2))
+    )
+    this.#healthyLowWatermarkBytes = Math.min(
+      DEFAULT_HEALTHY_LOW_WATERMARK_BYTES,
+      Math.max(0, Math.floor(this.#healthyHighWatermarkBytes / 2))
+    )
     this.#pauser = options.pauser
     this.#onFault = options.onFault
     this.#onRecovered = options.onRecovered
@@ -104,6 +120,7 @@ export class SessionDurabilityGate {
     this.#lastAcceptedSequence = frame.sequence
 
     if (this.#state !== 'healthy') return Promise.resolve()
+    this.#pauseHealthyThroughputAtHighWatermark()
     const operation = this.#operation.then(() => this.#drainHealthy())
     this.#operation = operation.catch(() => undefined)
     return operation
@@ -128,6 +145,8 @@ export class SessionDurabilityGate {
         this.#state = 'paused'
         throw error
       }
+      this.#throughputPaused = false
+      this.#throughputPauseOperation = undefined
       this.#state = 'healthy'
       this.#emitRecovered()
       if (this.#queue.length > 0) await this.#drainHealthy()
@@ -156,7 +175,8 @@ export class SessionDurabilityGate {
       } catch (error) {
         this.#state = 'pausing'
         try {
-          await this.#pauser.pause()
+          if (this.#throughputPaused) await this.#throughputPauseOperation
+          else await this.#pauser.pause()
         } catch {
           // Read pausing is attempted before the process-group signal. Even if
           // the latter races process exit, retain the frame and keep recovery live.
@@ -167,6 +187,7 @@ export class SessionDurabilityGate {
         return
       }
       this.#commitHead(queued)
+      await this.#resumeHealthyThroughputAtLowWatermark()
     }
   }
 
@@ -188,6 +209,24 @@ export class SessionDurabilityGate {
     } catch (error) {
       this.#onSideEffectError?.(error, queued.frame)
     }
+  }
+
+  #pauseHealthyThroughputAtHighWatermark(): void {
+    if (this.#throughputPaused || this.#retainedBytes < this.#healthyHighWatermarkBytes) return
+    this.#throughputPaused = true
+    try {
+      this.#throughputPauseOperation = Promise.resolve(this.#pauser.pause()).catch(() => undefined)
+    } catch {
+      this.#throughputPauseOperation = Promise.resolve()
+    }
+  }
+
+  async #resumeHealthyThroughputAtLowWatermark(): Promise<void> {
+    if (!this.#throughputPaused || this.#retainedBytes > this.#healthyLowWatermarkBytes) return
+    await this.#throughputPauseOperation
+    await this.#pauser.resume()
+    this.#throughputPaused = false
+    this.#throughputPauseOperation = undefined
   }
 
   #emitFault(failedSequence: number, error: unknown): void {
