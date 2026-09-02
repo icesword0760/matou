@@ -37,7 +37,7 @@ class ScaleDatabaseConnection {
 }
 
 export interface ScaleDataset {
-  siblingSessions: 50 | 200 | 1000
+  siblingSessions: 20 | 50 | 200 | 1000
   relationshipDepth?: 5000
   dagNodes?: 10000
   scenes?: number
@@ -133,8 +133,8 @@ export async function readScaleDatabaseCounts(
 }
 
 function validateDataset(dataset: ScaleDataset): void {
-  if (![50, 200, 1000].includes(dataset.siblingSessions)) {
-    throw new Error('siblingSessions must be one of 50, 200, or 1000')
+  if (![20, 50, 200, 1000].includes(dataset.siblingSessions)) {
+    throw new Error('siblingSessions must be one of 20, 50, 200, or 1000')
   }
   if (dataset.relationshipDepth !== undefined && dataset.relationshipDepth !== 5000) {
     throw new Error('relationshipDepth must be 5000 when supplied')
@@ -393,6 +393,11 @@ function insertSessions(database: ScaleDatabaseConnection, input: {
        created_at, updated_at, pending_user_interaction_seq
      ) VALUES (?, ?, ?, 0, ?, ?, 0)`
   )
+  const insertMount = database.prepare(
+    `INSERT INTO session_mounts (
+       id, scene_id, scene_node_id, session_id, created_at
+     ) VALUES (?, ?, NULL, ?, ?)`
+  )
   const insertRelationEvent = database.prepare(
     `INSERT INTO session_relation_events (
        event_id, relation_id, operation, task_id, from_session_id,
@@ -414,6 +419,12 @@ function insertSessions(database: ScaleDatabaseConnection, input: {
       `${prefix.slice('scale-'.length)} ${index + 1}`, input.workspaceDirectory
     )
     insertMembership.run(id, input.sceneId, index + 1, timestamp, timestamp)
+    // Scale fixtures represent durable Sessions that can survive an App
+    // restart. A canvas membership alone is enough to project a card, but
+    // Runtime recovery intentionally follows the authoritative Scene mount.
+    // Keep both projections populated so restart benchmarks exercise the same
+    // recovery path as Sessions created through the product UI.
+    insertMount.run(`${id}-mount`, input.sceneId, id, timestamp)
     const parentIndex = input.parentIndex?.(index)
     if (parentIndex === undefined) continue
     const parentId = entityId(prefix, parentIndex)

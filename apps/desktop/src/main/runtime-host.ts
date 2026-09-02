@@ -35,6 +35,13 @@ type RuntimeChildMessage = RuntimeLifecycleEvent | {
   ptyCount: number
   ptyPids: number[]
   statementCount: number
+  eventLoopDelayP99Ms: number
+  eventLoopDelayMaxMs: number
+  maxUnackedBytes: number
+  retainedDurabilityBytes: number
+  heapUsedBytes: number
+  externalBytes: number
+  arrayBufferBytes: number
 }
 
 interface PendingRecoveryCommand {
@@ -47,6 +54,13 @@ export interface RuntimeScaleMetrics {
   ptyCount: number
   ptyPids: number[]
   statementCount: number
+  eventLoopDelayP99Ms: number
+  eventLoopDelayMaxMs: number
+  maxUnackedBytes: number
+  retainedDurabilityBytes: number
+  heapUsedBytes: number
+  externalBytes: number
+  arrayBufferBytes: number
 }
 
 interface PendingScaleMetrics {
@@ -252,7 +266,14 @@ export class RuntimeHost {
         runtimePid: candidate.runtimePid,
         ptyCount: candidate.ptyCount,
         ptyPids: candidate.ptyPids,
-        statementCount: candidate.statementCount
+        statementCount: candidate.statementCount,
+        eventLoopDelayP99Ms: candidate.eventLoopDelayP99Ms,
+        eventLoopDelayMaxMs: candidate.eventLoopDelayMaxMs,
+        maxUnackedBytes: candidate.maxUnackedBytes,
+        retainedDurabilityBytes: candidate.retainedDurabilityBytes,
+        heapUsedBytes: candidate.heapUsedBytes,
+        externalBytes: candidate.externalBytes,
+        arrayBufferBytes: candidate.arrayBufferBytes
       })
       return
     }

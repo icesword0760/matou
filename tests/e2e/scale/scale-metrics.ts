@@ -19,6 +19,13 @@ export interface ScaleSample {
   ptyPids: number[]
   domNodes: number
   statementCount: number
+  eventLoopDelayP99Ms: number
+  eventLoopDelayMaxMs: number
+  maxUnackedBytes: number
+  retainedDurabilityBytes: number
+  runtimeHeapUsedMb: number
+  runtimeExternalMb: number
+  runtimeArrayBuffersMb: number
   longTaskCount: number
   longTaskP95: number
   longTaskMax: number
@@ -45,6 +52,13 @@ interface RuntimeScaleMetrics {
   ptyCount: number
   ptyPids: number[]
   statementCount: number
+  eventLoopDelayP99Ms: number
+  eventLoopDelayMaxMs: number
+  maxUnackedBytes: number
+  retainedDurabilityBytes: number
+  heapUsedBytes: number
+  externalBytes: number
+  arrayBufferBytes: number
 }
 
 interface ProcessScaleMetrics {
@@ -104,6 +118,13 @@ export async function collectScaleSample(
     ptyPids: runtime.ptyPids,
     domNodes,
     statementCount: runtime.statementCount,
+    eventLoopDelayP99Ms: runtime.eventLoopDelayP99Ms,
+    eventLoopDelayMaxMs: runtime.eventLoopDelayMaxMs,
+    maxUnackedBytes: runtime.maxUnackedBytes,
+    retainedDurabilityBytes: runtime.retainedDurabilityBytes,
+    runtimeHeapUsedMb: bytesToMb(runtime.heapUsedBytes),
+    runtimeExternalMb: bytesToMb(runtime.externalBytes),
+    runtimeArrayBuffersMb: bytesToMb(runtime.arrayBufferBytes),
     longTaskCount: longTasks.length,
     longTaskP95: percentile(longTasks, 0.95),
     longTaskMax: maximum(longTasks),

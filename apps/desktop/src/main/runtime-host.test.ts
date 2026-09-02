@@ -55,14 +55,28 @@ describe('RuntimeHost', () => {
       runtimePid: 321,
       ptyCount: 17,
       ptyPids: [401, 402],
-      statementCount: 81
+      statementCount: 81,
+      eventLoopDelayP99Ms: 12.5,
+      eventLoopDelayMaxMs: 21.75,
+      maxUnackedBytes: 524_288,
+      retainedDurabilityBytes: 262_144,
+      heapUsedBytes: 10_000_000,
+      externalBytes: 2_000_000,
+      arrayBufferBytes: 1_000_000
     })
 
     await expect(pending).resolves.toEqual({
       runtimePid: 321,
       ptyCount: 17,
       ptyPids: [401, 402],
-      statementCount: 81
+      statementCount: 81,
+      eventLoopDelayP99Ms: 12.5,
+      eventLoopDelayMaxMs: 21.75,
+      maxUnackedBytes: 524_288,
+      retainedDurabilityBytes: 262_144,
+      heapUsedBytes: 10_000_000,
+      externalBytes: 2_000_000,
+      arrayBufferBytes: 1_000_000
     })
   })
 

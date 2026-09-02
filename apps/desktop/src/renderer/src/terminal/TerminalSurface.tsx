@@ -15,6 +15,7 @@ import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { ResizeCoalescer } from './resize-coalescer'
 import { quoteDroppedPath } from './shell-path-quote'
 import { foregroundTerminalModels } from './terminal-model-cache'
+import { TerminalOutputCoalescer } from './terminal-output-coalescer'
 import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
 import {
   DEFAULT_TERMINAL_THEME, TERMINAL_THEMES, type TerminalThemeKey
@@ -132,6 +133,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const pendingInputRef = useRef('')
   const sendInputRef = useRef<(data: string) => void>(NOOP)
   const checkpointNowRef = useRef<() => void>(NOOP)
+  const flushOutputRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
   const historyModeRef = useRef(false)
   const historyRequestGenerationRef = useRef(0)
@@ -165,7 +167,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [client, profile, sessionId])
 
   useEffect(() => {
-    if (visible) requestAnimationFrame(() => fitRef.current?.fit())
+    if (visible) {
+      flushOutputRef.current()
+      requestAnimationFrame(() => fitRef.current?.fit())
+    }
   }, [visible])
 
   useEffect(() => {
@@ -287,6 +292,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let lastAppliedSequence = 0
     let screenEpoch = 0
     let lastCheckpointSequence = -1
+    let surfaceDisposed = false
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     const clearCheckpointTimer = () => {
       if (checkpointTimer !== undefined) clearTimeout(checkpointTimer)
@@ -317,6 +323,19 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       checkpointTimer = setTimeout(storeCheckpoint, delay)
     }
     checkpointNowRef.current = storeCheckpoint
+    const writeLiveOutput = (bytes: Uint8Array, sequence: number) => {
+      terminal.write(bytes, () => {
+        lastAppliedSequence = Math.max(lastAppliedSequence, sequence)
+        client.acknowledgeTerminal(sessionId, sequence)
+        if (surfaceDisposed) return
+        scheduleCheckpoint()
+        if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
+          terminal.focus()
+        }
+      })
+    }
+    const output = new TerminalOutputCoalescer(writeLiveOutput)
+    flushOutputRef.current = () => output.flush()
     const markSpawned = () => {
       spawned = true
       if (pendingInputRef.current) {
@@ -356,22 +375,21 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         const bytes = message.data instanceof Uint8Array
           ? message.data
           : new Uint8Array(message.data)
-        observed = (observed + decoder.decode(bytes, { stream: true })).slice(-8192)
-        if (observed.includes(SMOKE_MARKER)) {
-          onSmokeMarker(SMOKE_MARKER)
-          if (!replayRequested && replayProbe) {
-            replayRequested = true
-            client.requestTerminalReplay(sessionId)
+        // The rolling decoded string exists only for the E2E transport probe.
+        // Decoding every live byte a second time for ordinary Sessions creates
+        // large short-lived strings under multi-terminal output; xterm already
+        // owns the authoritative UTF-8/VT decoding path.
+        if (replayProbe) {
+          observed = (observed + decoder.decode(bytes, { stream: true })).slice(-8192)
+          if (observed.includes(SMOKE_MARKER)) {
+            onSmokeMarker(SMOKE_MARKER)
+            if (!replayRequested) {
+              replayRequested = true
+              client.requestTerminalReplay(sessionId)
+            }
           }
         }
-        terminal.write(bytes, () => {
-          lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
-          client.acknowledgeTerminal(sessionId, message.sequence)
-          scheduleCheckpoint()
-          if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
-            terminal.focus()
-          }
-        })
+        output.offer(bytes, message.sequence, visibleRef.current || replaying)
       } else if (message.type === 'terminal.restored-history') {
         const bytes = message.data instanceof Uint8Array
           ? message.data
@@ -591,7 +609,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       historyRequestGenerationRef.current += 1
       historyModeRef.current = false
       historyOpenedSearchSequenceRef.current = undefined
+      surfaceDisposed = true
       clearCheckpointTimer()
+      output.dispose()
+      flushOutputRef.current = NOOP
       storeCheckpoint()
       checkpointNowRef.current = NOOP
       container.removeEventListener('wheel', wheel)

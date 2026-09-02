@@ -132,6 +132,9 @@ async function createWindow(): Promise<BrowserWindow> {
     rendererUrl.searchParams.set('defaultName', defaultName)
     if (process.env.MATOU_E2E === '1') {
       rendererUrl.searchParams.set('e2e', '1')
+      if (process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0') {
+        rendererUrl.searchParams.set('terminalDiagnostics', '0')
+      }
     }
     await window.loadURL(rendererUrl.toString())
   } else {
@@ -140,7 +143,12 @@ async function createWindow(): Promise<BrowserWindow> {
         windowId,
         defaultRootDirectory,
         defaultName,
-        ...(process.env.MATOU_E2E === '1' ? { e2e: '1' } : {})
+        ...(process.env.MATOU_E2E === '1' ? {
+          e2e: '1',
+          ...(process.env.MATOU_E2E_TERMINAL_DIAGNOSTICS === '0'
+            ? { terminalDiagnostics: '0' }
+            : {})
+        } : {})
       }
     })
   }

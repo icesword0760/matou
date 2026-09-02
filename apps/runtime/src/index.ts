@@ -2,6 +2,7 @@ import type { MessagePortMain, ParentPort } from 'electron'
 import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import { resolve } from 'node:path'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
 
 import {
   PROTOCOL_VERSION,
@@ -73,6 +74,10 @@ if (!parentPort) {
 const servers = new Set<RuntimeServer>()
 const recoveryServerWaiters = new Set<(server: RuntimeServer) => void>()
 const sessions = new RuntimeSessionRegistry()
+const scaleEventLoopDelay = process.env.MATOU_E2E_SCALE === '1'
+  ? monitorEventLoopDelay({ resolution: 10 })
+  : undefined
+scaleEventLoopDelay?.enable()
 const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
 interface RuntimeStateBase {
@@ -480,14 +485,25 @@ parentPort.on('message', async (event) => {
       resetStatementCount?: unknown
     }
     const state = await runtimeReady
+    const eventLoopDelayP99Ms = nanosecondsToMilliseconds(scaleEventLoopDelay?.percentile(99) ?? 0)
+    const eventLoopDelayMaxMs = nanosecondsToMilliseconds(scaleEventLoopDelay?.max ?? 0)
+    const memory = process.memoryUsage()
     parentPort.postMessage({
       type: 'runtime.scale-metrics-result',
       requestId: String(request.requestId ?? 'invalid'),
       runtimePid: process.pid,
       ptyCount: sessions.size,
       ptyPids: sessions.pids(),
-      statementCount: state.database.readStatementCount(request.resetStatementCount === true)
+      statementCount: state.database.readStatementCount(request.resetStatementCount === true),
+      eventLoopDelayP99Ms,
+      eventLoopDelayMaxMs,
+      maxUnackedBytes: sessions.maxUnackedBytes(),
+      retainedDurabilityBytes: sessions.retainedDurabilityBytes(),
+      heapUsedBytes: memory.heapUsed,
+      externalBytes: memory.external,
+      arrayBufferBytes: memory.arrayBuffers
     })
+    if (request.resetStatementCount === true) scaleEventLoopDelay?.reset()
     return
   }
   if (event.data && typeof event.data === 'object' && event.data.type === 'runtime.recovery-command') {
@@ -557,6 +573,11 @@ parentPort.on('message', async (event) => {
     return
   }
 })
+
+function nanosecondsToMilliseconds(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.round(value / 10_000) / 100
+}
 
 async function startRecoveryJob(job: RecoveryJob): Promise<void> {
   const server = [...servers][0] ?? await new Promise<RuntimeServer>((resolve) => {

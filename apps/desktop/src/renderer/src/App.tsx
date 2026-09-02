@@ -13,6 +13,8 @@ export function App() {
   const [replayMarker, setReplayMarker] = useState('')
   const [lifecycle, setLifecycle] = useState<RuntimeLifecyclePresentation>()
   const e2e = new URLSearchParams(window.location.search).get('e2e') === '1'
+  const terminalDiagnostics = new URLSearchParams(window.location.search)
+    .get('terminalDiagnostics') !== '0'
   const detached = new URLSearchParams(window.location.search).get('kind') === 'detached-terminal'
   const dag = new URLSearchParams(window.location.search).get('kind') === 'dag'
 
@@ -52,7 +54,7 @@ export function App() {
 
   return <>
     <HierarchyShell runtimeMode={lifecycle.snapshot.mode} />
-    {e2e && <div className="e2e-diagnostics" aria-hidden="true">
+    {e2e && terminalDiagnostics && <div className="e2e-diagnostics" aria-hidden="true">
       <TerminalSurface onStatusChange={setStatus}
         onSmokeMarker={setSmokeMarker} onReplayComplete={setReplayMarker} />
       <output data-testid="runtime-status">{status}</output>

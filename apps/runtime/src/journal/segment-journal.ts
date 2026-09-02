@@ -31,6 +31,7 @@ import {
   writeJournalTailIndex,
   type JournalTailIndexSnapshot
 } from './journal-tail-index'
+import { LatestValueWriter } from './latest-value-writer'
 
 const MAGIC = Buffer.from('MTJRNL2\n', 'ascii')
 const FRAME_PREFIX_BYTES = 8
@@ -97,7 +98,7 @@ export class SegmentJournal {
   readonly #sealedSegments: SegmentDescriptor[]
   readonly #tailIndex: JournalTailIndex
   readonly #tailIndexPath: string
-  #tailIndexWrite = Promise.resolve()
+  readonly #tailIndexWriter: LatestValueWriter<JournalTailIndexSnapshot>
   #handle: FileHandle
   #segmentIndex: number
   #path: string
@@ -131,6 +132,9 @@ export class SegmentJournal {
     this.#sealedSegments = sealedSegments
     this.#tailIndex = tailIndex
     this.#tailIndexPath = tailIndexPath
+    this.#tailIndexWriter = new LatestValueWriter((snapshot) =>
+      writeJournalTailIndex(this.#tailIndexPath, snapshot)
+    )
     this.#scheduleSealedCompression()
   }
 
@@ -276,7 +280,7 @@ export class SegmentJournal {
       storageError ??= error
     }
     this.#scheduleTailIndexWrite()
-    await this.#tailIndexWrite
+    await this.#tailIndexWriter.whenIdle()
     if (storageError !== undefined) throw storageError
   }
 
@@ -346,7 +350,7 @@ export class SegmentJournal {
     }
     await sealedHandle.sync()
     this.#scheduleTailIndexWrite()
-    await this.#tailIndexWrite
+    await this.#tailIndexWriter.whenIdle()
 
     const nextSegmentIndex = this.#segmentIndex + 1
     const nextPath = segmentPath(this.directory, nextSegmentIndex)
@@ -401,10 +405,7 @@ export class SegmentJournal {
 
   #scheduleTailIndexWrite(): void {
     const snapshot = this.#tailIndex.snapshot(this.#segmentIndex)
-    this.#tailIndexWrite = this.#tailIndexWrite.then(
-      () => writeJournalTailIndex(this.#tailIndexPath, snapshot),
-      () => writeJournalTailIndex(this.#tailIndexPath, snapshot)
-    ).catch(() => undefined)
+    this.#tailIndexWriter.schedule(snapshot)
   }
 }
 

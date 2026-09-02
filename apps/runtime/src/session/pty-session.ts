@@ -13,6 +13,7 @@ import {
   type SessionDurabilityState
 } from './session-durability-gate'
 import { PtyExecutionPauser } from './pty-execution-pauser'
+import { PtyOutputBatcher } from './pty-output-batcher'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
 
@@ -64,6 +65,7 @@ export class PtySession {
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
+  readonly #outputBatcher: PtyOutputBatcher
 
   #sequence: number
   #writeChain = Promise.resolve()
@@ -76,6 +78,7 @@ export class PtySession {
   #ending: Promise<void> | undefined
   #pendingReplayFrom: number | undefined
   #durabilityFault: SessionDurabilityFaultEvent | undefined
+  #maximumUnackedBytes = 0
   #lastCols: number
   #lastRows: number
   readonly #closed: Promise<void>
@@ -84,6 +87,7 @@ export class PtySession {
   get lastSequence(): number { return this.#sequence }
   get durabilityState(): SessionDurabilityState { return this.#durabilityGate.state }
   get retainedDurabilityBytes(): number { return this.#durabilityGate.retainedBytes }
+  get maximumUnackedBytes(): number { return this.#maximumUnackedBytes }
   tailStart(maxLines = 10_000): number { return this.#journal.tailStart(maxLines) }
   domainEventSequenceAtOrBefore(sequence: number): number {
     return this.#journal.domainEventSequenceAtOrBefore(sequence)
@@ -126,8 +130,9 @@ export class PtySession {
         options.onDurabilityRecovered?.(event)
       }
     })
+    this.#outputBatcher = new PtyOutputBatcher((data) => this.#enqueueOutputNow(data))
 
-    terminal.onData((data) => this.#enqueueOutput(data))
+    terminal.onData((data) => this.#outputBatcher.offer(data))
     terminal.onExit(({ exitCode, signal }) => this.#enqueueExit(exitCode, signal))
   }
 
@@ -178,7 +183,9 @@ export class PtySession {
 
   display(data: string): void {
     if (this.#disposed) return
-    this.#enqueueOutput(data)
+    // Runtime-authored notices and screen resets are control feedback rather
+    // than PTY transport bursts; publish them immediately.
+    this.#enqueueOutputNow(data)
   }
 
   resize(cols: number, rows: number): void {
@@ -186,6 +193,7 @@ export class PtySession {
       throw new Error('session is disposed')
     }
     if (cols === this.#lastCols && rows === this.#lastRows) return
+    this.#outputBatcher.flush()
     this.#pty.resize(cols, rows)
     this.#lastCols = cols
     this.#lastRows = rows
@@ -211,12 +219,14 @@ export class PtySession {
   }
 
   readFrames() {
+    this.#outputBatcher.flush()
     return this.#writeChain.then(() => this.#journal.readFrames())
   }
 
   whenClosed(): Promise<void> { return this.#closed }
 
   async retryDurability(): Promise<void> {
+    this.#outputBatcher.flush()
     const operation = this.#durabilityGate.retry()
     this.#trackWrite(operation)
     await operation
@@ -285,6 +295,7 @@ export class PtySession {
     this.#notifyExit = options.notifyExit ?? true
     this.#exitReason = options.reason
     this.#disposed = true
+    this.#outputBatcher.flush()
     if (this.#durabilityGate.state !== 'healthy') {
       void this.endDurability()
       return
@@ -292,7 +303,7 @@ export class PtySession {
     this.#pty.kill()
   }
 
-  #enqueueOutput(data: string): void {
+  #enqueueOutputNow(data: string): void {
     if (this.#forceFinalized) return
     const bytes = this.#encoder.encode(data)
     const sequence = this.#sequence + 1
@@ -325,6 +336,7 @@ export class PtySession {
 
   #enqueueExit(exitCode: number, signal?: number): void {
     if (this.#forceFinalized) return
+    this.#outputBatcher.flush()
     const sequence = this.#sequence + 1
     let operation: Promise<void>
     try {
@@ -428,6 +440,7 @@ export class PtySession {
       data: bytes
     })
     this.#creditWindow.recordSent(sequence, bytes.byteLength)
+    this.#maximumUnackedBytes = Math.max(this.#maximumUnackedBytes, this.#creditWindow.unackedBytes)
   }
 
   #sendDurabilityFault(event: SessionDurabilityFaultEvent): void {
