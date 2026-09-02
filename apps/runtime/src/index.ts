@@ -62,6 +62,7 @@ import { SessionForkIntentRepository } from './session/session-fork-intent-repos
 import type { SessionExecutionDescriptor } from './session/session-execution-service'
 import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
 import { ForkOperationCoordinator } from './session-canvas/fork-operation-coordinator'
+import { createE2eJournalOptionsProvider } from './journal/e2e-journal-fault-controller'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -80,6 +81,7 @@ const scaleEventLoopDelay = process.env.MATOU_E2E_SCALE === '1'
 scaleEventLoopDelay?.enable()
 const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
+const e2eJournalOptionsForSession = createE2eJournalOptionsProvider(process.env)
 interface RuntimeStateBase {
   mode: 'normal' | 'read-only'
   dataRoot: string
@@ -376,7 +378,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
     sessions,
     providerHooks,
     undefined,
-    { hudRegistry: sessionHuds, accessPolicy }
+    {
+      hudRegistry: sessionHuds,
+      accessPolicy,
+      ...(e2eJournalOptionsForSession ? {
+        journalOptionsForSession: e2eJournalOptionsForSession
+      } : {})
+    }
   )
   servers.add(backgroundServer)
   const forkWorkflow = new ForkWorkflowService(runtimeDataRoot, database, transactions, {
@@ -560,6 +568,9 @@ parentPort.on('message', async (event) => {
       {
         hudRegistry: sessionHuds,
         accessPolicy: state.accessPolicy,
+        ...(e2eJournalOptionsForSession ? {
+          journalOptionsForSession: e2eJournalOptionsForSession
+        } : {}),
         ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {})
       }
     )
