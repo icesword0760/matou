@@ -26,6 +26,7 @@ const SMOKE_MARKER = '__MATOU_CHANNEL_READY__'
 const REFERENCE_FILE_TREE_MIME = 'application/x-file-tree-nodes'
 const CHECKPOINT_QUIET_MS = 500
 const CHECKPOINT_SCROLLBACK_LINES = 10_000
+const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -51,6 +52,7 @@ interface TerminalSurfaceProps {
   visible?: boolean
   active?: boolean
   foreground?: boolean
+  viewportMoving?: boolean
   inputDisabled?: boolean
   readOnly?: boolean
   themeKey?: TerminalThemeKey
@@ -103,7 +105,7 @@ interface CachedTerminalModel {
 export function TerminalSurface(props: TerminalSurfaceProps) {
   const {
     sessionId = 'foundation-shell', executionContextId = 'local-default',
-    profile = 'shell', visible = true, active = true, foreground = true,
+    profile = 'shell', visible = true, active = true, foreground = true, viewportMoving = false,
     inputDisabled = false, readOnly = false,
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
@@ -137,6 +139,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const sendInputRef = useRef<(data: string) => void>(NOOP)
   const checkpointNowRef = useRef<() => void>(NOOP)
   const flushOutputRef = useRef<() => void>(NOOP)
+  const resumeVisualRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
   const historyModeRef = useRef(false)
   const historyRequestGenerationRef = useRef(0)
@@ -171,10 +174,18 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   useEffect(() => {
     if (visible) {
+      const catchupTimer = active || viewportMoving
+        ? undefined
+        : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
+      if (active && !viewportMoving) resumeVisualRef.current()
       flushOutputRef.current()
       requestAnimationFrame(() => fitRef.current?.fit())
+      return () => {
+        if (catchupTimer !== undefined) clearTimeout(catchupTimer)
+      }
     }
-  }, [visible])
+    return undefined
+  }, [active, viewportMoving, visible])
 
   useEffect(() => {
     if (!foreground) checkpointNowRef.current()
@@ -316,6 +327,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let lastAppliedSequence = 0
     let screenEpoch = 0
     let lastCheckpointSequence = -1
+    let visualCatchupPending = false
+    let visualCatchupRequested = false
     let surfaceDisposed = false
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
@@ -383,6 +396,16 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     const output = new TerminalOutputCoalescer(writeLiveOutput)
     flushOutputRef.current = () => output.flush()
+    const requestVisualCatchup = () => {
+      if (!visualCatchupPending || visualCatchupRequested || replaying) return
+      visualCatchupRequested = true
+      clearCheckpointTimer()
+      // Rebuild from Runtime's bounded tail rather than parsing an unbounded
+      // offscreen byte stream. Runtime and its Journal stay live throughout;
+      // only hidden xterm painting is suspended.
+      client.requestTerminalReplay(sessionId)
+    }
+    resumeVisualRef.current = requestVisualCatchup
     const markSpawned = () => {
       spawned = true
       if (pendingInputRef.current) {
@@ -408,13 +431,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         onStatusChange('streaming')
         const replayFromSequence = replayFromSequenceForSpawn(message, reusedTerminalModel)
         if (replayFromSequence !== undefined && !replayRequested) {
-          preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
-          replayRequested = true
-          client.requestTerminalReplay(
-            sessionId,
-            replayFromSequence,
-            preserveExistingModelForReplay
-          )
+          if (visibleRef.current) {
+            preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
+            replayRequested = true
+            client.requestTerminalReplay(
+              sessionId,
+              replayFromSequence,
+              preserveExistingModelForReplay
+            )
+          } else {
+            visualCatchupPending = true
+          }
         }
         if (replayProbe) {
           client.sendTerminalInput(sessionId, `printf '${SMOKE_MARKER}\\n'\r`)
@@ -441,7 +468,18 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             }
           }
         }
-        output.offer(bytes, message.sequence, visibleRef.current || replaying)
+        if ((!visibleRef.current || visualCatchupPending) && !replaying) {
+          visualCatchupPending = true
+          client.acknowledgeTerminal(sessionId, message.sequence)
+        } else if (visualCatchupRequested && !replaying) {
+          // The replay request has not detached the live stream yet. These
+          // bytes are included by the replay watermark, so acknowledge them
+          // without briefly painting content that replay-start will reset.
+          visualCatchupPending = true
+          client.acknowledgeTerminal(sessionId, message.sequence)
+        } else {
+          output.offer(bytes, message.sequence, true)
+        }
       } else if (message.type === 'terminal.restored-history') {
         const bytes = message.data instanceof Uint8Array
           ? message.data
@@ -457,11 +495,13 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.storage-recovered') {
         onStorageRecoveredRef.current()
       } else if (message.type === 'protocol.error') {
+        visualCatchupRequested = false
         onStatusChange('error')
         onRuntimeError(message.message)
       } else if (message.type === 'terminal.replay-start') {
         clearCheckpointTimer()
         replaying = true
+        visualCatchupPending = false
         if (!preserveExistingModelForReplay || message.checkpoint) terminal.reset()
         preserveExistingModelForReplay = false
         lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
@@ -493,6 +533,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-complete') {
         terminal.write('', () => {
           replaying = false
+          visualCatchupRequested = false
           lastAppliedSequence = Math.max(lastAppliedSequence, message.throughSequence)
           fit.fit()
           publishTerminalDimensions()
@@ -670,6 +711,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
       output.dispose()
       flushOutputRef.current = NOOP
+      resumeVisualRef.current = NOOP
       storeCheckpoint()
       checkpointNowRef.current = NOOP
       container.removeEventListener('wheel', wheel)

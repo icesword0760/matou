@@ -730,7 +730,11 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
               const graph = projection.sessionGraphs?.[scene.id]
               const graphIndex = graphIndexByScene.get(scene.id)
               const activeSessionId = graph?.focusedSessionId ?? projection.navigation.sessionByScene[scene.id]
-              const renderSession = (sessionId: string, cardVisible: boolean) => {
+              const renderSession = (
+                sessionId: string,
+                cardVisible: boolean,
+                viewportMoving = false
+              ) => {
                 const mount = layoutIndex?.mountBySession.get(sessionId)
                 const session = sessionById.get(sessionId)
                 if (!session || !mount) return <div className="scene-recovery" aria-hidden="true" />
@@ -761,6 +765,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                 const isFocused = activeSessionId === session.id
                 return <TerminalPane session={session}
                   active={isFocused} visible={scene.id === activeSceneId && cardVisible}
+                  viewportMoving={viewportMoving}
                   foreground={scene.id === activeSceneId}
                   sceneId={scene.id} pathValid={pathValid} readOnly={readOnly}
                   themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
@@ -875,7 +880,8 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
                       {...(revealSessionByScene[scene.id]
                         ? { revealRequest: revealSessionByScene[scene.id] }
                         : {})}
-                      renderSession={(node, cardVisible) => renderSession(node.sessionId, cardVisible)}
+                      renderSession={(node, cardVisible, viewportMoving) =>
+                        renderSession(node.sessionId, cardVisible, viewportMoving)}
                       {...(snapshot.geometry
                         ? { geometry: snapshot.geometry as Array<{ ownerKey: string; geometry: Record<string, unknown> }> }
                         : {})}

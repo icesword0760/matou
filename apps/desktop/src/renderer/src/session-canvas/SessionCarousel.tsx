@@ -16,7 +16,7 @@ import { SessionCard } from './SessionCard'
 export function SessionCarousel(props: {
   nodes: SessionGraphNodeView[]
   focusedSessionId?: string
-  renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
+  renderSession(node: SessionGraphNodeView, inViewport: boolean, viewportMoving: boolean): ReactNode
   onActivate(sessionId: string): void
   onEnsureSessionVisible?(sessionId: string): void
   parent?: SessionGraphNodeView
@@ -53,6 +53,7 @@ export function SessionCarousel(props: {
   const focusVisibilityFrame = useRef<number | undefined>(undefined)
   const focusVisibilitySessionId = useRef<string | null>(null)
   const wheelTimer = useRef<number | undefined>(undefined)
+  const viewportSettleTimer = useRef<number | undefined>(undefined)
   const parentCommitTimer = useRef<number | undefined>(undefined)
   const pullSpringFrame = useRef<number | undefined>(undefined)
   const hoverRestoreTimer = useRef<number | undefined>(undefined)
@@ -86,6 +87,7 @@ export function SessionCarousel(props: {
   const [pull, setPull] = useState({ distance: 0, progress: 0, effectIntensity: 0, springBack: false })
   const [visibleCount, setVisibleCount] = useState(() => visibleColumnsForWidth(nodes.length, 0))
   const [narrow, setNarrow] = useState(false)
+  const [viewportMoving, setViewportMoving] = useState(false)
   const inViewport = useMemo(() => new Set(
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
@@ -130,6 +132,7 @@ export function SessionCarousel(props: {
       if (hoverVisibilityFrame.current !== undefined) cancelAnimationFrame(hoverVisibilityFrame.current)
       if (focusVisibilityFrame.current !== undefined) cancelAnimationFrame(focusVisibilityFrame.current)
       if (wheelTimer.current !== undefined) window.clearTimeout(wheelTimer.current)
+      if (viewportSettleTimer.current !== undefined) window.clearTimeout(viewportSettleTimer.current)
       if (parentCommitTimer.current !== undefined) window.clearTimeout(parentCommitTimer.current)
       if (pullSpringFrame.current !== undefined) cancelAnimationFrame(pullSpringFrame.current)
       if (hoverRestoreTimer.current !== undefined) window.clearTimeout(hoverRestoreTimer.current)
@@ -552,6 +555,12 @@ export function SessionCarousel(props: {
     edgeBrowseTimer.current = window.setTimeout(edgeBrowseStep, EDGE_INTENT_DWELL_MS)
   }
   const markScrolling = (userInitiated = false) => {
+    setViewportMoving(true)
+    if (viewportSettleTimer.current !== undefined) window.clearTimeout(viewportSettleTimer.current)
+    viewportSettleTimer.current = window.setTimeout(() => {
+      viewportSettleTimer.current = undefined
+      setViewportMoving(false)
+    }, VIEWPORT_SETTLE_MS)
     // A wheel or drag may arrive before the two geometry-restoration frames
     // finish after a Session was added. User input is authoritative from that
     // point onward and must not be mistaken for a programmatic restore event.
@@ -870,6 +879,7 @@ export function SessionCarousel(props: {
       ref={viewportRef} role="region" aria-label="同级会话列表"
       data-visible-columns={visibleCount} data-total-sessions={nodes.length}
       data-foreground-terminals={foregroundTerminalCount}
+      data-viewport-moving={viewportMoving ? 'true' : 'false'}
       data-rendered-sessions={renderedNodes.length} data-edge-browse-phase={edgeBrowsePhase}
       data-edge-browse-direction={edgeBrowseDirection === -1 ? 'left' : edgeBrowseDirection === 1 ? 'right' : 'none'}
       onScroll={() => markScrolling()}
@@ -920,7 +930,7 @@ export function SessionCarousel(props: {
             onGeometryChange?.(currentGeometry(sessionId))
             onActivate(sessionId)
           }} onHover={hover}>
-          {renderSession(node, inViewport.has(node.sessionId))}
+          {renderSession(node, inViewport.has(node.sessionId), viewportMoving)}
           {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
             <strong>{node.title}</strong>
             <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
@@ -982,6 +992,7 @@ export function fullyVisibleCardScrollLeft(
 
 const CARD_EDGE_INSET = 10
 const VIRTUALIZE_THRESHOLD = 80
+const VIEWPORT_SETTLE_MS = 300
 const EDGE_INTENT_WIDTH = 84
 const EDGE_INTENT_DWELL_MS = 180
 const EDGE_BROWSE_INTERVAL_MS = 900

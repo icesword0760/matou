@@ -933,6 +933,20 @@ describe('SessionCarousel', () => {
     expect(sibling.textContent).toContain('子会话 3')
   })
 
+  it('activates a compact sibling summary in a narrow window with one pointer press', () => {
+    const onActivate = vi.fn()
+    render(<SessionCarousel nodes={fixtures(4)} focusedSessionId="session-1"
+      onActivate={onActivate} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 600 })
+    fireEvent(window, new Event('resize'))
+
+    const summary = document.querySelector('[data-session-id="session-2"] .session-compact-summary')!
+    fireEvent.pointerDown(summary, { button: 0 })
+
+    expect(onActivate).toHaveBeenCalledWith('session-2')
+  })
+
   it('finishes restoring at the browser-clamped reachable position', () => {
     vi.useFakeTimers()
     const onGeometryChange = vi.fn()

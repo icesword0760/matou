@@ -20,7 +20,7 @@ export function SessionCard(props: {
       // A mounted terminal may keep its hidden textarea focused even after
       // another Session becomes active. A fresh click must still activate the
       // card immediately instead of depending on a second focus event.
-      if (!focused && (event.target as HTMLElement).closest('.terminal-surface')) {
+      if (!focused && !(event.target as HTMLElement).closest('button,[role="menuitem"]')) {
         onActivate(node.sessionId)
       }
     }}

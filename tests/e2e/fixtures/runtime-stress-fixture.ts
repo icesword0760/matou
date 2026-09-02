@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { expect, type Locator } from '@playwright/test'
@@ -64,17 +65,24 @@ export async function createRuntimeStressFixture(sessionCount = 20): Promise<Run
       if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
         throw new Error('durationSeconds must be positive')
       }
-      const startAtSeconds = Date.now() / 1000 + Math.max(5, sessionCount / 2)
+      const barrierPath = join(fixture.dataDirectory, `runtime-stress-start-${Date.now()}`)
+      await rm(barrierPath, { force: true })
       for (const sessionId of sessionIds) {
+        const card = fixture.page.locator(`.session-card-slot[data-session-id="${sessionId}"]`)
+        await card.scrollIntoViewIfNeeded()
+        await expect(card).toBeInViewport({ ratio: 0.5 })
+        const compactSummary = card.locator('.session-compact-summary')
+        if (await compactSummary.isVisible()) await compactSummary.click()
         const textarea = surface(sessionId).locator('.xterm-helper-textarea')
-        await expect(textarea).toBeAttached()
+        await expect(textarea).toBeVisible()
         await textarea.click()
         await fixture.page.keyboard.insertText(stressCommand({
-          sessionId, bytesPerSecond, durationSeconds, startAtSeconds
+          sessionId, bytesPerSecond, durationSeconds, barrierPath
         }))
         await textarea.press('Enter')
       }
-      await fixture.page.waitForTimeout(Math.max(0, startAtSeconds * 1000 - Date.now()) + 250)
+      await writeFile(barrierPath, 'start')
+      await fixture.page.waitForTimeout(250)
     },
     sample: (name, frameCount) => collectScaleSample(fixture, {
       name, minimumFrameCount: frameCount, warmupRuns: 0, measuredRuns: 1
@@ -87,15 +95,16 @@ function stressCommand(input: {
   sessionId: string
   bytesPerSecond: number
   durationSeconds: number
-  startAtSeconds: number
+  barrierPath: string
 }): string {
   const script = [
-    'import sys,time',
-    `start=${input.startAtSeconds}`,
+    'import os,sys,time',
+    `barrier=${JSON.stringify(input.barrierPath)}`,
     `duration=${input.durationSeconds}`,
     `rate=${input.bytesPerSecond}`,
     `prefix=${JSON.stringify(`${input.sessionId}:`)}`,
-    'time.sleep(max(0,start-time.time()))',
+    'while not os.path.exists(barrier): time.sleep(0.01)',
+    'start=time.time()',
     'payload=(prefix+("x"*max(1,1023-len(prefix)))+"\\n").encode()',
     'interval=len(payload)/rate',
     'deadline=start+duration',

@@ -10,7 +10,7 @@ export function SessionCanvas(props: {
   levelParentSessionId?: string | null
   disabled?: boolean
   disabledReason?: string
-  renderSession(node: SessionGraphNodeView, inViewport: boolean): ReactNode
+  renderSession(node: SessionGraphNodeView, inViewport: boolean, viewportMoving: boolean): ReactNode
   onActivate(sessionId: string): void
   onRemoveBranch?(sessionId: string, scope: RemoveNodeScope): unknown
   onNavigateToChildren?(sessionId: string): void
@@ -137,8 +137,8 @@ export function SessionCanvas(props: {
     data-last-saved-scroll-left={lastSavedScrollLeft}
     data-parent-session-id={parentId ?? ''}>
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}
-      renderSession={(node, inViewport) => {
-        if (node.archivedAt === undefined) return renderSession(node, inViewport)
+      renderSession={(node, inViewport, viewportMoving) => {
+        if (node.archivedAt === undefined) return renderSession(node, inViewport, viewportMoving)
         const descendantNodes = graphIndex.descendantsOf(node.sessionId)
         return <StoppedSessionCard node={node}
           descendantNodes={[...descendantNodes]}

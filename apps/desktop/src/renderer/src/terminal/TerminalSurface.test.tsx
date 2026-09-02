@@ -30,7 +30,8 @@ const state = vi.hoisted(() => ({
   storeTerminalCheckpoint: vi.fn(),
   searchTerminalHistory: vi.fn(),
   historyAroundTerminalCursor: vi.fn(),
-  acknowledgeTerminal: vi.fn()
+  acknowledgeTerminal: vi.fn(),
+  requestTerminalReplay: vi.fn()
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -96,7 +97,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({
       return vi.fn()
     },
     acknowledgeTerminal: state.acknowledgeTerminal,
-    requestTerminalReplay: vi.fn(),
+    requestTerminalReplay: state.requestTerminalReplay,
     resizeTerminal: vi.fn(),
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
@@ -140,6 +141,7 @@ describe('TerminalSurface focus continuity', () => {
       lines: [], gaps: [], hasMore: false
     })
     state.acknowledgeTerminal.mockClear()
+    state.requestTerminalReplay.mockClear()
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       disconnect() {}
@@ -214,6 +216,74 @@ describe('TerminalSurface focus continuity', () => {
 
     expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
     expect(state.terminalReset).not.toHaveBeenCalled()
+  })
+
+  it('keeps an offscreen foreground terminal live without parsing every hidden output frame', async () => {
+    render(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    const hiddenBytes = new TextEncoder().encode('hidden sustained output')
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 9, data: hiddenBytes
+    })
+
+    expect(state.terminalWrite).not.toHaveBeenCalled()
+    expect(state.acknowledgeTerminal).toHaveBeenCalledWith('session-1', 9)
+  })
+
+  it('replays the bounded terminal tail when an offscreen foreground card returns to view', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('visible')
+    })
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 2,
+      data: new TextEncoder().encode('hidden')
+    })
+    state.requestTerminalReplay.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground />)
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
+  })
+
+  it('waits for an inactive preview to settle before replaying its offscreen tail', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('hidden')
+    })
+    state.requestTerminalReplay.mockClear()
+    vi.useFakeTimers()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible foreground />)
+    await act(() => vi.advanceTimersByTimeAsync(499))
+    expect(state.requestTerminalReplay).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(1))
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
+  })
+
+  it('defers even the focused terminal catch-up while the horizontal viewport is moving', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    view.rerender(<TerminalSurface sessionId="session-1" active={false} visible={false} foreground />)
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 4,
+      data: new TextEncoder().encode('hidden')
+    })
+    state.requestTerminalReplay.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground viewportMoving />)
+    expect(state.requestTerminalReplay).not.toHaveBeenCalled()
+    view.rerender(<TerminalSurface sessionId="session-1" active visible foreground viewportMoving={false} />)
+
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('session-1')
   })
 
   it('replays historical terminal resize frames before continuing output', async () => {

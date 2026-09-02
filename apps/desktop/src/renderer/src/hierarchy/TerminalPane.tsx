@@ -30,6 +30,7 @@ export function TerminalPane(props: {
   active: boolean
   visible?: boolean
   foreground?: boolean
+  viewportMoving?: boolean
   workspaceId?: string
   sceneId?: string
   pathValid?: boolean
@@ -78,7 +79,7 @@ export function TerminalPane(props: {
   onHandoffEnvironment?(sessionId: string, target: SessionEnvironmentTarget): unknown
 }) {
   const {
-    session, active, visible = true, foreground = true,
+    session, active, visible = true, foreground = true, viewportMoving = false,
     pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
     recoveryState = 'ready', recoveryError,
@@ -352,6 +353,7 @@ export function TerminalPane(props: {
       (recoveryState === 'ready' || storageFault !== null) && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}
+      viewportMoving={viewportMoving}
       inputDisabled={actionBlocked || !pathValid || storageFault !== null}
       readOnly={actionBlocked}
       themeKey={themeKey} fontSize={fontSize}
