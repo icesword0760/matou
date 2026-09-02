@@ -404,6 +404,51 @@ describe('ForkWorkflowService', () => {
     })
   })
 
+  it('publishes applying-setup while the real setup process is still running', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-parent')
+    seedReadyGitState(source.executionContextId)
+    const releaseSetup = join(dataRoot, 'release-slow-setup')
+    service = new ForkWorkflowService(
+      dataRoot, database, new DomainTransactionManager(database), {
+        stopRuns: async () => undefined,
+        setupPolicyForWorkspace: () => [{
+          idempotencyKey: 'observable-slow-setup',
+          command: '/bin/sh',
+          args: ['-c', `while [ ! -f ${JSON.stringify(releaseSetup)} ]; do sleep 0.02; done`]
+        }]
+      }
+    )
+    const accepted = await service.createForkChild(command('observable-setup-accept'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '后台准备', worktreeMode: 'new', submissionKey: 'observable-setup', now: 30
+    })
+    const operationId = accepted.forkProgress!.operationId
+    const repository = new SessionForkIntentRepository(database)
+    const decision = repository.acquireLease({
+      operationId, owner: 'observable-worker', now: 30, ttlMs: 30_000
+    })
+    if (decision.kind !== 'acquired') throw new Error('observable setup lease missing')
+    const executing = service.executeFork(command('observable-setup-execute'), {
+      windowId: 'window-1', sceneId: source.sceneId,
+      operationId, lease: decision.lease, now: 30
+    })
+
+    let stageError: unknown
+    try {
+      await expect.poll(() => repository.progressByOperation(operationId)?.stage, {
+        timeout: 500
+      }).toBe('applying-setup')
+    } catch (error) {
+      stageError = error
+    }
+    await writeFile(releaseSetup, 'continue')
+    await expect(executing).resolves.toMatchObject({
+      forkProgress: { stage: 'restoring-provider' }
+    })
+    if (stageError) throw stageError
+  })
+
   it('reports that the new-worktree choice needs a Git repository before creating a node', async () => {
     const source = bootstrapClaude('provider-parent')
     const before = database.get<{ count: number }>(
@@ -469,7 +514,7 @@ describe('ForkWorkflowService', () => {
     )).toEqual({ state: 'starting', attempt_count: 1 })
     expect(retried.graph.nodes.find(({ sessionId }) => sessionId === retried.session!.id))
       .toMatchObject({
-        forkProgress: { stage: 'creating-worktree', attempt: 1 },
+        forkProgress: { stage: 'applying-setup', attempt: 1 },
         workStatus: 'starting'
       })
     const resumed = await executeAccepted(retried, source.sceneId, 'retry-setup-execute', 32)

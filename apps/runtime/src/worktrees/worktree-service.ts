@@ -77,6 +77,7 @@ export class WorktreeService {
       setupPolicy: WorktreeSetupStep[]
       now: number
       beforeExternalSideEffect?: () => void
+      onSetupStarted?: () => Promise<void> | void
       onCheckpoint?: (
         point: 'branch-created' | 'path-created' | 'setup-completed'
       ) => Promise<void> | void
@@ -144,6 +145,7 @@ export class WorktreeService {
       }
       await input.onCheckpoint?.('branch-created')
       await input.onCheckpoint?.('path-created')
+      if (input.setupPolicy.length > 0) await input.onSetupStarted?.()
       const setupResult = setupCheckpoints(this.get(input.id)?.setupResult ?? [])
       for (const step of input.setupPolicy) {
         const idempotencyKey = step.idempotencyKey!

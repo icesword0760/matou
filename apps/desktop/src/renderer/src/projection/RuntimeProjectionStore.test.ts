@@ -142,6 +142,39 @@ describe('RuntimeProjectionStore', () => {
     })
   })
 
+  it('projects a Fork stage emitted while background setup is still running', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], sessions: [], relations: [], scenes: [],
+      sessionGraphs: {
+        'scene-1': {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'child-1', forkProgress: {
+            operationId: 'operation-1', sessionId: 'child-1', submissionKey: 'submission-1',
+            stage: 'creating-worktree', completedSteps: 0, totalSteps: 5, attempt: 0
+          } }], edges: []
+        }
+      }
+    })
+
+    store.applyBatch('generation-1', [{
+      sequence: 2, eventId: 'fork-progress-2', eventType: 'session.fork-progressed',
+      aggregateType: 'session', aggregateId: 'child-1', sessionId: 'child-1',
+      payload: {
+        graph: {
+          sceneId: 'scene-1', nodes: [{ sessionId: 'child-1', forkProgress: {
+            operationId: 'operation-1', sessionId: 'child-1', submissionKey: 'submission-1',
+            stage: 'applying-setup', completedSteps: 1, totalSteps: 5, attempt: 0
+          } }], edges: []
+        }
+      },
+      schemaVersion: 1, commandId: 'fork-progress', occurredAt: 2
+    }])
+
+    expect(store.view().sessionGraphs['scene-1']?.nodes[0]?.forkProgress)
+      .toMatchObject({ stage: 'applying-setup' })
+  })
+
   it('updates both the terminal entity and graph during restore and legacy stopped-node recovery', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

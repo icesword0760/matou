@@ -495,6 +495,11 @@ function isSessionGraphEvent(eventType: string): boolean {
     eventType === 'session.user-interacted' ||
     eventType === 'session.mode-changed' ||
     eventType === 'session.restore-state-changed' ||
+    eventType === 'session.fork-progressed' ||
+    eventType === 'session.fork-worktree-ready' ||
+    eventType === 'session.fork-failed' ||
+    eventType === 'session.fork-retrying' ||
+    eventType === 'session.fork-removed' ||
     eventType === 'session.graph-summary-changed' ||
     eventType === 'session.stopped-state-changed'
 }
