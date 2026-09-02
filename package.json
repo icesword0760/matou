@@ -28,6 +28,7 @@
     "package:dir": "pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --dir",
     "test:packaged": "pnpm package:dir && playwright test tests/e2e/packaged-runtime.spec.ts",
     "test:e2e:recovery-scale": "node tooling/run-recovery-scale-gate.mjs",
+    "test:e2e:fork-crash-recovery": "pnpm build && playwright test tests/e2e/fork-runtime-crash-recovery.spec.ts --workers=1 --reporter=line",
     "clean": "pnpm -r --if-present run clean"
   },
   "devDependencies": {

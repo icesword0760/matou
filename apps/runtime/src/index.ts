@@ -63,6 +63,7 @@ import { SessionForkIntentRepository } from './session/session-fork-intent-repos
 import type { SessionExecutionDescriptor } from './session/session-execution-service'
 import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
 import { ForkOperationCoordinator } from './session-canvas/fork-operation-coordinator'
+import { createE2eForkCrashObserver } from './session-canvas/fork-operation-e2e-crash-controller'
 import { createE2eJournalOptionsProvider } from './journal/e2e-journal-fault-controller'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
@@ -86,6 +87,7 @@ scaleEventLoopDelay?.enable()
 const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
 const e2eJournalOptionsForSession = createE2eJournalOptionsProvider(process.env)
+const e2eForkCrashObserver = createE2eForkCrashObserver(process.env)
 interface RuntimeStateBase {
   mode: 'normal' | 'read-only'
   dataRoot: string
@@ -437,7 +439,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
           now
         })
         for (const server of servers) server.flushSemanticEvents()
-      }
+      },
+      ...(e2eForkCrashObserver ? { observer: e2eForkCrashObserver } : {})
     }
   )
   forkCoordinator.start()

@@ -169,6 +169,7 @@ export class RuntimeServer {
   readonly #cancelledRequests = new Set<string>()
   readonly #subscriptions = new Map<string, { afterSequence: number; batchSize: number }>()
   readonly #replays = new Map<string, ReplayState>()
+  readonly #replayRequestGenerations = new Map<string, number>()
   readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerLaunchRunIds = new Map<string, string>()
@@ -494,6 +495,10 @@ export class RuntimeServer {
         break
       }
       case 'terminal.view-detach': {
+        this.#replayRequestGenerations.set(
+          message.sessionId,
+          (this.#replayRequestGenerations.get(message.sessionId) ?? 0) + 1
+        )
         this.#sessions.get(message.sessionId)?.detach(this.#sendToPort)
         this.#attachedSessionIds.delete(message.sessionId)
         this.#completedReplayThrough.delete(message.sessionId)
@@ -886,6 +891,10 @@ export class RuntimeServer {
       this.#sendError('SESSION_FORBIDDEN', `session ${message.sessionId} is outside this Renderer capability`)
       return
     }
+    const generation = (this.#replayRequestGenerations.get(message.sessionId) ?? 0) + 1
+    this.#replayRequestGenerations.set(message.sessionId, generation)
+    this.#replays.delete(message.sessionId)
+    const isCurrentRequest = () => this.#replayRequestGenerations.get(message.sessionId) === generation
     let detachedSession: PtySession | undefined
     try {
       this.#completedReplayThrough.delete(message.sessionId)
@@ -897,6 +906,7 @@ export class RuntimeServer {
       const metadata = activeSession
         ? await activeSession.replayMetadata(10_000)
         : await readSessionReplayMetadata(this.#dataRoot, message.sessionId, 10_000)
+      if (!isCurrentRequest()) return
       const availableFromSequence = metadata.firstSequence
       const liveSequence = metadata.lastSequence
       const tailFromSequence = metadata.tailFromSequence
@@ -909,6 +919,7 @@ export class RuntimeServer {
           domainEventSequence: checkpointDomainWatermark
         }
       )
+      if (!isCurrentRequest()) return
       // A re-attached PTY asks for the beginning of its current run. An older
       // checkpoint cannot replace that prefix: resetting to it and then
       // starting at requestedFrom would leave a visible hole. A newer
@@ -980,6 +991,7 @@ export class RuntimeServer {
       })
       this.#pumpReplay(message.sessionId)
     } catch (error) {
+      if (!isCurrentRequest()) return
       detachedSession?.attach(this.#sendToPort)
       if (error instanceof JournalCorruptionError) {
         this.#port.postMessage({
@@ -1165,8 +1177,14 @@ export class RuntimeServer {
   }
 
   async #finishReplay(replay: ReplayState): Promise<void> {
+    if (this.#replays.get(replay.sessionId) !== replay) return
     if (replay.activeSession) {
       const metadata = await replay.activeSession.replayMetadata(10_000)
+      // A second Renderer attachment can replace this replay while journal
+      // metadata is being read. Only the newest replay may reattach the live
+      // PTY or clear replay state; otherwise the replacement is left detached
+      // and its terminal stops receiving live output.
+      if (this.#replays.get(replay.sessionId) !== replay) return
       if (metadata.lastSequence > replay.liveSequence) {
         const fromSequence = replay.liveSequence + 1
         replay.liveSequence = metadata.lastSequence
@@ -2186,6 +2204,7 @@ export class RuntimeServer {
     this.#endedSessionIds.clear()
     this.#completedReplayThrough.clear()
     this.#replays.clear()
+    this.#replayRequestGenerations.clear()
   }
 
   #sendError(
