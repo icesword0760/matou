@@ -67,6 +67,17 @@ describe('SessionCanvas', () => {
     expect(onRemoveBranch).toHaveBeenCalledWith('stopped', true)
   })
 
+  it('does not offer removal when a stopped branch is the final card on the canvas', () => {
+    const data = graph()
+    data.nodes = [{ ...node('stopped', '最后一张卡片'), archivedAt: 20, workStatus: 'exited' }]
+    data.edges = []
+    data.focusedSessionId = 'stopped'
+
+    renderCanvas(data, { onRemoveBranch: vi.fn() })
+
+    expect(screen.queryByRole('button', { name: '移出节点：最后一张卡片' })).toBeNull()
+  })
+
   it('reveals a stopped Session selected from the DAG without changing projections', async () => {
     const data = graph()
     data.nodes.push({ ...node('archived', '已停止 Shell', 'parent'), archivedAt: 20, workStatus: 'exited' })

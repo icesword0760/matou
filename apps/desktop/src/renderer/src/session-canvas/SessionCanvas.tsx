@@ -135,7 +135,9 @@ export function SessionCanvas(props: {
               workStatus === 'running' || workStatus === 'starting').length,
             needsInput: descendants.filter(({ workStatus }) => workStatus === 'needs-input').length
           }}
-          {...(onRemoveBranch ? { onRemoveBranch } : {})} />
+          {...(onRemoveBranch && branchHasSurvivingCard(graph.nodes, node.sessionId)
+            ? { onRemoveBranch }
+            : {})} />
       }}
       onActivate={(sessionId) => {
         const node = graph.nodes.find((candidate) => candidate.sessionId === sessionId)
@@ -156,4 +158,19 @@ export function SessionCanvas(props: {
 function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
   const children = nodes.filter(({ parentSessionId }) => parentSessionId === sessionId)
   return children.flatMap((child) => [child, ...sessionDescendants(nodes, child.sessionId)])
+}
+
+export function branchHasSurvivingCard(nodes: SessionGraphNodeView[], sessionId: string): boolean {
+  const branchIds = new Set([sessionId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of nodes) {
+      if (node.parentSessionId && branchIds.has(node.parentSessionId) && !branchIds.has(node.sessionId)) {
+        branchIds.add(node.sessionId)
+        changed = true
+      }
+    }
+  }
+  return nodes.some(({ sessionId: candidate }) => !branchIds.has(candidate))
 }

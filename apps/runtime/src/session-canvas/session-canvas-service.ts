@@ -547,6 +547,14 @@ export class SessionCanvasService {
         ? descendants
         : [input.sessionId]
       const placeholders = removedSessionIds.map(() => '?').join(', ')
+      const survivingMembershipCount = tx.get<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM session_canvas_memberships
+         WHERE scene_id = ? AND session_id NOT IN (${placeholders})`,
+        input.sceneId, ...removedSessionIds
+      )?.count ?? 0
+      if (survivingMembershipCount === 0) {
+        throw new Error('Scene must keep one Session')
+      }
       const focusedSessionId = tx.get<{ active_session_id: string | null }>(
         `SELECT active_session_id FROM window_scene_focus
          WHERE window_id = ? AND scene_id = ?`,

@@ -284,6 +284,10 @@ describe('SessionCanvasService', () => {
 
   it('removes an active parent and its complete descendant branch from both projections', () => {
     const initial = bootstrap()
+    const survivor = service.createShellSibling(command('active-branch-survivor'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 19
+    })
     const child = service.createShellSibling(command('active-branch-child'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
       sourceSessionId: initial.session!.id, parentSessionId: initial.session!.id, now: 20
@@ -308,7 +312,19 @@ describe('SessionCanvasService', () => {
     expect(result.disposedSessionIds).toEqual(expect.arrayContaining([
       initial.session!.id, child.session!.id, grandchild.session!.id
     ]))
-    expect(result.graph.nodes).toEqual([])
+    expect(result.graph.nodes.map(({ sessionId }) => sessionId)).toEqual([survivor.session!.id])
+  })
+
+  it('protects the final card from structural removal', () => {
+    const initial = bootstrap()
+
+    expect(() => service.removeSessionBranch(command('remove-final-card'), {
+      windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
+      includeDescendants: false, now: 20
+    })).toThrow('Scene must keep one Session')
+
+    expect(service.projectSceneGraph(initial.scene!.id, 'window-1').nodes.map(({ sessionId }) => sessionId))
+      .toEqual([initial.session!.id])
   })
 
   it('restores a durable Claude identity on the same stopped node', () => {
