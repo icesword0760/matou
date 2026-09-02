@@ -170,6 +170,7 @@ export class ForkWorkflowService {
   readonly #gitStates: SessionGitStateRepository
   readonly #forkIntents: SessionForkIntentRepository
   readonly #setupPolicyForWorkspace: (workspaceId: string) => WorktreeSetupStep[]
+  readonly #onProgressCommitted: () => void
 
   constructor(
     dataRoot: string,
@@ -178,6 +179,7 @@ export class ForkWorkflowService {
     dependencies: {
       stopRuns: (runIds: string[]) => Promise<void>
       setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
+      onProgressCommitted?: () => void
     }
   ) {
     try {
@@ -192,6 +194,7 @@ export class ForkWorkflowService {
     this.#gitStates = new SessionGitStateRepository(database)
     this.#forkIntents = new SessionForkIntentRepository(database)
     this.#setupPolicyForWorkspace = dependencies.setupPolicyForWorkspace ?? (() => [])
+    this.#onProgressCommitted = dependencies.onProgressCommitted ?? (() => undefined)
   }
 
   createForkChild(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
@@ -260,6 +263,13 @@ export class ForkWorkflowService {
               setupPolicy: worktree.setupPolicy as WorktreeSetupStep[],
               now: input.now,
               beforeExternalSideEffect: renew,
+              onSetupStarted: () => {
+                if (progress.stage !== 'creating-worktree') return
+                progress = this.#publishProgressStage(
+                  derivedCommand(command, 'applying-setup'), input, intent.session_id,
+                  input.operationId, input.lease, 'applying-setup', renew(), preserveFocus
+                )
+              },
               onCheckpoint: async (point) => {
                 const operation = this.#forkIntents.operationById(input.operationId)
                 if (operation) await input.observer?.reach(point, operation)
@@ -375,6 +385,38 @@ export class ForkWorkflowService {
       return { ...result, forkState: 'pending' as const, forkProgress }
     }).result
     return prepared
+  }
+
+  #publishProgressStage(
+    command: DomainCommandMetadata,
+    input: MutationLocation,
+    sessionId: string,
+    operationId: string,
+    lease: Pick<ForkLease, 'token' | 'fence'>,
+    stage: 'applying-setup',
+    now: number,
+    preserveFocusedSessionId?: string
+  ): ForkProgress {
+    const progress = this.#transactions.execute(command, ({ tx, emit }) => {
+      const advanced = this.#forkIntents.advanceStage({
+        operationId, lease, stage, now
+      }, tx)
+      if (advanced.kind === 'stale') throw new StaleForkLeaseError()
+      const result = readCreatedForkResult(
+        tx, input.windowId, input.sceneId, sessionId, now, preserveFocusedSessionId
+      )
+      emit({
+        eventId: `${command.commandId}:fork-progress`,
+        eventType: 'session.fork-progressed',
+        aggregateType: 'session', aggregateId: sessionId,
+        taskId: result.session!.taskId, sessionId,
+        payload: { graph: result.graph, forkProgress: advanced.progress },
+        occurredAt: now
+      })
+      return advanced.progress
+    }).result
+    this.#onProgressCommitted()
+    return progress
   }
 
   removeFailedFork(

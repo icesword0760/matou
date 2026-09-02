@@ -65,6 +65,7 @@ import type { SessionExecutionDescriptor } from './session/session-execution-ser
 import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
 import { ForkOperationCoordinator } from './session-canvas/fork-operation-coordinator'
 import { createE2eForkCrashObserver } from './session-canvas/fork-operation-e2e-crash-controller'
+import { createE2eForkSetupPolicyProvider } from './session-canvas/e2e-fork-setup-policy'
 import { createE2eJournalOptionsProvider } from './journal/e2e-journal-fault-controller'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
@@ -89,6 +90,7 @@ const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
 const e2eJournalOptionsForSession = createE2eJournalOptionsProvider(process.env)
 const e2eForkCrashObserver = createE2eForkCrashObserver(process.env)
+const e2eForkSetupPolicyForWorkspace = createE2eForkSetupPolicyProvider(process.env)
 const e2eMigrationObserver = createE2eMigrationInterruptionObserver(process.env)
 interface RuntimeStateBase {
   mode: 'normal' | 'read-only'
@@ -177,7 +179,12 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const accessPolicy = new RuntimeAccessPolicy(
     opened.kind === 'read-only' ? 'read-only' : 'normal'
   )
-  const rpcRouter = new RuntimeRpcRouter(database, notifications, { accessPolicy })
+  const rpcRouter = new RuntimeRpcRouter(database, notifications, {
+    accessPolicy,
+    ...(e2eForkSetupPolicyForWorkspace ? {
+      setupPolicyForWorkspace: e2eForkSetupPolicyForWorkspace
+    } : {})
+  })
   if (opened.kind === 'read-only') {
     console.error(`[runtime.storage] database opened read-only: ${opened.reason}`)
     return {
@@ -398,7 +405,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
   )
   servers.add(backgroundServer)
   const forkWorkflow = new ForkWorkflowService(runtimeDataRoot, database, transactions, {
-    stopRuns
+    stopRuns,
+    ...(e2eForkSetupPolicyForWorkspace ? {
+      setupPolicyForWorkspace: e2eForkSetupPolicyForWorkspace
+    } : {}),
+    onProgressCommitted: () => {
+      for (const server of servers) server.flushSemanticEvents()
+    }
   })
   forkCoordinator = new ForkOperationCoordinator(
     new SessionForkIntentRepository(database),

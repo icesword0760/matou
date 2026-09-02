@@ -37,6 +37,7 @@ import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
+import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -84,7 +85,11 @@ export class RuntimeRpcRouter {
   constructor(
     database: RuntimeDatabase,
     notifications = new NotificationProjection(),
-    options: { projectsRoot?: string; accessPolicy?: RuntimeAccessPolicy } = {}
+    options: {
+      projectsRoot?: string
+      accessPolicy?: RuntimeAccessPolicy
+      setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
+    } = {}
   ) {
     this.#database = database
     const transactions = new DomainTransactionManager(database)
@@ -106,7 +111,12 @@ export class RuntimeRpcRouter {
     this.#sessionInteractions = new SessionInteractionService(database, transactions)
     this.#providerModes = new ProviderModeService(database, transactions)
     this.#forkWorkflows = new ForkWorkflowService(
-      dirname(database.path), database, transactions, { stopRuns: async () => undefined }
+      dirname(database.path), database, transactions, {
+        stopRuns: async () => undefined,
+        ...(options.setupPolicyForWorkspace ? {
+          setupPolicyForWorkspace: options.setupPolicyForWorkspace
+        } : {})
+      }
     )
     this.#git = new GitWorkspaceService({ database, dataRoot: dirname(database.path) })
     this.#gitStates = new SessionGitStateRepository(database)
