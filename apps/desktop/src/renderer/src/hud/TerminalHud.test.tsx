@@ -275,6 +275,25 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByRole('button', { name: '打开运行环境：待恢复' }).textContent).toBe('待恢复')
   })
 
+  it('keeps recovery actions enabled when only the current Environment blocks normal Session mutations', async () => {
+    render(<TerminalHud hud={undefined} sessionId="session-1"
+      disabledReason="当前运行环境需要先恢复或交接"
+      environment={{
+        kind: 'worktree', state: 'missing', path: '/missing', error: 'path-missing',
+        localExecutionContextId: 'local-context', worktreeId: 'worktree-1',
+        worktreeExecutionContextId: 'worktree-context'
+      }}
+      git={{ state: 'unavailable', dirty: false }}
+      environmentActions={environmentActions()}
+      onPermissionMode={vi.fn()} onModel={vi.fn()} />)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '打开运行环境：待恢复' }))
+
+    expect(screen.getByRole('button', { name: '恢复原 Worktree' })).toHaveProperty('disabled', false)
+    expect(screen.getByRole('button', { name: '定位已移动的 Worktree' })).toHaveProperty('disabled', false)
+    expect(screen.getByRole('button', { name: '交接到 Local' })).toHaveProperty('disabled', false)
+  })
+
   it('clears the Git badge when a live Shell leaves its repository', () => {
     render(<TerminalHud hud={{
       sessionId: 'session-1', mode: 'shell', shell: 'zsh', cwd: '/outside', startedAt: Date.now()

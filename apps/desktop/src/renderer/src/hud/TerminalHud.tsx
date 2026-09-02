@@ -34,6 +34,7 @@ export function TerminalHud(props: {
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
   disabledReason?: string
+  environmentDisabledReason?: string
   environment?: SessionEnvironment
   git?: SessionGitState
   hasOwnedWorktree?: boolean
@@ -189,7 +190,9 @@ export function TerminalHud(props: {
     {environmentOpen && props.environment && props.environmentActions && createPortal(
       <EnvironmentControlMenu sessionId={sessionId} environment={props.environment}
         hasOwnedWorktree={props.hasOwnedWorktree === true} actions={props.environmentActions}
-        {...(props.disabledReason ? { mutationDisabledReason: props.disabledReason } : {})}
+        {...(props.environmentDisabledReason
+          ? { mutationDisabledReason: props.environmentDisabledReason }
+          : {})}
         onClose={() => setEnvironmentOpen(false)} />, document.body
     )}
     {gitOpen && !disabled && git?.state === 'ready' && gitClient && gitCwd && createPortal(<GitControlMenu client={gitClient}
