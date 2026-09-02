@@ -17,7 +17,7 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
   const dataDirectory = await mkdtemp(join(tmpdir(), 'matou-packaged-e2e-'))
   const executablePath = await packagedExecutable()
   try {
-    await runPackagedSmoke(executablePath, dataDirectory, true)
+    await runPackagedSmoke(executablePath, dataDirectory, true, 'normal')
 
     const databasePath = join(dataDirectory, 'matou.sqlite')
     expect(existsSync(databasePath)).toBe(true)
@@ -43,7 +43,7 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
     expect(before.byteLength).toBeGreaterThan(16)
     await truncate(activePath, before.byteLength - 3)
 
-    await runPackagedSmoke(executablePath, dataDirectory, false)
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal')
     const after = await readFile(activePath)
     expect(after.byteLength).toBeGreaterThan(before.byteLength - 3)
 
@@ -52,13 +52,13 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
       'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)'
     ).run(999, 'future-version', 'future-checksum', Date.now())
     newer.close()
-    await runPackagedSmoke(executablePath, dataDirectory, false)
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'read-only')
     const untouched = new DatabaseSync(databasePath)
     expect(untouched.prepare('SELECT MAX(version) AS version FROM schema_migrations').get())
       .toEqual({ version: 999 })
     untouched.prepare('DELETE FROM schema_migrations WHERE version = 999').run()
     untouched.close()
-    await runPackagedSmoke(executablePath, dataDirectory, false)
+    await runPackagedSmoke(executablePath, dataDirectory, false, 'normal')
   } finally {
     await rm(dataDirectory, { recursive: true, force: true })
   }
@@ -67,7 +67,8 @@ test('packaged app runs SQLite, node-pty, replay, torn-tail recovery, and schema
 async function runPackagedSmoke(
   executablePath: string,
   dataDirectory: string,
-  exerciseProduct: boolean
+  exerciseProduct: boolean,
+  expectedMode: 'normal' | 'read-only'
 ): Promise<void> {
   await chmod(executablePath, 0o755)
   // MATOU_DEFAULT_WORKSPACE models the directory a normal macOS Terminal opens
@@ -99,11 +100,21 @@ async function runPackagedSmoke(
     await expect(page.getByRole('group', { name: 'matou_workspace 工作空间' })).toBeVisible()
     await expect(page.getByTestId('active-task')).toHaveText('默认')
     await expect(page.getByTestId('terminal-pane')).toHaveCount(exerciseProduct ? 1 : 2)
-    await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
-    await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
-    await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
+    if (expectedMode === 'normal') {
+      await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+      await expect(page.getByTestId('smoke-marker')).toHaveText('__MATOU_CHANNEL_READY__')
+      await expect(page.getByTestId('replay-marker')).toHaveText(/^replayed-through:\d+$/)
+    } else {
+      await expect(page.locator('.read-only-recovery-banner'))
+        .toContainText('数据库处于只读恢复模式')
+      const replayOnlySurface = page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
+      await expect(replayOnlySurface).toBeVisible()
+      await expect(replayOnlySurface).not.toHaveAttribute('data-pid', /\d+/)
+    }
     await page.waitForTimeout(200)
-    await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+    if (expectedMode === 'normal') {
+      await expect(page.getByTestId('runtime-status')).toHaveText('streaming')
+    }
     if (exerciseProduct) {
       await page.getByRole('button', { name: '横向新增 Shell' }).click()
       await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
@@ -120,14 +131,10 @@ async function runPackagedSmoke(
       await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid', pid!)
       await detached.close()
       await expect(page.getByTestId('detached-placeholder')).toHaveCount(0)
-      await expect(page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)).toHaveCount(0)
-      await expect(page.locator('.stopped-session-card')).toContainText('已停止')
-      await expect(page.getByRole('button', { name: '重新启动' })).toHaveCount(0)
-
-      await page.getByRole('button', { name: '横向新增 Shell' }).click()
-      const continued = page.locator('.scene-stage:not([hidden]) .terminal-surface').first()
-      await expect(continued).toHaveAttribute('data-session-id', /.+/)
-      await expect(continued).not.toHaveAttribute('data-session-id', detachedSessionId!)
+      const returned = page.locator(`.terminal-surface[data-session-id="${detachedSessionId}"]`)
+      await expect(returned).toBeVisible()
+      await expect(returned).toHaveAttribute('data-pid', pid!)
+      await expect(page.locator('.stopped-session-card')).toHaveCount(0)
       await expect(page.locator('[data-testid="terminal-pane"]:visible')).toHaveCount(2)
 
       const workspace = join(dataDirectory, 'matou_workspace')
