@@ -61,6 +61,26 @@ describe('RuntimeSessionRegistry', () => {
     await first
   })
 
+  it('keeps provider identity confirmation and output ownership shared across connections', () => {
+    const registry = new RuntimeSessionRegistry()
+    const confirm = vi.fn()
+    const reject = vi.fn()
+
+    registry.markProviderIdentityPending('shared-provider', 'run-1', { confirm, reject })
+    expect(registry.providerIdentityPending('shared-provider')).toBe(true)
+
+    expect(registry.confirmProviderIdentity('shared-provider', 'stale-run')).toBe(false)
+    expect(confirm).not.toHaveBeenCalled()
+    expect(registry.confirmProviderIdentity('shared-provider', 'run-1')).toBe(true)
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(reject).not.toHaveBeenCalled()
+    expect(registry.providerIdentityPending('shared-provider')).toBe(false)
+    expect(registry.providerIdentityConfirmed('run-1')).toBe(true)
+
+    registry.forgetProviderIdentity('shared-provider', 'run-1')
+    expect(registry.providerIdentityConfirmed('run-1')).toBe(false)
+  })
+
   it('waits for every PTY journal to close during a graceful Runtime shutdown', async () => {
     const registry = new RuntimeSessionRegistry()
     const first = session('first')

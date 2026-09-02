@@ -3758,13 +3758,14 @@ sleep 30
     await writeFile(executable, [
       '#!/bin/sh',
       `printf '%s\\n' "$*" >> ${JSON.stringify(launchLog)}`,
-      'sleep 30',
+      `trap 'printf "bypass permissions on (shift+tab to cycle)\\r\\nAPI Error: provider unavailable\\r\\n"' USR1`,
+      'while :; do sleep 1; done',
       ''
     ].join('\n'))
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
-    registerSession(database, 'provider-cross-window', 'claude-code')
+    registerCanvasSession(database, 'provider-cross-window', 'claude-code')
     database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state, metadata_json,
@@ -3775,17 +3776,18 @@ sleep 30
     )
     const sessions = new RuntimeSessionRegistry()
     const providerConfigs = new ProviderConfigStore(root)
+    const sharedHud = new SessionHudRegistry()
     const secondaryPort = new MockPort()
     const secondaryServer = new RuntimeServer(
       secondaryPort, root, database,
       new RuntimeRpcRouter(database, undefined, { providerConfigs }),
-      undefined, sessions, undefined, undefined, { providerConfigs }
+      undefined, sessions, undefined, undefined, { providerConfigs, hudRegistry: sharedHud }
     )
     const ownerPort = new MockPort()
     const ownerServer = new RuntimeServer(
       ownerPort, root, database,
       new RuntimeRpcRouter(database, undefined, { providerConfigs }),
-      undefined, sessions, undefined, undefined, { providerConfigs }
+      undefined, sessions, undefined, undefined, { providerConfigs, hudRegistry: sharedHud }
     )
     secondaryPort.receive({
       type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
@@ -3881,8 +3883,28 @@ sleep 30
 
       ownerPort.emit('close')
       expect(sessions.providerIdentityPending('provider-cross-window')).toBe(true)
+      secondaryPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-cross-window', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => secondaryPort.last('terminal.spawned')?.pid === secondPendingPid)
       secondaryServer.providerIdentityRecorded('provider-cross-window', secondPendingRunId)
       expect(sessions.providerIdentityPending('provider-cross-window')).toBe(false)
+
+      const takeoverSession = sessions.get('provider-cross-window')!
+      const beforeTakeoverOutput = secondaryPort.sent.length
+      process.kill(takeoverSession.pid, 'SIGUSR1')
+      await waitUntil(() => secondaryPort.sent.slice(beforeTakeoverOutput).some((message) =>
+        message.type === 'terminal.hud' && message.hud?.permissionMode === 'bypassPermissions'
+      ))
+      expect(secondaryPort.sent.slice(beforeTakeoverOutput).filter((message) =>
+        message.type === 'terminal.hud' && message.hud?.permissionMode === 'bypassPermissions'
+      )).toHaveLength(1)
+      await waitUntil(() => database.get<{ work_status: string }>(
+        'SELECT work_status FROM sessions WHERE id = ?', 'provider-cross-window'
+      )?.work_status === 'error')
+
       secondaryPort.receive(rpc('cross-window-plan-after-owner-close', 'session.set-permission-mode', {
         sessionId: 'provider-cross-window', provider: 'claude-code',
         permissionMode: 'plan', respawn: false, now: 6

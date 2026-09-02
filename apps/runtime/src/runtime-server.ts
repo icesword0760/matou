@@ -143,12 +143,6 @@ interface ProviderRecoveryWaiter {
   reject(error: Error): void
 }
 
-interface ProviderDerivedOutputGate {
-  runId: string
-  confirm(): void
-  reject(): void
-}
-
 // Resolving an interactive alias starts the user's login shell and may execute
 // a costly zsh configuration. Start it with the Runtime instead of making the
 // first Enter on `cc` pay that startup cost. The environment key keeps tests,
@@ -164,7 +158,9 @@ export class RuntimeServer {
   readonly #attachedSessionIds = new Set<string>()
   readonly #endedSessionIds = new Set<string>()
   readonly #completedReplayThrough = new Map<string, number>()
-  readonly #sendToPort = (message: RuntimeMessage) => this.#port.postMessage(message)
+  readonly #sendToPort = (message: RuntimeMessage) => {
+    if (!this.#portClosed) this.#port.postMessage(message)
+  }
   readonly #dataRoot: string
   readonly #database: RuntimeDatabase
   readonly #router: RuntimeRpcRouter
@@ -192,9 +188,7 @@ export class RuntimeServer {
   readonly #cwdTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerResumeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #providerLaunchRunIds = new Map<string, string>()
-  readonly #confirmedProviderRunIds = new Set<string>()
   readonly #providerIdentityMismatches = new Map<string, ProviderIdentityMismatch>()
-  readonly #providerDerivedOutputGates = new Map<string, ProviderDerivedOutputGate>()
   readonly #providerRecoveryWaiters = new Map<string, Set<ProviderRecoveryWaiter>>()
   readonly #spawnDescriptors = new Map<string, TerminalSpawnMessage>()
   readonly #environmentResumeDescriptors = new Map<string, TerminalSpawnMessage>()
@@ -213,6 +207,7 @@ export class RuntimeServer {
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerResumeTimeoutMs: number
   readonly #forkProviderIdentityTimeoutMs: number
+  #portClosed = false
   readonly #hud: SessionHudRegistry
   readonly #control:
     | { backend: RuntimeControlBackend; tokens: CapabilityTokenService; endpoint: string }
@@ -350,13 +345,13 @@ export class RuntimeServer {
       })
     })
     port.on('close', () => {
-      this.#closeConnection(false)
+      this.#disconnectPort()
     })
     port.start()
   }
 
   flushSemanticEvents(): void {
-    if (this.#closed) return
+    if (this.#closed || this.#portClosed) return
     for (const consumerId of this.#subscriptions.keys()) this.#pumpSubscription(consumerId)
   }
 
@@ -443,14 +438,12 @@ export class RuntimeServer {
       this.#sessions.get(sessionId)?.runId === runId
     if (!launchMatches) return
     this.#confirmProviderDerivedOutput(sessionId, runId)
-    this.#confirmedProviderRunIds.add(runId)
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
       this.#providerLaunchRunIds.delete(sessionId)
       this.#settleProviderRecovery(sessionId)
       return
     }
-    this.#confirmedProviderRunIds.add(runId)
     this.#settleProviderRecovery(sessionId)
   }
 
@@ -471,15 +464,12 @@ export class RuntimeServer {
   }
 
   close(): void {
-    this.#closeConnection(true)
-  }
-
-  #closeConnection(closePort: boolean): void {
     if (this.#closed) return
     for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
     this.#summaryTimers.clear()
     for (const sessionId of this.#summaryBuffers.keys()) this.#flushSessionSummary(sessionId)
     this.#closed = true
+    this.#portClosed = true
     RuntimeServer.#instances.delete(this)
     for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
     this.#cwdTimers.clear()
@@ -487,10 +477,7 @@ export class RuntimeServer {
     this.#providerResumeTimers.clear()
     this.#closeAllHudFileWatchers()
     this.#providerLaunchRunIds.clear()
-    this.#confirmedProviderRunIds.clear()
     this.#providerIdentityMismatches.clear()
-    for (const gate of this.#providerDerivedOutputGates.values()) gate.reject()
-    this.#providerDerivedOutputGates.clear()
     this.#rejectAllProviderRecoveries(
       new Error('Runtime connection closed during provider recovery')
     )
@@ -500,11 +487,22 @@ export class RuntimeServer {
     this.#environmentResumeDescriptors.clear()
     this.#permissionModeTrackers.clear()
     this.#detachAll()
-    if (closePort) this.#port.close()
+    this.#port.close()
+  }
+
+  #disconnectPort(): void {
+    if (this.#portClosed) return
+    this.#portClosed = true
+    RuntimeServer.#instances.delete(this)
+    this.#subscriptions.clear()
+    this.#rejectAllProviderRecoveries(
+      new Error('Runtime connection closed during provider recovery')
+    )
+    this.#detachAll()
   }
 
   async #receive(rawMessage: unknown): Promise<void> {
-    if (this.#closed) return
+    if (this.#closed || this.#portClosed) return
     let message: RendererMessage
     try {
       message = parseRendererMessage(rawMessage)
@@ -794,7 +792,7 @@ export class RuntimeServer {
           ...(hud.shell ? { shell: hud.shell } : {}),
           ...(hud.gitBranch ? { gitBranch: hud.gitBranch, gitDirty: hud.gitDirty } : {})
         })
-        await this.refreshSessionHud(sessionId)
+        await RuntimeServer.#refreshAttachedSessionHud(sessionId)
       }
       const authority = this.#sessionRepository.getSession(sessionId)
       if (!authority || authority.cwd === cwd) return
@@ -1355,6 +1353,7 @@ export class RuntimeServer {
   }
 
   #pumpSubscription(consumerId: string): void {
+    if (this.#portClosed) return
     const subscription = this.#subscriptions.get(consumerId)
     if (!subscription) return
     const events = this.#eventStore.readAfter(subscription.afterSequence, subscription.batchSize)
@@ -1394,6 +1393,7 @@ export class RuntimeServer {
     executionMode?: 'attach-only',
     attachView = true
   ): Promise<void> {
+    attachView = attachView && !this.#portClosed
     const persistentAuthority = this.#database.get<{
       execution_context_id: string
       cwd: string
@@ -1441,7 +1441,7 @@ export class RuntimeServer {
         this.#control?.tokens.revokeRun(existing.runId ?? message.sessionId)
         if (existing.profile !== message.profile) {
           this.#hud.delete(message.sessionId)
-          this.publishSessionHud(message.sessionId)
+          RuntimeServer.#publishAttachedSessionHud(message.sessionId)
         }
         this.#shellInputBuffers.delete(message.sessionId)
         this.#providerInputBuffers.delete(message.sessionId)
@@ -1674,7 +1674,7 @@ export class RuntimeServer {
         const visiblePermissionMode = permissionModeTracker?.ingest(data)
         if (visiblePermissionMode) {
           this.#hud.ingestProvider(message.sessionId, { permission_mode: visiblePermissionMode })
-          this.publishSessionHud(message.sessionId)
+          RuntimeServer.#publishAttachedSessionHud(message.sessionId)
         }
       }
       let providerDerivationState: 'pending' | 'confirmed' | 'rejected' =
@@ -1685,12 +1685,15 @@ export class RuntimeServer {
       if (providerDerivationState === 'pending') {
         this.#rejectProviderDerivedOutput(message.sessionId)
         const gatedRunId = runId!
-        this.#sessions.markProviderIdentityPending(message.sessionId, gatedRunId)
-        this.#providerDerivedOutputGates.set(message.sessionId, {
-          runId: gatedRunId,
+        this.#sessions.markProviderIdentityPending(message.sessionId, gatedRunId, {
           confirm: () => {
             if (providerDerivationState !== 'pending') return
             providerDerivationState = 'confirmed'
+            this.#clearProviderResumeTimer(message.sessionId)
+            if (this.#providerLaunchRunIds.get(message.sessionId) === gatedRunId) {
+              this.#providerLaunchRunIds.delete(message.sessionId)
+            }
+            this.#settleProviderRecovery(message.sessionId)
             if (workStatusTracker) {
               this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
             }
@@ -1761,7 +1764,7 @@ export class RuntimeServer {
           this.#flushSessionSummary(message.sessionId)
           this.#clearProviderResumeTimer(message.sessionId)
           const providerIdentityConfirmed = exited.runId !== undefined &&
-            this.#confirmedProviderRunIds.has(exited.runId)
+            this.#sessions.providerIdentityConfirmed(exited.runId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
           hookRegistration?.retire()
           if (exitReason === 'runtime-shutdown' || exitReason === 'environment-transition') {
@@ -1828,7 +1831,7 @@ export class RuntimeServer {
             this.#hud.exit(message.sessionId, {
               fallbackToShell: exited.profile !== 'shell' && !forkLaunch && !resumeExitFallback
             })
-            this.publishSessionHud(message.sessionId)
+            RuntimeServer.#publishAttachedSessionHud(message.sessionId)
             if (!resumeExitFallback && !naturalAgentFallback) {
               this.#spawnDescriptors.delete(message.sessionId)
             }
@@ -2233,7 +2236,7 @@ export class RuntimeServer {
   }
 
   #consumeProviderIdentityConfirmation(sessionId: string, runId: string | undefined): boolean {
-    if (!runId || !this.#confirmedProviderRunIds.has(runId)) return false
+    if (!runId || !this.#sessions.providerIdentityConfirmed(runId)) return false
     if (this.#providerLaunchRunIds.get(sessionId) === runId) {
       this.#providerLaunchRunIds.delete(sessionId)
     }
@@ -2241,29 +2244,17 @@ export class RuntimeServer {
   }
 
   #confirmProviderDerivedOutput(sessionId: string, runId: string): void {
-    this.#sessions.clearProviderIdentityPending(sessionId, runId)
-    const gate = this.#providerDerivedOutputGates.get(sessionId)
-    if (!gate || gate.runId !== runId) return
-    this.#providerDerivedOutputGates.delete(sessionId)
-    gate.confirm()
+    this.#sessions.confirmProviderIdentity(sessionId, runId)
   }
 
   #rejectProviderDerivedOutput(sessionId: string, runId?: string): void {
-    if (runId !== undefined) {
-      this.#sessions.clearProviderIdentityPending(sessionId, runId)
-    }
-    const gate = this.#providerDerivedOutputGates.get(sessionId)
-    if (!gate || (runId !== undefined && gate.runId !== runId)) return
-    this.#providerDerivedOutputGates.delete(sessionId)
-    this.#sessions.clearProviderIdentityPending(sessionId, gate.runId)
-    gate.reject()
+    this.#sessions.rejectProviderIdentity(sessionId, runId)
   }
 
   #forgetProviderLaunch(sessionId: string, runId: string | undefined): void {
     this.#providerIdentityMismatches.delete(sessionId)
-    this.#rejectProviderDerivedOutput(sessionId, runId)
+    this.#sessions.forgetProviderIdentity(sessionId, runId)
     if (!runId) return
-    this.#confirmedProviderRunIds.delete(runId)
     if (this.#providerLaunchRunIds.get(sessionId) === runId) {
       this.#providerLaunchRunIds.delete(sessionId)
     }
@@ -2604,6 +2595,7 @@ export class RuntimeServer {
     message: string,
     sessionId?: string
   ): void {
+    if (this.#portClosed) return
     console.error(`[protocol.error] ${code}: ${message}`)
     this.#port.postMessage({
       type: 'protocol.error',
@@ -2615,11 +2607,25 @@ export class RuntimeServer {
   }
 
   publishSessionHud(sessionId: string): void {
-    if (this.#closed || !this.#attachedSessionIds.has(sessionId)) return
+    if (this.#closed || this.#portClosed || !this.#attachedSessionIds.has(sessionId)) return
     this.#port.postMessage({
       type: 'terminal.hud', protocolVersion: PROTOCOL_VERSION,
       sessionId, hud: this.#hud.snapshot(sessionId) ?? null
     })
+  }
+
+  static #publishAttachedSessionHud(sessionId: string): void {
+    for (const server of RuntimeServer.#instances) server.publishSessionHud(sessionId)
+  }
+
+  static #flushSemanticEventsForAll(): void {
+    for (const server of RuntimeServer.#instances) server.flushSemanticEvents()
+  }
+
+  static async #refreshAttachedSessionHud(sessionId: string): Promise<void> {
+    await Promise.all([...RuntimeServer.#instances].map((server) =>
+      server.refreshSessionHud(sessionId)
+    ))
   }
 
   async refreshSessionHud(sessionId: string): Promise<void> {
@@ -2969,7 +2975,7 @@ export class RuntimeServer {
         commandType: 'session.work-status',
         requestHash: `${sessionId}:${workStatus}:${now}`
       }, { sessionId, workStatus, now })
-      this.flushSemanticEvents()
+      RuntimeServer.#flushSemanticEventsForAll()
     } catch (error) {
       if (!this.#closed) console.error(`[session.work-status] ${errorMessage(error)}`)
     }

@@ -1,10 +1,17 @@
 import type { PtySession } from './pty-session'
 
+interface PendingProviderIdentity {
+  runId: string
+  confirm(): void
+  reject(): void
+}
+
 /** Runtime-generation owner for live PTYs; Renderer connections only attach views. */
 export class RuntimeSessionRegistry {
   readonly #sessions = new Map<string, PtySession>()
   readonly #operations = new Map<string, Promise<void>>()
-  readonly #pendingProviderRuns = new Map<string, string>()
+  readonly #pendingProviderRuns = new Map<string, PendingProviderIdentity>()
+  readonly #confirmedProviderRuns = new Set<string>()
 
   get(sessionId: string): PtySession | undefined { return this.#sessions.get(sessionId) }
   has(sessionId: string): boolean { return this.#sessions.has(sessionId) }
@@ -28,18 +35,39 @@ export class RuntimeSessionRegistry {
     return this.#sessions.delete(sessionId)
   }
   values(): IterableIterator<PtySession> { return this.#sessions.values() }
-  markProviderIdentityPending(sessionId: string, runId: string): void {
-    this.#pendingProviderRuns.set(sessionId, runId)
+  markProviderIdentityPending(
+    sessionId: string,
+    runId: string,
+    callbacks: Pick<PendingProviderIdentity, 'confirm' | 'reject'>
+  ): void {
+    this.#confirmedProviderRuns.delete(runId)
+    this.#pendingProviderRuns.set(sessionId, { runId, ...callbacks })
   }
   providerIdentityPending(sessionId: string): boolean {
     return this.#pendingProviderRuns.has(sessionId)
   }
-  clearProviderIdentityPending(sessionId: string, expectedRunId?: string): boolean {
-    if (
-      expectedRunId !== undefined &&
-      this.#pendingProviderRuns.get(sessionId) !== expectedRunId
-    ) return false
-    return this.#pendingProviderRuns.delete(sessionId)
+  confirmProviderIdentity(sessionId: string, runId: string): boolean {
+    const pending = this.#pendingProviderRuns.get(sessionId)
+    if (!pending || pending.runId !== runId) return false
+    this.#pendingProviderRuns.delete(sessionId)
+    this.#confirmedProviderRuns.add(runId)
+    pending.confirm()
+    return true
+  }
+  rejectProviderIdentity(sessionId: string, expectedRunId?: string): boolean {
+    const pending = this.#pendingProviderRuns.get(sessionId)
+    if (!pending || (expectedRunId !== undefined && pending.runId !== expectedRunId)) return false
+    this.#pendingProviderRuns.delete(sessionId)
+    this.#confirmedProviderRuns.delete(pending.runId)
+    pending.reject()
+    return true
+  }
+  providerIdentityConfirmed(runId: string): boolean {
+    return this.#confirmedProviderRuns.has(runId)
+  }
+  forgetProviderIdentity(sessionId: string, runId?: string): void {
+    if (runId !== undefined) this.#confirmedProviderRuns.delete(runId)
+    this.rejectProviderIdentity(sessionId, runId)
   }
   async runExclusive<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.#operations.get(sessionId) ?? Promise.resolve()
@@ -57,12 +85,18 @@ export class RuntimeSessionRegistry {
   disposeAll(): void {
     for (const session of this.#sessions.values()) session.dispose()
     this.#sessions.clear()
-    this.#pendingProviderRuns.clear()
+    this.#rejectAllProviderIdentities()
   }
   async shutdownAll(): Promise<void> {
     const sessions = [...this.#sessions.values()]
     await Promise.all(sessions.map((session) => session.shutdownForRuntime()))
     for (const session of sessions) this.delete(session.sessionId, session)
-    this.#pendingProviderRuns.clear()
+    this.#rejectAllProviderIdentities()
+  }
+  #rejectAllProviderIdentities(): void {
+    for (const [sessionId, pending] of [...this.#pendingProviderRuns]) {
+      this.rejectProviderIdentity(sessionId, pending.runId)
+    }
+    this.#confirmedProviderRuns.clear()
   }
 }
