@@ -41,6 +41,10 @@ import { activeAppSessionCount } from '../updates/active-app-sessions'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
+import {
+  DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+  usePersistentTerminalFontSize
+} from '../terminal/usePersistentTerminalFontSize'
 export function HierarchyShell({ fixture }: { fixture?: HierarchyProjection }) {
   const client = useRuntimeClient()
   const windowId = fixture?.windowId ?? queryValue('windowId') ?? 'window-1'
@@ -177,7 +181,7 @@ function HierarchyProduct({ projection, commands }: {
   useEffect(() => { projectionRef.current = projection }, [projection])
   const [liveRatios, setLiveRatios] = useState<Record<string, number>>({})
   const [themeKey, setThemeKey] = useState<TerminalThemeKey>(DEFAULT_TERMINAL_THEME)
-  const [fontSize, setFontSize] = useState(11)
+  const [fontSize, setFontSize] = usePersistentTerminalFontSize()
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [sessionLoader, setSessionLoader] = useState<{
@@ -380,9 +384,9 @@ function HierarchyProduct({ projection, commands }: {
       if (direction === 'right' && index < scenes.length - 1) run(commands.reorderScene(activeSceneId, scenes[index + 2]?.id))
     },
     openSearch: () => setSearchOpen(true),
-    increaseFontSize: () => setFontSize((value) => Math.min(24, value + 1)),
-    decreaseFontSize: () => setFontSize((value) => Math.max(10, value - 1)),
-    resetFontSize: () => setFontSize(11),
+    increaseFontSize: () => setFontSize((value) => Math.min(MAX_TERMINAL_FONT_SIZE, value + 1)),
+    decreaseFontSize: () => setFontSize((value) => Math.max(MIN_TERMINAL_FONT_SIZE, value - 1)),
+    resetFontSize: () => setFontSize(DEFAULT_TERMINAL_FONT_SIZE),
     cycleTheme: () => {
       setThemeKey((value) => value === 'light' ? 'dark' : 'light')
       setTerminalFocusRequest((value) => value + 1)
@@ -693,7 +697,6 @@ function HierarchyProduct({ projection, commands }: {
                         )
                       } : {})} />}
                     <TerminalHud hud={activeHud} onPermissionMode={commands.setPermissionMode}
-                      onModel={commands.setModel}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
                       } : {})} />

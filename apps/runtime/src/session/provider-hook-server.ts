@@ -377,10 +377,8 @@ function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown 
       SessionStart: [{ hooks: [hook(5)] }],
       SessionEnd: [{ hooks: [hook(3)] }],
       UserPromptSubmit: [{ hooks: [hook(5)] }],
-      PreToolUse: [{
-        matcher: 'Bash|Write|Edit|Read|Glob|Grep|TodoWrite|TaskCreate|TaskUpdate|Agent|Skill', hooks: [hook(10)]
-      }],
-      PostToolUse: [{ matcher: 'Bash|Write|Edit|Read|Glob|Grep|TodoWrite|TaskCreate|TaskUpdate|Agent|Skill', hooks: [hook(10)] }],
+      PreToolUse: [{ hooks: [hook(10)] }],
+      PostToolUse: [{ hooks: [hook(10)] }],
       PostToolUseFailure: [{ hooks: [hook(5)] }],
       PermissionRequest: [{ hooks: [hook(10)] }],
       Stop: [{ hooks: [hook(5)] }],

@@ -24,6 +24,7 @@ import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
 import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracker'
+import { ClaudePermissionModeTracker } from './session/claude-permission-mode-tracker'
 import { ProviderResumeMonitor } from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
@@ -138,6 +139,7 @@ export class RuntimeServer {
   readonly #providerInputBuffers = new Map<string, string>()
   readonly #lastProviderInputs = new Map<string, string>()
   readonly #workStatusTrackers = new Map<string, TerminalWorkStatusTracker>()
+  readonly #permissionModeTrackers = new Map<string, ClaudePermissionModeTracker>()
   readonly #summaryBuffers = new Map<string, string>()
   readonly #summaryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
@@ -268,6 +270,7 @@ export class RuntimeServer {
     this.#providerInputBuffers.clear()
     this.#lastProviderInputs.clear()
     this.#workStatusTrackers.clear()
+    this.#permissionModeTrackers.clear()
     this.#detachAll()
     this.#port.close()
   }
@@ -858,6 +861,7 @@ export class RuntimeServer {
         this.#shellInputBuffers.delete(message.sessionId)
         this.#providerInputBuffers.delete(message.sessionId)
         this.#workStatusTrackers.delete(message.sessionId)
+        this.#permissionModeTrackers.delete(message.sessionId)
         existing.dispose({ notifyExit: false })
         await existing.whenClosed()
       } else {
@@ -978,6 +982,9 @@ export class RuntimeServer {
           )
         : undefined
       if (workStatusTracker) this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
+      const permissionModeTracker = message.profile === 'claude-code'
+        ? new ClaudePermissionModeTracker() : undefined
+      if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
@@ -1087,6 +1094,11 @@ export class RuntimeServer {
             if (status === 'error') this.#flushSessionSummary(message.sessionId)
             this.#setWorkStatus(message.sessionId, status)
           }
+          const visiblePermissionMode = permissionModeTracker?.ingest(data)
+          if (visiblePermissionMode) {
+            this.#hud.ingestProvider(message.sessionId, { permission_mode: visiblePermissionMode })
+            this.publishSessionHud(message.sessionId)
+          }
           const resumeFailure = resumeMonitor?.ingest(data)
           if (resumeFailure) {
             pendingResumeFailure = resumeFailure
@@ -1173,6 +1185,7 @@ export class RuntimeServer {
             this.#shellInputBuffers.delete(message.sessionId)
             this.#providerInputBuffers.delete(message.sessionId)
             this.#workStatusTrackers.delete(message.sessionId)
+            this.#permissionModeTrackers.delete(message.sessionId)
           }
           if (exited.runId && persistentAuthority) {
             try {
@@ -1532,6 +1545,7 @@ export class RuntimeServer {
     this.#providerInputBuffers.delete(sessionId)
     this.#lastProviderInputs.delete(sessionId)
     this.#workStatusTrackers.delete(sessionId)
+    this.#permissionModeTrackers.delete(sessionId)
     this.#skipResumeSessionIds.delete(sessionId)
     this.#hud.delete(sessionId)
     this.publishSessionHud(sessionId)

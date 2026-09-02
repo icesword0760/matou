@@ -5,13 +5,17 @@ import type { RuntimeMessage } from '@matou/contracts'
 import { TerminalSurface } from '../terminal/TerminalSurface'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { TerminalHud } from '../hud/TerminalHud'
-import type { HudModelStrategy, HudPermissionMode, SessionGraphNodeView, SessionHudView } from './hierarchy-types'
+import type { HudPermissionMode, SessionGraphNodeView, SessionHudView } from './hierarchy-types'
 import { ShortcutPanel } from './ShortcutPanel'
 import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchBar'
 import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeKey } from '../terminal/terminal-themes'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
+import {
+  DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+  usePersistentTerminalFontSize
+} from '../terminal/usePersistentTerminalFontSize'
 
 export function DetachedTerminalApp() {
   const client = useRuntimeClient()
@@ -35,7 +39,7 @@ export function DetachedTerminalApp() {
     })
   }))
   const [themeKey, setThemeKey] = useState<TerminalThemeKey>(DEFAULT_TERMINAL_THEME)
-  const [fontSize, setFontSize] = useState(11)
+  const [fontSize, setFontSize] = usePersistentTerminalFontSize()
   const [shortcutPanelOpen, setShortcutPanelOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [focusRequest, setFocusRequest] = useState(0)
@@ -75,8 +79,12 @@ export function DetachedTerminalApp() {
     void loadSnapshot().catch(() => {})
     return unsubscribe
   }, [client, isTeamMember, sceneId, sessionId])
-  const command = (method: 'session.set-permission-mode' | 'session.set-model', input: Record<string, unknown>) => {
+  const setPermissionMode = (targetSessionId: string, permissionMode: HudPermissionMode, respawn: boolean) => {
     if (!client) return
+    const method = 'session.set-permission-mode'
+    const input = {
+      sessionId: targetSessionId, provider: 'claude-code', permissionMode, respawn
+    }
     const commandId = `${method}-${Date.now()}-${++sequence.current}`
     return client.request(method, {
       command: { commandId, commandType: method, requestHash: JSON.stringify(input) },
@@ -89,9 +97,9 @@ export function DetachedTerminalApp() {
   const shortcutHandlers = useMemo(() => ({
     closePane: () => window.close(),
     openSearch: () => setSearchOpen(true),
-    increaseFontSize: () => setFontSize((value) => Math.min(24, value + 1)),
-    decreaseFontSize: () => setFontSize((value) => Math.max(10, value - 1)),
-    resetFontSize: () => setFontSize(11),
+    increaseFontSize: () => setFontSize((value) => Math.min(MAX_TERMINAL_FONT_SIZE, value + 1)),
+    decreaseFontSize: () => setFontSize((value) => Math.max(MIN_TERMINAL_FONT_SIZE, value - 1)),
+    resetFontSize: () => setFontSize(DEFAULT_TERMINAL_FONT_SIZE),
     cycleTheme: () => {
       setThemeKey((value) => value === 'light' ? 'dark' : 'light')
       setFocusRequest((value) => value + 1)
@@ -144,12 +152,7 @@ export function DetachedTerminalApp() {
       {...(searchOpen ? { searchRequest } : {})} onSearchResults={setSearchResults}
       focusRequest={focusRequest} />}
     {!isTeamMember && <div className="shortcut-bar" aria-label="快捷指令栏">
-      <TerminalHud hud={hud} onPermissionMode={(_sessionId: string, permissionMode: HudPermissionMode, respawn: boolean) =>
-        command('session.set-permission-mode', {
-          sessionId, provider: 'claude-code', permissionMode, respawn
-        })}
-        onModel={(_sessionId: string, modelStrategy: HudModelStrategy) =>
-          command('session.set-model', { sessionId, modelStrategy })} />
+      <TerminalHud hud={hud} onPermissionMode={setPermissionMode} />
     </div>}
     {!isTeamMember && <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}
       onClose={() => {

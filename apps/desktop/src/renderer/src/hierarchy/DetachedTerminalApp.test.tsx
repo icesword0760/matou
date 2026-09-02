@@ -18,6 +18,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime }
 
 afterEach(() => {
   cleanup()
+  window.localStorage.clear()
   runtime.request.mockClear()
   runtime.subscribeProjection.mockClear()
   window.history.replaceState({}, '', '/')
@@ -26,6 +27,18 @@ afterEach(() => {
 })
 
 describe('PRD 02 detached HUD', () => {
+  it('uses and updates the persisted terminal font size', () => {
+    window.localStorage.setItem('matou:terminal-font-size', '14')
+    Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
+    window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')
+    render(<DetachedTerminalApp />)
+
+    expect(screen.getByTestId('terminal-agent-1').dataset.fontSize).toBe('14')
+    fireEvent.keyDown(document, { key: '+', metaKey: true })
+    expect(screen.getByTestId('terminal-agent-1').dataset.fontSize).toBe('15')
+    expect(window.localStorage.getItem('matou:terminal-font-size')).toBe('15')
+  })
+
   it('uses the same default white skin and reference product theme shortcut as the main terminal', () => {
     Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
     window.history.replaceState({}, '', '/?kind=detached-terminal&sessionId=agent-1&profile=claude-code')

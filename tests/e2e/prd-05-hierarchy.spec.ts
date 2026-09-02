@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 
 import { expect, test } from '@playwright/test'
 
-import { launchMatou } from './matou-fixture'
+import { launchMatou, restartMatou } from './matou-fixture'
 
 const evidenceDirectory = resolve(import.meta.dirname, '../../docs/acceptance/evidence/prd-05/matou')
 
@@ -322,5 +322,21 @@ test('matches reference product terminal shortcuts, real search, focus, zoom, an
 
     await page.keyboard.press(`${mod}+w`)
     await expect(page.locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"]')).toHaveCount(1)
+  } finally { await fixture.close() }
+})
+
+test('keeps the chosen terminal font size after the App restarts', async () => {
+  let fixture = await launchMatou()
+  try {
+    const mod = process.platform === 'darwin' ? 'Meta' : 'Control'
+    const terminal = fixture.page.locator('.scene-stage:not([hidden]) .terminal-surface[data-session-id]').first()
+    await terminal.hover()
+    await fixture.page.keyboard.press(`${mod}++`)
+    await expect(terminal).toHaveAttribute('data-font-size', '12')
+
+    fixture = await restartMatou(fixture)
+
+    await expect(fixture.page.locator('.scene-stage:not([hidden]) .terminal-surface[data-session-id]').first())
+      .toHaveAttribute('data-font-size', '12')
   } finally { await fixture.close() }
 })

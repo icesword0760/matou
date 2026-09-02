@@ -22,6 +22,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  window.localStorage.clear()
   Reflect.deleteProperty(window, 'matouDesktop')
   Reflect.deleteProperty(window, 'matouE2e')
   Reflect.deleteProperty(document, 'visibilityState')
@@ -368,6 +369,18 @@ describe('PRD 05 hierarchy shell', () => {
 
     for (let index = 0; index < 20; index += 1) fireEvent.keyDown(document, { key: '+', metaKey: true })
     expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('24')
+  })
+
+  it('restores the terminal font size after the main window is reopened', () => {
+    const first = render(<HierarchyShell fixture={fixture()} />)
+
+    fireEvent.keyDown(document, { key: '+', metaKey: true })
+    expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('12')
+
+    first.unmount()
+    render(<HierarchyShell fixture={fixture()} />)
+
+    expect(screen.getByTestId('xterm-session-a1').dataset.fontSize).toBe('12')
   })
 
   it('routes the reference product search bar to the focused Session only', async () => {

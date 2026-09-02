@@ -1,26 +1,58 @@
 {
   "mode": "agent",
-  "text": "Default72%任务中◐Read: src/App.tsx◐TodoWrite▸实现 HUD(1/2)~/matou_workspace⏱0s",
+  "text": "AutoFable 5 (1M context)72%Weekly 8% · 4d22h任务中1 CLAUDE.md1 MCPs2 hooks⚠ browser_bridge◐TodoWrite⚠browser_bridge: open✓Read×1✓mcp__browser_bridge__open×1▸实现 HUD(1/2)~/matou_workspace⏱1h0m",
   "fields": [
     {
-      "className": "status-field status-perm-badge is-clickable perm-default",
-      "text": "Default"
+      "className": "status-field status-perm-badge is-clickable perm-auto",
+      "text": "Auto"
+    },
+    {
+      "className": "status-field status-model status-priority-8",
+      "text": "Fable 5 (1M context)"
     },
     {
       "className": "status-field status-context-ring status-priority-7",
       "text": "72%"
     },
     {
+      "className": "status-field status-usage status-priority-6",
+      "text": "Weekly 8% · 4d22h"
+    },
+    {
       "className": "status-field status-priority-6",
       "text": "任务中"
     },
     {
-      "className": "status-field status-tool-running status-priority-4",
-      "text": "◐Read: src/App.tsx"
+      "className": "status-field status-config status-priority-5",
+      "text": "1 CLAUDE.md"
+    },
+    {
+      "className": "status-field status-config status-priority-5",
+      "text": "1 MCPs"
+    },
+    {
+      "className": "status-field status-config status-priority-5",
+      "text": "2 hooks"
+    },
+    {
+      "className": "status-field status-mcp-error status-priority-5",
+      "text": "⚠ browser_bridge"
     },
     {
       "className": "status-field status-tool-running status-priority-4",
       "text": "◐TodoWrite"
+    },
+    {
+      "className": "status-field status-last-tool status-priority-4 is-error",
+      "text": "⚠browser_bridge: open"
+    },
+    {
+      "className": "status-field status-tool-done status-priority-4",
+      "text": "✓Read×1"
+    },
+    {
+      "className": "status-field status-tool-done status-priority-4",
+      "text": "✓mcp__browser_bridge__open×1"
     },
     {
       "className": "status-field status-todos status-priority-4",
@@ -36,7 +68,7 @@
     },
     {
       "className": "status-field status-priority-1",
-      "text": "⏱0s"
+      "text": "⏱1h0m"
     }
   ],
   "bar": {
@@ -46,7 +78,7 @@
     "gap": "8px"
   },
   "hud": {
-    "maxWidth": "760px",
+    "maxWidth": "none",
     "fontSize": "10px",
     "gap": "8px",
     "whiteSpace": "nowrap",

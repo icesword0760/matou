@@ -1667,6 +1667,48 @@ sleep 30
     }
   })
 
+  it('follows Claude permission changes from the visible terminal footer', async () => {
+    server.close()
+    const executable = join(root, 'provider-permission-footer.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      "printf '\\033[2K▶▶ auto mode on (shift+tab to cycle)'",
+      'sleep 0.15',
+      "printf '\\r\\033[2K▶▶ bypass permissions on (shift+tab to cycle) · ← for agents'",
+      'sleep 30'
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = new RuntimeSessionRegistry()
+    const footerPort = new MockPort()
+    const footerServer = new RuntimeServer(footerPort, root, database, undefined, undefined, sessions)
+    try {
+      registerSession(database, 'provider-permission-footer', 'claude-code')
+      footerPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'permission-footer-renderer'
+      })
+      footerPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-permission-footer', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+
+      await waitUntil(() => footerPort.sent.some((message) =>
+        message.type === 'terminal.hud' && message.hud?.permissionMode === 'auto'
+      ))
+      await waitUntil(() => footerPort.last('terminal.hud')?.hud?.permissionMode === 'bypassPermissions')
+    } finally {
+      footerPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-permission-footer'
+      })
+      await settle()
+      footerServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('switches live permission modes in place and respawns across the Bypass boundary', async () => {
     const executable = join(root, 'provider-live-permission.sh')
     const argumentFile = join(root, 'provider-live-permission-arguments.txt')
