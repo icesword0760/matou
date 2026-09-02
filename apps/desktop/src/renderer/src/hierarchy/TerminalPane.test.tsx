@@ -12,6 +12,10 @@ vi.mock('../terminal/TerminalSurface', () => ({
     readOnly?: boolean
     onStatusChange?(status: string): void; onRuntimeError?(message: string): void
     onUserInput?(): void
+    onStorageFault?(fault: {
+      type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
+      code: 'STORAGE_WRITE_FAILED'; message: string; retainedBytes: number
+    }): void
   }) =>
     <div data-testid={`surface-${props.sessionId}`} data-visible={props.visible}
       data-input-disabled={props.inputDisabled} data-read-only={props.readOnly}
@@ -22,6 +26,10 @@ vi.mock('../terminal/TerminalSurface', () => ({
         props.onRuntimeError?.('spawn ENOENT: /missing/SHELL')
         props.onStatusChange?.('error')
       }} />
+      <button type="button" aria-label="触发存储异常" onClick={() => props.onStorageFault?.({
+        type: 'terminal.storage-fault', protocolVersion: 1, sessionId: props.sessionId,
+        sequence: 1, code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
+      })} />
     </div>
 }))
 
@@ -62,6 +70,50 @@ describe('Terminal pane', () => {
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
     await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：Claude 主会话' }))
     expect(onRetryRecovery).toHaveBeenCalledWith('session-1')
+  })
+
+  it('keeps Worktree repair actions above a concurrent recovery failure', async () => {
+    const restore = vi.fn()
+    render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="启动未完成"
+      environment={worktreeEnvironment('missing')} onRestoreEnvironment={restore}
+      onLocateEnvironment={vi.fn()} onHandoffEnvironment={vi.fn()} />)
+
+    expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '恢复 Worktree' }))
+    expect(restore).toHaveBeenCalledWith('session-1')
+  })
+
+  it('keeps storage repair actions above a recovery failure after a reconnect race', async () => {
+    const props = fixture()
+    const view = render(<TerminalPane {...props} />)
+    await userEvent.setup().click(screen.getByRole('button', { name: '触发存储异常' }))
+
+    view.rerender(<TerminalPane {...props} recoveryState="failed" recoveryError="重连恢复失败" />)
+
+    expect(screen.getByRole('status', { name: '终端记录写入异常：Claude 主会话' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重试写入' })).toBeTruthy()
+    expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
+  })
+
+  it('keeps durable Fork progress authoritative while generic recovery is still restoring', () => {
+    render(<TerminalPane {...fixture()} recoveryState="restoring" forkProgress={{
+      operationId: 'operation-1', sessionId: 'session-1', submissionKey: 'submission-1',
+      stage: 'restoring-provider', completedSteps: 3, totalSteps: 5, attempt: 1
+    }} />)
+
+    expect(screen.getByRole('status', { name: '正在创建分支：正在恢复智能体会话' })).toBeTruthy()
+    expect(screen.queryByRole('status', { name: '正在恢复终端：Claude 主会话' })).toBeNull()
+  })
+
+  it('keeps durable Fork retry actions visible when both authorities report failure', async () => {
+    const retryFork = vi.fn()
+    render(<TerminalPane {...fixture()} recoveryState="failed" recoveryError="restore failed"
+      forkState="failed" forkError="setup failed" onRetryFork={retryFork}
+      onRemoveFailedFork={vi.fn()} />)
+
+    expect(screen.queryByRole('status', { name: '终端恢复失败：Claude 主会话' })).toBeNull()
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试创建分支' }))
+    expect(retryFork).toHaveBeenCalledWith('session-1')
   })
 
   it('keeps programmatic terminal focus from stealing the active Session', async () => {

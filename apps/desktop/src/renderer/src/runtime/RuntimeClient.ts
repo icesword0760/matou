@@ -63,12 +63,14 @@ export class RuntimeClient {
   readonly #terminalResizeIds = new Map<string, number>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
   readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
+  readonly #recoveryResetListeners = new Set<() => void>()
   readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
   #readOnly = false
   #projectionAfterSequence: number | undefined
+  #requiresRecoverySnapshot = true
 
   constructor(
     port: RuntimeClientPort,
@@ -84,6 +86,8 @@ export class RuntimeClient {
     this.#port.close()
     this.#port = port
     this.#ready = false
+    this.#requiresRecoverySnapshot = true
+    this.#resetRecoveryStatuses()
     // An acknowledgement belongs to the port generation that carried the
     // write. A replacement Runtime may already have committed it or may never
     // have seen it, so discard transport state and let the next replay/output
@@ -173,19 +177,33 @@ export class RuntimeClient {
     return () => this.#projectionListeners.delete(listener)
   }
 
-  subscribeSessionRecovery(listener: (status: SessionRecoveryStatus) => void): () => void {
+  subscribeSessionRecovery(
+    listener: (status: SessionRecoveryStatus) => void,
+    onReset?: () => void
+  ): () => void {
     this.#recoveryListeners.add(listener)
+    if (onReset) this.#recoveryResetListeners.add(onReset)
     for (const status of this.#recoveryStatuses.values()) listener(status)
-    return () => this.#recoveryListeners.delete(listener)
+    return () => {
+      this.#recoveryListeners.delete(listener)
+      if (onReset) this.#recoveryResetListeners.delete(onReset)
+    }
   }
 
-  prioritizeSessionRecovery(sceneId: string, activeSessionId?: string): void {
+  prioritizeSessionRecovery(
+    sceneId: string,
+    activeSessionId?: string,
+    foregroundSessionIds?: readonly string[]
+  ): void {
     if (this.#readOnly) return
     this.#post({
       type: 'session.recovery-prioritize',
       protocolVersion: PROTOCOL_VERSION,
       sceneId,
-      ...(activeSessionId === undefined ? {} : { activeSessionId })
+      ...(activeSessionId === undefined ? {} : { activeSessionId }),
+      ...(foregroundSessionIds === undefined ? {} : {
+        foregroundSessionIds: [...foregroundSessionIds]
+      })
     })
   }
 
@@ -215,7 +233,10 @@ export class RuntimeClient {
     consumer.config = effectiveTerminalConfig(config, requestedReadOnly || this.#readOnly)
     consumer.listeners.add(listener)
     this.#terminals.set(config.sessionId, consumer)
-    if (this.#ready && consumer.listeners.size === 1) this.#spawn(consumer.config)
+    if (
+      this.#ready && consumer.listeners.size === 1 &&
+      !this.#requiresRecoverySnapshot && this.#recoveryAllowsAttach(config.sessionId)
+    ) this.#spawn(consumer.config)
     return () => {
       consumer.listeners.delete(listener)
       if (consumer.listeners.size === 0 && !this.#foregroundTerminalSessions.has(config.sessionId)) {
@@ -356,9 +377,28 @@ export class RuntimeClient {
       this.#ready = true
       for (const resolve of this.#readyWaiters) resolve()
       this.#readyWaiters.clear()
-      for (const { config } of this.#terminals.values()) this.#spawn(config)
+      if (!this.#requiresRecoverySnapshot) {
+        for (const { config } of this.#terminals.values()) {
+          if (this.#recoveryAllowsAttach(config.sessionId)) this.#spawn(config)
+        }
+      }
       if (this.#projectionAfterSequence !== undefined) {
         this.#subscribeEvents(this.#projectionAfterSequence)
+      }
+      return
+    }
+    if (message.type === 'session.recovery-snapshot') {
+      this.#resetRecoveryStatuses()
+      for (const status of message.statuses) {
+        const wireStatus: SessionRecoveryStatus = {
+          type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION, ...status
+        }
+        this.#recoveryStatuses.set(wireStatus.sessionId, wireStatus)
+        for (const listener of this.#recoveryListeners) listener(wireStatus)
+      }
+      this.#requiresRecoverySnapshot = false
+      for (const { config } of this.#terminals.values()) {
+        if (this.#recoveryAllowsAttach(config.sessionId)) this.#spawn(config)
       }
       return
     }
@@ -372,8 +412,16 @@ export class RuntimeClient {
       return
     }
     if (message.type === 'session.recovery-status') {
+      const previous = this.#recoveryStatuses.get(message.sessionId)
       this.#recoveryStatuses.set(message.sessionId, message)
       for (const listener of this.#recoveryListeners) listener(message)
+      if (
+        !this.#requiresRecoverySnapshot && message.state === 'ready' &&
+        previous?.state !== 'ready'
+      ) {
+        const consumer = this.#terminals.get(message.sessionId)
+        if (consumer) this.#spawn(consumer.config)
+      }
       return
     }
     if (
@@ -428,6 +476,16 @@ export class RuntimeClient {
     }
     const queue = this.#terminalCheckpoints.get(sessionId)
     if (!queue?.inFlight && !queue?.pending) this.#terminalCheckpoints.delete(sessionId)
+  }
+
+  #recoveryAllowsAttach(sessionId: string): boolean {
+    const state = this.#recoveryStatuses.get(sessionId)?.state
+    return state === undefined || state === 'ready'
+  }
+
+  #resetRecoveryStatuses(): void {
+    this.#recoveryStatuses.clear()
+    for (const listener of this.#recoveryResetListeners) listener()
   }
 
   #subscribeEvents(afterSequence: number): void {

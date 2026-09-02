@@ -54,7 +54,9 @@ describe('RuntimeSessionRecoveryScheduler', () => {
       job('current', 'scene-a', 'active-session', 3),
       job('foreground-1', 'scene-a', 'foreground-scene', 1)
     ])
-    scheduler.prioritizeScene('scene-a', 'current')
+    scheduler.prioritizeScene('scene-a', 'current', [
+      'current', 'foreground-1', 'foreground-2'
+    ])
     await settle()
 
     expect(started).toEqual(['current', 'foreground-1'])
@@ -64,6 +66,70 @@ describe('RuntimeSessionRecoveryScheduler', () => {
     await settle()
     expect(started).toEqual(['current', 'foreground-1', 'foreground-2'])
     expect(scheduler.runningCount).toBe(2)
+  })
+
+  it('treats only the current DAG sibling list as foreground inside one Scene', async () => {
+    const first = deferred()
+    const started: string[] = []
+    const scheduler = new RuntimeSessionRecoveryScheduler({
+      concurrency: 1,
+      start: (candidate) => {
+        started.push(candidate.sessionId)
+        return candidate.sessionId === 'blocker' ? first.promise : Promise.resolve()
+      }
+    })
+    scheduler.enqueue([
+      job('blocker', 'scene-other', 'active-session', 0),
+      job('same-scene-other-level', 'scene-a', 'foreground-scene', 1),
+      job('offscreen-sibling', 'scene-a', 'active-task', 2),
+      job('current', 'scene-a', 'active-task', 3)
+    ])
+    await settle()
+
+    scheduler.prioritizeScene('scene-a', 'current', ['current', 'offscreen-sibling'])
+    first.resolve()
+    await scheduler.whenIdle()
+
+    expect(started).toEqual([
+      'blocker', 'current', 'offscreen-sibling', 'same-scene-other-level'
+    ])
+  })
+
+  it('holds fork-authority recovery outside the four Runtime launch slots until it settles', async () => {
+    const started: string[] = []
+    const scheduler = new RuntimeSessionRecoveryScheduler({
+      concurrency: 1,
+      start: async (candidate) => { started.push(candidate.sessionId) }
+    })
+    scheduler.enqueue([
+      { ...job('durable-fork', 'scene-a', 'active-session', 1), recoveryAuthority: 'fork' },
+      job('ordinary', 'scene-a', 'foreground-scene', 2)
+    ])
+
+    await scheduler.whenIdle()
+    expect(started).toEqual(['ordinary'])
+    expect(scheduler.snapshot()).toContainEqual(expect.objectContaining({
+      sessionId: 'durable-fork', state: 'restoring', recoveryAuthority: 'fork'
+    }))
+
+    scheduler.settleExternal('durable-fork', 'ready')
+    expect(scheduler.snapshot()).toContainEqual(expect.objectContaining({
+      sessionId: 'durable-fork', state: 'ready'
+    }))
+  })
+
+  it('cancels an externally restoring Fork card after the Session is removed', async () => {
+    const scheduler = new RuntimeSessionRecoveryScheduler({
+      concurrency: 4,
+      start: async () => undefined
+    })
+    scheduler.enqueue([{
+      ...job('removed-fork', 'scene-a', 'active-session', 1), recoveryAuthority: 'fork'
+    }])
+
+    scheduler.cancel(['removed-fork'])
+
+    expect(scheduler.snapshot()).toEqual([])
   })
 
   it('reprioritizes queued work when the user switches Scene while running work stays isolated', async () => {
@@ -84,11 +150,11 @@ describe('RuntimeSessionRecoveryScheduler', () => {
       job('a-2', 'scene-a', 'foreground-scene', 2),
       job('b-1', 'scene-b', 'background', 3)
     ])
-    scheduler.prioritizeScene('scene-a', 'a-1')
+    scheduler.prioritizeScene('scene-a', 'a-1', ['a-1', 'a-2'])
     await settle()
     expect(started).toEqual(['a-1'])
 
-    scheduler.prioritizeScene('scene-b', 'b-1')
+    scheduler.prioritizeScene('scene-b', 'b-1', ['b-1'])
     pending.get('a-1')!.resolve()
     await settle()
 
@@ -112,7 +178,7 @@ describe('RuntimeSessionRecoveryScheduler', () => {
     ])
     await settle()
 
-    scheduler.prioritizeScene('scene-b', 'current-sibling')
+    scheduler.prioritizeScene('scene-b', 'current-sibling', ['current-sibling'])
     first.resolve()
     await scheduler.whenIdle()
 
@@ -130,7 +196,8 @@ describe('RuntimeSessionRecoveryScheduler', () => {
         job(`foreground-${index + 1}`, 'scene-a', 'foreground-scene', index + 1)),
       job('background', 'scene-b', 'background', 20)
     ])
-    scheduler.prioritizeScene('scene-a', 'foreground-1')
+    scheduler.prioritizeScene('scene-a', 'foreground-1',
+      Array.from({ length: 10 }, (_, index) => `foreground-${index + 1}`))
 
     await scheduler.whenIdle()
 
@@ -151,7 +218,7 @@ describe('RuntimeSessionRecoveryScheduler', () => {
       job('broken', 'scene-a', 'active-session', 1),
       job('healthy', 'scene-a', 'foreground-scene', 2)
     ])
-    scheduler.prioritizeScene('scene-a', 'broken')
+    scheduler.prioritizeScene('scene-a', 'broken', ['broken', 'healthy'])
 
     await scheduler.whenIdle()
 
@@ -177,7 +244,7 @@ describe('RuntimeSessionRecoveryScheduler', () => {
       job('deleted', 'scene-a', 'foreground-scene', 2),
       job('remaining', 'scene-a', 'foreground-scene', 3)
     ])
-    scheduler.prioritizeScene('scene-a', 'first')
+    scheduler.prioritizeScene('scene-a', 'first', ['first', 'deleted', 'remaining'])
     await settle()
 
     scheduler.cancel(['deleted'])

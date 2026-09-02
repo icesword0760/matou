@@ -11,20 +11,29 @@ afterEach(cleanup)
 describe('useSessionRecovery', () => {
   it('projects authoritative per-card state and reprioritizes the current foreground list', () => {
     let listener: ((status: SessionRecoveryStatus) => void) | undefined
+    let reset: (() => void) | undefined
     const client = {
-      subscribeSessionRecovery: vi.fn((next: (status: SessionRecoveryStatus) => void) => {
+      subscribeSessionRecovery: vi.fn((next: (status: SessionRecoveryStatus) => void, onReset?: () => void) => {
         listener = next
-        return () => { listener = undefined }
+        reset = onReset
+        return () => { listener = undefined; reset = undefined }
       }),
       prioritizeSessionRecovery: vi.fn(),
       retrySessionRecovery: vi.fn()
     }
     const view = renderHook(
-      ({ sceneId, sessionId }) => useSessionRecovery(client, sceneId, sessionId),
-      { initialProps: { sceneId: 'scene-1', sessionId: 'session-1' } }
+      ({ sceneId, sessionId, foregroundIds }) => useSessionRecovery(
+        client, sceneId, sessionId, foregroundIds
+      ),
+      { initialProps: {
+        sceneId: 'scene-1', sessionId: 'session-1',
+        foregroundIds: ['session-1', 'session-offscreen']
+      } }
     )
 
-    expect(client.prioritizeSessionRecovery).toHaveBeenCalledWith('scene-1', 'session-1')
+    expect(client.prioritizeSessionRecovery).toHaveBeenCalledWith(
+      'scene-1', 'session-1', ['session-1', 'session-offscreen']
+    )
     act(() => listener?.({
       type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-2', sceneId: 'scene-1', priority: 'foreground-scene',
@@ -32,8 +41,15 @@ describe('useSessionRecovery', () => {
     }))
     expect(view.result.current.statusBySession.get('session-2')?.state).toBe('restoring')
 
-    view.rerender({ sceneId: 'scene-2', sessionId: 'session-3' })
-    expect(client.prioritizeSessionRecovery).toHaveBeenLastCalledWith('scene-2', 'session-3')
+    act(() => reset?.())
+    expect(view.result.current.statusBySession.size).toBe(0)
+
+    view.rerender({
+      sceneId: 'scene-2', sessionId: 'session-3', foregroundIds: ['session-3', 'session-4']
+    })
+    expect(client.prioritizeSessionRecovery).toHaveBeenLastCalledWith(
+      'scene-2', 'session-3', ['session-3', 'session-4']
+    )
     view.result.current.retry('session-2')
     expect(client.retrySessionRecovery).toHaveBeenCalledWith('session-2')
   })

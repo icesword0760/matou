@@ -353,6 +353,21 @@ export class RuntimeServer {
     }
   }
 
+  publishRecoverySnapshot(snapshot: readonly RecoveryJobSnapshot[]): void {
+    if (this.#closed || !this.#handshakeComplete) return
+    this.#port.postMessage({
+      type: 'session.recovery-snapshot',
+      protocolVersion: PROTOCOL_VERSION,
+      statuses: snapshot.map((job) => ({
+        sessionId: job.sessionId,
+        sceneId: job.sceneId,
+        priority: job.priority,
+        state: job.state,
+        ...(job.error === undefined ? {} : { error: job.error })
+      }))
+    })
+  }
+
   providerIdentityRecorded(sessionId: string, runId: string): void {
     const restoring = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
@@ -436,7 +451,7 @@ export class RuntimeServer {
         runtimeId: this.#runtimeId,
         capabilities: this.#accessPolicy.capabilities
       })
-      if (this.#recoveryCoordinator) this.publishRecovery(this.#recoveryCoordinator.snapshot())
+      this.publishRecoverySnapshot(this.#recoveryCoordinator?.snapshot() ?? [])
       return
     }
 
@@ -482,7 +497,9 @@ export class RuntimeServer {
         break
       }
       case 'session.recovery-prioritize':
-        this.#recoveryCoordinator?.prioritizeScene(message.sceneId, message.activeSessionId)
+        this.#recoveryCoordinator?.prioritizeScene(
+          message.sceneId, message.activeSessionId, message.foregroundSessionIds
+        )
         break
       case 'session.recovery-retry':
         this.#recoveryCoordinator?.retry(message.sessionId)

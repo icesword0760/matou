@@ -255,6 +255,7 @@ describe('RuntimeServer domain RPC', () => {
       expect(port.last('protocol.ready')?.capabilities).toEqual([
         'semantic-events-v1', 'replay-v1', 'projection-v1'
       ])
+      expect(port.last('session.recovery-snapshot')).toMatchObject({ statuses: [] })
       expect(workspacePaths.startCount).toBe(0)
 
       port.receive({

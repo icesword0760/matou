@@ -385,9 +385,16 @@ async function initializeRuntime(): Promise<RuntimeState> {
       startOrResume: async (sessionId, authority) => {
         const descriptor = forkExecutionDescriptor(database, sessionId)
         if (!descriptor) throw new Error(`Fork Session ${sessionId} is unavailable`)
+        const recoveryJob = recoveryService.describeExternalForkRecovery(sessionId)
+        if (recoveryJob) recoveryCoordinator.trackExternal(recoveryJob)
         return backgroundServer.startOrResumeSession(descriptor, authority)
       },
       notify: (notification) => {
+        recoveryCoordinator.settleExternal(
+          notification.sessionId,
+          notification.status === 'succeeded' ? 'ready' : 'failed',
+          notification.error
+        )
         const now = Date.now()
         agentNotifications.publish({
           commandId: notification.eventId,

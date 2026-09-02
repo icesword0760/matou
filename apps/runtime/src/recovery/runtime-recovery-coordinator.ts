@@ -29,8 +29,25 @@ export class RuntimeRecoveryCoordinator {
     this.#scheduler.enqueue([...this.#jobs.values()])
   }
 
-  prioritizeScene(sceneId: string, activeSessionId?: string): void {
-    this.#scheduler.prioritizeScene(sceneId, activeSessionId)
+  prioritizeScene(
+    sceneId: string,
+    activeSessionId?: string,
+    foregroundSessionIds?: readonly string[]
+  ): void {
+    this.#scheduler.prioritizeScene(
+      sceneId,
+      activeSessionId,
+      foregroundSessionIds ?? (activeSessionId ? [activeSessionId] : [])
+    )
+  }
+
+  settleExternal(sessionId: string, state: 'ready' | 'failed', error?: string): void {
+    this.#scheduler.settleExternal(sessionId, state, error)
+  }
+
+  trackExternal(job: RecoveryJob & { recoveryAuthority: 'fork' }): void {
+    this.#jobs.set(job.sessionId, job)
+    if (this.#started) this.#scheduler.enqueue([job])
   }
 
   cancel(sessionIds: readonly string[]): void {

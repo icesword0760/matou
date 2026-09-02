@@ -289,6 +289,19 @@ describe('ProviderHookServer', () => {
         lease: expect.objectContaining({ fence: second.lease.fence })
       })
     }))
+
+    await postHook(currentRegistration.hookUrl, {
+      hook_event_name: 'UserPromptSubmit', session_id: 'provider-current', cwd: root
+    })
+    await postHook(currentRegistration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'provider-current', cwd: root
+    })
+    expect(sessions.getResumeBinding('session-1', 'claude-code')?.metadata)
+      .toMatchObject({ lastHookEvent: 'Stop', inheritedConversation: true, canFork: true })
+    expect(identityEvents.at(-1)).toEqual(expect.objectContaining({
+      runId: 'run-current-fork', eventName: 'Stop'
+    }))
+    expect(identityEvents.at(-1)).not.toHaveProperty('forkAuthority')
   })
 
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {

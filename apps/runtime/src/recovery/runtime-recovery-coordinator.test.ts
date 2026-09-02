@@ -58,4 +58,76 @@ describe('RuntimeRecoveryCoordinator', () => {
     expect(started).toEqual([])
     expect(coordinator.snapshot()).toEqual([])
   })
+
+  it('converges a durable Fork card from external restore to ready or failed', async () => {
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 4,
+      jobs: [{
+        sessionId: 'fork-child', sceneId: 'scene-a', priority: 'active-session',
+        enqueueSequence: 1, recoveryAuthority: 'fork'
+      }],
+      start: async () => { throw new Error('generic recovery must not launch a durable Fork') }
+    })
+
+    coordinator.start()
+    await coordinator.whenIdle()
+    expect(coordinator.snapshot()).toEqual([
+      expect.objectContaining({ sessionId: 'fork-child', state: 'restoring' })
+    ])
+
+    coordinator.settleExternal('fork-child', 'failed', 'fork setup failed')
+    expect(coordinator.snapshot()).toEqual([
+      expect.objectContaining({
+        sessionId: 'fork-child', state: 'failed', error: 'fork setup failed'
+      })
+    ])
+    coordinator.settleExternal('fork-child', 'ready')
+    expect(coordinator.snapshot()).toEqual([
+      expect.objectContaining({ sessionId: 'fork-child', state: 'ready' })
+    ])
+  })
+
+  it('tracks a durable Fork created after startup before its headless provider launch', async () => {
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 4,
+      jobs: [],
+      start: async () => { throw new Error('external Fork must stay outside generic recovery') }
+    })
+    coordinator.start()
+
+    coordinator.trackExternal({
+      sessionId: 'new-fork', sceneId: 'scene-a', priority: 'active-session',
+      enqueueSequence: 1, recoveryAuthority: 'fork'
+    })
+    await coordinator.whenIdle()
+
+    expect(coordinator.snapshot()).toEqual([
+      expect.objectContaining({ sessionId: 'new-fork', state: 'restoring' })
+    ])
+    coordinator.settleExternal('new-fork', 'ready')
+    expect(coordinator.snapshot()).toEqual([
+      expect.objectContaining({ sessionId: 'new-fork', state: 'ready' })
+    ])
+  })
+
+  it('returns a failed durable Fork to restoring when its authoritative retry starts', () => {
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 4,
+      jobs: [],
+      start: async () => { throw new Error('external Fork must stay outside generic recovery') }
+    })
+    const external = {
+      sessionId: 'retried-fork', sceneId: 'scene-a', priority: 'active-session' as const,
+      enqueueSequence: 1, recoveryAuthority: 'fork' as const
+    }
+    coordinator.start()
+    coordinator.trackExternal(external)
+    coordinator.settleExternal('retried-fork', 'failed', 'first attempt failed')
+
+    coordinator.trackExternal(external)
+
+    expect(coordinator.snapshot()).toEqual([
+      expect.objectContaining({ sessionId: 'retried-fork', state: 'restoring' })
+    ])
+  })
 })

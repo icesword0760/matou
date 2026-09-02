@@ -235,6 +235,7 @@ export class ProviderHookServer {
         const permissionMode = hookPermissionMode ??
           (isKnownIdentity ? undefined : registration.permissionMode)
         const now = Date.now()
+        const forkAuthority = registration.forkAuthority
         try {
           this.#sessions.recordResumableProviderIdentity({
             commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
@@ -254,19 +255,23 @@ export class ProviderHookServer {
                 : {})
             },
             now,
-            ...(registration.forkAuthority === undefined
+            ...(forkAuthority === undefined
               ? {}
-              : { forkAuthority: registration.forkAuthority })
+              : { forkAuthority })
           })
+          // The first accepted provider identity atomically completes the
+          // durable Fork. Later lifecycle hooks belong to the now ordinary
+          // live Session and must not reuse the expired launch lease.
+          if (forkAuthority !== undefined) delete registration.forkAuthority
           this.#onIdentityRecorded({
             runId: registration.runId,
             sessionId: registration.sessionId,
             provider: 'claude-code',
             providerSessionId,
             eventName,
-            ...(registration.forkAuthority === undefined
+            ...(forkAuthority === undefined
               ? {}
-              : { forkAuthority: registration.forkAuthority })
+              : { forkAuthority })
           })
         } catch (error) {
           // An old provider process may report its identity after lease takeover.

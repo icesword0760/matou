@@ -49,7 +49,7 @@ describe('RuntimeClient', () => {
     ])
   })
 
-  it('subscribes to per-card recovery status and sends authoritative recovery intent', () => {
+  it('subscribes to per-card recovery status and sends the whole sibling list as foreground', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })
     const observed: string[] = []
@@ -60,23 +60,27 @@ describe('RuntimeClient', () => {
       state: 'restoring'
     })
 
-    client.prioritizeSessionRecovery('scene-1', 'session-1')
+    client.prioritizeSessionRecovery('scene-1', 'session-1', ['session-1', 'session-offscreen'])
     client.retrySessionRecovery('session-1')
 
     expect(observed).toEqual(['session-1:restoring'])
     expect(port.sent.slice(-2)).toEqual([
       expect.objectContaining({
-        type: 'session.recovery-prioritize', sceneId: 'scene-1', activeSessionId: 'session-1'
+        type: 'session.recovery-prioritize', sceneId: 'scene-1', activeSessionId: 'session-1',
+        foregroundSessionIds: ['session-1', 'session-offscreen']
       }),
       expect.objectContaining({ type: 'session.recovery-retry', sessionId: 'session-1' })
     ])
   })
-  it('correlates RPC and reattaches terminal consumers after a new port', async () => {
+  it('correlates RPC and waits for the fresh recovery snapshot before reconnecting terminals', async () => {
     const first = new FakePort()
     const client = new RuntimeClient(first, { clientId: 'renderer-1' })
     first.deliver({
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-1', capabilities: ['terminal-v1']
+    })
+    first.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
     })
     const detach = client.attachTerminal({
       sessionId: 'session-1', executionContextId: 'context-1',
@@ -100,12 +104,51 @@ describe('RuntimeClient', () => {
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-2', capabilities: ['terminal-v1']
     })
+    expect(second.sent.map((message) => message.type)).not.toContain('terminal.spawn')
+    second.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION,
+      statuses: [{
+        sessionId: 'session-1', sceneId: 'scene-1', priority: 'active-session',
+        state: 'restoring'
+      }]
+    })
+    expect(second.sent.map((message) => message.type)).not.toContain('terminal.spawn')
+    second.deliver({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', sceneId: 'scene-1', priority: 'active-session', state: 'ready'
+    })
     expect(second.sent.map((message) => message.type)).toContain('terminal.spawn')
     detach()
     expect(second.sent.map((message) => message.type)).not.toContain('terminal.dispose')
     expect(second.sent).toContainEqual(expect.objectContaining({
       type: 'terminal.view-detach', sessionId: 'session-1'
     }))
+  })
+
+  it('clears stale failed recovery state when a replacement Runtime publishes an empty snapshot', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, { clientId: 'renderer-1' })
+    const states: Array<string | undefined> = []
+    client.subscribeSessionRecovery(
+      (status) => states.push(status.state),
+      () => states.push(undefined)
+    )
+    first.deliver({
+      type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', sceneId: 'scene-1', priority: 'active-session', state: 'failed'
+    })
+
+    const second = new FakePort()
+    client.replacePort(second)
+    second.deliver({
+      type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2', capabilities: ['terminal-v1']
+    })
+    second.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
+    })
+
+    expect(states).toEqual(['failed', undefined, undefined])
   })
 
   it('keeps a foreground sibling terminal bound while its virtualized card is outside the DOM', () => {
@@ -115,11 +158,10 @@ describe('RuntimeClient', () => {
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-1', capabilities: ['terminal-v1']
     })
-    const foregroundClient = client as RuntimeClient & {
-      setForegroundTerminalSessions(sessionIds: readonly string[]): void
-    }
-    expect(typeof foregroundClient.setForegroundTerminalSessions).toBe('function')
-    foregroundClient.setForegroundTerminalSessions(['session-1'])
+    port.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
+    })
+    client.setForegroundTerminalSessions(['session-1'])
 
     const detachCard = client.attachTerminal({
       sessionId: 'session-1', executionContextId: 'context-1',
@@ -153,11 +195,10 @@ describe('RuntimeClient', () => {
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-1', capabilities: ['terminal-v1']
     })
-    const foregroundClient = client as RuntimeClient & {
-      setForegroundTerminalSessions(sessionIds: readonly string[]): void
-    }
-    expect(typeof foregroundClient.setForegroundTerminalSessions).toBe('function')
-    foregroundClient.setForegroundTerminalSessions(['session-a', 'session-b'])
+    first.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
+    })
+    client.setForegroundTerminalSessions(['session-a', 'session-b'])
     const detachA = client.attachTerminal({
       sessionId: 'session-a', executionContextId: 'context-1', profile: 'shell', cols: 80, rows: 24
     }, () => undefined)
@@ -167,7 +208,7 @@ describe('RuntimeClient', () => {
     detachA()
     detachB()
 
-    foregroundClient.setForegroundTerminalSessions(['session-b'])
+    client.setForegroundTerminalSessions(['session-b'])
     expect(first.sent.filter(({ type }) => type === 'terminal.view-detach')).toEqual([
       expect.objectContaining({ sessionId: 'session-a' })
     ])
@@ -177,6 +218,10 @@ describe('RuntimeClient', () => {
     second.deliver({
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-2', capabilities: ['terminal-v1']
+    })
+    expect(second.sent.filter(({ type }) => type === 'terminal.spawn')).toEqual([])
+    second.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
     })
     expect(second.sent.filter(({ type }) => type === 'terminal.spawn')).toEqual([
       expect.objectContaining({ sessionId: 'session-b' })
@@ -264,6 +309,9 @@ describe('RuntimeClient', () => {
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-1', capabilities: ['terminal-v1']
     })
+    first.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
+    })
     const spawnCount = first.sent.filter(({ type }) => type === 'terminal.spawn').length
 
     client.updateTerminalProfile('session-1', 'claude-code')
@@ -274,6 +322,9 @@ describe('RuntimeClient', () => {
     second.deliver({
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-2', capabilities: ['terminal-v1']
+    })
+    second.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
     })
     expect(second.sent).toContainEqual(expect.objectContaining({
       type: 'terminal.spawn', sessionId: 'session-1', profile: 'claude-code'
@@ -397,6 +448,9 @@ describe('RuntimeClient', () => {
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-1', capabilities: ['replay-v1']
     })
+    port.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
+    })
 
     client.attachTerminal({
       sessionId: 'session-read-only', executionContextId: 'context-1',
@@ -427,6 +481,9 @@ describe('RuntimeClient', () => {
     second.deliver({
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-2', capabilities: ['replay-v1']
+    })
+    second.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
     })
 
     expect(second.sent).toContainEqual(expect.objectContaining({
@@ -463,6 +520,9 @@ describe('RuntimeClient', () => {
     port.deliver({
       type: 'protocol.ready', protocolVersion: PROTOCOL_VERSION,
       runtimeId: 'runtime-1', capabilities: ['replay-v1']
+    })
+    port.deliver({
+      type: 'session.recovery-snapshot', protocolVersion: PROTOCOL_VERSION, statuses: []
     })
     client.setRuntimeMode('read-only')
 
