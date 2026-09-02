@@ -22,7 +22,7 @@ interface PtySessionOptions {
   permissionMode?: string
   settingsPath?: string
   env?: Record<string, string>
-  send: (message: RuntimeMessage) => void
+  send?: (message: RuntimeMessage) => void
   onExit?: (
     session: PtySession,
     exitCode: number,

@@ -152,6 +152,21 @@ describe('parseRendererMessage', () => {
     })).toMatchObject({ type: 'terminal.retry-last-input', sessionId: 'session-1' })
   })
 
+  it('accepts foreground recovery priority, retry, and view detach messages', () => {
+    expect(parseRendererMessage({
+      type: 'session.recovery-prioritize', protocolVersion: PROTOCOL_VERSION,
+      sceneId: 'scene-1', activeSessionId: 'session-1'
+    })).toMatchObject({ type: 'session.recovery-prioritize', sceneId: 'scene-1' })
+    expect(parseRendererMessage({
+      type: 'session.recovery-retry', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1'
+    })).toMatchObject({ type: 'session.recovery-retry', sessionId: 'session-1' })
+    expect(parseRendererMessage({
+      type: 'terminal.view-detach', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1'
+    })).toMatchObject({ type: 'terminal.view-detach', sessionId: 'session-1' })
+  })
+
   it('rejects unknown message types', () => {
     expect(() =>
       parseRendererMessage({
