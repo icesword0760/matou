@@ -406,11 +406,15 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         markSpawned()
         setPid(message.pid)
         onStatusChange('streaming')
-        const replayFromSequence = replayFromSequenceForSpawn(message)
+        const replayFromSequence = replayFromSequenceForSpawn(message, reusedTerminalModel)
         if (replayFromSequence !== undefined && !replayRequested) {
           preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
           replayRequested = true
-          client.requestTerminalReplay(sessionId, replayFromSequence)
+          client.requestTerminalReplay(
+            sessionId,
+            replayFromSequence,
+            preserveExistingModelForReplay
+          )
         }
         if (replayProbe) {
           client.sendTerminalInput(sessionId, `printf '${SMOKE_MARKER}\\n'\r`)

@@ -1,9 +1,10 @@
 export function replayFromSequenceForSpawn(message: {
   reattached?: boolean
   replayFromSequence?: number
-}): number | undefined {
+}, hasReusableTerminalModel: boolean): number | undefined {
   if (!message.reattached || !Number.isSafeInteger(message.replayFromSequence)) return undefined
-  return message.replayFromSequence! >= 0 ? message.replayFromSequence : undefined
+  if (message.replayFromSequence! < 0) return undefined
+  return hasReusableTerminalModel ? message.replayFromSequence : 0
 }
 
 export function shouldRunReplayProbe(sessionId: string, e2e: boolean): boolean {
