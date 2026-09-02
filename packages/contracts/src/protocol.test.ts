@@ -155,8 +155,12 @@ describe('parseRendererMessage', () => {
   it('accepts foreground recovery priority, retry, and view detach messages', () => {
     expect(parseRendererMessage({
       type: 'session.recovery-prioritize', protocolVersion: PROTOCOL_VERSION,
-      sceneId: 'scene-1', activeSessionId: 'session-1'
-    })).toMatchObject({ type: 'session.recovery-prioritize', sceneId: 'scene-1' })
+      sceneId: 'scene-1', activeSessionId: 'session-1',
+      foregroundSessionIds: ['session-1', 'session-offscreen']
+    })).toMatchObject({
+      type: 'session.recovery-prioritize', sceneId: 'scene-1',
+      foregroundSessionIds: ['session-1', 'session-offscreen']
+    })
     expect(parseRendererMessage({
       type: 'session.recovery-retry', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-1'

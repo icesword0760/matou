@@ -391,7 +391,6 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const workspaceSessionCount = projection.sessions.filter(({ taskId: owner }) => workspaceTaskIds.has(owner)).length
   const pathValid = projection.pathStates.find(({ workspaceId: owner }) => owner === workspaceId)?.status !== 'invalid'
   const focusedSessionId = focusedSession(projection)
-  const sessionRecovery = useSessionRecovery(client, activeSceneId, focusedSessionId)
   const activeHud = projection.sessionHuds?.find(({ sessionId }) => sessionId === focusedSessionId)
   const activeSnapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === activeSceneId)
   const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
@@ -415,6 +414,9 @@ function HierarchyProduct({ projection, commands, readOnly }: {
         archivedAt === undefined && parentSessionId === activeGraphFocused.parentSessionId
       ).map(({ sessionId }) => sessionId)
     : activeSnapshot ? orderedSessionIds(activeSnapshot) : []
+  const sessionRecovery = useSessionRecovery(
+    client, activeSceneId, focusedSessionId, paneSessionIds
+  )
   const activeRatios = activeSnapshot ? layoutRatios(activeSnapshot, liveRatios) : {}
   const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
   const applyEnvironmentResult = (result: Awaited<ReturnType<HierarchyCommands['restoreSessionEnvironment']>>) => {

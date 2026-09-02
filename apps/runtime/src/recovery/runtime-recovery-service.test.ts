@@ -112,15 +112,41 @@ describe('RuntimeRecoveryService', () => {
     expect(jobs.map(({ sessionId, priority }) => [sessionId, priority])).toEqual([
       ['current', 'active-session'],
       ['foreground-offscreen', 'foreground-scene'],
+      ['same-scene-other-level', 'active-task'],
+      ['durable-fork', 'active-task'],
       ['same-task', 'active-task'],
       ['same-workspace', 'active-workspace'],
       ['background', 'background']
     ])
     expect(jobs.every(({ executionContextId, profile }) =>
       typeof executionContextId === 'string' &&
-      executionContextId.startsWith('context-') && profile === 'shell')).toBe(true)
+      executionContextId.startsWith('context-') &&
+      (profile === 'shell' || profile === 'claude-code'))).toBe(true)
+    expect(jobs.find(({ sessionId }) => sessionId === 'durable-fork'))
+      .toMatchObject({ recoveryAuthority: 'fork' })
     expect(jobs.some(({ sessionId }) => sessionId === 'explicitly-stopped')).toBe(false)
     expect(jobs.some(({ sessionId }) => sessionId === 'deleted')).toBe(false)
+  })
+
+  it('describes a newly accepted durable Fork before its provider launch changes work status', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-layered-recovery-live-fork-'))
+    const database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
+    databases.push(database)
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    seedRecoveryHierarchy(database)
+    database.run("UPDATE sessions SET work_status = 'idle' WHERE id = 'durable-fork'")
+
+    const service = new RuntimeRecoveryService(root, database)
+    expect(service.planSessionRecovery().some(({ sessionId }) => sessionId === 'durable-fork')).toBe(false)
+    expect(service.describeExternalForkRecovery('durable-fork')).toMatchObject({
+      sessionId: 'durable-fork',
+      sceneId: 'scene-active',
+      taskId: 'task-active',
+      workspaceId: 'workspace-active',
+      executionContextId: 'context-workspace-active',
+      profile: 'claude-code',
+      recoveryAuthority: 'fork'
+    })
   })
 
 })
@@ -187,6 +213,10 @@ function seedRecoveryHierarchy(database: RuntimeDatabase): void {
     const sessions = [
       ['current', 'task-active', 'scene-active', 'interrupted', null],
       ['foreground-offscreen', 'task-active', 'scene-active', 'running', null],
+      ['same-scene-other-level', 'task-active', 'scene-active', 'running', null],
+      ['durable-fork', 'task-active', 'scene-active', 'starting', null],
+      ['parent-a', 'task-active', 'scene-active', 'exited', null],
+      ['parent-b', 'task-active', 'scene-active', 'exited', null],
       ['same-task', 'task-active', 'scene-same-task', 'needs-input', null],
       ['same-workspace', 'task-same-workspace', 'scene-same-workspace', 'starting', null],
       ['background', 'task-background', 'scene-background', 'interrupted', null],
@@ -210,6 +240,40 @@ function seedRecoveryHierarchy(database: RuntimeDatabase): void {
         `mount-${sessionId}`, sceneId, sessionId, ordinal
       )
     }
+    tx.run("UPDATE sessions SET kind = 'claude-code' WHERE id = 'durable-fork'")
+    for (const [childId, parentId] of [
+      ['current', 'parent-a'],
+      ['foreground-offscreen', 'parent-a'],
+      ['same-scene-other-level', 'parent-b'],
+      ['durable-fork', 'parent-b']
+    ] as const) {
+      const event = tx.run(
+        `INSERT INTO session_relation_events (
+           event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+           relation_kind, command_id, occurred_at
+         ) VALUES (?, ?, 'created', 'task-active', ?, ?, 'derived-from', ?, 10)`,
+        `event-${childId}`, `relation-${childId}`, childId, parentId, `command-${childId}`
+      )
+      tx.run(
+        `INSERT INTO session_relations_current (
+           relation_id, task_id, from_session_id, to_session_id, relation_kind,
+           created_at, updated_at, source_event_sequence
+         ) VALUES (?, 'task-active', ?, ?, 'derived-from', 10, 10, ?)`,
+        `relation-${childId}`, childId, parentId, Number(event.lastInsertRowid)
+      )
+    }
+    tx.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, created_at, display_name, worktree_mode, attempt_count, updated_at,
+         operation_id, submission_key, stage, completed_steps, total_steps, attempt,
+         lease_fence
+       ) VALUES (
+         'durable-fork', 'parent-b', 'claude-code', 'provider-parent', 'starting', 10,
+         'Durable Fork', 'current', 0, 10, 'operation-durable', 'submission-durable',
+         'restoring-provider', 1, 2, 0, 0
+       )`
+    )
     tx.run("INSERT INTO app_windows (id, kind, state, created_at, updated_at) VALUES ('window-main', 'main', 'visible', 1, 10)")
     tx.run("INSERT INTO window_navigation (window_id, active_workspace_id, updated_at) VALUES ('window-main', 'workspace-active', 10)")
     tx.run("INSERT INTO window_workspace_focus (window_id, workspace_id, active_task_id, updated_at) VALUES ('window-main', 'workspace-active', 'task-active', 10)")

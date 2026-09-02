@@ -131,6 +131,7 @@ export function TerminalPane(props: {
   const recoveryBlocking = recoveryState !== 'ready'
   const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
   const actionBlocked = readOnly || environmentUnavailable || recoveryBlocking
+  const forkRepairBlocked = readOnly || environmentUnavailable
   const actionBlockedReason = readOnly ? READ_ONLY_REASON : environmentUnavailable
     ? '当前运行环境需要先恢复或交接'
     : recoveryBlocking ? '当前终端仍在恢复' : undefined
@@ -304,13 +305,13 @@ export function TerminalPane(props: {
         {forkFailure.reason && <span className="fork-failure-reason">{forkFailure.reason}</span>}
       </div>
       <div className="fork-failure-actions">
-        {onRetryFork && <button type="button" aria-label="重试创建分支" disabled={actionBlocked}
-          title={actionBlockedReason} onClick={(event) => {
+        {onRetryFork && <button type="button" aria-label="重试创建分支" disabled={forkRepairBlocked}
+          title={forkRepairBlocked ? actionBlockedReason : undefined} onClick={(event) => {
           event.stopPropagation()
           void onRetryFork(session.id)
         }}>重试</button>}
-        {onRemoveFailedFork && <button type="button" aria-label="移除失败分支" disabled={actionBlocked}
-          title={actionBlockedReason} onClick={(event) => {
+        {onRemoveFailedFork && <button type="button" aria-label="移除失败分支" disabled={forkRepairBlocked}
+          title={forkRepairBlocked ? actionBlockedReason : undefined} onClick={(event) => {
           event.stopPropagation()
           void onRemoveFailedFork(session.id)
         }}>移除</button>}
@@ -365,7 +366,8 @@ export function TerminalPane(props: {
       </div>}
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
       workStatus={workStatus} latestLines={latestLines} />}
-    {!isTeamMember && forkState !== 'failed' && foreground && recoveryState === 'ready' && <TerminalSurface sessionId={session.id}
+    {!isTeamMember && forkState !== 'failed' && foreground &&
+      (recoveryState === 'ready' || storageFault !== null) && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}
       inputDisabled={actionBlocked || !pathValid || storageFault !== null}
@@ -395,7 +397,7 @@ export function TerminalPane(props: {
     {!isTeamMember && forkState !== 'failed' && !foreground && recoveryState === 'ready' &&
       <div className="background-session-placeholder" data-testid={`background-session-${session.id}`}
         aria-hidden="true" />}
-    {recoveryState === 'ready' && storageFault && visible && <StorageFaultOverlay
+    {storageFault && !environmentUnavailable && !currentForkProgress && visible && <StorageFaultOverlay
       sessionTitle={session.title}
       fault={{
         code: storageFault.code,
@@ -404,8 +406,10 @@ export function TerminalPane(props: {
       }}
       onRetry={() => runtimeClient?.retryTerminalStorage(session.id)}
       onEnd={() => runtimeClient?.endTerminalAfterStorageFault(session.id)} />}
-    {recoveryState === 'ready' && currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
-    {recoveryState !== 'ready' && <div className={`session-recovery-overlay state-${recoveryState}`}
+    {currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
+    {recoveryState !== 'ready' && forkState !== 'failed' && !storageFault &&
+      !currentForkProgress && !environmentUnavailable &&
+      <div className={`session-recovery-overlay state-${recoveryState}`}
       role="status" aria-label={recoveryState === 'failed'
         ? `终端恢复失败：${session.title}` : `正在恢复终端：${session.title}`}
       onPointerDown={(event) => event.stopPropagation()}>
@@ -424,7 +428,7 @@ export function TerminalPane(props: {
           onClick={() => void onRetryRecovery(session.id)}>重试</button>}
       </div>
     </div>}
-    {recoveryState === 'ready' && environmentUnavailable && !currentForkProgress && visible && <div className={`environment-card-overlay state-${environment!.state}`}
+    {environmentUnavailable && !currentForkProgress && visible && <div className={`environment-card-overlay state-${environment!.state}`}
       role="status" aria-label={`运行环境${environmentOverlayTitle(environment!)}`}
       onPointerDown={(event) => event.stopPropagation()}>
       <div className="environment-card-overlay__content">

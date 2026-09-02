@@ -15,6 +15,7 @@ export interface RecoveryJob {
   taskId?: string
   executionContextId?: string
   profile?: 'shell' | 'claude-code' | 'codex'
+  recoveryAuthority?: 'fork'
 }
 
 export interface RecoveryJobSnapshot extends RecoveryJob {
@@ -34,6 +35,7 @@ export class RuntimeSessionRecoveryScheduler {
   readonly #idleWaiters = new Set<() => void>()
   #activeSceneId: string | undefined
   #activeSessionId: string | undefined
+  #foregroundSessionIds = new Set<string>()
   #running = 0
   #insertionOrder = 0
   #foregroundBurst = 0
@@ -61,7 +63,7 @@ export class RuntimeSessionRecoveryScheduler {
       if (current && current.state !== 'failed') continue
       this.#jobs.set(job.sessionId, {
         ...job,
-        state: 'queued',
+        state: job.recoveryAuthority === 'fork' ? 'restoring' : 'queued',
         insertionOrder: current?.insertionOrder ?? this.#insertionOrder++
       })
       changed = true
@@ -70,18 +72,34 @@ export class RuntimeSessionRecoveryScheduler {
     this.#scheduleDrain()
   }
 
-  prioritizeScene(sceneId: string, activeSessionId?: string): void {
+  prioritizeScene(
+    sceneId: string,
+    activeSessionId?: string,
+    foregroundSessionIds: readonly string[] = activeSessionId ? [activeSessionId] : []
+  ): void {
     this.#activeSceneId = sceneId
     this.#activeSessionId = activeSessionId
+    this.#foregroundSessionIds = new Set(foregroundSessionIds)
     this.#changed()
     this.#scheduleDrain()
+  }
+
+  settleExternal(sessionId: string, state: 'ready' | 'failed', error?: string): void {
+    const current = this.#jobs.get(sessionId)
+    if (!current || current.recoveryAuthority !== 'fork') return
+    current.state = state
+    if (error === undefined) delete current.error
+    else current.error = error
+    this.#changed()
+    this.#resolveIdleIfNeeded()
   }
 
   cancel(sessionIds: readonly string[]): void {
     let changed = false
     for (const sessionId of sessionIds) {
       const current = this.#jobs.get(sessionId)
-      if (current?.state !== 'queued') continue
+      if (!current) continue
+      if (current.state === 'restoring' && current.recoveryAuthority !== 'fork') continue
       this.#jobs.delete(sessionId)
       changed = true
     }
@@ -160,12 +178,12 @@ export class RuntimeSessionRecoveryScheduler {
 
   #rank(job: RecoveryJob): number {
     if (job.sessionId === this.#activeSessionId) return 0
-    if (job.sceneId === this.#activeSceneId) return 1
+    if (this.#foregroundSessionIds.has(job.sessionId)) return 1
     return PRIORITY_RANK[job.priority] + (this.#activeSceneId === undefined ? 0 : 2)
   }
 
   #isForeground(job: RecoveryJob): boolean {
-    return job.sessionId === this.#activeSessionId || job.sceneId === this.#activeSceneId
+    return job.sessionId === this.#activeSessionId || this.#foregroundSessionIds.has(job.sessionId)
   }
 
   #publicJob(job: MutableRecoveryJob): RecoveryJob {

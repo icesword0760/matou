@@ -88,7 +88,8 @@ const recoveryPrioritizeSchema = z.object({
   type: z.literal('session.recovery-prioritize'),
   protocolVersion,
   sceneId: identifier,
-  activeSessionId: sessionId.optional()
+  activeSessionId: sessionId.optional(),
+  foregroundSessionIds: z.array(sessionId).max(10_000).optional()
 })
 
 const recoveryRetrySchema = z.object({
@@ -293,8 +294,7 @@ type RpcErrorCode =
   | 'INTERNAL_ERROR'
   | RuntimeErrorCode
 
-export type RuntimeMessage =
-  | {
+export type SessionRecoveryStatusWire = {
       type: 'session.recovery-status'
       protocolVersion: typeof PROTOCOL_VERSION
       sessionId: string
@@ -302,6 +302,14 @@ export type RuntimeMessage =
       priority: 'active-session' | 'foreground-scene' | 'active-task' | 'active-workspace' | 'background'
       state: 'queued' | 'restoring' | 'ready' | 'failed'
       error?: string
+}
+
+export type RuntimeMessage =
+  | SessionRecoveryStatusWire
+  | {
+      type: 'session.recovery-snapshot'
+      protocolVersion: typeof PROTOCOL_VERSION
+      statuses: Array<Omit<SessionRecoveryStatusWire, 'type' | 'protocolVersion'>>
     }
   | {
       type: 'protocol.ready'

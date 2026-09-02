@@ -88,6 +88,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     render(<HierarchyShell />)
     await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await waitFor(() => expect(recoveryListener).toBeTypeOf('function'))
     act(() => recoveryListener?.({
       type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-a1', sceneId: 'scene-a1', priority: 'active-session',
@@ -103,6 +104,32 @@ describe('PRD 05 hierarchy shell', () => {
     }))
     await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：终端 A1' }))
     expect(retrySessionRecovery).toHaveBeenCalledWith('session-a1')
+  })
+
+  it('prioritizes every current-level sibling including cards outside the viewport', async () => {
+    const data = fixture()
+    data.sessionGraphs = {
+      'scene-a1': {
+        sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+        nodes: [
+          { ...graphNode('session-a1', '终端 A1'), parentSessionId: 'parent-a' },
+          { ...graphNode('session-offscreen', '终端 A2'), parentSessionId: 'parent-a' },
+          { ...graphNode('session-other-level', '终端 B'), parentSessionId: 'parent-b' }
+        ]
+      }
+    }
+    const prioritizeSessionRecovery = vi.fn()
+    runtime.current = {
+      request: vi.fn(), startProjection: vi.fn(), subscribeProjection: vi.fn(() => () => {}),
+      subscribeSessionRecovery: vi.fn(() => () => {}), prioritizeSessionRecovery,
+      retrySessionRecovery: vi.fn()
+    }
+
+    render(<HierarchyShell fixture={data} />)
+
+    await waitFor(() => expect(prioritizeSessionRecovery).toHaveBeenCalledWith(
+      'scene-a1', 'session-a1', ['session-a1', 'session-offscreen']
+    ))
   })
 
   it('opens session management from the card header centered inside the workspace stage', async () => {
