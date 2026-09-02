@@ -12,7 +12,7 @@
 | 8 Scene 挂载与整卡 Loading | **部分实现** | `TerminalPane` 仅在 `foreground && ready` 挂载 xterm；queued/restoring/failed 使用整卡遮罩；组件 tests 覆盖单卡隔离 | `SessionCarousel` 在同级会话超过 80 时窗口化，导致横向列表离屏会话不再保持 xterm 绑定，与已确认前台规则冲突 |
 | 9 统一节点移除范围 | **待实施** | 当前 `removeSessionBranch` 仍在 `includeDescendants=false` 且存在后代时抛 `Session has descendants` | “仅当前节点”需事务重连直接子节点；“当前及后代”删除完整子树，并统一 UI 入口 |
 | 10 Carousel / Resize | **部分实现（专项验证）** | Resize 已合并并有真实 16 会话 / 60Hz 验收；Carousel 具有稳定 hover/geometry 与 1,000 会话窗口化；专项报告记录滚动 p50/p95 6.9/7.7 ms | 先解决 Task 8 的前台规则冲突，再决定能同时满足“大列表 DOM 上限”和“所有同级 xterm 保持绑定”的承载方式 |
-| 11 DAG 迭代布局与可视窗口 | **部分实现（专项验证）** | `layoutGraph()` 迭代深度推导、`nodeById/nodesByDepth`；深 DAG 卡片 DOM ≤5；报告记录 5,000 深链 12 ms、10,000 节点 layout p95 5.39 ms | 尚无 branch/layer aggregate render model；pan/zoom 仍逐事件 setState；`DagWindowApp` 仍 500ms 轮询并 stringify 全图 |
+| 11 DAG 迭代布局与可视窗口 | **部分实现（聚合专项验证）** | `layoutGraph()` 保持迭代深度推导；`buildDagRenderModel()` 将远层按分支/层聚合并计算真实会话总数、运行中/待输入/异常计数；点击、缩放/平移和搜索可把目标替换为真实卡片；10,000 会话模型 node+aggregate ≤400、edge ≤800；5,000/10,000 布局专项结果继续成立 | pan/zoom 仍逐事件 setState；`DagWindowApp` 仍 500ms 轮询并 stringify 全图；需在 Task 12 同一提交完成真实 Electron 与 scale 最终门禁 |
 | 12 发布容量收口 | **待最终门禁** | `scale-dag-performance.md` 已记录专项测量：1,000 会话 DOM 151、SQL 463、层级恢复 445–516 ms、切换 79 ms、DAG 与滚动均低于专项预算 | 需在包含全部集成修复的同一提交上完成 typecheck、unit、完整真实 E2E、scale、打包运行和清理审计，再形成发布结论 |
 
 ## 状态口径
@@ -28,7 +28,7 @@
 
 - 32 个工作空间、249 个事项、1,992 个会话和 249 个画布从真实 SQLite 恢复到主画布用时 445–516 ms；跨工作空间事项切换 79 ms。
 - 1,000 会话场景把 DOM 从 3,105 降到 151、测量窗 SQL statements 从 30,570 降到 463；持续滚动 p50/p95 为 6.9/7.7 ms，未记录 Long Task。
-- 5,000 层关系布局以迭代方式完成，专项记录 12 ms；10,000 节点 DAG layout p50/p95 为 5.21/5.39 ms。
+- 5,000 层关系布局以迭代方式完成，专项记录 12 ms；10,000 节点 DAG layout p50/p95 为 5.21/5.39 ms。远层聚合专项测试进一步验证 10,000 会话 node+aggregate ≤400、edge ≤800，且聚合总数与运行中/待输入/异常计数来自真实成员会话。
 - 上述数字证明专项路径的性能收益，不证明完整产品已达到发布状态。尤其是当前 1,000 会话 DOM 数依赖 Carousel 窗口化，而已确认产品规则要求横向列表中滑出视野的会话仍定义为前台并保持 xterm 绑定；两者必须在 Task 8/10 收口时共同解决，不能用性能数字覆盖产品规则。
 
 ## 待最终门禁

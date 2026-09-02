@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerE
 import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
 import { DagSearch } from './DagSearch'
 import { layoutGraph, visibleLayers } from './dag-layout'
+import { buildDagRenderModel, type DagAggregateItem } from './dag-render-model'
 
 export interface DagTransform { x: number; y: number; scale: number }
 
@@ -37,25 +38,11 @@ export function DagCanvas(props: {
     top: -transform.y / transform.scale - 260,
     bottom: (viewportHeight - transform.y) / transform.scale + 260
   }
-  const renderedNodes = [...fullDepths].flatMap((depth) => layout.nodesByDepth.get(depth) ?? [])
-    .filter(({ x, y, width, height, sessionId }) =>
-      sessionId === previewSessionId ||
-      (x + width >= worldBounds.left && x <= worldBounds.right &&
-        y + height >= worldBounds.top && y <= worldBounds.bottom)
-    )
-  // Far layers remain discoverable as one directional affordance on each
-  // side. Rendering every off-screen node as a ghost defeats DAG
-  // virtualization for deep or wide graphs.
-  const ghostDepths = boundaryGhostDepths(fullDepths, layout.depthCount)
-  const ghostNodes = ghostDepths.flatMap((depth) => {
-    const peers = layout.nodesByDepth.get(depth) ?? []
-    if (peers.length === 0) return []
-    const centerWorldY = (viewportHeight / 2 - transform.y) / transform.scale
-    return [peers.reduce((nearest, node) =>
-      Math.abs(node.y - centerWorldY) < Math.abs(nearest.y - centerWorldY) ? node : nearest
-    )]
+  const centerWorldY = (viewportHeight / 2 - transform.y) / transform.scale
+  const renderModel = buildDagRenderModel({
+    layout, fullDepths, worldBounds, centerWorldY, previewSessionId
   })
-  const renderedNodeIds = new Set([...renderedNodes, ...ghostNodes].map(({ sessionId }) => sessionId))
+  const renderedNodes = renderModel.realNodes
   const update = (next: DagTransform) => {
     setTransform(next)
     onTransformChange?.(next)
@@ -113,7 +100,7 @@ export function DagCanvas(props: {
     update({ ...transform, x: transform.x - event.deltaX, y: transform.y - event.deltaY })
   }
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || (event.target as HTMLElement).closest('button,input,.dag-node-card')) return
+    if (event.button !== 0 || (event.target as HTMLElement).closest('button,input,.dag-node-card,.dag-aggregate-card')) return
     dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, originX: transform.x, originY: transform.y }
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
@@ -131,6 +118,7 @@ export function DagCanvas(props: {
   return <div className="dag-canvas" ref={viewportRef} role="application" aria-label="会话 DAG 画布"
     data-scale={round(transform.scale)} data-pan={`${round(transform.x)},${round(transform.y)}`}
     data-rendered-node-count={renderedNodes.length}
+    data-rendered-aggregate-count={renderModel.aggregates.length}
     onWheel={wheel} onPointerDown={pointerDown} onPointerMove={pointerMove}
     onPointerUp={pointerEnd} onPointerCancel={pointerEnd}>
     <header className="dag-toolbar">
@@ -159,13 +147,7 @@ export function DagCanvas(props: {
         ).map((root) =>
           <path key={`root:${root.sessionId}`} className="dag-root-guide"
             d={`M 12 ${layout.height / 2} C 28 ${layout.height / 2}, 32 ${root.y + root.height / 2}, ${root.x} ${root.y + root.height / 2}`} />)}
-        {layout.edges.filter((edge) => {
-          const fromDepth = layout.nodeById.get(edge.fromSessionId)?.depth
-          const toDepth = layout.nodeById.get(edge.toSessionId)?.depth
-          return fromDepth !== undefined && toDepth !== undefined &&
-            (fullDepths.has(fromDepth) || fullDepths.has(toDepth)) &&
-            (renderedNodeIds.has(edge.fromSessionId) || renderedNodeIds.has(edge.toSessionId))
-        }).map((edge) => {
+        {renderModel.edges.map((edge) => {
           const mid = (edge.from.x + edge.to.x) / 2
           return <path key={`${edge.fromSessionId}:${edge.toSessionId}`}
             className={`dag-edge relation-${edge.relationKind}`}
@@ -184,10 +166,10 @@ export function DagCanvas(props: {
             setPreviewSessionId(positioned.sessionId)
             onSelect(positioned.sessionId)
           }} />)}
-      {ghostNodes.map((positioned) => <DagNodeCard key={`ghost:${positioned.sessionId}`}
-        node={positioned.node} focused={false} ghost notified={notified.has(positioned.sessionId)}
-        style={{ left: positioned.x, top: positioned.y, width: positioned.width, height: positioned.height }}
-        onClick={() => focusNode(positioned.sessionId)} />)}
+      {renderModel.aggregates.map((aggregate) => <DagAggregateCard key={aggregate.key}
+        aggregate={aggregate}
+        style={{ left: aggregate.x, top: aggregate.y, width: aggregate.width, height: aggregate.height }}
+        onClick={() => focusNode(aggregate.targetSessionId)} />)}
     </div>
   </div>
 }
@@ -196,17 +178,16 @@ function DagNodeCard(props: {
   node: SessionGraphNodeView
   focused: boolean
   notified: boolean
-  ghost?: boolean
   style: CSSProperties
   onClick(): void
 }) {
-  const { node, focused, notified, ghost = false, style, onClick } = props
+  const { node, focused, notified, style, onClick } = props
   const branch = node.worktree?.branch ?? node.git?.branch
   const shared = node.sharedWorkingDirectory === true || node.worktree?.shared === true
   const legacyStopped = node.archivedAt !== undefined
   const visualStatus = legacyStopped ? 'exited' : node.workStatus
-  return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}${ghost ? ' is-ghost' : ''}`}
-    style={style} data-session-id={node.sessionId} data-ghost={ghost} aria-label={`${ghost ? '远层会话' : '打开会话'}：${node.title}`} onClick={onClick}>
+  return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}`}
+    style={style} data-session-id={node.sessionId} aria-label={`打开会话：${node.title}`} onClick={onClick}>
     <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{modeLabel(node.currentMode)}</em></span>
     <strong>{node.title}</strong>
     <span className="dag-node-card__path" title={node.cwd}>
@@ -216,6 +197,34 @@ function DagNodeCard(props: {
     <pre>{node.latestLines.slice(-4).join('\n') || '等待会话输出…'}</pre>
     <span className="dag-node-card__meta">子会话 {node.activeChildCount + node.stoppedChildCount}{legacyStopped ? ' · 已停止' : ''} · {activityLabel(node)}</span>
     {shared && <span className="dag-node-card__shared">{branch ? '共享工作树' : '共享目录'}</span>}
+  </button>
+}
+
+function DagAggregateCard(props: {
+  aggregate: DagAggregateItem
+  style: CSSProperties
+  onClick(): void
+}) {
+  const { aggregate, style, onClick } = props
+  const { counts } = aggregate
+  const label = `共 ${aggregate.sessionCount} 个会话，运行中 ${counts.running}，等待输入 ${counts.needsInput}，异常 ${counts.error}`
+  return <button type="button"
+    className={`dag-aggregate-card${counts.running > 0 ? ' has-running' : ''}${counts.needsInput > 0 ? ' has-needs-input' : ''}${counts.error > 0 ? ' has-error' : ''}`}
+    style={style}
+    data-aggregate-key={aggregate.key}
+    data-aggregate-kind={aggregate.kind}
+    data-aggregate-count={aggregate.sessionCount}
+    data-direction={aggregate.direction}
+    aria-label={`展开远层会话：${label}`}
+    onClick={onClick}>
+    <span className="dag-aggregate-card__eyebrow">{aggregate.kind === 'branch' ? '远层分支' : '远层层级'}</span>
+    <strong>共 {aggregate.sessionCount} 个会话</strong>
+    <span className="dag-aggregate-card__range">第 {aggregate.minimumDepth + 1}–{aggregate.maximumDepth + 1} 层 · 点击展开</span>
+    <span className="dag-aggregate-card__counts">
+      <i className="running" />运行中 {counts.running}
+      <i className="needs-input" />等待输入 {counts.needsInput}
+      <i className="error" />异常 {counts.error}
+    </span>
   </button>
 }
 
@@ -275,12 +284,4 @@ function compactPath(value: string): string {
 function depthsAround(centerDepth: number, depthCount: number): number[] {
   return [centerDepth - 1, centerDepth, centerDepth + 1]
     .filter((depth) => depth >= 0 && depth < depthCount)
-}
-
-function boundaryGhostDepths(fullDepths: Set<number>, depthCount: number): number[] {
-  if (fullDepths.size === 0) return []
-  const depths = [...fullDepths]
-  const minimum = Math.min(...depths)
-  const maximum = Math.max(...depths)
-  return [minimum - 1, maximum + 1].filter((depth) => depth >= 0 && depth < depthCount)
 }
