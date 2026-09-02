@@ -103,13 +103,8 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     const onProjection = (message: RuntimeMessage) => {
       if (!alive) return
       if (message.type === 'terminal.hud') {
-        setProjection((current) => {
-          if (!current) return current
-          const next = structuredClone(current)
-          next.sessionHuds = (next.sessionHuds ?? []).filter(({ sessionId }) => sessionId !== message.sessionId)
-          if (message.hud) next.sessionHuds.push(message.hud)
-          return next
-        })
+        if (!storeRef.current.applyTerminalHud(message.sessionId, message.hud)) return
+        setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
         return
       }
       if (message.type !== 'events.batch') return
@@ -584,7 +579,18 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
     },
     closePane: () => {
       if (!activeSessionMutationBlocked && focusedSessionId) {
-        setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
+        const focusedNode = activeGraphIndex?.byId.get(focusedSessionId)
+        const inactiveLeafWithoutWorktree = focusedNode !== undefined &&
+          (activeGraphIndex?.descendantsOf(focusedSessionId).length ?? 0) === 0 &&
+          focusedNode.hasOwnedWorktree === false &&
+          focusedNode.workStatus !== 'starting' &&
+          focusedNode.workStatus !== 'running' &&
+          focusedNode.workStatus !== 'needs-input'
+        if (activeSceneId && commands.removeSessionBranch && inactiveLeafWithoutWorktree) {
+          run(commands.removeSessionBranch(activeSceneId, focusedSessionId, 'node-only'))
+        } else {
+          setCloseRequest((value) => ({ sessionId: focusedSessionId, sequence: value.sequence + 1 }))
+        }
       }
     },
     newTab: () => { if (!readOnly && pathValid && task) run(commands.createCanvas(task.id)) },
@@ -613,7 +619,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
       if (shortcutPanelOpen) setTerminalFocusRequest((value) => value + 1)
       setShortcutPanelOpen(!shortcutPanelOpen)
     }
-  }), [activeRatios, activeSceneId, activeSessionMutationBlocked, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
+  }), [activeGraphIndex, activeRatios, activeSceneId, activeSessionMutationBlocked, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
     if (!activeSceneId || !dagFocusSessionId) return
