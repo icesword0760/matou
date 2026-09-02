@@ -94,11 +94,72 @@ describe('SessionDurabilityGate', () => {
     }))
     await gate.append(frame(2, 2 * 1024 * 1024, async () => {}))
 
-    expect(order).toEqual(['persist', 'pause'])
+    expect(order).toEqual(['pause', 'persist'])
     expect(gate.retainedBytes).toBe(4 * 1024 * 1024)
     expect(() => gate.append(frame(3, 1, async () => {}))).toThrow(DurabilityBufferOverflowError)
     expect(gate.retainedBytes).toBe(4 * 1024 * 1024)
     expect(gate.lastAcceptedSequence).toBe(2)
+  })
+
+  it('backpressures a healthy producer before the retained FIFO fills and resumes after durable drain', async () => {
+    let releaseFirstWrite: () => void = () => {}
+    const firstWriteReleased = new Promise<void>((resolve) => { releaseFirstWrite = resolve })
+    const persisted: number[] = []
+    const pause = vi.fn()
+    const resume = vi.fn()
+    const gate = new SessionDurabilityGate({
+      sessionId: 'healthy-backpressure',
+      pauser: { pause, resume }
+    })
+    const persist = (sequence: number) => async () => {
+      if (sequence === 1) await firstWriteReleased
+      persisted.push(sequence)
+    }
+
+    const writes = [
+      gate.append(frame(1, 1024 * 1024, persist(1))),
+      gate.append(frame(2, 1024 * 1024, persist(2))),
+      gate.append(frame(3, 1024 * 1024, persist(3)))
+    ]
+
+    expect(gate.state).toBe('healthy')
+    expect(gate.retainedBytes).toBe(3 * 1024 * 1024)
+    expect(pause).toHaveBeenCalledTimes(1)
+    expect(resume).not.toHaveBeenCalled()
+
+    releaseFirstWrite()
+    await Promise.all(writes)
+
+    expect(persisted).toEqual([1, 2, 3])
+    expect(gate.retainedBytes).toBe(0)
+    expect(resume).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-arms healthy backpressure after a storage fault is retried', async () => {
+    let failFirstWrite = true
+    let releaseSecondWrite: () => void = () => {}
+    const secondWriteReleased = new Promise<void>((resolve) => { releaseSecondWrite = resolve })
+    const pause = vi.fn()
+    const gate = new SessionDurabilityGate({
+      sessionId: 'backpressure-after-retry',
+      pauser: { pause, resume: vi.fn() }
+    })
+
+    await gate.append(frame(1, 1024 * 1024, async () => {
+      if (failFirstWrite) {
+        failFirstWrite = false
+        throw storageError('ENOSPC')
+      }
+    }))
+    await gate.retry()
+
+    const secondWrite = gate.append(frame(2, 1024 * 1024, async () => {
+      await secondWriteReleased
+    }))
+    expect(pause).toHaveBeenCalledTimes(2)
+
+    releaseSecondWrite()
+    await secondWrite
   })
 
   it('isolates an EACCES fault to one session while another keeps persisting', async () => {
