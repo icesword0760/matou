@@ -167,6 +167,8 @@ test.describe('real Electron scale benchmark', () => {
       await expect(fixture.page.locator('.hierarchy-shell')).toBeVisible()
       await expect(fixture.page.locator('.session-carousel'))
         .toHaveAttribute('data-total-sessions', '1000')
+      await expect(fixture.page.locator('.session-carousel'))
+        .toHaveAttribute('data-foreground-terminals', '1000')
       await expect(fixture.page.locator('[data-testid^="task-scale-task"]'))
         .toHaveCount(249)
       const recoveryMs = performance.now() - recoveryStartedAt
@@ -178,8 +180,9 @@ test.describe('real Electron scale benchmark', () => {
       expect(recoveryMs).toBeLessThan(5_000)
       expect(sample.p95).toBeLessThan(34)
       // The sidebar intentionally keeps all 249 Task entries keyboard- and
-      // screen-reader-addressable; the 1,000-Session canvas itself remains
-      // virtualized. Leave headroom for platform-specific accessibility DOM.
+      // screen-reader-addressable. The 1,000 foreground terminal ownership
+      // entries survive horizontal virtualization while only card presentation
+      // remains in the DOM. Leave headroom for platform accessibility DOM.
       expect(sample.domNodes).toBeLessThan(3_500)
       expect(sample.statementCount).toBeLessThan(750)
       expect(sample.longTaskP95).toBeLessThan(100)

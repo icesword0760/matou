@@ -32,6 +32,7 @@ import { TerminalSearchBar, type TerminalSearchOptions } from './TerminalSearchB
 import { BranchDialog, type BranchDialogSubmit } from '../session-canvas/BranchDialog'
 import { SessionBreadcrumb } from '../session-canvas/SessionBreadcrumb'
 import { SessionCanvas } from '../session-canvas/SessionCanvas'
+import { foregroundSiblingSessionIds } from '../session-canvas/foreground-terminal-policy'
 import { SessionLoaderDialog } from '../session-canvas/SessionLoaderDialog'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import '../session-canvas/session-canvas.css'
@@ -39,6 +40,7 @@ import { useTerminalShortcuts } from './useTerminalShortcuts'
 import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
+import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
 import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 import { AppFocusRestorer } from './focus-restoration'
 import { useSessionRecovery } from '../runtime/useSessionRecovery'
@@ -410,12 +412,28 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const activeLevelSessionCount = activeGraph?.nodes.filter(
     ({ parentSessionId }) => parentSessionId === activeLevelParentId
   ).length ?? 0
+  const foregroundTerminalSessionIds = foregroundSiblingSessionIds(
+    activeGraph?.nodes ?? [], activeLevelParentId
+  )
+  const foregroundTerminalSignature = foregroundTerminalSessionIds.join(':')
   const paneSessionIds = activeGraph && activeGraphFocused
     ? activeGraph.nodes.filter(({ archivedAt, parentSessionId }) =>
         archivedAt === undefined && parentSessionId === activeGraphFocused.parentSessionId
       ).map(({ sessionId }) => sessionId)
     : activeSnapshot ? orderedSessionIds(activeSnapshot) : []
   const activeRatios = activeSnapshot ? layoutRatios(activeSnapshot, liveRatios) : {}
+  useEffect(() => {
+    client?.setForegroundTerminalSessions?.(foregroundTerminalSessionIds)
+    foregroundTerminalModels.setForegroundSessions(foregroundTerminalSessionIds)
+    // Session IDs are stable and globally unique. The signature prevents a
+    // projection refresh from churning Runtime bindings when the level is
+    // unchanged while still reacting to add/remove and navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, foregroundTerminalSignature])
+  useEffect(() => () => {
+    client?.setForegroundTerminalSessions?.([])
+    foregroundTerminalModels.setForegroundSessions([])
+  }, [client])
   const run = (action: unknown) => { void Promise.resolve(action).catch(() => {}) }
   const applyEnvironmentResult = (result: Awaited<ReturnType<HierarchyCommands['restoreSessionEnvironment']>>) => {
     if (result.kind === 'environment' && result.restartRequired) {

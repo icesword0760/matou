@@ -4,6 +4,7 @@ import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { TerminalSurface } from './TerminalSurface'
+import { foregroundTerminalModels } from './terminal-model-cache'
 
 const state = vi.hoisted(() => ({
   focus: vi.fn(),
@@ -15,6 +16,8 @@ const state = vi.hoisted(() => ({
   onData: undefined as undefined | ((data: string) => void),
   terminalResize: vi.fn(),
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
+  terminalConstructed: vi.fn(),
+  terminalDisposed: vi.fn(),
   serialize: vi.fn(() => '\u001b[2Jserialized screen'),
   attachTerminal: vi.fn(),
   sendTerminalInput: vi.fn(),
@@ -26,11 +29,14 @@ const state = vi.hoisted(() => ({
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
+    element = document.createElement('div')
+    options: Record<string, unknown> = {}
     cols = 80
     rows = 24
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
     loadAddon = vi.fn()
-    open = vi.fn()
+    constructor() { state.terminalConstructed() }
+    open = vi.fn((container: HTMLElement) => container.appendChild(this.element))
     focus = state.focus
     write = state.terminalWrite
     resize = state.terminalResize
@@ -39,7 +45,7 @@ vi.mock('@xterm/xterm', () => ({
       return { dispose: vi.fn() }
     })
     reset = vi.fn()
-    dispose = vi.fn()
+    dispose = state.terminalDisposed
   }
 }))
 vi.mock('@xterm/addon-fit', () => ({
@@ -82,6 +88,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({
 
 describe('TerminalSurface focus continuity', () => {
   beforeEach(() => {
+    foregroundTerminalModels.setForegroundSessions([])
     state.focus.mockClear()
     state.searchNext.mockClear()
     state.searchPrevious.mockClear()
@@ -95,6 +102,8 @@ describe('TerminalSurface focus continuity', () => {
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
     state.terminalWrite.mockClear()
+    state.terminalConstructed.mockClear()
+    state.terminalDisposed.mockClear()
     state.serialize.mockClear()
     state.storeTerminalCheckpoint.mockClear()
     state.searchTerminalHistory.mockReset()
@@ -119,6 +128,19 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
 
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
+  })
+
+  it('reuses its xterm VT model after foreground card DOM virtualization', async () => {
+    foregroundTerminalModels.setForegroundSessions(['session-1'])
+    const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(1))
+
+    first.unmount()
+    expect(state.terminalDisposed).not.toHaveBeenCalled()
+    render(<TerminalSurface sessionId="session-1" active visible foreground />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(2))
+
+    expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
   })
 
   it('replays historical terminal resize frames before continuing output', async () => {
