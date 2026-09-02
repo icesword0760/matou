@@ -343,10 +343,15 @@ export class RuntimeClient {
     })
   }
 
-  requestTerminalReplay(sessionId: string, fromSequence = 0): void {
+  requestTerminalReplay(
+    sessionId: string,
+    fromSequence = 0,
+    preserveExistingModel = false
+  ): void {
     this.#post({
       type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
-      sessionId, fromSequence
+      sessionId, fromSequence,
+      ...(preserveExistingModel ? { preserveExistingModel: true } : {})
     })
   }
 

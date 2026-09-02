@@ -12,14 +12,20 @@ import {
 } from './matou-fixture'
 import { terminalCommand } from './fixtures/session-canvas-fixture'
 import {
+  countRegisteredScaleLinkedWorktrees,
   historyMarker,
+  readHealthyManagedSessions,
   readRecoveryScaleCounts,
+  readRecoveryScaleReconciliation,
   RECOVERY_SCALE_ACTIVE_SESSION_ID,
+  RECOVERY_SCALE_ARCHIVED_SESSION_IDS,
   RECOVERY_SCALE_BACKGROUND_IDS,
   RECOVERY_SCALE_BACKGROUND_TASK_ID,
   RECOVERY_SCALE_BACKGROUND_WORKSPACE_ID,
   RECOVERY_SCALE_FOREGROUND_IDS,
+  RECOVERY_SCALE_HEALTHY_WORKTREE_SESSION_IDS,
   RECOVERY_SCALE_SESSION_IDS,
+  RECOVERY_SCALE_STOPPED_SESSION_IDS,
   seedRuntimeRecoveryScale
 } from './fixtures/runtime-recovery-scale-fixture'
 
@@ -42,7 +48,7 @@ interface RuntimeMetrics {
   }
 }
 
-test('recovers twenty real PTYs fairly across a durable 100-Session hierarchy after Runtime SIGKILL', async () => {
+test('reconciles Worktrees and interrupted Forks while recovering twenty real PTYs across a durable 5/20/100 hierarchy', async () => {
   test.skip(process.platform !== 'darwin', 'the display-constrained recovery gate runs on macOS')
   test.setTimeout(4 * 60_000)
   let fixture: MatouFixture | undefined
@@ -60,10 +66,15 @@ test('recovers twenty real PTYs fairly across a durable 100-Session hierarchy af
       recoveryWorkspaces: 2,
       recoveryTasks: 2,
       recoveryScenes: 2,
-      workspaces: 3,
-      tasks: 11,
-      scenes: 13
+      workspaces: 5,
+      tasks: 20,
+      scenes: 26,
+      worktrees: 10,
+      managedWorktreeBindings: 10,
+      forkOperations: 5,
+      interruptedForkOperations: 5
     })
+    expect(await countRegisteredScaleLinkedWorktrees(fixture.dataDirectory)).toBe(10)
 
     fixture = await restartMatou(fixture, { env: recoveryScaleEnvironment() })
     const appPid = fixture.app.process().pid
@@ -75,7 +86,20 @@ test('recovers twenty real PTYs fairly across a durable 100-Session hierarchy af
     expect(new Set(before.ptySessions.map(({ pid }) => pid)).size).toBe(20)
     expect(new Set(before.ptySessions.map(({ sessionId }) => sessionId)))
       .toEqual(new Set(RECOVERY_SCALE_SESSION_IDS))
+    assertStoppedAndDeletedSessionsStayedEnded(before)
     previousPids.push(...before.ptySessions.map(({ pid }) => pid))
+
+    const reconciliation = await waitForScaleReconciliation(fixture.dataDirectory)
+    expect(reconciliation).toMatchObject({
+      worktreeReady: 5,
+      worktreeFailed: 5,
+      managedBindingReady: 5,
+      managedBindingFailed: 5,
+      forkFailed: 5,
+      forkFailureNotifications: 5
+    })
+    expect(reconciliation.forkSessionIds).toHaveLength(5)
+    expect(await countRegisteredScaleLinkedWorktrees(fixture.dataDirectory)).toBe(10)
 
     await writeHistoryBeforeCrash(fixture)
 
@@ -113,6 +137,7 @@ test('recovers twenty real PTYs fairly across a durable 100-Session hierarchy af
     expect(new Set(after.ptySessions.map(({ pid }) => pid)).size).toBe(20)
     expect(new Set(after.ptySessions.map(({ sessionId }) => sessionId)))
       .toEqual(new Set(RECOVERY_SCALE_SESSION_IDS))
+    assertStoppedAndDeletedSessionsStayedEnded(after, reconciliation.forkSessionIds)
     for (const { sessionId, pid } of after.ptySessions) {
       expect(pid).not.toBe(previousBySession.get(sessionId))
     }
@@ -122,9 +147,11 @@ test('recovers twenty real PTYs fairly across a durable 100-Session hierarchy af
 
     await verifyDurableHistory(fixture.dataDirectory)
     await verifyHistoryAndInput(fixture, RECOVERY_SCALE_FOREGROUND_IDS, true)
+    await verifyHealthyWorktreeDirectories(fixture)
     await openBackgroundRecoveryTask(fixture.page)
     await expect(activeCarousel(fixture.page)).toHaveAttribute('data-total-sessions', '4')
     await verifyHistoryAndInput(fixture, RECOVERY_SCALE_BACKGROUND_IDS, false)
+    await verifyForkFailureNotifications(fixture, reconciliation.forkSessionIds)
     await assertVisibleWindowsOnSecondaryColorLcd(fixture)
   } finally {
     await fixture?.close()
@@ -133,6 +160,42 @@ test('recovers twenty real PTYs fairly across a durable 100-Session hierarchy af
 
 function recoveryScaleEnvironment(): Record<string, string> {
   return { MATOU_E2E_SCALE: '1', MATOU_E2E_TERMINAL_DIAGNOSTICS: '0' }
+}
+
+async function waitForScaleReconciliation(dataDirectory: string) {
+  let result: Awaited<ReturnType<typeof readRecoveryScaleReconciliation>> | undefined
+  await expect.poll(async () => {
+    result = await readRecoveryScaleReconciliation(dataDirectory)
+    return {
+      ready: result.worktreeReady,
+      failed: result.worktreeFailed,
+      bindingReady: result.managedBindingReady,
+      bindingFailed: result.managedBindingFailed,
+      forkFailed: result.forkFailed,
+      notifications: result.forkFailureNotifications
+    }
+  }, { message: 'real Worktrees and interrupted Fork operations must reconcile after restart' })
+    .toEqual({
+      ready: 5,
+      failed: 5,
+      bindingReady: 5,
+      bindingFailed: 5,
+      forkFailed: 5,
+      notifications: 5
+    })
+  return result!
+}
+
+function assertStoppedAndDeletedSessionsStayedEnded(
+  metrics: RuntimeMetrics,
+  failedForkSessionIds: string[] = []
+): void {
+  const running = new Set(metrics.ptySessions.map(({ sessionId }) => sessionId))
+  for (const sessionId of [
+    ...RECOVERY_SCALE_STOPPED_SESSION_IDS,
+    ...RECOVERY_SCALE_ARCHIVED_SESSION_IDS,
+    ...failedForkSessionIds
+  ]) expect(running.has(sessionId)).toBe(false)
 }
 
 async function waitForRecoveredRuntime(
@@ -211,7 +274,7 @@ async function writeHistory(fixture: MatouFixture, sessionIds: string[]): Promis
     await card.scrollIntoViewIfNeeded()
     await card.click({ position: { x: 12, y: 12 } })
     const surface = surfaceFor(fixture.page, sessionId)
-    await terminalCommand(surface, `printf "${historyMarker(sessionId)}\\n"`)
+    await terminalCommand(surface, `echo ${historyMarker(sessionId)}`)
     await expect(surface.locator('.xterm-rows')).toContainText(historyMarker(sessionId))
   }
 }
@@ -235,7 +298,12 @@ async function verifyHistoryAndInput(
     await card.click({ position: { x: 12, y: 12 } })
     const surface = surfaceFor(fixture.page, sessionId)
     await expect(surface).toBeVisible()
-    if (expectCachedHistory) {
+    // zsh redraws a Worktree-aware prompt that is wider than one of the
+    // deliberately narrow 16-card terminals. That redraw can overwrite raw
+    // screen cells even though the Journal is durable (verified separately).
+    // Ordinary foreground Shells must retain their visible marker; managed
+    // Worktree Shells are verified by durable frames, real cwd, and new input.
+    if (expectCachedHistory && !RECOVERY_SCALE_HEALTHY_WORKTREE_SESSION_IDS.includes(sessionId)) {
       await expect(surface.locator('.xterm-rows')).toContainText(historyMarker(sessionId))
     }
     const afterMarker = `MATOU_INPUT_${String(
@@ -244,6 +312,47 @@ async function verifyHistoryAndInput(
     await terminalCommand(surface, `printf "${afterMarker}\\n"`)
     await expect(surface.locator('.xterm-rows')).toContainText(afterMarker)
   }
+}
+
+async function verifyHealthyWorktreeDirectories(fixture: MatouFixture): Promise<void> {
+  const managed = await readHealthyManagedSessions(fixture.dataDirectory)
+  expect(managed.map(({ sessionId }) => sessionId))
+    .toEqual([...RECOVERY_SCALE_HEALTHY_WORKTREE_SESSION_IDS].sort())
+  for (const { sessionId, worktreePath } of managed) {
+    const card = fixture.page.locator(`[data-session-card="${sessionId}"]`)
+    await card.scrollIntoViewIfNeeded()
+    await card.click({ position: { x: 12, y: 12 } })
+    const marker = `MATOU_WORKTREE_${RECOVERY_SCALE_HEALTHY_WORKTREE_SESSION_IDS.indexOf(sessionId) + 1}`
+    const expectedPath = shellQuote(worktreePath)
+    await terminalCommand(surfaceFor(fixture.page, sessionId),
+      `test "$(pwd -P)" = "$(cd ${expectedPath} && pwd -P)" && printf "${marker}\\n"`)
+    await expect(surfaceFor(fixture.page, sessionId).locator('.xterm-rows')).toContainText(marker)
+  }
+}
+
+async function verifyForkFailureNotifications(
+  fixture: MatouFixture,
+  failedForkSessionIds: string[]
+): Promise<void> {
+  await fixture.page.getByRole('button', { name: '通知中心' }).click()
+  const center = fixture.page.getByRole('region', { name: '通知中心' })
+  const failures = center.getByRole('button', {
+    name: /打开通知：Fork Worktree identity mismatch: wrong-branch/
+  })
+  await expect(failures).toHaveCount(5)
+  await failures.first().click()
+  const activePane = fixture.page.locator('[data-testid="terminal-pane"][data-active="true"]')
+  const forkFailure = activePane.locator('.fork-failure-card')
+  await expect(forkFailure).toContainText('分支创建失败')
+  await expect(forkFailure).toContainText('wrong-branch')
+  await expect(activePane.locator('.environment-card-overlay')).toContainText('运行环境需要处理')
+  const activeSessionId = await activePane.evaluate((pane) =>
+    pane.closest<HTMLElement>('[data-session-card]')?.dataset.sessionCard ?? null)
+  expect(failedForkSessionIds).toContain(activeSessionId)
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
 }
 
 async function openBackgroundRecoveryTask(page: Page): Promise<void> {

@@ -1019,6 +1019,34 @@ describe('RuntimeServer domain RPC', () => {
     ])
   })
 
+  it('replays the requested run tail when Renderer retains its existing VT model', async () => {
+    registerSession(database, 'reattach-retained-model')
+    const journal = await SegmentJournal.open(root, 'reattach-retained-model')
+    for (let sequence = 1; sequence <= 6; sequence += 1) {
+      await journal.appendOutput(sequence, Uint8Array.from([64 + sequence]))
+    }
+    await journal.close()
+    await new CheckpointManager(root, database).create({
+      sessionId: 'reattach-retained-model', terminalSequence: 5, domainEventSequence: 0,
+      screenEpoch: 0, snapshot: Uint8Array.from([9, 9])
+    })
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'reattach-retained-model', fromSequence: 3,
+      preserveExistingModel: true
+    })
+    await settle()
+
+    expect(port.last('terminal.replay-start')).toMatchObject({
+      source: 'tail', fromSequence: 3
+    })
+    expect(port.last('terminal.replay-start')).not.toHaveProperty('checkpoint')
+    expect(port.sent.filter((message) => message.type === 'terminal.data').map(
+      (message) => message.sequence
+    )).toEqual([3, 4, 5, 6])
+  })
+
   it('ignores a checkpoint older than the requested PTY run and replays the full run prefix', async () => {
     registerSession(database, 'older-reattach-checkpoint')
     const journal = await SegmentJournal.open(root, 'older-reattach-checkpoint')

@@ -917,7 +917,7 @@ export class RuntimeServer {
       // checkpoint cannot replace that prefix: resetting to it and then
       // starting at requestedFrom would leave a visible hole. A newer
       // checkpoint already contains that prefix and is the fastest exact base.
-      const checkpoint = candidateCheckpoint && (
+      const checkpoint = !message.preserveExistingModel && candidateCheckpoint && (
         message.fromSequence === 0 ||
         candidateCheckpoint.terminalSequence >= message.fromSequence
       ) ? candidateCheckpoint : undefined

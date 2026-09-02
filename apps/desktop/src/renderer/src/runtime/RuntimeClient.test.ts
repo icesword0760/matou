@@ -78,6 +78,18 @@ describe('RuntimeClient', () => {
     ])
   })
 
+  it('marks a replay that must extend the Renderer cached VT model', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port)
+
+    client.requestTerminalReplay('session-cached', 42, true)
+
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'terminal.replay-request', sessionId: 'session-cached', fromSequence: 42,
+      preserveExistingModel: true
+    }))
+  })
+
   it('subscribes to per-card recovery status and sends the whole sibling list as foreground', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })

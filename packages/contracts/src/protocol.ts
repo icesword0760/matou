@@ -109,7 +109,8 @@ const replayRequestSchema = z.object({
   type: z.literal('terminal.replay-request'),
   protocolVersion,
   sessionId,
-  fromSequence: z.number().int().nonnegative()
+  fromSequence: z.number().int().nonnegative(),
+  preserveExistingModel: z.boolean().optional()
 })
 
 const checkpointSchema = z.object({
