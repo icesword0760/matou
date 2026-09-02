@@ -193,6 +193,20 @@ export class RuntimeClient {
     })
   }
 
+  retryTerminalStorage(sessionId: string): void {
+    if (this.#readOnly) return
+    this.#post({
+      type: 'terminal.storage-retry', protocolVersion: PROTOCOL_VERSION, sessionId
+    })
+  }
+
+  endTerminalAfterStorageFault(sessionId: string): void {
+    if (this.#readOnly) return
+    this.#post({
+      type: 'terminal.storage-end', protocolVersion: PROTOCOL_VERSION, sessionId
+    })
+  }
+
   recordTerminalInteraction(
     sessionId: string,
     interactionKind: 'submit' | 'control' | 'provider-action',

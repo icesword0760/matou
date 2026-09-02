@@ -165,6 +165,21 @@ describe('RuntimeClient', () => {
     })
   })
 
+  it('keeps storage recovery commands scoped to the affected Session', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+
+    client.retryTerminalStorage('session-1')
+    client.endTerminalAfterStorageFault('session-2')
+
+    expect(port.sent.slice(-2)).toEqual([
+      expect.objectContaining({ type: 'terminal.storage-retry', sessionId: 'session-1' }),
+      expect.objectContaining({ type: 'terminal.storage-end', sessionId: 'session-2' })
+    ])
+    expect(() => parseRendererMessage(port.sent.at(-2))).not.toThrow()
+    expect(() => parseRendererMessage(port.sent.at(-1))).not.toThrow()
+  })
+
   it('sends a serialized terminal checkpoint with its applied Journal watermark', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })
@@ -303,6 +318,8 @@ describe('RuntimeClient', () => {
     client.sendTerminalInput('session-1', 'blocked')
     client.resizeTerminal('session-1', 100, 30)
     client.retryLastTerminalInput('session-1')
+    client.retryTerminalStorage('session-1')
+    client.endTerminalAfterStorageFault('session-1')
     client.recordTerminalInteraction('session-1', 'submit')
     client.storeTerminalCheckpoint('session-1', 1, 0, 'blocked')
     client.disposeDeletedTerminal('session-1')

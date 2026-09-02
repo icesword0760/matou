@@ -36,6 +36,7 @@ export interface SessionGraphNodeView {
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
   forkAttempt?: number
+  forkProgress?: import('@matou/domain').ForkProgress
   providerSpawnRevision?: number
   canFork: boolean
   title: string

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
-import { TerminalSurface, type RuntimeStatus, type TerminalSearchRequest } from '../terminal/TerminalSurface'
+import {
+  TerminalSurface,
+  type RuntimeStatus,
+  type TerminalSearchRequest,
+  type TerminalStorageFaultMessage
+} from '../terminal/TerminalSurface'
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import type { SessionView } from './hierarchy-types'
 import { sessionDeleteFlow } from './terminal-close-flow'
@@ -13,6 +18,13 @@ import type { SessionGraphNodeView } from './hierarchy-types'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 import type { SessionEnvironmentTarget } from '@matou/contracts'
+import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import { StorageFaultOverlay } from './StorageFaultOverlay'
+import {
+  activeForkProgress,
+  ForkProgressOverlay
+} from '../session-canvas/ForkProgressOverlay'
+import '../session-canvas/fork-progress-overlay.css'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -40,6 +52,7 @@ export function TerminalPane(props: {
   restoreError?: string
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
+  forkProgress?: import('@matou/domain').ForkProgress
   cwd?: string
   git?: SessionGitState
   sharedWorkingDirectory?: boolean
@@ -68,7 +81,7 @@ export function TerminalPane(props: {
   const {
     session, active, visible = true, foreground = true, workspaceSessionCount, taskName,
     pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
-    providerRestoreState = 'none', restoreError, forkState, forkError, cwd, git,
+    providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
     sharedWorkingDirectory = false, environment, hasOwnedWorktree = false,
     spawnRevision = 0, onRetryRestore, onRetryWork, onRetryFork, onRemoveFailedFork,
     childNodes = [], workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
@@ -84,6 +97,7 @@ export function TerminalPane(props: {
   const [removalOpen, setRemovalOpen] = useState(false)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('waiting-for-port')
   const [runtimeError, setRuntimeError] = useState('')
+  const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
   const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
@@ -95,7 +109,9 @@ export function TerminalPane(props: {
   const handleRuntimeStatus = useCallback((status: RuntimeStatus) => {
     setRuntimeStatus(status)
     if (status === 'streaming') setRuntimeError('')
+    if (status === 'exited') setStorageFault(null)
   }, [])
+  const runtimeClient = useRuntimeClient()
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
   const flow = sessionDeleteFlow({
@@ -139,6 +155,7 @@ export function TerminalPane(props: {
     const timer = window.setTimeout(() => setForkReadinessHint(false), 2_800)
     return () => window.clearTimeout(timer)
   }, [forkReadinessHint])
+  useEffect(() => { setStorageFault(null) }, [session.id])
   useEffect(() => {
     if (canFork) setForkReadinessHint(false)
   }, [canFork])
@@ -176,6 +193,7 @@ export function TerminalPane(props: {
   const canForkSibling = onForkSibling !== undefined
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
+  const currentForkProgress = activeForkProgress(forkProgress)
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)
   const restoreNoticeKey = restoreIdentityExpired && providerRestoreState === 'failed'
     ? `${session.id}:${restoreError ?? ''}`
@@ -344,7 +362,7 @@ export function TerminalPane(props: {
     {!isTeamMember && forkState !== 'failed' && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}
-      inputDisabled={actionBlocked || !pathValid}
+      inputDisabled={actionBlocked || !pathValid || storageFault !== null}
       readOnly={actionBlocked}
       themeKey={themeKey} fontSize={fontSize}
       {...(onFontSizeChange ? { onFontSizeChange } : {})}
@@ -354,6 +372,8 @@ export function TerminalPane(props: {
       spawnRevision={spawnRevision + startupRetry}
       onStatusChange={handleRuntimeStatus}
       onRuntimeError={setRuntimeError}
+      onStorageFault={setStorageFault}
+      onStorageRecovered={() => setStorageFault(null)}
       onUserInput={() => {
         if (restoreNoticeKey !== null) setDismissedRestoreNotice(restoreNoticeKey)
       }}
@@ -366,7 +386,17 @@ export function TerminalPane(props: {
           isFocusedSession: active && visible
         })
       }} />}
-    {environmentUnavailable && visible && <div className={`environment-card-overlay state-${environment!.state}`}
+    {storageFault && visible && <StorageFaultOverlay
+      sessionTitle={session.title}
+      fault={{
+        code: storageFault.code,
+        retainedBytes: storageFault.retainedBytes,
+        message: storageFault.message
+      }}
+      onRetry={() => runtimeClient?.retryTerminalStorage(session.id)}
+      onEnd={() => runtimeClient?.endTerminalAfterStorageFault(session.id)} />}
+    {currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
+    {environmentUnavailable && !currentForkProgress && visible && <div className={`environment-card-overlay state-${environment!.state}`}
       role="status" aria-label={`运行环境${environmentOverlayTitle(environment!)}`}
       onPointerDown={(event) => event.stopPropagation()}>
       <div className="environment-card-overlay__content">

@@ -2,7 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
-import { TerminalSurface } from '../terminal/TerminalSurface'
+import {
+  TerminalSurface,
+  type TerminalStorageFaultMessage
+} from '../terminal/TerminalSurface'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { TerminalHud } from '../hud/TerminalHud'
 import type { HudModelStrategy, HudPermissionMode, SessionGraphNodeView, SessionHudView } from './hierarchy-types'
@@ -13,6 +16,7 @@ import { DEFAULT_TERMINAL_THEME, type TerminalThemeKey } from '../terminal/termi
 import { useDagShortcut } from '../dag/useDagShortcut'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
+import { StorageFaultOverlay } from './StorageFaultOverlay'
 
 export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: RuntimeMode }) {
   const client = useRuntimeClient()
@@ -47,6 +51,7 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
     direction: 'next' as 'next' | 'previous', sequence: 0
   })
   const [teamMemberNode, setTeamMemberNode] = useState<SessionGraphNodeView>()
+  const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const sequence = useRef(0)
   useEffect(() => {
     if (!client) return
@@ -151,10 +156,16 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
     {isTeamMember ? <AgentTeamMemberSummary
       workStatus={teamMemberNode?.workStatus ?? 'starting'}
       latestLines={teamMemberNode?.latestLines ?? []} /> : <TerminalSurface sessionId={sessionId} executionContextId={executionContextId}
-      profile={profile} visible readOnly={readOnly} inputDisabled={readOnly}
+      profile={profile} visible readOnly={readOnly} inputDisabled={readOnly || storageFault !== null}
       themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
       {...(searchOpen ? { searchRequest } : {})} onSearchResults={setSearchResults}
-      focusRequest={focusRequest} />}
+      focusRequest={focusRequest}
+      onStorageFault={setStorageFault}
+      onStorageRecovered={() => setStorageFault(null)} />}
+    {storageFault && <StorageFaultOverlay sessionTitle={title}
+      fault={{ code: storageFault.code, retainedBytes: storageFault.retainedBytes }}
+      onRetry={() => client?.retryTerminalStorage(sessionId)}
+      onEnd={() => client?.endTerminalAfterStorageFault(sessionId)} />}
     {!isTeamMember && <div className="shortcut-bar" aria-label="快捷指令栏">
       <TerminalHud hud={hud} onPermissionMode={(_sessionId: string, permissionMode: HudPermissionMode, respawn: boolean) =>
         command('session.set-permission-mode', {

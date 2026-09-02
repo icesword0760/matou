@@ -31,6 +31,11 @@ export interface TerminalSearchRequest {
   sequence: number
 }
 
+export type TerminalStorageFaultMessage = Extract<
+  RuntimeMessage,
+  { type: 'terminal.storage-fault' }
+>
+
 interface TerminalSurfaceProps {
   sessionId?: string
   executionContextId?: string
@@ -53,6 +58,8 @@ interface TerminalSurfaceProps {
   onReplayComplete?: (marker: string) => void
   onOscNotification?: (oscId: number, content: string) => void
   onUserInput?: () => void
+  onStorageFault?: (fault: TerminalStorageFaultMessage) => void
+  onStorageRecovered?: () => void
 }
 
 export function TerminalSurface(props: TerminalSurfaceProps) {
@@ -63,7 +70,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onRuntimeError = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
-    onOscNotification = NOOP, onUserInput = NOOP
+    onOscNotification = NOOP, onUserInput = NOOP,
+    onStorageFault = NOOP, onStorageRecovered = NOOP
   } = props
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
@@ -80,6 +88,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const onFontSizeChangeRef = useRef(onFontSizeChange)
   const onSearchResultsRef = useRef(onSearchResults)
   const onUserInputRef = useRef(onUserInput)
+  const onStorageFaultRef = useRef(onStorageFault)
+  const onStorageRecoveredRef = useRef(onStorageRecovered)
   const fontSizeRef = useRef(fontSize)
   const pendingInputRef = useRef('')
   const sendInputRef = useRef<(data: string) => void>(NOOP)
@@ -93,6 +103,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   activeRef.current = active
   profileRef.current = profile
   onUserInputRef.current = onUserInput
+  onStorageFaultRef.current = onStorageFault
+  onStorageRecoveredRef.current = onStorageRecovered
 
   useEffect(() => { pendingInputRef.current = '' }, [sessionId])
   useEffect(() => {
@@ -269,6 +281,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         lastAppliedSequence = Math.max(lastAppliedSequence, message.sequence)
         scheduleCheckpoint()
         onStatusChange('exited')
+      } else if (message.type === 'terminal.storage-fault') {
+        onStorageFaultRef.current(message)
+      } else if (message.type === 'terminal.storage-recovered') {
+        onStorageRecoveredRef.current()
       } else if (message.type === 'protocol.error') {
         onStatusChange('error')
         onRuntimeError(message.message)

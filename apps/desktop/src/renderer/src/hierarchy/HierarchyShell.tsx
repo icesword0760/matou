@@ -3,7 +3,7 @@ import {
   type Dispatch, type SetStateAction
 } from 'react'
 
-import type { LayoutNode, SessionEnvironment } from '@matou/domain'
+import type { ForkStage, LayoutNode, SessionEnvironment } from '@matou/domain'
 import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
 import { RuntimeProjectionStore, type RuntimeProjectionSnapshot } from '../projection/RuntimeProjectionStore'
@@ -696,11 +696,16 @@ function HierarchyProduct({ projection, commands, readOnly }: {
                     workStatus: graphNode.workStatus,
                     latestLines: graphNode.latestLines,
                     providerRestoreState: graphNode.providerRestoreState,
-                    forkState: graphNode.forkState,
-                    spawnRevision: (graphNode.forkAttempt ?? 0) +
+                    forkState: graphNode.forkProgress
+                      ? forkStateFromStage(graphNode.forkProgress.stage)
+                      : graphNode.forkState,
+                    ...(graphNode.forkProgress ? { forkProgress: graphNode.forkProgress } : {}),
+                    spawnRevision: (graphNode.forkProgress?.attempt ?? graphNode.forkAttempt ?? 0) +
                       (graphNode.providerSpawnRevision ?? 0) +
                       (environmentRestartBySession[session.id] ?? 0),
-                    ...(graphNode.forkError ? { forkError: graphNode.forkError } : {}),
+                    ...(graphNode.forkProgress?.error ?? graphNode.forkError
+                      ? { forkError: (graphNode.forkProgress?.error ?? graphNode.forkError)! }
+                      : {}),
                     ...(graphNode.providerRestoreError ? { restoreError: graphNode.providerRestoreError } : {})
                   } : {})}
                   {...(sessionHud?.cwd ?? graphNode?.cwd
@@ -1250,6 +1255,12 @@ function createFixtureCommands(
 
 function toHierarchyProjection(value: unknown): HierarchyProjection {
   return value as HierarchyProjection
+}
+
+function forkStateFromStage(stage: ForkStage): 'pending' | 'starting' | 'succeeded' | 'failed' {
+  if (stage === 'queued') return 'pending'
+  if (stage === 'succeeded' || stage === 'failed') return stage
+  return 'starting'
 }
 
 function sessionDescendants(nodes: SessionGraphNodeView[], sessionId: string): SessionGraphNodeView[] {
