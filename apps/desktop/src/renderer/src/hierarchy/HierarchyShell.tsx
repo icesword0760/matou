@@ -1362,6 +1362,9 @@ function mutationSceneId(
   context: { type: string; input: Record<string, unknown> }
 ): string | undefined {
   if (typeof context.input.sceneId === 'string') return context.input.sceneId
+  if (value && typeof value === 'object' && 'sceneId' in value && typeof value.sceneId === 'string') {
+    return value.sceneId
+  }
   if (!value || typeof value !== 'object' || !('scene' in value)) return undefined
   const scene = value.scene
   return scene && typeof scene === 'object' && 'id' in scene && typeof scene.id === 'string'

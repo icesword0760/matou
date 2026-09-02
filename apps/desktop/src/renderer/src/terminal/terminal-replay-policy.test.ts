@@ -4,16 +4,20 @@ import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-rep
 
 describe('PRD 04 terminal replay policy', () => {
   it('replays only the current live Runtime run when a cached VT model reconnects', () => {
-    expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, true)).toBe(41)
+    expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, true, 'shell')).toBe(41)
   })
 
-  it('rebuilds durable history when a reattached Runtime finds a fresh VT model', () => {
-    expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, false)).toBe(0)
+  it('keeps a fresh Shell model out of raw interrupted history', () => {
+    expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, false, 'shell')).toBe(41)
+  })
+
+  it('rebuilds Agent history when a reattached Runtime finds a fresh VT model', () => {
+    expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, false, 'claude-code')).toBe(0)
   })
 
   it('does not replay durable Shell history after an application restart', () => {
-    expect(replayFromSequenceForSpawn({ reattached: false, replayFromSequence: 41 }, false)).toBeUndefined()
-    expect(replayFromSequenceForSpawn({ reattached: true }, false)).toBeUndefined()
+    expect(replayFromSequenceForSpawn({ reattached: false, replayFromSequence: 41 }, false, 'shell')).toBeUndefined()
+    expect(replayFromSequenceForSpawn({ reattached: true }, false, 'shell')).toBeUndefined()
   })
 
   it('keeps the E2E replay probe out of user terminal panels', () => {
