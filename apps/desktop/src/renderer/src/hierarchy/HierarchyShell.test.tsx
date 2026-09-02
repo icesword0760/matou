@@ -276,10 +276,11 @@ describe('PRD 05 hierarchy shell', () => {
 
     await userEvent.setup().click(screen.getByRole('button', { name: '打开会话 DAG' }))
 
-    expect(openDagWindow).toHaveBeenCalledWith({
+    expect(openDagWindow).toHaveBeenCalledWith(expect.objectContaining({
       mainWindowId: 'window-1', sceneId: 'scene-a1', sessionId: 'history-parent', theme: 'light',
       notificationSessionIds: []
-    })
+    }))
+    expect(openDagWindow.mock.calls[0]?.[0]).not.toHaveProperty('initialGraph')
   })
 
   it('opens the reference product shortcut floating panel with Cmd+/ and double Option', () => {

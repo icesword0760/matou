@@ -99,9 +99,11 @@ export interface DagWindowContext {
   sessionId: string
   theme: 'light' | 'dark'
   notificationSessionIds?: string[]
+  requestedAt?: number
+  initialGraph?: unknown
 }
 
-export interface DagNodeSelection extends DagWindowContext {
+export interface DagNodeSelection extends Omit<DagWindowContext, 'initialGraph' | 'requestedAt'> {
   targetWindowId?: string
 }
 

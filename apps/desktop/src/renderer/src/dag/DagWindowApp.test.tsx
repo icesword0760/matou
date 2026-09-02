@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
+import type { DagWindowContext } from '../../../shared/desktop-api'
 import { DagWindowApp } from './DagWindowApp'
 
 const runtime = vi.hoisted(() => ({ current: null as null | {
@@ -15,14 +16,19 @@ const runtime = vi.hoisted(() => ({ current: null as null | {
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
 let runtimeConnectionListener: ((state: 'reconnecting' | 'ready') => void) | undefined
 let dagNotificationListener: ((sessionIds: string[]) => void) | undefined
+let dagContextListener: ((context: DagWindowContext) => void) | undefined
 
 beforeEach(() => {
   runtime.current = null
   runtimeConnectionListener = undefined
   dagNotificationListener = undefined
+  dagContextListener = undefined
   window.history.replaceState({}, '', '/?kind=dag&mainWindowId=main-1&sceneId=scene-1&sessionId=child&theme=light')
   Object.defineProperty(window, 'matouDesktop', { configurable: true, value: {
-    selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn(() => () => {}),
+    selectDagNode: vi.fn(), closeDagWindow: vi.fn(), onDagContext: vi.fn((listener) => {
+      dagContextListener = listener
+      return () => { dagContextListener = undefined }
+    }),
     onDagNotifications: vi.fn((listener) => {
       dagNotificationListener = listener
       return () => { dagNotificationListener = undefined }
@@ -116,6 +122,27 @@ describe('DagWindowApp', () => {
 
     expect(await screen.findByRole('button', { name: '打开会话：Live Child' })).toBeTruthy()
     expect(request.mock.calls.filter(([method]) => method === 'hierarchy.get-scene-session-graph')).toHaveLength(1)
+  })
+
+  it('renders a large authoritative graph handoff before the scoped Runtime refresh completes', async () => {
+    const handedOffGraph = { ...graph(), runtimeGeneration: 'runtime-1', eventSequence: 7 }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'geometry.list') return []
+      if (method === 'hierarchy.get-scene-session-graph') return new Promise(() => {})
+      return undefined
+    })
+    const startProjection = vi.fn()
+    runtime.current = { request, startProjection, subscribeProjection: vi.fn(() => () => {}) }
+
+    render(<DagWindowApp />)
+    act(() => dagContextListener?.({
+      mainWindowId: 'main-1', sceneId: 'scene-1', sessionId: 'child', theme: 'light',
+      requestedAt: Date.now() - 20, initialGraph: JSON.stringify(handedOffGraph)
+    }))
+
+    expect(await screen.findByRole('application', { name: '会话 DAG 画布' })).toBeTruthy()
+    expect(document.querySelector('.dag-window')?.getAttribute('data-first-operable-ms')).not.toBeNull()
+    expect(startProjection).toHaveBeenCalledWith(7)
   })
 
   it('persists every changed viewport before the short-lived native DAG can close', async () => {

@@ -1195,5 +1195,13 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX session_fork_intents_lease_idx
       ON session_fork_intents(stage, lease_expires_at, created_at);
     `
+  },
+  {
+    version: 26,
+    name: 'session-structural-relation-lookup',
+    sql: `
+      CREATE INDEX session_relations_structural_lookup_idx
+      ON session_relations_current(from_session_id, relation_kind);
+    `
   }
 ]

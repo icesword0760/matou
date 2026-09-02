@@ -27,6 +27,7 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   const runtimeGeneration = useRef(fixtureGraph?.runtimeGeneration ?? '')
   const projectionStarted = useRef(false)
   const refreshInFlight = useRef(false)
+  const firstOperableMs = useRef<number | undefined>(undefined)
   const [error, setError] = useState('')
   const [runtimeConnection, setRuntimeConnection] = useState<RuntimeConnectionState>('ready')
   const [notifiedSessionIds, setNotifiedSessionIds] = useState<string[]>(
@@ -70,12 +71,21 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   }, [applyGraph, client, context.mainWindowId, context.sceneId, fixtureGraph])
 
   useEffect(() => window.matouDesktop?.onDagContext?.((next) => {
-    setContext(next)
-    setGraph(null)
-    graphRef.current = null
-    graphEventSequence.current = -1
-    runtimeGeneration.current = ''
+    const initialGraph = graphFromContext(next.initialGraph, next.sceneId)
+    setContext({
+      mainWindowId: next.mainWindowId,
+      sceneId: next.sceneId,
+      sessionId: next.sessionId,
+      theme: next.theme,
+      ...(next.notificationSessionIds ? { notificationSessionIds: next.notificationSessionIds } : {}),
+      ...(next.requestedAt === undefined ? {} : { requestedAt: next.requestedAt })
+    })
+    setGraph(initialGraph ?? null)
+    graphRef.current = initialGraph ?? null
+    graphEventSequence.current = initialGraph?.eventSequence ?? -1
+    runtimeGeneration.current = initialGraph?.runtimeGeneration ?? ''
     projectionStarted.current = false
+    firstOperableMs.current = undefined
     setInitialTransform(undefined)
     setGeometryReady(false)
     setNotifiedSessionIds(next.notificationSessionIds ?? [])
@@ -130,8 +140,13 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
     }).catch(() => {}).finally(() => setGeometryReady(true))
   }, [client, context.sceneId, fixtureGraph])
   useEffect(() => {
-    void refresh()
+    if (!graphRef.current) void refresh()
   }, [fixtureGraph, refresh])
+  useEffect(() => {
+    if (fixtureGraph || !client || projectionStarted.current || graphEventSequence.current < 0) return
+    client.startProjection(graphEventSequence.current)
+    projectionStarted.current = true
+  }, [client, fixtureGraph, graph])
   const wasReconnecting = useRef(false)
   useEffect(() => {
     if (runtimeConnection === 'reconnecting') {
@@ -198,7 +213,11 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   const focusedSessionId = graph.nodes.some(({ sessionId }) => sessionId === context.sessionId)
     ? context.sessionId
     : graph.focusedSessionId ?? graph.nodes[0]?.sessionId ?? ''
-  return <main className="dag-window" aria-label="会话 DAG">
+  if (firstOperableMs.current === undefined && context.requestedAt !== undefined) {
+    firstOperableMs.current = Math.max(0, Date.now() - context.requestedAt)
+  }
+  return <main className="dag-window" aria-label="会话 DAG"
+    data-first-operable-ms={firstOperableMs.current}>
     <div className="dag-window-title"><span>Matou 会话画布</span>
       <button aria-label="关闭 DAG" onClick={() => void window.matouDesktop?.closeDagWindow?.(context.mainWindowId)}>×</button>
     </div>
@@ -220,8 +239,13 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
       const target = graph.nodes.find((node) => node.sessionId === sessionId)
       if (!target) return
       void window.matouDesktop?.selectDagNode?.({
-        ...context,
+        mainWindowId: context.mainWindowId,
+        sceneId: context.sceneId,
         sessionId,
+        theme: context.theme,
+        ...(context.notificationSessionIds ? {
+          notificationSessionIds: context.notificationSessionIds
+        } : {}),
         ...(target.detachedWindowId ? { targetWindowId: target.detachedWindowId } : {})
       })
     }} />
@@ -230,12 +254,32 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
 
 function readContext(): DagWindowContext {
   const query = new URLSearchParams(window.location.search)
+  const requestedAt = query.get('requestedAt')
   return {
     mainWindowId: query.get('mainWindowId') ?? '',
     sceneId: query.get('sceneId') ?? '',
     sessionId: query.get('sessionId') ?? '',
-    theme: query.get('theme') === 'dark' ? 'dark' : 'light'
+    theme: query.get('theme') === 'dark' ? 'dark' : 'light',
+    ...(requestedAt !== null && Number.isFinite(Number(requestedAt)) ? {
+      requestedAt: Number(requestedAt)
+    } : {})
   }
+}
+
+function graphFromContext(value: unknown, sceneId: string): SessionGraphView | undefined {
+  if (typeof value === 'string') {
+    try {
+      return graphFromContext(JSON.parse(value), sceneId)
+    } catch {
+      return undefined
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const candidate = value as Partial<SessionGraphView>
+  if (candidate.sceneId !== sceneId || !Array.isArray(candidate.nodes) || !Array.isArray(candidate.edges)) {
+    return undefined
+  }
+  return candidate as SessionGraphView
 }
 
 function graphFromEvent(event: DomainEventWireEnvelope): SessionGraphView | undefined {
