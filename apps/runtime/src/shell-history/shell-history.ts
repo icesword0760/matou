@@ -4,6 +4,7 @@ import type { RuntimeDatabase } from '../storage/database'
 
 export const SHELL_HISTORY_BLOCK_LIMIT = 100
 export const SHELL_HISTORY_OUTPUT_LINE_LIMIT = 5_000
+export const SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT = 1024 * 1024
 
 export interface ShellHistoryBlock {
   id: string
@@ -40,7 +41,7 @@ export class ShellHistoryRepository {
     const block: ShellHistoryBlock = {
       id: randomUUID(),
       ...input,
-      output: retainNewestLines(input.output, SHELL_HISTORY_OUTPUT_LINE_LIMIT)
+      output: retainNewestOutput(input.output),
     }
     this.#database.transaction((tx) => {
       tx.run(
@@ -92,7 +93,7 @@ export interface CollectedShellBlock {
 
 interface ActiveBlock {
   command: string
-  output: string
+  output: OutputLineTail
   startedAt: number
 }
 
@@ -136,13 +137,20 @@ export class ShellCommandBlockCollector {
       const marker = source.slice(markerStart, markerEnd + terminatorLength)
       const command = decodeCommandMarker(marker)
       if (command !== undefined) {
-        this.#active = { command, output: '', startedAt: sourceStartedAt }
+        this.#active = {
+          command,
+          output: new OutputLineTail(
+            SHELL_HISTORY_OUTPUT_LINE_LIMIT,
+            SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT
+          ),
+          startedAt: sourceStartedAt
+        }
       } else {
         const exitCode = decodeCompletionMarker(marker)
         if (exitCode !== undefined && this.#active) {
           completed.push({
             command: this.#active.command,
-            output: this.#active.output,
+            output: this.#active.output.toString(),
             exitCode,
             startedAt: this.#active.startedAt,
             completedAt: now
@@ -159,7 +167,59 @@ export class ShellCommandBlockCollector {
   }
 
   #appendOutput(data: string): void {
-    if (this.#active) this.#active.output += data
+    this.#active?.output.append(data)
+  }
+}
+
+/**
+ * Bounds command output while it is arriving instead of first retaining an
+ * arbitrarily large string and splitting it when the command completes.
+ * The final shape matches retainNewestLines, including its trailing empty line.
+ */
+class OutputLineTail {
+  readonly #maximum: number
+  readonly #maximumCharacters: number
+  #lines: string[] = []
+  #start = 0
+  #partial = ''
+  #lineCharacters = 0
+
+  constructor(maximum: number, maximumCharacters: number) {
+    this.#maximum = maximum
+    this.#maximumCharacters = maximumCharacters
+  }
+
+  append(data: string): void {
+    if (!data) return
+    const parts = `${this.#partial}${data}`.split('\n')
+    this.#partial = (parts.pop() ?? '').slice(-this.#maximumCharacters)
+    for (const original of parts) {
+      const line = original.length + 1 > this.#maximumCharacters
+        ? original.slice(-(this.#maximumCharacters - 1))
+        : original
+      this.#lines.push(line)
+      this.#lineCharacters += line.length + 1
+    }
+    while (
+      this.#start < this.#lines.length &&
+      (
+        this.#lines.length - this.#start > this.#maximum ||
+        this.#lineCharacters + this.#partial.length > this.#maximumCharacters
+      )
+    ) {
+      this.#lineCharacters -= this.#lines[this.#start]!.length + 1
+      this.#start += 1
+    }
+    if (this.#start >= this.#maximum) {
+      this.#lines = this.#lines.slice(this.#start)
+      this.#start = 0
+    }
+  }
+
+  toString(): string {
+    const lines = this.#lines.slice(this.#start)
+    lines.push(this.#partial)
+    return (lines.length <= this.#maximum ? lines : lines.slice(-this.#maximum)).join('\n')
   }
 }
 
@@ -207,6 +267,13 @@ function earliestTerminator(bel: number, st: number): number {
 function retainNewestLines(output: string, maximum: number): string {
   const lines = output.split('\n')
   return lines.length <= maximum ? output : lines.slice(-maximum).join('\n')
+}
+
+function retainNewestOutput(output: string): string {
+  return retainNewestLines(
+    output.slice(-SHELL_HISTORY_OUTPUT_CHARACTER_LIMIT),
+    SHELL_HISTORY_OUTPUT_LINE_LIMIT
+  )
 }
 
 function terminalLineEndings(value: string): string {
