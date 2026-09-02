@@ -247,7 +247,8 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
   })
   const query = {
     kind: 'dag', mainWindowId: context.mainWindowId,
-    sceneId: context.sceneId, sessionId: context.sessionId, theme: context.theme
+    sceneId: context.sceneId, sessionId: context.sessionId, theme: context.theme,
+    requestedAt: String(context.requestedAt ?? Date.now())
   }
   if (process.env.ELECTRON_RENDERER_URL) {
     const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL)

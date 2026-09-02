@@ -50,8 +50,8 @@ export class DagWindowManager {
     const window = this.#dependencies.createWindow({ context, bounds })
     this.#windows.set(context.mainWindowId, window)
     window.onReady(() => {
-      this.#dependencies.connectRuntime(window)
       window.send(DESKTOP_CHANNELS.dagContext, context)
+      this.#dependencies.connectRuntime(window)
       window.show()
       window.focus()
     })

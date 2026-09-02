@@ -238,14 +238,16 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal' }: {
     return <main className="hierarchy-loading" aria-busy="true" data-load-error={loadError || undefined} />
   }
   return <NotificationProvider store={notificationStoreRef.current}>
-    <HierarchyProduct projection={projection} commands={commands} readOnly={readOnly} />
+    <HierarchyProduct projection={projection} commands={commands} readOnly={readOnly}
+      eventSequence={storeRef.current.eventSequence} />
   </NotificationProvider>
 }
 
-function HierarchyProduct({ projection, commands, readOnly }: {
+function HierarchyProduct({ projection, commands, readOnly, eventSequence }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
   readOnly: boolean
+  eventSequence: number
 }) {
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
@@ -445,6 +447,9 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const activeGraph = activeSceneId ? projection.sessionGraphs?.[activeSceneId] : undefined
   const activeGraphIndex = activeSceneId ? graphIndexByScene.get(activeSceneId) : undefined
   const activeLayoutIndex = activeSceneId ? layoutIndexByScene.get(activeSceneId) : undefined
+  const serializedDagInitialGraph = useMemo(() => activeGraph && activeGraph.nodes.length >= 1_000
+    ? JSON.stringify({ ...activeGraph, eventSequence })
+    : undefined, [activeGraph, eventSequence])
   const dagFocusSessionId = dagFocusTarget(activeGraph, focusedSessionId)
   const dagNotificationSessionIds = notifiedSessionIds(projection, notificationStore)
   const dagNotificationSignature = dagNotificationSessionIds.join(':')
@@ -612,12 +617,17 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
     if (!activeSceneId || !dagFocusSessionId) return
+    const activeGraph = projection.sessionGraphs?.[activeSceneId]
     const request = window.matouDesktop?.openDagWindow?.({
       mainWindowId: projection.windowId,
       sceneId: activeSceneId,
       sessionId: dagFocusSessionId,
       theme: themeKey,
-      notificationSessionIds: dagNotificationSessionIds
+      notificationSessionIds: dagNotificationSessionIds,
+      requestedAt: Date.now(),
+      ...(serializedDagInitialGraph ? {
+        initialGraph: serializedDagInitialGraph
+      } : {})
     })
     if (request === undefined) {
       setDagOpenError(true)
@@ -634,7 +644,8 @@ function HierarchyProduct({ projection, commands, readOnly }: {
   useEffect(() => window.matouDesktop?.onDagShortcut?.((kind) => {
     if (kind === 'long') openDag()
     else window.dispatchEvent(new Event('matou:forward-terminal-tab'))
-  }), [activeSceneId, dagFocusSessionId, projection.windowId, themeKey])
+  }), [activeSceneId, dagFocusSessionId, dagNotificationSignature, projection.windowId,
+    serializedDagInitialGraph, themeKey])
   useEffect(() => window.matouDesktop?.onDagNodeSelected?.((selection) => {
     const currentProjection = projectionRef.current
     if (selection.mainWindowId !== currentProjection.windowId) return

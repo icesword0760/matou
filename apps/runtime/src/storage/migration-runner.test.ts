@@ -30,8 +30,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25])
-    expect(result.currentVersion).toBe(25)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26])
+    expect(result.currentVersion).toBe(26)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -100,6 +100,9 @@ describe('MigrationRunner', () => {
       .toEqual(expect.arrayContaining(['restore_state', 'restore_error', 'user_exited_at']))
     expect(database.all<{ name: string }>('PRAGMA table_info(session_canvas_memberships)').map(({ name }) => name))
       .toEqual(expect.arrayContaining(['pending_user_interaction_seq']))
+    expect(database.get<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'session_relations_structural_lookup_idx'"
+    )).toEqual({ name: 'session_relations_structural_lookup_idx' })
   })
 
   it('is idempotent when every migration is already applied', async () => {
@@ -109,7 +112,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 25,
+      currentVersion: 26,
       backupPath: undefined
     })
   })
@@ -156,7 +159,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([25])
+    expect(result.appliedVersions).toEqual([25, 26])
     expect(database.all(
       `SELECT session_id, operation_id, submission_key, stage, completed_steps,
               total_steps, attempt, lease_fence
@@ -208,7 +211,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25])
+    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26])
     expect(() => database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state,
@@ -294,8 +297,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([22, 23, 24, 25])
-    expect(result.currentVersion).toBe(25)
+    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26])
+    expect(result.currentVersion).toBe(26)
     expect(database.all(
       `SELECT session_id, local_execution_context_id, managed_worktree_id,
               active_target, state, error_message, updated_at
@@ -406,7 +409,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([23, 24, 25])
+    expect(result.appliedVersions).toEqual([23, 24, 25, 26])
     expect(database.all(
       `SELECT execution_context_id, repository_root, state, branch, detached_head,
               dirty, error_message, updated_at
@@ -485,7 +488,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[21]!,
       FOUNDATION_MIGRATIONS[22]!,
       FOUNDATION_MIGRATIONS[23]!,
-      FOUNDATION_MIGRATIONS[24]!
+      FOUNDATION_MIGRATIONS[24]!,
+      FOUNDATION_MIGRATIONS[25]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -506,7 +510,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 25')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 26')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -541,7 +545,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25])
+    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
@@ -605,7 +609,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25])
+    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26])
     expect(database.all(
       `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
        FROM session_canvas_memberships ORDER BY sibling_created_seq`
@@ -684,7 +688,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25])
+    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26])
     expect(database.get<{ state: string }>(
       `SELECT state FROM session_fork_intents WHERE session_id = 'child'`
     )).toEqual({ state: 'succeeded' })
