@@ -3,6 +3,7 @@ export interface ConfirmStep {
   body: string
   confirmLabel: string
   cancelLabel: '取消'
+  confirmTone?: 'default' | 'danger'
 }
 
 export interface CloseFlow {
@@ -30,23 +31,26 @@ export function sceneCloseFlow(input: {
   isLastScene: boolean
   isLastTask: boolean
   taskName: string
+  sceneName: string
+  sessionCount: number
   runningCount?: number
   needsInputCount?: number
 }): CloseFlow {
   if (input.isLastScene && input.isLastTask) return { action: 'hide-window', steps: [] }
   const runningCount = input.runningCount ?? 0
   const needsInputCount = input.needsInputCount ?? 0
-  if (runningCount === 0 && needsInputCount === 0) return { action: 'silent', steps: [] }
   const affected = [
     runningCount > 0 ? `${runningCount} 个运行中会话` : '',
     needsInputCount > 0 ? `${needsInputCount} 个待输入会话` : ''
   ].filter(Boolean).join('和 ')
+  const activity = affected ? `其中 ${affected}将停止。` : ''
   return {
     action: 'confirm',
     steps: [{
       title: '关闭画布',
-      body: `这张画布中有 ${affected}。关闭后这些会话将停止，画布会从标签栏移除，本地目录和工作树保持原样。`,
-      confirmLabel: '确认关闭',
+      body: `关闭后，“${input.sceneName}”下的 ${input.sessionCount} 个会话会全部从界面移除。${activity}项目文件和工作树保持原样。`,
+      confirmLabel: '关闭画布',
+      confirmTone: 'danger',
       cancelLabel: '取消'
     }]
   }

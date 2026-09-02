@@ -123,11 +123,17 @@ export function SceneTabBar({ projection, commands, pathValid = true, onOpenDag,
   }
   const workspaceTasks = projection.tasks.filter(({ workspaceId: candidate }) => candidate === workspaceId)
   const closeFlowFor = (sceneId: string) => {
-    const nodes = projection.sessionGraphs?.[sceneId]?.nodes.filter(({ archivedAt }) => archivedAt === undefined) ?? []
+    const graphNodes = projection.sessionGraphs?.[sceneId]?.nodes
+    const nodes = graphNodes?.filter(({ archivedAt }) => archivedAt === undefined) ?? []
+    const scene = scenes.find(({ id }) => id === sceneId)
+    const mountedSessionCount = projection.sceneSnapshots?.find(({ scene: owner }) => owner.id === sceneId)
+      ?.mounts.length ?? 0
     return sceneCloseFlow({
       isLastScene: scenes.length === 1,
       isLastTask: workspaceTasks.length === 1,
       taskName: task?.title ?? '当前事项',
+      sceneName: scene?.name ?? '当前画布',
+      sessionCount: graphNodes?.length ?? mountedSessionCount,
       runningCount: nodes.filter(({ workStatus }) => workStatus === 'running' || workStatus === 'starting').length,
       needsInputCount: nodes.filter(({ workStatus }) => workStatus === 'needs-input').length
     })

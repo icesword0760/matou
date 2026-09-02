@@ -179,6 +179,28 @@ describe('Scene tabs and split actions', () => {
     expect(commands.closeScene).not.toHaveBeenCalled()
   })
 
+  it('asks for confirmation before closing an idle canvas with sessions', async () => {
+    const user = userEvent.setup()
+    const commands = sceneCommands()
+    const projection = fixture(2)
+    projection.sessionGraphs = {
+      'scene-1': {
+        sceneId: 'scene-1', nodes: [graphNode('idle', 'idle')], edges: []
+      }
+    }
+    render(<SceneTabBar projection={projection} commands={commands} />)
+
+    await user.click(screen.getByRole('button', { name: '关闭页签：页签 1' }))
+    const dialog = screen.getByRole('alertdialog', { name: '关闭画布' })
+    expect(dialog.textContent).toContain('“页签 1”下的 1 个会话会全部从界面移除')
+    expect(commands.closeScene).not.toHaveBeenCalled()
+
+    const confirm = screen.getByRole('button', { name: '关闭画布' })
+    expect(confirm.classList.contains('is-danger')).toBe(true)
+    await user.click(confirm)
+    expect(commands.closeScene).toHaveBeenCalledWith('scene-1', true)
+  })
+
   it('measures divider movement against the whole split and keeps pointer capture', () => {
     const onRatio = vi.fn()
     render(<div className="split-node" data-testid="split"><div><SplitDivider direction="horizontal" onRatio={onRatio} /></div></div>)
