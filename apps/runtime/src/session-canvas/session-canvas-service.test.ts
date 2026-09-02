@@ -254,7 +254,7 @@ describe('SessionCanvasService', () => {
       .toBeUndefined()
   })
 
-  it('requires explicit branch removal before removing an exited parent and its descendants', () => {
+  it('removes only an exited parent and reconnects its direct child to the surviving grandparent', () => {
     const initial = bootstrap()
     const parent = service.createShellSibling(command('history-parent-node'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
@@ -267,10 +267,42 @@ describe('SessionCanvasService', () => {
     })
     archiveSession(parent.session!.id, 23)
 
-    expect(() => service.removeSessionBranch(command('remove-parent-without-branch'), {
+    const result = service.removeSessionBranch(command('remove-parent-without-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: parent.session!.id,
       includeDescendants: false, now: 25
-    })).toThrow('Session has descendants')
+    })
+
+    expect(result.removedSessionIds).toEqual([parent.session!.id])
+    expect(result.disposedSessionIds).toEqual([])
+    expect(result.graph.nodes.map(({ sessionId }) => sessionId)).not.toContain(parent.session!.id)
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === child.session!.id)).toMatchObject({
+      parentSessionId: initial.session!.id,
+      relationKind: 'derived-from'
+    })
+    expect(database.all<{ operation: string; from_session_id: string; to_session_id: string }>(
+      `SELECT operation, from_session_id, to_session_id
+       FROM session_relation_events
+       WHERE command_id = 'remove-parent-without-branch'
+       ORDER BY sequence`
+    )).toEqual(expect.arrayContaining([
+      { operation: 'revoked', from_session_id: parent.session!.id, to_session_id: initial.session!.id },
+      { operation: 'revoked', from_session_id: child.session!.id, to_session_id: parent.session!.id },
+      { operation: 'created', from_session_id: child.session!.id, to_session_id: initial.session!.id }
+    ]))
+  })
+
+  it('removes an exited parent together with its complete descendant branch when requested', () => {
+    const initial = bootstrap()
+    const parent = service.createShellSibling(command('history-branch-parent-node'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, now: 20
+    })
+    insertStructuralRelation('history-branch-parent-edge', parent.session!.id, initial.session!.id, 21)
+    const child = service.createShellSibling(command('history-branch-child-node'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: parent.session!.id, parentSessionId: parent.session!.id, now: 22
+    })
+    archiveSession(parent.session!.id, 23)
 
     const result = service.removeSessionBranch(command('remove-whole-history-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: parent.session!.id,
@@ -282,7 +314,7 @@ describe('SessionCanvasService', () => {
     expect(result.graph.nodes.map(({ sessionId }) => sessionId)).not.toContain(child.session!.id)
   })
 
-  it('removes an active parent and its complete descendant branch from both projections', () => {
+  it('removes only an active root and promotes its direct child without breaking deeper descendants', () => {
     const initial = bootstrap()
     const child = service.createShellSibling(command('active-branch-child'), {
       windowId: 'window-1', sceneId: initial.scene!.id,
@@ -293,10 +325,30 @@ describe('SessionCanvasService', () => {
       sourceSessionId: child.session!.id, parentSessionId: child.session!.id, now: 21
     })
 
-    expect(() => service.removeSessionBranch(command('remove-active-parent-without-branch'), {
+    const result = service.removeSessionBranch(command('remove-active-parent-without-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
       includeDescendants: false, now: 22
-    })).toThrow('Session has descendants')
+    })
+
+    expect(result.removedSessionIds).toEqual([initial.session!.id])
+    expect(result.disposedSessionIds).toEqual([initial.session!.id])
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === child.session!.id)?.parentSessionId)
+      .toBeUndefined()
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === grandchild.session!.id))
+      .toMatchObject({ parentSessionId: child.session!.id })
+    expect(result.graph.focusedSessionId).toBe(grandchild.session!.id)
+  })
+
+  it('removes an active parent and its complete descendant branch from both projections', () => {
+    const initial = bootstrap()
+    const child = service.createShellSibling(command('active-whole-branch-child'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: initial.session!.id, parentSessionId: initial.session!.id, now: 20
+    })
+    const grandchild = service.createShellSibling(command('active-whole-branch-grandchild'), {
+      windowId: 'window-1', sceneId: initial.scene!.id,
+      sourceSessionId: child.session!.id, parentSessionId: child.session!.id, now: 21
+    })
 
     const result = service.removeSessionBranch(command('remove-active-whole-branch'), {
       windowId: 'window-1', sceneId: initial.scene!.id, sessionId: initial.session!.id,
