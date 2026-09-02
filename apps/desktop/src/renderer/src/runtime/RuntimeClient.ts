@@ -88,6 +88,7 @@ export class RuntimeClient {
     this.#ready = false
     this.#requiresRecoverySnapshot = true
     this.#resetRecoveryStatuses()
+    this.#markTerminalsQueuedForRecovery()
     // An acknowledgement belongs to the port generation that carried the
     // write. A replacement Runtime may already have committed it or may never
     // have seen it, so discard transport state and let the next replay/output
@@ -499,6 +500,21 @@ export class RuntimeClient {
   #resetRecoveryStatuses(): void {
     this.#recoveryStatuses.clear()
     for (const listener of this.#recoveryResetListeners) listener()
+  }
+
+  #markTerminalsQueuedForRecovery(): void {
+    for (const sessionId of this.#terminals.keys()) {
+      const status: SessionRecoveryStatus = {
+        type: 'session.recovery-status', protocolVersion: PROTOCOL_VERSION,
+        sessionId, sceneId: '',
+        priority: this.#foregroundTerminalSessions.has(sessionId)
+          ? 'foreground-scene'
+          : 'background',
+        state: 'queued'
+      }
+      this.#recoveryStatuses.set(sessionId, status)
+      for (const listener of this.#recoveryListeners) listener(status)
+    }
   }
 
   #subscribeEvents(afterSequence: number): void {

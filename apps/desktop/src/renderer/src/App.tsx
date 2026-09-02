@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { HierarchyShell } from './hierarchy/HierarchyShell'
 import { DetachedTerminalApp } from './hierarchy/DetachedTerminalApp'
@@ -17,6 +17,7 @@ export function App() {
     .get('terminalDiagnostics') !== '0'
   const detached = new URLSearchParams(window.location.search).get('kind') === 'detached-terminal'
   const dag = new URLSearchParams(window.location.search).get('kind') === 'dag'
+  const lastReadyLifecycle = useRef<RuntimeLifecyclePresentation | undefined>(undefined)
 
   useEffect(() => {
     let active = true
@@ -29,9 +30,15 @@ export function App() {
     return () => { active = false; unsubscribe() }
   }, [])
 
-  if (!lifecycle || lifecycle.snapshot.stage !== 'ready') {
-    if (lifecycle?.recovery || lifecycle?.snapshot.mode === 'recovery-required') {
-      return <DatabaseRecoveryPage state={lifecycle} actions={{
+  if (lifecycle?.snapshot.stage === 'ready') lastReadyLifecycle.current = lifecycle
+  const presentedLifecycle = lifecycle?.snapshot.stage !== 'ready' &&
+    lifecycle?.snapshot.mode === 'normal' && !lifecycle.recovery && lastReadyLifecycle.current
+    ? lastReadyLifecycle.current
+    : lifecycle
+
+  if (!presentedLifecycle || presentedLifecycle.snapshot.stage !== 'ready') {
+    if (presentedLifecycle?.recovery || presentedLifecycle?.snapshot.mode === 'recovery-required') {
+      return <DatabaseRecoveryPage state={presentedLifecycle} actions={{
         restore: (backupId, expectedRecoveryId) =>
           window.matouDesktop.restoreDatabaseBackup(backupId, expectedRecoveryId),
         exportBundle: () => window.matouDesktop.exportDatabaseRecoveryBundle(),
@@ -49,11 +56,11 @@ export function App() {
     </main>
   }
 
-  if (detached) return <DetachedTerminalApp runtimeMode={lifecycle.snapshot.mode} />
-  if (dag) return <DagWindowApp runtimeMode={lifecycle.snapshot.mode} />
+  if (detached) return <DetachedTerminalApp runtimeMode={presentedLifecycle.snapshot.mode} />
+  if (dag) return <DagWindowApp runtimeMode={presentedLifecycle.snapshot.mode} />
 
   return <>
-    <HierarchyShell runtimeMode={lifecycle.snapshot.mode} />
+    <HierarchyShell runtimeMode={presentedLifecycle.snapshot.mode} />
     {e2e && terminalDiagnostics && <div className="e2e-diagnostics" aria-hidden="true">
       <TerminalSurface onStatusChange={setStatus}
         onSmokeMarker={setSmokeMarker} onReplayComplete={setReplayMarker} />

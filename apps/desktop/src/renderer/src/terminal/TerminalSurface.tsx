@@ -261,6 +261,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } satisfies CachedTerminalModel
     }) as CachedTerminalModel
     const { terminal, fit, search, serialize } = model
+    const reusedTerminalModel = model.opened
     terminal.options.fontSize = fontSize
     terminal.options.theme = TERMINAL_THEMES[themeKey]
     if (!model.opened) {
@@ -288,6 +289,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let observed = ''
     let replayRequested = false
     let replaying = false
+    let preserveExistingModelForReplay = false
     let spawned = false
     let lastAppliedSequence = 0
     let screenEpoch = 0
@@ -361,6 +363,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         onStatusChange('streaming')
         const replayFromSequence = replayFromSequenceForSpawn(message)
         if (replayFromSequence !== undefined && !replayRequested) {
+          preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
           replayRequested = true
           client.requestTerminalReplay(sessionId, replayFromSequence)
         }
@@ -410,7 +413,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-start') {
         clearCheckpointTimer()
         replaying = true
-        terminal.reset()
+        if (!preserveExistingModelForReplay || message.checkpoint) terminal.reset()
+        preserveExistingModelForReplay = false
         lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
         lastCheckpointSequence = message.checkpoint?.terminalSequence ?? -1
         screenEpoch = message.checkpoint?.screenEpoch ?? 0
