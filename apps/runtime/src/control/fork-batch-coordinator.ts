@@ -73,10 +73,37 @@ interface BatchItemRow {
   state: LedgerItemState
   start_state: StartState
   error_message: string | null
+  failure_generation: number
+  failure_receipt: string | null
+}
+
+interface RetryAttemptRow {
+  attempt_id: string
+  batch_key: string
+  batch_request_fingerprint: string
+  request_fingerprint: string
+  retry_keys_json: string
+  failure_generations_json: string
+  state: 'pending' | 'completed'
+}
+
+interface RetryAttemptItemRow {
+  attempt_id: string
+  batch_key: string
+  item_key: string
+  ordinal: number
+  failure_generation: number
+  state: 'pending' | 'executing' | 'completed' | 'failed'
+  session_id: string | null
+  result_state: Exclude<LedgerItemState, 'unsubmitted'> | null
+  result_failure_generation: number | null
+  error_message: string | null
 }
 
 interface ForkIntentSnapshot {
   session_id: string
+  operation_id: string
+  attempt: number
   stage: 'queued' | 'creating-worktree' | 'applying-setup' | 'binding-session' |
     'restoring-provider' | 'starting-window' | 'succeeded' | 'failed'
   error_message: string | null
@@ -149,30 +176,11 @@ export class ForkBatchCoordinator {
     }
 
     this.#ensureLedger(input, fingerprint, false)
-    const priorRows = new Map(
-      this.#itemRows(input.batchKey).map((row) => [row.item_key, row])
-    )
     this.#refreshAll(input)
-    const rows = this.#itemRows(input.batchKey)
-    const byKey = new Map(rows.map((row) => [row.item_key, row]))
-    const resumedRetryKeys = new Set<string>()
-    const invalid = input.retryItemKeys.filter((itemKey) => {
-      const current = byKey.get(itemKey)
-      if (current?.state === 'failed') return false
-      const prior = priorRows.get(itemKey)
-      const intent = current ? this.#intent(current.submission_key) : undefined
-      if (prior?.state === 'failed' && intent && intent.stage !== 'failed') {
-        resumedRetryKeys.add(itemKey)
-        return false
-      }
-      return true
-    })
-    if (invalid.length > 0) {
-      throw new Error(`仅可重试上一轮失败的项目：${invalid.join(', ')}`)
-    }
     if (input.retryItemKeys.length === 0) return this.#result(input)
+    const attempt = this.#resolveRetryAttempt(input, fingerprint)
 
-    const operation = this.#executeRetry(input, resumedRetryKeys)
+    const operation = this.#executeRetry(input, attempt)
     this.#operations.set(input.batchKey, {
       fingerprint, kind: 'retry', retryKey, promise: operation
     })
@@ -188,7 +196,11 @@ export class ForkBatchCoordinator {
   async #resumeCreate(input: CreateForkBatchInput): Promise<ForkBatchResult> {
     for (const item of input.items) {
       let row = this.#refreshItem(input.batchKey, item)
-      if (row.state === 'unsubmitted') row = await this.#createItem(input, item)
+      if (row.state === 'unsubmitted') {
+        row = await this.#createItem(
+          input, item, `initial-create:${itemSubmissionKey(input.batchKey, item.itemKey)}`
+        )
+      }
       if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
     }
     this.#refreshAll(input)
@@ -197,47 +209,72 @@ export class ForkBatchCoordinator {
 
   async #executeRetry(
     input: RetryForkBatchInput,
-    resumedRetryKeys: ReadonlySet<string>
+    attempt: RetryAttemptRow
   ): Promise<ForkBatchResult> {
     const selected = new Set(input.retryItemKeys)
+    const attemptItems = new Map(
+      this.#retryItemRows(attempt.attempt_id).map((row) => [row.item_key, row])
+    )
     for (const item of input.items) {
       if (!selected.has(item.itemKey)) continue
-      let row = this.#refreshItem(input.batchKey, item)
-      if (resumedRetryKeys.has(item.itemKey) && row.state !== 'failed') {
-        if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+      let attemptItem = requireValue(
+        attemptItems.get(item.itemKey),
+        `重试 ${attempt.attempt_id} 缺少项目 ${item.itemKey}`
+      )
+      if (attemptItem.state === 'completed' || attemptItem.state === 'failed') continue
+      let row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+      if (row.failure_generation !== attemptItem.failure_generation) {
+        this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'failed', row)
         continue
       }
       if (row.state !== 'failed') {
-        throw new Error(`仅可重试上一轮失败的项目：${item.itemKey}`)
+        if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+        row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+        this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'completed', row)
+        continue
+      }
+
+      if (attemptItem.state === 'pending') {
+        this.#writeRetryItemState(attempt.attempt_id, item.itemKey, 'executing')
+        attemptItem = this.#retryItemRow(attempt.attempt_id, item.itemKey)
       }
       const intent = this.#intent(row.submission_key)
       if (intent) {
         if (intent.stage !== 'failed') {
-          row = this.#refreshItem(input.batchKey, item)
-          throw new Error(`仅可重试上一轮失败的项目：${item.itemKey}（当前 ${row.state}）`)
+          row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+        } else {
+          row = await this.#retryExistingItem(
+            input, item, row, intent.session_id, attempt.attempt_id
+          )
         }
-        row = await this.#retryExistingItem(input, item, row, intent.session_id)
       } else {
         if (row.session_id !== null) {
           throw new Error(`项目 ${item.itemKey} 的失败 Fork 记录缺失`)
         }
-        this.#writeItem(input.batchKey, item.itemKey, {
-          state: 'unsubmitted',
-          startState: item.start === true ? 'pending' : 'not-requested',
-          sessionId: null,
-          error: null
-        })
-        row = await this.#createItem(input, item)
+        row = await this.#createItem(
+          input, item, `retry-create:${attempt.attempt_id}:${item.itemKey}`,
+          attempt.attempt_id
+        )
       }
       if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+      row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+      this.#recordRetryItem(
+        attempt.attempt_id,
+        item.itemKey,
+        row.state === 'failed' ? 'failed' : 'completed',
+        row
+      )
     }
+    this.#completeRetryAttempt(attempt.attempt_id)
     this.#refreshAll(input)
     return this.#result(input)
   }
 
   async #createItem(
     input: CreateForkBatchInput,
-    item: ResolvedForkItemInput
+    item: ResolvedForkItemInput,
+    failureReceipt: string,
+    retryAttemptId?: string
   ): Promise<BatchItemRow> {
     const submissionKey = itemSubmissionKey(input.batchKey, item.itemKey)
     try {
@@ -253,20 +290,28 @@ export class ForkBatchCoordinator {
           now: this.#now()
         }
       )
-      return this.#recordWorkflowResult(input.batchKey, item, accepted)
+      return this.#recordWorkflowResult(
+        input.batchKey, item, accepted, failureReceipt, retryAttemptId
+      )
     } catch (error) {
       const intent = this.#intent(submissionKey)
       if (intent) {
-        this.#writeItem(input.batchKey, item.itemKey, {
-          sessionId: intent.session_id,
-          state: intent.stage === 'failed' ? 'failed' : 'created',
-          error: intent.stage === 'failed' ? intent.error_message ?? errorMessage(error) : null
-        })
+        if (intent.stage === 'failed') {
+          this.#recordFailure(input.batchKey, item.itemKey, {
+            sessionId: intent.session_id,
+            error: intent.error_message ?? errorMessage(error),
+            receipt: intentFailureReceipt(intent)
+          }, retryAttemptId)
+        } else {
+          this.#writeItem(input.batchKey, item.itemKey, {
+            sessionId: intent.session_id, state: 'created', error: null
+          })
+        }
         return this.#refreshItem(input.batchKey, item)
       }
-      this.#writeItem(input.batchKey, item.itemKey, {
-        state: 'failed', sessionId: null, error: errorMessage(error)
-      })
+      this.#recordFailure(input.batchKey, item.itemKey, {
+        sessionId: null, error: errorMessage(error), receipt: failureReceipt
+      }, retryAttemptId)
       return this.#itemRow(input.batchKey, item.itemKey)
     }
   }
@@ -275,7 +320,8 @@ export class ForkBatchCoordinator {
     input: RetryForkBatchInput,
     item: ResolvedForkItemInput,
     row: BatchItemRow,
-    sessionId: string
+    sessionId: string,
+    attemptId: string
   ): Promise<BatchItemRow> {
     this.#writeItem(input.batchKey, item.itemKey, {
       startState: item.start === true ? 'pending' : 'not-requested',
@@ -296,7 +342,10 @@ export class ForkBatchCoordinator {
         sessionId,
         now: this.#now()
       })
-      return this.#recordWorkflowResult(input.batchKey, item, accepted)
+      return this.#recordWorkflowResult(
+        input.batchKey, item, accepted, `retry-workflow:${attemptId}:${item.itemKey}`,
+        attemptId
+      )
     } catch (error) {
       const currentIntent = this.#intent(row.submission_key)
       if (currentIntent && currentIntent.stage !== 'failed') {
@@ -305,9 +354,13 @@ export class ForkBatchCoordinator {
         })
         return this.#refreshItem(input.batchKey, item)
       }
-      this.#writeItem(input.batchKey, item.itemKey, {
-        state: 'failed', sessionId, error: errorMessage(error)
-      })
+      this.#recordFailure(input.batchKey, item.itemKey, {
+        sessionId,
+        error: errorMessage(error),
+        receipt: currentIntent?.stage === 'failed'
+          ? retryCallFailureReceipt(currentIntent, attemptId, item.itemKey)
+          : `retry-call:${attemptId}:${item.itemKey}`
+      }, attemptId)
       return this.#itemRow(input.batchKey, item.itemKey)
     }
   }
@@ -315,19 +368,26 @@ export class ForkBatchCoordinator {
   #recordWorkflowResult(
     batchKey: string,
     item: ResolvedForkItemInput,
-    accepted: ForkWorkflowResult
+    accepted: ForkWorkflowResult,
+    fallbackFailureReceipt: string,
+    retryAttemptId?: string
   ): BatchItemRow {
     const sessionId = accepted.session?.id ?? null
     if (sessionId === null) {
-      this.#writeItem(batchKey, item.itemKey, {
-        state: 'failed', sessionId: null,
-        error: accepted.error ?? 'Fork 未返回已创建的会话'
-      })
+      this.#recordFailure(batchKey, item.itemKey, {
+        sessionId: null,
+        error: accepted.error ?? 'Fork 未返回已创建的会话',
+        receipt: fallbackFailureReceipt
+      }, retryAttemptId)
     } else if (accepted.forkState === 'failed') {
-      this.#writeItem(batchKey, item.itemKey, {
-        state: 'failed', sessionId,
-        error: accepted.error ?? 'Fork 创建失败'
-      })
+      const intent = this.#intent(itemSubmissionKey(batchKey, item.itemKey))
+      this.#recordFailure(batchKey, item.itemKey, {
+        sessionId,
+        error: accepted.error ?? intent?.error_message ?? 'Fork 创建失败',
+        receipt: intent?.stage === 'failed'
+          ? intentFailureReceipt(intent)
+          : fallbackFailureReceipt
+      }, retryAttemptId)
     } else {
       this.#writeItem(batchKey, item.itemKey, {
         state: accepted.forkState === 'succeeded' ? 'ready' : 'created',
@@ -452,11 +512,202 @@ export class ForkBatchCoordinator {
     })
   }
 
+  #resolveRetryAttempt(
+    input: RetryForkBatchInput,
+    batchRequestFingerprint: string
+  ): RetryAttemptRow {
+    const byKey = new Map(
+      this.#itemRows(input.batchKey).map((row) => [row.item_key, row])
+    )
+    const failureGenerations = input.retryItemKeys.map((itemKey) => {
+      const row = requireValue(byKey.get(itemKey), `批次 ${input.batchKey} 缺少项目 ${itemKey}`)
+      return { itemKey, failureGeneration: row.failure_generation }
+    })
+    const requestFingerprint = hash(canonicalJson({
+      batchKey: input.batchKey,
+      batchRequestFingerprint,
+      retryItemKeys: input.retryItemKeys,
+      failureGenerations
+    }))
+    const existing = this.#database.get<RetryAttemptRow>(
+      `SELECT * FROM fork_batch_retry_attempts
+       WHERE batch_key = ? AND request_fingerprint = ?`,
+      input.batchKey,
+      requestFingerprint
+    )
+    if (existing) {
+      if (
+        existing.batch_request_fingerprint !== batchRequestFingerprint ||
+        existing.retry_keys_json !== canonicalJson(input.retryItemKeys) ||
+        existing.failure_generations_json !== canonicalJson(failureGenerations)
+      ) {
+        throw new Error(`批次 ${input.batchKey} 的重试凭据与请求不一致`)
+      }
+      return existing
+    }
+
+    const interrupted = this.#pendingRetryAttempt(
+      input, batchRequestFingerprint, byKey
+    )
+    if (interrupted) return interrupted
+
+    const invalid = input.retryItemKeys.filter((itemKey) => byKey.get(itemKey)?.state !== 'failed')
+    if (invalid.length > 0) {
+      throw new Error(`仅可重试上一轮失败的项目：${invalid.join(', ')}`)
+    }
+    const attemptId = hash(`fork-batch-retry:${requestFingerprint}`)
+    const now = this.#now()
+    this.#database.transaction((tx) => {
+      tx.run(
+        `INSERT INTO fork_batch_retry_attempts (
+           attempt_id, batch_key, batch_request_fingerprint, request_fingerprint, retry_keys_json,
+           failure_generations_json, state, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        attemptId,
+        input.batchKey,
+        batchRequestFingerprint,
+        requestFingerprint,
+        canonicalJson(input.retryItemKeys),
+        canonicalJson(failureGenerations),
+        now,
+        now
+      )
+      for (const [ordinal, binding] of failureGenerations.entries()) {
+        tx.run(
+          `INSERT INTO fork_batch_retry_items (
+             attempt_id, batch_key, item_key, ordinal, failure_generation,
+             state, session_id, result_state, error_message, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)`,
+          attemptId,
+          input.batchKey,
+          binding.itemKey,
+          ordinal,
+          binding.failureGeneration,
+          now,
+          now
+        )
+      }
+    })
+    return requireValue(
+      this.#database.get<RetryAttemptRow>(
+        'SELECT * FROM fork_batch_retry_attempts WHERE attempt_id = ?', attemptId
+      ),
+      `重试 ${attemptId} 未写入`
+    )
+  }
+
+  #pendingRetryAttempt(
+    input: RetryForkBatchInput,
+    batchRequestFingerprint: string,
+    currentRows: ReadonlyMap<string, BatchItemRow>
+  ): RetryAttemptRow | undefined {
+    const candidates = this.#database.all<RetryAttemptRow>(
+      `SELECT * FROM fork_batch_retry_attempts
+       WHERE batch_key = ? AND batch_request_fingerprint = ?
+         AND retry_keys_json = ? AND state = 'pending'
+       ORDER BY created_at DESC, attempt_id DESC`,
+      input.batchKey,
+      batchRequestFingerprint,
+      canonicalJson(input.retryItemKeys)
+    )
+    for (const candidate of candidates) {
+      const receipts = new Map(
+        this.#retryItemRows(candidate.attempt_id).map((row) => [row.item_key, row])
+      )
+      const matches = input.retryItemKeys.every((itemKey) => {
+        const current = currentRows.get(itemKey)
+        const receipt = receipts.get(itemKey)
+        if (!current || !receipt) return false
+        if (receipt.state === 'failed') {
+          return current.state === 'failed' &&
+            receipt.result_failure_generation === current.failure_generation
+        }
+        return receipt.failure_generation === current.failure_generation
+      })
+      if (matches) return candidate
+    }
+    return undefined
+  }
+
+  #retryItemRows(attemptId: string): RetryAttemptItemRow[] {
+    return this.#database.all<RetryAttemptItemRow>(
+      'SELECT * FROM fork_batch_retry_items WHERE attempt_id = ? ORDER BY ordinal',
+      attemptId
+    )
+  }
+
+  #retryItemRow(attemptId: string, itemKey: string): RetryAttemptItemRow {
+    return requireValue(
+      this.#database.get<RetryAttemptItemRow>(
+        'SELECT * FROM fork_batch_retry_items WHERE attempt_id = ? AND item_key = ?',
+        attemptId,
+        itemKey
+      ),
+      `重试 ${attemptId} 缺少项目 ${itemKey}`
+    )
+  }
+
+  #writeRetryItemState(
+    attemptId: string,
+    itemKey: string,
+    state: RetryAttemptItemRow['state']
+  ): void {
+    this.#database.run(
+      `UPDATE fork_batch_retry_items SET state = ?, updated_at = ?
+       WHERE attempt_id = ? AND item_key = ?`,
+      state,
+      this.#now(),
+      attemptId,
+      itemKey
+    )
+  }
+
+  #recordRetryItem(
+    attemptId: string,
+    itemKey: string,
+    state: 'completed' | 'failed',
+    result: BatchItemRow
+  ): void {
+    this.#database.run(
+      `UPDATE fork_batch_retry_items
+       SET state = ?, session_id = ?, result_state = ?, result_failure_generation = ?,
+           error_message = ?, updated_at = ?
+       WHERE attempt_id = ? AND item_key = ?`,
+      state,
+      result.session_id,
+      result.state === 'unsubmitted' ? 'created' : result.state,
+      result.state === 'failed' ? result.failure_generation : null,
+      result.error_message,
+      this.#now(),
+      attemptId,
+      itemKey
+    )
+  }
+
+  #completeRetryAttempt(attemptId: string): void {
+    const unfinished = this.#database.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM fork_batch_retry_items
+       WHERE attempt_id = ? AND state IN ('pending', 'executing')`,
+      attemptId
+    )?.count ?? 0
+    if (unfinished !== 0) return
+    this.#database.run(
+      `UPDATE fork_batch_retry_attempts SET state = 'completed', updated_at = ?
+       WHERE attempt_id = ?`,
+      this.#now(),
+      attemptId
+    )
+  }
+
   #refreshAll(input: CreateForkBatchInput): void {
     for (const item of input.items) this.#refreshItem(input.batchKey, item)
   }
 
-  #refreshItem(batchKey: string, item: ResolvedForkItemInput): BatchItemRow {
+  #refreshItem(
+    batchKey: string,
+    item: ResolvedForkItemInput,
+    retryAttemptId?: string
+  ): BatchItemRow {
     let row = this.#itemRow(batchKey, item.itemKey)
     if (row.start_state === 'delivering') {
       this.#writeItem(batchKey, item.itemKey, {
@@ -469,11 +720,12 @@ export class ForkBatchCoordinator {
     if (!intent) return row
 
     if (intent.stage === 'failed') {
-      this.#writeItem(batchKey, item.itemKey, {
-        state: 'failed',
+      if (isRetryCallReceiptFor(row.failure_receipt, intent)) return row
+      this.#recordFailure(batchKey, item.itemKey, {
         sessionId: intent.session_id,
-        error: intent.error_message ?? 'Fork 创建失败'
-      })
+        error: intent.error_message ?? 'Fork 创建失败',
+        receipt: intentFailureReceipt(intent)
+      }, retryAttemptId)
     } else if (row.start_state === 'completed') {
       this.#writeItem(batchKey, item.itemKey, {
         state: item.prompt === undefined ? 'ready' : 'started',
@@ -500,10 +752,62 @@ export class ForkBatchCoordinator {
 
   #intent(submissionKey: string): ForkIntentSnapshot | undefined {
     return this.#database.get<ForkIntentSnapshot>(
-      `SELECT session_id, stage, error_message
+      `SELECT session_id, operation_id, attempt, stage, error_message
        FROM session_fork_intents WHERE submission_key = ?`,
       submissionKey
     )
+  }
+
+  #recordFailure(
+    batchKey: string,
+    itemKey: string,
+    failure: { sessionId: string | null; error: string; receipt: string },
+    retryAttemptId?: string
+  ): void {
+    const now = this.#now()
+    this.#database.transaction((tx) => {
+      const row = requireValue(tx.get<BatchItemRow>(
+        'SELECT * FROM fork_batch_items WHERE batch_key = ? AND item_key = ?',
+        batchKey,
+        itemKey
+      ), `批次 ${batchKey} 缺少项目 ${itemKey}`)
+      const failureGeneration = row.failure_receipt === failure.receipt
+        ? row.failure_generation
+        : row.failure_generation + 1
+      tx.run(
+        `UPDATE fork_batch_items
+         SET state = 'failed', session_id = ?, error_message = ?,
+             failure_generation = ?, failure_receipt = ?, updated_at = ?
+         WHERE batch_key = ? AND item_key = ?`,
+        failure.sessionId,
+        failure.error,
+        failureGeneration,
+        failure.receipt,
+        now,
+        batchKey,
+        itemKey
+      )
+      if (retryAttemptId) {
+        tx.run(
+          `UPDATE fork_batch_retry_items
+           SET state = 'failed', session_id = ?, result_state = 'failed',
+               result_failure_generation = ?, error_message = ?, updated_at = ?
+           WHERE attempt_id = ? AND item_key = ? AND failure_generation <> ?`,
+          failure.sessionId,
+          failureGeneration,
+          failure.error,
+          now,
+          retryAttemptId,
+          itemKey,
+          failureGeneration
+        )
+      }
+      tx.run(
+        'UPDATE fork_batch_ledger SET updated_at = ? WHERE batch_key = ?',
+        now,
+        batchKey
+      )
+    })
   }
 
   #writeItem(
@@ -519,12 +823,15 @@ export class ForkBatchCoordinator {
     const row = this.#itemRow(batchKey, itemKey)
     this.#database.run(
       `UPDATE fork_batch_items
-       SET state = ?, start_state = ?, session_id = ?, error_message = ?, updated_at = ?
+       SET state = ?, start_state = ?, session_id = ?, error_message = ?,
+           failure_generation = ?, failure_receipt = ?, updated_at = ?
        WHERE batch_key = ? AND item_key = ?`,
       update.state ?? row.state,
       update.startState ?? row.start_state,
       update.sessionId === undefined ? row.session_id : update.sessionId,
       update.error === undefined ? row.error_message : update.error,
+      row.failure_generation,
+      row.failure_receipt,
       this.#now(),
       batchKey,
       itemKey
@@ -717,4 +1024,28 @@ function canonicalValue(value: unknown): unknown {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function intentFailureReceipt(intent: ForkIntentSnapshot): string {
+  return `fork-intent:${intent.operation_id}:${intent.attempt}`
+}
+
+function retryCallFailureReceipt(
+  intent: ForkIntentSnapshot,
+  attemptId: string,
+  itemKey: string
+): string {
+  return `retry-call:${intent.operation_id}:${intent.attempt}:${attemptId}:${hash(itemKey)}`
+}
+
+function isRetryCallReceiptFor(
+  receipt: string | null,
+  intent: ForkIntentSnapshot
+): boolean {
+  return receipt?.startsWith(`retry-call:${intent.operation_id}:${intent.attempt}:`) === true
+}
+
+function requireValue<T>(value: T | undefined, message: string): T {
+  if (value === undefined) throw new Error(message)
+  return value
 }

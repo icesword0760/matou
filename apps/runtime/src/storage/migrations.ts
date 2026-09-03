@@ -1278,5 +1278,68 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX fork_batch_items_session_idx
       ON fork_batch_items(session_id);
     `
+  },
+  {
+    version: 30,
+    name: 'durable-fork-batch-retry-attempts',
+    sql: `
+      ALTER TABLE fork_batch_items
+      ADD COLUMN failure_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (failure_generation >= 0);
+      ALTER TABLE fork_batch_items ADD COLUMN failure_receipt TEXT;
+
+      UPDATE fork_batch_items
+      SET failure_generation = 1,
+          failure_receipt = COALESCE(
+            (
+              SELECT 'fork-intent:' || intent.operation_id || ':' || intent.attempt
+              FROM session_fork_intents AS intent
+              WHERE intent.submission_key = fork_batch_items.submission_key
+                AND intent.stage = 'failed'
+            ),
+            'migration-29:' || submission_key
+          )
+      WHERE state = 'failed';
+
+      CREATE TABLE fork_batch_retry_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        batch_key TEXT NOT NULL REFERENCES fork_batch_ledger(batch_key) ON DELETE CASCADE,
+        batch_request_fingerprint TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        retry_keys_json TEXT NOT NULL,
+        failure_generations_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (batch_key, request_fingerprint)
+      ) STRICT;
+
+      CREATE TABLE fork_batch_retry_items (
+        attempt_id TEXT NOT NULL
+          REFERENCES fork_batch_retry_attempts(attempt_id) ON DELETE CASCADE,
+        batch_key TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        failure_generation INTEGER NOT NULL CHECK (failure_generation > 0),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'executing', 'completed', 'failed')),
+        session_id TEXT,
+        result_state TEXT CHECK (
+          result_state IS NULL OR result_state IN ('created', 'ready', 'started', 'failed')
+        ),
+        result_failure_generation INTEGER CHECK (
+          result_failure_generation IS NULL OR result_failure_generation > 0
+        ),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (attempt_id, item_key),
+        UNIQUE (attempt_id, ordinal),
+        FOREIGN KEY (batch_key, item_key)
+          REFERENCES fork_batch_items(batch_key, item_key) ON DELETE CASCADE
+      ) STRICT;
+
+      CREATE INDEX fork_batch_retry_attempts_batch_idx
+      ON fork_batch_retry_attempts(batch_key, created_at, attempt_id);
+    `
   }
 ]
