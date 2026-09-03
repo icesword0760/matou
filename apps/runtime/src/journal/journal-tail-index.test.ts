@@ -4,6 +4,9 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
+// Shared CI runners are slower and noisier than developer machines; keep the gate but loosen it there.
+const CI_BUDGET_FACTOR = process.env.CI ? 2 : 1
+
 import {
   JournalTailIndex,
   loadJournalTailIndex,
@@ -45,7 +48,7 @@ describe('JournalTailIndex', () => {
 
     expect(index.snapshot().completedLineCount).toBe(200_000)
     expect(index.tailStart()).toBe(191)
-    expect(performance.now() - startedAt).toBeLessThan(50)
+    expect(performance.now() - startedAt).toBeLessThan(50 * CI_BUDGET_FACTOR)
   })
 
   it('counts LF and split CRLF once while preserving Unicode split across frames', () => {

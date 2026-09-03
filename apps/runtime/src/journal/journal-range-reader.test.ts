@@ -4,6 +4,9 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
+// Shared CI runners are slower and noisier than developer machines; keep the gate but loosen it there.
+const CI_BUDGET_FACTOR = process.env.CI ? 2 : 1
+
 import { SegmentJournal } from './segment-journal'
 import {
   iterateSessionFrames,
@@ -226,7 +229,7 @@ describe('Journal range reader', () => {
       if (historyMiB === 32) {
         durations.sort((left, right) => left - right)
         const p95 = durations[Math.ceil(durations.length * 0.95) - 1]!
-        expect(p95).toBeLessThan(100)
+        expect(p95).toBeLessThan(100 * CI_BUDGET_FACTOR)
       }
     }
   )

@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest'
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import { indexSessionGraph } from './session-graph-index'
 
+// Shared CI runners are slower and noisier than developer machines; keep the gate but loosen it there.
+const CI_BUDGET_FACTOR = process.env.CI ? 2 : 1
+
 describe('session graph index', () => {
   it('preserves the existing reverse sibling depth-first descendant order', () => {
     const nodes = [
@@ -40,8 +43,8 @@ describe('session graph index', () => {
     expect(descendants).toHaveLength(4_999)
     expect(descendants[0]?.sessionId).toBe('session-1')
     expect(descendants.at(-1)?.sessionId).toBe('session-4999')
-    expect(indexElapsed).toBeLessThanOrEqual(50)
-    expect(descendantsElapsed).toBeLessThanOrEqual(50)
+    expect(indexElapsed).toBeLessThanOrEqual(50 * CI_BUDGET_FACTOR)
+    expect(descendantsElapsed).toBeLessThanOrEqual(50 * CI_BUDGET_FACTOR)
   })
 
   it('indexes and traverses a 10000-node wide tree within the scale budget', () => {
@@ -62,7 +65,7 @@ describe('session graph index', () => {
     expect(descendants).toHaveLength(9_999)
     expect(descendants[0]?.sessionId).toBe('session-9999')
     expect(descendants.at(-1)?.sessionId).toBe('session-1')
-    expect(p95).toBeLessThanOrEqual(50)
+    expect(p95).toBeLessThanOrEqual(50 * CI_BUDGET_FACTOR)
   })
 
   it('reports every node in a corrupt cycle instead of looping', () => {
