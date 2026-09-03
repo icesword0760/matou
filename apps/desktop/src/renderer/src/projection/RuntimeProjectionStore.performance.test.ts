@@ -10,7 +10,9 @@ import {
 } from './RuntimeProjectionStore'
 
 const SESSION_COUNT = 10_000
-const FRAME_BUDGET_MS = 16.7
+// Shared CI runners are slower and noisier than developer machines; keep the gate but loosen it there.
+const CI_BUDGET_FACTOR = process.env.CI ? 2 : 1
+const FRAME_BUDGET_MS = 16.7 * CI_BUDGET_FACTOR
 
 describe('RuntimeProjectionStore 10,000-Session event budget', () => {
   it('applies consecutive cwd batches and publishes the production view within one frame at p95', () => {

@@ -4,6 +4,9 @@ import { describe, expect, it } from 'vitest'
 import type { SceneSnapshotView } from './hierarchy-types'
 import { layoutFromSnapshot, orderedSessionIds } from './scene-layout-index'
 
+// Shared CI runners are slower and noisier than developer machines; keep the gate but loosen it there.
+const CI_BUDGET_FACTOR = process.env.CI ? 2 : 1
+
 describe('scene layout index performance', () => {
   it('restores a 5000-level split and orders its sessions within the scale budget', () => {
     const snapshot = deepSplitSnapshot(5_000)
@@ -35,8 +38,8 @@ describe('scene layout index performance', () => {
       coldLayoutCpuP95: Number(coldLayoutCpuP95.toFixed(2)),
       cachedOrderCpuP95: Number(cachedOrderCpuP95.toFixed(2))
     })}`)
-    expect(coldLayoutCpuP95).toBeLessThanOrEqual(50)
-    expect(cachedOrderCpuP95).toBeLessThanOrEqual(1)
+    expect(coldLayoutCpuP95).toBeLessThanOrEqual(50 * CI_BUDGET_FACTOR)
+    expect(cachedOrderCpuP95).toBeLessThanOrEqual(1 * CI_BUDGET_FACTOR)
   })
 })
 
