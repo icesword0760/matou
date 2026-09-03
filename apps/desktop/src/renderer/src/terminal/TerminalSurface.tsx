@@ -28,6 +28,7 @@ const CHECKPOINT_QUIET_MS = 500
 const CHECKPOINT_SCROLLBACK_LINES = 10_000
 const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const TERMINAL_RESIZE_SETTLE_MS = 80
+const TERMINAL_FOCUS_RESIZE_WINDOW_MS = 600
 const NOOP = () => {}
 
 interface QueuedWebglActivation {
@@ -171,6 +172,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
   const activeRef = useRef(active)
+  const previousActiveRef = useRef(active)
+  const inactiveResizeDeadlineRef = useRef(0)
   const profileRef = useRef(profile)
   const inputDisabledRef = useRef(inputDisabled)
   const onOscNotificationRef = useRef(onOscNotification)
@@ -186,6 +189,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const checkpointNowRef = useRef<() => void>(NOOP)
   const flushOutputRef = useRef<() => void>(NOOP)
   const resumeVisualRef = useRef<() => void>(NOOP)
+  const syncActiveDimensionsRef = useRef<() => void>(NOOP)
   const activateWebglRef = useRef<() => void>(NOOP)
   const scheduleWebglRef = useRef<() => void>(NOOP)
   const cancelWebglRef = useRef<() => void>(NOOP)
@@ -222,6 +226,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [client, profile, sessionId])
 
   useEffect(() => {
+    const wasActive = previousActiveRef.current
+    const becameActive = active && !wasActive
+    if (!active && wasActive) {
+      inactiveResizeDeadlineRef.current = performance.now() + TERMINAL_FOCUS_RESIZE_WINDOW_MS
+    } else if (active) inactiveResizeDeadlineRef.current = 0
+    previousActiveRef.current = active
     if (visible || active) {
       if (active) {
         cancelWebglRef.current()
@@ -232,7 +242,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
       if (active && !viewportMoving) resumeVisualRef.current()
       flushOutputRef.current()
-      requestAnimationFrame(() => fitRef.current?.fit())
+      if (becameActive) requestAnimationFrame(() => syncActiveDimensionsRef.current())
       return () => {
         if (catchupTimer !== undefined) clearTimeout(catchupTimer)
       }
@@ -399,6 +409,14 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const resizeCoalescer = new ResizeCoalescer((cols, rows) => {
       if (!readOnly) client.resizeTerminal(sessionId, cols, rows)
     })
+    syncActiveDimensionsRef.current = () => {
+      if (!activeRef.current || !visibleRef.current) return
+      fit.fit()
+      publishTerminalDimensions()
+      if (validTerminalDimensions(terminal.cols, terminal.rows)) {
+        resizeCoalescer.offer(terminal.cols, terminal.rows)
+      }
+    }
     if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
       requestAnimationFrame(() => {
         if (terminalFocusAllowed(container)) terminal.focus()
@@ -784,7 +802,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined
     const settleTerminalResize = () => {
       resizeSettleTimer = undefined
-      if (!visibleRef.current) return
+      // Hover previews animate between compact and expanded widths. Keeping
+      // that animation visual avoids making full-screen CLIs redraw both
+      // layouts into scrollback; focus transitions publish one final grid.
+      const settlingFocusTransition = performance.now() <= inactiveResizeDeadlineRef.current
+      if (!visibleRef.current || (!activeRef.current && !settlingFocusTransition)) return
+      inactiveResizeDeadlineRef.current = 0
       fit.fit()
       publishTerminalDimensions()
       if (validTerminalDimensions(terminal.cols, terminal.rows)) {
@@ -819,6 +842,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       cancelWebglRef.current = NOOP
       flushOutputRef.current = NOOP
       resumeVisualRef.current = NOOP
+      syncActiveDimensionsRef.current = NOOP
       storeCheckpoint()
       checkpointNowRef.current = NOOP
       container.removeEventListener('wheel', wheel)

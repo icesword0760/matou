@@ -213,6 +213,60 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.resizeTerminal).toHaveBeenCalledWith('session-resize-settle', 80, 24)
   })
 
+  it('keeps an inactive preview from resizing the PTY when its card expands', () => {
+    vi.useFakeTimers()
+    render(<TerminalSurface sessionId="session-preview" active={false} visible />)
+    act(() => { vi.runOnlyPendingTimers() })
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+      vi.runOnlyPendingTimers()
+    })
+
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+  })
+
+  it('publishes the focused card dimensions when an inactive preview becomes active', () => {
+    const view = render(<TerminalSurface sessionId="session-preview" active={false} visible />)
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active visible />)
+
+    expect(state.fit).toHaveBeenCalled()
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
+  })
+
+  it('settles the old active card once after it loses focus, then ignores hover resizes', () => {
+    vi.useFakeTimers()
+    const view = render(<TerminalSurface sessionId="session-preview" active visible />)
+    act(() => { vi.runAllTimers() })
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active={false} visible />)
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+      vi.runOnlyPendingTimers()
+    })
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
+
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+      vi.runOnlyPendingTimers()
+    })
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+  })
+
   it('spreads cold WebGL setup for inactive moving cards across animation frames', async () => {
     const animationFrames: FrameRequestCallback[] = []
     const activationMicrotasks: VoidFunction[] = []
