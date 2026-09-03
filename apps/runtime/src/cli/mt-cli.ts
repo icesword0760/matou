@@ -139,35 +139,52 @@ export async function runMt(
 }
 
 function jsonOutputRequested(argv: string[]): boolean {
-  const command = argv[0]
-  const optionStart = command === 'create'
-    ? 2
-    : command === 'fork' || command === 'remove' || command === 'close'
-      ? 3
-      : command === 'switch'
-        ? 3
-        : command === 'focus' || command === 'read' || command === 'history' || command === 'commands'
-          ? 2
-          : command === 'key'
-            ? 3
-            : command === 'send'
-              ? 2
-              : 1
-  const valueFlags = new Set([
-    '--path', '--workspace', '--task', '--canvas', '--profile', '--title', '--submission-key',
-    '--environment-json', '--prompt', '--items-json', '--batch-key', '--retry-item-key',
-    '--retry-item-keys-json', '--retry-items-json', '--scope', '--lines', '--bytes', '--limit'
-  ])
-  for (let index = optionStart; index < argv.length; index += 1) {
+  const valueFlags = jsonValueFlagsFor(argv)
+  let requested = false
+  for (let index = 1; index < argv.length; index += 1) {
     const token = argv[index]!
-    if (token === '--') return false
+    if (token === '--') break
     if (valueFlags.has(token)) {
       index += 1
       continue
     }
-    if (token === '--json') return true
+    if (token === '--json') requested = true
   }
-  return false
+  return requested
+}
+
+function jsonValueFlagsFor(argv: string[]): ReadonlySet<string> {
+  const flags = (...values: string[]) => new Set(values)
+  switch (argv[0]) {
+    case 'create':
+      switch (argv[1]) {
+        case 'workspace': return flags('--path', '--title', '--submission-key')
+        case 'task': return flags('--workspace', '--title', '--submission-key')
+        case 'canvas': return flags('--task', '--title', '--submission-key')
+        case 'session': return flags('--canvas', '--profile', '--title', '--submission-key')
+        default:
+          return flags(
+            '--path', '--workspace', '--task', '--canvas', '--profile', '--title', '--submission-key'
+          )
+      }
+    case 'fork':
+      if (argv[1] === 'children') {
+        return flags(
+          '--items-json', '--batch-key', '--retry-item-key',
+          '--retry-item-keys-json', '--retry-items-json'
+        )
+      }
+      return flags('--title', '--environment-json', '--prompt', '--submission-key')
+    case 'remove':
+      return argv[1] === 'preview' ? flags('--scope') : flags()
+    case 'read':
+    case 'history':
+      return flags('--lines', '--bytes')
+    case 'commands':
+      return flags('--limit')
+    default:
+      return flags()
+  }
 }
 
 function normalizeDependencies(
@@ -300,7 +317,7 @@ async function parseForkCommand(
         source: await parseActionTarget(sourceText, request),
         batchKey: options.values.batchKey ?? randomUUID(),
         items,
-        ...(retryItemKeys.length === 0 ? {} : { retryItemKeys })
+        ...(retryFlagPresent ? { retryItemKeys } : {})
       },
       json: options.booleans.has('--json')
     }

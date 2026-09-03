@@ -591,6 +591,119 @@ describe('mt CLI', () => {
     expect(closing.out[0]).toContain('关闭画布预览')
     expect(closing.out[0]).toContain('项目文件、Git 分支和 Worktree 保持不变')
   })
+
+  it.each([
+    ['focus missing target', ['focus', '--json']],
+    ['create missing entity', ['create', '--json']],
+    ['unknown option before JSON mode', ['focus', 'self', '--bogus', '--json']],
+    ['a value flag unsupported by this subcommand', ['create', 'task', '--path', '--json']]
+  ])('detects requested JSON error output for $0', async (_label, argv) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => undefined)
+
+    expect(await runMt(argv, {}, fixture.io, request)).toBe(2)
+    expect(fixture.out).toEqual([])
+    expect(JSON.parse(fixture.err[0]!)).toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it('does not treat --json consumed by a declared value flag as output mode', async () => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => undefined)
+
+    expect(await runMt([
+      'fork', 'child', 'self', '--title', '保留值', '--environment-json', '{"mode":"current"}',
+      '--prompt', '--json', '--bogus'
+    ], {}, fixture.io, request)).toBe(2)
+    expect(fixture.err[0]).toBe('未知选项：--bogus')
+    expect(() => JSON.parse(fixture.err[0]!)).toThrow()
+  })
+
+  it('stops JSON-mode discovery at the standalone option terminator', async () => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => undefined)
+
+    expect(await runMt(['focus', 'self', '--', '--json'], {}, fixture.io, request)).toBe(2)
+    expect(fixture.err[0]).toBe('-- 之后存在多余参数：--json')
+    expect(() => JSON.parse(fixture.err[0]!)).toThrow()
+  })
+
+  it.each([
+    {
+      label: 'one repeated retry key',
+      retryArgs: ['--retry-item-key', 'one'],
+      expected: ['one']
+    },
+    {
+      label: 'an explicitly empty repeated retry value',
+      retryArgs: ['--retry-item-key', ''],
+      expected: ['']
+    },
+    {
+      label: 'a nonempty retry JSON array',
+      retryArgs: ['--retry-item-keys-json', '["one","two"]'],
+      expected: ['one', 'two']
+    },
+    {
+      label: 'an explicitly empty retry JSON array',
+      retryArgs: ['--retry-item-keys-json', '[]'],
+      expected: []
+    }
+  ])('preserves retry presence for $label', async ({ retryArgs, expected }) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => batchResult([]))
+
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', '[]', '--batch-key', 'original-batch',
+      ...retryArgs, '--json'
+    ], {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenCalledWith('structure.fork.children', {
+      source: { kind: 'self' }, items: [], batchKey: 'original-batch', retryItemKeys: expected
+    })
+  })
+
+  it('routes an explicit empty retry list to the authoritative retry result', async () => {
+    const fixture = ioFixture()
+    const request = vi.fn(async (_method: HostControlScope, params: unknown) => {
+      if (Object.hasOwn(params as object, 'retryItemKeys')) {
+        throw new HostControlClientError('TARGET_NOT_FOUND', '未找到原批次')
+      }
+      return batchResult([])
+    })
+
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', '[]', '--batch-key', 'missing-batch',
+      '--retry-item-keys-json', '[]', '--json'
+    ], {}, fixture.io, request)).toBe(3)
+    expect(JSON.parse(fixture.err[0]!)).toEqual({ code: 'TARGET_NOT_FOUND', message: '未找到原批次' })
+  })
+
+  it('redacts a real missing Unix socket path from human and JSON transport errors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-mt-missing-control-'))
+    const endpoint = join(root, 'private', 'control.sock')
+    try {
+      const human = ioFixture()
+      expect(await runMt(
+        ['identify'],
+        { MATOU_CONTROL_ENDPOINT: endpoint, MATOU_CONTROL_TOKEN: 'token' },
+        human.io
+      )).toBe(5)
+      expect(human.err[0]).toContain('Matou Host Control')
+      expect(human.err[0]).not.toContain(root)
+      expect(human.err[0]).not.toContain(endpoint)
+
+      const json = ioFixture()
+      expect(await runMt(
+        ['identify', '--json'],
+        { MATOU_CONTROL_ENDPOINT: endpoint, MATOU_CONTROL_TOKEN: 'token' },
+        json.io
+      )).toBe(5)
+      expect(JSON.parse(json.err[0]!)).toMatchObject({ code: 'CONNECTION_ERROR' })
+      expect(json.err[0]).not.toContain(root)
+      expect(json.err[0]).not.toContain(endpoint)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 function ioFixture(): { io: MtIo; out: string[]; err: string[] } {
