@@ -30,6 +30,90 @@ describe('RuntimeClient', () => {
     unsubscribe()
     port.deliver({ ...request, requestId: 'nav-after-unsubscribe' })
     expect(listener).toHaveBeenCalledTimes(1)
+    client.dispose()
+  })
+
+  it('replays one request attempt that arrives before the first navigation subscriber', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, {
+      clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+    })
+    const request = navigationRequestFixture()
+    const listener = vi.fn()
+
+    port.deliver(request)
+    port.deliver(request)
+    expect(listener).not.toHaveBeenCalled()
+
+    client.subscribeHostNavigation(listener)
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith(request)
+    client.acknowledgeHostNavigation(navigationResultFixture())
+    expect(port.sent.at(-1)).toEqual({
+      type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
+      ...navigationResultFixture()
+    })
+  })
+
+  it('expires an undelivered request and its acknowledgement origin before subscription', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    try {
+      const port = new FakePort()
+      const client = new RuntimeClient(port, {
+        clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+      })
+      const listener = vi.fn()
+      port.deliver(navigationRequestFixture({ deadlineAt: 1_050 }))
+
+      await vi.advanceTimersByTimeAsync(51)
+      client.subscribeHostNavigation(listener)
+      client.acknowledgeHostNavigation(navigationResultFixture())
+
+      expect(listener).not.toHaveBeenCalled()
+      expect(port.sent).toHaveLength(1)
+      expect(port.sent[0]?.type).toBe('protocol.hello')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears undelivered attempts on port replacement and dispose without accepting stale delivery', () => {
+    vi.useFakeTimers()
+    try {
+      const first = new FakePort()
+      const client = new RuntimeClient(first, {
+        clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+      })
+      const staleDelivery = first.onmessage!
+      first.deliver(navigationRequestFixture({ requestId: 'nav-old' }))
+      expect(vi.getTimerCount()).toBe(1)
+
+      const second = new FakePort()
+      client.replacePort(second)
+      staleDelivery({ data: navigationRequestFixture({ requestId: 'nav-stale' }) } as MessageEvent)
+      expect(vi.getTimerCount()).toBe(0)
+      const afterReplacement = vi.fn()
+      const unsubscribe = client.subscribeHostNavigation(afterReplacement)
+      expect(afterReplacement).not.toHaveBeenCalled()
+      unsubscribe()
+
+      second.deliver(navigationRequestFixture({ requestId: 'nav-before-dispose' }))
+      expect(vi.getTimerCount()).toBe(1)
+      client.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+      const afterDispose = vi.fn()
+      client.subscribeHostNavigation(afterDispose)
+
+      expect(afterDispose).not.toHaveBeenCalled()
+      expect(first.onmessage).toBeNull()
+      expect(second.onmessage).toBeNull()
+      expect(first.closed).toBe(true)
+      expect(second.closed).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('sends the route identity in every hello and leaves background routes anonymous', () => {
