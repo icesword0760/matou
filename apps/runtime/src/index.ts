@@ -18,6 +18,8 @@ import {
   controlEndpointForPlatform
 } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
+import { ForkBatchCoordinator } from './control/fork-batch-coordinator'
+import { ProviderReadyRegistry } from './control/provider-ready-registry'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
@@ -111,6 +113,7 @@ interface WritableRuntimeState extends RuntimeStateBase {
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
   forkCoordinator: ForkOperationCoordinator
+  forkBatchCoordinator: ForkBatchCoordinator
   recoveryCoordinator: RuntimeRecoveryCoordinator
 }
 
@@ -288,6 +291,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionCanvas = new SessionCanvasService(database, transactions)
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
+  const providerReady = new ProviderReadyRegistry()
   const hostControl = new HostControlServer({
     socketPath: controlEndpoint,
     tokenService: controlTokens,
@@ -371,6 +375,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     onIdentityRecorded: ({
       sessionId, runId, providerSessionId, eventName, forkAuthority
     }) => {
+      providerReady.record(sessionId, runId)
       sessionHuds.markResumable(sessionId)
       const now = Date.now()
       try {
@@ -458,6 +463,16 @@ async function initializeRuntime(): Promise<RuntimeState> {
       for (const server of servers) server.flushSemanticEvents()
     }
   })
+  const forkBatchCoordinator = new ForkBatchCoordinator({
+    createChild: (command, input) => forkWorkflow.createForkChild(command, input),
+    startSession: async (sessionId) => {
+      const descriptor = forkExecutionDescriptor(database, sessionId)
+      if (!descriptor) throw new Error(`会话 ${sessionId} 尚未准备完成`)
+      await backgroundServer.startOrResumeSession(descriptor)
+    },
+    waitUntilReady: (sessionId) => providerReady.wait(sessionId, 60_000),
+    sendPrompt: (sessionId, prompt) => controlBackend.sendText(sessionId, prompt, true)
+  })
   forkCoordinator = new ForkOperationCoordinator(
     new SessionForkIntentRepository(database),
     {
@@ -518,6 +533,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     hostControl,
     providerHooks,
     forkCoordinator,
+    forkBatchCoordinator,
     recoveryCoordinator,
     providerConfigs
   }
