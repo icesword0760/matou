@@ -15,6 +15,7 @@ import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { ForkBatchCoordinator } from './fork-batch-coordinator'
 import { HostActionConfirmationService } from './host-action-confirmation-service'
 import { HostActionTargetResolver } from './host-action-target-resolver'
+import { HostControlClient, HostControlClientError } from './host-control-client'
 import {
   CapabilityTokenService,
   HostControlServer,
@@ -181,7 +182,17 @@ describe('HostControlServer', () => {
         },
         field: 'canvas'
       },
-      { label: 'extra field', params: { ...valid, internalOverride: true }, field: 'internalOverride' }
+      { label: 'extra field', params: { ...valid, internalOverride: true }, field: 'internalOverride' },
+      {
+        label: 'matching inner method',
+        params: { ...valid, method: 'structure.create.session' },
+        field: 'method'
+      },
+      {
+        label: 'different inner method',
+        params: { ...valid, method: 'structure.remove.commit' },
+        field: 'method'
+      }
     ]
 
     try {
@@ -206,7 +217,7 @@ describe('HostControlServer', () => {
   })
 
   it('preserves sorted safe ambiguity candidates from the real resolver through the socket frame', async () => {
-    const fixture = await realActionFacadeFixture(root, true)
+    const fixture = await realActionFacadeFixture(root, true, 6)
     backend.executeHostAction.mockImplementation((method, caller, params) =>
       fixture.facade.execute(method, caller, params)
     )
@@ -253,9 +264,109 @@ describe('HostControlServer', () => {
         expect(candidate).not.toHaveProperty('displayPath')
         expect(candidate).not.toHaveProperty('sessionId')
       }
+
+      const client = new HostControlClient({ endpoint: socketPath, token, timeoutMs: 5_000 })
+      let clientError: HostControlClientError | undefined
+      try {
+        await client.request('structure.remove.preview', {
+          target: { kind: 'ref', ref: 'legacy:duplicate', projectionRevision },
+          scope: 'node'
+        })
+      } catch (caught) {
+        expect(caught).toBeInstanceOf(HostControlClientError)
+        clientError = caught as HostControlClientError
+      }
+      expect(clientError).toMatchObject({
+        code: 'AMBIGUOUS_TARGET',
+        details: {
+          candidates: fixture.expectedHumanPaths.map((humanPath) => ({ humanPath }))
+        }
+      })
     } finally {
       fixture.database.close()
     }
+  })
+
+  it('fails closed on mixed invalid candidates and enforces the 4096-byte path limit', async () => {
+    const token = tokenService.issue(
+      'run-ambiguity-details', ['structure.create.task'], Date.now() + 5_000
+    )
+    const requestAction = (requestId: string) => request(socketPath, controlRequest(
+      requestId,
+      token,
+      'structure.create.task',
+      { workspace: { kind: 'current', entity: 'workspace' }, submissionKey: requestId }
+    ))
+    const atLimit = 'v'.repeat(4_096)
+
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      { candidates: [{ displayPath: atLimit }] }
+    ))
+    const valid = await requestAction('candidate-at-limit')
+    expect(valid).toMatchObject({
+      ok: false,
+      error: { details: { candidates: [{ humanPath: atLimit }] } }
+    })
+
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      {
+        candidates: [
+          { displayPath: 'Workspace / Valid' },
+          { displayPath: 42, internalPath: { sessionId: 'secret' } },
+          { displayPath: 'Workspace / Also valid' }
+        ]
+      }
+    ))
+    const mixed = await requestAction('candidate-mixed-invalid')
+    expect(mixed).toMatchObject({ ok: false, error: { code: 'AMBIGUOUS_TARGET' } })
+    expect(Object.keys(mixed.error as object)).toEqual(['code', 'message'])
+
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      { candidates: [{ displayPath: 'x'.repeat(4_097) }] }
+    ))
+    const tooLong = await requestAction('candidate-over-limit')
+    expect(tooLong).toMatchObject({ ok: false, error: { code: 'AMBIGUOUS_TARGET' } })
+    expect(Object.keys(tooLong.error as object)).toEqual(['code', 'message'])
+  })
+
+  it('returns a deterministic framed fault when complete ambiguity details exceed the frame limit', async () => {
+    await server.stop()
+    server = new HostControlServer({ socketPath, tokenService, backend, maxFrameBytes: 512 })
+    await server.start()
+    const token = tokenService.issue(
+      'run-oversized-ambiguity', ['structure.create.task'], Date.now() + 5_000
+    )
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      {
+        candidates: Array.from({ length: 6 }, (_, index) => ({
+          displayPath: `${index + 1}-${'candidate'.repeat(40)}`
+        }))
+      }
+    ))
+
+    const response = await request(socketPath, controlRequest(
+      'oversized-ambiguity',
+      token,
+      'structure.create.task',
+      { workspace: { kind: 'current', entity: 'workspace' }, submissionKey: 'oversized' }
+    ))
+    expect(response).toEqual({
+      version: 1,
+      requestId: 'oversized-ambiguity',
+      ok: false,
+      error: {
+        code: 'AMBIGUOUS_TARGET',
+        message: 'ambiguity candidates exceed control frame size; refine the target filter'
+      }
+    })
   })
 
   it('reports an uninstalled action executor as Runtime not ready', async () => {
@@ -585,7 +696,8 @@ class AmbiguousTargetProjector extends HostTopologyProjector {
 
 async function realActionFacadeFixture(
   dataRoot: string,
-  ambiguous = false
+  ambiguous = false,
+  candidateCount = 2
 ): Promise<{
   database: RuntimeDatabase
   facade: RuntimeHostActionFacade
@@ -602,16 +714,25 @@ async function realActionFacadeFixture(
   const hierarchy = new HierarchyApplicationService(database, transactions)
   const sessionCanvas = new SessionCanvasService(database, transactions)
   const firstRoot = join(dataRoot, `workspace-first-${ambiguous ? 'ambiguous' : 'validation'}`)
-  const secondRoot = join(dataRoot, `workspace-second-${ambiguous ? 'ambiguous' : 'validation'}`)
-  await Promise.all([mkdir(firstRoot), mkdir(secondRoot)])
+  const otherRoots = Array.from({ length: candidateCount - 1 }, (_, index) => join(
+    dataRoot,
+    `workspace-${index + 2}-${ambiguous ? 'ambiguous' : 'validation'}`
+  ))
+  await Promise.all([mkdir(firstRoot), ...otherRoots.map((path) => mkdir(path))])
   const first = hierarchy.bootstrapWindow(command('action-bootstrap'), {
     windowId: 'window-1', defaultRootDirectory: firstRoot,
     defaultName: 'First workspace', now: 1
   })
-  hierarchy.createWorkspace(command('action-second-window'), {
-    windowId: 'window-2', name: 'Second workspace', rootDirectory: secondRoot,
-    navigation: 'activate', now: 2
-  })
+  for (const [index, rootDirectory] of otherRoots.entries()) {
+    const ordinal = index + 2
+    hierarchy.createWorkspace(command(`action-window-${ordinal}`), {
+      windowId: `window-${ordinal}`,
+      name: `Workspace ${ordinal}`,
+      rootDirectory,
+      navigation: 'activate',
+      now: ordinal
+    })
+  }
   const caller = { runId: 'run-real-facade', sessionId: first.session!.id }
   const projected = new HostTopologyProjector(database).list(caller, 'all')
   const expectedHumanPaths = projected.map((target) => [

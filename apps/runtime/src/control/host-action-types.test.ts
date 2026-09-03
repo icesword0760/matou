@@ -130,6 +130,37 @@ describe('parseHostActionRequest', () => {
     })).toThrow()
   })
 
+  it.each([
+    'structure.create.session',
+    'structure.remove.preview'
+  ] as const)('rejects params.method even when it equals or differs from outer %s', (outerMethod) => {
+    const params = outerMethod === 'structure.create.session'
+      ? {
+          canvas: { kind: 'current', entity: 'canvas' },
+          profile: 'shell',
+          submissionKey: 'method-injection'
+        }
+      : {
+          target: { kind: 'current', entity: 'session' },
+          scope: 'node'
+        }
+
+    expect(() => parseHostActionRequest(outerMethod, {
+      ...params,
+      method: outerMethod
+    })).toThrow(expect.objectContaining({ issues: expect.arrayContaining([
+      expect.objectContaining({ code: 'unrecognized_keys', keys: ['method'] })
+    ]) }))
+    expect(() => parseHostActionRequest(outerMethod, {
+      ...params,
+      method: outerMethod === 'structure.create.session'
+        ? 'structure.remove.commit'
+        : 'structure.create.workspace'
+    })).toThrow(expect.objectContaining({ issues: expect.arrayContaining([
+      expect.objectContaining({ code: 'unrecognized_keys', keys: ['method'] })
+    ]) }))
+  })
+
   it('only accepts unique retry keys that belong to the submitted batch', () => {
     const request = {
       source: { kind: 'self' as const }, batchKey: 'retry-invariants',

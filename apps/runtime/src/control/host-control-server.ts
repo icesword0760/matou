@@ -395,7 +395,10 @@ export class HostControlServer {
 
   #write(socket: Socket, value: unknown): Promise<void> {
     if (socket.destroyed) return Promise.resolve()
-    const body = Buffer.from(JSON.stringify(value))
+    let body = Buffer.from(JSON.stringify(value))
+    if (body.byteLength > this.#maxFrameBytes) {
+      body = Buffer.from(JSON.stringify(responseSizeFault(value)))
+    }
     const prefix = Buffer.alloc(4)
     prefix.writeUInt32BE(body.byteLength)
     return new Promise<void>((resolveWrite) => {
@@ -515,6 +518,23 @@ function errorResponse(
     error: { code, message, ...(details === undefined ? {} : { details }) }
   }
 }
+function responseSizeFault(value: unknown): unknown {
+  const response = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as { requestId?: unknown; error?: unknown }
+    : {}
+  const requestId = typeof response.requestId === 'string' ? response.requestId : 'unknown'
+  const error = typeof response.error === 'object' && response.error !== null && !Array.isArray(response.error)
+    ? response.error as { code?: unknown }
+    : {}
+  if (error.code === 'AMBIGUOUS_TARGET') {
+    return errorResponse(
+      requestId,
+      'AMBIGUOUS_TARGET',
+      'ambiguity candidates exceed control frame size; refine the target filter'
+    )
+  }
+  return errorResponse(requestId, 'INTERNAL_ERROR', 'control response exceeds size limit')
+}
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new ControlFault('INVALID_REQUEST', 'params must be an object')
@@ -597,16 +617,17 @@ function controlErrorDetails(error: Error & { code: ControlErrorCode }): HostCon
   if (error.code !== 'AMBIGUOUS_TARGET') return undefined
   const rawCandidates = (error as Error & { candidates?: unknown }).candidates
   if (!Array.isArray(rawCandidates)) return undefined
-  const candidates = rawCandidates.slice(0, 5).flatMap((candidate) => {
-    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return []
+  const candidates: Array<{ humanPath: string }> = []
+  for (const candidate of rawCandidates) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return undefined
     const humanPath = (candidate as { displayPath?: unknown }).displayPath
     if (
       typeof humanPath !== 'string' ||
       !humanPath.trim() ||
       Buffer.byteLength(humanPath, 'utf8') > 4_096
-    ) return []
-    return [{ humanPath }]
-  })
+    ) return undefined
+    candidates.push({ humanPath })
+  }
   return candidates.length > 0 ? { candidates } : undefined
 }
 const CONTROL_ERROR_CODES = [

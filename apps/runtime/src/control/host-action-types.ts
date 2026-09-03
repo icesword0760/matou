@@ -219,5 +219,15 @@ export function parseHostActionRequest(method: HostActionMethod, params: unknown
   if (typeof params !== 'object' || params === null || Array.isArray(params)) {
     throw new z.ZodError([{ code: 'invalid_type', expected: 'object', input: params, path: [], message: 'params must be an object' }])
   }
-  return hostActionRequestSchema.parse({ ...params, method }) as HostActionRequest
+  const input = params as Record<string, unknown>
+  if (Object.prototype.hasOwnProperty.call(input, 'method')) {
+    throw new z.ZodError([{
+      code: 'unrecognized_keys',
+      keys: ['method'],
+      input,
+      path: [],
+      message: 'params.method is not supported'
+    }])
+  }
+  return hostActionRequestSchema.parse({ ...input, method }) as HostActionRequest
 }

@@ -193,3 +193,81 @@ Only the repository's existing Node experimental SQLite warnings appeared.
 ### Concerns
 
 No open code concern in Fix round 1 scope. The packaged-App interaction boundary still needs later end-to-end product verification and is not claimed here.
+
+---
+
+## Fix round 2 — complete ambiguity transport and authoritative action method
+
+### Status and user impact
+
+Both follow-up P2 gaps are closed:
+
+- Host Control now preserves every validated `AMBIGUOUS_TARGET` candidate in resolver order. The server and client no longer truncate after five entries; later CLI/AI formatting can decide how to ask for a narrower target when more than five choices exist.
+- Candidate transport remains limited to `humanPath`. Stable refs, result-path objects, session IDs, and undeclared detail fields do not cross the protocol boundary.
+- Candidate validation is all-or-nothing. A mixed malformed candidate list or a path above `4096` UTF-8 bytes yields no partial details, avoiding a misleading subset. A path exactly at the byte limit remains valid.
+- The existing frame-size limit now applies to outgoing responses as well as incoming requests. When a complete ambiguity payload exceeds it, the server sends a small framed `AMBIGUOUS_TARGET` fault with an explicit refine-filter message instead of truncating candidates. Other oversized responses receive a framed `INTERNAL_ERROR` size fault.
+- `params.method` is always rejected as `INVALID_REQUEST`, whether it matches or conflicts with the outer framed method. The authenticated outer request method remains the only dispatch authority, and the correction message names `method`.
+
+### TDD evidence
+
+The new tests were written first. Initial command:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run --testTimeout=30000 \
+  src/control/host-action-types.test.ts \
+  src/control/host-control-server.test.ts \
+  src/control/host-control-client.test.ts
+```
+
+Observed RED: exit code `1`; `9` expected failures and `59` passes. Evidence covered same/different inner `method` acceptance, sixth-candidate loss on both server and client, partial acceptance of malformed details, over-limit path leakage, and lack of an outgoing frame-size fault.
+
+After implementation, the same three files passed `68/68` tests. The broader Task 8 focused run was:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run --testTimeout=120000 \
+  src/control/host-action-types.test.ts \
+  src/control/host-control-server.test.ts \
+  src/control/host-control-client.test.ts \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/runtime-control-backend.test.ts \
+  src/runtime-server.test.ts
+```
+
+Observed: exit code `0`; `6` files and `219/219` tests passed.
+
+### Complete automated verification
+
+```bash
+pnpm --filter @matou/runtime test
+pnpm --filter @matou/runtime typecheck
+pnpm check:identifiers
+git diff --check
+```
+
+Observed:
+
+- complete Runtime regression: exit code `0`, with `105` files / `880` tests in the main phase, `102` RuntimeServer tests, and `9` long journal tests (`991/991` total);
+- TypeScript typecheck: exit code `0`;
+- identifier policy gate: exit code `0`;
+- diff whitespace check: exit code `0`.
+
+Only the existing Node experimental SQLite warnings appeared.
+
+### Coverage and self-review
+
+- Extended the migrated-storage, real-resolver, real-facade socket fixture to six distinct hierarchy paths, deliberately reversed at the projector boundary. Both the raw framed response and `HostControlClientError` contain all six paths in authoritative sorted order.
+- Added server and client boundary tests for malformed mixed candidate arrays, exactly `4096` bytes, and `4097` bytes. Invalid arrays are discarded as a whole rather than filtered into a misleading partial choice list.
+- Added a small-frame socket test proving oversized complete ambiguity details produce one valid, deterministic protocol frame with no candidate truncation.
+- Added parser and real-facade framed tests for matching and conflicting inner `method` fields. Both name `method` and return `INVALID_REQUEST`.
+- Re-read the response-size fallback and post-response flow: the fallback is written through the same length-prefixed protocol, while queued post-response effects still run after the write.
+- No scope set, token lifecycle, startup order, terminal dispatch, model selection, or permission persistence code changed.
+
+### Code / automation / real App boundary
+
+- **Code:** full candidate transport, strict candidate parsing, outgoing response bounds, and outer-method authority are implemented.
+- **Automated verification:** real socket/client round trips, parser/facade boundary tests, full Runtime regression, typecheck, identifier, and diff gates passed.
+- **Real App:** no packaged Matou App was launched in this round; presentation rules for more than five choices remain assigned to later CLI/AI formatting work.
+
+### Concerns
+
+No open code concern in Fix round 2 scope. Packaged-App choice presentation remains a later end-to-end verification item and is not claimed here.

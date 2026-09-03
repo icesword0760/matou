@@ -50,6 +50,10 @@ describe('HostControlClient', () => {
   })
 
   it('preserves only the documented ambiguity candidate fields', async () => {
+    const paths = Array.from(
+      { length: 6 },
+      (_, index) => `Workspace / Task / Canvas / Candidate ${index + 1}`
+    )
     const { endpoint } = await fixtureServer((request) => ({
       version: 1, requestId: request.requestId, ok: false,
       error: {
@@ -57,8 +61,7 @@ describe('HostControlClient', () => {
         message: 'choose one',
         details: {
           candidates: [
-            { humanPath: 'Workspace / Task / Canvas / One', internal: true },
-            { humanPath: 'Workspace / Task / Canvas / Two' }
+            ...paths.map((humanPath) => ({ humanPath, internal: true }))
           ],
           internalTrace: 'hidden'
         }
@@ -74,8 +77,7 @@ describe('HostControlClient', () => {
         code: 'AMBIGUOUS_TARGET',
         details: {
           candidates: [
-            { humanPath: 'Workspace / Task / Canvas / One' },
-            { humanPath: 'Workspace / Task / Canvas / Two' }
+            ...paths.map((humanPath) => ({ humanPath }))
           ]
         }
       })
@@ -85,7 +87,66 @@ describe('HostControlClient', () => {
     }
     throw new Error('expected Host Control client fault')
   })
+
+  it('rejects mixed invalid ambiguity details instead of keeping a partial candidate list', async () => {
+    const { endpoint } = await fixtureServer((request) => ({
+      version: 1, requestId: request.requestId, ok: false,
+      error: {
+        code: 'AMBIGUOUS_TARGET', message: 'choose one',
+        details: {
+          candidates: [
+            { humanPath: 'Workspace / Valid' },
+            { humanPath: 42 },
+            { humanPath: 'Workspace / Also valid' }
+          ]
+        }
+      }
+    }))
+
+    const error = await captureClientError(new HostControlClient({
+      endpoint, token: 'token', timeoutMs: 1000
+    }))
+    expect(error).not.toHaveProperty('details')
+  })
+
+  it('accepts a 4096-byte candidate path and rejects a longer one', async () => {
+    const valid = 'v'.repeat(4_096)
+    const overLimit = 'x'.repeat(4_097)
+    const validServer = await fixtureServer((request) => ({
+      version: 1, requestId: request.requestId, ok: false,
+      error: {
+        code: 'AMBIGUOUS_TARGET', message: 'choose one',
+        details: { candidates: [{ humanPath: valid }] }
+      }
+    }))
+    const invalidServer = await fixtureServer((request) => ({
+      version: 1, requestId: request.requestId, ok: false,
+      error: {
+        code: 'AMBIGUOUS_TARGET', message: 'choose one',
+        details: { candidates: [{ humanPath: overLimit }] }
+      }
+    }))
+
+    const validError = await captureClientError(new HostControlClient({
+      endpoint: validServer.endpoint, token: 'token', timeoutMs: 1000
+    }))
+    const invalidError = await captureClientError(new HostControlClient({
+      endpoint: invalidServer.endpoint, token: 'token', timeoutMs: 1000
+    }))
+    expect(validError.details?.candidates).toEqual([{ humanPath: valid }])
+    expect(invalidError).not.toHaveProperty('details')
+  })
 })
+
+async function captureClientError(client: HostControlClient): Promise<HostControlClientError> {
+  try {
+    await client.request('host.list', {})
+  } catch (error) {
+    expect(error).toBeInstanceOf(HostControlClientError)
+    return error as HostControlClientError
+  }
+  throw new Error('expected Host Control client fault')
+}
 
 async function fixtureServer(
   respond: (request: Record<string, any>) => Record<string, any>,

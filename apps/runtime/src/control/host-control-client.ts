@@ -19,7 +19,7 @@ interface ControlResponse {
 
 export class HostControlClientError extends Error {
   readonly code: string
-  readonly details?: HostControlErrorDetails
+  declare readonly details?: HostControlErrorDetails
 
   constructor(code: string, message: string, details?: HostControlErrorDetails) {
     super(message)
@@ -79,16 +79,17 @@ function parseErrorDetails(code: string | undefined, value: unknown): HostContro
   }
   const rawCandidates = (value as { candidates?: unknown }).candidates
   if (!Array.isArray(rawCandidates)) return undefined
-  const candidates = rawCandidates.slice(0, 5).flatMap((candidate) => {
-    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return []
+  const candidates: Array<{ humanPath: string }> = []
+  for (const candidate of rawCandidates) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return undefined
     const humanPath = (candidate as { humanPath?: unknown }).humanPath
     if (
       typeof humanPath !== 'string' ||
       !humanPath.trim() ||
       Buffer.byteLength(humanPath, 'utf8') > 4_096
-    ) return []
-    return [{ humanPath }]
-  })
+    ) return undefined
+    candidates.push({ humanPath })
+  }
   return candidates.length > 0 ? { candidates } : undefined
 }
 
