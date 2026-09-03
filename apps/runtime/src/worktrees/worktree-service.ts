@@ -131,8 +131,9 @@ export class WorktreeService {
       input.beforeExternalSideEffect?.()
       const repository = (await exec('git', ['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).stdout.trim()
       input.beforeExternalSideEffect?.()
-      const baseRevision = (await exec('git', ['-C', repository, 'rev-parse', input.baseRef])).stdout.trim()
+      const baseRevision = await resolveCommit(repository, worktree.baseRevision ?? input.baseRef)
       input.beforeExternalSideEffect?.()
+      let createdWorktreePath = false
       if (!(await pathIsGitWorktree(input.path))) {
         // `git worktree add -b` creates the branch before it creates the target
         // directory. A permission or disk failure can therefore leave the ref
@@ -146,12 +147,46 @@ export class WorktreeService {
             `Worktree ${input.id} existing branch is not reserved by this Worktree`
           )
         }
+        if (branchExists) {
+          input.beforeExternalSideEffect?.()
+          const branchRevision = await resolveCommit(
+            repository, `refs/heads/${input.branch}`
+          )
+          input.beforeExternalSideEffect?.()
+          if (branchRevision !== baseRevision) {
+            throw revisionMismatchError(input.id, input.branch, branchRevision, baseRevision)
+          }
+        }
         const args = branchExists
           ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
           : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
         input.beforeExternalSideEffect?.()
         await exec('git', args)
+        createdWorktreePath = true
         input.beforeExternalSideEffect?.()
+      }
+      input.beforeExternalSideEffect?.()
+      let worktreeRevision: string
+      try {
+        worktreeRevision = await resolveCommit(input.path, 'HEAD')
+      } catch (error) {
+        const verificationError = new Error(
+          `Worktree ${input.id} did not expose its frozen revision ${baseRevision}: ${errorMessage(error)}`
+        )
+        if (createdWorktreePath) {
+          await cleanupCreatedWorktree(repository, input.path, verificationError)
+        }
+        throw verificationError
+      }
+      input.beforeExternalSideEffect?.()
+      if (worktreeRevision !== baseRevision) {
+        const verificationError = revisionMismatchError(
+          input.id, input.branch, worktreeRevision, baseRevision
+        )
+        if (createdWorktreePath) {
+          await cleanupCreatedWorktree(repository, input.path, verificationError)
+        }
+        throw verificationError
       }
       await input.onCheckpoint?.('branch-created')
       await input.onCheckpoint?.('path-created')
@@ -291,7 +326,7 @@ export class WorktreeService {
         emitWorktree(emit, command.commandId, 'worktree.removal-started', removing, undefined, now)
         return null
       })
-      await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'remove', worktree.path])
+      await removeGitWorktree(worktree.repositoryRoot, worktree.path)
       return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
     } catch (error) {
       this.#transactions.execute(derivedCommand(command, 'remove-failed'), ({ tx, emit }) => {
@@ -506,6 +541,51 @@ async function localBranchExists(repository: string, branch: string): Promise<bo
       return false
     }
     throw error
+  }
+}
+
+async function resolveCommit(repository: string, ref: string): Promise<string> {
+  return (await exec('git', [
+    '-C', repository, 'rev-parse', '--verify', `${ref}^{commit}`
+  ])).stdout.trim()
+}
+
+function revisionMismatchError(
+  worktreeId: string,
+  branch: string,
+  actualRevision: string,
+  frozenRevision: string
+): Error {
+  return new Error(
+    `Worktree ${worktreeId} branch ${branch} resolved to ${actualRevision}, not frozen revision ${frozenRevision}`
+  )
+}
+
+async function removeGitWorktree(
+  repository: string,
+  path: string,
+  force = false
+): Promise<void> {
+  await exec('git', [
+    '-C', repository, 'worktree', 'remove', ...(force ? ['--force'] : []), path
+  ])
+}
+
+async function cleanupCreatedWorktree(
+  repository: string,
+  path: string,
+  verificationError: Error
+): Promise<void> {
+  try {
+    // This path was created by the current invocation and setup has not started.
+    // Use Git's Worktree removal instead of deleting the directory directly so
+    // its administrative metadata is cleaned atomically with the checkout.
+    await removeGitWorktree(repository, path, true)
+  } catch (cleanupError) {
+    throw new Error(
+      `${verificationError.message}; cleanup failed: ${errorMessage(cleanupError)}`,
+      { cause: verificationError }
+    )
   }
 }
 

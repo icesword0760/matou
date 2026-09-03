@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -145,6 +145,65 @@ describe('WorktreeService', () => {
       branch: 'external-competition', baseRef: 'HEAD', setupPolicy: [], now: 20
     })).rejects.toThrow('existing branch is not reserved by this Worktree')
     await expect(realpath(path)).rejects.toThrow()
+  })
+
+  it('removes a just-created worktree when its reserved branch moves before revision verification', async () => {
+    const path = join(root, 'worktrees', 'moved-after-add')
+    const setupMarker = join(root, 'setup-must-not-start')
+    const branch = 'moved-after-add'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await writeFile(join(repositoryRoot, 'README.md'), 'external revision\n')
+    await exec('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await exec('git', ['-C', repositoryRoot, 'commit', '-m', 'external revision'])
+    const externalRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await exec('git', ['-C', repositoryRoot, 'reset', '--hard', frozenRevision])
+    seedCreatingWorktreeClaim({
+      id: 'worktree-moved-after-add',
+      executionContextId: 'context-moved-after-add',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    let externalEffects = 0
+    const onSetupStarted = vi.fn()
+
+    await expect(service.create(command('moved-after-add'), {
+      id: 'worktree-moved-after-add',
+      executionContextId: 'context-moved-after-add',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision,
+      setupPolicy: [{
+        idempotencyKey: 'must-not-start', command: '/usr/bin/touch', args: [setupMarker]
+      }],
+      onSetupStarted,
+      now: 20,
+      beforeExternalSideEffect: () => {
+        externalEffects += 1
+        if (externalEffects === 5) {
+          // This callback runs immediately after `git worktree add`.
+          execFileSync('git', [
+            '-C', repositoryRoot, 'update-ref', `refs/heads/${branch}`, externalRevision
+          ])
+        }
+      }
+    })).rejects.toThrow('frozen revision')
+
+    expect(database.get(
+      'SELECT state, base_revision FROM worktrees WHERE id = ?',
+      'worktree-moved-after-add'
+    )).toEqual({ state: 'failed', base_revision: null })
+    expect(onSetupStarted).not.toHaveBeenCalled()
+    await expect(realpath(setupMarker)).rejects.toThrow()
+    await expect(realpath(path)).rejects.toThrow()
+    expect((await exec('git', ['-C', repositoryRoot, 'worktree', 'list', '--porcelain']))
+      .stdout).not.toContain(path)
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
   })
 
   it('checkpoints idempotent setup and skips a completed step after restart', async () => {

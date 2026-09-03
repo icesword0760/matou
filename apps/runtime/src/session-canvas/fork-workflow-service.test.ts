@@ -11,6 +11,7 @@ import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { WorktreeService } from '../worktrees/worktree-service'
 import {
   ForkWorkflowError,
   ForkWorkflowService,
@@ -521,6 +522,81 @@ describe('ForkWorkflowService', () => {
     const forkRevision = (await exec('git', ['-C', result.worktree!.path, 'rev-parse', 'HEAD']))
       .stdout.trim()
     expect(forkRevision).toBe(acceptedRevision)
+  })
+
+  it('fails a durable Fork when its reserved branch moves after acceptance', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-branch-moved-after-acceptance')
+    seedReadyGitState(source.executionContextId)
+    const branch = 'feature/moved-after-acceptance'
+    const frozenRevision = (await exec(
+      'git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+
+    const accepted = await service.createForkChild(command('branch-moved-accept'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '接受后分支竞争', environment: { mode: 'new-worktree', branch },
+      submissionKey: 'branch-moved-after-acceptance', now: 30
+    })
+    const claim = database.get<{
+      worktree_id: string
+      worktree_path: string
+      base_revision: string
+      execution_context_id: string
+      repository_root: string
+      workspace_id: string
+    }>(
+      `SELECT intent.worktree_id, intent.worktree_path, worktrees.base_revision,
+              worktrees.execution_context_id, worktrees.repository_root,
+              execution_contexts.workspace_id
+       FROM session_fork_intents AS intent
+       JOIN worktrees ON worktrees.id = intent.worktree_id
+       JOIN execution_contexts ON execution_contexts.id = worktrees.execution_context_id
+       WHERE intent.operation_id = ?`,
+      accepted.forkProgress!.operationId
+    )!
+    expect(claim.base_revision).toBe(frozenRevision)
+
+    await writeFile(join(workspaceRoot, 'README.md'), 'external branch revision\n')
+    await exec('git', ['-C', workspaceRoot, 'add', 'README.md'])
+    await exec('git', ['-C', workspaceRoot, 'commit', '-m', 'external branch revision'])
+    const externalRevision = (await exec(
+      'git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await exec('git', ['-C', workspaceRoot, 'branch', branch, externalRevision])
+
+    const worktrees = new WorktreeService(
+      database, new DomainTransactionManager(database), { stopRuns: async () => undefined }
+    )
+    await expect(worktrees.create(command('branch-moved-worktree-create'), {
+      id: claim.worktree_id,
+      executionContextId: claim.execution_context_id,
+      workspaceId: claim.workspace_id,
+      repositoryRoot: claim.repository_root,
+      path: claim.worktree_path,
+      branch,
+      baseRef: frozenRevision,
+      setupPolicy: [],
+      now: 31
+    })).rejects.toThrow('frozen revision')
+    expect(database.get(
+      'SELECT state, base_revision FROM worktrees WHERE id = ?', claim.worktree_id
+    )).toEqual({ state: 'failed', base_revision: frozenRevision })
+
+    const failed = await executeAccepted(
+      accepted, source.sceneId, 'branch-moved-execute', 32
+    )
+
+    expect(failed).toMatchObject({
+      forkState: 'failed', error: expect.stringContaining('frozen revision')
+    })
+    expect(database.get(
+      'SELECT state, base_revision FROM worktrees WHERE id = ?', claim.worktree_id
+    )).toEqual({ state: 'failed', base_revision: frozenRevision })
+    await expect(realpath(claim.worktree_path)).rejects.toThrow()
+    expect((await exec('git', [
+      '-C', workspaceRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
   })
 
   it('does not start external work or mutate the accepted assets with an already expired lease', async () => {
