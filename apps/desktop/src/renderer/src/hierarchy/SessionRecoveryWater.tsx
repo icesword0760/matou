@@ -17,6 +17,15 @@ const clamp = (value: number, minimum: number, maximum: number) =>
 
 const smooth = (value: number) => value * value * (3 - 2 * value)
 
+export function recoveryWaterTimeline(elapsed: number, reducedMotion: boolean) {
+  if (reducedMotion) return { rise: .5, alpha: 1 }
+  const rise = .94 * smooth(1 - Math.exp(-Math.max(0, elapsed) / 2_400))
+  return {
+    rise,
+    alpha: clamp(elapsed / 288, 0, 1)
+  }
+}
+
 export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -29,7 +38,6 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
     const surfaceState: SurfaceState = { nodes: [], velocities: [] }
     const animationOrigin = performance.now()
     let previousFrame = animationOrigin
-    let previousCycle = -1
     let cssWidth = 0
     let cssHeight = 0
     let slosh = 0
@@ -140,17 +148,10 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
       const elapsed = now - animationOrigin
       const frameScale = clamp((now - previousFrame) / 16.667, .35, 1.5)
       previousFrame = now
-      const cycleNumber = Math.floor(elapsed / 7200)
-      const cyclePosition = reducedMotion ? .5 : (elapsed % 7200) / 7200
-      if (cycleNumber !== previousCycle) {
-        previousCycle = cycleNumber
-        resetSurface()
-      }
-      const rise = smooth(clamp(cyclePosition / .9, 0, 1))
+      const timeline = recoveryWaterTimeline(elapsed, reducedMotion)
+      const rise = timeline.rise
       const surface = cssHeight * (.85 - rise * .74)
-      const fadeIn = clamp(cyclePosition / .04, 0, 1)
-      const fadeOut = clamp((1 - cyclePosition) / .075, 0, 1)
-      const alpha = reducedMotion ? 1 : Math.min(fadeIn, fadeOut)
+      const alpha = timeline.alpha
       const energy = reducedMotion ? .08 : Math.pow(1 - rise, 1.45)
       const introIntensity = reducedMotion ? 1 : 1 + (1 - smooth(clamp(elapsed / 1700, 0, 1))) * .65
       bulkPhase = elapsed * .00272 + 2.1 * (1 - Math.exp(-elapsed / 1050)) - 1.08
@@ -271,11 +272,6 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
     role="status" aria-label={`正在恢复终端：${sessionTitle}`}
     onPointerDown={(event) => event.stopPropagation()}>
     <span className="visually-hidden">正在恢复最近的终端内容与运行状态</span>
-    <div className="session-recovery-water__skeleton" aria-hidden="true">
-      <i /><i /><i /><i /><i /><i />
-    </div>
     <canvas ref={canvasRef} className="session-recovery-water__canvas" aria-hidden="true" />
-    <span className="session-recovery-water__glint is-left" aria-hidden="true" />
-    <span className="session-recovery-water__glint is-right" aria-hidden="true" />
   </div>
 }

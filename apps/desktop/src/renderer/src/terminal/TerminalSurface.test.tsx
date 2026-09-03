@@ -14,7 +14,9 @@ const state = vi.hoisted(() => ({
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
+  onRender: undefined as undefined | ((range: { start: number; end: number }) => void),
   terminalResize: vi.fn(),
+  terminalRefresh: vi.fn(),
   fit: vi.fn(),
   resizeTerminal: vi.fn(),
   resizeObserverCallback: undefined as ResizeObserverCallback | undefined,
@@ -56,8 +58,13 @@ vi.mock('@xterm/xterm', () => ({
     focus = state.focus
     write = state.terminalWrite
     resize = state.terminalResize
+    refresh = state.terminalRefresh
     onData = vi.fn((listener: (data: string) => void) => {
       state.onData = listener
+      return { dispose: vi.fn() }
+    })
+    onRender = vi.fn((listener: (range: { start: number; end: number }) => void) => {
+      state.onRender = listener
       return { dispose: vi.fn() }
     })
     reset = state.terminalReset
@@ -124,11 +131,13 @@ describe('TerminalSurface focus continuity', () => {
     state.searchResultsListener = undefined
     state.onMessage = undefined
     state.onData = undefined
+    state.onRender = undefined
     state.sendTerminalInput.mockClear()
     state.attachTerminal.mockClear()
     state.updateTerminalProfile.mockClear()
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
+    state.terminalRefresh.mockClear()
     state.fit.mockClear()
     state.resizeTerminal.mockClear()
     state.resizeObserverCallback = undefined
@@ -187,6 +196,9 @@ describe('TerminalSurface focus continuity', () => {
       type: 'terminal.data', sessionId: 'session-1', sequence: 1,
       data: new TextEncoder().encode('restored terminal frame')
     })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    state.onRender?.({ start: 0, end: 1 })
     expect(onVisualReady).toHaveBeenCalledTimes(1)
 
     state.onMessage?.({

@@ -434,6 +434,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let visualCatchupRequested = false
     let surfaceDisposed = false
     let visualReadyReported = false
+    let terminalContentApplied = false
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
     const reportVisualReady = () => {
@@ -443,7 +444,14 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         if (!surfaceDisposed) onVisualReadyRef.current()
       })
     }
-    if (reusedTerminalModel && model.lastAppliedSequence > 0) reportVisualReady()
+    const rendered = terminal.onRender(() => {
+      if (terminalContentApplied) reportVisualReady()
+    })
+    const awaitRenderedTerminalFrame = () => {
+      terminalContentApplied = true
+      terminal.refresh(0, Math.max(0, terminal.rows - 1))
+    }
+    if (reusedTerminalModel && model.lastAppliedSequence > 0) awaitRenderedTerminalFrame()
     const publishE2eRows = () => {
       e2eRowsTimer = undefined
       if (!e2eRows?.classList.contains('xterm-rows')) return
@@ -499,7 +507,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         model.lastAppliedSequence = Math.max(model.lastAppliedSequence, sequence)
         client.acknowledgeTerminal(sessionId, sequence)
         if (surfaceDisposed) return
-        reportVisualReady()
+        awaitRenderedTerminalFrame()
         scheduleE2eRows()
         scheduleCheckpoint()
         if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
@@ -596,7 +604,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           ? message.data
           : new Uint8Array(message.data)
         terminal.write(bytes, () => {
-          reportVisualReady()
+          awaitRenderedTerminalFrame()
           scheduleE2eRows()
         })
       } else if (message.type === 'terminal.exited') {
@@ -621,7 +629,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             ? '\r\n[部分终端历史损坏，已继续显示实时输出]\r\n'
             : '\r\n[较早的终端历史已清理，已继续显示实时输出]\r\n',
           () => {
-            reportVisualReady()
+            awaitRenderedTerminalFrame()
             scheduleE2eRows()
           }
         )
@@ -646,7 +654,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             ? message.checkpoint.snapshot
             : new Uint8Array(message.checkpoint.snapshot)
           terminal.write(snapshot, () => {
-            reportVisualReady()
+            awaitRenderedTerminalFrame()
             scheduleE2eRows()
           })
         }
@@ -874,6 +882,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       resizeCoalescer.flush()
       resizeCoalescer.dispose()
       input.dispose()
+      rendered.dispose()
       window.removeEventListener('matou:forward-terminal-tab', forwardTab)
       searchResults.dispose()
       for (const handler of oscHandlers) handler.dispose()

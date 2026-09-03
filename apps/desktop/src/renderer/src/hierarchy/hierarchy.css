@@ -250,17 +250,6 @@ button { -webkit-app-region: no-drag; }
 .terminal-pane > .session-recovery-water { top: 32px; display: block; padding: 0; overflow: hidden; color: inherit; background: radial-gradient(circle at 50% 35%,rgba(71,147,222,.05),transparent 48%),var(--terminal-bg); backdrop-filter: none; }
 .session-recovery-water::after { position: absolute; z-index: 4; content: ''; inset: 0; box-shadow: inset 0 0 0 1px rgba(181,216,255,.055),inset 0 -28px 48px rgba(19,92,159,.055); pointer-events: none; }
 .session-recovery-water__canvas { position: absolute; z-index: 2; display: block; width: 100%; height: 100%; inset: 0; }
-.session-recovery-water__skeleton { position: absolute; z-index: 1; top: 24px; left: 20px; display: grid; width: 58%; gap: 12px; opacity: .3; }
-.session-recovery-water__skeleton i { display: block; height: 2px; border-radius: 2px; background: rgba(171,190,211,.12); }
-.session-recovery-water__skeleton i:nth-child(1) { width: 86%; }
-.session-recovery-water__skeleton i:nth-child(2) { width: 58%; }
-.session-recovery-water__skeleton i:nth-child(3) { width: 72%; }
-.session-recovery-water__skeleton i:nth-child(4) { width: 42%; margin-top: 10px; }
-.session-recovery-water__skeleton i:nth-child(5) { width: 91%; }
-.session-recovery-water__skeleton i:nth-child(6) { width: 64%; }
-.session-recovery-water__glint { position: absolute; z-index: 3; top: 9%; bottom: 8%; width: 1px; background: linear-gradient(transparent,rgba(151,207,255,.18),transparent); pointer-events: none; }
-.session-recovery-water__glint.is-left { left: 7px; }
-.session-recovery-water__glint.is-right { right: 7px; }
 .session-recovery-overlay__content { display: flex; width: min(360px,calc(100% - 24px)); box-sizing: border-box; flex-direction: column; align-items: center; gap: 9px; padding: 22px; border: 1px solid rgba(125,161,209,.3); border-radius: 12px; background: rgba(24,31,41,.96); box-shadow: 0 16px 44px rgba(0,0,0,.34); text-align: center; }
 .session-recovery-overlay__content p { margin: 0; color: #93a2b7; font-size: 11px; line-height: 1.5; }
 .session-recovery-overlay__spinner { width: 18px; height: 18px; box-sizing: border-box; border: 2px solid rgba(127,169,226,.25); border-top-color: #79b8ff; border-radius: 50%; animation: environment-spin .8s linear infinite; }
@@ -289,8 +278,6 @@ button { -webkit-app-region: no-drag; }
 .hierarchy-shell[data-theme="light"] .environment-card-overlay__actions button { border-color: #c5d1df; color: #29364a; background: #f0f4f8; }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay { color: #29364a; background: rgba(244,247,251,.92); }
 .hierarchy-shell[data-theme="light"] .session-recovery-water { background: radial-gradient(circle at 50% 35%,rgba(86,153,219,.055),transparent 48%),#fafcff; }
-.hierarchy-shell[data-theme="light"] .session-recovery-water__skeleton i { background: rgba(80,110,139,.16); }
-.hierarchy-shell[data-theme="light"] .session-recovery-water__glint { background: linear-gradient(transparent,rgba(77,139,196,.24),transparent); }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay__content { border-color: #c8d4e3; background: rgba(255,255,255,.98); box-shadow: 0 16px 44px rgba(31,45,61,.14); }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay__content p { color: #617086; }
 .hierarchy-shell[data-theme="light"] .session-recovery-overlay.state-failed { background: rgba(255,246,245,.94); }
