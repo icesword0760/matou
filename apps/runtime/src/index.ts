@@ -500,6 +500,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
     forkBatches: forkBatchCoordinator,
     disposeSessions: (sessionIds) => backgroundServer.disposeSessions(sessionIds)
   })
+  // Do not accept Host Control requests until the complete facade owns every action.
+  controlBackend.setHostActionExecutor((method, caller, params) =>
+    hostActions.execute(method, caller, params)
+  )
   forkCoordinator = new ForkOperationCoordinator(
     new SessionForkIntentRepository(database),
     {
@@ -546,8 +550,6 @@ async function initializeRuntime(): Promise<RuntimeState> {
       ...(e2eForkCrashObserver ? { observer: e2eForkCrashObserver } : {})
     }
   )
-  // Keep this preflight boundary before accepting Host Control requests so the
-  // backend action executor can be installed only after the facade is complete.
   await hostControl.start()
   lifecycleCoordinator.assertStartupActive()
   forkCoordinator.start()

@@ -16,7 +16,7 @@ import {
 import { JournalCompressor } from './journal/journal-compressor'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
 import {
-  RuntimeServer, terminalSummaryLines, withSessionRuntimeEnvironment,
+  MANAGED_SESSION_CONTROL_SCOPES, RuntimeServer, terminalSummaryLines, withSessionRuntimeEnvironment,
   type PortMessageEvent, type RuntimePort
 } from './runtime-server'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
@@ -47,6 +47,16 @@ let port: MockPort
 let server: RuntimeServer
 let testSessionRegistries: Set<RuntimeSessionRegistry>
 const execFileAsync = promisify(execFile)
+const EXPECTED_MANAGED_SESSION_CONTROL_SCOPES = [
+  'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history',
+  'terminal.read-commands', 'terminal.send-text', 'terminal.send-key',
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+] as const
 
 beforeEach(async () => {
   testSessionRegistries = new Set()
@@ -377,77 +387,154 @@ describe('RuntimeServer domain RPC', () => {
     }
   )
 
-  it('injects a run-bound mt identity into an ordinary managed Shell', async () => {
+  it('injects the frozen structural, navigation, and terminal scope set into every managed profile', async () => {
     server.close()
-    const executable = join(root, 'control-env-shell.sh')
-    const environmentFile = join(root, 'control-env.txt')
+    const executable = join(root, 'control-env-profile.sh')
     await writeFile(executable, `#!/bin/sh
 if [ -z "$MATOU_CONTROL_CALLER_SESSION" ]; then
   sleep 30
   exit 0
 fi
-/usr/bin/env > "${environmentFile}.tmp"
-mv "${environmentFile}.tmp" "${environmentFile}"
+/usr/bin/env > "$MATOU_CONTROL_CALLER_SESSION.env.tmp"
+mv "$MATOU_CONTROL_CALLER_SESSION.env.tmp" "$MATOU_CONTROL_CALLER_SESSION.env"
+printf '%s\n' "$@" > "$MATOU_CONTROL_CALLER_SESSION.args.tmp"
+mv "$MATOU_CONTROL_CALLER_SESSION.args.tmp" "$MATOU_CONTROL_CALLER_SESSION.args"
 sleep 30
 `)
     await chmod(executable, 0o755)
     const previousShell = process.env.SHELL
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    const previousCodex = process.env.MATOU_CODEX_COMMAND
     process.env.SHELL = executable
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_CODEX_COMMAND = executable
+    const controlAssetRoot = join(root, 'control-assets')
+    await mkdir(join(controlAssetRoot, 'bin'), { recursive: true })
+    await mkdir(join(controlAssetRoot, 'providers', 'claude-plugin'), { recursive: true })
+    await writeFile(
+      join(controlAssetRoot, 'providers', 'codex-developer-instructions.md'),
+      'Task 8 fixture\n'
+    )
     const controlledPort = new MockPort()
     const registry = createTestSessionRegistry()
     const tokens = new CapabilityTokenService(database.runtimeGeneration)
     const backend = new RuntimeControlBackend(
       database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
     )
-    const controlledServer = new RuntimeServer(
-      controlledPort, root, database, undefined,
-      { backend, tokens, endpoint: join(root, 'control.sock') },
-      registry, undefined, undefined,
-      { controlAssetRoot: '/private/matou/control-assets', controlNodeExecutable: '/Applications/Matou' }
-    )
+    const providerConfigs = new ProviderConfigStore(root)
+    let controlledServer: RuntimeServer | undefined
     try {
-      registerSession(database, 'control-shell-session')
+      for (const [cli, model] of [
+        ['claude-code', 'claude-control-model'],
+        ['codex', 'codex-control-model']
+      ] as const) {
+        const provider = await providerConfigs.upsert({
+          cli,
+          name: `${cli} control fixture`,
+          endpoint: cli === 'claude-code' ? 'https://claude.example' : 'https://codex.example/v1',
+          model,
+          apiKey: `${cli}-token`
+        })
+        await providerConfigs.activate(cli, provider.id)
+      }
+      const profileFixtures = [
+        { profile: 'shell', sessionId: 'control-shell-session' },
+        { profile: 'claude-code', sessionId: 'control-claude-session' },
+        { profile: 'codex', sessionId: 'control-codex-session' }
+      ] as const
+      for (const { profile, sessionId } of profileFixtures) {
+        registerSession(database, sessionId, profile)
+        if (profile !== 'shell') {
+          database.run(
+            `INSERT INTO provider_bindings (
+               id, session_id, provider, provider_session_id, resume_state, metadata_json,
+               created_at, updated_at, validated_at
+             ) VALUES (?, ?, ?, ?, 'available', ?, 1, 1, 1)`,
+            `binding-${profile}`, sessionId, profile, `provider-${profile}`,
+            JSON.stringify({ permissionMode: 'bypassPermissions', model: `${profile}-persisted` })
+          )
+        }
+      }
+      const providerSnapshot = await providerConfigs.snapshot()
+      const bindingMetadata = database.all<{ id: string; metadata_json: string }>(
+        'SELECT id, metadata_json FROM provider_bindings ORDER BY id'
+      )
+      controlledServer = new RuntimeServer(
+        controlledPort, root, database, undefined,
+        { backend, tokens, endpoint: join(root, 'control.sock') },
+        registry, undefined, undefined,
+        { controlAssetRoot, controlNodeExecutable: '/Applications/Matou', providerConfigs }
+      )
       controlledPort.receive({
         type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'control-renderer'
       })
-      controlledPort.receive({
-        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
-        sessionId: 'control-shell-session', executionContextId: 'replay-context',
-        profile: 'shell', cols: 80, rows: 24
-      })
-      await waitUntilAsync(async () => (await readFile(environmentFile, 'utf8').catch(() => '')).length > 0)
-      const environment = Object.fromEntries(
-        (await readFile(environmentFile, 'utf8')).trim().split('\n').map((line) => {
-          const separator = line.indexOf('=')
-          return [line.slice(0, separator), line.slice(separator + 1)]
+      expect(Object.isFrozen(MANAGED_SESSION_CONTROL_SCOPES)).toBe(true)
+      expect(MANAGED_SESSION_CONTROL_SCOPES).toEqual(EXPECTED_MANAGED_SESSION_CONTROL_SCOPES)
+      const issuedCapabilities: Array<{ token: string; runId: string }> = []
+      for (const { profile, sessionId } of profileFixtures) {
+        controlledPort.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context', profile, cols: 80, rows: 24
         })
-      )
-      const endpoint = environment.MATOU_CONTROL_ENDPOINT
-      const token = environment.MATOU_CONTROL_TOKEN
-      const protocol = environment.MATOU_CONTROL_PROTOCOL
-      const sessionId = environment.MATOU_CONTROL_CALLER_SESSION
-      const runId = environment.MATOU_CONTROL_CALLER_RUN
-      const assetRoot = environment.MATOU_CONTROL_ASSET_ROOT
-      const executablePath = environment.MATOU_CONTROL_NODE_EXECUTABLE
-      const path = environment.PATH
-      expect({ endpoint, protocol, sessionId, assetRoot, executablePath }).toEqual({
-        endpoint: join(root, 'control.sock'), protocol: '1', sessionId: 'control-shell-session',
-        assetRoot: '/private/matou/control-assets', executablePath: '/Applications/Matou'
-      })
-      expect(path?.split(':')[0]).toBe('/private/matou/control-assets/bin')
-      expect(runId).toBeTruthy()
-      expect(tokens.validate(token!, 'host.identify')?.caller).toEqual({
-        runId, sessionId: 'control-shell-session'
-      })
-      expect(tokens.validate(token!, 'task.status.write')).toBeUndefined()
+        const environmentFile = join(root, `${sessionId}.env`)
+        const argumentFile = join(root, `${sessionId}.args`)
+        await waitUntilAsync(async () =>
+          (await readFile(environmentFile, 'utf8').catch(() => '')).length > 0 &&
+          (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0
+        )
+        const environment = Object.fromEntries(
+          (await readFile(environmentFile, 'utf8')).trim().split('\n').map((line) => {
+            const separator = line.indexOf('=')
+            return [line.slice(0, separator), line.slice(separator + 1)]
+          })
+        )
+        const token = environment.MATOU_CONTROL_TOKEN!
+        const runId = environment.MATOU_CONTROL_CALLER_RUN!
+        expect(environment).toMatchObject({
+          MATOU_CONTROL_ENDPOINT: join(root, 'control.sock'),
+          MATOU_CONTROL_PROTOCOL: '1',
+          MATOU_CONTROL_CALLER_SESSION: sessionId,
+          MATOU_CONTROL_ASSET_ROOT: controlAssetRoot,
+          MATOU_CONTROL_NODE_EXECUTABLE: '/Applications/Matou'
+        })
+        expect(environment.PATH?.split(':')[0]).toBe(join(controlAssetRoot, 'bin'))
+        expect(runId).toBeTruthy()
+        issuedCapabilities.push({ token, runId })
+        for (const scope of EXPECTED_MANAGED_SESSION_CONTROL_SCOPES) {
+          expect(tokens.validate(token, scope)?.caller).toEqual({ runId, sessionId })
+        }
+        expect(tokens.validate(token, 'task.status.write')).toBeUndefined()
+      }
+      expect((await readFile(join(root, 'control-claude-session.args'), 'utf8')).trim().split('\n'))
+        .toEqual([
+          '--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'),
+          '--model', 'claude-control-model', '--resume', 'provider-claude-code',
+          '--dangerously-skip-permissions'
+        ])
+      expect((await readFile(join(root, 'control-codex-session.args'), 'utf8')).trim().split('\n'))
+        .toEqual([
+          '-c', 'developer_instructions="Task 8 fixture\\n"',
+          '--model', 'codex-control-model', '--dangerously-bypass-approvals-and-sandbox',
+          'resume', 'provider-codex'
+        ])
+      expect(await providerConfigs.snapshot()).toEqual(providerSnapshot)
+      expect(database.all(
+        'SELECT id, metadata_json FROM provider_bindings ORDER BY id'
+      )).toEqual(bindingMetadata)
+      for (const { sessionId } of profileFixtures) {
+        controlledPort.receive({
+          type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId
+        })
+      }
+      await waitUntil(() => profileFixtures.every(({ sessionId }) => !registry.has(sessionId)))
+      for (const { token } of issuedCapabilities) {
+        expect(tokens.validate(token, 'host.identify')).toBeUndefined()
+      }
     } finally {
-      controlledPort.receive({
-        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
-        sessionId: 'control-shell-session'
-      })
-      await waitUntil(() => controlledPort.last('terminal.exited') !== undefined)
-      controlledServer.close()
+      controlledServer?.close()
       restoreEnv('SHELL', previousShell)
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+      restoreEnv('MATOU_CODEX_COMMAND', previousCodex)
     }
   })
 

@@ -28,7 +28,10 @@ import {
 } from './journal/journal-range-reader'
 import { JournalHistoryReader } from './journal/journal-history-reader'
 import { CheckpointManager } from './checkpoints/checkpoint-manager'
-import type { CapabilityTokenService } from './control/host-control-server'
+import type {
+  CapabilityTokenService,
+  HostControlScope
+} from './control/host-control-server'
 import type { RuntimeControlBackend } from './control/runtime-control-backend'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { PtySession } from './session/pty-session'
@@ -133,6 +136,17 @@ const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const execFileAsync = promisify(execFile)
+
+export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Object.freeze([
+  'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history',
+  'terminal.read-commands', 'terminal.send-text', 'terminal.send-key',
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+])
 
 interface InteractiveClaudeLaunch {
   permissionMode: HudPermissionMode
@@ -1676,10 +1690,7 @@ export class RuntimeServer {
       if (this.#control) {
         const token = this.#control.tokens.issue(
           { runId, sessionId: message.sessionId },
-          [
-            'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history',
-            'terminal.read-commands', 'terminal.send-text', 'terminal.send-key'
-          ],
+          MANAGED_SESSION_CONTROL_SCOPES,
           Date.now() + 24 * 60 * 60 * 1000
         )
         controlEnvironment = {

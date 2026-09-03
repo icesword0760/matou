@@ -2,9 +2,16 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { RuntimeControlBackend } from './runtime-control-backend'
+import {
+  hasHostControlPostResponseEffects,
+  isHostControlCommittedResult,
+  markHostControlCommittedResult,
+  runHostControlPostResponseEffects,
+  withHostControlPostResponseEffect
+} from './host-control-post-response'
 import { SegmentJournal } from '../journal/segment-journal'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
@@ -26,6 +33,49 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeControlBackend Task information channel', () => {
+  it('fails closed until the Runtime installs the complete Host Action facade', async () => {
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+
+    await expect(backend.executeHostAction(
+      'structure.create.workspace',
+      { runId: 'run-uninstalled', sessionId: 'session-uninstalled' },
+      { path: root, submissionKey: 'uninstalled' }
+    )).rejects.toMatchObject({ code: 'RUNTIME_NOT_READY' })
+  })
+
+  it('returns the facade result object unchanged with commit and post-response metadata intact', async () => {
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+    const disposed = vi.fn(async () => undefined)
+    const facadeResult = markHostControlCommittedResult(withHostControlPostResponseEffect({
+      kind: 'removed' as const,
+      targetRef: 'session:session-1',
+      removedTasks: 0,
+      removedCanvases: 0,
+      removedSessions: 1,
+      activePath: {
+        window: { ref: 'window:window-1', title: 'Window' },
+        workspace: { ref: 'workspace:workspace-1', title: 'Workspace', path: root }
+      }
+    }, disposed))
+    backend.setHostActionExecutor(async () => facadeResult)
+
+    const result = await backend.executeHostAction(
+      'structure.remove.commit',
+      { runId: 'run-1', sessionId: 'session-1' },
+      { confirmationRef: 'confirmation-1' }
+    )
+
+    expect(result).toBe(facadeResult)
+    expect(isHostControlCommittedResult(result)).toBe(true)
+    expect(hasHostControlPostResponseEffects(result)).toBe(true)
+    await runHostControlPostResponseEffects(result)
+    expect(disposed).toHaveBeenCalledTimes(1)
+  })
+
   it('separates the latest terminal screen from journal history', async () => {
     const hierarchy = new HierarchyApplicationService(database, new DomainTransactionManager(database))
     const initial = hierarchy.bootstrapWindow(command('bootstrap-screen'), {

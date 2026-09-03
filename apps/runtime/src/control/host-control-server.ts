@@ -17,6 +17,11 @@ import {
   isHostControlCommittedResult,
   runHostControlPostResponseEffects
 } from './host-control-post-response'
+import type {
+  HostActionErrorCode,
+  HostActionMethod,
+  HostActionResult
+} from './host-action-types'
 
 export type {
   AllowedControlKey,
@@ -53,6 +58,11 @@ export interface HostControlBackend {
     sourceWindowId: string
     targetWindowId: string
   }): Promise<unknown>
+  executeHostAction(
+    method: HostActionMethod,
+    caller: HostCallerIdentity,
+    params: unknown
+  ): Promise<HostActionResult>
 }
 
 export function controlEndpointForPlatform(
@@ -88,7 +98,11 @@ export class CapabilityTokenService {
     this.#onRunRevoked = options.onRunRevoked
   }
 
-  issue(callerOrRunId: HostCallerIdentity | string, scopes: HostControlScope[], expiresAt: number): string {
+  issue(
+    callerOrRunId: HostCallerIdentity | string,
+    scopes: readonly HostControlScope[],
+    expiresAt: number
+  ): string {
     const caller = typeof callerOrRunId === 'string'
       ? { runId: callerOrRunId, sessionId: callerOrRunId }
       : callerOrRunId
@@ -137,7 +151,7 @@ interface ControlRequest {
   deadlineAt: number
 }
 
-type ControlErrorCode =
+export type ControlErrorCode =
   | 'INVALID_REQUEST'
   | 'TARGET_NOT_FOUND'
   | 'TARGET_NOT_READY'
@@ -148,6 +162,7 @@ type ControlErrorCode =
   | 'CONFLICT'
   | 'UNSUPPORTED'
   | 'INTERNAL_ERROR'
+  | HostActionErrorCode
 
 class ControlFault extends Error {
   readonly code: ControlErrorCode
@@ -255,6 +270,8 @@ export class HostControlServer {
     } catch (error) {
       const fault = error instanceof ControlFault
         ? error
+        : isCodedControlError(error)
+          ? new ControlFault(error.code, error.message)
         : error instanceof HostControlTargetNotFoundError
           ? new ControlFault('TARGET_NOT_FOUND', error.message)
         : error instanceof HostControlTargetNotReadyError
@@ -275,6 +292,9 @@ export class HostControlServer {
   ): Promise<unknown> {
     const params = record(rawParams)
     if (method === 'host.identify') return this.#backend.identify(caller)
+    if (isHostActionMethod(method)) {
+      return this.#backend.executeHostAction(method, caller, rawParams)
+    }
 
     const listScope = method === 'host.list'
       ? enumerationWithDefault(params.scope, ['current-level', 'all'] as const, 'scope', 'current-level')
@@ -331,7 +351,7 @@ export class HostControlServer {
       (selector.kind === 'ref' || selector.kind === 'sibling') &&
       selector.projectionRevision !== projectionRevision
     ) {
-      throw new ControlFault('CONFLICT', 'target ordinal projection is stale; list targets again')
+      throw new ControlFault('STALE_PROJECTION', 'target ordinal projection is stale; list targets again')
     }
     const sessionId = await this.#backend.resolveTarget(caller, selector, targets, projectionRevision)
     if (method === 'terminal.read-current' || method === 'terminal.read-history') {
@@ -535,9 +555,33 @@ function isControlScope(value: unknown): value is HostControlScope {
   return typeof value === 'string' && [
     'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history', 'terminal.read-commands',
     'terminal.send-text', 'terminal.send-key', 'task.status.write',
-    'task.progress.write', 'task.log.append', 'task.move-to-window'
+    'task.progress.write', 'task.log.append', 'task.move-to-window',
+    ...HOST_ACTION_METHODS
   ].includes(value)
 }
+const HOST_ACTION_METHODS = [
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+] as const satisfies readonly HostActionMethod[]
+function isHostActionMethod(value: HostControlScope): value is HostActionMethod {
+  return (HOST_ACTION_METHODS as readonly string[]).includes(value)
+}
+function isCodedControlError(error: unknown): error is Error & { code: ControlErrorCode } {
+  return error instanceof Error &&
+    typeof (error as Error & { code?: unknown }).code === 'string' &&
+    CONTROL_ERROR_CODES.includes((error as Error & { code: string }).code as ControlErrorCode)
+}
+const CONTROL_ERROR_CODES = [
+  'INVALID_REQUEST', 'TARGET_NOT_FOUND', 'TARGET_NOT_READY', 'RUNTIME_NOT_READY',
+  'AMBIGUOUS_TARGET', 'TIMEOUT', 'CAPABILITY_DENIED', 'CONFLICT', 'UNSUPPORTED',
+  'INTERNAL_ERROR', 'STALE_PROJECTION', 'CONFIRMATION_REQUIRED',
+  'CONFIRMATION_EXPIRED', 'CONFIRMATION_STALE', 'PATH_CONFLICT', 'BRANCH_CONFLICT',
+  'WORKTREE_CONFLICT', 'PARTIAL_SUCCESS', 'NAVIGATION_TIMEOUT', 'STORAGE_READ_ONLY'
+] as const satisfies readonly ControlErrorCode[]
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }

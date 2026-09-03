@@ -1,3 +1,5 @@
+import type { HostActionMethod } from './host-action-types'
+
 export type HostControlScope =
   | 'host.identify'
   | 'host.list'
@@ -10,6 +12,7 @@ export type HostControlScope =
   | 'task.progress.write'
   | 'task.log.append'
   | 'task.move-to-window'
+  | HostActionMethod
 
 export interface HostCallerIdentity {
   runId: string

@@ -12,10 +12,21 @@ import {
   type HostControlBackend,
   type HostTarget
 } from './host-control-server'
+import type { HostActionMethod, HostActionResult } from './host-action-types'
 import {
   markHostControlCommittedResult,
   withHostControlPostResponseEffect
 } from './host-control-post-response'
+import { RuntimeHostActionError } from './runtime-host-action-facade'
+
+const HOST_ACTION_SCOPES = [
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+] as const satisfies readonly HostActionMethod[]
 
 let root: string
 let socketPath: string
@@ -87,6 +98,89 @@ describe('HostControlServer', () => {
         result: { caller: { runId: 'run-caller', sessionId: 'session-2' }, target: { title: 'Two' } }
       })
     expect(backend.identify).toHaveBeenCalledWith({ runId: 'run-caller', sessionId: 'session-2' })
+  })
+
+  it.each(HOST_ACTION_SCOPES)('authorizes %s independently before terminal target resolution', async (scope) => {
+    const caller = { runId: `run-${scope}`, sessionId: 'session-2' }
+    const token = tokenService.issue(caller, [scope], Date.now() + 1_000)
+    const otherScope = HOST_ACTION_SCOPES[(HOST_ACTION_SCOPES.indexOf(scope) + 1) % HOST_ACTION_SCOPES.length]!
+
+    await expect(request(socketPath, controlRequest(`allow-${scope}`, token, scope, {
+      fixture: scope
+    }))).resolves.toMatchObject({ ok: true })
+    expect(backend.executeHostAction).toHaveBeenLastCalledWith(scope, caller, { fixture: scope })
+    expect(backend.listTargets).not.toHaveBeenCalled()
+
+    await expect(request(socketPath, controlRequest(`deny-${scope}`, token, otherScope, {
+      fixture: otherScope
+    }))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' }
+    })
+  })
+
+  it.each([
+    'TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET', 'STALE_PROJECTION', 'TARGET_NOT_READY',
+    'CAPABILITY_DENIED', 'CONFIRMATION_REQUIRED', 'CONFIRMATION_EXPIRED',
+    'CONFIRMATION_STALE', 'PATH_CONFLICT', 'BRANCH_CONFLICT', 'WORKTREE_CONFLICT',
+    'PARTIAL_SUCCESS', 'NAVIGATION_TIMEOUT', 'STORAGE_READ_ONLY'
+  ] as const)('preserves the facade error code %s', async (code) => {
+    const token = tokenService.issue('run-facade-error', ['structure.create.task'], Date.now() + 1_000)
+    backend.executeHostAction.mockRejectedValueOnce(
+      new RuntimeHostActionError(code, `fixture ${code}`)
+    )
+
+    await expect(request(socketPath, controlRequest(
+      `facade-error-${code}`,
+      token,
+      'structure.create.task',
+      { workspace: { kind: 'current', entity: 'workspace' }, submissionKey: 'fixture' }
+    ))).resolves.toMatchObject({
+      ok: false,
+      error: { code, message: `fixture ${code}` }
+    })
+  })
+
+  it('reports an uninstalled action executor as Runtime not ready', async () => {
+    const token = tokenService.issue(
+      'run-not-ready', ['structure.create.workspace'], Date.now() + 1_000
+    )
+    backend.executeHostAction.mockRejectedValueOnce(Object.assign(
+      new Error('Host Action facade is not installed'),
+      { code: 'RUNTIME_NOT_READY' as const }
+    ))
+
+    await expect(request(socketPath, controlRequest(
+      'action-not-ready', token, 'structure.create.workspace',
+      { path: '/fixture', submissionKey: 'fixture' }
+    ))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'RUNTIME_NOT_READY' }
+    })
+  })
+
+  it('returns a self-removal success frame before running the action post-response disposal', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-self-remove-action', sessionId: 'session-1' },
+      ['structure.remove.commit'],
+      Date.now() + 1_000
+    )
+    const disposed = vi.fn(async () => server.stop())
+    backend.executeHostAction.mockResolvedValueOnce(markHostControlCommittedResult(
+      withHostControlPostResponseEffect(
+        { kind: 'removed', targetRef: 'session:session-1' },
+        disposed
+      )
+    ) as never)
+
+    await expect(request(socketPath, controlRequest(
+      'self-remove-action', token, 'structure.remove.commit',
+      { confirmationRef: 'confirmation-1' }
+    ))).resolves.toMatchObject({
+      ok: true,
+      result: { kind: 'removed', targetRef: 'session:session-1' }
+    })
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
   })
 
   it('writes the authoritative Host Control result before running caller disposal', async () => {
@@ -227,7 +321,7 @@ describe('HostControlServer', () => {
       target: { ref: 'surface:1', projectionRevision: listing.result.projectionRevision },
       maxLines: 100, maxBytes: 4096
     }))
-    expect(stale).toMatchObject({ ok: false, error: { code: 'CONFLICT' } })
+    expect(stale).toMatchObject({ ok: false, error: { code: 'STALE_PROJECTION' } })
   })
 
   it('bounds terminal reads and allowlists control keys', async () => {
@@ -316,6 +410,12 @@ class TestBackend implements HostControlBackend {
   writeTaskProgress = vi.fn(async () => undefined)
   appendTaskLog = vi.fn(async () => undefined)
   moveTaskToWindow = vi.fn(async () => ({ state: 'committed' }))
+  executeHostAction = vi.fn(async (_method: HostActionMethod): Promise<HostActionResult> => ({
+    kind: 'navigated',
+    finalPath: {
+      windowId: 'window-1', workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1'
+    }
+  }))
   identify = vi.fn(async (caller: { sessionId: string }) => ({
     caller,
     target: this.targets.find(({ sessionId }) => sessionId === caller.sessionId)
@@ -328,7 +428,7 @@ class TestBackend implements HostControlBackend {
     if (selector.kind === 'relative' && selector.direction === 'right') return targets[1]!.sessionId
     return targets[0]!.sessionId
   })
-  listTargets(): HostTarget[] { return this.targets.map((target) => ({ ...target })) }
+  listTargets = vi.fn((): HostTarget[] => this.targets.map((target) => ({ ...target })))
 }
 
 function targetFixture(ordinal: number, title: string): HostTarget {
