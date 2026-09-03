@@ -1,14 +1,16 @@
-# 码头 Matou — Claude Code / Codex 多智能体桌面终端
+# 码头 Matou — Claude Code / Codex 多智能体桌面工作台
 
-**Claude Code GUI · Codex Desktop Workspace · AI Coding Agent Session Manager · DAG Visualization · Git Worktree**
+**Matou is a macOS desktop workbench for running many Claude Code and Codex coding agents side by side: session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.**
 
 码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code、Codex、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
 
-[快速开始](#三分钟运行) · [核心场景](#从混乱的终端到可管理的-ai-工作流) · [DAG 使用方法](#用-dag-看懂会话从哪里来下一步去哪里) · [架构文档](#架构与质量)
+> **项目状态**：早期预览版，仅支持 macOS，目前只能从源码运行；预构建安装包稍后提供。协议为 [GPL-3.0](LICENSE)。
+
+[快速开始](#从源码运行) · [核心场景](#从混乱的终端到可管理的-ai-工作流) · [DAG 使用方法](#用-dag-看懂会话从哪里来下一步去哪里) · [架构文档](#架构与质量)
 
 ![码头 Matou 的 Claude Code 多会话桌面工作台](assets/shots/workspace-demo.png)
 
-> 上图为副屏中的完整 Matou App 窗口。所有会话均为 Claude Code 隔离演示会话；工作空间、任务名称、终端输出和通知均为一次性演示数据。
+> 本文所有截图均为隔离演示数据：工作空间、事项名称、终端输出和通知都是一次性演示内容。
 
 ---
 
@@ -47,12 +49,12 @@
 
 > “让左边的会话继续运行回归，完成后把结果发回来。”
 
-Matou 会向受管 Agent 提供会话定位与控制能力，使它能够识别自己、列出关联卡片、读取实时屏幕或历史输出、查看可执行命令，并向父卡片、子卡片、左右相邻卡片或指定会话发送输入。这样，跨会话协作仍然发生在你的任务结构里。
+Matou 会向它托管的每个 Agent 提供会话定位与控制能力，使它能够识别自己、列出关联卡片、读取实时屏幕或历史输出、查看可执行命令，并向父卡片、子卡片、左右相邻卡片或指定会话发送输入。这样，跨会话协作仍然发生在你的任务结构里。
 
 <details>
-<summary>当前 main 已提供的会话控制范围</summary>
+<summary>当前版本支持的控制命令</summary>
 
-受管会话可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send` 和 `mt key`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
+Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send` 和 `mt key`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
 
 </details>
 
@@ -68,7 +70,7 @@ Matou 会向受管 Agent 提供会话定位与控制能力，使它能够识别�
 
 ![Claude Code 会话分支 DAG 可视化](assets/shots/session-dag-demo.png)
 
-> DAG 演示使用五个隔离 Claude Code 会话；画面展示当前层级的三个节点，更深层节点由图层聚合承载。
+> 父会话派生出方案 A、方案 B 两条 Fork 路线；更深层的节点会被自动聚合，避免大图过载。
 
 ### 4. AI 通知：只在需要你时打断你
 
@@ -87,7 +89,7 @@ Matou 会向受管 Agent 提供会话定位与控制能力，使它能够识别�
 
 ![Claude Code AI HUD 与分级通知中心](assets/shots/agent-hud-notifications-demo.png)
 
-> 左侧是通知中心，右侧卡片收到新通知，底部为 Claude Code Agent HUD。截图只包含完整 App 内容。
+> 左侧为通知中心，右侧卡片刚收到新通知，底部为 Agent HUD。
 
 ### 6. Fork + Git Worktree：放心比较多种实现
 
@@ -108,15 +110,17 @@ Matou 会向受管 Agent 提供会话定位与控制能力，使它能够识别�
 
 ### 8. 重启恢复与多窗口：工作现场跟着任务走
 
-Matou 持久化事项、页签、分屏、目录、焦点、终端输出和受管 Agent 身份。窗口隐藏、应用重启或异常退出后，按不同会话类型恢复现场。会话还可以脱出为独立窗口，再归还原画布；主窗口和独立窗口共享同一 Runtime 会话。
+Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托管 Agent 的身份。窗口隐藏、应用重启或异常退出后，按不同会话类型恢复现场。会话还可以脱出为独立窗口，再归还原画布；主窗口和独立窗口共享同一 Runtime 会话。
 
-## 自然语言新建子卡片：产品设计已确认
+## 路线图
 
-自然语言结构操作已经进入产品设计，目标是让用户直接描述任务拆分，而不必连续点击菜单。例如：
+**自然语言创建层级结构（未实现）。** 当前版本已支持用自然语言读取和控制其他卡片；下一步是让你直接描述任务拆分，由 Agent 创建工作空间、事项、画布和会话卡片，而不必连续点击菜单：
 
 > “根据这三个方案创建三个子卡片，分别验证性能、兼容性和回滚路径。”
 
-规划范围包括新建工作空间、事项、画布和会话卡片；创建子卡片、兄弟卡片和批量子卡片；聚焦、切换、移除与关闭前预览确认。**当前 main 已支持自然语言读取与控制其他卡片；自然语言创建层级结构处于待实现阶段。**
+规划范围包括创建子卡片、兄弟卡片和批量子卡片；聚焦、切换、移除，以及关闭前的预览确认。
+
+**预构建安装包（未发布）。** 当前只能从源码运行，macOS 安装包会随首个正式版本一起提供。
 
 ## 适合谁
 
@@ -126,15 +130,16 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和受�
 - 经常使用 Git Worktree 并行开发、测试、审查和修复的工程师
 - 关注会话恢复、通知分级和上下文用量的重度 AI 编程用户
 
-## 三分钟运行
+## 从源码运行
 
 ### 环境要求
 
+- macOS（目前唯一支持的平台；Linux 和 Windows 未经验证）
 - Node.js `>=22.16.0`
-- pnpm `10.17.1`
-- macOS、Linux 或 Windows
+- pnpm `10.17.1`（通过 `corepack enable` 启用）
+- 已安装并登录的 Claude Code 或 Codex CLI
 
-### 从源码启动
+### 启动
 
 ```bash
 git clone https://github.com/icesword0760/matou.git
@@ -144,7 +149,7 @@ pnpm install
 pnpm dev
 ```
 
-`pnpm install` 会校正 node-pty 在 macOS 预构建包中的 `spawn-helper` 可执行权限。使用 Claude Code 或 Codex 前，请先在本机完成对应 CLI 的安装与登录。
+`pnpm install` 会自动校正 node-pty macOS 预构建包中 `spawn-helper` 的可执行权限；`pnpm dev` 会先构建 packages 和 runtime，再启动 Electron，首次启动需要几分钟。
 
 ## 常用命令
 
@@ -191,7 +196,11 @@ tests/e2e/                真实 Electron 用户旅程
 ## 反馈与交流
 
 - 在 [Issues](https://github.com/icesword0760/matou/issues) 提交问题或建议。
-- 涉及恢复、分支、通知或多窗口问题时，请附上复现步骤、系统版本和可公开的演示数据。
+- 涉及恢复、分支、通知或多窗口问题时，请附上复现步骤、macOS 版本和可公开的演示数据。
+
+## 许可证
+
+本项目以 [GNU General Public License v3.0](LICENSE) 发布。你可以自由使用、修改和分发，但基于本项目的衍生作品必须以相同协议开源。
 
 ---
 

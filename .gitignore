@@ -10,5 +10,8 @@ playwright-report/
 .matou-data/
 apps/desktop/package-resources/
 apps/desktop/release/
+apps/desktop/release-*/
+output/
+.playwright-cli/
 .worktrees/
 .superpowers/
