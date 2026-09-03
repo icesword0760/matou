@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { access, constants, stat } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 
@@ -25,6 +25,10 @@ import {
   type ResolvedForkEnvironment,
   type ResolvedHostEntity
 } from './host-action-target-resolver'
+import {
+  HostNavigationBrokerError,
+  type HostNavigationBroker
+} from './host-navigation-broker'
 import {
   parseHostActionRequest,
   type ForkItemInput,
@@ -92,6 +96,7 @@ const DATABASE_FOCUS_WINDOW_LOCKS = new WeakMap<
   RuntimeDatabase,
   Map<string, Promise<void>>
 >()
+const HOST_NAVIGATION_TIMEOUT_MS = 5_000
 
 export interface RuntimeHostActionFacadeDependencies {
   database: RuntimeDatabase
@@ -101,6 +106,7 @@ export interface RuntimeHostActionFacadeDependencies {
   sessionCanvas: SessionCanvasActions
   forkWorkflow: ForkWorkflowActions
   forkBatches: ForkBatchActions
+  navigation: Pick<HostNavigationBroker, 'navigate'>
   disposeSessions(sessionIds: string[]): void | Promise<void>
   now?: () => number
 }
@@ -130,6 +136,7 @@ export class RuntimeHostActionFacade {
   readonly #sessionCanvas: SessionCanvasActions
   readonly #forkWorkflow: ForkWorkflowActions
   readonly #forkBatches: ForkBatchActions
+  readonly #navigation: Pick<HostNavigationBroker, 'navigate'>
   readonly #disposeManagedSessions: RuntimeHostActionFacadeDependencies['disposeSessions']
   readonly #now: () => number
   readonly #singleForks = new Map<string, ActiveSingleFork>()
@@ -142,6 +149,7 @@ export class RuntimeHostActionFacade {
     this.#sessionCanvas = dependencies.sessionCanvas
     this.#forkWorkflow = dependencies.forkWorkflow
     this.#forkBatches = dependencies.forkBatches
+    this.#navigation = dependencies.navigation
     this.#disposeManagedSessions = dependencies.disposeSessions
     this.#now = dependencies.now ?? Date.now
   }
@@ -184,10 +192,7 @@ export class RuntimeHostActionFacade {
         case 'navigation.switch.workspace':
         case 'navigation.switch.task':
         case 'navigation.switch.canvas':
-          throw new RuntimeHostActionError(
-            'TARGET_NOT_READY',
-            '目标已解析，等待窗口导航通道接管'
-          )
+          return await this.#navigate(caller, request)
       }
     } catch (error) {
       throw normalizeFacadeError(error)
@@ -687,6 +692,33 @@ export class RuntimeHostActionFacade {
   #resolve(caller: HostCallerIdentity, selector: HostEntitySelector): ResolvedHostEntity {
     const revision = 'projectionRevision' in selector ? selector.projectionRevision : ''
     return this.#resolver.resolveEntity(caller, selector, revision)
+  }
+
+  async #navigate(
+    caller: HostCallerIdentity,
+    request: Extract<HostActionRequest, {
+      method: 'navigation.focus.session' | 'navigation.switch.workspace' |
+        'navigation.switch.task' | 'navigation.switch.canvas'
+    }>
+  ): Promise<HostActionResult> {
+    const resolved = this.#resolve(caller, request.target)
+    const target = request.method === 'navigation.focus.session'
+      ? requireEntity(resolved, 'session')
+      : resolved
+    const now = this.#now()
+    const acknowledgement = await this.#navigation.navigate({
+      requestId: `host-navigation-${randomUUID()}`,
+      windowId: target.windowId,
+      workspaceId: target.workspaceId,
+      taskId: target.taskId,
+      sceneId: target.sceneId,
+      ...(request.method === 'navigation.focus.session'
+        ? { sessionId: target.sessionId }
+        : {}),
+      focusTerminal: request.method === 'navigation.focus.session',
+      deadlineAt: now + HOST_NAVIGATION_TIMEOUT_MS
+    })
+    return { kind: 'navigated', finalPath: acknowledgement.finalPath }
   }
 
   #resolveStable(caller: HostCallerIdentity, ref: string): ResolvedHostEntity {
@@ -1193,6 +1225,9 @@ function normalizeFacadeError(error: unknown): unknown {
       candidates: error.candidates,
       cause: error
     })
+  }
+  if (error instanceof HostNavigationBrokerError) {
+    return new RuntimeHostActionError(error.code, error.message, { cause: error })
   }
   if (error instanceof HostActionConfirmationError) {
     return new RuntimeHostActionError(error.code, error.message, { cause: error })

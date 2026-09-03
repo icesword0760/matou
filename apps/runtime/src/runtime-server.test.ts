@@ -37,6 +37,7 @@ import { SessionForkIntentRepository } from './session/session-fork-intent-repos
 import { ProviderConfigStore } from './provider-config/provider-config-store'
 import { CapabilityTokenService } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
+import { HostNavigationBroker } from './control/host-navigation-broker'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
@@ -74,6 +75,141 @@ afterEach(async () => {
   server.close()
   await Promise.all([...testSessionRegistries].map((sessions) => sessions.shutdownAll()))
   database.close()
+})
+
+describe('RuntimeServer host navigation registration', () => {
+  it('registers a main window only after hello and forwards its bound acknowledgement', async () => {
+    const navigation = new HostNavigationBroker()
+    const mainPort = new MockPort()
+    const mainServer = new RuntimeServer(
+      mainPort, root, database, undefined, undefined, createTestSessionRegistry(),
+      undefined, undefined, {
+        navigationBroker: navigation,
+        accessPolicy: new RuntimeAccessPolicy('read-only')
+      }
+    )
+    try {
+      await expect(navigation.navigate(navigationInput('before-hello')))
+        .rejects.toMatchObject({ code: 'TARGET_NOT_READY' })
+
+      mainPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'main-renderer-2', windowId: 'main-window-2', windowKind: 'main'
+      })
+      await settle()
+      const pending = navigation.navigate(navigationInput('runtime-nav'))
+      expect(mainPort.last('host.navigation-request')).toMatchObject({
+        requestId: 'runtime-nav', windowId: 'main-window-2'
+      })
+
+      mainPort.receive({
+        type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'runtime-nav', windowId: 'main-window-2', ok: true,
+        finalPath: navigationPath()
+      })
+      await expect(pending).resolves.toEqual({ finalPath: navigationPath() })
+    } finally {
+      mainServer.close()
+      navigation.close()
+    }
+  })
+
+  it.each(['detached-terminal', 'background'] as const)(
+    'does not register a %s connection as a navigation target',
+    async (windowKind) => {
+      const navigation = new HostNavigationBroker()
+      const nonMainPort = new MockPort()
+      const nonMainServer = new RuntimeServer(
+        nonMainPort, root, database, undefined, undefined, createTestSessionRegistry(),
+        undefined, undefined, {
+          navigationBroker: navigation,
+          accessPolicy: new RuntimeAccessPolicy('read-only')
+        }
+      )
+      try {
+        nonMainPort.receive({
+          type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+          clientId: `${windowKind}-renderer`, windowId: 'main-window-2', windowKind
+        })
+        await settle()
+
+        await expect(navigation.navigate(navigationInput(`not-${windowKind}`)))
+          .rejects.toMatchObject({ code: 'TARGET_NOT_READY' })
+        expect(nonMainPort.last('host.navigation-request')).toBeUndefined()
+      } finally {
+        nonMainServer.close()
+        navigation.close()
+      }
+    }
+  )
+
+  it('keeps the new same-window connection when the old port closes and ignores its ack', async () => {
+    const navigation = new HostNavigationBroker()
+    const firstPort = new MockPort()
+    const secondPort = new MockPort()
+    const firstServer = new RuntimeServer(
+      firstPort, root, database, undefined, undefined, createTestSessionRegistry(),
+      undefined, undefined, {
+        navigationBroker: navigation,
+        accessPolicy: new RuntimeAccessPolicy('read-only')
+      }
+    )
+    const secondServer = new RuntimeServer(
+      secondPort, root, database, undefined, undefined, createTestSessionRegistry(),
+      undefined, undefined, {
+        navigationBroker: navigation,
+        accessPolicy: new RuntimeAccessPolicy('read-only')
+      }
+    )
+    try {
+      firstPort.receive(mainWindowHello('first-main'))
+      secondPort.receive(mainWindowHello('second-main'))
+      await settle()
+      firstPort.disconnect()
+
+      const pending = navigation.navigate(navigationInput('reconnected-nav'))
+      expect(firstPort.last('host.navigation-request')).toBeUndefined()
+      expect(secondPort.last('host.navigation-request')).toMatchObject({ requestId: 'reconnected-nav' })
+
+      firstPort.receive({
+        type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'reconnected-nav', windowId: 'main-window-2', ok: true,
+        finalPath: navigationPath()
+      })
+      await Promise.resolve()
+      secondPort.receive({
+        type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'reconnected-nav', windowId: 'main-window-2', ok: true,
+        finalPath: navigationPath()
+      })
+      await expect(pending).resolves.toEqual({ finalPath: navigationPath() })
+    } finally {
+      firstServer.close()
+      secondServer.close()
+      navigation.close()
+    }
+  })
+
+  it('settles a target request when its Runtime port closes', async () => {
+    const navigation = new HostNavigationBroker()
+    const mainPort = new MockPort()
+    const mainServer = new RuntimeServer(
+      mainPort, root, database, undefined, undefined, createTestSessionRegistry(),
+      undefined, undefined, {
+        navigationBroker: navigation,
+        accessPolicy: new RuntimeAccessPolicy('read-only')
+      }
+    )
+    mainPort.receive(mainWindowHello('closing-main'))
+    await settle()
+    const pending = navigation.navigate(navigationInput('port-close'))
+    const result = expect(pending).rejects.toMatchObject({ code: 'TARGET_NOT_READY' })
+
+    mainServer.close()
+
+    await result
+    navigation.close()
+  })
 })
 
 describe('RuntimeServer domain RPC', () => {
@@ -5514,6 +5650,39 @@ function rpc(requestId: string, method: RpcMethod, input: Record<string, unknown
       command: { commandId: requestId, commandType: method, requestHash: `hash-${requestId}` },
       input
     }
+  }
+}
+
+function mainWindowHello(clientId: string) {
+  return {
+    type: 'protocol.hello' as const,
+    protocolVersion: PROTOCOL_VERSION,
+    clientId,
+    windowId: 'main-window-2',
+    windowKind: 'main' as const
+  }
+}
+
+function navigationInput(requestId: string) {
+  return {
+    requestId,
+    windowId: 'main-window-2',
+    workspaceId: 'workspace-2',
+    taskId: 'task-2',
+    sceneId: 'scene-2',
+    sessionId: 'session-2',
+    focusTerminal: true,
+    deadlineAt: Date.now() + 5_000
+  }
+}
+
+function navigationPath() {
+  return {
+    windowId: 'main-window-2',
+    workspaceId: 'workspace-2',
+    taskId: 'task-2',
+    sceneId: 'scene-2',
+    sessionId: 'session-2'
   }
 }
 

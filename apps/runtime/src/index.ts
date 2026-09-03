@@ -23,6 +23,7 @@ import { ProviderReadyRegistry } from './control/provider-ready-registry'
 import { HostActionConfirmationService } from './control/host-action-confirmation-service'
 import { HostActionTargetResolver } from './control/host-action-target-resolver'
 import { RuntimeHostActionFacade } from './control/runtime-host-action-facade'
+import { HostNavigationBroker } from './control/host-navigation-broker'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
@@ -86,6 +87,7 @@ if (!parentPort) {
 const servers = new Set<RuntimeServer>()
 const recoveryServerWaiters = new Set<(server: RuntimeServer) => void>()
 const sessions = new RuntimeSessionRegistry()
+const hostNavigation = new HostNavigationBroker()
 const recoveryE2eObserver = process.env.MATOU_E2E === '1'
   ? new RuntimeRecoveryE2eObserver()
   : undefined
@@ -465,7 +467,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
       ...(e2eJournalOptionsForSession ? {
         journalOptionsForSession: e2eJournalOptionsForSession
       } : {}),
-      recoveryCoordinator
+      recoveryCoordinator,
+      navigationBroker: hostNavigation
     }
   )
   servers.add(backgroundServer)
@@ -498,6 +501,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     sessionCanvas,
     forkWorkflow,
     forkBatches: forkBatchCoordinator,
+    navigation: hostNavigation,
     disposeSessions: (sessionIds) => backgroundServer.disposeSessions(sessionIds)
   })
   // Do not accept Host Control requests until the complete facade owns every action.
@@ -585,6 +589,7 @@ function shutdown(): Promise<void> {
       }
       forkCoordinator?.stop()
       forkCoordinator = undefined
+      hostNavigation.close()
       for (const server of servers) server.close()
       servers.clear()
     },
@@ -704,7 +709,8 @@ parentPort.on('message', async (event) => {
         ...(e2eJournalOptionsForSession ? {
           journalOptionsForSession: e2eJournalOptionsForSession
         } : {}),
-        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {})
+        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {}),
+        navigationBroker: hostNavigation
       }
     )
     servers.add(server)

@@ -815,6 +815,7 @@ async function realActionFacadeFixture(
     sessionCanvas,
     forkWorkflow: { createForkChild: unexpected, createForkSibling: unexpected },
     forkBatches,
+    navigation: { navigate: unexpected },
     disposeSessions: unexpected
   })
   return { database, facade, resolver, caller, expectedHumanPaths }

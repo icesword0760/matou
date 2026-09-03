@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { DomainCommandMetadata } from '@matou/domain'
+import type { HostNavigationPath } from '@matou/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
@@ -21,6 +22,10 @@ import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 import { ForkBatchCoordinator } from './fork-batch-coordinator'
 import { HostActionConfirmationService } from './host-action-confirmation-service'
 import { HostActionTargetResolver } from './host-action-target-resolver'
+import {
+  HostNavigationBrokerError,
+  type HostNavigationRequestInput
+} from './host-navigation-broker'
 import type {
   ForkBatchResult,
   HostActionResult,
@@ -50,6 +55,9 @@ let root: string
 let workspaceRoot: string
 let clock: number
 let disposeSessions: ReturnType<typeof vi.fn<(sessionIds: string[]) => Promise<void>>>
+let navigate: ReturnType<typeof vi.fn<(
+  request: HostNavigationRequestInput
+) => Promise<{ finalPath: HostNavigationPath }>>>
 let createForkChild: ReturnType<typeof vi.fn<(
   command: DomainCommandMetadata,
   input: CreateForkInput
@@ -89,6 +97,15 @@ beforeEach(async () => {
   })
   clock = 100
   disposeSessions = vi.fn(async () => undefined)
+  navigate = vi.fn(async (request) => ({
+    finalPath: {
+      windowId: request.windowId,
+      workspaceId: request.workspaceId,
+      taskId: request.taskId,
+      sceneId: request.sceneId,
+      ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId })
+    }
+  }))
 
   createForkChild = vi.fn(async (metadata, input) => createForkResult(metadata, input))
   retryFork = vi.fn(async () => { throw new Error('unexpected Fork retry') })
@@ -943,6 +960,129 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
   })
 })
 
+describe('RuntimeHostActionFacade navigation actions', () => {
+  it('fully resolves a Session, waits for Renderer acknowledgement, and returns its authoritative path', async () => {
+    const target = seedSecondWindow()
+    const resolved = resolver.resolveEntity(caller, {
+      kind: 'session', sessionId: target.focusedSessionId
+    }, '')
+    const finalPath: HostNavigationPath = {
+      windowId: resolved.windowId,
+      workspaceId: resolved.workspaceId,
+      taskId: resolved.taskId,
+      sceneId: resolved.sceneId,
+      sessionId: target.focusedSessionId
+    }
+    const acknowledgement = deferred<{ finalPath: HostNavigationPath }>()
+    navigate.mockImplementationOnce(() => acknowledgement.promise)
+    const before = navigationState()
+
+    const operation = facade.execute('navigation.focus.session', caller, {
+      target: { kind: 'session', sessionId: target.focusedSessionId }
+    })
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledTimes(1))
+
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: expect.any(String),
+      windowId: resolved.windowId,
+      workspaceId: resolved.workspaceId,
+      taskId: resolved.taskId,
+      sceneId: resolved.sceneId,
+      sessionId: target.focusedSessionId,
+      focusTerminal: true,
+      deadlineAt: expect.any(Number)
+    }))
+    expect(navigationState()).toEqual(before)
+
+    acknowledgement.resolve({ finalPath })
+    const result = await operation
+    expect(result).toEqual({ kind: 'navigated', finalPath })
+    expect(isHostControlCommittedResult(result)).toBe(false)
+    await runHostControlPostResponseEffects(result)
+    expect(navigationState()).toEqual(before)
+  })
+
+  it.each([
+    ['navigation.switch.workspace', 'workspace'] as const,
+    ['navigation.switch.task', 'task'] as const,
+    ['navigation.switch.canvas', 'canvas'] as const
+  ])('routes %s with a complete path without requesting terminal focus', async (method, kind) => {
+    const target = seedSecondWindow()
+    const session = resolver.resolveEntity(caller, {
+      kind: 'session', sessionId: target.focusedSessionId
+    }, '')
+    const projectionRevision = resolver.projectionRevision(caller)
+    const selector = kind === 'workspace'
+      ? { kind: 'ref' as const, ref: `workspace:${session.workspaceId}`, projectionRevision }
+      : kind === 'task'
+        ? { kind: 'ref' as const, ref: `task:${session.taskId}`, projectionRevision }
+        : { kind: 'ref' as const, ref: `scene:${session.sceneId}`, projectionRevision }
+    const resolved = resolver.resolveEntity(caller, selector, projectionRevision)
+
+    const result = await facade.execute(method, caller, { target: selector })
+
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      windowId: resolved.windowId,
+      workspaceId: resolved.workspaceId,
+      taskId: resolved.taskId,
+      sceneId: resolved.sceneId,
+      focusTerminal: false
+    }))
+    expect(navigate.mock.calls[0]![0]).not.toHaveProperty('sessionId')
+    expect(result).toEqual({
+      kind: 'navigated',
+      finalPath: {
+        windowId: resolved.windowId,
+        workspaceId: resolved.workspaceId,
+        taskId: resolved.taskId,
+        sceneId: resolved.sceneId
+      }
+    })
+  })
+
+  it('switches an enclosing product level from a resolved Session selector', async () => {
+    const target = seedSecondWindow()
+    const resolved = resolver.resolveEntity(caller, {
+      kind: 'session', sessionId: target.focusedSessionId
+    }, '')
+
+    await expect(facade.execute('navigation.switch.workspace', caller, {
+      target: { kind: 'session', sessionId: target.focusedSessionId }
+    })).resolves.toMatchObject({ kind: 'navigated' })
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      windowId: resolved.windowId,
+      workspaceId: resolved.workspaceId,
+      taskId: resolved.taskId,
+      sceneId: resolved.sceneId,
+      focusTerminal: false
+    }))
+  })
+
+  it('finishes request parsing and target resolution before dispatching navigation', async () => {
+    await expectFault(facade.execute('navigation.focus.session', caller, {
+      target: { kind: 'session', sessionId: caller.sessionId },
+      unsupported: true
+    }), 'INVALID_REQUEST')
+    await expectFault(facade.execute('navigation.focus.session', caller, {
+      target: { kind: 'session', sessionId: 'missing-session' }
+    }), 'TARGET_NOT_FOUND')
+
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['Renderer refusal', 'TARGET_NOT_READY' as const, 'target disappeared', 'TARGET_NOT_READY'],
+    ['offline window', 'TARGET_NOT_READY' as const, 'target window is offline', 'TARGET_NOT_READY'],
+    ['acknowledgement timeout', 'NAVIGATION_TIMEOUT' as const, 'deadline passed', 'NAVIGATION_TIMEOUT']
+  ])('maps %s to %s', async (_case, brokerCode, message, expectedCode) => {
+    navigate.mockRejectedValueOnce(new HostNavigationBrokerError(brokerCode, message))
+
+    await expectFault(facade.execute('navigation.focus.session', caller, {
+      target: { kind: 'session', sessionId: caller.sessionId }
+    }), expectedCode)
+  })
+})
+
 describe('RuntimeHostActionFacade destructive actions', () => {
   it('previews and removes a stable three-session subtree, stops runs, and keeps files', async () => {
     const { child, grandchild } = seedRemovableBranch()
@@ -1255,6 +1395,7 @@ function createFacade(
       createForkSibling: createForkChild
     },
     forkBatches,
+    navigation: { navigate },
     disposeSessions,
     now: () => ++clock,
     ...overrides
@@ -1306,6 +1447,23 @@ function activeSession(windowId: string, sceneId: string): string | undefined {
     `SELECT active_session_id FROM window_scene_focus WHERE window_id = ? AND scene_id = ?`,
     windowId, sceneId
   )?.active_session_id
+}
+
+function navigationState(): Record<string, Array<Record<string, unknown>>> {
+  return {
+    windows: database.all<Record<string, unknown>>(
+      'SELECT * FROM window_navigation ORDER BY window_id'
+    ),
+    workspaces: database.all<Record<string, unknown>>(
+      'SELECT * FROM window_workspace_focus ORDER BY window_id, workspace_id'
+    ),
+    tasks: database.all<Record<string, unknown>>(
+      'SELECT * FROM window_task_focus ORDER BY window_id, task_id'
+    ),
+    sessions: database.all<Record<string, unknown>>(
+      'SELECT * FROM window_scene_focus ORDER BY window_id, scene_id'
+    )
+  }
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {

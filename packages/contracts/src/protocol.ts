@@ -16,7 +16,27 @@ const sessionId = identifier
 const helloSchema = z.object({
   type: z.literal('protocol.hello'),
   protocolVersion,
-  clientId: identifier
+  clientId: identifier,
+  windowId: identifier.optional(),
+  windowKind: z.enum(['main', 'detached-terminal', 'background']).optional()
+})
+
+const hostNavigationPathSchema = z.object({
+  windowId: identifier,
+  workspaceId: identifier,
+  taskId: identifier,
+  sceneId: identifier,
+  sessionId: sessionId.optional()
+})
+
+const hostNavigationResultSchema = z.object({
+  type: z.literal('host.navigation-result'),
+  protocolVersion,
+  requestId: identifier,
+  windowId: identifier,
+  ok: z.boolean(),
+  finalPath: hostNavigationPathSchema.optional(),
+  error: z.string().min(1).max(4096).optional()
 })
 
 const spawnSchema = z.object({
@@ -273,7 +293,8 @@ const rendererMessageSchema = z.discriminatedUnion('type', [
   hudRefreshSchema,
   rpcRequestSchema,
   rpcCancelSchema,
-  eventsSubscribeSchema
+  eventsSubscribeSchema,
+  hostNavigationResultSchema
 ])
 
 export type RendererMessage = z.infer<typeof rendererMessageSchema>
@@ -320,6 +341,18 @@ export type SessionRecoveryStatusWire = {
 
 export type RuntimeMessage =
   | SessionRecoveryStatusWire
+  | {
+      type: 'host.navigation-request'
+      protocolVersion: typeof PROTOCOL_VERSION
+      requestId: string
+      windowId: string
+      workspaceId: string
+      taskId: string
+      sceneId: string
+      sessionId?: string
+      focusTerminal: boolean
+      deadlineAt: number
+    }
   | {
       type: 'session.recovery-snapshot'
       protocolVersion: typeof PROTOCOL_VERSION
@@ -486,3 +519,13 @@ export interface RuntimeConnectRequest {
   type: 'runtime.connect'
   protocolVersion: typeof PROTOCOL_VERSION
 }
+
+export type HostNavigationRequestWire = Extract<
+  RuntimeMessage,
+  { type: 'host.navigation-request' }
+>
+
+export type HostNavigationResultWire = Extract<
+  RendererMessage,
+  { type: 'host.navigation-result' }
+>

@@ -33,6 +33,10 @@ import type {
   HostControlScope
 } from './control/host-control-server'
 import type { RuntimeControlBackend } from './control/runtime-control-backend'
+import {
+  type HostNavigationBroker,
+  type HostNavigationRegistration
+} from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
@@ -128,6 +132,7 @@ export interface RuntimeServerOptions {
   controlAssetRoot?: string
   controlNodeExecutable?: string
   providerConfigs?: ProviderConfigStore
+  navigationBroker?: HostNavigationBroker
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -246,6 +251,8 @@ export class RuntimeServer {
   readonly #recoveryCoordinator: RuntimeRecoveryCoordinator | undefined
   readonly #controlAssetRoot: string | undefined
   readonly #controlNodeExecutable: string
+  readonly #navigationBroker: HostNavigationBroker | undefined
+  #navigationRegistration: HostNavigationRegistration | undefined
   #handshakeComplete = false
   #closed = false
 
@@ -347,6 +354,7 @@ export class RuntimeServer {
     this.#controlAssetRoot = options.controlAssetRoot ?? process.env.MATOU_CONTROL_ASSET_ROOT
     this.#controlNodeExecutable = options.controlNodeExecutable ??
       process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
+    this.#navigationBroker = options.navigationBroker
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
@@ -557,6 +565,7 @@ export class RuntimeServer {
     for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
     this.#summaryTimers.clear()
     for (const sessionId of this.#summaryBuffers.keys()) this.#flushSessionSummary(sessionId)
+    this.#unregisterNavigationWindow()
     this.#closed = true
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
@@ -581,6 +590,7 @@ export class RuntimeServer {
 
   #disconnectPort(): void {
     if (this.#portClosed) return
+    this.#unregisterNavigationWindow()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
     this.#subscriptions.clear()
@@ -617,6 +627,12 @@ export class RuntimeServer {
         runtimeId: this.#runtimeId,
         capabilities: this.#accessPolicy.capabilities
       })
+      if (message.windowKind === 'main' && message.windowId !== undefined) {
+        this.#navigationRegistration = this.#navigationBroker?.registerWindow(
+          message.windowId,
+          this.#sendToPort
+        )
+      }
       this.publishRecoverySnapshot(this.#recoveryCoordinator?.snapshot() ?? [])
       return
     }
@@ -626,6 +642,11 @@ export class RuntimeServer {
     switch (message.type) {
       case 'protocol.hello':
         this.#sendError('INVALID_MESSAGE', 'protocol handshake is already complete')
+        break
+      case 'host.navigation-result':
+        if (this.#navigationRegistration !== undefined) {
+          this.#navigationBroker?.acknowledge(message, this.#navigationRegistration)
+        }
         break
       case 'terminal.spawn':
         await this.#spawnSerialized(message)
@@ -794,6 +815,13 @@ export class RuntimeServer {
       }
       return false
     }
+  }
+
+  #unregisterNavigationWindow(): void {
+    const registration = this.#navigationRegistration
+    if (registration === undefined) return
+    this.#navigationRegistration = undefined
+    this.#navigationBroker?.unregisterWindow(registration.windowId, registration)
   }
 
   #scheduleCwdCapture(session: PtySession): void {
