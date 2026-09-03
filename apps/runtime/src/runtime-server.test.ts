@@ -4144,6 +4144,7 @@ sleep 30
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
         '--dangerously-skip-permissions'
       ])
+      await waitUntilAsync(async () => (await readFile(sizeFile, 'utf8').catch(() => '')).trim() === '43 132', 6_000)
       expect((await readFile(sizeFile, 'utf8')).trim()).toBe('43 132')
       expect(database.get<{ kind: string; title: string }>(
         'SELECT kind, title FROM sessions WHERE id = ?', 'shell-promoted-provider'
