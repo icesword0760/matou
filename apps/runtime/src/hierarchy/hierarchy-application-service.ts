@@ -106,7 +106,11 @@ export interface BootstrapWindowInput {
   now: number
 }
 
-export interface CreateWorkspaceInput {
+export interface CreateNavigationOptions {
+  navigation?: 'activate' | 'preserve'
+}
+
+export interface CreateWorkspaceInput extends CreateNavigationOptions {
   windowId: string
   name: string
   rootDirectory: string
@@ -148,9 +152,22 @@ export interface WorkspaceHierarchyResult {
   navigation: WindowNavigation
 }
 
-export interface CreateTaskWorkflowInput {
+export interface CreatedHierarchyPath {
+  workspace: Workspace
+  task: Task
+  scene: Scene
+  session: Session
+  mount: SessionMount
+}
+
+export interface CreateHierarchyResult extends WorkspaceHierarchyResult {
+  created: CreatedHierarchyPath
+}
+
+export interface CreateTaskWorkflowInput extends CreateNavigationOptions {
   windowId: string
   workspaceId: string
+  title?: string
   now: number
 }
 
@@ -343,11 +360,12 @@ export class HierarchyApplicationService {
   createWorkspace(
     command: DomainCommandMetadata,
     input: CreateWorkspaceInput
-  ): WorkspaceHierarchyResult {
+  ): CreateHierarchyResult {
     const rootDirectory = resolve(input.rootDirectory)
     const ids = createHierarchyIds()
     return this.#transactions.execute(command, (context) => {
       registerWindow(context.tx, input.windowId, input.now)
+      const navigationBefore = readNavigation(context.tx, input.windowId)
       const existing = context.tx.get<WorkspaceRow>(
         `SELECT * FROM workspaces
          WHERE root_directory = ? AND archived_at IS NULL
@@ -367,7 +385,11 @@ export class HierarchyApplicationService {
           now: input.now
         })
       }
-      return readHierarchyResult(context.tx, input.windowId)
+      const created = createdPathFromHierarchy(readHierarchyResult(context.tx, input.windowId))
+      if (input.navigation === 'preserve') {
+        restoreNavigationInTransaction(context.tx, navigationBefore, input.now)
+      }
+      return { ...readHierarchyResult(context.tx, input.windowId), created }
     }).result
   }
 
@@ -570,16 +592,27 @@ export class HierarchyApplicationService {
   createTask(
     command: DomainCommandMetadata,
     input: CreateTaskWorkflowInput
-  ): WorkspaceHierarchyResult {
+  ): CreateHierarchyResult {
     const ids = createHierarchyIds()
     return this.#transactions.execute(command, (context) => {
       registerWindow(context.tx, input.windowId, input.now)
+      const navigationBefore = readNavigation(context.tx, input.windowId)
       const workspace = requireRow<WorkspaceRow>(context.tx.get(
         'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL',
         input.workspaceId
       ), 'Workspace')
       assertWorkspacePathAvailable(context.tx, input.workspaceId)
-      const title = nextTaskTitle(context.tx, input.workspaceId)
+      const title = input.title === undefined
+        ? nextTaskTitle(context.tx, input.workspaceId)
+        : requiredTrimmed(input.title, 'Task title')
+      if (context.tx.get(
+        `SELECT id FROM tasks
+         WHERE workspace_id = ? AND title = ? AND archived_at IS NULL`,
+        input.workspaceId,
+        title
+      )) {
+        throw new Error(`an active Task named "${title}" already exists in this Workspace`)
+      }
       this.#createTaskHierarchy(context, {
         ids,
         windowId: input.windowId,
@@ -589,7 +622,11 @@ export class HierarchyApplicationService {
         now: input.now,
         lastOpenedAt: 0
       })
-      return readHierarchyResult(context.tx, input.windowId)
+      const created = readCreatedHierarchyPathForSession(context.tx, ids.sessionId)
+      if (input.navigation === 'preserve') {
+        restoreNavigationInTransaction(context.tx, navigationBefore, input.now)
+      }
+      return { ...readHierarchyResult(context.tx, input.windowId), created }
     }).result
   }
 
@@ -2415,6 +2452,60 @@ export function readHierarchyResultForSession(
   }
 }
 
+export function readCreatedHierarchyPathForSession(
+  tx: DatabaseTransaction,
+  sessionId: string
+): CreatedHierarchyPath {
+  return createdPathFromHierarchy(readHierarchyResultForSession(tx, '', sessionId))
+}
+
+export function restoreNavigationInTransaction(
+  tx: DatabaseTransaction,
+  navigation: WindowNavigation,
+  now: number
+): void {
+  tx.run(
+    `UPDATE window_navigation SET active_workspace_id = ?, updated_at = ?
+     WHERE window_id = ?`,
+    navigation.activeWorkspaceId ?? null,
+    now,
+    navigation.windowId
+  )
+  tx.run('DELETE FROM window_workspace_focus WHERE window_id = ?', navigation.windowId)
+  tx.run('DELETE FROM window_task_focus WHERE window_id = ?', navigation.windowId)
+  tx.run('DELETE FROM window_scene_focus WHERE window_id = ?', navigation.windowId)
+  for (const [workspaceId, taskId] of Object.entries(navigation.taskByWorkspace)) {
+    tx.run(
+      `INSERT INTO window_workspace_focus (window_id, workspace_id, active_task_id, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      navigation.windowId,
+      workspaceId,
+      taskId,
+      now
+    )
+  }
+  for (const [taskId, sceneId] of Object.entries(navigation.sceneByTask)) {
+    tx.run(
+      `INSERT INTO window_task_focus (window_id, task_id, active_scene_id, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      navigation.windowId,
+      taskId,
+      sceneId,
+      now
+    )
+  }
+  for (const [sceneId, sessionId] of Object.entries(navigation.sessionByScene)) {
+    tx.run(
+      `INSERT INTO window_scene_focus (window_id, scene_id, active_session_id, updated_at)
+       VALUES (?, ?, ?, ?)`,
+      navigation.windowId,
+      sceneId,
+      sessionId,
+      now
+    )
+  }
+}
+
 function readNavigation(tx: DatabaseTransaction, windowId: string): WindowNavigation {
   const row = tx.get<{ active_workspace_id: string | null }>(
     'SELECT active_workspace_id FROM window_navigation WHERE window_id = ?',
@@ -2444,6 +2535,19 @@ function readNavigation(tx: DatabaseTransaction, windowId: string): WindowNaviga
         windowId
       ).map((focus) => [focus.scene_id, focus.active_session_id])
     )
+  }
+}
+
+function createdPathFromHierarchy(result: WorkspaceHierarchyResult): CreatedHierarchyPath {
+  if (!result.workspace || !result.task || !result.scene || !result.session || !result.mount) {
+    throw new Error('Created hierarchy path is incomplete')
+  }
+  return {
+    workspace: result.workspace,
+    task: result.task,
+    scene: result.scene,
+    session: result.session,
+    mount: result.mount
   }
 }
 
