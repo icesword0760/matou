@@ -116,6 +116,10 @@ describe('WorktreeService', () => {
 
   it('reuses its existing branch when a prior add failed before linking the worktree directory', async () => {
     const path = join(root, 'worktrees', 'retry-partial')
+    seedCreatingWorktreeClaim({
+      id: 'worktree-retry-partial', executionContextId: 'context-retry-partial',
+      path, branch: 'retry-partial', baseRef: 'HEAD'
+    })
     await exec('git', ['-C', repositoryRoot, 'branch', 'retry-partial', 'HEAD'])
 
     const retried = await service.create(command('retry-partial'), {
@@ -128,6 +132,19 @@ describe('WorktreeService', () => {
     await expect(exec('git', ['-C', path, 'branch', '--show-current'])).resolves.toMatchObject({
       stdout: 'retry-partial\n'
     })
+  })
+
+  it('does not adopt an externally created branch without a prior matching durable claim', async () => {
+    const path = join(root, 'worktrees', 'external-competition')
+    await exec('git', ['-C', repositoryRoot, 'branch', 'external-competition', 'HEAD'])
+
+    await expect(service.create(command('external-competition'), {
+      id: 'worktree-external-competition',
+      executionContextId: 'context-external-competition',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch: 'external-competition', baseRef: 'HEAD', setupPolicy: [], now: 20
+    })).rejects.toThrow('existing branch is not reserved by this Worktree')
+    await expect(realpath(path)).rejects.toThrow()
   })
 
   it('checkpoints idempotent setup and skips a completed step after restart', async () => {
@@ -184,4 +201,26 @@ function seedBoundRun(db: RuntimeDatabase, contextId: string): void {
     tx.run('INSERT INTO sessions (id, task_id, execution_context_id, kind, status, title, created_at, updated_at, last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', 'session-1', 'task-1', contextId, 'shell', 'running', 'Shell', 1, 1, 1)
     tx.run('INSERT INTO session_runs (id, session_id, ordinal, runtime_generation, status, started_at) VALUES (?, ?, ?, ?, ?, ?)', 'run-1', 'session-1', 1, 'generation', 'running', 1)
   })
+}
+
+function seedCreatingWorktreeClaim(input: {
+  id: string
+  executionContextId: string
+  path: string
+  branch: string
+  baseRef: string
+}): void {
+  database.run(
+    `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+     VALUES (?, 'workspace-1', 'git-worktree', ?, 10)`,
+    input.executionContextId, input.path
+  )
+  database.run(
+    `INSERT INTO worktrees (
+       id, execution_context_id, repository_root, worktree_path, branch_name,
+       base_ref, state, setup_policy_json, setup_result_json, cleanup_policy,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, 'creating', '[]', '[]', 'retain-dirty', 10, 10)`,
+    input.id, input.executionContextId, repositoryRoot, input.path, input.branch, input.baseRef
+  )
 }

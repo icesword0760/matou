@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -180,6 +180,7 @@ interface ForkEnvironmentPlan {
   cwd: string
   targetExecutionContextId?: string
   gitPlan?: GitPlan
+  existingWorktree?: Extract<ResolvedForkEnvironment, { mode: 'existing-worktree' }>
 }
 
 interface ForkIntentRow {
@@ -678,14 +679,19 @@ export class ForkWorkflowService {
     displayName: string,
     sessionId: string
   ): Promise<ForkEnvironmentPlan> {
+    if (!('environment' in input) && input.worktreeMode === 'current') {
+      return {
+        worktreeMode: 'current',
+        executionContextId: source.forkSource.execution_context_id,
+        cwd: source.forkSource.cwd
+      }
+    }
     const environment = 'environment' in input
       ? input.environment
-      : input.worktreeMode === 'current'
-        ? { mode: 'current' as const, executionContextId: source.forkSource.execution_context_id }
-        : {
-            mode: 'new-worktree' as const,
-            branch: createGitBranchName(displayName, sessionId)
-          }
+      : {
+          mode: 'new-worktree' as const,
+          branch: createGitBranchName(displayName, sessionId)
+        }
     if (environment.mode === 'new-worktree') {
       const gitPlan = await this.#resolveGitPlan(source, environment.branch, sessionId)
       return {
@@ -696,37 +702,15 @@ export class ForkWorkflowService {
       }
     }
     if (environment.mode === 'existing-worktree') {
-      const target = this.#database.get<{
-        execution_context_id: string
-        cwd: string
-        workspace_id: string
-        worktree_id: string
-        branch_name: string
-        state: Worktree['state']
-      }>(
-        `SELECT execution_contexts.id AS execution_context_id, execution_contexts.cwd,
-                execution_contexts.workspace_id, worktrees.id AS worktree_id,
-                worktrees.branch_name, worktrees.state
-         FROM execution_contexts
-         JOIN worktrees ON worktrees.execution_context_id = execution_contexts.id
-         WHERE execution_contexts.id = ? AND worktrees.id = ?
-           AND execution_contexts.archived_at IS NULL`,
-        environment.executionContextId, environment.worktreeId
+      const target = this.#assertExistingWorktreeAvailable(
+        this.#database, source.task.workspace_id, environment
       )
-      if (
-        !target || target.workspace_id !== source.task.workspace_id ||
-        target.branch_name !== environment.branch ||
-        !['ready', 'dirty', 'retained'].includes(target.state)
-      ) {
-        throw new ForkWorkflowError(
-          'WORKTREE_CONFLICT', '指定的 Worktree 已不可用', environment.worktreeRef
-        )
-      }
       return {
         worktreeMode: 'current',
         executionContextId: target.execution_context_id,
         cwd: target.cwd,
-        targetExecutionContextId: target.execution_context_id
+        targetExecutionContextId: target.execution_context_id,
+        existingWorktree: environment
       }
     }
     const target = this.#database.get<{ id: string; cwd: string; workspace_id: string }>(
@@ -742,6 +726,57 @@ export class ForkWorkflowService {
       executionContextId: target.id,
       cwd: target.cwd
     }
+  }
+
+  #assertExistingWorktreeAvailable(
+    source: DatabaseTransaction,
+    workspaceId: string,
+    environment: Extract<ResolvedForkEnvironment, { mode: 'existing-worktree' }>
+  ): { execution_context_id: string; cwd: string } {
+    const target = source.get<{
+      execution_context_id: string
+      cwd: string
+      workspace_id: string
+      branch_name: string
+      worktree_state: Worktree['state']
+      worktree_repository_root: string
+      git_state: 'ready' | 'unavailable' | null
+      git_repository_root: string | null
+      git_branch: string | null
+    }>(
+      `SELECT execution_contexts.id AS execution_context_id, execution_contexts.cwd,
+              execution_contexts.workspace_id, worktrees.branch_name,
+              worktrees.state AS worktree_state,
+              worktrees.repository_root AS worktree_repository_root,
+              git_state.state AS git_state,
+              git_state.repository_root AS git_repository_root,
+              git_state.branch AS git_branch
+       FROM execution_contexts
+       JOIN worktrees ON worktrees.execution_context_id = execution_contexts.id
+       LEFT JOIN execution_context_git_states AS git_state
+         ON git_state.execution_context_id = execution_contexts.id
+       WHERE execution_contexts.id = ? AND worktrees.id = ?
+         AND execution_contexts.archived_at IS NULL`,
+      environment.executionContextId, environment.worktreeId
+    )
+    if (
+      !target || target.workspace_id !== workspaceId ||
+      !['ready', 'dirty', 'retained'].includes(target.worktree_state) ||
+      target.git_state !== 'ready' || target.git_repository_root === null ||
+      target.git_repository_root !== target.worktree_repository_root ||
+      environment.worktreeRef !== `worktree:${environment.worktreeId}`
+    ) {
+      throw new ForkWorkflowError(
+        'WORKTREE_CONFLICT', '指定的 Worktree 已不可用', environment.worktreeRef
+      )
+    }
+    if (target.branch_name !== environment.branch || target.git_branch !== environment.branch) {
+      throw new ForkWorkflowError(
+        'BRANCH_CONFLICT', `Worktree 当前分支与提交的 ${environment.branch} 不一致`,
+        environment.branch
+      )
+    }
+    return target
   }
 
   async #resolveGitPlan(
@@ -795,6 +830,17 @@ export class ForkWorkflowService {
           forkState: legacyForkState(duplicate.progress.stage),
           forkProgress: duplicate.progress
         }
+      }
+      if (gitPlan) {
+        assertBranchAvailableSync(gitPlan.repositoryRoot, gitPlan.branch)
+        assertDurableBranchAvailable(
+          tx, gitPlan, operationId, submissionKey
+        )
+      }
+      if (environment.existingWorktree) {
+        this.#assertExistingWorktreeAvailable(
+          tx, source.task.workspace_id, environment.existingWorktree
+        )
       }
       registerWindow(tx, input.windowId, input.now)
       const acceptedName = validateDisplayName(
@@ -1200,6 +1246,52 @@ async function assertBranchAvailable(repositoryRoot: string, branch: string): Pr
     throw error
   }
   throw new ForkWorkflowError('BRANCH_CONFLICT', `分支 ${branch} 已存在`, branch)
+}
+
+function assertBranchAvailableSync(repositoryRoot: string, branch: string): void {
+  const checked = spawnSync('git', ['check-ref-format', '--branch', branch], {
+    encoding: 'utf8'
+  })
+  if (checked.error || checked.status !== 0 || checked.stdout.trim() !== branch) {
+    throw new ForkWorkflowError('INVALID_BRANCH', '分支名称无效', branch)
+  }
+  const collision = spawnSync(
+    'git', ['-C', repositoryRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
+    { encoding: 'utf8' }
+  )
+  if (collision.error) throw collision.error
+  if (collision.status === 1) return
+  if (collision.status === 0) {
+    throw new ForkWorkflowError('BRANCH_CONFLICT', `分支 ${branch} 已存在`, branch)
+  }
+  throw new Error(collision.stderr.trim() || `Git branch check failed with ${collision.status}`)
+}
+
+function assertDurableBranchAvailable(
+  source: DatabaseTransaction,
+  gitPlan: GitPlan,
+  operationId: string,
+  submissionKey: string
+): void {
+  const conflict = source.get<{ worktree_id: string }>(
+    `SELECT worktrees.id AS worktree_id
+     FROM worktrees
+     LEFT JOIN session_fork_intents AS fork ON fork.worktree_id = worktrees.id
+     WHERE worktrees.repository_root = ? AND worktrees.branch_name = ?
+       AND (
+         worktrees.state <> 'removed' OR fork.stage NOT IN ('succeeded', 'failed')
+       )
+       AND NOT (
+         COALESCE(fork.operation_id, '') = ? AND COALESCE(fork.submission_key, '') = ?
+       )
+     LIMIT 1`,
+    gitPlan.repositoryRoot, gitPlan.branch, operationId, submissionKey
+  )
+  if (conflict) {
+    throw new ForkWorkflowError(
+      'BRANCH_CONFLICT', `分支 ${gitPlan.branch} 已被其他 Fork 预留`, gitPlan.branch
+    )
+  }
 }
 
 function processExitCode(error: unknown): number | undefined {

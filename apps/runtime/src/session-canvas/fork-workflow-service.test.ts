@@ -42,6 +42,66 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('ForkWorkflowService', () => {
+  it('reserves one repository branch for only one durable Fork before background execution', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-branch-reservation')
+    seedReadyGitState(source.executionContextId)
+    const environment = {
+      mode: 'new-worktree' as const,
+      branch: 'feature/reserved-before-execution'
+    }
+    const first = await service.createForkChild(command('reserve-first'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '首个预留', environment, submissionKey: 'reservation-first', now: 30
+    })
+    const beforeSecond = database.get<{ sessions: number; nodes: number }>(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )!
+
+    await expect(service.createForkChild(command('reserve-second'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '第二个预留', environment, submissionKey: 'reservation-second', now: 31
+    })).rejects.toMatchObject({
+      code: 'BRANCH_CONFLICT', input: environment.branch
+    } satisfies Partial<ForkWorkflowError>)
+
+    expect(database.get(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )).toEqual(beforeSecond)
+    expect(database.all(
+      `SELECT operation_id, submission_key, branch_name
+       FROM session_fork_intents WHERE branch_name = ?`, environment.branch
+    )).toEqual([{
+      operation_id: first.forkProgress!.operationId,
+      submission_key: 'reservation-first',
+      branch_name: environment.branch
+    }])
+  })
+
+  it('keeps the Fork source cwd for the Renderer current-mode compatibility path', async () => {
+    const source = bootstrapClaude('provider-renderer-current-cwd')
+    const contextCwd = join(dataRoot, 'context-row-cwd')
+    database.run(
+      'UPDATE execution_contexts SET cwd = ? WHERE id = ?',
+      contextCwd, source.executionContextId
+    )
+
+    const result = await service.createForkChild(command('renderer-current-cwd'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '继续当前会话', worktreeMode: 'current', now: 30
+    })
+
+    expect(result.session).toMatchObject({
+      executionContextId: source.executionContextId,
+      cwd: workspaceRoot
+    })
+    expect(result.session!.cwd).not.toBe(contextCwd)
+  })
+
   it('uses the submitted branch when creating a new Worktree', async () => {
     await initializeGitRepository(workspaceRoot)
     const source = bootstrapClaude('provider-explicit-branch')
@@ -110,6 +170,43 @@ describe('ForkWorkflowService', () => {
     expect(database.get(
       'SELECT state, branch_name FROM worktrees WHERE id = ?', existing.worktreeId
     )).toEqual({ state: 'ready', branch_name: existing.branch })
+  })
+
+  it('rejects an existing Worktree whose recorded Git branch changes before final acceptance', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-existing-branch-switch')
+    seedReadyGitState(source.executionContextId)
+    const existing = await seedExistingOwnedWorktree(source.sessionId, 'feature/stable-existing')
+    const before = database.get<{ sessions: number; nodes: number }>(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )!
+
+    const pending = service.createForkChild(command('existing-branch-switch'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '切换中的工作树', environment: {
+        mode: 'existing-worktree', branch: existing.branch,
+        worktreeRef: `worktree:${existing.worktreeId}`,
+        worktreeId: existing.worktreeId,
+        executionContextId: existing.executionContextId
+      }, now: 30
+    })
+    database.run(
+      `UPDATE execution_context_git_states
+       SET branch = 'feature/switched-elsewhere', updated_at = 31
+       WHERE execution_context_id = ?`,
+      existing.executionContextId
+    )
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'BRANCH_CONFLICT', input: existing.branch
+    } satisfies Partial<ForkWorkflowError>)
+    expect(database.get(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )).toEqual(before)
   })
 
   it('creates a current-worktree Fork child from a valid Claude conversation', async () => {

@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { HostActionTargetResolver } from '../control/host-action-target-resolver'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
@@ -38,9 +39,13 @@ describe('ForkWorkflowService explicit environment integration', () => {
 
   afterEach(() => database.close())
 
-  it('rejects a submitted branch collision before inserting a Fork scene node', async () => {
+  it('rejects an external ref created after Host resolution but before final Fork acceptance', async () => {
     const source = bootstrapClaude()
     seedReadyGitState(source.executionContextId)
+    const environment = new HostActionTargetResolver(database).resolveForkEnvironment({
+      kind: 'session', windowId: 'window-1', workspaceId: source.workspaceId,
+      taskId: source.taskId, sceneId: source.sceneId, sessionId: source.sessionId
+    }, { mode: 'new-worktree', branch: 'feature/already-exists' })
     await exec('git', ['-C', workspaceRoot, 'branch', 'feature/already-exists'])
     const before = database.get<{ sessions: number; nodes: number }>(
       `SELECT
@@ -50,9 +55,7 @@ describe('ForkWorkflowService explicit environment integration', () => {
 
     await expect(workflow.createForkChild(command('branch-collision'), {
       windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
-      name: '重名分支', environment: {
-        mode: 'new-worktree', branch: 'feature/already-exists'
-      }, now: 30
+      name: '重名分支', environment, now: 30
     })).rejects.toMatchObject({ code: 'BRANCH_CONFLICT' } satisfies Partial<ForkWorkflowError>)
     expect(database.get(
       `SELECT
@@ -101,6 +104,8 @@ describe('ForkWorkflowService explicit environment integration', () => {
       result.session!.id
     )
     return {
+      workspaceId: result.workspace!.id,
+      taskId: result.task!.id,
       sceneId: result.scene!.id,
       sessionId: result.session!.id,
       executionContextId: result.executionContext!.id
