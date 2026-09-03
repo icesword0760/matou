@@ -112,6 +112,7 @@ interface WritableRuntimeState extends RuntimeStateBase {
   controlBackend: RuntimeControlBackend
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
+  providerReady: ProviderReadyRegistry
   forkCoordinator: ForkOperationCoordinator
   forkBatchCoordinator: ForkBatchCoordinator
   recoveryCoordinator: RuntimeRecoveryCoordinator
@@ -375,7 +376,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     onIdentityRecorded: ({
       sessionId, runId, providerSessionId, eventName, forkAuthority
     }) => {
-      providerReady.record(sessionId, runId)
+      providerReady.record(sessionId, runId, sessions.get(sessionId)?.runId ?? '')
       sessionHuds.markResumable(sessionId)
       const now = Date.now()
       try {
@@ -464,13 +465,15 @@ async function initializeRuntime(): Promise<RuntimeState> {
     }
   })
   const forkBatchCoordinator = new ForkBatchCoordinator({
+    database,
     createChild: (command, input) => forkWorkflow.createForkChild(command, input),
+    retryChild: (command, input) => forkWorkflow.retryFork(command, input),
     startSession: async (sessionId) => {
       const descriptor = forkExecutionDescriptor(database, sessionId)
       if (!descriptor) throw new Error(`会话 ${sessionId} 尚未准备完成`)
       await backgroundServer.startOrResumeSession(descriptor)
     },
-    waitUntilReady: (sessionId) => providerReady.wait(sessionId, 60_000),
+    waitUntilReady: (sessionId, signal) => providerReady.wait(sessionId, 60_000, signal),
     sendPrompt: (sessionId, prompt) => controlBackend.sendText(sessionId, prompt, true)
   })
   forkCoordinator = new ForkOperationCoordinator(
@@ -532,6 +535,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     accessPolicy,
     hostControl,
     providerHooks,
+    providerReady,
     forkCoordinator,
     forkBatchCoordinator,
     recoveryCoordinator,
@@ -545,6 +549,9 @@ function shutdown(): Promise<void> {
   pendingDatabaseRecovery = undefined
   return lifecycleCoordinator.shutdown(runtimeReady, {
     closeIncoming: () => {
+      if (runtimeState?.mode === 'normal') {
+        runtimeState.providerReady.cancelAll(new Error('Runtime 正在关闭'))
+      }
       forkCoordinator?.stop()
       forkCoordinator = undefined
       for (const server of servers) server.close()

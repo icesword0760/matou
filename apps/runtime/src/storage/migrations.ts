@@ -1232,5 +1232,51 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX session_relations_structural_lookup_idx
       ON session_relations_current(from_session_id, relation_kind);
     `
+  },
+  {
+    version: 29,
+    name: 'durable-fork-batch-ledger',
+    sql: `
+      CREATE TABLE fork_batch_ledger (
+        batch_key TEXT PRIMARY KEY,
+        request_fingerprint TEXT NOT NULL,
+        caller_session_id TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        source_scene_id TEXT NOT NULL,
+        item_count INTEGER NOT NULL CHECK (item_count >= 0 AND item_count <= 50),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE fork_batch_items (
+        batch_key TEXT NOT NULL REFERENCES fork_batch_ledger(batch_key) ON DELETE CASCADE,
+        item_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        item_fingerprint TEXT NOT NULL,
+        submission_key TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        environment_json TEXT NOT NULL,
+        start_requested INTEGER NOT NULL CHECK (start_requested IN (0, 1)),
+        prompt_fingerprint TEXT,
+        session_id TEXT,
+        state TEXT NOT NULL CHECK (
+          state IN ('unsubmitted', 'created', 'ready', 'started', 'failed')
+        ),
+        start_state TEXT NOT NULL CHECK (
+          start_state IN (
+            'not-requested', 'pending', 'waiting', 'delivering',
+            'completed', 'failed', 'uncertain'
+          )
+        ),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (batch_key, item_key),
+        UNIQUE (batch_key, ordinal)
+      ) STRICT;
+
+      CREATE INDEX fork_batch_items_session_idx
+      ON fork_batch_items(session_id);
+    `
   }
 ]

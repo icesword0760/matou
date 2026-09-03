@@ -1,13 +1,27 @@
 import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { DomainCommandMetadata } from '@matou/domain'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ResolvedForkEnvironment, ResolvedHostEntity } from './host-action-target-resolver'
 import type { HostCallerIdentity } from './host-control-types'
 import { ForkBatchCoordinator, type CreateForkBatchInput } from './fork-batch-coordinator'
 import { ProviderReadyRegistry } from './provider-ready-registry'
-import type { CreateForkInput, ForkWorkflowResult } from '../session-canvas/fork-workflow-service'
+import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
+import { SessionForkIntentRepository } from '../session/session-fork-intent-repository'
+import {
+  ForkWorkflowService,
+  type CreateForkInput,
+  type ForkWorkflowResult,
+  type RetryForkInput
+} from '../session-canvas/fork-workflow-service'
+import { RuntimeDatabase } from '../storage/database'
+import { DomainTransactionManager } from '../storage/domain-transaction'
+import { MigrationRunner } from '../storage/migration-runner'
+import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
 
 const caller: HostCallerIdentity = { runId: 'run-parent', sessionId: 'session-parent' }
 const source: ResolvedHostEntity & { kind: 'session' } = {
@@ -26,6 +40,21 @@ type CreateChild = (
   command: DomainCommandMetadata,
   input: CreateForkInput
 ) => Promise<ForkWorkflowResult>
+type RetryChild = (
+  command: DomainCommandMetadata,
+  input: RetryForkInput
+) => Promise<ForkWorkflowResult>
+
+let database: RuntimeDatabase
+let dataRoot: string
+
+beforeEach(async () => {
+  dataRoot = await mkdtemp(join(tmpdir(), 'matou-fork-batch-'))
+  database = RuntimeDatabase.open(join(dataRoot, 'matou.sqlite'))
+  await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+})
+
+afterEach(() => database.close())
 
 function forkResult(
   sessionId: string,
@@ -59,20 +88,22 @@ function batchFixture(
 
 function coordinatorFixture(overrides: Partial<{
   createChild: CreateChild
+  retryChild: RetryChild
   startSession: (sessionId: string) => Promise<void>
-  waitUntilReady: (sessionId: string) => Promise<unknown>
+  waitUntilReady: (sessionId: string, signal?: AbortSignal) => Promise<unknown>
   sendPrompt: (sessionId: string, prompt: string) => Promise<void>
 }> = {}) {
   const createChild = vi.fn<CreateChild>(overrides.createChild ?? (async (_command, input) => (
     forkResult(`created-${input.name}`)
   )))
+  const retryChild = vi.fn<RetryChild>(overrides.retryChild ?? (async () => forkResult('retried-session')))
   const startSession = vi.fn(overrides.startSession ?? (async () => undefined))
   const waitUntilReady = vi.fn(overrides.waitUntilReady ?? (async () => undefined))
   const sendPrompt = vi.fn(overrides.sendPrompt ?? (async () => undefined))
   const coordinator = new ForkBatchCoordinator({
-    createChild, startSession, waitUntilReady, sendPrompt, now: () => 123
+    database, createChild, retryChild, startSession, waitUntilReady, sendPrompt, now: () => 123
   })
-  return { coordinator, createChild, startSession, waitUntilReady, sendPrompt }
+  return { coordinator, createChild, retryChild, startSession, waitUntilReady, sendPrompt }
 }
 
 describe('ForkBatchCoordinator', () => {
@@ -180,6 +211,48 @@ describe('ForkBatchCoordinator', () => {
     expect(createdNodes).toBe(3)
   })
 
+  it('persists canonical input and prompt delivery across a Runtime restart', async () => {
+    const real = await realForkFixture()
+    const createChild = vi.fn<CreateChild>((command, input) => real.workflow.createForkChild(command, input))
+    const retryChild = vi.fn<RetryChild>((command, input) => real.workflow.retryFork(command, input))
+    const startSession = vi.fn(async () => undefined)
+    const waitUntilReady = vi.fn(async () => undefined)
+    const sendPrompt = vi.fn(async () => undefined)
+    const dependencies = {
+      database, createChild, retryChild, startSession, waitUntilReady, sendPrompt, now: () => 123
+    }
+    const input = realBatchInput(real.source, {
+      itemKey: 'durable', title: '持久方案', environment: real.environment,
+      start: true, prompt: '实现持久方案'
+    }, 'durable-batch')
+
+    const first = await new ForkBatchCoordinator(dependencies).createChildren(input)
+    const sessionsAfterFirst = database.get<{ count: number }>('SELECT COUNT(*) AS count FROM sessions')!.count
+    const replay = await new ForkBatchCoordinator(dependencies).createChildren({
+      ...input,
+      caller: { ...input.caller, runId: 'run-after-restart' }
+    })
+
+    expect(first.items[0]).toMatchObject({ state: 'started' })
+    expect(replay).toEqual(first)
+    expect(createChild).toHaveBeenCalledTimes(1)
+    expect(startSession).toHaveBeenCalledTimes(1)
+    expect(sendPrompt).toHaveBeenCalledTimes(1)
+    expect(database.get<{ count: number }>('SELECT COUNT(*) AS count FROM sessions')!.count)
+      .toBe(sessionsAfterFirst)
+    expect(database.get(
+      'SELECT start_state FROM fork_batch_items WHERE batch_key = ? AND item_key = ?',
+      input.batchKey, 'durable'
+    )).toEqual({ start_state: 'completed' })
+
+    await expect(new ForkBatchCoordinator(dependencies).createChildren({
+      ...input,
+      caller: { ...input.caller, runId: 'another-run' },
+      items: [{ ...input.items[0]!, title: '不同方案' }]
+    })).rejects.toThrow('与已提交输入不一致')
+    expect(createChild).toHaveBeenCalledTimes(1)
+  })
+
   it('retries only failed item keys and keeps prior successful nodes', async () => {
     const { coordinator, createChild } = coordinatorFixture()
     createChild.mockRejectedValueOnce(new Error('branch collision'))
@@ -197,6 +270,194 @@ describe('ForkBatchCoordinator', () => {
       ['one', 'ready'], ['two', 'ready'], ['three', 'ready']
     ])
     expect(retried.retry).toBeUndefined()
+  })
+
+  it('refreshes an asynchronously failed durable Fork and retries its existing Session after restart', async () => {
+    const real = await realForkFixture()
+    const createChild = vi.fn<CreateChild>((command, input) => real.workflow.createForkChild(command, input))
+    const retryChild = vi.fn<RetryChild>((command, input) => real.workflow.retryFork(command, input))
+    const dependencies = {
+      database,
+      createChild,
+      retryChild,
+      startSession: vi.fn(async () => undefined),
+      waitUntilReady: vi.fn(async () => undefined),
+      sendPrompt: vi.fn(async () => undefined),
+      now: () => 123
+    }
+    const input = realBatchInput(real.source, {
+      itemKey: 'async-failure', title: '异步失败方案', environment: real.environment
+    }, 'async-failure-batch')
+    const initial = await new ForkBatchCoordinator(dependencies).createChildren(input)
+    const sessionId = initial.items[0]!.sessionRef!.slice('session:'.length)
+    const intents = new SessionForkIntentRepository(database)
+    const operation = intents.findBySubmissionKey(itemKey(input.batchKey, 'async-failure'))!
+    const lease = intents.acquireLease({
+      operationId: operation.identity.operationId,
+      owner: 'test-failure', now: 124, ttlMs: 1_000
+    })
+    if (lease.kind !== 'acquired') throw new Error('test Fork lease was not acquired')
+    expect(intents.failOperation({
+      operationId: operation.identity.operationId,
+      lease: lease.lease,
+      error: 'provider failed asynchronously',
+      now: 125
+    }).kind).toBe('applied')
+
+    const retried = await new ForkBatchCoordinator(dependencies).retryFailures({
+      ...input,
+      caller: { ...input.caller, runId: 'run-after-restart' },
+      retryItemKeys: ['async-failure']
+    })
+
+    expect(retryChild).toHaveBeenCalledTimes(1)
+    expect(retryChild.mock.calls[0]![1].sessionId).toBe(sessionId)
+    expect(createChild).toHaveBeenCalledTimes(1)
+    expect(retried.items[0]).toMatchObject({
+      state: 'created', sessionRef: `session:${sessionId}`
+    })
+    expect(database.get(
+      'SELECT state, stage, attempt FROM session_fork_intents WHERE session_id = ?', sessionId
+    )).toEqual({ state: 'starting', stage: 'restoring-provider', attempt: 1 })
+  })
+
+  it('resumes a durably accepted retry after restart without retrying the Session twice', async () => {
+    const real = await realForkFixture()
+    const createChild = vi.fn<CreateChild>((command, input) => real.workflow.createForkChild(command, input))
+    const retryChild = vi.fn<RetryChild>((command, input) => real.workflow.retryFork(command, input))
+    const dependencies = {
+      database,
+      createChild,
+      retryChild,
+      startSession: vi.fn(async () => undefined),
+      waitUntilReady: vi.fn(async () => undefined),
+      sendPrompt: vi.fn(async () => undefined),
+      now: () => 123
+    }
+    const input = realBatchInput(real.source, {
+      itemKey: 'accepted-retry', title: '已受理重试', environment: real.environment
+    }, 'accepted-retry-batch')
+    const initial = await new ForkBatchCoordinator(dependencies).createChildren(input)
+    const sessionId = initial.items[0]!.sessionRef!.slice('session:'.length)
+    const intents = new SessionForkIntentRepository(database)
+    const operation = intents.findBySubmissionKey(itemKey(input.batchKey, 'accepted-retry'))!
+    const lease = intents.acquireLease({
+      operationId: operation.identity.operationId,
+      owner: 'test-accepted-retry', now: 124, ttlMs: 1_000
+    })
+    if (lease.kind !== 'acquired') throw new Error('test Fork lease was not acquired')
+    expect(intents.failOperation({
+      operationId: operation.identity.operationId,
+      lease: lease.lease,
+      error: 'failed before durable retry',
+      now: 125
+    }).kind).toBe('applied')
+    const observedFailure = await new ForkBatchCoordinator(dependencies).createChildren({
+      ...input, caller: { ...input.caller, runId: 'run-observing-failure' }
+    })
+    expect(observedFailure.items[0]).toMatchObject({ state: 'failed' })
+    // Represents a Runtime stopping after retryFork committed, but before the
+    // batch coordinator could persist its post-call result.
+    await real.workflow.retryFork(command('external-retry-accepted'), {
+      windowId: input.source.windowId,
+      sceneId: input.source.sceneId,
+      sessionId,
+      now: 126
+    })
+
+    const replay = await new ForkBatchCoordinator(dependencies).retryFailures({
+      ...input,
+      caller: { ...input.caller, runId: 'run-after-accepted-retry' },
+      retryItemKeys: ['accepted-retry']
+    })
+
+    expect(retryChild).not.toHaveBeenCalled()
+    expect(createChild).toHaveBeenCalledTimes(1)
+    expect(replay.items[0]).toMatchObject({
+      state: 'created', sessionRef: `session:${sessionId}`
+    })
+    expect(database.get(
+      'SELECT attempt FROM session_fork_intents WHERE session_id = ?', sessionId
+    )).toEqual({ attempt: 1 })
+  })
+
+  it('coalesces concurrent retries into one create, start, and prompt delivery', async () => {
+    let releaseCreate!: () => void
+    const createMayFinish = new Promise<void>((resolve) => { releaseCreate = resolve })
+    const ready = new ProviderReadyRegistry()
+    const { coordinator, createChild, startSession, sendPrompt } = coordinatorFixture({
+      startSession: async (sessionId) => {
+        ready.record(sessionId, 'run-retry', 'run-retry')
+      },
+      waitUntilReady: (sessionId, signal) => ready.wait(sessionId, 1_000, signal)
+    })
+    createChild.mockRejectedValueOnce(new Error('pre-create failure'))
+      .mockImplementationOnce(async () => {
+        await createMayFinish
+        return forkResult('session-retried')
+      })
+    const input = batchFixture([{
+      itemKey: 'failed', title: '失败后重试', environment: current,
+      start: true, prompt: '执行重试任务'
+    }], 'concurrent-retry')
+    await coordinator.createChildren(input)
+
+    const first = coordinator.retryFailures({ ...input, retryItemKeys: ['failed'] })
+    const second = coordinator.retryFailures({ ...input, retryItemKeys: ['failed'] })
+    await vi.waitFor(() => expect(createChild).toHaveBeenCalledTimes(2))
+    releaseCreate()
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ failed: 0 }),
+      expect.objectContaining({ failed: 0 })
+    ])
+    expect(createChild).toHaveBeenCalledTimes(2)
+    expect(startSession).toHaveBeenCalledTimes(1)
+    expect(sendPrompt).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares the single retry executor across coordinator instances for one Runtime database', async () => {
+    let releaseCreate!: () => void
+    const createMayFinish = new Promise<void>((resolve) => { releaseCreate = resolve })
+    const ready = new ProviderReadyRegistry()
+    const createChild = vi.fn<CreateChild>()
+      .mockRejectedValueOnce(new Error('pre-create failure'))
+      .mockImplementationOnce(async () => {
+        await createMayFinish
+        return forkResult('session-shared-retry')
+      })
+    const retryChild = vi.fn<RetryChild>(async () => forkResult('unused-retry'))
+    const startSession = vi.fn(async (sessionId: string) => {
+      ready.record(sessionId, 'run-shared-retry', 'run-shared-retry')
+    })
+    const waitUntilReady = vi.fn(
+      (sessionId: string, signal?: AbortSignal) => ready.wait(sessionId, 1_000, signal)
+    )
+    const sendPrompt = vi.fn(async () => undefined)
+    const dependencies = {
+      database, createChild, retryChild, startSession, waitUntilReady, sendPrompt, now: () => 123
+    }
+    const firstCoordinator = new ForkBatchCoordinator(dependencies)
+    const secondCoordinator = new ForkBatchCoordinator(dependencies)
+    const input = batchFixture([{
+      itemKey: 'failed', title: '共享重试', environment: current,
+      start: true, prompt: '执行共享重试任务'
+    }], 'shared-concurrent-retry')
+    await firstCoordinator.createChildren(input)
+
+    const first = firstCoordinator.retryFailures({ ...input, retryItemKeys: ['failed'] })
+    const second = secondCoordinator.retryFailures({ ...input, retryItemKeys: ['failed'] })
+    await vi.waitFor(() => expect(createChild).toHaveBeenCalledTimes(2))
+    releaseCreate()
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ failed: 0 }),
+      expect.objectContaining({ failed: 0 })
+    ])
+    expect(createChild).toHaveBeenCalledTimes(2)
+    expect(retryChild).not.toHaveBeenCalled()
+    expect(startSession).toHaveBeenCalledTimes(1)
+    expect(sendPrompt).toHaveBeenCalledTimes(1)
   })
 
   it('rejects retry keys whose prior state is ready, created, or starting', async () => {
@@ -282,4 +543,149 @@ describe('ForkBatchCoordinator', () => {
     })
     expect(result.items[0]!.error).toContain('节点已创建，任务仍待启动')
   })
+
+  it('does not erase a durable pending-start error when the Fork later succeeds', async () => {
+    const real = await realForkFixture()
+    const dependencies = {
+      database,
+      createChild: vi.fn<CreateChild>((command, input) => real.workflow.createForkChild(command, input)),
+      retryChild: vi.fn<RetryChild>((command, input) => real.workflow.retryFork(command, input)),
+      startSession: vi.fn(async () => undefined),
+      waitUntilReady: vi.fn(async () => { throw new Error('provider timeout') }),
+      sendPrompt: vi.fn(async () => undefined),
+      now: () => 123
+    }
+    const input = realBatchInput(real.source, {
+      itemKey: 'late-ready', title: '延迟就绪方案', environment: real.environment,
+      start: true, prompt: '执行延迟就绪任务'
+    }, 'late-ready-batch')
+    const first = await new ForkBatchCoordinator(dependencies).createChildren(input)
+    const sessionId = first.items[0]!.sessionRef!.slice('session:'.length)
+    database.run(
+      `UPDATE session_fork_intents
+       SET state = 'succeeded', stage = 'succeeded', completed_steps = total_steps,
+           completed_at = 130, updated_at = 130
+       WHERE session_id = ?`,
+      sessionId
+    )
+
+    const replay = await new ForkBatchCoordinator(dependencies).createChildren({
+      ...input, caller: { ...input.caller, runId: 'run-after-late-ready' }
+    })
+
+    expect(replay.items[0]).toMatchObject({
+      state: 'created', sessionRef: `session:${sessionId}`
+    })
+    expect(replay.items[0]!.error).toContain('节点已创建，任务仍待启动')
+    expect(dependencies.startSession).toHaveBeenCalledTimes(1)
+    expect(dependencies.sendPrompt).not.toHaveBeenCalled()
+  })
+
+  it('turns an interrupted delivery claim into a durable uncertain receipt without resending', async () => {
+    const { coordinator, createChild, startSession, sendPrompt, waitUntilReady } = coordinatorFixture()
+    const input = batchFixture([{
+      itemKey: 'delivery', title: '投递方案', environment: current,
+      start: true, prompt: '只投递一次'
+    }], 'delivery-receipt-batch')
+    await coordinator.createChildren(input)
+    database.run(
+      `UPDATE fork_batch_items
+       SET state = 'created', start_state = 'delivering', error_message = NULL
+       WHERE batch_key = ? AND item_key = ?`,
+      input.batchKey, 'delivery'
+    )
+
+    const replay = await new ForkBatchCoordinator({
+      database, createChild, retryChild: async () => forkResult('unused'),
+      startSession, waitUntilReady, sendPrompt, now: () => 124
+    }).createChildren({
+      ...input, caller: { ...input.caller, runId: 'run-after-interruption' }
+    })
+
+    expect(replay.items[0]).toMatchObject({ state: 'created' })
+    expect(replay.items[0]!.error).toContain('投递结果待确认')
+    expect(startSession).toHaveBeenCalledTimes(1)
+    expect(sendPrompt).toHaveBeenCalledTimes(1)
+    expect(database.get(
+      'SELECT start_state FROM fork_batch_items WHERE batch_key = ? AND item_key = ?',
+      input.batchKey, 'delivery'
+    )).toEqual({ start_state: 'uncertain' })
+  })
+
+  it('cancels the registered waiter when Session startup fails immediately', async () => {
+    const ready = new ProviderReadyRegistry()
+    const { coordinator } = coordinatorFixture({
+      startSession: async () => { throw new Error('spawn failed') },
+      waitUntilReady: (sessionId, signal) => ready.wait(sessionId, 60_000, signal)
+    })
+
+    const result = await coordinator.createChildren(batchFixture([{
+      itemKey: 'cancelled', title: '启动失败方案', environment: current,
+      start: true, prompt: '执行任务'
+    }], 'cancelled-waiter'))
+
+    expect(result.items[0]).toMatchObject({ state: 'created' })
+    expect(ready.pendingWaiterCount).toBe(0)
+  })
 })
+
+async function realForkFixture() {
+  const workspaceRoot = join(dataRoot, 'workspace')
+  await mkdir(workspaceRoot)
+  const transactions = new DomainTransactionManager(database)
+  const hierarchy = new HierarchyApplicationService(database, transactions)
+  const initial = hierarchy.bootstrapWindow(command('bootstrap-real-fork'), {
+    windowId: 'window-real', defaultRootDirectory: workspaceRoot,
+    defaultName: 'workspace', now: 10
+  })
+  database.run(
+    "UPDATE sessions SET kind = 'claude-code', title = 'Claude' WHERE id = ?",
+    initial.session!.id
+  )
+  database.run(
+    `INSERT INTO provider_bindings (
+       id, session_id, provider, provider_session_id, resume_state, restore_state,
+       metadata_json, created_at, updated_at, validated_at
+     ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 20, 20, 20)`,
+    `binding-${initial.session!.id}`,
+    initial.session!.id,
+    `provider-${initial.session!.id}`,
+    JSON.stringify({ canFork: true })
+  )
+  const workflow = new ForkWorkflowService(dataRoot, database, transactions, {
+    stopRuns: async () => undefined
+  })
+  const realSource: ResolvedHostEntity & { kind: 'session' } = {
+    kind: 'session',
+    windowId: 'window-real',
+    workspaceId: initial.workspace!.id,
+    taskId: initial.task!.id,
+    sceneId: initial.scene!.id,
+    sessionId: initial.session!.id
+  }
+  const environment: ResolvedForkEnvironment = {
+    mode: 'current', executionContextId: initial.executionContext!.id
+  }
+  return { workflow, source: realSource, environment }
+}
+
+function realBatchInput(
+  realSource: ResolvedHostEntity & { kind: 'session' },
+  item: CreateForkBatchInput['items'][number],
+  batchKey: string
+): CreateForkBatchInput {
+  return {
+    caller: { runId: 'run-real-parent', sessionId: realSource.sessionId },
+    source: realSource,
+    batchKey,
+    items: [item]
+  }
+}
+
+function command(commandId: string): DomainCommandMetadata {
+  return { commandId, commandType: 'test', requestHash: `hash-${commandId}` }
+}
+
+function itemKey(batchKey: string, key: string): string {
+  return createHash('sha256').update(`${batchKey}:${key}`).digest('hex')
+}

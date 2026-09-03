@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import type { DomainCommandMetadata } from '@matou/domain'
 
@@ -14,8 +14,10 @@ import type {
 import type { HostCallerIdentity } from './host-control-types'
 import type {
   CreateForkInput,
-  ForkWorkflowResult
+  ForkWorkflowResult,
+  RetryForkInput
 } from '../session-canvas/fork-workflow-service'
+import type { RuntimeDatabase } from '../storage/database'
 
 export type ResolvedForkItemInput = Omit<ForkItemInput, 'environment'> & {
   environment: ResolvedForkEnvironment
@@ -33,175 +35,580 @@ export interface RetryForkBatchInput extends CreateForkBatchInput {
 }
 
 export interface ForkBatchCoordinatorDependencies {
+  database: RuntimeDatabase
   createChild(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult>
+  retryChild(command: DomainCommandMetadata, input: RetryForkInput): Promise<ForkWorkflowResult>
   startSession(sessionId: string): Promise<void>
-  waitUntilReady(sessionId: string): Promise<unknown>
+  waitUntilReady(sessionId: string, signal?: AbortSignal): Promise<unknown>
   sendPrompt(sessionId: string, prompt: string): Promise<void>
   now?: () => number
 }
 
 type BatchItemResult = ForkBatchResult['items'][number]
+type LedgerItemState = 'unsubmitted' | 'created' | 'ready' | 'started' | 'failed'
+type StartState =
+  | 'not-requested' | 'pending' | 'waiting' | 'delivering'
+  | 'completed' | 'failed' | 'uncertain'
 
-interface BatchRecord {
-  fingerprint: string
-  items: ResolvedForkItemInput[]
-  results: Map<string, BatchItemResult>
-  operation?: Promise<ForkBatchResult>
+interface BatchLedgerRow {
+  batch_key: string
+  request_fingerprint: string
+  caller_session_id: string
+  source_session_id: string
+  source_scene_id: string
+  item_count: number
 }
 
-/** Coordinates deterministic, item-idempotent child Forks for one Runtime generation. */
+interface BatchItemRow {
+  batch_key: string
+  item_key: string
+  ordinal: number
+  item_fingerprint: string
+  submission_key: string
+  title: string
+  environment_json: string
+  start_requested: number
+  prompt_fingerprint: string | null
+  session_id: string | null
+  state: LedgerItemState
+  start_state: StartState
+  error_message: string | null
+}
+
+interface ForkIntentSnapshot {
+  session_id: string
+  stage: 'queued' | 'creating-worktree' | 'applying-setup' | 'binding-session' |
+    'restoring-provider' | 'starting-window' | 'succeeded' | 'failed'
+  error_message: string | null
+}
+
+interface ActiveBatchOperation {
+  fingerprint: string
+  kind: 'create' | 'retry'
+  retryKey?: string
+  promise: Promise<ForkBatchResult>
+}
+
+const DATABASE_OPERATIONS = new WeakMap<RuntimeDatabase, Map<string, ActiveBatchOperation>>()
+
+/**
+ * Durable, item-idempotent coordination for child Fork batches.
+ *
+ * SQLite owns completed and restart-resumable state. Memory contains only the
+ * currently executing Promise for each batch, so retries have one executor and
+ * completed batches do not accumulate in a Runtime-generation cache.
+ */
 export class ForkBatchCoordinator {
+  readonly #database: RuntimeDatabase
   readonly #dependencies: ForkBatchCoordinatorDependencies
   readonly #now: () => number
-  readonly #batches = new Map<string, BatchRecord>()
+  readonly #operations: Map<string, ActiveBatchOperation>
 
   constructor(dependencies: ForkBatchCoordinatorDependencies) {
+    this.#database = dependencies.database
     this.#dependencies = dependencies
     this.#now = dependencies.now ?? Date.now
+    const shared = DATABASE_OPERATIONS.get(dependencies.database) ??
+      new Map<string, ActiveBatchOperation>()
+    DATABASE_OPERATIONS.set(dependencies.database, shared)
+    this.#operations = shared
   }
 
   async createChildren(input: CreateForkBatchInput): Promise<ForkBatchResult> {
     validateBatch(input)
     const fingerprint = batchFingerprint(input)
-    const existing = this.#batches.get(input.batchKey)
-    if (existing) {
-      assertSameBatch(input.batchKey, existing.fingerprint, fingerprint)
-      return existing.operation ?? batchResult(input.batchKey, existing)
+    const active = this.#operations.get(input.batchKey)
+    if (active) {
+      assertSameBatch(input.batchKey, active.fingerprint, fingerprint)
+      return active.promise
     }
 
-    const record: BatchRecord = {
-      fingerprint,
-      items: input.items.map(cloneItem),
-      results: new Map()
+    this.#ensureLedger(input, fingerprint, true)
+    const operation = this.#resumeCreate(input)
+    this.#operations.set(input.batchKey, { fingerprint, kind: 'create', promise: operation })
+    try {
+      return await operation
+    } finally {
+      if (this.#operations.get(input.batchKey)?.promise === operation) {
+        this.#operations.delete(input.batchKey)
+      }
     }
-    this.#batches.set(input.batchKey, record)
-    const operation = this.#execute(input, record, input.items.map(({ itemKey }) => itemKey))
-    record.operation = operation
-    void operation.finally(() => {
-      if (record.operation === operation) delete record.operation
-    }).catch(() => undefined)
-    return operation
   }
 
   async retryFailures(input: RetryForkBatchInput): Promise<ForkBatchResult> {
     validateBatch(input)
     validateRetryKeys(input)
     const fingerprint = batchFingerprint(input)
-    const record = this.#batches.get(input.batchKey)
-    if (!record) throw new Error(`批次 ${input.batchKey} 没有可重试的上一轮结果`)
-    assertSameBatch(input.batchKey, record.fingerprint, fingerprint)
-    if (record.operation) await record.operation
+    const retryKey = canonicalJson(input.retryItemKeys)
+    const active = this.#operations.get(input.batchKey)
+    if (active) {
+      assertSameBatch(input.batchKey, active.fingerprint, fingerprint)
+      if (active.kind === 'retry' && active.retryKey === retryKey) return active.promise
+      await active.promise
+      return this.retryFailures(input)
+    }
 
-    const invalid = input.retryItemKeys.filter((itemKey) => record.results.get(itemKey)?.state !== 'failed')
+    this.#ensureLedger(input, fingerprint, false)
+    const priorRows = new Map(
+      this.#itemRows(input.batchKey).map((row) => [row.item_key, row])
+    )
+    this.#refreshAll(input)
+    const rows = this.#itemRows(input.batchKey)
+    const byKey = new Map(rows.map((row) => [row.item_key, row]))
+    const resumedRetryKeys = new Set<string>()
+    const invalid = input.retryItemKeys.filter((itemKey) => {
+      const current = byKey.get(itemKey)
+      if (current?.state === 'failed') return false
+      const prior = priorRows.get(itemKey)
+      const intent = current ? this.#intent(current.submission_key) : undefined
+      if (prior?.state === 'failed' && intent && intent.stage !== 'failed') {
+        resumedRetryKeys.add(itemKey)
+        return false
+      }
+      return true
+    })
     if (invalid.length > 0) {
       throw new Error(`仅可重试上一轮失败的项目：${invalid.join(', ')}`)
     }
-    if (input.retryItemKeys.length === 0) return batchResult(input.batchKey, record)
+    if (input.retryItemKeys.length === 0) return this.#result(input)
 
-    const operation = this.#execute(input, record, input.retryItemKeys)
-    record.operation = operation
+    const operation = this.#executeRetry(input, resumedRetryKeys)
+    this.#operations.set(input.batchKey, {
+      fingerprint, kind: 'retry', retryKey, promise: operation
+    })
     try {
       return await operation
     } finally {
-      if (record.operation === operation) delete record.operation
+      if (this.#operations.get(input.batchKey)?.promise === operation) {
+        this.#operations.delete(input.batchKey)
+      }
     }
   }
 
-  async #execute(
-    input: CreateForkBatchInput,
-    record: BatchRecord,
-    itemKeys: string[]
+  async #resumeCreate(input: CreateForkBatchInput): Promise<ForkBatchResult> {
+    for (const item of input.items) {
+      let row = this.#refreshItem(input.batchKey, item)
+      if (row.state === 'unsubmitted') row = await this.#createItem(input, item)
+      if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+    }
+    this.#refreshAll(input)
+    return this.#result(input)
+  }
+
+  async #executeRetry(
+    input: RetryForkBatchInput,
+    resumedRetryKeys: ReadonlySet<string>
   ): Promise<ForkBatchResult> {
-    const selected = new Set(itemKeys)
-    for (const item of record.items) {
+    const selected = new Set(input.retryItemKeys)
+    for (const item of input.items) {
       if (!selected.has(item.itemKey)) continue
-      record.results.set(item.itemKey, await this.#executeItem(input, item))
+      let row = this.#refreshItem(input.batchKey, item)
+      if (resumedRetryKeys.has(item.itemKey) && row.state !== 'failed') {
+        if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+        continue
+      }
+      if (row.state !== 'failed') {
+        throw new Error(`仅可重试上一轮失败的项目：${item.itemKey}`)
+      }
+      const intent = this.#intent(row.submission_key)
+      if (intent) {
+        if (intent.stage !== 'failed') {
+          row = this.#refreshItem(input.batchKey, item)
+          throw new Error(`仅可重试上一轮失败的项目：${item.itemKey}（当前 ${row.state}）`)
+        }
+        row = await this.#retryExistingItem(input, item, row, intent.session_id)
+      } else {
+        if (row.session_id !== null) {
+          throw new Error(`项目 ${item.itemKey} 的失败 Fork 记录缺失`)
+        }
+        this.#writeItem(input.batchKey, item.itemKey, {
+          state: 'unsubmitted',
+          startState: item.start === true ? 'pending' : 'not-requested',
+          sessionId: null,
+          error: null
+        })
+        row = await this.#createItem(input, item)
+      }
+      if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
     }
-    return batchResult(input.batchKey, record)
+    this.#refreshAll(input)
+    return this.#result(input)
   }
 
-  async #executeItem(
+  async #createItem(
     input: CreateForkBatchInput,
     item: ResolvedForkItemInput
-  ): Promise<BatchItemResult> {
+  ): Promise<BatchItemRow> {
     const submissionKey = itemSubmissionKey(input.batchKey, item.itemKey)
-    const environment = publicEnvironment(item.environment)
-    let accepted: ForkWorkflowResult
     try {
-      accepted = await this.#dependencies.createChild({
-        commandId: `fork-batch-item:${submissionKey}`,
-        commandType: 'structure.fork.children.item',
-        requestHash: itemRequestHash(input, item),
+      const accepted = await this.#dependencies.createChild(
+        createCommand(input, item, submissionKey),
+        {
+          windowId: input.source.windowId,
+          sceneId: input.source.sceneId,
+          sourceSessionId: input.source.sessionId,
+          name: item.title,
+          environment: item.environment,
+          submissionKey,
+          now: this.#now()
+        }
+      )
+      return this.#recordWorkflowResult(input.batchKey, item, accepted)
+    } catch (error) {
+      const intent = this.#intent(submissionKey)
+      if (intent) {
+        this.#writeItem(input.batchKey, item.itemKey, {
+          sessionId: intent.session_id,
+          state: intent.stage === 'failed' ? 'failed' : 'created',
+          error: intent.stage === 'failed' ? intent.error_message ?? errorMessage(error) : null
+        })
+        return this.#refreshItem(input.batchKey, item)
+      }
+      this.#writeItem(input.batchKey, item.itemKey, {
+        state: 'failed', sessionId: null, error: errorMessage(error)
+      })
+      return this.#itemRow(input.batchKey, item.itemKey)
+    }
+  }
+
+  async #retryExistingItem(
+    input: RetryForkBatchInput,
+    item: ResolvedForkItemInput,
+    row: BatchItemRow,
+    sessionId: string
+  ): Promise<BatchItemRow> {
+    this.#writeItem(input.batchKey, item.itemKey, {
+      startState: item.start === true ? 'pending' : 'not-requested',
+      error: null
+    })
+    try {
+      const accepted = await this.#dependencies.retryChild({
+        commandId: `fork-batch-retry:${row.submission_key}:${randomUUID()}`,
+        commandType: 'structure.fork.children.retry',
+        requestHash: hash(canonicalJson({
+          batchKey: input.batchKey, itemKey: item.itemKey, sessionId
+        })),
         causationId: input.caller.runId,
         correlationId: `fork-batch:${input.batchKey}`
       }, {
         windowId: input.source.windowId,
         sceneId: input.source.sceneId,
-        sourceSessionId: input.source.sessionId,
-        name: item.title,
-        environment: item.environment,
-        submissionKey,
+        sessionId,
         now: this.#now()
       })
+      return this.#recordWorkflowResult(input.batchKey, item, accepted)
     } catch (error) {
-      return {
-        itemKey: item.itemKey,
-        title: item.title,
-        state: 'failed',
-        environment,
-        error: errorMessage(error)
+      const currentIntent = this.#intent(row.submission_key)
+      if (currentIntent && currentIntent.stage !== 'failed') {
+        this.#writeItem(input.batchKey, item.itemKey, {
+          state: 'created', sessionId: currentIntent.session_id, error: null
+        })
+        return this.#refreshItem(input.batchKey, item)
       }
+      this.#writeItem(input.batchKey, item.itemKey, {
+        state: 'failed', sessionId, error: errorMessage(error)
+      })
+      return this.#itemRow(input.batchKey, item.itemKey)
     }
+  }
 
-    const sessionId = accepted.session?.id
-    if (!sessionId) {
-      return {
-        itemKey: item.itemKey,
-        title: item.title,
-        state: 'failed',
-        environment,
+  #recordWorkflowResult(
+    batchKey: string,
+    item: ResolvedForkItemInput,
+    accepted: ForkWorkflowResult
+  ): BatchItemRow {
+    const sessionId = accepted.session?.id ?? null
+    if (sessionId === null) {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'failed', sessionId: null,
         error: accepted.error ?? 'Fork 未返回已创建的会话'
-      }
-    }
-    const base: Omit<BatchItemResult, 'state'> = {
-      itemKey: item.itemKey,
-      title: item.title,
-      sessionRef: `session:${sessionId}`,
-      environment
-    }
-    if (accepted.forkState === 'failed') {
-      return { ...base, state: 'failed', error: accepted.error ?? 'Fork 创建失败' }
-    }
-    if (item.start !== true) {
-      return {
-        ...base,
+      })
+    } else if (accepted.forkState === 'failed') {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'failed', sessionId,
+        error: accepted.error ?? 'Fork 创建失败'
+      })
+    } else {
+      this.#writeItem(batchKey, item.itemKey, {
         state: accepted.forkState === 'succeeded' ? 'ready' : 'created',
-        ...(accepted.error === undefined ? {} : { error: accepted.error })
-      }
+        sessionId,
+        error: accepted.error ?? null
+      })
     }
+    return this.#itemRow(batchKey, item.itemKey)
+  }
 
+  async #startItem(
+    batchKey: string,
+    item: ResolvedForkItemInput,
+    row: BatchItemRow
+  ): Promise<void> {
+    const sessionId = row.session_id
+    if (!sessionId) return
+    const abort = new AbortController()
     let readiness: Promise<unknown> | undefined
     try {
-      // Register first so a synchronous identity hook during startup cannot be lost.
-      readiness = this.#dependencies.waitUntilReady(sessionId)
+      this.#writeItem(batchKey, item.itemKey, {
+        startState: 'waiting', error: null
+      })
+      readiness = this.#dependencies.waitUntilReady(sessionId, abort.signal)
+      // Startup may resolve after the readiness timeout. Attach a handler now
+      // while still awaiting the original Promise below so no rejection is
+      // transiently unhandled during that interval.
+      void readiness.catch(() => undefined)
       await this.#dependencies.startSession(sessionId)
       await readiness
-      if (item.prompt === undefined) return { ...base, state: 'ready' }
-      await this.#dependencies.sendPrompt(sessionId, item.prompt)
-      return { ...base, state: 'started' }
-    } catch (error) {
-      void readiness?.catch(() => undefined)
-      return {
-        ...base,
-        state: 'created',
-        error: `节点已创建，任务仍待启动：${errorMessage(error)}`
+      if (item.prompt === undefined) {
+        this.#writeItem(batchKey, item.itemKey, {
+          state: 'ready', startState: 'completed', error: null
+        })
+        return
       }
+
+      // Claim delivery durably before the external terminal write. A crash after
+      // this point is reported as uncertain and never replays the prompt.
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'created', startState: 'delivering', error: null
+      })
+      await this.#dependencies.sendPrompt(sessionId, item.prompt)
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'started', startState: 'completed', error: null
+      })
+    } catch (error) {
+      abort.abort(error)
+      await readiness?.catch(() => undefined)
+      const current = this.#itemRow(batchKey, item.itemKey)
+      const uncertain = current.start_state === 'delivering'
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'created',
+        startState: uncertain ? 'uncertain' : 'failed',
+        error: uncertain
+          ? `节点已创建，任务投递结果待确认：${errorMessage(error)}`
+          : `节点已创建，任务仍待启动：${errorMessage(error)}`
+      })
+    } finally {
+      abort.abort(new Error('provider readiness completed'))
+    }
+  }
+
+  #ensureLedger(input: CreateForkBatchInput, fingerprint: string, create: boolean): void {
+    this.#database.transaction((tx) => {
+      const existing = tx.get<BatchLedgerRow>(
+        'SELECT * FROM fork_batch_ledger WHERE batch_key = ?', input.batchKey
+      )
+      if (existing) {
+        assertSameBatch(input.batchKey, existing.request_fingerprint, fingerprint)
+        if (existing.item_count !== input.items.length) {
+          throw new Error(`批次 ${input.batchKey} 的持久条目数量不一致`)
+        }
+        const rows = tx.all<BatchItemRow>(
+          'SELECT * FROM fork_batch_items WHERE batch_key = ? ORDER BY ordinal', input.batchKey
+        )
+        for (const [index, item] of input.items.entries()) {
+          if (rows[index]?.item_fingerprint !== itemFingerprint(item)) {
+            throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+          }
+        }
+        return
+      }
+      if (!create) throw new Error(`批次 ${input.batchKey} 没有可重试的上一轮结果`)
+
+      const now = this.#now()
+      tx.run(
+        `INSERT INTO fork_batch_ledger (
+           batch_key, request_fingerprint, caller_session_id, source_session_id,
+           source_scene_id, item_count, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        input.batchKey,
+        fingerprint,
+        input.caller.sessionId,
+        input.source.sessionId,
+        input.source.sceneId,
+        input.items.length,
+        now,
+        now
+      )
+      for (const [ordinal, item] of input.items.entries()) {
+        tx.run(
+          `INSERT INTO fork_batch_items (
+             batch_key, item_key, ordinal, item_fingerprint, submission_key,
+             title, environment_json, start_requested, prompt_fingerprint,
+             session_id, state, start_state, error_message, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'unsubmitted', ?, NULL, ?, ?)`,
+          input.batchKey,
+          item.itemKey,
+          ordinal,
+          itemFingerprint(item),
+          itemSubmissionKey(input.batchKey, item.itemKey),
+          item.title,
+          canonicalJson(publicEnvironment(item.environment)),
+          item.start === true ? 1 : 0,
+          item.prompt === undefined ? null : hash(item.prompt),
+          item.start === true ? 'pending' : 'not-requested',
+          now,
+          now
+        )
+      }
+    })
+  }
+
+  #refreshAll(input: CreateForkBatchInput): void {
+    for (const item of input.items) this.#refreshItem(input.batchKey, item)
+  }
+
+  #refreshItem(batchKey: string, item: ResolvedForkItemInput): BatchItemRow {
+    let row = this.#itemRow(batchKey, item.itemKey)
+    if (row.start_state === 'delivering') {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'created', startState: 'uncertain',
+        error: '节点已创建，任务投递结果待确认'
+      })
+      row = this.#itemRow(batchKey, item.itemKey)
+    }
+    const intent = this.#intent(row.submission_key)
+    if (!intent) return row
+
+    if (intent.stage === 'failed') {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'failed',
+        sessionId: intent.session_id,
+        error: intent.error_message ?? 'Fork 创建失败'
+      })
+    } else if (row.start_state === 'completed') {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: item.prompt === undefined ? 'ready' : 'started',
+        sessionId: intent.session_id,
+        error: null
+      })
+    } else if (row.start_state === 'failed' || row.start_state === 'uncertain') {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'created', sessionId: intent.session_id
+      })
+    } else if (intent.stage === 'succeeded') {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: item.start === true ? 'created' : 'ready',
+        sessionId: intent.session_id, error: null
+      })
+    } else {
+      this.#writeItem(batchKey, item.itemKey, {
+        state: 'created', sessionId: intent.session_id,
+        error: null
+      })
+    }
+    return this.#itemRow(batchKey, item.itemKey)
+  }
+
+  #intent(submissionKey: string): ForkIntentSnapshot | undefined {
+    return this.#database.get<ForkIntentSnapshot>(
+      `SELECT session_id, stage, error_message
+       FROM session_fork_intents WHERE submission_key = ?`,
+      submissionKey
+    )
+  }
+
+  #writeItem(
+    batchKey: string,
+    itemKey: string,
+    update: {
+      state?: LedgerItemState
+      startState?: StartState
+      sessionId?: string | null
+      error?: string | null
+    }
+  ): void {
+    const row = this.#itemRow(batchKey, itemKey)
+    this.#database.run(
+      `UPDATE fork_batch_items
+       SET state = ?, start_state = ?, session_id = ?, error_message = ?, updated_at = ?
+       WHERE batch_key = ? AND item_key = ?`,
+      update.state ?? row.state,
+      update.startState ?? row.start_state,
+      update.sessionId === undefined ? row.session_id : update.sessionId,
+      update.error === undefined ? row.error_message : update.error,
+      this.#now(),
+      batchKey,
+      itemKey
+    )
+    this.#database.run(
+      'UPDATE fork_batch_ledger SET updated_at = ? WHERE batch_key = ?',
+      this.#now(),
+      batchKey
+    )
+  }
+
+  #itemRow(batchKey: string, itemKey: string): BatchItemRow {
+    const row = this.#database.get<BatchItemRow>(
+      'SELECT * FROM fork_batch_items WHERE batch_key = ? AND item_key = ?',
+      batchKey,
+      itemKey
+    )
+    if (!row) throw new Error(`批次 ${batchKey} 缺少项目 ${itemKey}`)
+    return row
+  }
+
+  #itemRows(batchKey: string): BatchItemRow[] {
+    return this.#database.all<BatchItemRow>(
+      'SELECT * FROM fork_batch_items WHERE batch_key = ? ORDER BY ordinal', batchKey
+    )
+  }
+
+  #result(input: CreateForkBatchInput): ForkBatchResult {
+    const rows = this.#itemRows(input.batchKey)
+    const items = rows.map((row, index): BatchItemResult => {
+      const item = input.items[index]!
+      const publicState = row.state === 'unsubmitted' ? 'created' : row.state
+      return {
+        itemKey: item.itemKey,
+        title: item.title,
+        state: publicState,
+        ...(row.session_id === null ? {} : { sessionRef: `session:${row.session_id}` }),
+        environment: publicEnvironment(item.environment),
+        ...(row.error_message === null ? {} : { error: row.error_message })
+      }
+    })
+    const failedItems = items.filter(({ state }) => state === 'failed')
+    return {
+      kind: 'fork-batch',
+      batchKey: input.batchKey,
+      succeeded: items.length - failedItems.length,
+      failed: failedItems.length,
+      items,
+      ...(failedItems.length === 0 ? {} : {
+        retry: {
+          batchKey: input.batchKey,
+          itemKeys: failedItems.map(({ itemKey }) => itemKey)
+        }
+      })
     }
   }
 }
 
 export function itemSubmissionKey(batchKey: string, itemKey: string): string {
   return hash(`${batchKey}:${itemKey}`)
+}
+
+function shouldResumeStart(row: BatchItemRow): boolean {
+  return row.start_requested === 1 && row.session_id !== null && row.state !== 'failed' &&
+    (row.start_state === 'pending' || row.start_state === 'waiting')
+}
+
+function createCommand(
+  input: CreateForkBatchInput,
+  item: ResolvedForkItemInput,
+  submissionKey: string
+): DomainCommandMetadata {
+  return {
+    commandId: `fork-batch-item:${submissionKey}`,
+    commandType: 'structure.fork.children.item',
+    requestHash: hash(canonicalJson({
+      callerSessionId: input.caller.sessionId,
+      source: input.source,
+      batchKey: input.batchKey,
+      item
+    })),
+    causationId: input.caller.runId,
+    correlationId: `fork-batch:${input.batchKey}`
+  }
 }
 
 function validateBatch(input: CreateForkBatchInput): void {
@@ -262,31 +669,19 @@ function requiredText(value: string, field: string): void {
 
 function batchFingerprint(input: CreateForkBatchInput): string {
   return hash(canonicalJson({
-    caller: input.caller,
+    callerSessionId: input.caller.sessionId,
     source: input.source,
     batchKey: input.batchKey,
     items: input.items
   }))
 }
 
-function itemRequestHash(input: CreateForkBatchInput, item: ResolvedForkItemInput): string {
-  return hash(canonicalJson({
-    caller: input.caller,
-    source: input.source,
-    batchKey: input.batchKey,
-    item
-  }))
+function itemFingerprint(item: ResolvedForkItemInput): string {
+  return hash(canonicalJson(item))
 }
 
 function assertSameBatch(batchKey: string, prior: string, next: string): void {
-  if (prior !== next) throw new Error(`批次 ${batchKey} 与上一轮输入不一致`)
-}
-
-function cloneItem(item: ResolvedForkItemInput): ResolvedForkItemInput {
-  return {
-    ...item,
-    environment: { ...item.environment }
-  }
+  if (prior !== next) throw new Error(`批次 ${batchKey} 与已提交输入不一致`)
 }
 
 function publicEnvironment(environment: ResolvedForkEnvironment): ForkEnvironmentChoice {
@@ -298,24 +693,6 @@ function publicEnvironment(environment: ResolvedForkEnvironment): ForkEnvironmen
     mode: 'existing-worktree',
     branch: environment.branch,
     worktreeRef: environment.worktreeRef
-  }
-}
-
-function batchResult(batchKey: string, record: BatchRecord): ForkBatchResult {
-  const items = record.items.flatMap((item) => {
-    const result = record.results.get(item.itemKey)
-    return result ? [{ ...result, environment: { ...result.environment } }] : []
-  })
-  const failedItems = items.filter(({ state }) => state === 'failed')
-  return {
-    kind: 'fork-batch',
-    batchKey,
-    succeeded: items.length - failedItems.length,
-    failed: failedItems.length,
-    items,
-    ...(failedItems.length === 0 ? {} : {
-      retry: { batchKey, itemKeys: failedItems.map(({ itemKey }) => itemKey) }
-    })
   }
 }
 
