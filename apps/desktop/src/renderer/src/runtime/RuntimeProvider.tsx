@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { RuntimeMode } from '@matou/contracts'
 
-import { RuntimeClient } from './RuntimeClient'
+import { RuntimeClient, type RuntimeClientOptions } from './RuntimeClient'
 
 const PORT_CHANNEL = 'matou:terminal-port'
 const RENDERER_READY = 'matou:renderer-ready'
@@ -13,6 +13,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let current: RuntimeClient | null = null
     let runtimeMode: RuntimeMode = 'normal'
+    const windowIdentity = runtimeWindowIdentityFromSearch(window.location.search)
     const unsubscribeLifecycle = window.matouDesktop?.onRuntimeLifecycle((presentation) => {
       runtimeMode = presentation.snapshot.mode
       current?.setRuntimeMode(runtimeMode)
@@ -23,7 +24,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       if (!port) return
       if (current) current.replacePort(port)
       else {
-        current = new RuntimeClient(port)
+        current = new RuntimeClient(port, windowIdentity)
         current.setRuntimeMode(runtimeMode)
         setClient(current)
       }
@@ -33,10 +34,28 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     return () => {
       window.removeEventListener('message', receivePort)
       if (typeof unsubscribeLifecycle === 'function') unsubscribeLifecycle()
+      current?.dispose()
+      current = null
     }
   }, [])
 
   return <RuntimeContext.Provider value={client}>{children}</RuntimeContext.Provider>
+}
+
+export function runtimeWindowIdentityFromSearch(
+  search: string
+): Pick<RuntimeClientOptions, 'windowId' | 'windowKind'> {
+  const query = new URLSearchParams(search)
+  const windowId = query.get('windowId')?.trim()
+  if (!windowId) return {}
+  const kind = query.get('kind')
+  if (kind === 'detached-terminal') {
+    return { windowId, windowKind: 'detached-terminal' }
+  }
+  if (kind === null || kind === '' || kind === 'main') {
+    return { windowId, windowKind: 'main' }
+  }
+  return {}
 }
 
 export function useRuntimeClient(): RuntimeClient | null {

@@ -1,5 +1,7 @@
 import {
   PROTOCOL_VERSION,
+  type HostNavigationRequestWire,
+  type HostNavigationResultWire,
   type RpcMethod,
   type RuntimeMessage,
   type RuntimeMode,
@@ -29,6 +31,17 @@ export interface TerminalAttachment {
 }
 
 export type SessionRecoveryStatus = Extract<RuntimeMessage, { type: 'session.recovery-status' }>
+export type HostNavigationResultInput = Omit<
+  HostNavigationResultWire,
+  'type' | 'protocolVersion'
+>
+
+export interface RuntimeClientOptions {
+  clientId?: string
+  requestTimeoutMs?: number
+  windowId?: string
+  windowKind?: 'main' | 'detached-terminal'
+}
 
 interface PendingRequest {
   resolve(value: unknown): void
@@ -62,6 +75,8 @@ export class RuntimeClient {
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #terminalResizeIds = new Map<string, number>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
+  readonly #hostNavigationListeners = new Set<(request: HostNavigationRequestWire) => void>()
+  readonly #hostNavigationPorts = new Map<string, RuntimeClientPort>()
   readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
   readonly #recoveryResetListeners = new Set<() => void>()
   readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
@@ -71,19 +86,26 @@ export class RuntimeClient {
   #readOnly = false
   #projectionAfterSequence: number | undefined
   #requiresRecoverySnapshot = true
+  readonly #windowIdentity: Pick<RuntimeClientOptions, 'windowId' | 'windowKind'>
+  #disposed = false
 
   constructor(
     port: RuntimeClientPort,
-    options: { clientId?: string; requestTimeoutMs?: number } = {}
+    options: RuntimeClientOptions = {}
   ) {
     this.#port = port
     this.#clientId = options.clientId ?? crypto.randomUUID()
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 10_000
+    this.#windowIdentity = options.windowId !== undefined && options.windowKind !== undefined
+      ? { windowId: options.windowId, windowKind: options.windowKind }
+      : {}
     this.#bindPort(port)
   }
 
   replacePort(port: RuntimeClientPort): void {
-    this.#port.close()
+    const previousPort = this.#port
+    previousPort.onmessage = null
+    previousPort.close()
     this.#port = port
     this.#ready = false
     this.#requiresRecoverySnapshot = true
@@ -94,12 +116,30 @@ export class RuntimeClient {
     // have seen it, so discard transport state and let the next replay/output
     // snapshot establish a fresh authoritative checkpoint.
     this.#terminalCheckpoints.clear()
+    this.#hostNavigationPorts.clear()
     for (const [requestId, pending] of this.#requests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Runtime channel replaced before the request completed'))
       this.#requests.delete(requestId)
     }
     this.#bindPort(port)
+  }
+
+  dispose(): void {
+    if (this.#disposed) return
+    this.#disposed = true
+    this.#port.onmessage = null
+    this.#port.close()
+    this.#hostNavigationPorts.clear()
+    this.#hostNavigationListeners.clear()
+    this.#projectionListeners.clear()
+    this.#recoveryListeners.clear()
+    this.#recoveryResetListeners.clear()
+    for (const [requestId, pending] of this.#requests) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error('Runtime client was disposed before the request completed'))
+      this.#requests.delete(requestId)
+    }
   }
 
   setRuntimeMode(mode: RuntimeMode): void {
@@ -189,6 +229,19 @@ export class RuntimeClient {
   subscribeProjection(listener: (message: RuntimeMessage) => void): () => void {
     this.#projectionListeners.add(listener)
     return () => this.#projectionListeners.delete(listener)
+  }
+
+  subscribeHostNavigation(listener: (request: HostNavigationRequestWire) => void): () => void {
+    this.#hostNavigationListeners.add(listener)
+    return () => this.#hostNavigationListeners.delete(listener)
+  }
+
+  acknowledgeHostNavigation(result: HostNavigationResultInput): void {
+    const sourcePort = this.#hostNavigationPorts.get(hostNavigationAttemptKey(result))
+    if (this.#disposed || sourcePort === undefined || sourcePort !== this.#port) return
+    sourcePort.postMessage({
+      type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION, ...result
+    } satisfies HostNavigationResultWire)
   }
 
   subscribeSessionRecovery(
@@ -388,14 +441,18 @@ export class RuntimeClient {
   }
 
   #bindPort(port: RuntimeClientPort): void {
-    port.onmessage = (event) => this.#receive(event.data)
+    port.onmessage = (event) => {
+      if (this.#disposed || this.#port !== port) return
+      this.#receive(event.data, port)
+    }
     port.start()
     port.postMessage({
-      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: this.#clientId
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: this.#clientId,
+      ...this.#windowIdentity
     })
   }
 
-  #receive(message: RuntimeMessage): void {
+  #receive(message: RuntimeMessage, port: RuntimeClientPort): void {
     if (message.type === 'protocol.ready') {
       this.#ready = true
       for (const resolve of this.#readyWaiters) resolve()
@@ -408,6 +465,16 @@ export class RuntimeClient {
       if (this.#projectionAfterSequence !== undefined) {
         this.#subscribeEvents(this.#projectionAfterSequence)
       }
+      return
+    }
+    if (message.type === 'host.navigation-request') {
+      const key = hostNavigationAttemptKey(message)
+      if (!this.#hostNavigationPorts.has(key) && this.#hostNavigationPorts.size >= 256) {
+        const oldest = this.#hostNavigationPorts.keys().next().value as string | undefined
+        if (oldest !== undefined) this.#hostNavigationPorts.delete(oldest)
+      }
+      this.#hostNavigationPorts.set(key, port)
+      for (const listener of this.#hostNavigationListeners) listener(message)
       return
     }
     if (message.type === 'session.recovery-snapshot') {
@@ -548,6 +615,13 @@ export class RuntimeClient {
   #post(message: unknown): void {
     this.#port.postMessage(message)
   }
+}
+
+function hostNavigationAttemptKey(value: {
+  requestId: string
+  attemptId: string
+}): string {
+  return `${value.requestId}\u0000${value.attemptId}`
 }
 
 function effectiveTerminalConfig(

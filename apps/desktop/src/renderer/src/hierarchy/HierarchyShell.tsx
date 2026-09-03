@@ -4,13 +4,16 @@ import {
 } from 'react'
 
 import type { ForkStage, LayoutNode, SessionEnvironment } from '@matou/domain'
-import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
+import type {
+  HostNavigationPath, HostNavigationRequestWire, RuntimeMessage, RuntimeMode
+} from '@matou/contracts'
 
 import {
   RuntimeProjectionStore, type RuntimeProjectionSnapshot, type SceneSnapshotProjection,
   type SessionGraphProjection
 } from '../projection/RuntimeProjectionStore'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
+import type { HostNavigationResultInput } from '../runtime/RuntimeClient'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
 import type { AgentNotificationStore } from '../notifications/AgentNotificationStore'
 import {
@@ -62,6 +65,8 @@ import {
 const DETACHED_RETURN_RETRY_DELAYS_MS = [100, 300, 900, 1_800] as const
 const STORAGE_FAULT_MUTATION_REASON = '终端存储异常，请先恢复或结束当前会话'
 const RECOVERY_MUTATION_REASON = '当前终端需要先完成恢复'
+const HOST_NAVIGATION_ATTEMPT_LIMIT = 256
+const HOST_NAVIGATION_FOCUS_SUPPRESSION_MS = 800
 
 export interface HierarchyTerminalDiagnostics {
   onStatusChange(status: import('../terminal/TerminalSurface').RuntimeStatus): void
@@ -273,15 +278,19 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal', terminalDiagno
   }
   return <NotificationProvider store={notificationStoreRef.current}>
     <HierarchyProduct projection={projection} commands={commands} readOnly={readOnly}
+      routeWindowId={windowId}
       eventSequence={storeRef.current.eventSequence}
       {...(terminalDiagnostics ? { terminalDiagnostics } : {})} />
   </NotificationProvider>
 }
 
-function HierarchyProduct({ projection, commands, readOnly, eventSequence, terminalDiagnostics }: {
+function HierarchyProduct({
+  projection, commands, readOnly, routeWindowId, eventSequence, terminalDiagnostics
+}: {
   projection: HierarchyProjection
   commands: HierarchyCommands
   readOnly: boolean
+  routeWindowId: string
   eventSequence: number
   terminalDiagnostics?: HierarchyTerminalDiagnostics
 }) {
@@ -291,7 +300,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   const readOnlyRef = useRef(readOnly)
   readOnlyRef.current = readOnly
   const projectionRef = useRef(projection)
-  useEffect(() => { projectionRef.current = projection }, [projection])
+  projectionRef.current = projection
   const detachedWindowIds = useMemo(() => Array.from(new Set(
     (projection.sceneSnapshots ?? []).flatMap(({ mounts, windows }) => {
       const detached = new Set(windows.filter(({ state }) => state === 'detached').map(({ id }) => id))
@@ -347,6 +356,8 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   const [closeRequest, setCloseRequest] = useState({ sessionId: '', sequence: 0 })
   const [dagOpenError, setDagOpenError] = useState(false)
   const [terminalFocusRequest, setTerminalFocusRequest] = useState(0)
+  const suppressTerminalFocusRef = useRef(false)
+  const terminalFocusSuppressedUntilRef = useRef(new Map<string, number>())
   const [boardActive, setBoardActive] = useState(false)
   const [settingsActive, setSettingsActive] = useState(false)
   const [environmentRestartBySession, setEnvironmentRestartBySession] = useState<Record<string, number>>({})
@@ -388,7 +399,9 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
     const restorer = new AppFocusRestorer()
     const rememberFocus = (event: FocusEvent) => restorer.remember(event.target)
     const restoreFocus = () => restorer.scheduleRestore(() => {
-      setTerminalFocusRequest((value) => value + 1)
+      if (!suppressTerminalFocusRef.current) {
+        setTerminalFocusRequest((value) => value + 1)
+      }
     })
     const restoreVisibleFocus = () => {
       if (document.visibilityState === 'visible') restoreFocus()
@@ -417,6 +430,12 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
     sequence: number
     stopped?: boolean
   }>>({})
+  const hostNavigationChainRef = useRef<Promise<void>>(Promise.resolve())
+  const hostNavigationAttemptsRef = useRef(new Map<string, {
+    promise: Promise<HostNavigationResultInput>
+    settled: boolean
+  }>())
+  const hostNavigationFocusReleaseTimerRef = useRef<number | undefined>(undefined)
   const ratioTimers = useRef(new Map<string, number>())
   const detachedReturnTimers = useRef(new Map<string, number>())
   const detachedReturnAttempts = useRef(new Map<string, number>())
@@ -424,6 +443,152 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   const detachedReturnAlive = useRef(true)
   const commandsRef = useRef(commands)
   commandsRef.current = commands
+  useEffect(() => {
+    if (!client?.subscribeHostNavigation || !client.acknowledgeHostNavigation) return
+    let alive = true
+    const execute = async (request: HostNavigationRequestWire): Promise<HostNavigationResultInput> => {
+      let stage: HostNavigationStage = 'validate'
+      let terminalFocusSuppressionStarted = false
+      if (hostNavigationFocusReleaseTimerRef.current !== undefined) {
+        window.clearTimeout(hostNavigationFocusReleaseTimerRef.current)
+        hostNavigationFocusReleaseTimerRef.current = undefined
+      }
+      delete document.documentElement.dataset.hostNavigationTerminalFocus
+      try {
+        assertHostNavigationActive(alive, request)
+        const target = validateHostNavigationTarget(
+          projectionRef.current,
+          routeWindowId,
+          request
+        )
+        suppressTerminalFocusRef.current = !request.focusTerminal
+        if (!request.focusTerminal) {
+          document.documentElement.dataset.hostNavigationTerminalFocus = 'suppressed'
+          terminalFocusSuppressionStarted = true
+        }
+
+        stage = 'show-window'
+        assertHostNavigationActive(alive, request)
+        const showWindow = window.matouDesktop?.showWindow
+        if (!showWindow) throw new HostNavigationExecutionError('导航目标窗口当前未就绪')
+        await showWindow(request.targetWindowId)
+
+        stage = 'activate-workspace'
+        assertHostNavigationActive(alive, request)
+        await Promise.resolve(commandsRef.current.activateWorkspace(request.workspaceId))
+        stage = 'activate-task'
+        assertHostNavigationActive(alive, request)
+        await Promise.resolve(commandsRef.current.activateTask(request.taskId))
+        stage = 'activate-scene'
+        assertHostNavigationActive(alive, request)
+        await Promise.resolve(commandsRef.current.activateScene(request.sceneId))
+        setBoardActive(false)
+        setSettingsActive(false)
+        setSearchOpen(false)
+        setShortcutPanelOpen(false)
+        setSessionLoader(null)
+        setBranchDialog(null)
+        if (request.sessionId !== undefined) {
+          stage = 'focus-session'
+          assertHostNavigationActive(alive, request)
+          await Promise.resolve(commandsRef.current.setFocusedSession(
+            request.sceneId,
+            request.sessionId
+          ))
+          assertHostNavigationActive(alive, request)
+          if (!request.focusTerminal) {
+            // SessionCarousel follows a newly active card for 440ms. Start the
+            // guard after the Runtime mutation resolves so slow IPC cannot use
+            // up the guard before the reveal animation begins.
+            terminalFocusSuppressedUntilRef.current.set(
+              request.sessionId,
+              performance.now() + HOST_NAVIGATION_FOCUS_SUPPRESSION_MS
+            )
+          }
+          setLevelParentByScene((current) => ({
+            ...current,
+            [request.sceneId]: target.parentSessionId ?? null
+          }))
+          setRevealSessionByScene((current) => ({
+            ...current,
+            [request.sceneId]: {
+              sessionId: request.sessionId!,
+              sequence: (current[request.sceneId]?.sequence ?? 0) + 1,
+              ...(target.stopped ? { stopped: true } : {})
+            }
+          }))
+        }
+
+        stage = 'settle-view'
+        await waitForHostNavigationView(request, () => alive)
+        if (request.focusTerminal) {
+          assertHostNavigationActive(alive, request)
+          setTerminalFocusRequest((value) => value + 1)
+          await nextHostNavigationFrame()
+          await nextHostNavigationFrame()
+        }
+
+        stage = 'verify-path'
+        assertHostNavigationActive(alive, request)
+        const finalPath = readVisibleHostNavigationPath(projectionRef.current, request)
+        if (!finalPath || !sameHostNavigationPath(finalPath, request)) {
+          throw new HostNavigationExecutionError('导航目标位置在完成前已变化')
+        }
+        return hostNavigationResult(request, { ok: true, finalPath })
+      } catch (error) {
+        return hostNavigationResult(request, {
+          ok: false,
+          error: controlledHostNavigationError(error, stage)
+        })
+      } finally {
+        suppressTerminalFocusRef.current = false
+        if (terminalFocusSuppressionStarted && alive) {
+          hostNavigationFocusReleaseTimerRef.current = window.setTimeout(() => {
+            hostNavigationFocusReleaseTimerRef.current = undefined
+            delete document.documentElement.dataset.hostNavigationTerminalFocus
+          }, HOST_NAVIGATION_FOCUS_SUPPRESSION_MS)
+        } else {
+          delete document.documentElement.dataset.hostNavigationTerminalFocus
+        }
+      }
+    }
+    const onNavigation = (request: HostNavigationRequestWire) => {
+      if (
+        request.routeWindowId !== routeWindowId ||
+        request.routeWindowId !== projectionRef.current.windowId ||
+        request.routeWindowId !== projectionRef.current.navigation.windowId
+      ) return
+      const key = hostNavigationAttemptKey(request)
+      let attempt = hostNavigationAttemptsRef.current.get(key)
+      if (!attempt) {
+        const promise = hostNavigationChainRef.current.then(() => execute(request))
+        attempt = { promise, settled: false }
+        hostNavigationAttemptsRef.current.set(key, attempt)
+        const trackedAttempt = attempt
+        void promise.finally(() => {
+          trackedAttempt.settled = true
+          pruneHostNavigationAttempts(hostNavigationAttemptsRef.current)
+        })
+        hostNavigationChainRef.current = promise.then(() => undefined, () => undefined)
+        pruneHostNavigationAttempts(hostNavigationAttemptsRef.current)
+      }
+      void attempt.promise.then((result) => {
+        if (alive) client.acknowledgeHostNavigation(result)
+      })
+    }
+    const unsubscribe = client.subscribeHostNavigation(onNavigation)
+    return () => {
+      alive = false
+      suppressTerminalFocusRef.current = false
+      terminalFocusSuppressedUntilRef.current.clear()
+      if (hostNavigationFocusReleaseTimerRef.current !== undefined) {
+        window.clearTimeout(hostNavigationFocusReleaseTimerRef.current)
+        hostNavigationFocusReleaseTimerRef.current = undefined
+      }
+      delete document.documentElement.dataset.hostNavigationTerminalFocus
+      unsubscribe()
+    }
+  }, [client, routeWindowId])
   const clearDetachedReturnRetries = useCallback(() => {
     for (const timer of detachedReturnTimers.current.values()) window.clearTimeout(timer)
     detachedReturnTimers.current.clear()
@@ -1056,7 +1221,16 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
                         returnToLevelParent(scene.id, parentSessionId, graph)
                       }}
                       onEnsureSessionVisible={(sessionId) => {
-                        if (sessionId === activeSessionId) setTerminalFocusRequest((value) => value + 1)
+                        const suppressedUntil = terminalFocusSuppressedUntilRef.current.get(sessionId)
+                        const focusSuppressed = suppressTerminalFocusRef.current || (
+                          suppressedUntil !== undefined && performance.now() < suppressedUntil
+                        )
+                        if (suppressedUntil !== undefined && !focusSuppressed) {
+                          terminalFocusSuppressedUntilRef.current.delete(sessionId)
+                        }
+                        if (sessionId === activeSessionId && !focusSuppressed) {
+                          setTerminalFocusRequest((value) => value + 1)
+                        }
                       }} />
                   : layout && snapshot
                   ? <SplitTree root={layout} ratios={ratios} onRatio={(nodeId, ratio) => {
@@ -1503,6 +1677,227 @@ function forkStateFromStage(stage: ForkStage): 'pending' | 'starting' | 'succeed
   if (stage === 'queued') return 'pending'
   if (stage === 'succeeded' || stage === 'failed') return stage
   return 'starting'
+}
+
+type HostNavigationStage =
+  | 'validate'
+  | 'show-window'
+  | 'activate-workspace'
+  | 'activate-task'
+  | 'activate-scene'
+  | 'focus-session'
+  | 'settle-view'
+  | 'verify-path'
+
+class HostNavigationExecutionError extends Error {}
+
+function validateHostNavigationTarget(
+  projection: HierarchyProjection,
+  routeWindowId: string,
+  request: HostNavigationRequestWire
+): { parentSessionId?: string; stopped: boolean } {
+  if (
+    request.routeWindowId !== routeWindowId ||
+    projection.windowId !== routeWindowId ||
+    projection.navigation.windowId !== routeWindowId
+  ) {
+    throw new HostNavigationExecutionError('导航目标与当前窗口不匹配')
+  }
+  const workspace = projection.workspaces.find(({ id }) => id === request.workspaceId)
+  const task = projection.tasks.find(({ id }) => id === request.taskId)
+  const scene = projection.scenes.find(({ id }) => id === request.sceneId)
+  if (!workspace || !task || task.workspaceId !== workspace.id || !scene || scene.taskId !== task.id) {
+    throw new HostNavigationExecutionError('导航目标层级当前不可用')
+  }
+  if (projection.taskPlacements.length > 0 && !projection.taskPlacements.some((placement) =>
+    placement.windowId === routeWindowId && placement.taskId === task.id
+  )) {
+    throw new HostNavigationExecutionError('导航目标事项不在当前窗口')
+  }
+  if (request.focusTerminal && request.sessionId === undefined) {
+    throw new HostNavigationExecutionError('导航目标会话当前不可用')
+  }
+  if (request.sessionId === undefined) {
+    if (request.targetWindowId !== routeWindowId) {
+      throw new HostNavigationExecutionError('导航目标窗口与当前路径不匹配')
+    }
+    return { stopped: false }
+  }
+  const session = projection.sessions.find(({ id }) => id === request.sessionId)
+  const snapshot = projection.sceneSnapshots?.find(({ scene: candidate }) =>
+    candidate.id === request.sceneId
+  )
+  const mount = snapshot?.mounts.find(({ sessionId }) => sessionId === request.sessionId)
+  const node = projection.sessionGraphs?.[request.sceneId]?.nodes.find(({ sessionId }) =>
+    sessionId === request.sessionId
+  )
+  if (!session || session.taskId !== request.taskId || (!mount && !node)) {
+    throw new HostNavigationExecutionError('导航目标会话当前不可用')
+  }
+  const sceneWindow = mount?.sceneWindowId
+    ? snapshot?.windows.find(({ id }) => id === mount.sceneWindowId)
+    : undefined
+  const projectedNativeWindowId = node?.detachedWindowId ?? (
+    sceneWindow?.state === 'detached' && 'nativeWindowKey' in sceneWindow &&
+      typeof sceneWindow.nativeWindowKey === 'string'
+      ? sceneWindow.nativeWindowKey
+      : undefined
+  )
+  const expectedTargetWindowId = projectedNativeWindowId ?? routeWindowId
+  if (request.targetWindowId !== expectedTargetWindowId) {
+    throw new HostNavigationExecutionError('导航目标窗口与当前路径不匹配')
+  }
+  return {
+    ...(node?.parentSessionId === undefined ? {} : { parentSessionId: node.parentSessionId }),
+    stopped: node?.archivedAt !== undefined
+  }
+}
+
+function assertHostNavigationActive(
+  alive: boolean,
+  request: HostNavigationRequestWire
+): void {
+  if (!alive) throw new HostNavigationExecutionError('导航页面已关闭')
+  if (request.deadlineAt <= Date.now()) {
+    throw new HostNavigationExecutionError('导航请求已过期')
+  }
+}
+
+async function waitForHostNavigationView(
+  request: HostNavigationRequestWire,
+  alive: () => boolean
+): Promise<void> {
+  if (request.sessionId === undefined) {
+    assertHostNavigationActive(alive(), request)
+    await nextHostNavigationFrame()
+    assertHostNavigationActive(alive(), request)
+    return
+  }
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    assertHostNavigationActive(alive(), request)
+    await nextHostNavigationFrame()
+    if (visibleHostNavigationSession(request.sessionId)) {
+      await nextHostNavigationFrame()
+      assertHostNavigationActive(alive(), request)
+      return
+    }
+  }
+  throw new HostNavigationExecutionError('导航目标会话尚未显示')
+}
+
+function visibleHostNavigationSession(sessionId: string): HTMLElement | undefined {
+  const candidates = document.querySelectorAll<HTMLElement>(
+    '[data-session-card], .terminal-surface[data-session-id]'
+  )
+  return [...candidates].find((candidate) => {
+    const candidateSessionId = candidate.dataset.sessionCard ?? candidate.dataset.sessionId
+    return candidateSessionId === sessionId && candidate.closest('[hidden]') === null
+  })
+}
+
+function nextHostNavigationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    let frame: number | undefined
+    const timer = window.setTimeout(finish, 40)
+    function finish() {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      resolve()
+    }
+    frame = requestAnimationFrame(finish)
+  })
+}
+
+function readVisibleHostNavigationPath(
+  projection: HierarchyProjection,
+  request: HostNavigationRequestWire
+): HostNavigationPath | undefined {
+  const workspaceId = projection.navigation.activeWorkspaceId
+  const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
+  const sceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
+  if (!workspaceId || !taskId || !sceneId) return undefined
+  const sessionId = request.sessionId === undefined
+    ? undefined
+    : projection.navigation.sessionByScene[sceneId]
+  let targetWindowId = projection.windowId
+  if (sessionId !== undefined) {
+    const node = projection.sessionGraphs?.[sceneId]?.nodes.find((candidate) =>
+      candidate.sessionId === sessionId
+    )
+    const snapshot = projection.sceneSnapshots?.find(({ scene }) => scene.id === sceneId)
+    const mount = snapshot?.mounts.find((candidate) => candidate.sessionId === sessionId)
+    const sceneWindow = mount?.sceneWindowId
+      ? snapshot?.windows.find(({ id }) => id === mount.sceneWindowId)
+      : undefined
+    targetWindowId = node?.detachedWindowId ?? (
+      sceneWindow?.state === 'detached' && 'nativeWindowKey' in sceneWindow &&
+        typeof sceneWindow.nativeWindowKey === 'string'
+        ? sceneWindow.nativeWindowKey
+        : projection.windowId
+    )
+  }
+  return {
+    routeWindowId: projection.windowId,
+    targetWindowId,
+    workspaceId,
+    taskId,
+    sceneId,
+    ...(sessionId === undefined ? {} : { sessionId })
+  }
+}
+
+function sameHostNavigationPath(
+  path: HostNavigationPath,
+  request: HostNavigationRequestWire
+): boolean {
+  return path.routeWindowId === request.routeWindowId &&
+    path.targetWindowId === request.targetWindowId &&
+    path.workspaceId === request.workspaceId &&
+    path.taskId === request.taskId &&
+    path.sceneId === request.sceneId &&
+    path.sessionId === request.sessionId
+}
+
+function hostNavigationResult(
+  request: HostNavigationRequestWire,
+  outcome: { ok: boolean; finalPath?: HostNavigationPath; error?: string }
+): HostNavigationResultInput {
+  return {
+    requestId: request.requestId,
+    attemptId: request.attemptId,
+    routeWindowId: request.routeWindowId,
+    targetWindowId: request.targetWindowId,
+    ...outcome
+  }
+}
+
+function controlledHostNavigationError(error: unknown, stage: HostNavigationStage): string {
+  if (error instanceof HostNavigationExecutionError) return error.message
+  if (stage === 'show-window') return '导航目标窗口当前未就绪'
+  if (stage === 'activate-workspace') return '导航工作空间切换未完成'
+  if (stage === 'activate-task') return '导航事项切换未完成'
+  if (stage === 'activate-scene') return '导航画布切换未完成'
+  if (stage === 'focus-session') return '导航会话聚焦未完成'
+  if (stage === 'settle-view') return '导航目标界面尚未稳定'
+  return '导航目标位置当前未就绪'
+}
+
+function hostNavigationAttemptKey(request: HostNavigationRequestWire): string {
+  return `${request.requestId}\u0000${request.attemptId}`
+}
+
+function pruneHostNavigationAttempts(
+  attempts: Map<string, { promise: Promise<HostNavigationResultInput>; settled: boolean }>
+): void {
+  if (attempts.size <= HOST_NAVIGATION_ATTEMPT_LIMIT) return
+  for (const [key, attempt] of attempts) {
+    if (!attempt.settled) continue
+    attempts.delete(key)
+    if (attempts.size <= HOST_NAVIGATION_ATTEMPT_LIMIT) return
+  }
 }
 
 function queryValue(name: string): string | null {
