@@ -1,5 +1,7 @@
 // Rebuilds the README demo scene with isolated fixtures and captures assets/shots/*.png.
 // Run: pnpm build && MATOU_README_CAPTURE=1 npx playwright test tests/e2e/readme-capture --workers=1
+// Demo mode: MATOU_DEMO_HOLD=1 builds the same scene and keeps the app open (for recording); add
+// MATOU_E2E_DISPLAY=primary to place it on the main display instead of the built-in one.
 // The window is placed on the secondary (built-in) display like the other e2e specs.
 // Every session is a stub `claude` (claude-stub.py); nothing touches the real CLI or account.
 import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
@@ -19,12 +21,14 @@ const ZOOM = 1
 const WINDOW = { width: 1400, height: 880 }
 const BOARD_HEIGHT = 640
 
-test.setTimeout(300_000)
+const HOLD = process.env.MATOU_DEMO_HOLD === '1'
+test.setTimeout(HOLD ? 0 : 300_000)
 
 type Ids = { workspaceId: string; taskId: string; sceneId: string; sessionId: string }
 
 test('captures README screenshots', async () => {
-  test.skip(process.env.MATOU_README_CAPTURE !== '1', 'set MATOU_README_CAPTURE=1 to regenerate assets/shots')
+  test.skip(process.env.MATOU_README_CAPTURE !== '1' && !HOLD,
+    'set MATOU_README_CAPTURE=1 to regenerate assets/shots, or MATOU_DEMO_HOLD=1 to keep the demo app open')
   const root = await mkdtemp(join(tmpdir(), 'matou-readme-'))
   const home = join(root, 'home')
   const workspace = join(home, 'work', 'shop-api')
@@ -60,7 +64,7 @@ test('captures README screenshots', async () => {
     // ----- scene 1: implementation / regression / review -----
     await renameActiveTab(page, '实现与验证')
     const cards = [
-      '实现 · Redis 幂等键', '回归 · 支付模块测试', '审查 · 方案对比', '文档 · 回调约定', '调研 · 网关重试策略'
+      '实现 · Redis 幂等键', '回归 · 支付模块测试', '审查 · 方案对比', '文档 · 回调约定', '协调 · 跨卡片'
     ]
     const sceneOneSurfaces: Locator[] = [await stableSurface(visibleSurfaces(page).first())]
     for (let index = 1; index < cards.length; index += 1) {
@@ -74,6 +78,25 @@ test('captures README screenshots', async () => {
       await renameSession(page, surface, title)
       sceneOneIds.push(await hierarchyIds(page, surface))
     }
+    // A subtree under the review card so this canvas's DAG has depth too: the comparison forks into
+    // plan A / plan B, plus a derived shell running the regression. (Forking needs a finished turn,
+    // which the review role has and the still-running implementation role does not.)
+    const implPlanA = await newSurfaceAfter(page, () =>
+      forkChild(page, paneOf(sceneOneSurfaces[2]!), cards[2]!, 'impl-redis'))
+    await waitForRole(demo, 'planA1')
+    await renameSession(page, implPlanA, '方案 A · Redis SETNX')
+    const implPlanB = await newSurfaceAfter(page, () =>
+      forkSibling(page, paneOf(implPlanA), '方案 A · Redis SETNX', 'impl-unique-index'))
+    await waitForRole(demo, 'planB1')
+    await renameSession(page, implPlanB, '方案 B · DB 唯一索引')
+    await implPlanA.click({ position: { x: 12, y: 12 } })
+    const implVitest = await newSurfaceAfter(page, () => page.getByRole('button', { name: '横向新增 Shell' }).click())
+    await waitForShell(implVitest)
+    await terminalCommand(implVitest, 'pnpm vitest run src/payments')
+    await page.waitForTimeout(600)
+    await renameSession(page, implVitest, '回归 · vitest')
+    await page.getByRole('button', { name: '返回父会话' }).click()
+    await expect(visibleSurfaces(page)).toHaveCount(cards.length)
     await stage('02-scene-one')
 
     // ----- scene 2: baseline with two forks and one derived shell (for the DAG) -----
@@ -148,6 +171,30 @@ test('captures README screenshots', async () => {
     await focusCard(sceneOneSurfaces[0]!)
     await page.mouse.move(5, 500)
     await page.waitForTimeout(600)
+
+    if (HOLD) {
+      // Spread the board (persisted now), come back to the hero state, then hand the app over.
+      await page.getByRole('button', { name: '看板' }).click()
+      await moveTask(page, '订单列表分页超时', '运行中')
+      await moveTask(page, '支付回调幂等性', '运行中')
+      await moveTask(page, '结算页 500 热修', '阻塞')
+      await moveTask(page, '登录页 A/B 实验', '完成')
+      await moveTask(page, 'CI 缓存修复', '完成')
+      await expect(page.locator('.board-feedback')).toHaveCount(0, { timeout: 5_000 })
+      await page.getByRole('button', { name: '看板' }).click()
+      // A real shell as the last card: `mt` is on PATH inside managed shells, so the control plane
+      // can be driven live during a recording (mt list / read / send).
+      await focusCard(sceneOneSurfaces[4]!)
+      const shell = await newSurfaceAfter(page, () => page.getByRole('button', { name: '横向新增 Shell' }).click())
+      await waitForShell(shell)
+      await terminalCommand(shell, 'mt list')
+      await page.waitForTimeout(800)
+      await renameSession(page, shell, '终端 · mt')
+      await focusCard(sceneOneSurfaces[0]!)
+      await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.focus())
+      console.log(`DEMO READY (root ${root}) — the app stays open until this process is killed`)
+      await new Promise(() => {})
+    }
 
     // ----- shot 1: workspace -----
     await mkdir(SHOTS, { recursive: true })
@@ -343,7 +390,7 @@ async function prepareDemo(demo: string): Promise<void> {
   await writeFile(join(demo, 'bin', 'pnpm'), `#!/bin/sh\ncat "${join(demo, 'vitest.ans')}"\nexit 1\n`)
   await chmod(join(demo, 'bin', 'pnpm'), 0o755)
   await writeFile(join(demo, 'roles.queue'),
-    ['implementation', 'regression', 'review', 'docs', 'research', 'baseline', 'planA', 'planB'].join('\n') + '\n')
+    ['implementation', 'regression', 'review', 'docs', 'coordinate', 'planA1', 'planB1', 'baseline', 'planA', 'planB'].join('\n') + '\n')
   const day = 86_400
   const minute = 60_000
   const base = { model: 'Claude Opus 5', weekly: 41, resets_in: 3 * day + 5 * 3600 }
@@ -355,6 +402,23 @@ async function prepareDemo(demo: string): Promise<void> {
     { content: '更新 docs/payments.md 回调约定', status: 'pending' }
   ]
   const waiting = ['hook', 'Notification', { message: 'Claude is waiting for your input' }]
+  const planA = {
+    ...base, transcript: 'planA', permission: 'acceptEdits', context: 41, duration_ms: 16 * minute,
+    events: [
+      ['hook', 'UserPromptSubmit', {}],
+      ['tool', 'Edit', 'a-1', { file_path: 'src/payments/webhook.ts' }, 'ok'],
+      ['tool', 'Bash', 'a-2', { command: 'pnpm vitest run src/payments' }, 'running']
+    ]
+  }
+  const planB = {
+    ...base, transcript: 'planB', permission: 'acceptEdits', context: 37, duration_ms: 14 * minute,
+    events: [
+      ['hook', 'UserPromptSubmit', {}],
+      ['tool', 'Edit', 'b-1', { file_path: 'prisma/schema.prisma' }, 'ok'],
+      ['tool', 'Bash', 'b-2', { command: 'pnpm prisma migrate dev --name callback-event-unique' }, 'fail'],
+      ['hook', 'Notification', { message: 'Error: migration failed with P2002 unique constraint' }]
+    ]
+  }
   const regression = {
     ...base, transcript: 'regression', permission: 'default', context: 34, duration_ms: 12 * minute,
     events: [
@@ -382,7 +446,7 @@ async function prepareDemo(demo: string): Promise<void> {
         ['tool', 'Read', 'rev-1', { file_path: 'prisma/schema.prisma' }, 'ok'],
         ['tool', 'Write', 'rev-2', { file_path: 'docs/adr/0007-idempotency.md' }, 'ok'],
         ['hook', 'UserPromptSubmit', {}],
-        ['tool', 'Bash', 'rev-3', { command: 'mt read left --tail 12' }, 'ok'],
+        ['tool', 'Bash', 'rev-3', { command: 'mt read left --lines 12' }, 'ok'],
         ['hook', 'Stop', { last_assistant_message: '结论：方案 A（Redis）为主路径，方案 B 唯一索引兜底，ADR 已更新。' }]
       ]
     },
@@ -395,12 +459,15 @@ async function prepareDemo(demo: string): Promise<void> {
         ['hook', 'Stop', { last_assistant_message: '文档已更新，和 webhook.ts 里的实现保持一致。' }]
       ]
     },
-    research: {
-      ...base, transcript: 'research', permission: 'default', context: 29, duration_ms: 8 * minute,
+    coordinate: {
+      ...base, transcript: 'coordinate', permission: 'acceptEdits', context: 19, duration_ms: 5 * minute,
       events: [
         ['hook', 'UserPromptSubmit', {}],
-        ['tool', 'WebFetch', 'res-1', { url: 'https://docs.pay.example/webhooks' }, 'ok'],
-        ['hook', 'Stop', { last_assistant_message: '重复回调必须返回 2xx；幂等键过期时间至少覆盖 24h。' }]
+        ['tool', 'Bash', 'co-1', { command: 'mt list' }, 'ok'],
+        ['tool', 'Bash', 'co-2', { command: 'mt read sibling:2 --lines 8' }, 'ok'],
+        ['hook', 'UserPromptSubmit', {}],
+        ['tool', 'Bash', 'co-3', { command: 'mt send sibling:2 "改成新行为，并同步 docs/payments.md" --enter' }, 'ok'],
+        ['hook', 'Stop', { last_assistant_message: '已经交给回归卡片了，完成后我再读一次。' }]
       ]
     },
     baseline: {
@@ -411,23 +478,10 @@ async function prepareDemo(demo: string): Promise<void> {
         ['hook', 'Stop', { last_assistant_message: '建议分两条路线并行验证：Redis SETNX / DB 唯一索引。' }]
       ]
     },
-    planA: {
-      ...base, transcript: 'planA', permission: 'acceptEdits', context: 41, duration_ms: 16 * minute,
-      events: [
-        ['hook', 'UserPromptSubmit', {}],
-        ['tool', 'Edit', 'a-1', { file_path: 'src/payments/webhook.ts' }, 'ok'],
-        ['tool', 'Bash', 'a-2', { command: 'pnpm vitest run src/payments' }, 'running']
-      ]
-    },
-    planB: {
-      ...base, transcript: 'planB', permission: 'acceptEdits', context: 37, duration_ms: 14 * minute,
-      events: [
-        ['hook', 'UserPromptSubmit', {}],
-        ['tool', 'Edit', 'b-1', { file_path: 'prisma/schema.prisma' }, 'ok'],
-        ['tool', 'Bash', 'b-2', { command: 'pnpm prisma migrate dev --name callback-event-unique' }, 'fail'],
-        ['hook', 'Notification', { message: 'Error: migration failed with P2002 unique constraint' }]
-      ]
-    }
+    planA1: planA,
+    planB1: planB,
+    planA,
+    planB
   }, null, 2))
 }
 

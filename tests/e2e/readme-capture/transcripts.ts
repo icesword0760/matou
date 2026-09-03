@@ -127,7 +127,7 @@ const review = [
   prompt('看看左边卡片的回归跑完没，'),
   '  把结果纳入结论',
   '',
-  tool('Bash(mt read left --tail 12)'),
+  tool('Bash(mt read left --lines 12)'),
   out(`Test Files  ${RED}1 failed${R} | ${GREEN}3 passed${R}`),
   cont(`${RED}×${R} 重复回调应返回 409`),
   cont(`${DIM}（会话正在等待用户确认）${R}`),
@@ -162,23 +162,34 @@ const docs = [
   ...narrowInput()
 ]
 
-const research = [
-  prompt('查一下支付网关的重试策略：'),
-  '  间隔、次数、什么状态码停止重试',
+const coordinate = [
+  prompt('看看回归那张卡片的测试跑到哪了，'),
+  '  给我结论',
   '',
-  tool('WebFetch(docs.pay.example/webhooks)'),
-  out(`Received 24.1KB ${DIM}(200 OK)${R}`),
+  tool('Bash(mt list)'),
+  out('1. 实现 · Redis 幂等键 [claude-code]'),
+  cont('2. 回归 · 支付模块测试 [claude-code]'),
+  cont('3. 审查 · 方案对比 [claude-code]'),
+  cont('4. 文档 · 回调约定 [claude-code]'),
+  cont('5. 协调 · 跨卡片 [claude-code]'),
   '',
-  say('网关重试策略：'),
-  '  - 非 2xx 或超时（10s）即重试',
-  '  - 指数退避：1m, 5m, 30m, 2h, 12h',
-  '  - 最多 5 次，之后进入人工对账',
-  '  - 幂等由商户侧负责，网关不去重',
+  tool('Bash(mt read sibling:2 --lines 8)'),
+  out(`Test Files  ${RED}1 failed${R} | ${GREEN}3 passed${R}`),
+  cont(`     Tests  ${RED}1 failed${R} | ${GREEN}27 passed${R}`),
+  cont('要把这个断言改成新行为吗？'),
   '',
-  say('这意味着：'),
-  '  1. 重复回调必须返回 2xx',
-  '  2. 12h 内都可能重放，幂等键',
-  '     过期时间至少要覆盖 24h',
+  say('回归跑完了：27 过 1 挂。挂的那条'),
+  '  断言重复回调返回 409，和新的幂等',
+  '  行为冲突，不是功能回归。它在等你',
+  '  决定要不要改断言。',
+  '',
+  prompt('让它改成新行为，顺手更新文档'),
+  '',
+  tool('Bash(mt send sibling:2 "改成新行为，'),
+  '       并同步 docs/payments.md" --enter)',
+  out('已发送到「回归 · 支付模块测试」'),
+  '',
+  say('已经交给回归卡片了，完成后我再读一次。'),
   '',
   ...narrowInput()
 ]
@@ -248,10 +259,10 @@ const vitest = [
 // Scene-1 cards are printed while narrow and widen when focused; xterm reflows every line except the
 // cursor line, so those transcripts end with a newline. DAG previews show the last four lines, so the
 // scene-2 transcripts keep the cursor on their final line instead.
-const trailingNewline = new Set(['implementation', 'regression', 'review', 'docs', 'research'])
+const trailingNewline = new Set(['implementation', 'regression', 'review', 'docs', 'coordinate'])
 
 export const transcripts: Record<string, string> = Object.fromEntries(
-  Object.entries({ implementation, regression, review, docs, research, baseline, planA, planB, vitest })
+  Object.entries({ implementation, regression, review, docs, coordinate, baseline, planA, planB, vitest })
     .map(([name, lines]) => [name, lines.join('\r\n') + (trailingNewline.has(name) ? '\r\n' : '')])
 )
 
