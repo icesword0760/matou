@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -22,10 +22,11 @@ let hierarchy: HierarchyApplicationService
 let canvas: SessionCanvasService
 let projector: HostTopologyProjector
 let resolver: HostActionTargetResolver
+let root: string
 let workspaceRoot: string
 
 beforeEach(async () => {
-  const root = await mkdtemp(join(tmpdir(), 'matou-host-action-resolver-'))
+  root = await mkdtemp(join(tmpdir(), 'matou-host-action-resolver-'))
   workspaceRoot = join(root, 'workspace')
   await mkdir(workspaceRoot)
   await writeFile(join(workspaceRoot, 'README.md'), 'baseline\n')
@@ -44,7 +45,10 @@ beforeEach(async () => {
   resolver = new HostActionTargetResolver(database, projector)
 })
 
-afterEach(() => database.close())
+afterEach(async () => {
+  database.close()
+  await rm(root, { recursive: true, force: true })
+})
 
 describe('HostActionTargetResolver', () => {
   it('returns one complete hierarchy path for each unique stable entity ref', () => {
@@ -86,23 +90,37 @@ describe('HostActionTargetResolver', () => {
     expect(resolver.resolveEntity(caller, {
       kind: 'current', entity: 'canvas'
     }, 'not-used')).toMatchObject({ kind: 'canvas', sceneId: fixture.parent.scene!.id })
+    const revision = resolver.projectionRevision(caller, 'current-level')
     expect(resolver.resolveEntity(caller, {
-      kind: 'relative', direction: 'right'
-    }, 'not-used')).toMatchObject({ kind: 'session', sessionId: fixture.child2.session!.id })
+      kind: 'relative', direction: 'right', projectionRevision: revision
+    }, revision)).toMatchObject({ kind: 'session', sessionId: fixture.child2.session!.id })
   })
 
-  it('rejects an ordinal or ref write when its projection revision is stale', () => {
+  it('rejects every position-based action selector when its projection revision is stale', () => {
     const fixture = graphFixture()
-    const caller = { runId: 'run-child-1', sessionId: fixture.child1.session!.id }
-    const revision = resolver.projectionRevision(caller)
+    const childCaller = { runId: 'run-child-1', sessionId: fixture.child1.session!.id }
+    const childRevision = resolver.projectionRevision(childCaller, 'current-level')
     database.run(
       'UPDATE session_canvas_memberships SET last_user_interaction_seq = 99 WHERE session_id = ?',
       fixture.child2.session!.id
     )
 
-    expectFault(() => resolver.resolveEntity(caller, {
-      kind: 'sibling', ordinal: 1, projectionRevision: revision
-    }, revision), 'STALE_PROJECTION')
+    expectFault(() => resolver.resolveEntity(childCaller, {
+      kind: 'relative', direction: 'right', projectionRevision: childRevision
+    }, childRevision), 'STALE_PROJECTION')
+    expectFault(() => resolver.resolveEntity(childCaller, {
+      kind: 'sibling', ordinal: 1, projectionRevision: childRevision
+    }, childRevision), 'STALE_PROJECTION')
+
+    const parentCaller = { runId: 'run-parent', sessionId: fixture.parent.session!.id }
+    const parentRevision = resolver.projectionRevision(parentCaller, 'current-level')
+    database.run(
+      'UPDATE session_canvas_memberships SET last_user_interaction_seq = 100 WHERE session_id = ?',
+      fixture.rootSibling.session!.id
+    )
+    expectFault(() => resolver.resolveEntity(parentCaller, {
+      kind: 'relation', relation: 'child', ordinal: 1, projectionRevision: parentRevision
+    }, parentRevision), 'STALE_PROJECTION')
   })
 
   it('counts descendants and live terminal runs before removal', () => {
@@ -223,6 +241,10 @@ function graphFixture() {
     windowId: 'window-1', defaultRootDirectory: workspaceRoot,
     defaultName: 'Workspace', now: 1
   })
+  const rootSibling = canvas.createShellSibling(command('root-sibling'), {
+    windowId: 'window-1', sceneId: parent.scene!.id,
+    sourceSessionId: parent.session!.id, now: 5
+  })
   const child1 = canvas.createShellSibling(command('child-1'), {
     windowId: 'window-1', sceneId: parent.scene!.id,
     sourceSessionId: parent.session!.id, parentSessionId: parent.session!.id, now: 10
@@ -231,7 +253,7 @@ function graphFixture() {
     windowId: 'window-1', sceneId: parent.scene!.id,
     sourceSessionId: child1.session!.id, parentSessionId: parent.session!.id, now: 20
   })
-  return { parent, child1, child2 }
+  return { parent, rootSibling, child1, child2 }
 }
 
 function command(commandId: string) {

@@ -2,8 +2,6 @@ import { z } from 'zod'
 
 import type { HostNavigationPath } from '@matou/contracts'
 
-import type { HostTargetSelector } from './host-control-types'
-
 export type HostActionMethod =
   | 'structure.create.workspace' | 'structure.create.task'
   | 'structure.create.canvas' | 'structure.create.session'
@@ -25,10 +23,23 @@ export type HostActionErrorCode =
   | 'BRANCH_CONFLICT' | 'WORKTREE_CONFLICT' | 'PARTIAL_SUCCESS'
   | 'NAVIGATION_TIMEOUT' | 'STORAGE_READ_ONLY'
 
+/**
+ * High-level structure actions bind every position-based target choice to the
+ * projection that supplied the position. Terminal Host Control keeps its own
+ * compatibility selector because its legacy commands still accept revisionless
+ * relative and relation choices.
+ */
+export type HostActionTargetSelector =
+  | { kind: 'self' }
+  | { kind: 'relative'; direction: 'left' | 'right'; projectionRevision: string }
+  | { kind: 'relation'; relation: 'parent' | 'child'; ordinal?: number; projectionRevision: string }
+  | { kind: 'sibling'; ordinal: number; projectionRevision: string }
+  | { kind: 'ref'; ref: string; projectionRevision: string }
+  | { kind: 'session'; sessionId: string }
+
 export type HostEntitySelector =
   | { kind: 'current'; entity: 'workspace' | 'task' | 'canvas' | 'session' }
-  | { kind: 'ref'; ref: string; projectionRevision: string }
-  | HostTargetSelector
+  | HostActionTargetSelector
 
 export interface ForkItemInput {
   itemKey: string
@@ -49,9 +60,9 @@ export type HostActionRequest =
       profile: 'shell' | 'claude-code' | 'codex'; title?: string;
       submissionKey: string; enter?: boolean }
   | { method: 'structure.fork.child' | 'structure.fork.sibling';
-      source: HostTargetSelector; title: string; environment: ForkEnvironmentChoice;
+      source: HostActionTargetSelector; title: string; environment: ForkEnvironmentChoice;
       prompt?: string; start?: boolean; submissionKey: string }
-  | { method: 'structure.fork.children'; source: HostTargetSelector;
+  | { method: 'structure.fork.children'; source: HostActionTargetSelector;
       batchKey: string; items: ForkItemInput[]; retryItemKeys?: string[] }
   | { method: 'structure.remove.preview'; target: HostEntitySelector;
       scope: 'node' | 'subtree' }
@@ -138,10 +149,10 @@ const keySchema = nonEmptyText(160)
 const referenceSchema = nonEmptyText()
 const revisionSchema = nonEmptyText()
 
-const targetSelectorSchema = z.union([
+const actionTargetSelectorSchema = z.union([
   z.object({ kind: z.literal('self') }).strict(),
-  z.object({ kind: z.literal('relative'), direction: z.enum(['left', 'right']) }).strict(),
-  z.object({ kind: z.literal('relation'), relation: z.enum(['parent', 'child']), ordinal: z.number().int().positive().optional() }).strict(),
+  z.object({ kind: z.literal('relative'), direction: z.enum(['left', 'right']), projectionRevision: revisionSchema }).strict(),
+  z.object({ kind: z.literal('relation'), relation: z.enum(['parent', 'child']), ordinal: z.number().int().positive().optional(), projectionRevision: revisionSchema }).strict(),
   z.object({ kind: z.literal('sibling'), ordinal: z.number().int().positive(), projectionRevision: revisionSchema }).strict(),
   z.object({ kind: z.literal('ref'), ref: referenceSchema, projectionRevision: revisionSchema }).strict(),
   z.object({ kind: z.literal('session'), sessionId: nonEmptyText() }).strict()
@@ -149,8 +160,7 @@ const targetSelectorSchema = z.union([
 
 const entitySelectorSchema = z.union([
   z.object({ kind: z.literal('current'), entity: z.enum(['workspace', 'task', 'canvas', 'session']) }).strict(),
-  z.object({ kind: z.literal('ref'), ref: referenceSchema, projectionRevision: revisionSchema }).strict(),
-  targetSelectorSchema
+  actionTargetSelectorSchema
 ])
 
 const environmentSchema = z.discriminatedUnion('mode', [
@@ -177,8 +187,8 @@ const hostActionRequestSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('structure.create.task'), workspace: entitySelectorSchema, title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.literal('structure.create.canvas'), task: entitySelectorSchema, title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.literal('structure.create.session'), canvas: entitySelectorSchema, profile: z.enum(['shell', 'claude-code', 'codex']), title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
-  z.object({ method: z.enum(['structure.fork.child', 'structure.fork.sibling']), source: targetSelectorSchema, title: titleSchema, environment: environmentSchema, prompt: optionalPrompt, start: optionalStart, submissionKey: keySchema }).strict(),
-  z.object({ method: z.literal('structure.fork.children'), source: targetSelectorSchema, batchKey: keySchema, items: z.array(forkItemSchema).max(50), retryItemKeys: z.array(keySchema).max(50).optional() }).strict().superRefine((request, context) => {
+  z.object({ method: z.enum(['structure.fork.child', 'structure.fork.sibling']), source: actionTargetSelectorSchema, title: titleSchema, environment: environmentSchema, prompt: optionalPrompt, start: optionalStart, submissionKey: keySchema }).strict(),
+  z.object({ method: z.literal('structure.fork.children'), source: actionTargetSelectorSchema, batchKey: keySchema, items: z.array(forkItemSchema).max(50), retryItemKeys: z.array(keySchema).max(50).optional() }).strict().superRefine((request, context) => {
     const itemKeys = new Set<string>()
     for (const [index, item] of request.items.entries()) {
       if (itemKeys.has(item.itemKey)) {

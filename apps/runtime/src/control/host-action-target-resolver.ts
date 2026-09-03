@@ -1,8 +1,15 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 
-import type { HostResultPath, ForkEnvironmentChoice, HostActionErrorCode, HostImpactSummary } from './host-action-types'
-import type { HostCallerIdentity, HostListScope, HostTarget, HostTargetSelector } from './host-control-types'
+import type {
+  ForkEnvironmentChoice,
+  HostActionErrorCode,
+  HostActionTargetSelector,
+  HostEntitySelector,
+  HostImpactSummary,
+  HostResultPath
+} from './host-action-types'
+import type { HostCallerIdentity, HostListScope, HostTarget } from './host-control-types'
 import { HostTopologyProjector } from './host-topology-projector'
 import type { RuntimeDatabase } from '../storage/database'
 
@@ -67,10 +74,7 @@ export class HostActionTargetResolverError extends Error {
   }
 }
 
-type ResolverSelector = HostTargetSelector | {
-  kind: 'current'
-  entity: 'workspace' | 'task' | 'canvas' | 'session'
-}
+type ResolverSelector = HostEntitySelector
 
 type ForkEnvironmentSource = HostTarget | (ResolvedHostEntity & { kind: 'session' })
 
@@ -284,7 +288,7 @@ export class HostActionTargetResolver {
     selector: ResolverSelector,
     expectedRevision: string
   ): void {
-    if (selector.kind !== 'ref' && selector.kind !== 'sibling') return
+    if (selector.kind === 'current' || selector.kind === 'self' || selector.kind === 'session') return
     const scope: HostListScope = selector.kind === 'ref' ? 'all' : 'current-level'
     const currentRevision = this.projectionRevision(caller, scope)
     if (expectedRevision !== currentRevision || selector.projectionRevision !== expectedRevision) {
@@ -440,7 +444,7 @@ export class HostActionTargetResolver {
     }
   }
 
-  #relativeSessionId(caller: HostCallerIdentity, selector: Exclude<HostTargetSelector, { kind: 'ref' | 'session' }>): string {
+  #relativeSessionId(caller: HostCallerIdentity, selector: Exclude<HostActionTargetSelector, { kind: 'ref' | 'session' }>): string {
     try {
       return this.#topology.resolve(caller, selector)
     } catch (error) {

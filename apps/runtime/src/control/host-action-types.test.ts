@@ -35,6 +35,52 @@ describe('parseHostActionRequest', () => {
     })).toThrow()
   })
 
+  it('requires a projection revision for every position-based high-level target selector', () => {
+    const revision = 'projection-1'
+    const missingRelative = {
+      source: { kind: 'relative', direction: 'right' },
+      title: '相邻事项', environment: { mode: 'current' }, submissionKey: 'missing-relative'
+    }
+    const missingChildOrdinal = {
+      source: { kind: 'relation', relation: 'child', ordinal: 1 },
+      title: '子事项', environment: { mode: 'current' }, submissionKey: 'missing-child-ordinal'
+    }
+    expect(() => parseHostActionRequest('structure.fork.child', missingRelative)).toThrow()
+    expect(() => parseHostActionRequest('structure.fork.child', missingChildOrdinal)).toThrow()
+    expect(() => parseHostActionRequest('structure.fork.child', {
+      ...missingRelative, source: { kind: 'sibling', ordinal: 1 }
+    })).toThrow()
+    expect(() => parseHostActionRequest('structure.fork.child', {
+      ...missingRelative, source: { kind: 'ref', ref: 'session:1' }
+    })).toThrow()
+    expect(() => parseHostActionRequest('structure.create.canvas', {
+      task: { kind: 'relative', direction: 'left' }, submissionKey: 'missing-create-relative'
+    })).toThrow()
+
+    expect(parseHostActionRequest('structure.fork.child', {
+      ...missingRelative,
+      source: { kind: 'relative', direction: 'right', projectionRevision: revision }
+    })).toMatchObject({ source: { projectionRevision: revision } })
+    expect(parseHostActionRequest('structure.fork.children', {
+      source: { kind: 'relation', relation: 'child', ordinal: 1, projectionRevision: revision },
+      batchKey: 'positioned-batch',
+      items: [{ itemKey: 'child', title: '子事项', environment: { mode: 'current' } }]
+    })).toMatchObject({ source: { projectionRevision: revision } })
+    expect(parseHostActionRequest('structure.create.canvas', {
+      task: { kind: 'relative', direction: 'left', projectionRevision: revision },
+      submissionKey: 'positioned-create'
+    })).toMatchObject({ task: { projectionRevision: revision } })
+
+    expect(parseHostActionRequest('structure.fork.child', {
+      source: { kind: 'self' }, title: '当前会话', environment: { mode: 'current' },
+      submissionKey: 'stable-self'
+    })).toMatchObject({ source: { kind: 'self' } })
+    expect(parseHostActionRequest('structure.fork.child', {
+      source: { kind: 'session', sessionId: 'session-1' }, title: '指定会话',
+      environment: { mode: 'current' }, submissionKey: 'stable-session'
+    })).toMatchObject({ source: { kind: 'session', sessionId: 'session-1' } })
+  })
+
   it('accepts 50 batch items and rejects the 51st', () => {
     const items = Array.from({ length: 50 }, (_, index) => ({
       itemKey: `item-${index + 1}`,
