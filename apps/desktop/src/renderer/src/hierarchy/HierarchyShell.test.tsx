@@ -1236,7 +1236,7 @@ describe('PRD 05 hierarchy shell', () => {
 
     render(<HierarchyShell fixture={data} runtimeMode="read-only" />)
 
-    expect(screen.getByRole('status').textContent).toContain('数据库处于只读恢复模式')
+    expect(screen.getByText('数据库处于只读恢复模式')).toBeTruthy()
     expect(screen.getByTestId('xterm-session-a1').dataset.inputDisabled).toBe('true')
     expect(screen.getByTestId('xterm-session-a1').dataset.readOnly).toBe('true')
     expect(screen.getByRole('button', { name: '新增工作空间' })).toHaveProperty('disabled', true)

@@ -123,7 +123,7 @@ export function TerminalPane(props: {
   const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
-  const [terminalVisualReady, setTerminalVisualReady] = useState(suppliedRecoveryState === undefined)
+  const [terminalVisualReady, setTerminalVisualReady] = useState(false)
   const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
   const [forkReadinessHint, setForkReadinessHint] = useState(false)
   const [environmentAction, setEnvironmentAction] = useState('')
@@ -252,9 +252,8 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const currentForkProgress = activeForkProgress(forkProgress)
-  const waitingForRecoveredTerminalPaint = !isTeamMember && recoveryState === 'ready' &&
-    suppliedRecoveryState !== undefined && !terminalVisualReady
-  const showRecoveryWater = (recoveryBusy || waitingForRecoveredTerminalPaint) &&
+  const waitingForTerminalPaint = !isTeamMember && recoveryState === 'ready' && !terminalVisualReady
+  const showRecoveryWater = (recoveryBusy || waitingForTerminalPaint) &&
     forkState !== 'failed' && providerRestoreState !== 'failed' && runtimeStatus !== 'error' && !storageFault &&
     !currentForkProgress && !environmentUnavailable
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)

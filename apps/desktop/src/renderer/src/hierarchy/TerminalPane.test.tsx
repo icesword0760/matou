@@ -88,6 +88,16 @@ describe('Terminal pane', () => {
     expect(screen.queryByTestId('session-recovery-water')).toBeNull()
   })
 
+  it('covers an ordinary new terminal while it is still waiting for its first frame', () => {
+    render(<TerminalPane {...fixture()} />)
+
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+  })
+
   it('reveals a startup failure that arrives before the recovered terminal paints', () => {
     render(<TerminalPane {...fixture()} recoveryState="ready" />)
     expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
