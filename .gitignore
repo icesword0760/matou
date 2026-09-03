@@ -15,3 +15,4 @@ output/
 .playwright-cli/
 .worktrees/
 .superpowers/
+apps/desktop/prototypes/
