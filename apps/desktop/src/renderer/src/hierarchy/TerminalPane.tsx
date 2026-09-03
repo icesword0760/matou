@@ -28,6 +28,7 @@ import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import { sessionDeleteFlow } from './terminal-close-flow'
 import { AppIcon } from '../ui/AppIcon'
+import { SessionRecoveryWater } from './SessionRecoveryWater'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -246,6 +247,8 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const currentForkProgress = activeForkProgress(forkProgress)
+  const showRecoveryWater = recoveryBusy && forkState !== 'failed' && !storageFault &&
+    !currentForkProgress && !environmentUnavailable
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)
   const restoreNoticeKey = restoreIdentityExpired && providerRestoreState === 'failed'
     ? `${session.id}:${restoreError ?? ''}`
@@ -293,6 +296,7 @@ export function TerminalPane(props: {
       }}>
       <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
         {hasNotification && <span className="pane-notification-badge" role="status">新通知</span>}
+        {showRecoveryWater && <span className="pane-recovery-badge" aria-hidden="true"><i />恢复中</span>}
         {git && <span className="pane-environment-badge" title={gitTitle(git)}>
           {gitLabel(git)}
         </span>}
@@ -472,23 +476,16 @@ export function TerminalPane(props: {
       onRetry={() => runtimeClient?.retryTerminalStorage(session.id)}
       onEnd={() => runtimeClient?.endTerminalAfterStorageFault(session.id)} />}
     {currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
-    {recoveryState !== 'ready' && forkState !== 'failed' && !storageFault &&
+    {showRecoveryWater && <SessionRecoveryWater sessionTitle={session.title} />}
+    {recoveryState === 'failed' && forkState !== 'failed' && !storageFault &&
       !currentForkProgress && !environmentUnavailable &&
-      <div className={`session-recovery-overlay state-${recoveryState}`}
-      role="status" aria-label={recoveryState === 'failed'
-        ? `终端恢复失败：${session.title}` : `正在恢复终端：${session.title}`}
+      <div className="session-recovery-overlay state-failed" data-testid="session-recovery-dialog"
+      role="status" aria-label={`终端恢复失败：${session.title}`}
       onPointerDown={(event) => event.stopPropagation()}>
       <div className="session-recovery-overlay__content">
-        {recoveryState !== 'failed' && <span className="session-recovery-overlay__spinner" aria-hidden="true" />}
-        <strong>{recoveryState === 'failed'
-          ? '终端恢复失败'
-          : recoveryState === 'queued' ? '等待恢复终端' : '正在恢复终端'}</strong>
-        <p>{recoveryState === 'failed'
-          ? (recoveryError || '本会话恢复未完成，其他会话仍可继续使用。')
-          : recoveryState === 'queued'
-            ? '已进入恢复队列，将按当前使用位置优先恢复。'
-            : '正在恢复最近的终端内容与运行状态…'}</p>
-        {recoveryState === 'failed' && onRetryRecovery && <button type="button"
+        <strong>终端恢复失败</strong>
+        <p>{recoveryError || '本会话恢复未完成，其他会话仍可继续使用。'}</p>
+        {onRetryRecovery && <button type="button"
           aria-label={`重试恢复终端：${session.title}`}
           onClick={() => void onRetryRecovery(session.id)}>重试</button>}
       </div>

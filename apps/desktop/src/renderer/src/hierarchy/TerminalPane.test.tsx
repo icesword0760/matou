@@ -57,6 +57,9 @@ describe('Terminal pane', () => {
     const pane = screen.getByTestId('terminal-pane')
     expect(pane.getAttribute('aria-busy')).toBe('true')
     expect(screen.getByRole('status', { name: '正在恢复终端：Claude 主会话' })).toBeTruthy()
+    expect(screen.getByTestId('session-recovery-water').querySelector('canvas')).toBeTruthy()
+    expect(screen.queryByTestId('session-recovery-dialog')).toBeNull()
+    expect(screen.getByText('恢复中')).toBeTruthy()
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
   })
 
@@ -67,6 +70,8 @@ describe('Terminal pane', () => {
 
     expect(screen.getByRole('status', { name: '终端恢复失败：Claude 主会话' }).textContent)
       .toContain('进程恢复失败')
+    expect(screen.getByTestId('session-recovery-dialog')).toBeTruthy()
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
     await userEvent.setup().click(screen.getByRole('button', { name: '重试恢复终端：Claude 主会话' }))
     expect(onRetryRecovery).toHaveBeenCalledWith('session-1')
