@@ -24,13 +24,17 @@ export type ResolvedForkItemInput = Omit<ForkItemInput, 'environment'> & {
   environment: ResolvedForkEnvironment
 }
 
+export interface ForkFocusLease {
+  finish(temporarySessionId?: string, focusUpdatedAt?: number): void
+}
+
 export interface CreateForkBatchInput {
   caller: HostCallerIdentity
   source: ResolvedHostEntity & { kind: 'session' }
   batchKey: string
   items: ResolvedForkItemInput[]
   publicRequest?: ForkBatchPublicRequest
-  restoreFocus?: (temporarySessionId: string, focusUpdatedAt?: number) => void
+  acquireFocusLease?: () => Promise<ForkFocusLease>
 }
 
 export interface RetryForkBatchInput extends CreateForkBatchInput {
@@ -315,7 +319,7 @@ export class ForkBatchCoordinator {
       throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
     }
     if (shouldResumeStart(row)) {
-      await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+      await this.#startItem(input.batchKey, item, row)
     }
     return this.#result(input)
   }
@@ -329,7 +333,7 @@ export class ForkBatchCoordinator {
         )
       }
       if (shouldResumeStart(row)) {
-        await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+        await this.#startItem(input.batchKey, item, row)
       }
     }
     this.#refreshAll(input)
@@ -358,7 +362,7 @@ export class ForkBatchCoordinator {
       }
       if (row.state !== 'failed') {
         if (shouldResumeStart(row)) {
-          await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+          await this.#startItem(input.batchKey, item, row)
         }
         row = this.#refreshItem(input.batchKey, item)
         this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'completed', row)
@@ -387,7 +391,7 @@ export class ForkBatchCoordinator {
         )
       }
       if (shouldResumeStart(row)) {
-        await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+        await this.#startItem(input.batchKey, item, row)
       }
       row = this.#refreshItem(input.batchKey, item)
       this.#recordRetryItem(
@@ -408,6 +412,7 @@ export class ForkBatchCoordinator {
     failureReceipt: string
   ): Promise<BatchItemRow> {
     const submissionKey = itemSubmissionKey(input.batchKey, item.itemKey)
+    const focusLease = await input.acquireFocusLease?.()
     let temporarySessionId: string | undefined
     let focusUpdatedAt: number | undefined
     try {
@@ -450,9 +455,7 @@ export class ForkBatchCoordinator {
       })
       return this.#itemRow(input.batchKey, item.itemKey)
     } finally {
-      if (temporarySessionId !== undefined) {
-        input.restoreFocus?.(temporarySessionId, focusUpdatedAt)
-      }
+      focusLease?.finish(temporarySessionId, focusUpdatedAt)
     }
   }
 
@@ -467,6 +470,8 @@ export class ForkBatchCoordinator {
       startState: item.start === true ? 'pending' : 'not-requested',
       error: null
     })
+    const focusLease = await input.acquireFocusLease?.()
+    let focusUpdatedAt: number | undefined
     try {
       const accepted = await this.#dependencies.retryChild({
         commandId: `fork-batch-retry:${row.submission_key}:${randomUUID()}`,
@@ -482,7 +487,7 @@ export class ForkBatchCoordinator {
         sessionId,
         now: this.#now()
       })
-      input.restoreFocus?.(sessionId, accepted.session?.updatedAt)
+      focusUpdatedAt = accepted.session?.updatedAt
       return this.#recordWorkflowResult(
         input.batchKey, item, accepted, `retry-workflow:${attemptId}:${item.itemKey}`
       )
@@ -503,7 +508,7 @@ export class ForkBatchCoordinator {
       })
       return this.#itemRow(input.batchKey, item.itemKey)
     } finally {
-      input.restoreFocus?.(sessionId)
+      focusLease?.finish(sessionId, focusUpdatedAt)
     }
   }
 
@@ -542,15 +547,13 @@ export class ForkBatchCoordinator {
   async #startItem(
     batchKey: string,
     item: ResolvedForkItemInput,
-    row: BatchItemRow,
-    restoreFocus?: (temporarySessionId: string, focusUpdatedAt?: number) => void
+    row: BatchItemRow
   ): Promise<void> {
     const sessionId = row.session_id
     if (!sessionId) return
     const abort = new AbortController()
     let readiness: Promise<unknown> | undefined
     try {
-      restoreFocus?.(sessionId)
       this.#writeItem(batchKey, item.itemKey, {
         startState: 'waiting', error: null
       })
@@ -560,7 +563,6 @@ export class ForkBatchCoordinator {
       // transiently unhandled during that interval.
       void readiness.catch(() => undefined)
       await this.#dependencies.startSession(sessionId)
-      restoreFocus?.(sessionId)
       await readiness
       if (item.prompt === undefined) {
         this.#writeItem(batchKey, item.itemKey, {
@@ -591,7 +593,6 @@ export class ForkBatchCoordinator {
           : `节点已创建，任务仍待启动：${errorMessage(error)}`
       })
     } finally {
-      restoreFocus?.(sessionId)
       abort.abort(new Error('provider readiness completed'))
     }
   }

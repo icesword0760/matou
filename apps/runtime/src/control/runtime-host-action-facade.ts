@@ -8,6 +8,7 @@ import type {
   CoordinateAcceptedForkInput,
   CreateForkBatchInput,
   ForkBatchCoordinator,
+  ForkFocusLease,
   RetryForkBatchInput
 } from './fork-batch-coordinator'
 import {
@@ -78,6 +79,17 @@ interface ActiveSingleFork {
   requestHash: string
   promise: Promise<HostActionResult>
 }
+
+interface FocusSnapshot {
+  windowId: string
+  sceneId: string
+  sessionId: string
+}
+
+const DATABASE_FOCUS_WINDOW_LOCKS = new WeakMap<
+  RuntimeDatabase,
+  Map<string, Promise<void>>
+>()
 
 export interface RuntimeHostActionFacadeDependencies {
   database: RuntimeDatabase
@@ -301,7 +313,7 @@ export class RuntimeHostActionFacade {
     const source = requireEntity(this.#resolve(caller, request.source), 'session')
     this.#assertWorkspacePathAvailable(source.workspaceId)
     const environment = this.#resolver.resolveForkEnvironment(source, request.environment)
-    const restoreFocus = this.#forkFocusRestorer(
+    const focusLease = await this.#acquireForkFocusLease(
       caller, source, request.method === 'structure.fork.sibling'
     )
     let result!: ForkWorkflowResult
@@ -310,7 +322,7 @@ export class RuntimeHostActionFacade {
         ? this.#forkWorkflow.createForkChild(command, forkInput(source, request.title, environment, request.submissionKey, this.#now()))
         : this.#forkWorkflow.createForkSibling(command, forkInput(source, request.title, environment, request.submissionKey, this.#now())))
     } finally {
-      if (result?.session) restoreFocus(result.session.id, result.session.updatedAt)
+      focusLease.finish(result?.session?.id, result?.session?.updatedAt)
     }
     const forked = this.#forkedResult(result, environment)
     if (request.start !== true) return forked
@@ -320,8 +332,7 @@ export class RuntimeHostActionFacade {
       source,
       environment,
       result,
-      forked,
-      restoreFocus
+      forked
     )
   }
 
@@ -349,7 +360,7 @@ export class RuntimeHostActionFacade {
     const source = accepted?.source ?? this.#acceptedForkSource(stored)
     const environment = accepted?.items[0]?.environment ??
       this.#acceptedBatchEnvironment(source, request.environment)
-    const restoreFocus = this.#forkFocusRestorer(
+    const focusLease = await this.#acquireForkFocusLease(
       caller, source, request.method === 'structure.fork.sibling'
     )
     // The workflow checks its durable submission intent before inspecting this
@@ -373,7 +384,7 @@ export class RuntimeHostActionFacade {
         ? this.#forkWorkflow.createForkChild(command, replayInput)
         : this.#forkWorkflow.createForkSibling(command, replayInput))
     } finally {
-      if (result?.session) restoreFocus(result.session.id, result.session.updatedAt)
+      focusLease.finish(result?.session?.id, result?.session?.updatedAt)
     }
     const forked = this.#forkedResult(result, request.environment)
     if (request.start !== true) return forked
@@ -383,8 +394,7 @@ export class RuntimeHostActionFacade {
       source,
       environment,
       result,
-      forked,
-      restoreFocus
+      forked
     )
   }
 
@@ -396,8 +406,7 @@ export class RuntimeHostActionFacade {
     source: ResolvedHostEntity & { kind: 'session' },
     environment: ResolvedForkEnvironment,
     result: ForkWorkflowResult,
-    forked: Extract<HostActionResult, { kind: 'forked' }>,
-    restoreFocus: (temporarySessionId: string, focusUpdatedAt?: number) => void
+    forked: Extract<HostActionResult, { kind: 'forked' }>
   ): Promise<HostActionResult> {
     const input: CoordinateAcceptedForkInput = {
       caller,
@@ -414,7 +423,6 @@ export class RuntimeHostActionFacade {
         source: request.source,
         items: [singleForkPublicItem(request)]
       },
-      restoreFocus,
       sessionId: result.session!.id,
       state: result.forkState === 'succeeded' ? 'ready' : 'created'
     }
@@ -491,14 +499,13 @@ export class RuntimeHostActionFacade {
       ...item,
       environment: this.#resolver.resolveForkEnvironment(source, item.environment)
     }))
-    const restoreFocus = this.#forkFocusRestorer(caller, source)
     const input: CreateForkBatchInput = {
       caller,
       source,
       batchKey: request.batchKey,
       items,
       publicRequest: { source: request.source, items: request.items },
-      restoreFocus
+      acquireFocusLease: () => this.#acquireForkFocusLease(caller, source)
     }
     if (request.retryItemKeys !== undefined) {
       const retry: RetryForkBatchInput = {
@@ -824,45 +831,64 @@ export class RuntimeHostActionFacade {
     return fallback.session_id
   }
 
-  #forkFocusRestorer(
+  async #acquireForkFocusLease(
     caller: HostCallerIdentity,
     source: ResolvedHostEntity & { kind: 'session' },
     sourceMayBeTemporary = false
-  ): (temporarySessionId: string, focusUpdatedAt?: number) => void {
+  ): Promise<ForkFocusLease> {
     const callerWindowId = this.#callerSession(caller).windowId
-    const snapshots = [...new Set([callerWindowId, source.windowId])].flatMap((windowId) => {
-      const current = readHierarchyResult(this.#database, windowId)
-      return current.session === null || current.scene === null ? [] : [{
-        windowId,
-        sceneId: current.scene.id,
-        sessionId: current.session.id
-      }]
-    })
-    const handled = new Set<string>()
-    return (temporarySessionId, focusUpdatedAt) => {
-      if (handled.has(temporarySessionId)) return
-      handled.add(temporarySessionId)
-      for (const snapshot of snapshots) {
-        const expectedSessionIds = snapshot.windowId === source.windowId && sourceMayBeTemporary
-          ? [temporarySessionId, source.sessionId]
-          : [temporarySessionId]
-        for (const expectedSessionId of new Set(expectedSessionIds)) {
-          if (snapshot.sessionId === expectedSessionId) break
-          let restored = false
-          try {
-            restored = this.#sessionCanvas.restoreFocusedSessionIfCurrent({
-              windowId: snapshot.windowId,
-              sceneId: snapshot.sceneId,
-              sessionId: snapshot.sessionId,
-              expectedSessionId,
-              ...(focusUpdatedAt === undefined ? {} : { expectedFocusUpdatedAt: focusUpdatedAt }),
-              now: this.#now()
-            })
-          } catch {
-            // Focus restoration is a best-effort post-mutation CAS. The durable
-            // Fork result stays authoritative when its snapshot disappears.
+    const releaseWindows = await acquireFocusWindowLocks(
+      this.#database,
+      [callerWindowId, source.windowId]
+    )
+    let finished = false
+    let snapshots: FocusSnapshot[]
+    try {
+      snapshots = [...new Set([callerWindowId, source.windowId])].flatMap((windowId) => {
+        const current = readHierarchyResult(this.#database, windowId)
+        return current.session === null || current.scene === null ? [] : [{
+          windowId,
+          sceneId: current.scene.id,
+          sessionId: current.session.id
+        }]
+      })
+    } catch (error) {
+      releaseWindows()
+      throw error
+    }
+    return {
+      finish: (temporarySessionId, focusUpdatedAt) => {
+        if (finished) return
+        finished = true
+        try {
+          if (temporarySessionId === undefined) return
+          for (const snapshot of snapshots) {
+            const expectedSessionIds = snapshot.windowId === source.windowId && sourceMayBeTemporary
+              ? [temporarySessionId, source.sessionId]
+              : [temporarySessionId]
+            for (const expectedSessionId of new Set(expectedSessionIds)) {
+              if (snapshot.sessionId === expectedSessionId) break
+              let restored = false
+              try {
+                restored = this.#sessionCanvas.restoreFocusedSessionIfCurrent({
+                  windowId: snapshot.windowId,
+                  sceneId: snapshot.sceneId,
+                  sessionId: snapshot.sessionId,
+                  expectedSessionId,
+                  ...(focusUpdatedAt === undefined
+                    ? {}
+                    : { expectedFocusUpdatedAt: focusUpdatedAt }),
+                  now: this.#now()
+                })
+              } catch {
+                // Focus restoration is a best-effort post-mutation CAS. The durable
+                // Fork result stays authoritative when its snapshot disappears.
+              }
+              if (restored) break
+            }
           }
-          if (restored) break
+        } finally {
+          releaseWindows()
         }
       }
     }
@@ -1084,6 +1110,50 @@ function requireEntity<K extends ResolvedHostEntity['kind']>(
     )
   }
   return target as Extract<ResolvedHostEntity, { kind: K }>
+}
+
+async function acquireFocusWindowLocks(
+  database: RuntimeDatabase,
+  windowIds: string[]
+): Promise<() => void> {
+  // Facades sharing one Runtime database also share these short mutation leases.
+  // Stable window ordering keeps overlapping caller/target pairs deadlock-free.
+  let locks = DATABASE_FOCUS_WINDOW_LOCKS.get(database)
+  if (locks === undefined) {
+    locks = new Map()
+    DATABASE_FOCUS_WINDOW_LOCKS.set(database, locks)
+  }
+  const releases: Array<() => void> = []
+  try {
+    for (const windowId of [...new Set(windowIds)].sort()) {
+      const previous = locks.get(windowId) ?? Promise.resolve()
+      let releaseTicket!: () => void
+      const ticket = new Promise<void>((resolveTicket) => {
+        releaseTicket = resolveTicket
+      })
+      const tail = previous.then(() => ticket)
+      locks.set(windowId, tail)
+      await previous
+      let released = false
+      releases.push(() => {
+        if (released) return
+        released = true
+        releaseTicket()
+        void tail.then(() => {
+          if (locks?.get(windowId) === tail) locks.delete(windowId)
+        })
+      })
+    }
+  } catch (error) {
+    for (const release of releases.reverse()) release()
+    throw error
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    for (const release of releases.reverse()) release()
+  }
 }
 
 async function validateWorkspaceDirectory(path: string): Promise<void> {

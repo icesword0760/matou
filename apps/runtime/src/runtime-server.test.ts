@@ -249,6 +249,10 @@ describe('RuntimeServer domain RPC', () => {
         profile: 'shell', cols: 80, rows: 24
       })
       await waitUntil(() => registry.has('structure-removal-archived'))
+      database.run(
+        `UPDATE sessions SET work_status = 'needs-input'
+         WHERE id = 'structure-removal-archived'`
+      )
       const removal = sessionCanvas.removeSessionBranch({
         commandId: 'archive-live-session', commandType: 'session.remove', requestHash: 'remove'
       }, {
@@ -258,9 +262,14 @@ describe('RuntimeServer domain RPC', () => {
 
       await archivedServer.disposeSessions(removal.disposedSessionIds)
 
-      expect(database.get<{ status: string; archived_at: number | null }>(
-        `SELECT status, archived_at FROM sessions WHERE id = 'structure-removal-archived'`
-      )).toEqual({ status: 'archived', archived_at: 3 })
+      expect(database.get<{
+        status: string
+        work_status: string
+        archived_at: number | null
+      }>(
+        `SELECT status, work_status, archived_at FROM sessions
+         WHERE id = 'structure-removal-archived'`
+      )).toEqual({ status: 'archived', work_status: 'needs-input', archived_at: 3 })
       expect(database.get<{ status: string }>(
         `SELECT status FROM session_runs WHERE session_id = 'structure-removal-archived'
          ORDER BY ordinal DESC LIMIT 1`

@@ -571,6 +571,126 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
     })
   })
 
+  it('captures a fresh focus lease for each item after a manual switch between slow starts', async () => {
+    const manual = sessionCanvas.createShellSibling(command('per-item-manual-focus'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Manual focus between items', now: ++clock
+    }).session!.id
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: sourceSceneId(), sessionId: caller.sessionId, now: ++clock
+    })
+    const readiness = [deferred<void>(), deferred<void>()]
+    let readinessIndex = 0
+    const startSession = vi.fn(async () => undefined)
+    const operation = createFacade({
+      forkBatches: createForkBatchCoordinator({
+        startSession,
+        waitUntilReady: () => readiness[readinessIndex++]!.promise
+      })
+    }).execute('structure.fork.children', caller, {
+      source: { kind: 'self' }, batchKey: 'fresh-focus-per-item', items: [
+        {
+          itemKey: 'first', title: 'First slow child',
+          environment: { mode: 'current' }, start: true
+        },
+        {
+          itemKey: 'second', title: 'Second slow child',
+          environment: { mode: 'current' }, start: true
+        }
+      ]
+    })
+
+    await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(1))
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: sourceSceneId(), sessionId: manual, now: ++clock
+    })
+    readiness[0]!.resolve()
+    await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(2))
+    expect(activeSession('window-1', sourceSceneId())).toBe(manual)
+
+    readiness[1]!.resolve()
+    await expect(operation).resolves.toMatchObject({ kind: 'fork-batch', succeeded: 2, failed: 0 })
+    expect(activeSession('window-1', sourceSceneId())).toBe(manual)
+  })
+
+  it('serializes concurrent batch focus leases so temporary children never become snapshots', async () => {
+    const firstMutation = deferred<void>()
+    const secondMutation = deferred<void>()
+    const releaseFirst = deferred<void>()
+    let mutationCount = 0
+    createForkChild.mockImplementation(async (metadata, input) => {
+      const result = await createForkResult(metadata, input)
+      mutationCount += 1
+      if (mutationCount === 1) {
+        firstMutation.resolve()
+        await releaseFirst.promise
+      } else {
+        secondMutation.resolve()
+      }
+      return result
+    })
+    const first = facade.execute('structure.fork.children', caller, {
+      source: { kind: 'self' }, batchKey: 'concurrent-focus-first', items: [{
+        itemKey: 'first', title: 'Concurrent first', environment: { mode: 'current' }
+      }]
+    })
+    await firstMutation.promise
+    const second = facade.execute('structure.fork.children', caller, {
+      source: { kind: 'self' }, batchKey: 'concurrent-focus-second', items: [{
+        itemKey: 'second', title: 'Concurrent second', environment: { mode: 'current' }
+      }]
+    })
+    try {
+      expect(await Promise.race([
+        secondMutation.promise.then(() => 'started' as const),
+        new Promise<'serialized'>((resolve) => setTimeout(() => resolve('serialized'), 25))
+      ])).toBe('serialized')
+    } finally {
+      releaseFirst.resolve()
+    }
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ kind: 'fork-batch', succeeded: 1 }),
+      expect.objectContaining({ kind: 'fork-batch', succeeded: 1 })
+    ])
+    expect(activeSession('window-1', sourceSceneId())).toBe(caller.sessionId)
+  })
+
+  it('keeps an accepted child when its focus snapshot disappears before the first CAS', async () => {
+    const snapshot = sessionCanvas.createShellSibling(command('pre-cas-snapshot'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Snapshot removed before CAS', now: ++clock
+    }).session!.id
+    const createAfterSnapshotRemoval = vi.fn(async (
+      metadata: DomainCommandMetadata,
+      input: CreateForkInput
+    ) => {
+      const result = await createForkResult(metadata, input)
+      sessionCanvas.removeSessionBranch(command('remove-pre-cas-snapshot'), {
+        windowId: input.windowId, sceneId: input.sceneId,
+        sessionId: snapshot, scope: 'node-only', now: ++clock
+      })
+      return result
+    })
+    const result = await createFacade({
+      forkWorkflow: {
+        createForkChild: createAfterSnapshotRemoval,
+        createForkSibling: createAfterSnapshotRemoval
+      }
+    }).execute('structure.fork.child', caller, {
+      source: { kind: 'session', sessionId: caller.sessionId },
+      title: 'Accepted after snapshot removal', environment: { mode: 'current' },
+      submissionKey: 'removed-before-first-cas'
+    })
+
+    expect(result).toMatchObject({ kind: 'forked', state: 'ready' })
+    expect(database.get<{ status: string }>(
+      'SELECT status FROM sessions WHERE id = ?', snapshot
+    )).toEqual({ status: 'archived' })
+    expect(activeSession('window-1', sourceSceneId())).toBe(
+      result.kind === 'forked' ? result.sessionRef.slice('session:'.length) : ''
+    )
+  })
+
   it('restores the target window immediately after every child mutation', async () => {
     const target = seedSecondWindow()
     const focusBeforeMutation: Array<string | undefined> = []

@@ -329,3 +329,109 @@ Result: `107` files, `946/946` tests passed. Output contained only the existing 
 - Confirmed recovery tombstones reject all late publication paths and archived domain state survives Run interruption.
 - Confirmed migration 29–31 adapters were not added, migration 32 behavior was retained, Task 6 durability was not bypassed, and Task 8 backend dispatch was not implemented early.
 - Remaining integration boundary: Task 8 must preserve the exact facade result object through its executor; packaged-App behavior is still pending later acceptance.
+
+---
+
+## Fix round 3 addendum (2026-09-03)
+
+This addendum records the per-item focus-lease and archived work-status evidence requested in the third review round. The prior ruling still excludes adapters for development-only migrations 29–31; migration 32 and its public-request receipt semantics are unchanged.
+
+### Code changes
+
+1. **Each batch item owns a fresh focus lease**
+   - `ForkBatchCoordinator` now asks for a focus lease immediately before each external create or failed-item retry. The lease is released immediately after that structural mutation's compare-and-set restoration.
+   - The next item captures the caller and target windows again after the prior item's readiness/start/prompt stage. A focus selected by the user while the first item waits therefore becomes the second item's snapshot rather than being replaced by the batch's initial focus.
+   - Startup, readiness, and prompt delivery no longer invoke an old restoration callback. They retain Task 6's existing durable receipt transitions without reapplying a stale focus snapshot.
+
+2. **Concurrent Fork mutations do not snapshot one another's temporary child**
+   - Facades sharing a Runtime database use short per-window mutation leases across the caller and target windows. Window IDs are acquired in stable order, so overlapping same-window and cross-window operations serialize without a lock-order cycle.
+   - Snapshot capture occurs only after the relevant window leases are acquired. The lease covers the external structural create/retry and its immediate CAS restore, then releases before readiness/start/prompt waits.
+   - A concurrent batch therefore observes the restored or newly user-selected focus, never the other batch's operation-owned temporary child.
+
+3. **First-CAS snapshot disappearance remains non-fatal**
+   - The regression removes the snapshotted Session inside the Fork workflow after the child has been temporarily activated and before the facade's first restore attempt.
+   - The CAS sees that the snapshot is no longer an active member, leaves the current legal fallback/child focus in place, and preserves the already accepted Fork result.
+
+4. **Archived work status has explicit preservation evidence**
+   - The Runtime disposal regression now assigns `work_status = needs-input` before domain removal and asserts that `status = archived`, `work_status = needs-input`, and the original `archived_at` all survive disposal while the active Run becomes `interrupted`.
+   - This strengthens the round-2 state-preservation test; the existing conditional `interruptRun` transition required no additional production change.
+
+### TDD evidence
+
+The three focus regressions were added before the focus-lease implementation. The initial facade run produced:
+
+```text
+Test Files  1 failed (1)
+Tests       2 failed | 42 passed (44)
+```
+
+The failures were the intended ones: the second slow-start item restored batch-initial focus instead of the user's newer focus, and a concurrent batch entered its structural mutation while the first batch still exposed a temporary child. The first-CAS disappearance case already exercised the round-2 best-effort CAS behavior and remained green.
+
+### Automated verification
+
+Focused facade, coordinator, and Runtime disposal run:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/fork-batch-coordinator.test.ts \
+  src/runtime-server.test.ts
+```
+
+Result: `3` files, `171/171` tests passed.
+
+Related create/Fork/remove/close/Host Control/recovery/provider-hook run:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/host-control-server.test.ts \
+  src/control/fork-batch-coordinator.test.ts \
+  src/recovery/runtime-recovery-coordinator.test.ts \
+  src/recovery/runtime-session-recovery-scheduler.test.ts \
+  src/session/provider-hook-server.test.ts \
+  src/domain/session-repository.test.ts \
+  src/hierarchy/hierarchy-application-service.test.ts \
+  src/session-canvas/session-canvas-service.test.ts \
+  src/session-canvas/fork-workflow-service.test.ts \
+  src/runtime-server.test.ts
+```
+
+Result: `11` files, `318/318` tests passed.
+
+Complete Runtime regression:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run
+```
+
+Result: `107` files, `949/949` tests passed. Output contained the existing Node experimental SQLite warning only.
+
+Final gates:
+
+```bash
+pnpm --filter @matou/runtime typecheck
+pnpm check:identifiers
+git diff --check
+```
+
+Results: Runtime TypeScript check passed, identifier policy passed, and diff whitespace check passed.
+
+### Task 6 and Task 8 boundaries
+
+- Task 6 remains the sole owner of durable batch acceptance, ordered item processing, failed-item retry, readiness, startup, and prompt receipts. Round 3 replaces only its focus callback seam with a per-structural-item lease factory; no facade-local batch/retry or prompt-delivery path was introduced.
+- Task 8 still owns `RuntimeControlBackend.setHostActionExecutor(executor)` and installs it before `hostControl.start()`. The facade's committed-result marker and post-response effects continue to pass through the executor unchanged.
+
+### Code / automation / real App boundary after fix round 3
+
+- **Code:** per-item snapshots, operation-owned CAS restoration, overlapping-window serialization, first-CAS disappearance handling, and archived work-status preservation are represented in the implementation and regression assertions.
+- **Automated verification:** focused, related, and complete Runtime suites passed at the counts above; final static gates are listed separately after the last verification run.
+- **Real App:** packaged-App acceptance was outside this Task. Task 8 still owns live Host Control structure dispatch, and later integration tasks own end-to-end interaction evidence.
+
+### Self-review
+
+- Confirmed each new/retried item acquires and releases exactly one focus lease around only its external structural mutation.
+- Confirmed a slow readiness/start/prompt stage holds no window lease and performs no stale restore, so later user focus remains authoritative.
+- Confirmed shared, sorted caller/target window acquisition serializes overlapping batches while allowing disjoint Runtime windows to proceed independently.
+- Confirmed an archived or concurrently removed snapshot makes restoration a no-op without replacing the durable Fork outcome.
+- Confirmed Task 6 ledger writes, retry generations, and delivery receipts remain in their existing coordinator paths; Task 8 backend dispatch and migration compatibility scope remain unchanged.
