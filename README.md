@@ -1,12 +1,35 @@
-# 码头 Matou — Claude Code 多智能体桌面工作台
+<p align="center">
+  <img src="assets/logo.png" width="128" alt="码头 Matou logo">
+</p>
 
-**Matou is a macOS desktop workbench for running many Claude Code agents side by side: session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.**
+<h1 align="center">码头 Matou</h1>
+
+<p align="center">
+  <strong>Claude Code 多智能体桌面工作台</strong><br>
+  A macOS desktop workbench for running many Claude Code agents side by side —<br>
+  session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/icesword0760/matou?color=blue"></a>
+  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white">
+  <img alt="Node >= 22.16" src="https://img.shields.io/badge/node-%E2%89%A5%2022.16-339933?logo=node.js&logoColor=white">
+  <img alt="Electron 43" src="https://img.shields.io/badge/electron-43-47848F?logo=electron&logoColor=white">
+  <img alt="Status: early preview" src="https://img.shields.io/badge/status-early%20preview-orange">
+</p>
+
+<p align="center">
+  <a href="#从源码运行">快速开始</a> ·
+  <a href="#从混乱的终端到可管理的-ai-工作流">核心场景</a> ·
+  <a href="#用-dag-看懂会话从哪里来下一步去哪里">DAG 使用方法</a> ·
+  <a href="#架构与质量">架构文档</a>
+</p>
+
+<br>
 
 码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code 会话、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
 
-> **项目状态**：早期预览版，仅支持 macOS，目前只能从源码运行；预构建安装包稍后提供。协议为 [GPL-3.0](LICENSE)。
-
-[快速开始](#从源码运行) · [核心场景](#从混乱的终端到可管理的-ai-工作流) · [DAG 使用方法](#用-dag-看懂会话从哪里来下一步去哪里) · [架构文档](#架构与质量)
+> **项目状态**：早期预览版，仅支持 macOS，目前只能从源码运行；预构建安装包稍后提供。
 
 ![码头 Matou 的 Claude Code 多会话桌面工作台](assets/shots/workspace-demo.png)
 
