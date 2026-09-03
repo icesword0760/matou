@@ -41,6 +41,10 @@ import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 
 let root: string
+// A terminal hosted by an installed Matou exports MATOU_CONTROL_ASSET_ROOT; the server
+// under test would otherwise pick it up and pass --plugin-dir to every stub launch.
+delete process.env.MATOU_CONTROL_ASSET_ROOT
+
 let database: RuntimeDatabase
 let port: MockPort
 let server: RuntimeServer

@@ -22,7 +22,8 @@
   <a href="#下载安装">下载安装</a> ·
   <a href="#从混乱的终端到可管理的-ai-工作流">核心场景</a> ·
   <a href="#用-dag-看懂会话从哪里来下一步去哪里">DAG 使用方法</a> ·
-  <a href="#架构与质量">架构文档</a>
+  <a href="#架构与质量">架构文档</a> ·
+  <a href="README.en.md">English</a>
 </p>
 
 <br>
