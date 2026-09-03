@@ -162,10 +162,7 @@ function jsonValueFlagsFor(argv: string[]): ReadonlySet<string> {
         case 'task': return flags('--workspace', '--title', '--submission-key')
         case 'canvas': return flags('--task', '--title', '--submission-key')
         case 'session': return flags('--canvas', '--profile', '--title', '--submission-key')
-        default:
-          return flags(
-            '--path', '--workspace', '--task', '--canvas', '--profile', '--title', '--submission-key'
-          )
+        default: return flags()
       }
     case 'fork':
       if (argv[1] === 'children') {
@@ -174,7 +171,10 @@ function jsonValueFlagsFor(argv: string[]): ReadonlySet<string> {
           '--retry-item-keys-json', '--retry-items-json'
         )
       }
-      return flags('--title', '--environment-json', '--prompt', '--submission-key')
+      if (argv[1] === 'child' || argv[1] === 'sibling') {
+        return flags('--title', '--environment-json', '--prompt', '--submission-key')
+      }
+      return flags()
     case 'remove':
       return argv[1] === 'preview' ? flags('--scope') : flags()
     case 'read':

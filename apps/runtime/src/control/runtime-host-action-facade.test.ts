@@ -273,6 +273,41 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
     expect(retryFork).not.toHaveBeenCalled()
   })
 
+  it.each([
+    { label: 'empty retry set', itemKeys: [] },
+    { label: 'nonempty retry set', itemKeys: ['failed'] }
+  ])('maps a missing durable batch with $label to TARGET_NOT_FOUND', async ({ itemKeys }) => {
+    const batchKey = `missing-facade-${itemKeys.length}`
+    const items = itemKeys.map((itemKey) => ({
+      itemKey, title: '待重试方案', environment: { mode: 'current' as const }
+    }))
+
+    await expect(facade.execute('structure.fork.children', caller, {
+      source: { kind: 'self' }, batchKey, items, retryItemKeys: itemKeys
+    })).rejects.toMatchObject({
+      code: 'TARGET_NOT_FOUND',
+      message: `批次 ${batchKey} 没有可重试的上一轮结果`
+    })
+    expect(createForkChild).not.toHaveBeenCalled()
+  })
+
+  it('keeps a retry of a nonfailed durable item in the INVALID_REQUEST group', async () => {
+    const request = {
+      source: { kind: 'self' } as const,
+      batchKey: 'nonfailed-retry',
+      items: [{ itemKey: 'ready', title: '已完成方案', environment: { mode: 'current' } as const }]
+    }
+    await facade.execute('structure.fork.children', caller, request)
+
+    await expect(facade.execute('structure.fork.children', caller, {
+      ...request, retryItemKeys: ['ready']
+    })).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      message: '仅可重试上一轮失败的项目：ready'
+    })
+    expect(createForkChild).toHaveBeenCalledTimes(1)
+  })
+
   it('resolves every batch environment before it invokes the coordinator', async () => {
     const createChildren = vi.fn(async () => {
       throw new Error('batch coordinator must not run')

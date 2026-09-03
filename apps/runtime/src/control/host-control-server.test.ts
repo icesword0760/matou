@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { DomainCommandMetadata } from '@matou/domain'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { runMt } from '../cli/mt-cli'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { SessionCanvasService } from '../session-canvas/session-canvas-service'
 import { RuntimeDatabase } from '../storage/database'
@@ -211,6 +212,56 @@ describe('HostControlServer', () => {
         expect(String(error.message)).not.toMatch(/ZodError|\[\s*\{|stack|at RuntimeHostActionFacade/)
         expect(String(error.message).length).toBeLessThan(240)
       }
+    } finally {
+      fixture.database.close()
+    }
+  })
+
+  it.each([
+    { label: 'empty retry set', itemKeys: [] },
+    { label: 'nonempty retry set', itemKeys: ['failed'] }
+  ])('preserves a missing durable batch TARGET_NOT_FOUND through the real $label chain', async ({ itemKeys }) => {
+    const fixture = await realActionFacadeFixture(root)
+    backend.executeHostAction.mockImplementation((method, caller, params) =>
+      fixture.facade.execute(method, caller, params)
+    )
+    const token = tokenService.issue(
+      fixture.caller,
+      ['structure.fork.children'],
+      Date.now() + 5_000
+    )
+    const batchKey = `missing-socket-${itemKeys.length}`
+    const items = itemKeys.map((itemKey) => ({
+      itemKey, title: '待重试方案', environment: { mode: 'current' as const }
+    }))
+    const args = [
+      'fork', 'children', 'self', '--items-json', JSON.stringify(items), '--batch-key', batchKey,
+      '--retry-item-keys-json', JSON.stringify(itemKeys)
+    ]
+
+    try {
+      const jsonOut: string[] = []
+      const jsonErr: string[] = []
+      expect(await runMt(
+        [...args, '--json'],
+        { MATOU_CONTROL_ENDPOINT: socketPath, MATOU_CONTROL_TOKEN: token },
+        { stdout: (text) => jsonOut.push(text), stderr: (text) => jsonErr.push(text) }
+      )).toBe(3)
+      expect(jsonOut).toEqual([])
+      expect(JSON.parse(jsonErr[0]!)).toEqual({
+        code: 'TARGET_NOT_FOUND',
+        message: `批次 ${batchKey} 没有可重试的上一轮结果`
+      })
+
+      const humanOut: string[] = []
+      const humanErr: string[] = []
+      expect(await runMt(
+        args,
+        { MATOU_CONTROL_ENDPOINT: socketPath, MATOU_CONTROL_TOKEN: token },
+        { stdout: (text) => humanOut.push(text), stderr: (text) => humanErr.push(text) }
+      )).toBe(3)
+      expect(humanOut).toEqual([])
+      expect(humanErr).toEqual([`批次 ${batchKey} 没有可重试的上一轮结果`])
     } finally {
       fixture.database.close()
     }

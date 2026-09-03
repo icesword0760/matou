@@ -153,6 +153,18 @@ interface ActiveBatchOperation {
   promise: Promise<ForkBatchResult>
 }
 
+export type ForkBatchCoordinatorErrorCode = 'TARGET_NOT_FOUND' | 'INVALID_REQUEST'
+
+export class ForkBatchCoordinatorError extends Error {
+  readonly code: ForkBatchCoordinatorErrorCode
+
+  constructor(code: ForkBatchCoordinatorErrorCode, message: string) {
+    super(message)
+    this.name = 'ForkBatchCoordinatorError'
+    this.code = code
+  }
+}
+
 const DATABASE_OPERATIONS = new WeakMap<RuntimeDatabase, Map<string, ActiveBatchOperation>>()
 
 /**
@@ -618,7 +630,12 @@ export class ForkBatchCoordinator {
         }
         return
       }
-      if (!create) throw new Error(`批次 ${input.batchKey} 没有可重试的上一轮结果`)
+      if (!create) {
+        throw new ForkBatchCoordinatorError(
+          'TARGET_NOT_FOUND',
+          `批次 ${input.batchKey} 没有可重试的上一轮结果`
+        )
+      }
 
       const now = this.#now()
       const publicFingerprint = input.publicRequest === undefined
@@ -721,7 +738,10 @@ export class ForkBatchCoordinator {
 
     const invalid = input.retryItemKeys.filter((itemKey) => byKey.get(itemKey)?.state !== 'failed')
     if (invalid.length > 0) {
-      throw new Error(`仅可重试上一轮失败的项目：${invalid.join(', ')}`)
+      throw new ForkBatchCoordinatorError(
+        'INVALID_REQUEST',
+        `仅可重试上一轮失败的项目：${invalid.join(', ')}`
+      )
     }
     const attemptId = hash(`fork-batch-retry:${requestFingerprint}`)
     const now = this.#now()

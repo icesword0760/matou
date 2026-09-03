@@ -5,12 +5,13 @@ import { basename, resolve } from 'node:path'
 import type { DomainCommandMetadata } from '@matou/domain'
 import { ZodError } from 'zod'
 
-import type {
-  CoordinateAcceptedForkInput,
-  CreateForkBatchInput,
-  ForkBatchCoordinator,
-  ForkFocusLease,
-  RetryForkBatchInput
+import {
+  ForkBatchCoordinatorError,
+  type CoordinateAcceptedForkInput,
+  type CreateForkBatchInput,
+  type ForkBatchCoordinator,
+  type ForkFocusLease,
+  type RetryForkBatchInput
 } from './fork-batch-coordinator'
 import {
   HostActionConfirmationError,
@@ -1177,6 +1178,9 @@ function isStructuralMutation(method: HostActionMethod): boolean {
 
 function normalizeFacadeError(error: unknown): unknown {
   if (error instanceof RuntimeHostActionError) return error
+  if (error instanceof ForkBatchCoordinatorError) {
+    return new RuntimeHostActionError(error.code, error.message, { cause: error })
+  }
   if (error instanceof ZodError) {
     return new RuntimeHostActionError(
       'INVALID_REQUEST',

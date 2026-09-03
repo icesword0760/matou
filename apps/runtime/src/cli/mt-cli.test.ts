@@ -596,7 +596,10 @@ describe('mt CLI', () => {
     ['focus missing target', ['focus', '--json']],
     ['create missing entity', ['create', '--json']],
     ['unknown option before JSON mode', ['focus', 'self', '--bogus', '--json']],
-    ['a value flag unsupported by this subcommand', ['create', 'task', '--path', '--json']]
+    ['a value flag unsupported by this subcommand', ['create', 'task', '--path', '--json']],
+    ['a value flag after a missing create entity', ['create', '--path', '--json']],
+    ['a value flag after an unknown create entity', ['create', 'unknown', '--path', '--json']],
+    ['a value flag after an unknown fork relation', ['fork', 'unknown', '--title', '--json']]
   ])('detects requested JSON error output for $0', async (_label, argv) => {
     const fixture = ioFixture()
     const request = vi.fn(async () => undefined)
@@ -605,6 +608,18 @@ describe('mt CLI', () => {
     expect(fixture.out).toEqual([])
     expect(JSON.parse(fixture.err[0]!)).toMatchObject({ code: 'INVALID_REQUEST' })
   })
+
+  it.each(validJsonValueGrammarCases())(
+    'consumes a literal --json only for $0 in a valid grammar',
+    async (_label, argv) => {
+      const fixture = ioFixture()
+      const request = vi.fn(async () => undefined)
+
+      expect(await runMt(argv, {}, fixture.io, request)).toBe(2)
+      expect(fixture.err[0]).toBe('未知选项：--bogus')
+      expect(() => JSON.parse(fixture.err[0]!)).toThrow()
+    }
+  )
 
   it('does not treat --json consumed by a declared value flag as output mode', async () => {
     const fixture = ioFixture()
@@ -797,6 +812,50 @@ function validBatchJsonOfExactUtf8Bytes(bytes: number): { json: string; items: F
     throw new Error('test batch did not reach exact byte boundary')
   }
   return { json, items }
+}
+
+function validJsonValueGrammarCases(): Array<[string, string[]]> {
+  const grammars: Array<{ prefix: string[]; valueFlags: string[] }> = [
+    {
+      prefix: ['create', 'workspace'],
+      valueFlags: ['--path', '--title', '--submission-key']
+    },
+    {
+      prefix: ['create', 'task'],
+      valueFlags: ['--workspace', '--title', '--submission-key']
+    },
+    {
+      prefix: ['create', 'canvas'],
+      valueFlags: ['--task', '--title', '--submission-key']
+    },
+    {
+      prefix: ['create', 'session'],
+      valueFlags: ['--canvas', '--profile', '--title', '--submission-key']
+    },
+    {
+      prefix: ['fork', 'child', 'self'],
+      valueFlags: ['--title', '--environment-json', '--prompt', '--submission-key']
+    },
+    {
+      prefix: ['fork', 'sibling', 'self'],
+      valueFlags: ['--title', '--environment-json', '--prompt', '--submission-key']
+    },
+    {
+      prefix: ['fork', 'children', 'self'],
+      valueFlags: [
+        '--items-json', '--batch-key', '--retry-item-key',
+        '--retry-item-keys-json', '--retry-items-json'
+      ]
+    },
+    {
+      prefix: ['remove', 'preview', 'self'],
+      valueFlags: ['--scope']
+    }
+  ]
+  return grammars.flatMap(({ prefix, valueFlags }) => valueFlags.map((flag) => [
+    `${prefix.slice(0, 2).join(' ')} ${flag}`,
+    [...prefix, flag, '--json', '--bogus']
+  ]))
 }
 
 function hostControlBackend(

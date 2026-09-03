@@ -1020,6 +1020,25 @@ describe('ForkBatchCoordinator', () => {
     expect(createChild).toHaveBeenCalledTimes(callsBeforeInvalidRetry)
   })
 
+  it.each([
+    { label: 'empty retry set', itemKeys: [] },
+    { label: 'nonempty retry set', itemKeys: ['failed'] }
+  ])('returns a typed target fault when $label has no durable batch', async ({ itemKeys }) => {
+    const { coordinator, createChild } = coordinatorFixture()
+    const input = batchFixture(
+      itemKeys.map((itemKey) => ({ itemKey, title: '待重试方案', environment: current })),
+      `missing-${itemKeys.length}`
+    )
+
+    await expect(coordinator.retryFailures({
+      ...input, retryItemKeys: itemKeys
+    })).rejects.toMatchObject({
+      code: 'TARGET_NOT_FOUND',
+      message: `批次 ${input.batchKey} 没有可重试的上一轮结果`
+    })
+    expect(createChild).not.toHaveBeenCalled()
+  })
+
   it('waits for a fresh matching provider identity before submitting an assigned task', async () => {
     const ready = new ProviderReadyRegistry()
     const waitUntilReady = vi.fn((sessionId: string) => ready.wait(sessionId, 1_000))
