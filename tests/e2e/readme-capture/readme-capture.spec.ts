@@ -13,12 +13,11 @@ import { transcripts, widestLine } from './transcripts'
 const run = promisify(execFile)
 const REPO = resolve(import.meta.dirname, '../../..')
 const SHOTS = process.env.MATOU_SHOTS_DIR ?? join(REPO, 'assets', 'shots')
-// The secondary display is 1512×944 logical; zooming out widens the CSS viewport while keeping Retina pixels.
-const ZOOM = 0.7
-const DAG_ZOOM = 0.8
-const WINDOW_HEIGHT = 720
-const BOARD_HEIGHT = 520
-const DAG_HEIGHT = 660
+// At 1400 CSS px the canvas stage stays under the four-column threshold, so the carousel shows the
+// focused card plus one sibling at natural font size; capturePage() records the display's Retina pixels.
+const ZOOM = 1
+const WINDOW = { width: 1400, height: 880 }
+const BOARD_HEIGHT = 640
 
 test.setTimeout(300_000)
 
@@ -120,7 +119,7 @@ test('captures README screenshots', async () => {
     await page.locator('.workspace-group', { hasText: 'shop-api' }).locator('.workspace-group__toggle').click()
     await selectTask(page, '支付回调幂等性')
     await page.getByRole('tab').first().click()
-    await expect(visibleSurfaces(page)).toHaveCount(3)
+    await expect(visibleSurfaces(page)).toHaveCount(cards.length)
 
     // ----- notifications: drop the hook-generated ones, push curated Chinese ones -----
     await page.getByRole('button', { name: '通知中心' }).click()
@@ -175,7 +174,7 @@ test('captures README screenshots', async () => {
     await page.mouse.move(5, 300)
     await page.waitForTimeout(600)
     await captureWindow(app, 'main', join(SHOTS, 'workspace-board-demo.png'))
-    await resizeWindow(app, WINDOW_HEIGHT)
+    await resizeWindow(app, WINDOW.height)
     await page.getByRole('button', { name: '看板' }).click()
 
     // ----- shot 4: DAG window for scene 2 -----
@@ -184,12 +183,7 @@ test('captures README screenshots', async () => {
     await expect.poll(async () => (await app.windows()).length).toBe(2)
     const dag = (await app.windows()).find((candidate) => candidate !== page)!
     await expect(dag.locator('.dag-node-card')).toHaveCount(4)
-    await app.evaluate(({ BrowserWindow, screen }, { zoom, height }) => {
-      const window = BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('kind=dag'))!
-      const area = screen.getDisplayMatching(window.getBounds()).workArea
-      window.setBounds({ ...area, height: Math.min(area.height, height) })
-      window.webContents.setZoomFactor(zoom)
-    }, { zoom: DAG_ZOOM, height: DAG_HEIGHT })
+    await alignDagWindow(app, ZOOM)
     await dag.waitForTimeout(500)
     await dag.getByRole('button', { name: '恢复 100%' }).click()
     await dag.getByRole('button', { name: '聚焦当前节点' }).click()
@@ -200,32 +194,68 @@ test('captures README screenshots', async () => {
     await captureWindow(app, 'dag', join(SHOTS, 'session-dag-demo.png'))
     await stage('04-done')
 
-    // ----- animated demo: card focus, carousel slide, notification jump, board -----
+    // ----- animated demo: one storyline through notification, card switch, DAG and board -----
     await app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('kind=dag'))?.close()
     })
     await expect.poll(async () => (await app.windows()).length).toBe(1)
     await page.getByRole('tab').first().click()
     await focusCard(sceneOneSurfaces[0]!)
+    // Start from a quiet state with one older notification, so the new one visibly arrives.
+    await page.getByRole('button', { name: '通知中心' }).click()
+    await page.getByRole('button', { name: '清空通知' }).click()
+    await page.getByRole('button', { name: '关闭通知中心' }).click()
+    await notify(sceneOneIds[2]!, { eventType: 'completed', title: '审查 · 方案对比', subtitle: '任务完成',
+      body: 'ADR 已写入 docs/adr/0007，建议方案 A 为主、方案 B 兜底。' }, 300)
     await page.mouse.move(5, 500)
     const frames = join(root, 'frames')
     const recorder = frameRecorder(app, frames)
-    await recorder.hold(1600)
-    await focusCard(sceneOneSurfaces[1]!)
+
+    // 1. Working in the implementation card; the regression card finishes and needs a decision.
     await recorder.hold(1400)
-    await focusCard(sceneOneSurfaces[3]!)
-    await recorder.hold(1400)
-    await focusCard(sceneOneSurfaces[4]!)
+    await notify(sceneOneIds[1]!, { eventType: 'waiting', title: '回归 · 支付模块测试', subtitle: '等待输入',
+      body: '1 个用例与新行为冲突，需要确认是否更新断言。' }, 0)
     await recorder.hold(1600)
+    // 2. Open the notification center and jump to the card that raised it.
     await page.getByRole('button', { name: '通知中心' }).click()
-    await recorder.hold(1600)
-    await page.getByRole('button', { name: /打开通知：迁移失败/ }).click()
+    await recorder.hold(1500)
+    await page.getByRole('button', { name: /打开通知：1 个用例与新行为冲突/ }).click()
     await page.mouse.move(5, 500)
+    await recorder.hold(2200)
+    // 3. Switch to the exploration canvas and open the DAG to see both plans at once.
+    await page.getByRole('tab').last().click()
+    await recorder.hold(1000)
+    await page.getByRole('button', { name: '打开会话 DAG' }).click()
+    await expect.poll(async () => (await app.windows()).length).toBe(2)
+    const dagWindow = (await app.windows()).find((candidate) => candidate !== page)!
+    await expect(dagWindow.locator('.dag-node-card')).toHaveCount(4)
+    await alignDagWindow(app, ZOOM)
+    await dagWindow.waitForTimeout(400)
+    await dagWindow.getByRole('button', { name: '恢复 100%' }).click()
+    await centerDagGraph(dagWindow)
+    await dagWindow.mouse.move(5, 5)
+    await recorder.hold(2400, 'dag')
+    // 4. Plan B is stuck: click its node to land on that card.
+    await dagWindow.getByRole('button', { name: '打开会话：方案 B · DB 唯一索引' }).click()
+    await expect.poll(async () => (await app.windows()).length).toBe(1)
+    await page.mouse.move(5, 500)
+    await recorder.hold(2000)
+    // 5. Open the board and park the task as blocked until the data is cleaned up.
+    // Board moves are optimistic in the current build (no runtime handler persists them), so the
+    // column layout is rebuilt inside this board session before recording.
+    await page.getByRole('button', { name: '看板' }).click()
+    await moveTask(page, '订单列表分页超时', '运行中')
+    await moveTask(page, '支付回调幂等性', '运行中')
+    await moveTask(page, '结算页 500 热修', '阻塞')
+    await moveTask(page, '登录页 A/B 实验', '完成')
+    await moveTask(page, 'CI 缓存修复', '完成')
+    await expect(page.locator('.board-feedback')).toHaveCount(0, { timeout: 5_000 })
+    await page.mouse.move(5, 300)
+    await recorder.hold(1200)
+    await moveTask(page, '支付回调幂等性', '阻塞')
     await recorder.hold(1800)
     await page.getByRole('button', { name: '看板' }).click()
-    await page.mouse.move(5, 300)
-    await recorder.hold(1800)
-    await encodeAnimation(frames, join(SHOTS, 'workspace-demo.gif'), join(SHOTS, 'workspace-demo.mp4'))
+    await encodeAnimation(await recorder.writeConcatList(), join(SHOTS, 'workspace-demo.gif'), join(SHOTS, 'workspace-demo.mp4'))
   } finally {
     await app.evaluate(({ app: electronApp }) => { electronApp.quit() }).catch(() => {})
     await app.close().catch(() => {})
@@ -320,7 +350,7 @@ async function prepareDemo(demo: string): Promise<void> {
   const todos = [
     { content: '梳理回调处理链路', status: 'completed' },
     { content: '选择幂等键存储：Redis SETNX + 24h 过期', status: 'completed' },
-    { content: '在 handleWebhook 入口加幂等校验', status: 'in_progress' },
+    { content: '入口加幂等校验', status: 'in_progress' },
     { content: '为重复回调补测试', status: 'pending' },
     { content: '更新 docs/payments.md 回调约定', status: 'pending' }
   ]
@@ -339,7 +369,6 @@ async function prepareDemo(demo: string): Promise<void> {
       events: [
         ['hook', 'UserPromptSubmit', {}],
         ['tool', 'Read', 'impl-1', { file_path: 'src/payments/webhook.ts' }, 'ok'],
-        ['tool', 'Grep', 'impl-2', { pattern: 'event_id', path: 'src' }, 'ok'],
         ['tool', 'TodoWrite', 'impl-3', { todos }, 'ok'],
         ['tool', 'Edit', 'impl-4', { file_path: 'src/payments/webhook.ts' }, 'ok'],
         ['tool', 'Bash', 'impl-5', { command: 'pnpm vitest run src/payments --reporter=dot' }, 'running']
@@ -427,14 +456,30 @@ async function launch(input: { root: string; home: string; workspace: string; de
 }
 
 async function placeWindow(app: ElectronApplication, zoom: number): Promise<void> {
-  const placement = await app.evaluate(({ BrowserWindow, screen }, { zoom, WINDOW_HEIGHT }) => {
+  const placement = await app.evaluate(({ BrowserWindow, screen }, { zoom, size }) => {
     const window = BrowserWindow.getAllWindows()[0]!
     const area = screen.getDisplayMatching(window.getBounds()).workArea
-    window.setBounds({ ...area, height: Math.min(area.height, WINDOW_HEIGHT) })
+    window.setBounds({
+      x: area.x + Math.max(0, Math.floor((area.width - size.width) / 2)),
+      y: area.y + Math.max(0, Math.floor((area.height - size.height) / 2)),
+      width: Math.min(size.width, area.width),
+      height: Math.min(size.height, area.height)
+    })
     window.webContents.setZoomFactor(zoom)
     return { area, bounds: window.getBounds(), displays: screen.getAllDisplays().map((d) => ({ label: d.label, internal: d.internal, workArea: d.workArea, scale: d.scaleFactor })) }
-  }, { zoom, WINDOW_HEIGHT })
+  }, { zoom, size: WINDOW })
   console.log('window placement', JSON.stringify(placement))
+}
+
+// The DAG opens as its own window; give it the main window's frame so recorded frames share one size.
+async function alignDagWindow(app: ElectronApplication, zoom: number): Promise<void> {
+  await app.evaluate(({ BrowserWindow }, zoom) => {
+    const windows = BrowserWindow.getAllWindows()
+    const dag = windows.find((w) => w.webContents.getURL().includes('kind=dag'))!
+    const main = windows.find((w) => !w.webContents.getURL().includes('kind=dag'))!
+    dag.setBounds(main.getBounds())
+    dag.webContents.setZoomFactor(zoom)
+  }, zoom)
 }
 
 // Captures the composited window at the display's physical resolution (the zoomed CSS viewport
@@ -482,37 +527,56 @@ async function focusCard(surface: Locator): Promise<void> {
   await expect(paneOf(surface)).toHaveAttribute('data-active', 'true')
 }
 
-// Records the main window at ~10 fps while the caller drives the UI between holds.
+// Records a window at up to `fps` while the caller drives the UI between holds. Each frame keeps its
+// real duration (capturePage takes ~100 ms) so the encoded animation plays back at true speed.
 function frameRecorder(app: ElectronApplication, dir: string, fps = 10) {
-  let index = 0
+  const frames: Array<{ path: string; capturedAt: number }> = []
   const interval = 1000 / fps
   return {
-    async hold(ms: number) {
+    async hold(ms: number, which: 'main' | 'dag' = 'main') {
       await mkdir(dir, { recursive: true })
       const until = Date.now() + ms
       while (Date.now() < until) {
         const startedAt = Date.now()
-        await app.evaluate(async ({ BrowserWindow }, path) => {
-          const window = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('kind=dag'))!
+        const path = join(dir, `frame-${String(frames.length).padStart(4, '0')}.png`)
+        await app.evaluate(async ({ BrowserWindow }, { path, which }) => {
+          const isDag = (w: Electron.BrowserWindow) => w.webContents.getURL().includes('kind=dag')
+          const window = BrowserWindow.getAllWindows().find((w) => (which === 'dag') === isDag(w))!
           const image = await window.webContents.capturePage()
           const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs')
           fs.writeFileSync(path, image.toPNG())
-        }, join(dir, `frame-${String(index).padStart(4, '0')}.png`))
-        index += 1
+        }, { path, which })
+        frames.push({ path, capturedAt: startedAt })
         const remaining = interval - (Date.now() - startedAt)
         if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
       }
+    },
+    async writeConcatList(): Promise<string> {
+      const lines: string[] = []
+      frames.forEach((frame, index) => {
+        const next = frames[index + 1]
+        const duration = next ? (next.capturedAt - frame.capturedAt) / 1000 : 1.5
+        lines.push(`file '${frame.path}'`, `duration ${duration.toFixed(3)}`)
+      })
+      lines.push(`file '${frames.at(-1)!.path}'`)
+      const list = join(dir, 'frames.txt')
+      await writeFile(list, lines.join('\n') + '\n')
+      return list
     }
   }
 }
 
-async function encodeAnimation(frames: string, gifPath: string, mp4Path: string): Promise<void> {
-  const input = ['-framerate', '10', '-i', join(frames, 'frame-%04d.png')]
-  // Flat UI colours need no dithering; mpdecimate drops the static frames inside each hold so the
-  // GIF stays around 2 MB while keeping the real hold durations (variable frame rate).
-  const palette = 'mpdecimate=hi=768:lo=320:frac=0.33,scale=1100:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle'
-  await run('ffmpeg', ['-y', ...input, '-vf', palette, '-fps_mode', 'vfr', '-loop', '0', gifPath])
-  await run('ffmpeg', ['-y', ...input, '-vf', 'scale=1512:-2:flags=lanczos', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-movflags', '+faststart', mp4Path])
+async function encodeAnimation(concatList: string, gifPath: string, mp4Path: string): Promise<void> {
+  const input = ['-f', 'concat', '-safe', '0', '-i', concatList]
+  const scratch = join(concatList, '..')
+  const intermediate = join(scratch, 'animation.mov')
+  const palette = join(scratch, 'palette.png')
+  // Drop the static frames inside each hold (mpdecimate) but keep their real timing through a
+  // lossless intermediate; a single filtergraph loses the variable frame durations in GIF output.
+  await run('ffmpeg', ['-y', '-loglevel', 'error', ...input, '-vf', 'mpdecimate=hi=768:lo=320:frac=0.33,scale=1000:-1:flags=lanczos', '-fps_mode', 'vfr', '-c:v', 'png', intermediate])
+  await run('ffmpeg', ['-y', '-loglevel', 'error', '-i', intermediate, '-vf', 'palettegen=max_colors=256:stats_mode=full', palette])
+  await run('ffmpeg', ['-y', '-loglevel', 'error', '-i', intermediate, '-i', palette, '-lavfi', 'paletteuse=dither=none:diff_mode=rectangle', '-fps_mode', 'vfr', '-loop', '0', gifPath])
+  await run('ffmpeg', ['-y', '-loglevel', 'error', ...input, '-vf', 'scale=1400:-2:flags=lanczos,fps=15', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-movflags', '+faststart', mp4Path])
   const sizes = await Promise.all([gifPath, mp4Path].map(async (path) => `${path} ${(await stat(path)).size} bytes`))
   console.log(sizes.join('\n'))
 }

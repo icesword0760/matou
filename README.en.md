@@ -35,7 +35,7 @@ Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. I
 
 ![Matou workspace demo with five parallel Claude Code sessions](assets/shots/workspace-demo.gif)
 
-> Above: five Claude Code sessions under one task. Click a card and it expands; once the row is wider than the screen it slides. Click a "waiting for input" notification and you land on the card that raised it; then switch to the board for the big picture. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
+> One stretch of work: you are coding in the implementation card when the background regression finishes and needs a decision — its badge lights up. Open the notification center, click through, and the canvas slides to the regression card. Switch to the exploration canvas and open the DAG: plan A is still running, plan B is stuck, the regression failed. Click plan B's node to land on that card, then open the board and drag the task to blocked. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
 
 ---
 
@@ -78,7 +78,7 @@ Matou gives every agent it hosts the ability to identify itself, list related ca
 
 ![Three Claude Code cards side by side: implementation, regression, review](assets/shots/workspace-demo.png)
 
-> The left card is implementing a Redis idempotency key (running), the middle one is a regression run waiting for you to confirm an assertion change, and the right one is a review session that read the regression result with `mt read left` before drawing its conclusion.
+> The left card is implementing a Redis idempotency key (running), the middle one is a regression run waiting for you to confirm an assertion change, and the right one is a review session that read the regression result with `mt read left` before drawing its conclusion. The focused card expands; the others sit narrow beside it.
 
 <details>
 <summary>Control commands in the current version</summary>
