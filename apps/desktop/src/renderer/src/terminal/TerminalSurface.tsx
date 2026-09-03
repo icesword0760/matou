@@ -109,6 +109,7 @@ interface TerminalSurfaceProps {
   onRuntimeError?: (message: string) => void
   onSmokeMarker?: (marker: string) => void
   onReplayComplete?: (marker: string) => void
+  onVisualReady?: () => void
   onOscNotification?: (oscId: number, content: string) => void
   onUserInput?: () => void
   onStorageFault?: (fault: TerminalStorageFaultMessage) => void
@@ -157,6 +158,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     themeKey = DEFAULT_TERMINAL_THEME, fontSize = 11, onFontSizeChange = NOOP,
     searchRequest, onSearchResults = NOOP, focusRequest = 0, spawnRevision = 0,
     onStatusChange = NOOP, onRuntimeError = NOOP, onSmokeMarker = NOOP, onReplayComplete = NOOP,
+    onVisualReady = NOOP,
     onOscNotification = NOOP, onUserInput = NOOP,
     onStorageFault = NOOP, onStorageRecovered = NOOP
   } = props
@@ -179,6 +181,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const onOscNotificationRef = useRef(onOscNotification)
   const onFontSizeChangeRef = useRef(onFontSizeChange)
   const onSearchResultsRef = useRef(onSearchResults)
+  const onVisualReadyRef = useRef(onVisualReady)
   const searchRequestRef = useRef(searchRequest)
   const onUserInputRef = useRef(onUserInput)
   const onStorageFaultRef = useRef(onStorageFault)
@@ -207,6 +210,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   activeRef.current = active
   profileRef.current = profile
   onUserInputRef.current = onUserInput
+  onVisualReadyRef.current = onVisualReady
   onStorageFaultRef.current = onStorageFault
   onStorageRecoveredRef.current = onStorageRecovered
   searchRequestRef.current = searchRequest
@@ -429,8 +433,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let visualCatchupPending = false
     let visualCatchupRequested = false
     let surfaceDisposed = false
+    let visualReadyReported = false
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
+    const reportVisualReady = () => {
+      if (visualReadyReported || surfaceDisposed) return
+      visualReadyReported = true
+      requestAnimationFrame(() => {
+        if (!surfaceDisposed) onVisualReadyRef.current()
+      })
+    }
+    if (reusedTerminalModel && model.lastAppliedSequence > 0) reportVisualReady()
     const publishE2eRows = () => {
       e2eRowsTimer = undefined
       if (!e2eRows?.classList.contains('xterm-rows')) return
@@ -486,6 +499,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         model.lastAppliedSequence = Math.max(model.lastAppliedSequence, sequence)
         client.acknowledgeTerminal(sessionId, sequence)
         if (surfaceDisposed) return
+        reportVisualReady()
         scheduleE2eRows()
         scheduleCheckpoint()
         if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
@@ -581,7 +595,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         const bytes = message.data instanceof Uint8Array
           ? message.data
           : new Uint8Array(message.data)
-        terminal.write(bytes, scheduleE2eRows)
+        terminal.write(bytes, () => {
+          reportVisualReady()
+          scheduleE2eRows()
+        })
       } else if (message.type === 'terminal.exited') {
         spawned = false
         model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
@@ -603,7 +620,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           message.reason === 'corruption'
             ? '\r\n[部分终端历史损坏，已继续显示实时输出]\r\n'
             : '\r\n[较早的终端历史已清理，已继续显示实时输出]\r\n',
-          scheduleE2eRows
+          () => {
+            reportVisualReady()
+            scheduleE2eRows()
+          }
         )
       } else if (message.type === 'protocol.error') {
         visualCatchupRequested = false
@@ -625,7 +645,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           const snapshot = message.checkpoint.snapshot instanceof Uint8Array
             ? message.checkpoint.snapshot
             : new Uint8Array(message.checkpoint.snapshot)
-          terminal.write(snapshot, scheduleE2eRows)
+          terminal.write(snapshot, () => {
+            reportVisualReady()
+            scheduleE2eRows()
+          })
         }
       } else if (message.type === 'terminal.replay-resize') {
         // Resize is part of VT history: zsh and full-screen tools emit cursor

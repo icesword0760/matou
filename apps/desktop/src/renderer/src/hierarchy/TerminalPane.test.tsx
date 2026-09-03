@@ -11,6 +11,7 @@ vi.mock('../terminal/TerminalSurface', () => ({
     sessionId: string; visible: boolean; inputDisabled: boolean; spawnRevision?: number
     readOnly?: boolean
     onStatusChange?(status: string): void; onRuntimeError?(message: string): void
+    onVisualReady?(): void
     onUserInput?(): void
     onStorageFault?(fault: {
       type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
@@ -26,6 +27,7 @@ vi.mock('../terminal/TerminalSurface', () => ({
         props.onRuntimeError?.('spawn ENOENT: /missing/SHELL')
         props.onStatusChange?.('error')
       }} />
+      <button type="button" aria-label="触发终端首帧" onClick={() => props.onVisualReady?.()} />
       <button type="button" aria-label="触发存储异常" onClick={() => props.onStorageFault?.({
         type: 'terminal.storage-fault', protocolVersion: 1, sessionId: props.sessionId,
         sequence: 1, code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
@@ -61,6 +63,39 @@ describe('Terminal pane', () => {
     expect(screen.queryByTestId('session-recovery-dialog')).toBeNull()
     expect(screen.getByText('恢复中')).toBeTruthy()
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
+  })
+
+  it('keeps the recovery water visible until the restored terminal paints its first frame', () => {
+    const props = fixture()
+    const view = render(<TerminalPane {...props} recoveryState="restoring" />)
+
+    view.rerender(<TerminalPane {...props} recoveryState="ready" />)
+
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+  })
+
+  it('covers a recovered card that first mounts after Runtime already reported ready', () => {
+    render(<TerminalPane {...fixture()} recoveryState="ready" />)
+
+    expect(screen.getByTestId('surface-session-1')).toBeTruthy()
+    expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+  })
+
+  it('reveals a startup failure that arrives before the recovered terminal paints', () => {
+    render(<TerminalPane {...fixture()} recoveryState="ready" />)
+    expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '触发启动失败' }))
+
+    expect(screen.getByText('会话启动失败')).toBeTruthy()
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
   })
 
   it('isolates a failed card and lets the user retry only that recovery', async () => {

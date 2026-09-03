@@ -172,6 +172,30 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
   })
 
+  it('reports visual readiness only after terminal output has been applied', async () => {
+    const onVisualReady = vi.fn()
+    render(<TerminalSurface sessionId="session-1" active visible onVisualReady={onVisualReady} />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.spawned', sessionId: 'session-1', pid: 456,
+      reattached: true, replayFromSequence: 1
+    })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 1,
+      data: new TextEncoder().encode('restored terminal frame')
+    })
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-1', sequence: 2,
+      data: new TextEncoder().encode('next frame')
+    })
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
   it('uses WebGL after opening xterm and falls back when the GPU context is lost', async () => {
     window.history.replaceState({}, '', '/?e2e=1')
     render(<TerminalSurface sessionId="session-webgl" active visible />)

@@ -99,7 +99,7 @@ export function TerminalPane(props: {
     workspaceSessionCount = 0, taskName = '当前事项',
     pathValid = true, readOnly = false, workspaceId, sceneId, resumable = false, forkReady,
     providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
-    recoveryState = 'ready', recoveryError,
+    recoveryState: suppliedRecoveryState, recoveryError,
     sharedWorkingDirectory = false, environment, hasOwnedWorktree,
     spawnRevision = 0, onRetryRestore, onStartFreshProvider, onRetryRecovery, onRetryWork, onRetryFork,
     childNodes = [], descendantNodes = [], parentSessionId, workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
@@ -111,6 +111,7 @@ export function TerminalPane(props: {
     onRemoveBranch, onRestoreEnvironment, onLocateEnvironment, onHandoffEnvironment,
     onRename, onRestoreAutoTitle
   } = props
+  const recoveryState = suppliedRecoveryState ?? 'ready'
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -122,6 +123,7 @@ export function TerminalPane(props: {
   const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
+  const [terminalVisualReady, setTerminalVisualReady] = useState(suppliedRecoveryState === undefined)
   const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
   const [forkReadinessHint, setForkReadinessHint] = useState(false)
   const [environmentAction, setEnvironmentAction] = useState('')
@@ -164,6 +166,9 @@ export function TerminalPane(props: {
   const environmentUnavailable = environment !== undefined && environment.state !== 'ready'
   const recoveryBlocking = recoveryState !== 'ready'
   const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
+  useEffect(() => {
+    if (recoveryBusy) setTerminalVisualReady(false)
+  }, [recoveryBusy])
   const storageBlocked = storageFault !== null
   const actionBlocked = readOnly || storageBlocked || environmentUnavailable || recoveryBlocking
   const forkRepairBlocked = readOnly || storageBlocked || environmentUnavailable
@@ -247,7 +252,10 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const currentForkProgress = activeForkProgress(forkProgress)
-  const showRecoveryWater = recoveryBusy && forkState !== 'failed' && !storageFault &&
+  const waitingForRecoveredTerminalPaint = !isTeamMember && recoveryState === 'ready' &&
+    suppliedRecoveryState !== undefined && !terminalVisualReady
+  const showRecoveryWater = (recoveryBusy || waitingForRecoveredTerminalPaint) &&
+    forkState !== 'failed' && providerRestoreState !== 'failed' && runtimeStatus !== 'error' && !storageFault &&
     !currentForkProgress && !environmentUnavailable
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)
   const restoreNoticeKey = restoreIdentityExpired && providerRestoreState === 'failed'
@@ -280,7 +288,7 @@ export function TerminalPane(props: {
     }
   }
   return <section className={`terminal-pane split-leaf${active ? ' active-pane' : ''}${hasNotification ? ' has-notification' : ''}`} data-testid="terminal-pane"
-    data-active={active} hidden={!visible} aria-busy={recoveryBusy || undefined}
+    data-active={active} hidden={!visible} aria-busy={showRecoveryWater || undefined}
     onPointerDown={(event) => {
       if ((event.target as HTMLElement).closest('button,[role="menuitem"]')) return
       notificationStore.dismissSessionIndicator(session.id)
@@ -442,6 +450,7 @@ export function TerminalPane(props: {
       {...(props.diagnosticsProbe ? { diagnosticsProbe: true } : {})}
       spawnRevision={spawnRevision + startupRetry}
       onStatusChange={handleRuntimeAndDiagnosticsStatus}
+      onVisualReady={() => setTerminalVisualReady(true)}
       {...(props.onDiagnosticsSmokeMarker
         ? { onSmokeMarker: props.onDiagnosticsSmokeMarker }
         : {})}
