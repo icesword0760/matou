@@ -461,7 +461,6 @@ function emitRecoveryNotificationFailure(
 function providerWorkStatus(eventName: string, current: SessionWorkStatus): SessionWorkStatus {
   if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse') return 'running'
   if (eventName === 'PermissionRequest' || eventName === 'Notification') return 'needs-input'
-  if (eventName === 'PostToolUseFailure') return 'error'
   if (eventName === 'Stop') return 'idle'
   // Statusline identity is accepted only for resume/Fork launches. Its arrival
   // means the provider has rendered an interactive conversation, so a restored

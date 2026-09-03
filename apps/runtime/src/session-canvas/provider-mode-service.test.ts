@@ -239,6 +239,26 @@ describe('ProviderModeService', () => {
       .toMatchObject({ workStatus: 'running' })
   })
 
+  it('keeps the Claude task running when one tool call fails', () => {
+    const initial = bootstrapClaudeTree({ canFork: false })
+    providerModes.observeHook(command('hook-prompt-before-tool-failure'), {
+      sessionId: initial.parentSessionId,
+      providerSessionId: 'provider-parent',
+      eventName: 'UserPromptSubmit',
+      now: 30
+    })
+
+    const afterToolFailure = providerModes.observeHook(command('hook-tool-failure'), {
+      sessionId: initial.parentSessionId,
+      providerSessionId: 'provider-parent',
+      eventName: 'PostToolUseFailure',
+      now: 31
+    })
+
+    expect(afterToolFailure.graph.nodes.find(({ sessionId }) => sessionId === initial.parentSessionId))
+      .toMatchObject({ workStatus: 'running' })
+  })
+
   it('settles a restored Claude session to idle when its statusline confirms the live conversation', () => {
     const initial = bootstrapClaudeTree({ canFork: true })
     database.run(

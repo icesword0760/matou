@@ -77,9 +77,6 @@ function hookNotification(payload: Record<string, unknown>): ProviderNotificatio
   if (/permission|approve|approval/.test(lower)) {
     eventType = 'permission'
     subtitle = 'Permission'
-  } else if (/error|failed|exception/.test(lower)) {
-    eventType = 'error'
-    subtitle = 'Error'
   } else if (/complet|finish|done|success/.test(lower)) {
     eventType = 'completed'
     subtitle = 'Completed'

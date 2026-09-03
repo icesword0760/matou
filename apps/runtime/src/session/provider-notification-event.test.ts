@@ -31,8 +31,10 @@ describe('toProviderNotificationEvent', () => {
     })
   })
 
-  it('classifies errors, completion, waiting, and generic attention in reference product order', () => {
-    expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Tool failed' })?.eventType).toBe('error')
+  it('keeps failure wording as attention while classifying completion and waiting', () => {
+    expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Tool failed' })).toMatchObject({
+      eventType: 'attention', subtitle: 'Attention'
+    })
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Task done' })?.eventType).toBe('completed')
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Waiting for input' })?.eventType).toBe('waiting')
     expect(toProviderNotificationEvent({ hook_event_name: 'Notification', message: 'Please review this' })?.eventType).toBe('attention')
