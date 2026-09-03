@@ -4,7 +4,7 @@
 // Every session is a stub `claude` (claude-stub.py); nothing touches the real CLI or account.
 import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
 import { execFile } from 'node:child_process'
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -60,24 +60,19 @@ test('captures README screenshots', async () => {
 
     // ----- scene 1: implementation / regression / review -----
     await renameActiveTab(page, '实现与验证')
-    await page.getByRole('button', { name: '横向新增 Shell' }).click()
-    await expect(visibleSurfaces(page)).toHaveCount(2)
-    await page.getByRole('button', { name: '横向新增 Shell' }).click()
-    await expect(visibleSurfaces(page)).toHaveCount(3)
-    await waitForShell(visibleSurfaces(page).nth(0))
-    await waitForShell(visibleSurfaces(page).nth(1))
-    await waitForShell(visibleSurfaces(page).nth(2))
-
     const cards = [
-      { index: 0, title: '实现 · Redis 幂等键' },
-      { index: 1, title: '回归 · 支付模块测试' },
-      { index: 2, title: '审查 · 方案对比' }
+      '实现 · Redis 幂等键', '回归 · 支付模块测试', '审查 · 方案对比', '文档 · 回调约定', '调研 · 网关重试策略'
     ]
+    const sceneOneSurfaces: Locator[] = [await stableSurface(visibleSurfaces(page).first())]
+    for (let index = 1; index < cards.length; index += 1) {
+      sceneOneSurfaces.push(await newSurfaceAfter(page, () => page.getByRole('button', { name: '横向新增 Shell' }).click()))
+    }
     const sceneOneIds: Ids[] = []
-    for (const card of cards) {
-      const surface = visibleSurfaces(page).nth(card.index)
+    for (const [index, title] of cards.entries()) {
+      const surface = sceneOneSurfaces[index]!
+      await waitForShell(surface)
       await promoteToClaude(surface, demo)
-      await renameSession(page, surface, card.title)
+      await renameSession(page, surface, title)
       sceneOneIds.push(await hierarchyIds(page, surface))
     }
     await stage('02-scene-one')
@@ -151,8 +146,7 @@ test('captures README screenshots', async () => {
       body: 'vitest 退出码 1：webhook.duplicate.test.ts 有 1 个用例失败。' }, 300)
 
     // focus the implementation card so the HUD shows the running session
-    await visibleSurfaces(page).nth(0).click({ position: { x: 12, y: 12 } })
-    await expect(paneOf(visibleSurfaces(page).nth(0))).toHaveAttribute('data-active', 'true')
+    await focusCard(sceneOneSurfaces[0]!)
     await page.mouse.move(5, 500)
     await page.waitForTimeout(600)
 
@@ -205,6 +199,33 @@ test('captures README screenshots', async () => {
     await dag.waitForTimeout(700)
     await captureWindow(app, 'dag', join(SHOTS, 'session-dag-demo.png'))
     await stage('04-done')
+
+    // ----- animated demo: card focus, carousel slide, notification jump, board -----
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows().find((w) => w.webContents.getURL().includes('kind=dag'))?.close()
+    })
+    await expect.poll(async () => (await app.windows()).length).toBe(1)
+    await page.getByRole('tab').first().click()
+    await focusCard(sceneOneSurfaces[0]!)
+    await page.mouse.move(5, 500)
+    const frames = join(root, 'frames')
+    const recorder = frameRecorder(app, frames)
+    await recorder.hold(1600)
+    await focusCard(sceneOneSurfaces[1]!)
+    await recorder.hold(1400)
+    await focusCard(sceneOneSurfaces[3]!)
+    await recorder.hold(1400)
+    await focusCard(sceneOneSurfaces[4]!)
+    await recorder.hold(1600)
+    await page.getByRole('button', { name: '通知中心' }).click()
+    await recorder.hold(1600)
+    await page.getByRole('button', { name: /打开通知：迁移失败/ }).click()
+    await page.mouse.move(5, 500)
+    await recorder.hold(1800)
+    await page.getByRole('button', { name: '看板' }).click()
+    await page.mouse.move(5, 300)
+    await recorder.hold(1800)
+    await encodeAnimation(frames, join(SHOTS, 'workspace-demo.gif'), join(SHOTS, 'workspace-demo.mp4'))
   } finally {
     await app.evaluate(({ app: electronApp }) => { electronApp.quit() }).catch(() => {})
     await app.close().catch(() => {})
@@ -292,7 +313,7 @@ async function prepareDemo(demo: string): Promise<void> {
   await writeFile(join(demo, 'bin', 'pnpm'), `#!/bin/sh\ncat "${join(demo, 'vitest.ans')}"\nexit 1\n`)
   await chmod(join(demo, 'bin', 'pnpm'), 0o755)
   await writeFile(join(demo, 'roles.queue'),
-    ['implementation', 'regression', 'review', 'baseline', 'planA', 'planB'].join('\n') + '\n')
+    ['implementation', 'regression', 'review', 'docs', 'research', 'baseline', 'planA', 'planB'].join('\n') + '\n')
   const day = 86_400
   const minute = 60_000
   const base = { model: 'Claude Opus 5', weekly: 41, resets_in: 3 * day + 5 * 3600 }
@@ -334,6 +355,23 @@ async function prepareDemo(demo: string): Promise<void> {
         ['hook', 'UserPromptSubmit', {}],
         ['tool', 'Bash', 'rev-3', { command: 'mt read left --tail 12' }, 'ok'],
         ['hook', 'Stop', { last_assistant_message: '结论：方案 A（Redis）为主路径，方案 B 唯一索引兜底，ADR 已更新。' }]
+      ]
+    },
+    docs: {
+      ...base, transcript: 'docs', permission: 'acceptEdits', context: 22, duration_ms: 6 * minute,
+      events: [
+        ['hook', 'UserPromptSubmit', {}],
+        ['tool', 'Read', 'doc-1', { file_path: 'docs/payments.md' }, 'ok'],
+        ['tool', 'Edit', 'doc-2', { file_path: 'docs/payments.md' }, 'ok'],
+        ['hook', 'Stop', { last_assistant_message: '文档已更新，和 webhook.ts 里的实现保持一致。' }]
+      ]
+    },
+    research: {
+      ...base, transcript: 'research', permission: 'default', context: 29, duration_ms: 8 * minute,
+      events: [
+        ['hook', 'UserPromptSubmit', {}],
+        ['tool', 'WebFetch', 'res-1', { url: 'https://docs.pay.example/webhooks' }, 'ok'],
+        ['hook', 'Stop', { last_assistant_message: '重复回调必须返回 2xx；幂等键过期时间至少覆盖 24h。' }]
       ]
     },
     baseline: {
@@ -438,6 +476,47 @@ async function centerDagGraph(dag: Page): Promise<void> {
   await dag.mouse.up()
 }
 
+async function focusCard(surface: Locator): Promise<void> {
+  await surface.scrollIntoViewIfNeeded()
+  await surface.click({ position: { x: 12, y: 12 } })
+  await expect(paneOf(surface)).toHaveAttribute('data-active', 'true')
+}
+
+// Records the main window at ~10 fps while the caller drives the UI between holds.
+function frameRecorder(app: ElectronApplication, dir: string, fps = 10) {
+  let index = 0
+  const interval = 1000 / fps
+  return {
+    async hold(ms: number) {
+      await mkdir(dir, { recursive: true })
+      const until = Date.now() + ms
+      while (Date.now() < until) {
+        const startedAt = Date.now()
+        await app.evaluate(async ({ BrowserWindow }, path) => {
+          const window = BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('kind=dag'))!
+          const image = await window.webContents.capturePage()
+          const fs = process.getBuiltinModule('node:fs') as typeof import('node:fs')
+          fs.writeFileSync(path, image.toPNG())
+        }, join(dir, `frame-${String(index).padStart(4, '0')}.png`))
+        index += 1
+        const remaining = interval - (Date.now() - startedAt)
+        if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
+      }
+    }
+  }
+}
+
+async function encodeAnimation(frames: string, gifPath: string, mp4Path: string): Promise<void> {
+  const input = ['-framerate', '10', '-i', join(frames, 'frame-%04d.png')]
+  // Flat UI colours need no dithering; mpdecimate drops the static frames inside each hold so the
+  // GIF stays around 2 MB while keeping the real hold durations (variable frame rate).
+  const palette = 'mpdecimate=hi=768:lo=320:frac=0.33,scale=1100:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle'
+  await run('ffmpeg', ['-y', ...input, '-vf', palette, '-fps_mode', 'vfr', '-loop', '0', gifPath])
+  await run('ffmpeg', ['-y', ...input, '-vf', 'scale=1512:-2:flags=lanczos', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-movflags', '+faststart', mp4Path])
+  const sizes = await Promise.all([gifPath, mp4Path].map(async (path) => `${path} ${(await stat(path)).size} bytes`))
+  console.log(sizes.join('\n'))
+}
+
 // ---------- UI helpers ----------
 
 function visibleSurfaces(page: Page): Locator {
@@ -487,7 +566,10 @@ async function terminalCommand(surface: Locator, command: string): Promise<void>
   await waitForShell(stable)
   const pane = paneOf(stable)
   const textarea = stable.locator('.xterm-helper-textarea')
-  if (await pane.getAttribute('data-active') !== 'true') await stable.click({ position: { x: 12, y: 12 } })
+  if (await pane.getAttribute('data-active') !== 'true') {
+    await stable.scrollIntoViewIfNeeded()
+    await stable.click({ position: { x: 12, y: 12 } })
+  }
   await textarea.focus()
   await expect(pane).toHaveAttribute('data-active', 'true')
   await expect(textarea).toBeFocused()
@@ -517,6 +599,7 @@ async function launches(demo: string): Promise<number> {
 
 async function renameSession(page: Page, surface: Locator, title: string): Promise<void> {
   const pane = paneOf(surface)
+  await pane.locator('.pane-title').scrollIntoViewIfNeeded()
   await pane.locator('.pane-title').click({ button: 'right' })
   await page.getByRole('menuitem', { name: '重命名…' }).click()
   await page.getByRole('textbox', { name: '会话名称' }).fill(title)

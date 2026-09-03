@@ -134,6 +134,50 @@ const review = [
   ...inputBox()
 ]
 
+const docs = [
+  prompt('把新的回调约定写进 docs/payments.md，'),
+  '  说明重复回调返回 200 + duplicate: true',
+  '',
+  tool('Read(docs/payments.md)'),
+  out(`Read 64 lines ${DIM}(ctrl+r to expand)${R}`),
+  '',
+  tool('Update(docs/payments.md)'),
+  out(`Updated docs/payments.md with ${GREEN}11 additions${R}`),
+  `       ${DIM}18${R}    ## 回调幂等`,
+  `       ${DIM}19${R} ${GREEN}+  网关对同一 event_id 可能重试多次。${R}`,
+  `       ${DIM}20${R} ${GREEN}+  服务端以 event_id 去重：${R}`,
+  `       ${DIM}21${R} ${GREEN}+  - 首次：正常入账，返回 200${R}`,
+  `       ${DIM}22${R} ${GREEN}+  - 重复：不入账，返回 200 +${R}`,
+  `       ${DIM}23${R} ${GREEN}+    { duplicate: true }${R}`,
+  `       ${DIM}24${R} ${GREEN}+  网关只认 2xx 才停止重试，${R}`,
+  `       ${DIM}25${R} ${GREEN}+  因此重复回调不能返回 409。${R}`,
+  '',
+  say('文档已更新，和 webhook.ts 里的实现保持一致。'),
+  '',
+  ...inputBox()
+]
+
+const research = [
+  prompt('查一下支付网关的重试策略：间隔、次数、'),
+  '  什么状态码会停止重试',
+  '',
+  tool('WebFetch(https://docs.pay.example/webhooks)'),
+  out(`Received 24.1KB ${DIM}(200 OK)${R}`),
+  '',
+  say('网关重试策略：'),
+  '  - 收到非 2xx 或超时（10s）即重试',
+  '  - 间隔按指数退避：1m, 5m, 30m, 2h, 12h',
+  '  - 最多 5 次，之后进入人工对账队列',
+  '  - 幂等由商户侧负责，网关不去重',
+  '',
+  say('这意味着两点：'),
+  '  1. 重复回调必须返回 2xx，否则会持续重试',
+  '  2. 12 小时内都可能重放，幂等键过期时间',
+  '     至少要覆盖 24h',
+  '',
+  ...inputBox()
+]
+
 // Scene 2 lives in a four-column canvas (~38 cells per card); the DAG shows each node's last four lines.
 const narrowBox = (): string[] => box([`${B}>${R}`], 36)
 
@@ -195,7 +239,7 @@ const vitest = [
 ]
 
 export const transcripts: Record<string, string> = Object.fromEntries(
-  Object.entries({ implementation, regression, review, baseline, planA, planB, vitest })
+  Object.entries({ implementation, regression, review, docs, research, baseline, planA, planB, vitest })
     .map(([name, lines]) => [name, lines.join('\r\n')])
 )
 

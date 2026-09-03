@@ -33,9 +33,9 @@
 
 > **项目状态**：早期预览版，仅支持 macOS（Apple Silicon）。安装包见 [Releases](https://github.com/icesword0760/matou/releases/latest)。
 
-![码头 Matou 的 Claude Code 多会话桌面工作台](assets/shots/workspace-demo.png)
+![码头 Matou 的 Claude Code 多会话桌面工作台演示](assets/shots/workspace-demo.gif)
 
-> 上图：一个事项下并行三个 Claude Code——左侧在实现 Redis 幂等键（运行中），中间的回归测试在等你确认一条断言，右侧的审查会话直接用 `mt read left` 读取了回归结果并给出结论。本文截图均来自隔离演示环境，项目、终端输出和通知都是为演示构造的。
+> 上图：一个事项下并行五个 Claude Code。点哪张卡片哪张展开，超出一屏时整排横向滑动；从通知中心点一条「等待输入」，直接跳到出事的那张卡片；最后切到看板看全局。本文截图均来自隔离演示环境，项目、终端输出和通知都是为演示构造的。
 
 ---
 
@@ -75,6 +75,10 @@
 > “让左边的会话继续运行回归，完成后把结果发回来。”
 
 Matou 会向它托管的每个 Agent 提供会话定位与控制能力，使它能够识别自己、列出关联卡片、读取实时屏幕或历史输出、查看可执行命令，并向父卡片、子卡片、左右相邻卡片或指定会话发送输入。这样，跨会话协作仍然发生在你的任务结构里。
+
+![三张 Claude Code 卡片并行：实现、回归、审查](assets/shots/workspace-demo.png)
+
+> 左侧在实现 Redis 幂等键（运行中），中间的回归测试在等你确认一条断言，右侧的审查会话直接用 `mt read left` 读取了回归结果，再给出结论。
 
 <details>
 <summary>当前版本支持的控制命令</summary>

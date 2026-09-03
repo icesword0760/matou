@@ -33,9 +33,9 @@ Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. I
 
 > **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page. The product UI is currently in Chinese.
 
-![Matou workspace with three parallel Claude Code sessions](assets/shots/workspace-demo.png)
+![Matou workspace demo with five parallel Claude Code sessions](assets/shots/workspace-demo.gif)
 
-> Above: three Claude Code sessions under one task — the left card is implementing a Redis idempotency key (running), the middle one is a regression run waiting for you to confirm an assertion change, and the right one is a review session that read the regression result with `mt read left` before drawing its conclusion. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
+> Above: five Claude Code sessions under one task. Click a card and it expands; once the row is wider than the screen it slides. Click a "waiting for input" notification and you land on the card that raised it; then switch to the board for the big picture. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
 
 ---
 
@@ -75,6 +75,10 @@ When the result lives in another card you do not have to switch, scroll and copy
 > "Let the session on the left keep running the regression and send the result back when it is done."
 
 Matou gives every agent it hosts the ability to identify itself, list related cards, read live screens or history, inspect available commands, and send input to parent, child, left/right neighbours or any named session. Cross-session collaboration stays inside your task structure.
+
+![Three Claude Code cards side by side: implementation, regression, review](assets/shots/workspace-demo.png)
+
+> The left card is implementing a Redis idempotency key (running), the middle one is a regression run waiting for you to confirm an assertion change, and the right one is a review session that read the regression result with `mt read left` before drawing its conclusion.
 
 <details>
 <summary>Control commands in the current version</summary>
