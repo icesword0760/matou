@@ -57,3 +57,54 @@ The issue path takes a defensive impact snapshot, and consume returns a defensiv
 ## Concerns
 
 None.
+
+## Fix round 1 — purge expired records before every consume outcome
+
+### Finding addressed
+
+A caller-mismatch consume returned `CONFIRMATION_REQUIRED` before running expiry cleanup, leaving unrelated expired confirmations in the private map. The consume path now snapshots the requested record and its expiry state, purges all expired entries first, then applies caller masking: a mismatched caller still receives `CONFIRMATION_REQUIRED`, while the rightful caller of an expired record receives `CONFIRMATION_EXPIRED` even though that record was purged.
+
+### RED
+
+Added a regression test where an expired record and a live record coexist. A mismatched caller consumes the live reference, then the rightful caller accesses the expired reference.
+
+Command:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run src/control/host-action-confirmation-service.test.ts
+```
+
+Observed result before the fix:
+
+```text
+Test Files  1 failed (1)
+Tests  7 (6 passed, 1 failed)
+FAIL purges expired records even when another caller submits a live reference
+Expected code: CONFIRMATION_REQUIRED
+Received code: CONFIRMATION_EXPIRED
+```
+
+### GREEN
+
+Command:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run src/control/host-action-confirmation-service.test.ts \
+  && pnpm --filter @matou/runtime typecheck \
+  && pnpm check:identifiers \
+  && git diff --check
+```
+
+Result:
+
+```text
+Test Files  1 passed (1)
+Tests  7 passed (7)
+@matou/runtime typecheck: success
+matou check:identifiers: success
+git diff --check: success
+```
+
+### Self-review
+
+`consume()` invokes `#purgeExpired()` before every success and failure path. It retains only a local reference to the requested record long enough to distinguish a rightful expiry from a missing reference; caller mismatch is checked before that distinction, so another run receives no expiry-state signal. The existing exact-boundary expiry and one-time-consume behavior remain covered.

@@ -156,4 +156,22 @@ describe('HostActionConfirmationService', () => {
       .toThrowError(HostActionConfirmationError)
     expect(service.consume({ ...issueInput({ caller: otherCaller }), ref: 'confirmation-3' })).toBeDefined()
   })
+
+  it('purges expired records even when another caller submits a live reference', () => {
+    const service = new HostActionConfirmationService({
+      randomRef: (() => {
+        const refs = ['expired-confirmation', 'live-confirmation']
+        return () => refs.shift()!
+      })()
+    })
+    const expired = service.issue(issueInput({ now: 0 }))
+    const live = service.issue(issueInput({ now: 1_000 }))
+
+    expect(() => service.consume({
+      ...issueInput({ caller: otherCaller, now: 120_000 }), ref: live
+    })).toThrowError(expect.objectContaining({ code: 'CONFIRMATION_REQUIRED' }))
+    expect(() => service.consume({ ...issueInput({ now: 120_000 }), ref: expired }))
+      .toThrowError(expect.objectContaining({ code: 'CONFIRMATION_REQUIRED' }))
+    expect(service.consume({ ...issueInput({ now: 120_000 }), ref: live })).toBeDefined()
+  })
 })

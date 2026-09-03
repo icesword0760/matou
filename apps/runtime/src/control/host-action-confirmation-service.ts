@@ -81,8 +81,13 @@ export class HostActionConfirmationService {
 
   consume(input: ConfirmationConsumeInput): ConfirmationRecord {
     const record = this.#records.get(input.ref)
+    const requestedRecordExpired = record !== undefined && input.now >= record.expiresAt
+    // Purge before any outcome, including a caller mismatch. Keep the local
+    // requested record only to distinguish a rightful expired reference from
+    // an absent reference after the purge; mismatched callers still receive
+    // the same required fault without learning the record's state.
+    this.#purgeExpired(input.now)
     if (!record) {
-      this.#purgeExpired(input.now)
       throw new HostActionConfirmationError(
         'CONFIRMATION_REQUIRED',
         '确认已失效，请先重新预览'
@@ -99,18 +104,12 @@ export class HostActionConfirmationService {
       )
     }
 
-    // Delete the requested expired record explicitly so the caller receives a
-    // useful expiry fault; then purge any other expired records in the same
-    // pass. This keeps the map bounded without losing the boundary signal.
-    if (input.now >= record.expiresAt) {
-      this.#records.delete(input.ref)
-      this.#purgeExpired(input.now)
+    if (requestedRecordExpired) {
       throw new HostActionConfirmationError(
         'CONFIRMATION_EXPIRED',
         '确认已过期，请重新预览'
       )
     }
-    this.#purgeExpired(input.now)
 
     const submittedHash = impactHash(input.action, input.targetRef, input.scope, input.impact)
     if (
