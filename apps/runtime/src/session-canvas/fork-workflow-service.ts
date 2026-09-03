@@ -20,6 +20,7 @@ import {
   registerWindow,
   type WorkspaceHierarchyResult
 } from '../hierarchy/hierarchy-application-service'
+import type { ResolvedForkEnvironment } from '../control/host-action-target-resolver'
 import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainMutationContext, DomainTransactionManager } from '../storage/domain-transaction'
@@ -45,6 +46,9 @@ export type ForkWorkflowErrorCode =
   | 'FORK_SOURCE_NOT_READY'
   | 'DETACHED_SOURCE'
   | 'GIT_REPOSITORY_REQUIRED'
+  | 'INVALID_BRANCH'
+  | 'BRANCH_CONFLICT'
+  | 'WORKTREE_CONFLICT'
   | 'FORK_NOT_FAILED'
 
 export class ForkWorkflowError extends Error {
@@ -71,10 +75,23 @@ export interface CreateForkInput {
   sceneId: string
   sourceSessionId: string
   name: string
+  environment: ResolvedForkEnvironment
+  submissionKey?: string
+  now: number
+}
+
+/** Renderer RPC compatibility input; Host Control submits a resolved environment. */
+export interface CreateForkModeInput {
+  windowId: string
+  sceneId: string
+  sourceSessionId: string
+  name: string
   worktreeMode: ForkWorktreeMode
   submissionKey?: string
   now: number
 }
+
+type ForkCreateRequest = CreateForkInput | CreateForkModeInput
 
 export interface ForkWorkflowResult extends WorkspaceHierarchyResult {
   graph: SceneSessionGraph
@@ -157,6 +174,14 @@ interface GitPlan {
   executionContextId: string
 }
 
+interface ForkEnvironmentPlan {
+  worktreeMode: ForkWorktreeMode
+  executionContextId: string
+  cwd: string
+  targetExecutionContextId?: string
+  gitPlan?: GitPlan
+}
+
 interface ForkIntentRow {
   session_id: string
   source_session_id: string
@@ -203,11 +228,11 @@ export class ForkWorkflowService {
     this.#onProgressCommitted = dependencies.onProgressCommitted ?? (() => undefined)
   }
 
-  createForkChild(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
+  createForkChild(command: DomainCommandMetadata, input: ForkCreateRequest): Promise<ForkWorkflowResult> {
     return this.#accept(command, input, 'child')
   }
 
-  createForkSibling(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
+  createForkSibling(command: DomainCommandMetadata, input: ForkCreateRequest): Promise<ForkWorkflowResult> {
     return this.#accept(command, input, 'sibling')
   }
 
@@ -496,7 +521,7 @@ export class ForkWorkflowService {
 
   #accept(
     command: DomainCommandMetadata,
-    input: CreateForkInput,
+    input: ForkCreateRequest,
     placement: 'child' | 'sibling'
   ): Promise<ForkWorkflowResult> {
     const submissionKey = input.submissionKey ?? command.commandId
@@ -524,7 +549,7 @@ export class ForkWorkflowService {
 
   async #acceptNew(
     command: DomainCommandMetadata,
-    input: CreateForkInput,
+    input: ForkCreateRequest,
     placement: 'child' | 'sibling',
     submissionKey: string
   ): Promise<ForkWorkflowResult> {
@@ -536,11 +561,12 @@ export class ForkWorkflowService {
     const name = validateDisplayName(input.name, activeNames)
     if (!name.ok) throw displayNameError(name.code, name.message, name.input)
 
-    const gitPlan = input.worktreeMode === 'new'
-      ? await this.#resolveGitPlan(source, name.displayName, ids.sessionId)
-      : undefined
+    const environment = await this.#resolveEnvironment(
+      input, source, name.displayName, ids.sessionId
+    )
     const initial = this.#createPreparingNode(
-      command, input, source, name.displayName, ids, relationId, operationId, submissionKey, gitPlan,
+      command, input, source, name.displayName, ids, relationId, operationId, submissionKey,
+      environment,
       placement === 'sibling' ? source.selected.id : undefined
     )
     return initial
@@ -566,7 +592,7 @@ export class ForkWorkflowService {
     })
   }
 
-  #resolveSource(input: CreateForkInput, placement: 'child' | 'sibling'): SourceContext {
+  #resolveSource(input: ForkCreateRequest, placement: 'child' | 'sibling'): SourceContext {
     const scene = requireRow(this.#database.get<SceneRow>(
       'SELECT id, task_id FROM scenes WHERE id = ? AND archived_at IS NULL', input.sceneId
     ), 'Scene')
@@ -646,9 +672,81 @@ export class ForkWorkflowService {
     ).map(({ title }) => title)
   }
 
-  async #resolveGitPlan(
+  async #resolveEnvironment(
+    input: ForkCreateRequest,
     source: SourceContext,
     displayName: string,
+    sessionId: string
+  ): Promise<ForkEnvironmentPlan> {
+    const environment = 'environment' in input
+      ? input.environment
+      : input.worktreeMode === 'current'
+        ? { mode: 'current' as const, executionContextId: source.forkSource.execution_context_id }
+        : {
+            mode: 'new-worktree' as const,
+            branch: createGitBranchName(displayName, sessionId)
+          }
+    if (environment.mode === 'new-worktree') {
+      const gitPlan = await this.#resolveGitPlan(source, environment.branch, sessionId)
+      return {
+        worktreeMode: 'new',
+        executionContextId: source.forkSource.execution_context_id,
+        cwd: source.forkSource.cwd,
+        gitPlan
+      }
+    }
+    if (environment.mode === 'existing-worktree') {
+      const target = this.#database.get<{
+        execution_context_id: string
+        cwd: string
+        workspace_id: string
+        worktree_id: string
+        branch_name: string
+        state: Worktree['state']
+      }>(
+        `SELECT execution_contexts.id AS execution_context_id, execution_contexts.cwd,
+                execution_contexts.workspace_id, worktrees.id AS worktree_id,
+                worktrees.branch_name, worktrees.state
+         FROM execution_contexts
+         JOIN worktrees ON worktrees.execution_context_id = execution_contexts.id
+         WHERE execution_contexts.id = ? AND worktrees.id = ?
+           AND execution_contexts.archived_at IS NULL`,
+        environment.executionContextId, environment.worktreeId
+      )
+      if (
+        !target || target.workspace_id !== source.task.workspace_id ||
+        target.branch_name !== environment.branch ||
+        !['ready', 'dirty', 'retained'].includes(target.state)
+      ) {
+        throw new ForkWorkflowError(
+          'WORKTREE_CONFLICT', '指定的 Worktree 已不可用', environment.worktreeRef
+        )
+      }
+      return {
+        worktreeMode: 'current',
+        executionContextId: target.execution_context_id,
+        cwd: target.cwd,
+        targetExecutionContextId: target.execution_context_id
+      }
+    }
+    const target = this.#database.get<{ id: string; cwd: string; workspace_id: string }>(
+      `SELECT id, cwd, workspace_id FROM execution_contexts
+       WHERE id = ? AND archived_at IS NULL`,
+      environment.executionContextId
+    )
+    if (!target || target.workspace_id !== source.task.workspace_id) {
+      throw new ForkWorkflowError('WORKTREE_CONFLICT', '当前执行环境已不可用')
+    }
+    return {
+      worktreeMode: 'current',
+      executionContextId: target.id,
+      cwd: target.cwd
+    }
+  }
+
+  async #resolveGitPlan(
+    source: SourceContext,
+    branch: string,
     sessionId: string
   ): Promise<GitPlan> {
     const git = this.#database.get<{ repository_root: string }>(
@@ -657,6 +755,7 @@ export class ForkWorkflowService {
       source.forkSource.execution_context_id
     )
     if (!git) throw new ForkWorkflowError('GIT_REPOSITORY_REQUIRED', '新工作树需要 Git 仓库')
+    await assertBranchAvailable(git.repository_root, branch)
     const baseRevision = (await exec(
       'git', ['-C', git.repository_root, 'rev-parse', 'HEAD']
     )).stdout.trim()
@@ -666,7 +765,7 @@ export class ForkWorkflowService {
       baseRef: baseRevision,
       baseRevision,
       path: join(canonicalDataRoot, 'worktrees', source.task.workspace_id, sessionId),
-      branch: createGitBranchName(displayName, sessionId),
+      branch,
       worktreeId: randomUUID(),
       executionContextId: randomUUID()
     }
@@ -674,16 +773,17 @@ export class ForkWorkflowService {
 
   #createPreparingNode(
     command: DomainCommandMetadata,
-    input: CreateForkInput,
+    input: ForkCreateRequest,
     source: SourceContext,
     displayName: string,
     ids: ReturnType<typeof createHierarchyIds>,
     relationId: string,
     operationId: string,
     submissionKey: string,
-    gitPlan: GitPlan | undefined,
+    environment: ForkEnvironmentPlan,
     preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
+    const gitPlan = environment.gitPlan
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const duplicate = this.#forkIntents.findBySubmissionKey(submissionKey, tx)
       if (duplicate) {
@@ -733,8 +833,8 @@ export class ForkWorkflowService {
            id, task_id, execution_context_id, kind, status, title, cwd,
            created_at, updated_at, last_activity_at, version
          ) VALUES (?, ?, ?, 'claude-code', 'starting', ?, ?, ?, ?, ?, 1)`,
-        ids.sessionId, source.task.id, source.forkSource.execution_context_id,
-        displayName, source.forkSource.cwd, input.now, input.now, input.now
+        ids.sessionId, source.task.id, environment.executionContextId,
+        displayName, environment.cwd, input.now, input.now, input.now
       )
       tx.run(
         `INSERT INTO session_mounts (
@@ -754,7 +854,7 @@ export class ForkWorkflowService {
         sourceSessionId: source.forkSource.id,
         sourceProviderSessionId: source.binding.provider_session_id,
         displayName,
-        worktreeMode: input.worktreeMode,
+        worktreeMode: environment.worktreeMode,
         totalSteps: gitPlan ? 5 : 2,
         now: input.now,
         ...(gitPlan ? {
@@ -762,7 +862,9 @@ export class ForkWorkflowService {
           executionContextId: gitPlan.executionContextId,
           worktreePath: gitPlan.path,
           branchName: gitPlan.branch
-        } : {})
+        } : environment.targetExecutionContextId === undefined ? {} : {
+          executionContextId: environment.targetExecutionContextId
+        })
       }, tx)
       if (gitPlan) {
         tx.run(
@@ -779,7 +881,7 @@ export class ForkWorkflowService {
          ) VALUES (?, ?, 'created', ?, ?, ?, 'forked-from', ?, ?, ?)`,
         `${command.commandId}:fork-relation-created`, relationId, source.task.id,
         ids.sessionId, source.forkSource.id,
-        JSON.stringify({ worktreeMode: input.worktreeMode }), command.commandId, input.now
+        JSON.stringify({ worktreeMode: environment.worktreeMode }), command.commandId, input.now
       )
       tx.run(
         `INSERT INTO session_relations_current (
@@ -787,7 +889,7 @@ export class ForkWorkflowService {
            metadata_json, created_at, updated_at, source_event_sequence
          ) VALUES (?, ?, ?, ?, 'forked-from', ?, ?, ?, ?)`,
         relationId, source.task.id, ids.sessionId, source.forkSource.id,
-        JSON.stringify({ worktreeMode: input.worktreeMode }), input.now, input.now,
+        JSON.stringify({ worktreeMode: environment.worktreeMode }), input.now, input.now,
         Number(relationInsertion.lastInsertRowid)
       )
       const result = readCreatedForkResult(
@@ -1080,6 +1182,29 @@ function derivedCommand(command: DomainCommandMetadata, suffix: string): DomainC
 function requireRow<T>(row: T | undefined, label: string): T {
   if (row === undefined) throw new Error(`${label} does not exist`)
   return row
+}
+
+async function assertBranchAvailable(repositoryRoot: string, branch: string): Promise<void> {
+  try {
+    const checked = await exec('git', ['check-ref-format', '--branch', branch])
+    if (checked.stdout.trim() !== branch) throw new Error('branch shorthand is not stable')
+  } catch {
+    throw new ForkWorkflowError('INVALID_BRANCH', '分支名称无效', branch)
+  }
+  try {
+    await exec('git', [
+      '-C', repositoryRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`
+    ])
+  } catch (error) {
+    if (processExitCode(error) === 1) return
+    throw error
+  }
+  throw new ForkWorkflowError('BRANCH_CONFLICT', `分支 ${branch} 已存在`, branch)
+}
+
+function processExitCode(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined
+  return typeof error.code === 'number' ? error.code : undefined
 }
 
 function errorMessage(error: unknown): string {
