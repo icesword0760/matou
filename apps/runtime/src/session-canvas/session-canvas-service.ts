@@ -103,6 +103,15 @@ export interface SetFocusedSessionInput {
   now: number
 }
 
+export interface RestoreFocusedSessionIfCurrentInput {
+  windowId: string
+  sceneId: string
+  sessionId: string
+  expectedSessionId: string
+  expectedFocusUpdatedAt?: number
+  now: number
+}
+
 export interface RestartStoppedSessionInput {
   windowId: string
   sessionId: string
@@ -920,6 +929,40 @@ export class SessionCanvasService {
       if (!owner) throw new Error('会话不在当前画布中')
       activateSessionInTransaction(tx, input.windowId, input.sessionId, input.now)
       return projectSceneGraphFrom(tx, input.sceneId, input.windowId)
+    })
+  }
+
+  /**
+   * Restores a pre-operation focus only while the window still shows the
+   * exact operation-owned temporary focus. A concurrent user navigation or a
+   * removed snapshot simply makes the comparison fail.
+   */
+  restoreFocusedSessionIfCurrent(
+    input: RestoreFocusedSessionIfCurrentInput
+  ): boolean {
+    return this.#database.transaction((tx) => {
+      const current = readHierarchyResult(tx, input.windowId)
+      if (current.session?.id !== input.expectedSessionId || !current.scene) return false
+      if (input.expectedFocusUpdatedAt !== undefined) {
+        const focus = tx.get<{ updated_at: number }>(
+          `SELECT updated_at FROM window_scene_focus
+           WHERE window_id = ? AND scene_id = ? AND active_session_id = ?`,
+          input.windowId, current.scene.id, input.expectedSessionId
+        )
+        if (focus?.updated_at !== input.expectedFocusUpdatedAt) return false
+      }
+      const target = tx.get(
+        `SELECT 1 FROM sessions
+         JOIN session_mounts ON session_mounts.session_id = sessions.id
+         JOIN scenes ON scenes.id = session_mounts.scene_id
+         WHERE sessions.id = ? AND session_mounts.scene_id = ?
+           AND sessions.archived_at IS NULL
+           AND scenes.archived_at IS NULL LIMIT 1`,
+        input.sessionId, input.sceneId
+      )
+      if (!target) return false
+      activateSessionInTransaction(tx, input.windowId, input.sessionId, input.now)
+      return true
     })
   }
 }

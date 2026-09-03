@@ -204,22 +204,23 @@ export class ProviderHookServer {
       statusScriptPath
     }
     this.#registrations.set(token, record)
-    let disposed = false
-    const dispose = async () => {
-      if (disposed) return
-      disposed = true
-      clearTimeout(record.retirementTimer)
-      this.#stopTitleWatch(record)
-      this.#registrations.delete(token)
-      await Promise.all([
-        rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
-      ])
+    let disposePromise: Promise<void> | undefined
+    const dispose = (): Promise<void> => {
+      disposePromise ??= (async () => {
+        clearTimeout(record.retirementTimer)
+        this.#stopTitleWatch(record)
+        this.#registrations.delete(token)
+        await Promise.all([
+          rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+        ])
+      })()
+      return disposePromise
     }
     return {
       settingsPath,
       hookUrl,
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS) => {
-        if (disposed || record.retirementTimer) return
+        if (disposePromise || record.retirementTimer) return
         // Keep the endpoint alive briefly for the final HUD/notification hooks, while
         // preventing a process that has already returned to Shell from resurrecting
         // its Claude conversation identity.

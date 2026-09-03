@@ -39,6 +39,7 @@ import { CapabilityTokenService } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
+import { SessionCanvasService } from './session-canvas/session-canvas-service'
 
 let root: string
 let database: RuntimeDatabase
@@ -178,6 +179,194 @@ describe('RuntimeServer domain RPC', () => {
       restoreEnv('SHELL', previousShell)
     }
   })
+
+  it('tombstones an active recovery before its deferred launch settles', async () => {
+    server.close()
+    registerSession(database, 'structure-removal-restoring')
+    let finishRecovery!: () => void
+    const recoveryGate = new Promise<void>((resolve) => { finishRecovery = resolve })
+    const snapshots: Array<readonly { sessionId: string; state: string }[]> = []
+    const recovery = new RuntimeRecoveryCoordinator({
+      concurrency: 1,
+      jobs: [{
+        sessionId: 'structure-removal-restoring', sceneId: 'scene-restoring',
+        priority: 'active-session', enqueueSequence: 1
+      }],
+      start: () => recoveryGate,
+      publish: (snapshot) => snapshots.push(snapshot)
+    })
+    const recoveryServer = new RuntimeServer(
+      new MockPort(), root, database, undefined, undefined,
+      createTestSessionRegistry(), undefined, undefined, { recoveryCoordinator: recovery }
+    )
+    try {
+      recovery.start()
+      await waitUntil(() => recovery.snapshot()[0]?.state === 'restoring')
+
+      await recoveryServer.disposeSessions(['structure-removal-restoring'])
+      const cancelledAt = snapshots.length
+      finishRecovery()
+      await recovery.whenIdle()
+
+      expect(recovery.snapshot()).toEqual([])
+      expect(snapshots.slice(cancelledAt).every((snapshot) =>
+        snapshot.every(({ sessionId }) => sessionId !== 'structure-removal-restoring'))).toBe(true)
+    } finally {
+      recoveryServer.close()
+    }
+  })
+
+  it('interrupts the active Run without overwriting the domain archived Session status', async () => {
+    server.close()
+    const executable = join(root, 'structure-removal-archived-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "archive-me\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    registerCanvasSession(database, 'structure-removal-archived')
+    const sessionCanvas = new SessionCanvasService(
+      database, new DomainTransactionManager(database)
+    )
+    sessionCanvas.createShellSibling({
+      commandId: 'archive-survivor', commandType: 'session.create', requestHash: 'survivor'
+    }, {
+      windowId: 'window-archive', sceneId: 'scene-structure-removal-archived',
+      sourceSessionId: 'structure-removal-archived', title: 'Survivor', now: 2
+    })
+    const registry = createTestSessionRegistry()
+    const archivedPort = new MockPort()
+    const archivedServer = new RuntimeServer(
+      archivedPort, root, database, undefined, undefined, registry
+    )
+    try {
+      archivedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'structure-removal-archived-renderer'
+      })
+      archivedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'structure-removal-archived', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => registry.has('structure-removal-archived'))
+      const removal = sessionCanvas.removeSessionBranch({
+        commandId: 'archive-live-session', commandType: 'session.remove', requestHash: 'remove'
+      }, {
+        windowId: 'window-archive', sceneId: 'scene-structure-removal-archived',
+        sessionId: 'structure-removal-archived', scope: 'node-only', now: 3
+      })
+
+      await archivedServer.disposeSessions(removal.disposedSessionIds)
+
+      expect(database.get<{ status: string; archived_at: number | null }>(
+        `SELECT status, archived_at FROM sessions WHERE id = 'structure-removal-archived'`
+      )).toEqual({ status: 'archived', archived_at: 3 })
+      expect(database.get<{ status: string }>(
+        `SELECT status FROM session_runs WHERE session_id = 'structure-removal-archived'
+         ORDER BY ordinal DESC LIMIT 1`
+      )).toEqual({ status: 'interrupted' })
+    } finally {
+      archivedServer.close()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it.each(['healthy', 'paused'] as const)(
+    'revokes a %s Claude hook registration before structural PTY disposal',
+    async (durability) => {
+      server.close()
+      const executable = join(root, `structure-hook-${durability}.sh`)
+      const argumentFile = join(root, `structure-hook-${durability}-arguments.txt`)
+      await writeFile(executable, [
+        '#!/bin/sh',
+        'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+        'printf "hook-ready\\n"',
+        'sleep 30',
+        ''
+      ].join('\n'))
+      await chmod(executable, 0o755)
+      const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+      const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+      process.env.MATOU_CLAUDE_COMMAND = executable
+      process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+      registerSession(database, `structure-hook-${durability}`, 'claude-code')
+      const repository = new SessionRepository(
+        database, new DomainTransactionManager(database)
+      )
+      const identity = vi.fn()
+      const providerHooks = new ProviderHookServer(root, repository, {
+        onIdentityRecorded: identity
+      })
+      await providerHooks.start()
+      const registry = createTestSessionRegistry()
+      const hookPort = new MockPort()
+      const hud = new SessionHudRegistry()
+      const hookServer = new RuntimeServer(
+        hookPort, root, database, undefined, undefined, registry, providerHooks,
+        undefined, {
+          hudRegistry: hud,
+          ...(durability === 'paused' ? {
+            journalOptionsForSession: () => ({
+              writeFrame: async () => {
+                throw Object.assign(new Error('disk quota reached'), { code: 'ENOSPC' })
+              }
+            })
+          } : {})
+        }
+      )
+      let disposalServer = hookServer
+      try {
+        hookPort.receive({
+          type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+          clientId: `structure-hook-${durability}-renderer`
+        })
+        hookPort.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId: `structure-hook-${durability}`, executionContextId: 'replay-context',
+          profile: 'claude-code', cols: 80, rows: 24
+        })
+        await waitUntilAsync(async () =>
+          (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
+        await waitUntil(() => registry.has(`structure-hook-${durability}`))
+        if (durability === 'paused') {
+          await waitUntil(() => hookPort.last('terminal.storage-fault') !== undefined)
+        }
+        const arguments_ = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+        const settingsPath = arguments_[arguments_.indexOf('--settings') + 1]!
+        const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+          hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+          statusLine: { command: string }
+        }
+        const hookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+        expect(hud.snapshot(`structure-hook-${durability}`)).toBeDefined()
+
+        if (durability === 'healthy') {
+          hookServer.close()
+          disposalServer = new RuntimeServer(
+            new MockPort(), root, database, undefined, undefined, registry, providerHooks,
+            undefined, { hudRegistry: hud }
+          )
+        }
+
+        await disposalServer.disposeSessions([`structure-hook-${durability}`])
+
+        await expect(stat(settingsPath)).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(stat(settings.statusLine.command)).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(hud.snapshot(`structure-hook-${durability}`)).toBeUndefined()
+        expect((await fetch(hookUrl, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ hook_event_name: 'Stop', session_id: 'ghost-provider' })
+        })).status).toBe(404)
+        expect(identity).not.toHaveBeenCalled()
+      } finally {
+        if (disposalServer !== hookServer) disposalServer.close()
+        hookServer.close()
+        await providerHooks.stop()
+        restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+        restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+      }
+    }
+  )
 
   it('injects a run-bound mt identity into an ordinary managed Shell', async () => {
     server.close()

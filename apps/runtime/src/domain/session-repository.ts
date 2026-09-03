@@ -249,7 +249,9 @@ export class SessionRepository {
         now, runId
       )
       tx.run(
-        `UPDATE sessions SET status = 'interrupted', work_status = 'interrupted',
+        `UPDATE sessions SET
+         status = CASE WHEN archived_at IS NULL THEN 'interrupted' ELSE status END,
+         work_status = CASE WHEN archived_at IS NULL THEN 'interrupted' ELSE work_status END,
          updated_at = ?, last_activity_at = ?,
          version = version + 1 WHERE id = ?`,
         now, now, before.session_id

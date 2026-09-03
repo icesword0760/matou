@@ -1,7 +1,30 @@
 const POST_RESPONSE_EFFECTS = Symbol('matou.host-control.post-response-effects')
+const COMMITTED_RESULT = Symbol('matou.host-control.committed-result')
 
 type PostResponseCarrier = {
   [POST_RESPONSE_EFFECTS]?: Array<() => void | Promise<void>>
+}
+
+type CommittedResultCarrier = {
+  [COMMITTED_RESULT]?: true
+}
+
+/** Marks a result whose product structure transaction has already committed. */
+export function markHostControlCommittedResult<T extends object>(result: T): T {
+  const carrier = result as T & CommittedResultCarrier
+  if (carrier[COMMITTED_RESULT] === true) return result
+  Object.defineProperty(carrier, COMMITTED_RESULT, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: true
+  })
+  return result
+}
+
+export function isHostControlCommittedResult(value: unknown): boolean {
+  return typeof value === 'object' && value !== null &&
+    (value as CommittedResultCarrier)[COMMITTED_RESULT] === true
 }
 
 /**

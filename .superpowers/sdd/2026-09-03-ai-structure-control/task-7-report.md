@@ -227,3 +227,105 @@ Task 7 continues to expose the fully constructed facade as `WritableRuntimeState
 - **Code:** review findings 1–4 are implemented and self-reviewed in the Task 7 boundary plus the narrow Host Control response/disposal lifecycle seam.
 - **Automated verification:** focused, related, and complete Runtime suites passed at the counts above. `pnpm --filter @matou/runtime typecheck`, `pnpm check:identifiers`, and `git diff --check` also passed after the final code and report update.
 - **Real App:** 本 Task 未验收；真实 CLI 自移除与完整 UI interaction acceptance remain in the later integration and acceptance tasks.
+
+---
+
+## Fix round 2 addendum (2026-09-03)
+
+This addendum records the second review closure. The scoped ruling excludes compatibility adapters for development-only migrations 29–31. Migration 32 remains the authoritative public-request receipt schema and its existing migration coverage remains unchanged.
+
+### Code changes
+
+1. **Operation-owned focus preservation**
+   - The facade now snapshots the actual active Session in each unique caller and Fork-target window immediately before the structural mutation. A background caller is no longer treated as the visible focus.
+   - `SessionCanvasService.restoreFocusedSessionIfCurrent` performs the restore transactionally only when the window still shows the expected temporary Session with the operation's focus timestamp and the snapshot still belongs to its original active Canvas.
+   - Each accepted child is restored once immediately after create/retry. Later readiness, startup, and prompt boundaries carry the child identity but do not repeatedly overwrite a user's newer focus.
+   - Child, sibling, same-window, cross-window, batch, background-caller, manual-switch, and concurrently removed snapshot cases are covered. A vanished snapshot leaves the accepted Fork result intact.
+
+2. **Committed results remain authoritative**
+   - Every successful create, single/batch Fork, remove commit, and Canvas-close commit carries a non-enumerable Runtime-local committed marker. It is omitted from JSON while remaining visible to `HostControlServer`.
+   - The post-dispatch deadline now yields to that committed marker. A structure transaction that has completed is returned as success even when create/Fork coordination or cleanup crosses the caller deadline.
+   - All domain-returned Session disposal IDs, including non-caller IDs, are now one post-response effect. Disposal begins only after the success frame is queued; cleanup exceptions are emitted as post-response diagnostics and do not replace the committed result or `activePath`.
+
+3. **Provider-hook lifecycle follows Session/Run ownership**
+   - Runtime tracks Claude hook registrations by Session and Run in a registry shared across Runtime connections that own the same PTY registry.
+   - Structural disposal revokes every tracked hook before ending the PTY, awaits endpoint/settings/statusline cleanup, and then clears Runtime/HUD state. The registration's dispose Promise is idempotent, so retirement and structural disposal converge on the same cleanup.
+   - Coverage proves cleanup for healthy and paused-durability Runs, including disposal from a replacement Runtime connection; the retired URL returns 404 and its old identity callback stays inactive.
+
+4. **Active recovery removal is terminal**
+   - Scheduler cancellation now removes both queued and actively restoring candidates. Coordinator tombstones prevent late ordinary completion, late external Fork tracking, or late ready/failed settlement from publishing a ghost card.
+   - Both coordinator-level deferred recovery and `RuntimeServer.disposeSessions` racing an active deferred recovery are covered.
+
+5. **Archived Session state is preserved**
+   - `SessionRepository.interruptRun` always records the active Run as interrupted, while conditionally preserving an already archived Session's `status`, `work_status`, and `archived_at`.
+   - A domain Session removal followed by Runtime structural disposal now retains `status = archived` and its original archive timestamp while the Run becomes interrupted.
+
+### TDD evidence
+
+The round-2 regressions were added before the implementation changes. The initial focused run produced:
+
+```text
+Test Files  4 failed (4)
+Tests       16 failed | 148 passed (164)
+```
+
+Those failures exposed caller-derived focus snapshots, unconditional focus rewrites, accepted-result replacement by deadline/cleanup faults, retained provider-hook files and endpoints, an active recovery ghost, and archived Session status being overwritten as interrupted.
+
+Final focused lifecycle run:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/host-control-server.test.ts \
+  src/recovery/runtime-recovery-coordinator.test.ts \
+  src/runtime-server.test.ts
+```
+
+Result: `4` files, `166/166` tests passed.
+
+Final related create/Fork/remove/close/Host Control/recovery/provider-hook run:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/host-control-server.test.ts \
+  src/control/fork-batch-coordinator.test.ts \
+  src/recovery/runtime-recovery-coordinator.test.ts \
+  src/recovery/runtime-session-recovery-scheduler.test.ts \
+  src/session/provider-hook-server.test.ts \
+  src/domain/session-repository.test.ts \
+  src/hierarchy/hierarchy-application-service.test.ts \
+  src/session-canvas/session-canvas-service.test.ts \
+  src/session-canvas/fork-workflow-service.test.ts \
+  src/runtime-server.test.ts
+```
+
+Result: `11` files, `315/315` tests passed.
+
+Final complete Runtime regression:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run
+```
+
+Result: `107` files, `946/946` tests passed. Output contained only the existing Node experimental SQLite warning.
+
+### Task 6 and Task 8 boundaries
+
+- Task 6 remains the sole owner of durable batch acceptance, failed-item retry, readiness, startup, and prompt receipts. This round only adds the temporary child identity to its focus callback; no facade-local batch/retry path was introduced.
+- Task 8 still owns `RuntimeControlBackend.setHostActionExecutor(executor)` and installs it before `hostControl.start()`. Its executor must return the facade result object directly so the non-enumerable committed marker and post-response effects reach `HostControlServer`.
+
+### Code / automation / real App boundary after fix round 2
+
+- **Code:** all five round-2 findings are implemented and self-reviewed in the facade plus the narrow focus, Host Control response, Runtime disposal, hook, recovery, and Run-state lifecycle seams.
+- **Automated verification:** focused and related suites plus the complete Runtime regression passed at the counts above. Runtime typecheck, identifier policy, and whitespace gates are recorded after the final commit preparation.
+- **Real App:** this Task did not run packaged-App acceptance. Real CLI structure dispatch remains in Task 8, and end-to-end interaction acceptance remains in the later integration tasks.
+
+### Self-review and remaining concern
+
+- Confirmed focus restore is a compare-and-set against an operation-owned temporary identity/timestamp, not an unconditional navigation write.
+- Confirmed all structural disposal is post-response and that cleanup faults stay diagnostic after the stable success result.
+- Confirmed structural disposal revokes hook endpoints before PTY termination and survives a Runtime connection handoff.
+- Confirmed recovery tombstones reject all late publication paths and archived domain state survives Run interruption.
+- Confirmed migration 29–31 adapters were not added, migration 32 behavior was retained, Task 6 durability was not bypassed, and Task 8 backend dispatch was not implemented early.
+- Remaining integration boundary: Task 8 must preserve the exact facade result object through its executor; packaged-App behavior is still pending later acceptance.

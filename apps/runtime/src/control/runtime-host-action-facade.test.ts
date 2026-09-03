@@ -28,7 +28,10 @@ import type {
   HostRemovalPreview
 } from './host-action-types'
 import { CapabilityTokenService } from './host-control-server'
-import { runHostControlPostResponseEffects } from './host-control-post-response'
+import {
+  isHostControlCommittedResult,
+  runHostControlPostResponseEffects
+} from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
 import {
   RuntimeHostActionFacade,
@@ -110,6 +113,7 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
       path: { workspace: { title: 'Second Workspace', path: secondRoot } },
       focusedPath: { workspace: { title: 'Workspace', path: workspaceRoot } }
     })
+    expect(isHostControlCommittedResult(workspace)).toBe(true)
     expect(resolver.resolveEntity(caller, { kind: 'self' }, 'unused').sessionId)
       .toBe(caller.sessionId)
 
@@ -448,9 +452,123 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
     expect(activeSession('window-1', sourceSceneId())).toBe(caller.sessionId)
     expect(activeSession('window-2', target.sceneId)).toBe(target.focusedSessionId)
 
+    const userCallerFocus = sessionCanvas.createShellSibling(command('caller-manual-focus'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Caller manual focus', now: ++clock
+    }).session!.id
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-2', sceneId: target.sceneId,
+      sessionId: target.sourceSessionId, now: ++clock
+    })
+
     readiness.resolve()
     await expect(operation).resolves.toMatchObject({ kind: 'fork-batch', failed: 0 })
-    expect(activeSession('window-2', target.sceneId)).toBe(target.focusedSessionId)
+    expect(activeSession('window-1', sourceSceneId())).toBe(userCallerFocus)
+    expect(activeSession('window-2', target.sceneId)).toBe(target.sourceSessionId)
+  })
+
+  it('preserves the real active Session when the calling Session is in the background', async () => {
+    const visible = sessionCanvas.createShellSibling(command('background-caller-visible'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Visible Session', now: ++clock
+    }).session!.id
+
+    await facade.execute('structure.fork.child', caller, {
+      source: { kind: 'session', sessionId: caller.sessionId },
+      title: 'Background caller Fork', environment: { mode: 'current' },
+      submissionKey: 'background-caller-fork'
+    })
+
+    expect(activeSession('window-1', sourceSceneId())).toBe(visible)
+  })
+
+  it('restores a background focus after sibling placement temporarily reselects its source', async () => {
+    const visible = sessionCanvas.createShellSibling(command('background-sibling-visible'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Visible sibling', now: ++clock
+    }).session!.id
+    const createSibling = vi.fn(async (
+      metadata: DomainCommandMetadata,
+      input: CreateForkInput
+    ) => {
+      const created = await createForkResult(metadata, input)
+      sessionCanvas.setFocusedSession({
+        windowId: input.windowId, sceneId: input.sceneId,
+        sessionId: input.sourceSessionId, now: input.now
+      })
+      return created
+    })
+
+    await createFacade({
+      forkWorkflow: { createForkChild, createForkSibling: createSibling }
+    }).execute('structure.fork.sibling', caller, {
+      source: { kind: 'session', sessionId: caller.sessionId },
+      title: 'Background sibling Fork', environment: { mode: 'current' },
+      submissionKey: 'background-sibling-fork'
+    })
+
+    expect(activeSession('window-1', sourceSceneId())).toBe(visible)
+  })
+
+  it('keeps a manual same-window focus change made during readiness', async () => {
+    const manual = sessionCanvas.createShellSibling(command('same-window-manual'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Manual destination', now: ++clock
+    }).session!.id
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: sourceSceneId(), sessionId: caller.sessionId, now: ++clock
+    })
+    const readiness = deferred<void>()
+    const startSession = vi.fn(async () => undefined)
+    const operation = createFacade({
+      forkBatches: createForkBatchCoordinator({
+        startSession,
+        waitUntilReady: () => readiness.promise
+      })
+    }).execute('structure.fork.child', caller, {
+      source: { kind: 'self' }, title: 'Slow same-window Fork',
+      environment: { mode: 'current' }, start: true,
+      submissionKey: 'same-window-manual-focus'
+    })
+    await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(1))
+
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: sourceSceneId(), sessionId: manual, now: ++clock
+    })
+    readiness.resolve()
+
+    await expect(operation).resolves.toMatchObject({ kind: 'forked' })
+    expect(activeSession('window-1', sourceSceneId())).toBe(manual)
+  })
+
+  it('keeps an accepted batch when its focus snapshot is concurrently removed', async () => {
+    const target = seedSecondWindow()
+    const readiness = deferred<void>()
+    const startSession = vi.fn(async () => undefined)
+    const operation = createFacade({
+      forkBatches: createForkBatchCoordinator({
+        startSession,
+        waitUntilReady: () => readiness.promise
+      })
+    }).execute('structure.fork.children', caller, {
+      source: { kind: 'session', sessionId: target.sourceSessionId },
+      batchKey: 'removed-focus-snapshot',
+      items: [{
+        itemKey: 'one', title: 'Accepted despite focus removal',
+        environment: { mode: 'current' }, start: true
+      }]
+    })
+    await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(1))
+
+    sessionCanvas.removeSessionBranch(command('remove-focus-snapshot'), {
+      windowId: 'window-2', sceneId: target.sceneId,
+      sessionId: target.focusedSessionId, scope: 'node-only', now: ++clock
+    })
+    readiness.resolve()
+
+    await expect(operation).resolves.toMatchObject({
+      kind: 'fork-batch', succeeded: 1, failed: 0
+    })
   })
 
   it('restores the target window immediately after every child mutation', async () => {
@@ -691,10 +809,12 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       kind: 'removed', removedTasks: 0, removedCanvases: 0, removedSessions: 3,
       activePath: { session: { title: 'Survivor' } }
     })
-    expect(disposeSessions).toHaveBeenCalledWith(expect.arrayContaining([child, grandchild]))
-    expect(disposeSessions).not.toHaveBeenCalledWith(expect.arrayContaining([caller.sessionId]))
+    expect(isHostControlCommittedResult(committed)).toBe(true)
+    expect(disposeSessions).not.toHaveBeenCalled()
     await runHostControlPostResponseEffects(committed)
-    expect(disposeSessions).toHaveBeenCalledWith([caller.sessionId])
+    expect(disposeSessions).toHaveBeenCalledWith(expect.arrayContaining([
+      caller.sessionId, child, grandchild
+    ]))
     await expect(access(join(workspaceRoot, 'README.md'))).resolves.toBeUndefined()
     expect(execFileSync('git', ['branch', '--show-current'], { cwd: workspaceRoot, encoding: 'utf8' }).trim())
       .toBe('main')
@@ -769,6 +889,7 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       kind: 'removed', removedTasks: 1, removedCanvases: 1, removedSessions: 1,
       activePath: { session: { ref: `session:${caller.sessionId}` } }
     })
+    await runHostControlPostResponseEffects(result)
     expect(disposeSessions).toHaveBeenCalledWith([created.path.session!.ref.slice('session:'.length)])
   })
 
@@ -852,7 +973,34 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       removedSessions: 1,
       activePath: { canvas: { ref: `scene:${sourceSceneId()}` } }
     })
+    await runHostControlPostResponseEffects(result)
     expect(disposeSessions).toHaveBeenCalledWith([target.created.session.id])
+  })
+
+  it('returns the committed removal and active path before disposal diagnostics', async () => {
+    const removable = sessionCanvas.createShellSibling(command('dispose-error-target'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Dispose error target', now: ++clock
+    })
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: sourceSceneId(), sessionId: caller.sessionId, now: ++clock
+    })
+    const preview = await facade.execute('structure.remove.preview', caller, {
+      target: { kind: 'session', sessionId: removable.session!.id }, scope: 'node'
+    }) as HostRemovalPreview
+    const cleanupError = new Error('cleanup diagnostic')
+    const failingDisposal = vi.fn(async () => { throw cleanupError })
+    const result = await createFacade({ disposeSessions: failingDisposal }).execute(
+      'structure.remove.commit', caller, { confirmationRef: preview.confirmationRef }
+    )
+
+    expect(result).toMatchObject({
+      kind: 'removed', removedSessions: 1,
+      activePath: { session: { ref: `session:${caller.sessionId}` } }
+    })
+    expect(isHostControlCommittedResult(result)).toBe(true)
+    expect(failingDisposal).not.toHaveBeenCalled()
+    await expect(runHostControlPostResponseEffects(result)).rejects.toThrow(cleanupError)
   })
 
   it('inherits the existing last-canvas rule instead of deleting its only Session', async () => {

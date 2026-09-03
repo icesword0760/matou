@@ -34,7 +34,10 @@ import {
   type HostImpactSummary,
   type HostResultPath
 } from './host-action-types'
-import { withHostControlPostResponseEffect } from './host-control-post-response'
+import {
+  markHostControlCommittedResult,
+  withHostControlPostResponseEffect
+} from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
 import {
   HierarchyApplicationService,
@@ -62,7 +65,8 @@ type HierarchyActions = Pick<HierarchyApplicationService,
   'createWorkspace' | 'createTask' | 'removeWorkspace' | 'deleteTask' | 'closeScene'>
 
 type SessionCanvasActions = Pick<SessionCanvasService,
-  'createCanvas' | 'createSessionSibling' | 'removeSessionBranch' | 'setFocusedSession'>
+  'createCanvas' | 'createSessionSibling' | 'removeSessionBranch' |
+  'restoreFocusedSessionIfCurrent'>
 
 type ForkWorkflowActions = Pick<ForkWorkflowService, 'createForkChild' | 'createForkSibling'>
 type ForkBatchActions = Pick<
@@ -138,26 +142,30 @@ export class RuntimeHostActionFacade {
       if (isStructuralMutation(request.method)) this.#assertWritable()
       switch (request.method) {
         case 'structure.create.workspace':
-          return await this.#createWorkspace(caller, request)
+          return markHostControlCommittedResult(await this.#createWorkspace(caller, request))
         case 'structure.create.task':
-          return this.#createTask(caller, request)
+          return markHostControlCommittedResult(this.#createTask(caller, request))
         case 'structure.create.canvas':
-          return this.#createCanvas(caller, request)
+          return markHostControlCommittedResult(this.#createCanvas(caller, request))
         case 'structure.create.session':
-          return this.#createSession(caller, request)
+          return markHostControlCommittedResult(this.#createSession(caller, request))
         case 'structure.fork.child':
         case 'structure.fork.sibling':
-          return await this.#forkOne(caller, request)
+          return markHostControlCommittedResult(await this.#forkOne(caller, request))
         case 'structure.fork.children':
-          return await this.#forkChildren(caller, request)
+          return markHostControlCommittedResult(await this.#forkChildren(caller, request))
         case 'structure.remove.preview':
           return this.#previewRemoval(caller, request)
         case 'structure.remove.commit':
-          return await this.#commitRemoval(caller, request.confirmationRef)
+          return markHostControlCommittedResult(
+            await this.#commitRemoval(caller, request.confirmationRef)
+          )
         case 'structure.canvas-close.preview':
           return this.#previewCanvasClose(caller, request)
         case 'structure.canvas-close.commit':
-          return await this.#commitCanvasClose(caller, request.confirmationRef)
+          return markHostControlCommittedResult(
+            await this.#commitCanvasClose(caller, request.confirmationRef)
+          )
         case 'navigation.focus.session':
         case 'navigation.switch.workspace':
         case 'navigation.switch.task':
@@ -293,14 +301,16 @@ export class RuntimeHostActionFacade {
     const source = requireEntity(this.#resolve(caller, request.source), 'session')
     this.#assertWorkspacePathAvailable(source.workspaceId)
     const environment = this.#resolver.resolveForkEnvironment(source, request.environment)
-    const restoreFocus = this.#forkFocusRestorer(caller, source)
-    let result: ForkWorkflowResult
+    const restoreFocus = this.#forkFocusRestorer(
+      caller, source, request.method === 'structure.fork.sibling'
+    )
+    let result!: ForkWorkflowResult
     try {
       result = await (request.method === 'structure.fork.child'
         ? this.#forkWorkflow.createForkChild(command, forkInput(source, request.title, environment, request.submissionKey, this.#now()))
         : this.#forkWorkflow.createForkSibling(command, forkInput(source, request.title, environment, request.submissionKey, this.#now())))
     } finally {
-      restoreFocus()
+      if (result?.session) restoreFocus(result.session.id, result.session.updatedAt)
     }
     const forked = this.#forkedResult(result, environment)
     if (request.start !== true) return forked
@@ -339,7 +349,9 @@ export class RuntimeHostActionFacade {
     const source = accepted?.source ?? this.#acceptedForkSource(stored)
     const environment = accepted?.items[0]?.environment ??
       this.#acceptedBatchEnvironment(source, request.environment)
-    const restoreFocus = this.#forkFocusRestorer(caller, source)
+    const restoreFocus = this.#forkFocusRestorer(
+      caller, source, request.method === 'structure.fork.sibling'
+    )
     // The workflow checks its durable submission intent before inspecting this
     // compatibility input. Re-entering it refreshes current Fork progress while
     // avoiding a fresh branch/Worktree reservation check for the accepted key.
@@ -355,13 +367,13 @@ export class RuntimeHostActionFacade {
       submissionKey: request.submissionKey,
       now: this.#now()
     }
-    let result: ForkWorkflowResult
+    let result!: ForkWorkflowResult
     try {
       result = await (request.method === 'structure.fork.child'
         ? this.#forkWorkflow.createForkChild(command, replayInput)
         : this.#forkWorkflow.createForkSibling(command, replayInput))
     } finally {
-      restoreFocus()
+      if (result?.session) restoreFocus(result.session.id, result.session.updatedAt)
     }
     const forked = this.#forkedResult(result, request.environment)
     if (request.start !== true) return forked
@@ -385,7 +397,7 @@ export class RuntimeHostActionFacade {
     environment: ResolvedForkEnvironment,
     result: ForkWorkflowResult,
     forked: Extract<HostActionResult, { kind: 'forked' }>,
-    restoreFocus: () => void
+    restoreFocus: (temporarySessionId: string, focusUpdatedAt?: number) => void
   ): Promise<HostActionResult> {
     const input: CoordinateAcceptedForkInput = {
       caller,
@@ -488,18 +500,14 @@ export class RuntimeHostActionFacade {
       publicRequest: { source: request.source, items: request.items },
       restoreFocus
     }
-    try {
-      if (request.retryItemKeys !== undefined) {
-        const retry: RetryForkBatchInput = {
-          ...input,
-          retryItemKeys: request.retryItemKeys
-        }
-        return await this.#forkBatches.retryFailures(retry)
+    if (request.retryItemKeys !== undefined) {
+      const retry: RetryForkBatchInput = {
+        ...input,
+        retryItemKeys: request.retryItemKeys
       }
-      return await this.#forkBatches.createChildren(input)
-    } finally {
-      restoreFocus()
+      return this.#forkBatches.retryFailures(retry)
     }
+    return this.#forkBatches.createChildren(input)
   }
 
   #previewRemoval(
@@ -596,7 +604,7 @@ export class RuntimeHostActionFacade {
       removedSessions,
       activePath: this.#hostPath(active)
     }
-    return this.#applySessionDisposals(caller, result, disposedSessionIds)
+    return this.#applySessionDisposals(result, disposedSessionIds)
   }
 
   async #commitCanvasClose(
@@ -621,7 +629,7 @@ export class RuntimeHostActionFacade {
       removedSessions: result.disposedSessionIds.length,
       activePath: this.#hostPath(result)
     }
-    return this.#applySessionDisposals(caller, response, result.disposedSessionIds)
+    return this.#applySessionDisposals(response, result.disposedSessionIds)
   }
 
   #revalidateConfirmation(
@@ -816,39 +824,47 @@ export class RuntimeHostActionFacade {
     return fallback.session_id
   }
 
-  #restoreFocus(target: ResolvedHostEntity & { kind: 'session' }): void {
-    this.#sessionCanvas.setFocusedSession({
-      windowId: target.windowId,
-      sceneId: target.sceneId,
-      sessionId: target.sessionId,
-      now: this.#now()
-    })
-  }
-
   #forkFocusRestorer(
     caller: HostCallerIdentity,
-    source: ResolvedHostEntity & { kind: 'session' }
-  ): () => void {
-    const callerFocus = this.#callerSession(caller)
-    const byWindow = new Map<string, ResolvedHostEntity & { kind: 'session' }>([
-      [callerFocus.windowId, callerFocus]
-    ])
-    if (!byWindow.has(source.windowId)) {
-      const current = readHierarchyResult(this.#database, source.windowId)
-      byWindow.set(source.windowId, current.workspace && current.task && current.scene && current.session
-        ? {
-            kind: 'session',
-            windowId: source.windowId,
-            workspaceId: current.workspace.id,
-            taskId: current.task.id,
-            sceneId: current.scene.id,
-            sessionId: current.session.id,
-            ...(current.mount === null ? {} : { mountId: current.mount.id })
+    source: ResolvedHostEntity & { kind: 'session' },
+    sourceMayBeTemporary = false
+  ): (temporarySessionId: string, focusUpdatedAt?: number) => void {
+    const callerWindowId = this.#callerSession(caller).windowId
+    const snapshots = [...new Set([callerWindowId, source.windowId])].flatMap((windowId) => {
+      const current = readHierarchyResult(this.#database, windowId)
+      return current.session === null || current.scene === null ? [] : [{
+        windowId,
+        sceneId: current.scene.id,
+        sessionId: current.session.id
+      }]
+    })
+    const handled = new Set<string>()
+    return (temporarySessionId, focusUpdatedAt) => {
+      if (handled.has(temporarySessionId)) return
+      handled.add(temporarySessionId)
+      for (const snapshot of snapshots) {
+        const expectedSessionIds = snapshot.windowId === source.windowId && sourceMayBeTemporary
+          ? [temporarySessionId, source.sessionId]
+          : [temporarySessionId]
+        for (const expectedSessionId of new Set(expectedSessionIds)) {
+          if (snapshot.sessionId === expectedSessionId) break
+          let restored = false
+          try {
+            restored = this.#sessionCanvas.restoreFocusedSessionIfCurrent({
+              windowId: snapshot.windowId,
+              sceneId: snapshot.sceneId,
+              sessionId: snapshot.sessionId,
+              expectedSessionId,
+              ...(focusUpdatedAt === undefined ? {} : { expectedFocusUpdatedAt: focusUpdatedAt }),
+              now: this.#now()
+            })
+          } catch {
+            // Focus restoration is a best-effort post-mutation CAS. The durable
+            // Fork result stays authoritative when its snapshot disappears.
           }
-        : source)
-    }
-    return () => {
-      for (const focus of byWindow.values()) this.#restoreFocus(focus)
+          if (restored) break
+        }
+      }
     }
   }
 
@@ -923,16 +939,12 @@ export class RuntimeHostActionFacade {
   }
 
   async #applySessionDisposals<T extends HostActionResult>(
-    caller: HostCallerIdentity,
     result: T,
     sessionIds: string[]
   ): Promise<T> {
     const unique = [...new Set(sessionIds)]
-    const immediate = unique.filter((sessionId) => sessionId !== caller.sessionId)
-    if (immediate.length > 0) await this.#disposeManagedSessions(immediate)
-    if (unique.includes(caller.sessionId)) {
-      withHostControlPostResponseEffect(result, () =>
-        this.#disposeManagedSessions([caller.sessionId]))
+    if (unique.length > 0) {
+      withHostControlPostResponseEffect(result, () => this.#disposeManagedSessions(unique))
     }
     return result
   }

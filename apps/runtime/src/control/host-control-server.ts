@@ -14,7 +14,7 @@ import {
   type HostTargetSelector
 } from './host-control-types'
 import {
-  hasHostControlPostResponseEffects,
+  isHostControlCommittedResult,
   runHostControlPostResponseEffects
 } from './host-control-post-response'
 
@@ -249,7 +249,7 @@ export class HostControlServer {
       result = await this.#dispatch(request.method, request.params, capability.caller)
       if (
         Date.now() > request.deadlineAt &&
-        !hasHostControlPostResponseEffects(result)
+        !isHostControlCommittedResult(result)
       ) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
       await this.#write(socket, { version: CONTROL_VERSION, requestId, ok: true, result })
     } catch (error) {

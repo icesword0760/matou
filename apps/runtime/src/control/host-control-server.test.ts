@@ -12,7 +12,10 @@ import {
   type HostControlBackend,
   type HostTarget
 } from './host-control-server'
-import { withHostControlPostResponseEffect } from './host-control-post-response'
+import {
+  markHostControlCommittedResult,
+  withHostControlPostResponseEffect
+} from './host-control-post-response'
 
 let root: string
 let socketPath: string
@@ -123,10 +126,10 @@ describe('HostControlServer', () => {
     let now: ReturnType<typeof vi.spyOn> | undefined
     backend.identify.mockImplementationOnce(async () => {
       now = vi.spyOn(Date, 'now').mockReturnValue(deadlineAt + 1)
-      return withHostControlPostResponseEffect(
+      return markHostControlCommittedResult(withHostControlPostResponseEffect(
         { kind: 'removed', targetRef: 'session:session-1' },
         disposed
-      ) as never
+      )) as never
     })
 
     try {
@@ -142,6 +145,56 @@ describe('HostControlServer', () => {
       await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
     } finally {
       now?.mockRestore()
+    }
+  })
+
+  it.each([
+    { label: 'create', result: { kind: 'created', entity: 'task' } },
+    { label: 'slow Fork batch', result: { kind: 'fork-batch', batchKey: 'slow-batch' } },
+    { label: 'non-caller removal', result: { kind: 'removed', targetRef: 'session:other' } }
+  ])('keeps a committed $label result across the post-dispatch deadline', async ({ label, result }) => {
+    const token = tokenService.issue(`run-${label}`, ['host.identify'], Date.now() + 5_000)
+    const deadlineAt = Date.now() + 1_000
+    let now: ReturnType<typeof vi.spyOn> | undefined
+    backend.identify.mockImplementationOnce(async () => {
+      await Promise.resolve()
+      now = vi.spyOn(Date, 'now').mockReturnValue(deadlineAt + 1)
+      return markHostControlCommittedResult({ ...result }) as never
+    })
+
+    try {
+      await expect(request(socketPath, {
+        version: 1, requestId: `committed-${label}`, token, method: 'host.identify',
+        params: {}, deadlineAt
+      })).resolves.toMatchObject({ ok: true, result })
+    } finally {
+      now?.mockRestore()
+    }
+  })
+
+  it('reports disposal failure after returning the committed structure result', async () => {
+    const token = tokenService.issue('run-cleanup-error', ['host.identify'], Date.now() + 1_000)
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    backend.identify.mockResolvedValueOnce(markHostControlCommittedResult(
+      withHostControlPostResponseEffect(
+        { kind: 'removed', targetRef: 'session:other' },
+        async () => { throw new Error('cleanup diagnostic') }
+      )
+    ) as never)
+
+    try {
+      await expect(request(
+        socketPath,
+        controlRequest('cleanup-error', token, 'host.identify', {})
+      )).resolves.toMatchObject({
+        ok: true,
+        result: { kind: 'removed', targetRef: 'session:other' }
+      })
+      await vi.waitFor(() => expect(diagnostic).toHaveBeenCalledWith(
+        '[host-control.post-response] cleanup diagnostic'
+      ))
+    } finally {
+      diagnostic.mockRestore()
     }
   })
 

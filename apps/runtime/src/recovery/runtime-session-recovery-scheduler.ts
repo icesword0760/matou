@@ -99,7 +99,6 @@ export class RuntimeSessionRecoveryScheduler {
     for (const sessionId of sessionIds) {
       const current = this.#jobs.get(sessionId)
       if (!current) continue
-      if (current.state === 'restoring' && current.recoveryAuthority !== 'fork') continue
       this.#jobs.delete(sessionId)
       changed = true
     }

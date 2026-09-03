@@ -143,6 +143,17 @@ interface ProviderRecoveryWaiter {
   reject(error: Error): void
 }
 
+interface TrackedProviderHookRegistration {
+  registration: ProviderHookRegistration
+  retirementTimer?: ReturnType<typeof setTimeout>
+}
+
+const PROVIDER_HOOK_RETIREMENT_GRACE_MS = 2_000
+const PROVIDER_HOOK_REGISTRATIONS = new WeakMap<
+  RuntimeSessionRegistry,
+  Map<string, Map<string, TrackedProviderHookRegistration>>
+>()
+
 // Resolving an interactive alias starts the user's login shell and may execute
 // a costly zsh configuration. Start it with the Runtime instead of making the
 // first Enter on `cc` pay that startup cost. The environment key keeps tests,
@@ -205,6 +216,10 @@ export class RuntimeServer {
   readonly #hudFileRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
   readonly #providerHooks: ProviderHookServer | undefined
+  readonly #providerHookRegistrations: Map<
+    string,
+    Map<string, TrackedProviderHookRegistration>
+  >
   readonly #providerResumeTimeoutMs: number
   readonly #forkProviderIdentityTimeoutMs: number
   #portClosed = false
@@ -299,6 +314,9 @@ export class RuntimeServer {
     )
     this.#control = control
     this.#sessions = sessions
+    this.#providerHookRegistrations = PROVIDER_HOOK_REGISTRATIONS.get(sessions) ??
+      new Map<string, Map<string, TrackedProviderHookRegistration>>()
+    PROVIDER_HOOK_REGISTRATIONS.set(sessions, this.#providerHookRegistrations)
     this.#execution = new SessionExecutionService(database, sessions, {
       startOrResume: (descriptor, authority, mode, attachView) => this.#spawn({
         ...descriptor,
@@ -474,9 +492,15 @@ export class RuntimeServer {
       server.#control ? [server.#control.tokens] : []))
     const recoveryCoordinators = new Set(peers.flatMap((server) =>
       server.#recoveryCoordinator ? [server.#recoveryCoordinator] : []))
+    const disposalErrors: unknown[] = []
     for (const recovery of recoveryCoordinators) recovery.cancel(unique)
     for (const sessionId of unique) {
       await this.#sessions.runExclusive(sessionId, async () => {
+        try {
+          await this.#disposeProviderHooks(sessionId)
+        } catch (error) {
+          disposalErrors.push(error)
+        }
         const session = this.#sessions.get(sessionId)
         const activeRuns = this.#database.all<{
           id: string
@@ -508,6 +532,9 @@ export class RuntimeServer {
         session.dispose({ notifyExit: false, reason: 'structure-removal' })
         await session.whenClosed()
       })
+    }
+    if (disposalErrors.length > 0) {
+      throw new AggregateError(disposalErrors, 'Session structure-removal cleanup failed')
     }
   }
 
@@ -1612,8 +1639,10 @@ export class RuntimeServer {
     }
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
+    let hookRunId: string | undefined
     try {
       const runId = forkAuthority?.runId ?? randomUUID()
+      hookRunId = runId
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
         : undefined
@@ -1683,6 +1712,7 @@ export class RuntimeServer {
           ...(forkAuthority === undefined ? {} : { forkAuthority }),
           ...(permissionMode === undefined ? {} : { permissionMode })
         })
+        this.#trackProviderHook(message.sessionId, runId, hookRegistration)
         if (providerSessionId !== undefined) {
           this.#providerLaunchRunIds.set(message.sessionId, runId)
         }
@@ -1793,10 +1823,10 @@ export class RuntimeServer {
           if (resumeFailure) {
             pendingResumeFailure = resumeFailure
             if (activeSession && forkLaunch) {
-              hookRegistration?.retire()
+              this.#retireProviderHook(message.sessionId, runId, hookRegistration)
               this.#beginForkFailure(message, activeSession, resumeFailure, forkAuthority)
             } else if (activeSession && resumeBinding) {
-              hookRegistration?.retire()
+              this.#retireProviderHook(message.sessionId, runId, hookRegistration)
               this.#parkResumeFailure(message, activeSession, resumeBinding.id, resumeFailure)
             }
           } else if (resumeMonitor?.isSettled) {
@@ -1814,7 +1844,7 @@ export class RuntimeServer {
           const providerIdentityConfirmed = exited.runId !== undefined &&
             this.#sessions.providerIdentityConfirmed(exited.runId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
-          hookRegistration?.retire()
+          this.#retireProviderHook(message.sessionId, runId, hookRegistration)
           // Structural disposal has already removed every peer attachment,
           // backend registration, capability, recovery job and Runtime map.
           if (exitReason === 'structure-removal') return false
@@ -2007,7 +2037,7 @@ export class RuntimeServer {
       }
     } catch (error) {
       this.#rejectProviderDerivedOutput(message.sessionId)
-      await hookRegistration?.dispose()
+      await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
       if (forkLaunch && !providerProcessStarted) {
         const reason = `Fork 会话进程启动失败：${errorMessage(error)}`
         await this.#presentForkFailure(message, reason, forkAuthority, attachView)
@@ -2565,6 +2595,86 @@ export class RuntimeServer {
     this.#attachedSessionIds.delete(sessionId)
     session.dispose()
     await session.whenClosed()
+  }
+
+  #trackProviderHook(
+    sessionId: string,
+    runId: string,
+    registration: ProviderHookRegistration
+  ): void {
+    const byRun = this.#providerHookRegistrations.get(sessionId) ??
+      new Map<string, TrackedProviderHookRegistration>()
+    const existing = byRun.get(runId)
+    if (existing && existing.registration !== registration) {
+      clearTimeout(existing.retirementTimer)
+      void existing.registration.dispose().catch((error) => {
+        console.error(`[provider-hook.dispose] ${errorMessage(error)}`)
+      })
+    }
+    byRun.set(runId, { registration })
+    this.#providerHookRegistrations.set(sessionId, byRun)
+  }
+
+  #retireProviderHook(
+    sessionId: string,
+    runId: string,
+    registration?: ProviderHookRegistration
+  ): void {
+    if (!registration) return
+    const tracked = this.#providerHookRegistrations.get(sessionId)?.get(runId)
+    if (!tracked || tracked.registration !== registration || tracked.retirementTimer) return
+    registration.retire(PROVIDER_HOOK_RETIREMENT_GRACE_MS)
+    const timer = setTimeout(() => {
+      void registration.dispose().catch((error) => {
+        console.error(`[provider-hook.dispose] ${errorMessage(error)}`)
+      }).finally(() => this.#forgetProviderHook(sessionId, runId, registration))
+    }, PROVIDER_HOOK_RETIREMENT_GRACE_MS)
+    timer.unref?.()
+    tracked.retirementTimer = timer
+  }
+
+  async #disposeProviderHook(
+    sessionId: string,
+    runId: string | undefined,
+    registration?: ProviderHookRegistration
+  ): Promise<void> {
+    if (!registration) return
+    if (runId !== undefined) {
+      const tracked = this.#providerHookRegistrations.get(sessionId)?.get(runId)
+      clearTimeout(tracked?.retirementTimer)
+    }
+    try {
+      await registration.dispose()
+    } finally {
+      if (runId !== undefined) this.#forgetProviderHook(sessionId, runId, registration)
+    }
+  }
+
+  async #disposeProviderHooks(sessionId: string): Promise<void> {
+    const byRun = this.#providerHookRegistrations.get(sessionId)
+    if (!byRun) return
+    this.#providerHookRegistrations.delete(sessionId)
+    const registrations = [...byRun.values()]
+    for (const tracked of registrations) clearTimeout(tracked.retirementTimer)
+    const settled = await Promise.allSettled(
+      registrations.map(({ registration }) => registration.dispose())
+    )
+    const errors = settled.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [])
+    if (errors.length > 0) throw new AggregateError(errors, 'Provider hook cleanup failed')
+  }
+
+  #forgetProviderHook(
+    sessionId: string,
+    runId: string,
+    registration: ProviderHookRegistration
+  ): void {
+    const byRun = this.#providerHookRegistrations.get(sessionId)
+    const tracked = byRun?.get(runId)
+    if (!byRun || !tracked || tracked.registration !== registration) return
+    clearTimeout(tracked.retirementTimer)
+    byRun.delete(runId)
+    if (byRun.size === 0) this.#providerHookRegistrations.delete(sessionId)
   }
 
   #clearStructurallyRemovedSession(sessionId: string, session?: PtySession): void {
