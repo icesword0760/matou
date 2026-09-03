@@ -839,7 +839,7 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
   {
     version: 18,
     name: 'shell-command-blocks',
-    acceptedChecksums: [
+    acceptedLegacyChecksums: [
       'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd'
     ],
     sql: `

@@ -28,6 +28,11 @@ export const RUNTIME_ERROR_CODES = [
   'SESSION_ENVIRONMENT_UNAVAILABLE',
   'FORK_ALREADY_RUNNING'
 ] as const
+export const RUNTIME_STARTUP_FAILURE_CODES = [
+  'MIGRATION_HISTORY_MISMATCH',
+  'DATABASE_SCHEMA_UNSUPPORTED',
+  'RUNTIME_INITIALIZATION_FAILED'
+] as const
 export const STORAGE_FAULT_CODES = [
   ...RUNTIME_ERROR_CODES,
   'STORAGE_WRITE_FAILED',
@@ -39,6 +44,7 @@ export type RuntimeRecoveryStage = (typeof RUNTIME_RECOVERY_STAGES)[number]
 export type RuntimeRecoveryFailureLayer = (typeof RUNTIME_RECOVERY_FAILURE_LAYERS)[number]
 export type RuntimeRecoveryCommandAction = (typeof RUNTIME_RECOVERY_COMMAND_ACTIONS)[number]
 export type RuntimeErrorCode = (typeof RUNTIME_ERROR_CODES)[number]
+export type RuntimeStartupFailureCode = (typeof RUNTIME_STARTUP_FAILURE_CODES)[number]
 export type StorageFaultCode = (typeof STORAGE_FAULT_CODES)[number]
 
 const identifier = z
@@ -81,6 +87,15 @@ export const runtimeLifecycleEventSchema = z.object({
 }).strict()
 
 export type RuntimeLifecycleEvent = z.infer<typeof runtimeLifecycleEventSchema>
+
+export const runtimeStartupFailureSchema = z.object({
+  type: z.literal('runtime.startup-failure'),
+  code: z.enum(RUNTIME_STARTUP_FAILURE_CODES),
+  message: z.string().min(1).max(4_096),
+  retryable: z.literal(false)
+}).strict()
+
+export type RuntimeStartupFailure = z.infer<typeof runtimeStartupFailureSchema>
 
 const recoveryCommandBase = {
   type: z.literal('runtime.recovery-command'),
@@ -140,6 +155,10 @@ export function parseRuntimeLifecycleEvent(
   const event = runtimeLifecycleEventSchema.parse(value)
   validateRuntimeRecoveryTransition(previous, event.snapshot)
   return event
+}
+
+export function parseRuntimeStartupFailure(value: unknown): RuntimeStartupFailure {
+  return runtimeStartupFailureSchema.parse(value)
 }
 
 export function parseRuntimeRecoveryCommand(value: unknown): RuntimeRecoveryCommand {

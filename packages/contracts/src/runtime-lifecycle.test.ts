@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   parseRuntimeLifecycleEvent,
+  parseRuntimeStartupFailure,
   type RuntimeRecoverySnapshot,
   validateRuntimeRecoveryTransition,
   parseRuntimeRecoveryCommand
@@ -118,5 +119,21 @@ describe('runtime lifecycle contract', () => {
       requestId: 'unknown-1',
       action: 'drop-database'
     })).toThrow(/action/)
+  })
+
+  it('accepts a bounded deterministic startup failure and rejects retryable lookalikes', () => {
+    expect(parseRuntimeStartupFailure({
+      type: 'runtime.startup-failure',
+      code: 'MIGRATION_HISTORY_MISMATCH',
+      message: '升级记录与当前版本不一致',
+      retryable: false
+    })).toMatchObject({ code: 'MIGRATION_HISTORY_MISMATCH', retryable: false })
+
+    expect(() => parseRuntimeStartupFailure({
+      type: 'runtime.startup-failure',
+      code: 'MIGRATION_HISTORY_MISMATCH',
+      message: '升级记录与当前版本不一致',
+      retryable: true
+    })).toThrow(/retryable/)
   })
 })

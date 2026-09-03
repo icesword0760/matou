@@ -7,7 +7,7 @@ export interface Migration {
   version: number
   name: string
   sql: string
-  acceptedChecksums?: readonly string[]
+  acceptedLegacyChecksums?: readonly string[]
 }
 
 export interface MigrationResult {
@@ -73,10 +73,14 @@ export class MigrationRunner {
       )
     }
 
+    const historyUpdates: Migration[] = []
     for (const stored of applied) {
       const migration = this.#migrations.find(({ version }) => version === stored.version)
       if (!migration || !acceptsChecksum(migration, stored.checksum)) {
         throw new Error(`checksum mismatch for applied migration ${stored.version}`)
+      }
+      if (stored.checksum !== contentChecksum(migration) || stored.name !== migration.name) {
+        historyUpdates.push(migration)
       }
     }
 
@@ -90,6 +94,18 @@ export class MigrationRunner {
     }
 
     this.#ensureHistoryTable()
+    if (historyUpdates.length > 0) {
+      this.#database.transaction((transaction) => {
+        for (const migration of historyUpdates) {
+          transaction.run(
+            'UPDATE schema_migrations SET name = ?, checksum = ? WHERE version = ?',
+            migration.name,
+            contentChecksum(migration),
+            migration.version
+          )
+        }
+      })
+    }
     const appliedVersions: number[] = []
     for (const migration of pending) {
       this.#database.transaction((transaction) => {
@@ -99,7 +115,7 @@ export class MigrationRunner {
           'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)',
           migration.version,
           migration.name,
-          checksum(migration),
+          contentChecksum(migration),
           Date.now()
         )
       })
@@ -126,15 +142,22 @@ export class MigrationRunner {
   }
 }
 
-function checksum(migration: Migration): string {
+function contentChecksum(migration: Migration): string {
+  return `v2:${createHash('sha256')
+    .update(`${migration.version}\0${migration.sql}`)
+    .digest('hex')}`
+}
+
+function legacyChecksum(migration: Migration): string {
   return createHash('sha256')
     .update(`${migration.version}\0${migration.name}\0${migration.sql}`)
     .digest('hex')
 }
 
 function acceptsChecksum(migration: Migration, storedChecksum: string): boolean {
-  return checksum(migration) === storedChecksum ||
-    migration.acceptedChecksums?.includes(storedChecksum) === true
+  if (storedChecksum.startsWith('v2:')) return contentChecksum(migration) === storedChecksum
+  return legacyChecksum(migration) === storedChecksum ||
+    migration.acceptedLegacyChecksums?.includes(storedChecksum) === true
 }
 
 function validateMigrationSequence(migrations: readonly Migration[]): void {

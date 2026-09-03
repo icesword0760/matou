@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -115,23 +116,53 @@ describe('MigrationRunner', () => {
       currentVersion: 28,
       backupPath: undefined
     })
+    expect(database.all<{ checksum: string }>(
+      'SELECT checksum FROM schema_migrations ORDER BY version'
+    ).every(({ checksum }) => /^v2:[a-f0-9]{64}$/.test(checksum))).toBe(true)
+  })
+
+  it('treats a migration name as editable metadata instead of executable identity', async () => {
+    const { database } = await createDatabase()
+    const original: Migration = {
+      version: 1,
+      name: 'initial-description',
+      sql: 'CREATE TABLE rename_safe (id TEXT PRIMARY KEY) STRICT;'
+    }
+    await new MigrationRunner(database, [original]).migrate()
+    const before = database.get<{ checksum: string }>(
+      'SELECT checksum FROM schema_migrations WHERE version = 1'
+    )!.checksum
+
+    await expect(new MigrationRunner(database, [{
+      ...original,
+      name: 'updated-description'
+    }]).migrate()).resolves.toMatchObject({ appliedVersions: [], currentVersion: 1 })
+
+    expect(database.get<{ name: string; checksum: string }>(
+      'SELECT name, checksum FROM schema_migrations WHERE version = 1'
+    )).toEqual({ name: 'updated-description', checksum: before })
   })
 
   it('upgrades a v23 database that records the original migration 18 checksum', async () => {
     const { database } = await createDatabase()
     await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 23)).migrate()
-    database.run(
-      `UPDATE schema_migrations
-       SET name = ?, checksum = ?
-       WHERE version = 18`,
+    for (const migration of FOUNDATION_MIGRATIONS.slice(0, 23)) {
+      database.run(
+        `UPDATE schema_migrations SET checksum = ? WHERE version = ?`,
+        legacyChecksum(migration), migration.version
+      )
+    }
+    database.run(`UPDATE schema_migrations SET name = ?, checksum = ? WHERE version = 18`,
       'historical-shell-command-blocks',
-      'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd'
-    )
+      'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd')
 
     await expect(new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()).resolves.toMatchObject({
       appliedVersions: [24, 25, 26, 27, 28],
       currentVersion: 28
     })
+    expect(database.all<{ checksum: string }>(
+      'SELECT checksum FROM schema_migrations ORDER BY version'
+    ).every(({ checksum }) => /^v2:[a-f0-9]{64}$/.test(checksum))).toBe(true)
   })
 
   it('maps legacy Fork states into durable v27 operation stages', async () => {
@@ -839,4 +870,10 @@ function durableLegacyRow(
     attempt: 2,
     lease_fence: 0
   }
+}
+
+function legacyChecksum(migration: Migration): string {
+  return createHash('sha256')
+    .update(`${migration.version}\0${migration.name}\0${migration.sql}`)
+    .digest('hex')
 }

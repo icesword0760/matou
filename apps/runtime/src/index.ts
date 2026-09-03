@@ -163,6 +163,18 @@ const runtimeReady = lifecycleCoordinator.startInitialization(initializeRuntime)
   lifecyclePublisher.ready(state.mode)
   return state
 })
+void runtimeReady.catch((error: unknown) => {
+  if (lifecycleCoordinator.shutdownRequested) return
+  const failure = deterministicStartupFailure(error)
+  if (failure) {
+    console.error('[runtime.initialization]', error)
+    parentPort.postMessage(failure)
+    return
+  }
+  console.error('[runtime.initialization]', error)
+  process.exitCode = 1
+  setImmediate(() => process.exit(1))
+})
 
 async function initializeRuntime(): Promise<RuntimeState> {
   let opened = await openRecoverableRuntimeDatabase(
@@ -667,6 +679,32 @@ async function startRecoveryJob(job: RecoveryJob): Promise<void> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function deterministicStartupFailure(error: unknown): {
+  type: 'runtime.startup-failure'
+  code: 'MIGRATION_HISTORY_MISMATCH' | 'DATABASE_SCHEMA_UNSUPPORTED'
+  message: string
+  retryable: false
+} | undefined {
+  const message = errorMessage(error)
+  if (/checksum mismatch for applied migration \d+/i.test(message)) {
+    return {
+      type: 'runtime.startup-failure',
+      code: 'MIGRATION_HISTORY_MISMATCH',
+      message: '工作区升级记录与当前版本不一致，原数据保持原样。',
+      retryable: false
+    }
+  }
+  if (/database schema version \d+ is newer than supported version \d+/i.test(message)) {
+    return {
+      type: 'runtime.startup-failure',
+      code: 'DATABASE_SCHEMA_UNSUPPORTED',
+      message: '工作区数据来自较新的 Matou 版本，请更新应用后重新检查。',
+      retryable: false
+    }
+  }
+  return undefined
 }
 
 function forkExecutionDescriptor(

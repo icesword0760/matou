@@ -119,6 +119,7 @@ const desktopApi: MatouDesktopApi = {
     ipcRenderer.invoke(DESKTOP_CHANNELS.retryDatabaseOpen, expectedRecoveryId),
   startWithEmptyDatabase: (expectedRecoveryId) =>
     ipcRenderer.invoke(DESKTOP_CHANNELS.startWithEmptyDatabase, expectedRecoveryId),
+  retryRuntimeStart: () => ipcRenderer.invoke(DESKTOP_CHANNELS.retryRuntimeStart),
   getAppUpdateState: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getAppUpdateState),
   checkForAppUpdates: () => ipcRenderer.invoke(DESKTOP_CHANNELS.checkForAppUpdates),
   downloadAppUpdate: () => ipcRenderer.invoke(DESKTOP_CHANNELS.downloadAppUpdate),

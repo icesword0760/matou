@@ -1,6 +1,7 @@
 import type {
   RuntimeRecoveryCommandAction,
-  RuntimeRecoverySnapshot
+  RuntimeRecoverySnapshot,
+  RuntimeStartupFailure
 } from '@matou/contracts'
 
 export interface MatouDesktopApi {
@@ -36,6 +37,7 @@ export interface MatouDesktopApi {
   exportDatabaseRecoveryBundle(): Promise<RuntimeRecoveryCommandResult>
   retryDatabaseOpen(expectedRecoveryId: string): Promise<RuntimeRecoveryCommandResult>
   startWithEmptyDatabase(expectedRecoveryId: string): Promise<RuntimeRecoveryCommandResult>
+  retryRuntimeStart(): Promise<void>
   getAppUpdateState(): Promise<AppUpdateState>
   checkForAppUpdates(): Promise<void>
   downloadAppUpdate(): Promise<void>
@@ -115,6 +117,7 @@ export interface RuntimeLifecyclePresentation {
   snapshot: RuntimeRecoverySnapshot
   recovery?: RuntimeRecoveryDetails
   operation?: RuntimeRecoveryOperation
+  startupFailure?: RuntimeStartupFailure
 }
 
 export interface RuntimeRecoveryCommandResult {
@@ -183,6 +186,7 @@ export const DESKTOP_CHANNELS = {
   exportDatabaseRecoveryBundle: 'matou:export-database-recovery-bundle',
   retryDatabaseOpen: 'matou:retry-database-open',
   startWithEmptyDatabase: 'matou:start-with-empty-database',
+  retryRuntimeStart: 'matou:retry-runtime-start',
   getAppUpdateState: 'matou:app-update:get-state',
   checkForAppUpdates: 'matou:app-update:check',
   downloadAppUpdate: 'matou:app-update:download',

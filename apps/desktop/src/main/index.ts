@@ -518,6 +518,7 @@ ipcMain.handle(DESKTOP_CHANNELS.startWithEmptyDatabase, (_event, expectedRecover
     type: 'runtime.recovery-command', requestId: randomUUID(), action: 'start-empty-database',
     expectedRecoveryId
   }))
+ipcMain.handle(DESKTOP_CHANNELS.retryRuntimeStart, () => runtimeHost?.retryStartup())
 ipcMain.handle(DESKTOP_CHANNELS.getAppUpdateState, () => updateManager?.state() ?? ({
   status: 'idle', currentVersion: app.getVersion()
 }))

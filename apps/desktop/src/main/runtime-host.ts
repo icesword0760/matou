@@ -6,9 +6,11 @@ import { dirname, join } from 'node:path'
 import {
   PROTOCOL_VERSION,
   parseRuntimeLifecycleEvent,
+  parseRuntimeStartupFailure,
   type RuntimeConnectRequest,
   type RuntimeLifecycleEvent,
-  type RuntimeRecoveryCommand
+  type RuntimeRecoveryCommand,
+  type RuntimeStartupFailure
 } from '@matou/contracts'
 import {
   DESKTOP_CHANNELS,
@@ -20,7 +22,7 @@ import {
 
 const RESTART_DELAYS = [100, 500, 1_000, 2_000, 5_000] as const
 
-type RuntimeChildMessage = RuntimeLifecycleEvent | {
+type RuntimeChildMessage = RuntimeLifecycleEvent | RuntimeStartupFailure | {
   type: 'runtime.recovery-details'
   recovery: RuntimeRecoveryDetails
 } | {
@@ -97,6 +99,7 @@ export class RuntimeHost {
   #child: UtilityProcess | undefined
   #restartTimer: ReturnType<typeof setTimeout> | undefined
   #restartAttempt = 0
+  #startupBlocked = false
   #stopping = false
   #stopPromise: Promise<void> | undefined
   #connectionState: RuntimeConnectionState = 'reconnecting'
@@ -131,6 +134,21 @@ export class RuntimeHost {
 
   getLifecycle(): RuntimeLifecyclePresentation {
     return this.#lifecycle
+  }
+
+  async retryStartup(): Promise<void> {
+    if (!this.#startupBlocked) return
+    const child = this.#child
+    if (child) {
+      await new Promise<void>((resolve) => {
+        child.once('exit', () => resolve())
+        child.kill()
+      })
+    }
+    this.#startupBlocked = false
+    this.#restartAttempt = 0
+    this.#markReconnecting()
+    await this.#launch()
   }
 
   recover(command: RuntimeRecoveryCommand): Promise<RuntimeRecoveryCommandResult> {
@@ -204,7 +222,7 @@ export class RuntimeHost {
           true
         )
         this.#rejectScaleMetrics(new Error('Runtime exited during scale measurement'))
-        if (!this.#stopping) {
+        if (!this.#stopping && !this.#startupBlocked) {
           this.#markReconnecting()
           this.#scheduleRestart()
         }
@@ -265,17 +283,35 @@ export class RuntimeHost {
         return
       }
       if (event.snapshot.mode !== 'recovery-required' && event.snapshot.stage === 'ready') {
-        const { recovery: _recovery, operation: _operation, ...current } = this.#lifecycle
+        const {
+          recovery: _recovery,
+          operation: _operation,
+          startupFailure: _startupFailure,
+          ...current
+        } = this.#lifecycle
         this.#lifecycle = { ...current, snapshot: event.snapshot }
       } else {
         this.#lifecycle = { ...this.#lifecycle, snapshot: event.snapshot }
       }
       this.#publishLifecycle()
       if (event.snapshot.stage === 'ready') {
+        this.#startupBlocked = false
         this.#restartAttempt = 0
         this.#setConnectionState('ready')
         for (const renderer of this.#liveRenderers()) this.#connectRenderer(renderer)
       }
+      return
+    }
+    if (candidate.type === 'runtime.startup-failure') {
+      let failure: RuntimeStartupFailure
+      try {
+        failure = parseRuntimeStartupFailure(candidate)
+      } catch {
+        return
+      }
+      this.#startupBlocked = true
+      this.#lifecycle = { ...this.#lifecycle, startupFailure: failure }
+      this.#publishLifecycle()
       return
     }
     if (candidate.type === 'runtime.recovery-details') {
@@ -350,8 +386,9 @@ export class RuntimeHost {
 
   #markReconnecting(): void {
     this.#setConnectionState('reconnecting')
+    const { startupFailure: _startupFailure, ...current } = this.#lifecycle
     this.#lifecycle = {
-      ...this.#lifecycle,
+      ...current,
       snapshot: {
         recoveryId: `desktop-${randomUUID()}`,
         revision: 0,

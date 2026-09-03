@@ -232,6 +232,46 @@ describe('RuntimeHost', () => {
     expect(electron.children).toHaveLength(delays.length + 2)
   })
 
+  it('stops automatic retries for a deterministic startup failure and permits an explicit retry', async () => {
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const first = electron.children[0] as MockUtilityProcess
+    first.emit('spawn')
+    await starting
+    const renderer = new MockWebContents()
+    host.connect(renderer as never)
+
+    first.emit('message', {
+      type: 'runtime.startup-failure',
+      code: 'MIGRATION_HISTORY_MISMATCH',
+      message: '升级记录与当前版本不一致',
+      retryable: false
+    })
+    first.emit('exit', 1)
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(electron.children).toHaveLength(1)
+    expect(host.getLifecycle()).toMatchObject({
+      startupFailure: {
+        code: 'MIGRATION_HISTORY_MISMATCH',
+        message: '升级记录与当前版本不一致'
+      }
+    })
+    expect(renderer.signals).toContainEqual([
+      'matou:runtime-lifecycle',
+      expect.objectContaining({ startupFailure: expect.any(Object) })
+    ])
+
+    const retrying = host.retryStartup()
+    const second = electron.children[1] as MockUtilityProcess
+    second.emit('spawn')
+    await retrying
+    second.emit('message', ready)
+
+    expect(host.getLifecycle().startupFailure).toBeUndefined()
+    expect(host.getLifecycle().snapshot.stage).toBe('ready')
+  })
+
   it('correlates recovery commands and keeps an error available to the recovery page', async () => {
     const host = new RuntimeHost('/runtime/index.cjs')
     const starting = host.start()

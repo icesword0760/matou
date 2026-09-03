@@ -32,11 +32,18 @@ export function App() {
 
   if (lifecycle?.snapshot.stage === 'ready') lastReadyLifecycle.current = lifecycle
   const presentedLifecycle = lifecycle?.snapshot.stage !== 'ready' &&
-    lifecycle?.snapshot.mode === 'normal' && !lifecycle.recovery && lastReadyLifecycle.current
+    lifecycle?.snapshot.mode === 'normal' && !lifecycle.recovery &&
+    !lifecycle.startupFailure && lastReadyLifecycle.current
     ? lastReadyLifecycle.current
     : lifecycle
 
   if (!presentedLifecycle || presentedLifecycle.snapshot.stage !== 'ready') {
+    if (presentedLifecycle?.startupFailure) {
+      return <RuntimeStartupFailurePage
+        state={presentedLifecycle}
+        retry={() => window.matouDesktop.retryRuntimeStart()}
+      />
+    }
     if (presentedLifecycle?.recovery || presentedLifecycle?.snapshot.mode === 'recovery-required') {
       return <DatabaseRecoveryPage state={presentedLifecycle} actions={{
         restore: (backupId, expectedRecoveryId) =>
@@ -72,4 +79,37 @@ export function App() {
       <output data-testid="replay-marker">{replayMarker}</output>
     </div>}
   </>
+}
+
+function RuntimeStartupFailurePage({ state, retry }: {
+  state: RuntimeLifecyclePresentation
+  retry(): Promise<void>
+}) {
+  const [pending, setPending] = useState(false)
+  const [retryError, setRetryError] = useState('')
+  const failure = state.startupFailure!
+  const title = failure.code === 'DATABASE_SCHEMA_UNSUPPORTED'
+    ? '需要更新 Matou'
+    : '工作区升级未完成'
+  return <main className="database-recovery-page" aria-labelledby="runtime-startup-failure-title">
+    <section className="database-recovery-card">
+      <header>
+        <p className="database-recovery-eyebrow">Matou 启动检查</p>
+        <h1 id="runtime-startup-failure-title">{title}</h1>
+        <p>Matou 已停止重复启动，原数据保持原样。</p>
+      </header>
+      <p role="alert" className="database-recovery-error">{failure.message}</p>
+      {retryError && <p role="alert" className="database-recovery-error">{retryError}</p>}
+      <div className="database-recovery-primary-actions">
+        <button className="primary" disabled={pending} onClick={() => {
+          if (pending) return
+          setPending(true)
+          setRetryError('')
+          void retry().catch((error: unknown) => {
+            setRetryError(error instanceof Error ? error.message : String(error))
+          }).finally(() => setPending(false))
+        }}>{pending ? '正在检查…' : '重新检查'}</button>
+      </div>
+    </section>
+  </main>
 }

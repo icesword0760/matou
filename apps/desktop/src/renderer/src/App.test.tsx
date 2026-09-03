@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { RuntimeLifecyclePresentation } from '../../shared/desktop-api'
@@ -132,6 +133,19 @@ describe('App database lifecycle gate', () => {
     expect(screen.queryByText('正在打开工作区…')).toBeNull()
     expect(screen.queryByTestId('workspace')).toBeNull()
   })
+
+  it('shows a stable startup failure instead of an endless opening screen and retries on request', async () => {
+    installApi(startupFailureState())
+    const retry = vi.mocked(window.matouDesktop.retryRuntimeStart)
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '工作区升级未完成' })).toBeTruthy()
+    expect(screen.getByText(/原数据保持原样/)).toBeTruthy()
+    expect(screen.queryByText('正在打开工作区…')).toBeNull()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '重新检查' }))
+    expect(retry).toHaveBeenCalledOnce()
+  })
 })
 
 function installApi(initial: RuntimeLifecyclePresentation): void {
@@ -143,7 +157,8 @@ function installApi(initial: RuntimeLifecyclePresentation): void {
       restoreDatabaseBackup: vi.fn(),
       exportDatabaseRecoveryBundle: vi.fn(),
       retryDatabaseOpen: vi.fn(),
-      startWithEmptyDatabase: vi.fn()
+      startWithEmptyDatabase: vi.fn(),
+      retryRuntimeStart: vi.fn().mockResolvedValue(undefined)
     }
   })
 }
@@ -163,7 +178,8 @@ function installDynamicApi(initial: RuntimeLifecyclePresentation): {
       restoreDatabaseBackup: vi.fn(),
       exportDatabaseRecoveryBundle: vi.fn(),
       retryDatabaseOpen: vi.fn(),
-      startWithEmptyDatabase: vi.fn()
+      startWithEmptyDatabase: vi.fn(),
+      retryRuntimeStart: vi.fn().mockResolvedValue(undefined)
     }
   })
   return { publish: (value) => listener?.(value) }
@@ -188,6 +204,21 @@ function recoveryState(): RuntimeLifecyclePresentation {
       recoveryId: 'durable-recovery-app',
       reason: 'physical-corruption', durableDatabasePath: '/data/matou.sqlite',
       quarantinedPath: '/data/matou.sqlite.corrupt-1', backups: []
+    }
+  }
+}
+
+function startupFailureState(): RuntimeLifecyclePresentation {
+  return {
+    snapshot: {
+      recoveryId: 'startup-failure-app', revision: 1, mode: 'normal',
+      stage: 'opening-database', completed: 0, total: 1, failures: []
+    },
+    startupFailure: {
+      type: 'runtime.startup-failure',
+      code: 'MIGRATION_HISTORY_MISMATCH',
+      message: '升级记录与当前版本不一致',
+      retryable: false
     }
   }
 }
