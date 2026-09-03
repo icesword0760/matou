@@ -36,7 +36,8 @@ const state = vi.hoisted(() => ({
   searchTerminalHistory: vi.fn(),
   historyAroundTerminalCursor: vi.fn(),
   acknowledgeTerminal: vi.fn(),
-  requestTerminalReplay: vi.fn()
+  requestTerminalReplay: vi.fn(),
+  terminalViewportLines: ['observed terminal buffer'] as string[]
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -47,8 +48,11 @@ vi.mock('@xterm/xterm', () => ({
     rows = 24
     buffer = {
       active: {
-        length: 1,
-        getLine: () => ({ translateToString: () => 'observed terminal buffer' })
+        get length() { return state.terminalViewportLines.length },
+        viewportY: 0,
+        getLine: (index: number) => ({
+          translateToString: () => state.terminalViewportLines[index] ?? ''
+        })
       }
     }
     parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
@@ -157,6 +161,7 @@ describe('TerminalSurface focus continuity', () => {
     })
     state.acknowledgeTerminal.mockClear()
     state.requestTerminalReplay.mockClear()
+    state.terminalViewportLines = ['observed terminal buffer']
     vi.stubGlobal('ResizeObserver', class {
       constructor(callback: ResizeObserverCallback) { state.resizeObserverCallback = callback }
       observe() {}
@@ -188,7 +193,7 @@ describe('TerminalSurface focus continuity', () => {
 
     state.onMessage?.({
       type: 'terminal.spawned', sessionId: 'session-1', pid: 456,
-      reattached: true, replayFromSequence: 1
+      reattached: false
     })
     expect(onVisualReady).not.toHaveBeenCalled()
 
@@ -205,6 +210,54 @@ describe('TerminalSurface focus continuity', () => {
       type: 'terminal.data', sessionId: 'session-1', sequence: 2,
       data: new TextEncoder().encode('next frame')
     })
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps recovery visible when xterm renders a blank control-sequence frame', async () => {
+    const onVisualReady = vi.fn()
+    state.terminalViewportLines = ['   ', '']
+    render(<TerminalSurface sessionId="session-blank-frame" active visible
+      profile="claude-code" onVisualReady={onVisualReady} />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-blank-frame', sequence: 1,
+      data: new TextEncoder().encode('\u001b[2J\u001b[H')
+    })
+    state.onRender?.({ start: 0, end: 1 })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    state.terminalViewportLines = ['Claude Code']
+    state.onRender?.({ start: 0, end: 1 })
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps recovery visible through replay intermediate frames until replay completes', async () => {
+    const onVisualReady = vi.fn()
+    render(<TerminalSurface sessionId="session-replay-ready" active visible
+      profile="claude-code" onVisualReady={onVisualReady} />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({
+      type: 'terminal.spawned', sessionId: 'session-replay-ready', pid: 456,
+      reattached: true, replayFromSequence: 1
+    })
+    state.onMessage?.({
+      type: 'terminal.replay-start', sessionId: 'session-replay-ready', source: 'tail',
+      fromSequence: 1, throughSequence: 2, instantLineLimit: 10_000,
+      availableFromSequence: 1, liveSequence: 2
+    })
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-replay-ready', sequence: 1,
+      data: new TextEncoder().encode('partial replay')
+    })
+    state.onRender?.({ start: 0, end: 1 })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    state.onMessage?.({
+      type: 'terminal.replay-complete', sessionId: 'session-replay-ready', throughSequence: 2
+    })
+    state.onRender?.({ start: 0, end: 1 })
     expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 

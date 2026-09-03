@@ -435,6 +435,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let surfaceDisposed = false
     let visualReadyReported = false
     let terminalContentApplied = false
+    let visualReplayPending = false
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
     const reportVisualReady = () => {
@@ -445,7 +446,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       })
     }
     const rendered = terminal.onRender(() => {
-      if (terminalContentApplied) reportVisualReady()
+      if (
+        terminalContentApplied && !visualReplayPending &&
+        terminalViewportHasContent(terminal)
+      ) reportVisualReady()
     })
     const awaitRenderedTerminalFrame = () => {
       terminalContentApplied = true
@@ -559,6 +563,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           message, reusedTerminalModel, profileRef.current, model.lastAppliedSequence
         )
         if (replayFromSequence !== undefined && !replayRequested) {
+          visualReplayPending = true
           if (visibleRef.current) {
             preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
             replayRequested = true
@@ -574,6 +579,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         if (replayProbe) {
           onSmokeMarker(SMOKE_MARKER)
           if (!replayRequested) {
+            visualReplayPending = true
             replayRequested = true
             client.requestTerminalReplay(sessionId)
           }
@@ -621,6 +627,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // the visual replay state as well; otherwise every later live frame is
         // acknowledged but intentionally withheld from xterm forever.
         replaying = false
+        visualReplayPending = false
         visualCatchupPending = false
         visualCatchupRequested = false
         preserveExistingModelForReplay = false
@@ -640,6 +647,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-start') {
         clearCheckpointTimer()
         replaying = true
+        visualReplayPending = true
+        terminalContentApplied = false
         visualCatchupPending = false
         const preservingExistingModel = preserveExistingModelForReplay && !message.checkpoint
         if (!preservingExistingModel) {
@@ -678,6 +687,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-complete') {
         terminal.write('', () => {
           replaying = false
+          visualReplayPending = false
           visualCatchupRequested = false
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.throughSequence)
           fit.fit()
@@ -687,6 +697,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           }
           scheduleCheckpoint(0)
           onReplayComplete(`replayed-through:${message.throughSequence}`)
+          awaitRenderedTerminalFrame()
           scheduleE2eRows()
         })
       }
@@ -1085,6 +1096,16 @@ function serializeCheckpoint(serialize: SerializeAddon): string | undefined {
 
 function validTerminalDimensions(cols: number, rows: number): boolean {
   return cols >= 2 && cols <= 1000 && rows >= 1 && rows <= 500
+}
+
+function terminalViewportHasContent(terminal: Terminal): boolean {
+  const buffer = terminal.buffer.active
+  const firstLine = Math.max(0, buffer.viewportY)
+  const lastLine = Math.min(buffer.length, firstLine + Math.max(1, terminal.rows))
+  for (let index = firstLine; index < lastLine; index += 1) {
+    if (/\S/u.test(buffer.getLine(index)?.translateToString(true) ?? '')) return true
+  }
+  return false
 }
 
 function isTerminalFileDrop(dataTransfer: DataTransfer): boolean {
