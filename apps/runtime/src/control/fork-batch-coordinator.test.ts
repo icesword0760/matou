@@ -493,6 +493,220 @@ describe('ForkBatchCoordinator', () => {
     ])
   })
 
+  it('settles an interrupted multi-item retry when one accepted item fails before replay', async () => {
+    const real = await realForkFixture()
+    const createChild = vi.fn<CreateChild>(
+      (createCommand, createInput) => real.workflow.createForkChild(createCommand, createInput)
+    )
+    const initialRetry = vi.fn<RetryChild>(
+      (retryCommand, retryInput) => real.workflow.retryFork(retryCommand, retryInput)
+    )
+    const dependencies = {
+      database,
+      createChild,
+      retryChild: initialRetry,
+      startSession: vi.fn(async () => undefined),
+      waitUntilReady: vi.fn(async () => undefined),
+      sendPrompt: vi.fn(async () => undefined),
+      now: () => 123
+    }
+    const input: CreateForkBatchInput = {
+      ...realBatchInput(real.source, {
+        itemKey: 'A', title: '组合重试 A', environment: real.environment
+      }, 'retry-fails-before-replay'),
+      items: [{
+        itemKey: 'A', title: '组合重试 A', environment: real.environment
+      }, {
+        itemKey: 'B', title: '组合重试 B', environment: real.environment
+      }]
+    }
+    const initial = await new ForkBatchCoordinator(dependencies).createChildren(input)
+    const sessionB = initial.items[1]!.sessionRef!.slice('session:'.length)
+    const intents = new SessionForkIntentRepository(database)
+    failForkIntent(intents, input.batchKey, 'A', 'initial-failure-A', 124, 'failure A')
+    failForkIntent(intents, input.batchKey, 'B', 'initial-failure-B', 124, 'failure B')
+
+    const neverReturns = new Promise<ForkWorkflowResult>(() => undefined)
+    const acceptedWithoutReceipt = vi.fn<RetryChild>(async (retryCommand, retryInput) => {
+      const accepted = await real.workflow.retryFork(retryCommand, retryInput)
+      return retryInput.sessionId === sessionB ? neverReturns : accepted
+    })
+    const interrupted = new ForkBatchCoordinator({
+      ...dependencies, retryChild: acceptedWithoutReceipt
+    }).retryFailures({ ...input, retryItemKeys: ['A', 'B'] })
+    void interrupted.catch(() => undefined)
+    await vi.waitFor(() => expect(acceptedWithoutReceipt).toHaveBeenCalledTimes(2))
+    expect(database.all(
+      `SELECT retry.item_key, retry.state
+       FROM fork_batch_retry_items AS retry
+       JOIN fork_batch_retry_attempts AS attempt ON attempt.attempt_id = retry.attempt_id
+       WHERE attempt.batch_key = ? ORDER BY retry.ordinal`,
+      input.batchKey
+    )).toEqual([
+      { item_key: 'A', state: 'completed' },
+      { item_key: 'B', state: 'executing' }
+    ])
+    failForkIntent(
+      intents, input.batchKey, 'B', 'accepted-failure-B', 130, 'accepted retry B failed'
+    )
+
+    await restartDatabase()
+    const restartedWorkflow = new ForkWorkflowService(
+      dataRoot,
+      database,
+      new DomainTransactionManager(database),
+      { stopRuns: async () => undefined }
+    )
+    const restartedCreate = vi.fn<CreateChild>(
+      (createCommand, createInput) => restartedWorkflow.createForkChild(createCommand, createInput)
+    )
+    const restartedRetry = vi.fn<RetryChild>(
+      (retryCommand, retryInput) => restartedWorkflow.retryFork(retryCommand, retryInput)
+    )
+    const restartedDependencies = {
+      ...dependencies,
+      database,
+      createChild: restartedCreate,
+      retryChild: restartedRetry,
+      now: () => 140
+    }
+    const replay = await new ForkBatchCoordinator(restartedDependencies).retryFailures({
+      ...input,
+      caller: { ...input.caller, runId: 'replay-original-multi-retry' },
+      retryItemKeys: ['A', 'B']
+    })
+
+    expect(replay.items.map(({ itemKey, state }) => [itemKey, state])).toEqual([
+      ['A', 'created'], ['B', 'failed']
+    ])
+    expect(restartedCreate).not.toHaveBeenCalled()
+    expect(restartedRetry).not.toHaveBeenCalled()
+    expect(restartedDependencies.startSession).not.toHaveBeenCalled()
+    expect(restartedDependencies.sendPrompt).not.toHaveBeenCalled()
+    expect(database.all(
+      `SELECT retry.item_key, retry.state, retry.failure_generation,
+              retry.result_failure_generation
+       FROM fork_batch_retry_items AS retry
+       JOIN fork_batch_retry_attempts AS attempt ON attempt.attempt_id = retry.attempt_id
+       WHERE attempt.batch_key = ? ORDER BY retry.ordinal`,
+      input.batchKey
+    )).toEqual([
+      {
+        item_key: 'A', state: 'completed', failure_generation: 1,
+        result_failure_generation: null
+      },
+      {
+        item_key: 'B', state: 'failed', failure_generation: 1,
+        result_failure_generation: 2
+      }
+    ])
+    expect(database.get(
+      `SELECT state, replay_pending FROM fork_batch_retry_attempts
+       WHERE batch_key = ? AND retry_keys_json = '["A","B"]'`,
+      input.batchKey
+    )).toEqual({ state: 'completed', replay_pending: 0 })
+
+    const nextGeneration = await new ForkBatchCoordinator(restartedDependencies).retryFailures({
+      ...input,
+      caller: { ...input.caller, runId: 'retry-next-B-generation' },
+      retryItemKeys: ['B']
+    })
+
+    expect(restartedRetry).toHaveBeenCalledTimes(1)
+    expect(restartedRetry.mock.calls[0]![1].sessionId).toBe(sessionB)
+    expect(nextGeneration.items[1]).toMatchObject({
+      itemKey: 'B', state: 'created', sessionRef: `session:${sessionB}`
+    })
+  })
+
+  it('consumes an interrupted single-item replay before authorizing its next failure generation', async () => {
+    const real = await realForkFixture()
+    const createChild = vi.fn<CreateChild>(
+      (createCommand, createInput) => real.workflow.createForkChild(createCommand, createInput)
+    )
+    const dependencies = {
+      database,
+      createChild,
+      retryChild: vi.fn<RetryChild>(
+        (retryCommand, retryInput) => real.workflow.retryFork(retryCommand, retryInput)
+      ),
+      startSession: vi.fn(async () => undefined),
+      waitUntilReady: vi.fn(async () => undefined),
+      sendPrompt: vi.fn(async () => undefined),
+      now: () => 123
+    }
+    const input = realBatchInput(real.source, {
+      itemKey: 'single', title: '单项重试', environment: real.environment
+    }, 'single-retry-fails-before-replay')
+    const initial = await new ForkBatchCoordinator(dependencies).createChildren(input)
+    const sessionId = initial.items[0]!.sessionRef!.slice('session:'.length)
+    const intents = new SessionForkIntentRepository(database)
+    failForkIntent(intents, input.batchKey, 'single', 'initial-single-failure', 124, 'failure one')
+
+    const neverReturns = new Promise<ForkWorkflowResult>(() => undefined)
+    const acceptedWithoutReceipt = vi.fn<RetryChild>(async (retryCommand, retryInput) => {
+      await real.workflow.retryFork(retryCommand, retryInput)
+      return neverReturns
+    })
+    const interrupted = new ForkBatchCoordinator({
+      ...dependencies, retryChild: acceptedWithoutReceipt
+    }).retryFailures({ ...input, retryItemKeys: ['single'] })
+    void interrupted.catch(() => undefined)
+    await vi.waitFor(() => expect(acceptedWithoutReceipt).toHaveBeenCalledTimes(1))
+    failForkIntent(
+      intents, input.batchKey, 'single', 'accepted-single-failure', 130, 'failure two'
+    )
+
+    await restartDatabase()
+    const restartedWorkflow = new ForkWorkflowService(
+      dataRoot,
+      database,
+      new DomainTransactionManager(database),
+      { stopRuns: async () => undefined }
+    )
+    const restartedRetry = vi.fn<RetryChild>(
+      (retryCommand, retryInput) => restartedWorkflow.retryFork(retryCommand, retryInput)
+    )
+    const restartedDependencies = {
+      ...dependencies, database, retryChild: restartedRetry, now: () => 140
+    }
+
+    const replay = await new ForkBatchCoordinator(restartedDependencies).retryFailures({
+      ...input,
+      caller: { ...input.caller, runId: 'replay-original-single-retry' },
+      retryItemKeys: ['single']
+    })
+    expect(replay.items[0]).toMatchObject({
+      itemKey: 'single', state: 'failed', sessionRef: `session:${sessionId}`
+    })
+    expect(restartedRetry).not.toHaveBeenCalled()
+    expect(database.get(
+      `SELECT retry.state, retry.failure_generation, retry.result_failure_generation,
+              attempt.state AS attempt_state, attempt.replay_pending
+       FROM fork_batch_retry_items AS retry
+       JOIN fork_batch_retry_attempts AS attempt ON attempt.attempt_id = retry.attempt_id
+       WHERE attempt.batch_key = ? AND retry.item_key = ?`,
+      input.batchKey, 'single'
+    )).toEqual({
+      state: 'failed', failure_generation: 1, result_failure_generation: 2,
+      attempt_state: 'completed', replay_pending: 0
+    })
+
+    const nextGeneration = await new ForkBatchCoordinator(restartedDependencies).retryFailures({
+      ...input,
+      caller: { ...input.caller, runId: 'retry-next-single-generation' },
+      retryItemKeys: ['single']
+    })
+    expect(restartedRetry).toHaveBeenCalledTimes(1)
+    expect(nextGeneration.items[0]).toMatchObject({
+      itemKey: 'single', state: 'created', sessionRef: `session:${sessionId}`
+    })
+    expect(database.get<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM fork_batch_retry_attempts WHERE batch_key = ?',
+      input.batchKey
+    )).toEqual({ count: 2 })
+  })
+
   it('refreshes an asynchronously failed durable Fork and retries its existing Session after restart', async () => {
     const real = await realForkFixture()
     const createChild = vi.fn<CreateChild>((command, input) => real.workflow.createForkChild(command, input))
@@ -992,4 +1206,25 @@ function command(commandId: string): DomainCommandMetadata {
 
 function itemKey(batchKey: string, key: string): string {
   return createHash('sha256').update(`${batchKey}:${key}`).digest('hex')
+}
+
+function failForkIntent(
+  intents: SessionForkIntentRepository,
+  batchKey: string,
+  key: string,
+  owner: string,
+  now: number,
+  error: string
+): void {
+  const operation = intents.findBySubmissionKey(itemKey(batchKey, key))!
+  const lease = intents.acquireLease({
+    operationId: operation.identity.operationId, owner, now, ttlMs: 1_000
+  })
+  if (lease.kind !== 'acquired') throw new Error('test Fork lease was not acquired')
+  expect(intents.failOperation({
+    operationId: operation.identity.operationId,
+    lease: lease.lease,
+    error,
+    now: now + 1
+  }).kind).toBe('applied')
 }

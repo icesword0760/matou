@@ -85,6 +85,7 @@ interface RetryAttemptRow {
   retry_keys_json: string
   failure_generations_json: string
   state: 'pending' | 'completed'
+  replay_pending: 0 | 1
 }
 
 interface RetryAttemptItemRow {
@@ -222,14 +223,14 @@ export class ForkBatchCoordinator {
         `重试 ${attempt.attempt_id} 缺少项目 ${item.itemKey}`
       )
       if (attemptItem.state === 'completed' || attemptItem.state === 'failed') continue
-      let row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+      let row = this.#refreshItem(input.batchKey, item)
       if (row.failure_generation !== attemptItem.failure_generation) {
         this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'failed', row)
         continue
       }
       if (row.state !== 'failed') {
         if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
-        row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+        row = this.#refreshItem(input.batchKey, item)
         this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'completed', row)
         continue
       }
@@ -241,7 +242,7 @@ export class ForkBatchCoordinator {
       const intent = this.#intent(row.submission_key)
       if (intent) {
         if (intent.stage !== 'failed') {
-          row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+          row = this.#refreshItem(input.batchKey, item)
         } else {
           row = await this.#retryExistingItem(
             input, item, row, intent.session_id, attempt.attempt_id
@@ -252,12 +253,11 @@ export class ForkBatchCoordinator {
           throw new Error(`项目 ${item.itemKey} 的失败 Fork 记录缺失`)
         }
         row = await this.#createItem(
-          input, item, `retry-create:${attempt.attempt_id}:${item.itemKey}`,
-          attempt.attempt_id
+          input, item, `retry-create:${attempt.attempt_id}:${item.itemKey}`
         )
       }
       if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
-      row = this.#refreshItem(input.batchKey, item, attempt.attempt_id)
+      row = this.#refreshItem(input.batchKey, item)
       this.#recordRetryItem(
         attempt.attempt_id,
         item.itemKey,
@@ -273,8 +273,7 @@ export class ForkBatchCoordinator {
   async #createItem(
     input: CreateForkBatchInput,
     item: ResolvedForkItemInput,
-    failureReceipt: string,
-    retryAttemptId?: string
+    failureReceipt: string
   ): Promise<BatchItemRow> {
     const submissionKey = itemSubmissionKey(input.batchKey, item.itemKey)
     try {
@@ -291,7 +290,7 @@ export class ForkBatchCoordinator {
         }
       )
       return this.#recordWorkflowResult(
-        input.batchKey, item, accepted, failureReceipt, retryAttemptId
+        input.batchKey, item, accepted, failureReceipt
       )
     } catch (error) {
       const intent = this.#intent(submissionKey)
@@ -301,7 +300,7 @@ export class ForkBatchCoordinator {
             sessionId: intent.session_id,
             error: intent.error_message ?? errorMessage(error),
             receipt: intentFailureReceipt(intent)
-          }, retryAttemptId)
+          })
         } else {
           this.#writeItem(input.batchKey, item.itemKey, {
             sessionId: intent.session_id, state: 'created', error: null
@@ -311,7 +310,7 @@ export class ForkBatchCoordinator {
       }
       this.#recordFailure(input.batchKey, item.itemKey, {
         sessionId: null, error: errorMessage(error), receipt: failureReceipt
-      }, retryAttemptId)
+      })
       return this.#itemRow(input.batchKey, item.itemKey)
     }
   }
@@ -343,8 +342,7 @@ export class ForkBatchCoordinator {
         now: this.#now()
       })
       return this.#recordWorkflowResult(
-        input.batchKey, item, accepted, `retry-workflow:${attemptId}:${item.itemKey}`,
-        attemptId
+        input.batchKey, item, accepted, `retry-workflow:${attemptId}:${item.itemKey}`
       )
     } catch (error) {
       const currentIntent = this.#intent(row.submission_key)
@@ -360,7 +358,7 @@ export class ForkBatchCoordinator {
         receipt: currentIntent?.stage === 'failed'
           ? retryCallFailureReceipt(currentIntent, attemptId, item.itemKey)
           : `retry-call:${attemptId}:${item.itemKey}`
-      }, attemptId)
+      })
       return this.#itemRow(input.batchKey, item.itemKey)
     }
   }
@@ -369,8 +367,7 @@ export class ForkBatchCoordinator {
     batchKey: string,
     item: ResolvedForkItemInput,
     accepted: ForkWorkflowResult,
-    fallbackFailureReceipt: string,
-    retryAttemptId?: string
+    fallbackFailureReceipt: string
   ): BatchItemRow {
     const sessionId = accepted.session?.id ?? null
     if (sessionId === null) {
@@ -378,7 +375,7 @@ export class ForkBatchCoordinator {
         sessionId: null,
         error: accepted.error ?? 'Fork 未返回已创建的会话',
         receipt: fallbackFailureReceipt
-      }, retryAttemptId)
+      })
     } else if (accepted.forkState === 'failed') {
       const intent = this.#intent(itemSubmissionKey(batchKey, item.itemKey))
       this.#recordFailure(batchKey, item.itemKey, {
@@ -387,7 +384,7 @@ export class ForkBatchCoordinator {
         receipt: intent?.stage === 'failed'
           ? intentFailureReceipt(intent)
           : fallbackFailureReceipt
-      }, retryAttemptId)
+      })
     } else {
       this.#writeItem(batchKey, item.itemKey, {
         state: accepted.forkState === 'succeeded' ? 'ready' : 'created',
@@ -546,7 +543,7 @@ export class ForkBatchCoordinator {
       return existing
     }
 
-    const interrupted = this.#pendingRetryAttempt(
+    const interrupted = this.#resumableRetryAttempt(
       input, batchRequestFingerprint, byKey
     )
     if (interrupted) return interrupted
@@ -596,7 +593,7 @@ export class ForkBatchCoordinator {
     )
   }
 
-  #pendingRetryAttempt(
+  #resumableRetryAttempt(
     input: RetryForkBatchInput,
     batchRequestFingerprint: string,
     currentRows: ReadonlyMap<string, BatchItemRow>
@@ -604,8 +601,9 @@ export class ForkBatchCoordinator {
     const candidates = this.#database.all<RetryAttemptRow>(
       `SELECT * FROM fork_batch_retry_attempts
        WHERE batch_key = ? AND batch_request_fingerprint = ?
-         AND retry_keys_json = ? AND state = 'pending'
-       ORDER BY created_at DESC, attempt_id DESC`,
+         AND retry_keys_json = ?
+         AND (state = 'pending' OR (state = 'completed' AND replay_pending = 1))
+       ORDER BY replay_pending DESC, created_at DESC, attempt_id DESC`,
       input.batchKey,
       batchRequestFingerprint,
       canonicalJson(input.retryItemKeys)
@@ -692,7 +690,8 @@ export class ForkBatchCoordinator {
     )?.count ?? 0
     if (unfinished !== 0) return
     this.#database.run(
-      `UPDATE fork_batch_retry_attempts SET state = 'completed', updated_at = ?
+      `UPDATE fork_batch_retry_attempts
+       SET state = 'completed', replay_pending = 0, updated_at = ?
        WHERE attempt_id = ?`,
       this.#now(),
       attemptId
@@ -705,8 +704,7 @@ export class ForkBatchCoordinator {
 
   #refreshItem(
     batchKey: string,
-    item: ResolvedForkItemInput,
-    retryAttemptId?: string
+    item: ResolvedForkItemInput
   ): BatchItemRow {
     let row = this.#itemRow(batchKey, item.itemKey)
     if (row.start_state === 'delivering') {
@@ -725,7 +723,7 @@ export class ForkBatchCoordinator {
         sessionId: intent.session_id,
         error: intent.error_message ?? 'Fork 创建失败',
         receipt: intentFailureReceipt(intent)
-      }, retryAttemptId)
+      })
     } else if (row.start_state === 'completed') {
       this.#writeItem(batchKey, item.itemKey, {
         state: item.prompt === undefined ? 'ready' : 'started',
@@ -761,8 +759,7 @@ export class ForkBatchCoordinator {
   #recordFailure(
     batchKey: string,
     itemKey: string,
-    failure: { sessionId: string | null; error: string; receipt: string },
-    retryAttemptId?: string
+    failure: { sessionId: string | null; error: string; receipt: string }
   ): void {
     const now = this.#now()
     this.#database.transaction((tx) => {
@@ -774,6 +771,7 @@ export class ForkBatchCoordinator {
       const failureGeneration = row.failure_receipt === failure.receipt
         ? row.failure_generation
         : row.failure_generation + 1
+      const advanced = failureGeneration !== row.failure_generation
       tx.run(
         `UPDATE fork_batch_items
          SET state = 'failed', session_id = ?, error_message = ?,
@@ -787,20 +785,53 @@ export class ForkBatchCoordinator {
         batchKey,
         itemKey
       )
-      if (retryAttemptId) {
+      if (advanced) {
+        const relatedAttempts = tx.all<{ attempt_id: string }>(
+          `SELECT DISTINCT retry.attempt_id
+           FROM fork_batch_retry_items AS retry
+           JOIN fork_batch_retry_attempts AS attempt
+             ON attempt.attempt_id = retry.attempt_id
+           WHERE retry.batch_key = ? AND retry.item_key = ?
+             AND retry.failure_generation = ?
+             AND retry.state IN ('pending', 'executing')
+             AND attempt.state = 'pending'`,
+          batchKey,
+          itemKey,
+          row.failure_generation
+        )
         tx.run(
           `UPDATE fork_batch_retry_items
            SET state = 'failed', session_id = ?, result_state = 'failed',
                result_failure_generation = ?, error_message = ?, updated_at = ?
-           WHERE attempt_id = ? AND item_key = ? AND failure_generation <> ?`,
+           WHERE batch_key = ? AND item_key = ? AND failure_generation = ?
+             AND state IN ('pending', 'executing')
+             AND attempt_id IN (
+               SELECT attempt_id FROM fork_batch_retry_attempts WHERE state = 'pending'
+             )`,
           failure.sessionId,
           failureGeneration,
           failure.error,
           now,
-          retryAttemptId,
+          batchKey,
           itemKey,
-          failureGeneration
+          row.failure_generation
         )
+        for (const { attempt_id: attemptId } of relatedAttempts) {
+          const unfinished = tx.get<{ count: number }>(
+            `SELECT COUNT(*) AS count FROM fork_batch_retry_items
+             WHERE attempt_id = ? AND state IN ('pending', 'executing')`,
+            attemptId
+          )?.count ?? 0
+          if (unfinished === 0) {
+            tx.run(
+              `UPDATE fork_batch_retry_attempts
+               SET state = 'completed', replay_pending = 1, updated_at = ?
+               WHERE attempt_id = ? AND state = 'pending'`,
+              now,
+              attemptId
+            )
+          }
+        }
       }
       tx.run(
         'UPDATE fork_batch_ledger SET updated_at = ? WHERE batch_key = ?',

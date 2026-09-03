@@ -1341,5 +1341,69 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX fork_batch_retry_attempts_batch_idx
       ON fork_batch_retry_attempts(batch_key, created_at, attempt_id);
     `
+  },
+  {
+    version: 31,
+    name: 'fork-batch-interrupted-retry-replay',
+    sql: `
+      ALTER TABLE fork_batch_retry_attempts
+      ADD COLUMN replay_pending INTEGER NOT NULL DEFAULT 0
+        CHECK (replay_pending IN (0, 1));
+
+      UPDATE fork_batch_retry_items
+      SET state = 'failed',
+          session_id = (
+            SELECT item.session_id FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          ),
+          result_state = 'failed',
+          result_failure_generation = (
+            SELECT item.failure_generation FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          ),
+          error_message = (
+            SELECT item.error_message FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          ),
+          updated_at = (
+            SELECT MAX(fork_batch_retry_items.updated_at, item.updated_at)
+            FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          )
+      WHERE state IN ('pending', 'executing')
+        AND EXISTS (
+          SELECT 1 FROM fork_batch_items AS item
+          WHERE item.batch_key = fork_batch_retry_items.batch_key
+            AND item.item_key = fork_batch_retry_items.item_key
+            AND item.state = 'failed'
+            AND item.failure_generation > fork_batch_retry_items.failure_generation
+        );
+
+      UPDATE fork_batch_retry_attempts
+      SET state = 'completed', replay_pending = 1,
+          updated_at = MAX(
+            updated_at,
+            COALESCE((
+              SELECT MAX(item.updated_at) FROM fork_batch_retry_items AS item
+              WHERE item.attempt_id = fork_batch_retry_attempts.attempt_id
+            ), updated_at)
+          )
+      WHERE state = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM fork_batch_retry_items AS item
+          WHERE item.attempt_id = fork_batch_retry_attempts.attempt_id
+            AND item.state IN ('pending', 'executing')
+        )
+        AND EXISTS (
+          SELECT 1 FROM fork_batch_retry_items AS item
+          WHERE item.attempt_id = fork_batch_retry_attempts.attempt_id
+            AND item.state = 'failed'
+            AND item.result_failure_generation > item.failure_generation
+        );
+    `
   }
 ]
