@@ -117,7 +117,7 @@ export class RuntimeProjectionStore {
     if (Array.isArray(result)) {
       const target = context?.type === 'hierarchy.reorder-pinned-workspace'
         ? this.#workspaces
-        : context?.type === 'hierarchy.reorder-pinned-task'
+        : context?.type === 'hierarchy.reorder-pinned-task' || context?.type === 'hierarchy.move-task-on-board'
           ? this.#tasks
           : undefined
       if (target) {

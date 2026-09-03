@@ -147,6 +147,7 @@ export const RPC_METHODS = [
   'hierarchy.rename-session',
   'hierarchy.restore-session-auto-title',
   'hierarchy.reorder-task',
+  'hierarchy.move-task-on-board',
   'hierarchy.delete-task',
   'hierarchy.activate-task',
   'hierarchy.set-task-pinned',

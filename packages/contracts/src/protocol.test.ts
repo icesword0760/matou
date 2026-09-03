@@ -213,6 +213,7 @@ describe('parseRendererMessage', () => {
       'hierarchy.rename-session',
       'hierarchy.restore-session-auto-title',
       'hierarchy.reorder-task',
+      'hierarchy.move-task-on-board',
       'hierarchy.delete-task',
       'hierarchy.activate-task',
       'hierarchy.create-scene',

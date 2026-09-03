@@ -285,6 +285,16 @@ describe('RuntimeRpcRouter', () => {
       })
     ) as { task: { id: string } }
     expect(taskActivated.task.id).toBe(createdTask.task.id)
+
+    const moved = await router.handle('hierarchy.move-task-on-board', payload('move-task-on-board', {
+      workspaceId: custom.workspace.id, taskId: createdTask.task.id, status: 'blocked', now: 7
+    })) as Array<{ id: string; status: string }>
+    expect(moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: createdTask.task.id, status: 'blocked' })
+    ]))
+    expect(database.get<{ status: string }>(
+      'SELECT status FROM tasks WHERE id = ?', createdTask.task.id
+    )?.status).toBe('blocked')
   })
 
   it('keeps the final canvas as history when a detached native window closes', async () => {

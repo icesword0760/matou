@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 import { launchMatou, restartMatou } from './matou-fixture'
 
@@ -227,6 +227,43 @@ test('extends the main workspace visual system into the Workspace board', async 
     })
   } finally { await fixture.close() }
 })
+
+test('persists a board drag across restart', async () => {
+  let fixture = await launchMatou()
+  try {
+    await fixture.page.getByRole('button', { name: '看板' }).click()
+    const board = fixture.page.getByRole('region', { name: 'matou_workspace 看板' })
+    await expect(board.locator('section[aria-label="就绪列"] article.board-task-card[aria-label="默认"]')).toBeVisible()
+    await dragBoardTask(fixture.page, '默认', '阻塞')
+    await expect(board.locator('section[aria-label="阻塞列"] article.board-task-card[aria-label="默认"]')).toBeVisible()
+    await expect(fixture.page.locator('.board-feedback')).toHaveText('事项已移至「阻塞」')
+
+    fixture = await restartMatou(fixture)
+    await fixture.page.getByRole('button', { name: '看板' }).click()
+    await expect(fixture.page.getByRole('region', { name: 'matou_workspace 看板' })
+      .locator('section[aria-label="阻塞列"] article.board-task-card[aria-label="默认"]')).toBeVisible()
+  } finally { await fixture.close() }
+})
+
+// The board keeps the dragged id in React state, so each HTML5 drag event needs its own task turn.
+async function dragBoardTask(page: Page, title: string, column: string): Promise<void> {
+  const steps: Array<['card' | 'column', string]> = [
+    ['card', 'dragstart'], ['column', 'dragenter'], ['column', 'dragover'], ['column', 'drop'], ['card', 'dragend']
+  ]
+  for (const [on, type] of steps) {
+    await page.evaluate(({ title, column, on, type }) => {
+      const card = document.querySelector<HTMLElement>(`article.board-task-card[aria-label="${title}"]`)
+      const target = document.querySelector<HTMLElement>(`section[aria-label="${column}列"]`)
+      if (!card || !target) throw new Error(`board card or column missing: ${title} → ${column}`)
+      const scope = window as unknown as { __boardDragData?: DataTransfer }
+      scope.__boardDragData ??= new DataTransfer()
+      const element = on === 'card' ? card : target
+      element.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: scope.__boardDragData }))
+      if (type === 'dragend') delete scope.__boardDragData
+    }, { title, column, on, type })
+    await page.waitForTimeout(40)
+  }
+}
 
 test('separates Session cards without outlines and lifts the active card under vertical light', async () => {
   const fixture = await launchMatou()

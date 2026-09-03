@@ -451,6 +451,16 @@ export class RuntimeRpcRouter {
             : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.move-task-on-board':
+        return this.#hierarchy.moveTaskOnBoard(command, {
+          workspaceId: text(input.workspaceId, 'workspaceId'),
+          taskId: text(input.taskId, 'taskId'),
+          status: enumeration(input.status, ['planned', 'active', 'blocked', 'completed'] as const, 'status'),
+          ...(optionalText(input.beforeTaskId, 'beforeTaskId') === undefined
+            ? {}
+            : { beforeTaskId: optionalText(input.beforeTaskId, 'beforeTaskId')! }),
+          now: integer(input.now, 'now', 0)
+        })
       case 'hierarchy.delete-task': {
         const taskId = text(input.taskId, 'taskId')
         const result = this.#hierarchy.deleteTask(command, {

@@ -41,9 +41,12 @@ import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 
 let root: string
-// A terminal hosted by an installed Matou exports MATOU_CONTROL_ASSET_ROOT; the server
-// under test would otherwise pick it up and pass --plugin-dir to every stub launch.
-delete process.env.MATOU_CONTROL_ASSET_ROOT
+// A terminal hosted by an installed Matou exports MATOU_CONTROL_* for its own mt CLI. The
+// server under test would inherit them: --plugin-dir on every stub launch, and stub shells
+// that see a caller identity before this server injects its own.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('MATOU_CONTROL_')) delete process.env[key]
+}
 
 let database: RuntimeDatabase
 let port: MockPort

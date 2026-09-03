@@ -401,6 +401,9 @@ describe('RuntimeProjectionStore', () => {
       { id: 'task-b', workspaceId: 'workspace-a', isPinned: true, pinSortKey: 'a0' },
       { id: 'task-a', workspaceId: 'workspace-a', isPinned: true, pinSortKey: 'a1' }
     ], { type: 'hierarchy.reorder-pinned-task', input: {} })
+    store.applyCommandResult([
+      { id: 'task-a', workspaceId: 'workspace-a', status: 'blocked', sortKey: 'a0' }
+    ], { type: 'hierarchy.move-task-on-board', input: {} })
     store.applyCommandResult({
       workspaceId: 'workspace-a', status: 'invalid', reason: 'missing',
       checkedAt: 20, validationGeneration: 3
@@ -412,6 +415,9 @@ describe('RuntimeProjectionStore', () => {
     expect(store.view().workspaces).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'workspace-a', pinSortKey: 'a1', lastOpenedAt: 40 }),
       expect.objectContaining({ id: 'workspace-b', pinSortKey: 'a0' })
+    ]))
+    expect(store.view().tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'task-a', status: 'blocked', sortKey: 'a0' })
     ]))
     expect(store.view().tasks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'task-a', pinSortKey: 'a1', lastOpenedAt: 40 }),
