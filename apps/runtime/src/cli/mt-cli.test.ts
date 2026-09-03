@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import type { ForkItemInput, HostActionResult } from '../control/host-action-types'
 import type { HostControlScope, HostTarget } from '../control/host-control-types'
 import { HostControlClientError } from '../control/host-control-client'
 import { runMt, type MtIo } from './mt-cli'
@@ -79,6 +80,303 @@ describe('mt CLI', () => {
     expect(await runMt(['identify'], {}, fixture.io)).toBe(4)
     expect(fixture.err.join('')).toContain('仅在 Matou 托管终端中可用')
   })
+
+  it.each([
+    {
+      argv: ['create', 'workspace', '--path', '/tmp/项目 甲', '--title', '国际化 🚀', '--submission-key', 'create-w', '--enter', '--json'],
+      method: 'structure.create.workspace' as const,
+      params: { path: '/tmp/项目 甲', title: '国际化 🚀', submissionKey: 'create-w', enter: true }
+    },
+    {
+      argv: ['create', 'task', '--workspace', 'left', '--title', '事项甲', '--submission-key', 'create-t', '--json'],
+      method: 'structure.create.task' as const,
+      params: {
+        workspace: { kind: 'relative', direction: 'left', projectionRevision: 'revision-action' },
+        title: '事项甲', submissionKey: 'create-t'
+      }
+    },
+    {
+      argv: ['create', 'canvas', '--task', 'task:one', '--title', '画布甲', '--submission-key', 'create-c', '--json'],
+      method: 'structure.create.canvas' as const,
+      params: {
+        task: { kind: 'ref', ref: 'task:one', projectionRevision: 'revision-action' },
+        title: '画布甲', submissionKey: 'create-c'
+      }
+    },
+    {
+      argv: ['create', 'session', '--canvas', 'current', '--profile', 'codex', '--title', '会话甲', '--submission-key', 'create-s', '--json'],
+      method: 'structure.create.session' as const,
+      params: {
+        canvas: { kind: 'current', entity: 'canvas' }, profile: 'codex',
+        title: '会话甲', submissionKey: 'create-s'
+      }
+    }
+  ])('parses $method with exact titles and revision-bearing targets', async ({ argv, method, params }) => {
+    const fixture = ioFixture()
+    const request = actionRequest()
+
+    expect(await runMt(argv, {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenLastCalledWith(method, params)
+  })
+
+  it.each([
+    ['child', 'structure.fork.child'],
+    ['sibling', 'structure.fork.sibling']
+  ] as const)('parses fork %s with explicit environment, prompt, start and submission key', async (relation, method) => {
+    const fixture = ioFixture()
+    const request = actionRequest()
+    const environment = relation === 'child'
+      ? { mode: 'new-worktree', branch: 'feature/方案-甲' }
+      : { mode: 'existing-worktree', branch: 'main', worktreeRef: 'worktree:main' }
+
+    expect(await runMt([
+      'fork', relation, 'parent', '--title', '子节点 🧪',
+      '--environment-json', JSON.stringify(environment), '--prompt', '保留  "引号"  与  空格',
+      '--start', '--submission-key', `fork-${relation}`, '--json'
+    ], {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenLastCalledWith(method, {
+      source: { kind: 'relation', relation: 'parent', projectionRevision: 'revision-action' },
+      title: '子节点 🧪', environment, prompt: '保留  "引号"  与  空格', start: true,
+      submissionKey: `fork-${relation}`
+    })
+  })
+
+  it('submits a batch from stdin without shell quoting loss and retries only named failures', async () => {
+    const fixture = ioFixture()
+    const items: ForkItemInput[] = [
+      { itemKey: 'one', title: '原样  "引号"  🚀', environment: { mode: 'current' }, prompt: '第一行\n第二行' },
+      { itemKey: 'two', title: '新 Worktree', environment: { mode: 'new-worktree', branch: 'feature/two' }, start: true }
+    ]
+    const readStdin = vi.fn(async () => JSON.stringify(items))
+    const request = vi.fn(async (method: HostControlScope) => method === 'host.list'
+      ? { projectionRevision: 'revision-action', targets: [targetFixture()] }
+      : batchResult(items))
+
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', '-', '--batch-key', 'batch-1',
+      '--retry-item-key', 'two', '--json'
+    ], {}, fixture.io, request, readStdin)).toBe(0)
+    expect(readStdin).toHaveBeenCalledOnce()
+    expect(request).toHaveBeenCalledWith('structure.fork.children', {
+      source: { kind: 'self' }, batchKey: 'batch-1', items, retryItemKeys: ['two']
+    })
+  })
+
+  it('also accepts the dependency object and JSON retry-key list', async () => {
+    const fixture = ioFixture()
+    const items: ForkItemInput[] = [
+      { itemKey: 'one', title: '方案一', environment: { mode: 'current' } },
+      { itemKey: 'two', title: '方案二', environment: { mode: 'current' } }
+    ]
+    const request = vi.fn(async (method: HostControlScope) => method === 'host.list'
+      ? { projectionRevision: 'revision-action', targets: [targetFixture()] }
+      : batchResult(items))
+
+    expect(await runMt([
+      'fork', 'children', 'child:2', '--items-json', JSON.stringify(items), '--batch-key', 'batch-2',
+      '--retry-item-keys-json', '["one","two"]', '--json'
+    ], {}, fixture.io, { request })).toBe(0)
+    expect(request).toHaveBeenLastCalledWith('structure.fork.children', {
+      source: { kind: 'relation', relation: 'child', ordinal: 2, projectionRevision: 'revision-action' },
+      batchKey: 'batch-2', items, retryItemKeys: ['one', 'two']
+    })
+  })
+
+  it('accepts exactly 1 MiB from stdin and rejects the next byte before requesting', async () => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => batchResult([]))
+    const atLimit = jsonArrayOfExactUtf8Bytes(1024 * 1024)
+
+    expect(await runMt(
+      ['fork', 'children', 'self', '--items-json', '-', '--batch-key', 'limit', '--json'],
+      {}, fixture.io, request, async () => atLimit
+    )).toBe(0)
+    expect(request).toHaveBeenCalledOnce()
+
+    request.mockClear()
+    const overLimit = `${atLimit.slice(0, -1)}x]`
+    expect(Buffer.byteLength(overLimit, 'utf8')).toBe(1024 * 1024 + 1)
+    expect(await runMt(
+      ['fork', 'children', 'self', '--items-json', '-', '--batch-key', 'over', '--json'],
+      {}, fixture.io, request, async () => overLimit
+    )).toBe(2)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['invalid JSON', '{'],
+    ['invalid UTF-8 text', '[{"itemKey":"bad","title":"\ud800","environment":{"mode":"current"}}]']
+  ])('rejects %s from stdin before requesting', async (_label, stdin) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => batchResult([]))
+    expect(await runMt(
+      ['fork', 'children', 'self', '--items-json', '-', '--batch-key', 'bad', '--json'],
+      {}, fixture.io, { request, readStdin: async () => stdin }
+    )).toBe(2)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      argv: ['remove', 'preview', 'session:one', '--scope', 'subtree', '--json'],
+      method: 'structure.remove.preview' as const,
+      params: { target: { kind: 'ref', ref: 'session:one', projectionRevision: 'revision-action' }, scope: 'subtree' }
+    },
+    {
+      argv: ['remove', 'commit', 'confirmation-1', '--json'],
+      method: 'structure.remove.commit' as const,
+      params: { confirmationRef: 'confirmation-1' }
+    },
+    {
+      argv: ['close', 'canvas-preview', 'current', '--json'],
+      method: 'structure.canvas-close.preview' as const,
+      params: { target: { kind: 'current', entity: 'canvas' } }
+    },
+    {
+      argv: ['close', 'canvas-commit', 'confirmation-2', '--json'],
+      method: 'structure.canvas-close.commit' as const,
+      params: { confirmationRef: 'confirmation-2' }
+    }
+  ])('parses $method without leaking commit inputs into other fields', async ({ argv, method, params }) => {
+    const fixture = ioFixture()
+    const request = actionRequest()
+    expect(await runMt(argv, {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenLastCalledWith(method, params)
+  })
+
+  it.each([
+    ['focus', undefined, 'navigation.focus.session'],
+    ['switch', 'workspace', 'navigation.switch.workspace'],
+    ['switch', 'task', 'navigation.switch.task'],
+    ['switch', 'canvas', 'navigation.switch.canvas']
+  ] as const)('parses %s %s navigation with a fresh target revision', async (command, entity, method) => {
+    const fixture = ioFixture()
+    const request = actionRequest()
+    const argv = entity === undefined
+      ? [command, 'right', '--json']
+      : [command, entity, 'right', '--json']
+
+    expect(await runMt(argv, {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenLastCalledWith(method, {
+      target: { kind: 'relative', direction: 'right', projectionRevision: 'revision-action' }
+    })
+  })
+
+  it.each([
+    ['create workspace missing path', ['create', 'workspace', '--title', '缺路径']],
+    ['create session invalid profile', ['create', 'session', '--canvas', 'self', '--profile', 'other']],
+    ['fork child missing environment', ['fork', 'child', 'self', '--title', '无环境']],
+    ['fork child extra positional', ['fork', 'child', 'self', 'extra', '--title', '多余', '--environment-json', '{"mode":"current"}']],
+    ['remove commit extra positional', ['remove', 'commit', 'confirmation', 'extra']],
+    ['focus extra positional', ['focus', 'self', 'extra']],
+    ['unknown create option', ['create', 'workspace', '--path', '/tmp/x', '--bogus']]
+  ])('returns usage exit code for %s', async (_label, argv) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => undefined)
+    expect(await runMt(argv, {}, fixture.io, request)).toBe(2)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('prints each batch item with title, environment and state followed by one summary', async () => {
+    const fixture = ioFixture()
+    const items: ForkItemInput[] = [
+      { itemKey: 'one', title: '当前分支方案', environment: { mode: 'current' } },
+      { itemKey: 'two', title: '独立方案', environment: { mode: 'new-worktree', branch: 'feature/two' } },
+      { itemKey: 'three', title: '复用方案', environment: { mode: 'existing-worktree', branch: 'main', worktreeRef: 'worktree:secret' } }
+    ]
+    const request = vi.fn(async () => ({
+      ...batchResult(items), succeeded: 2, failed: 1,
+      items: [
+        { ...items[0]!, state: 'ready' },
+        { ...items[1]!, state: 'started' },
+        { ...items[2]!, state: 'failed', error: '分支冲突' }
+      ], retry: { batchKey: 'human', itemKeys: ['three'] }
+    }))
+
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', JSON.stringify(items), '--batch-key', 'human'
+    ], {}, fixture.io, request)).toBe(6)
+    expect(fixture.out).toHaveLength(1)
+    const lines = fixture.out[0]!.split('\n')
+    expect(lines).toEqual([
+      '1. 当前分支方案 | 环境：当前执行环境 | 状态：已就绪',
+      '2. 独立方案 | 环境：新 Worktree（feature/two） | 状态：已启动',
+      '3. 复用方案 | 环境：现有 Worktree（main） | 状态：失败',
+      '汇总：成功 2 项，失败 1 项。'
+    ])
+    expect(fixture.out[0]).not.toContain('worktree:secret')
+    expect(fixture.out[0]).not.toContain('three')
+    expect(fixture.out[0]).not.toContain('分支冲突')
+  })
+
+  it('prints preview impact and preservation guarantees without a confirmation ref', async () => {
+    const fixture = ioFixture()
+    const preview = previewResult('removal-preview')
+    const request = actionRequest(preview)
+
+    expect(await runMt(['remove', 'preview', 'self', '--scope', 'subtree'], {}, fixture.io, request)).toBe(0)
+    expect(fixture.out.join('')).toContain('影响：事项 1，画布 2，会话 3，子节点 2')
+    expect(fixture.out.join('')).toContain('将结束：运行或等待中会话 1，终端进程 2')
+    expect(fixture.out.join('')).toContain('项目文件、Git 分支和 Worktree 保持不变')
+    expect(fixture.out.join('')).not.toContain('confirmation-secret')
+  })
+
+  it('passes the authoritative result through unchanged in JSON mode', async () => {
+    const fixture = ioFixture()
+    const result = previewResult('canvas-close-preview')
+    const request = actionRequest(result)
+
+    expect(await runMt(['close', 'canvas-preview', 'self', '--json'], {}, fixture.io, request)).toBe(0)
+    expect(JSON.parse(fixture.out[0]!)).toEqual(result)
+    expect(fixture.out[0]).toContain('confirmation-secret')
+  })
+
+  it.each([
+    ['INVALID_REQUEST', 2],
+    ['TARGET_NOT_FOUND', 3],
+    ['AMBIGUOUS_TARGET', 3],
+    ['STALE_PROJECTION', 3],
+    ['TARGET_NOT_READY', 4],
+    ['CAPABILITY_DENIED', 4],
+    ['CONFIRMATION_REQUIRED', 4],
+    ['CONFIRMATION_EXPIRED', 4],
+    ['CONFIRMATION_STALE', 4],
+    ['PATH_CONFLICT', 4],
+    ['BRANCH_CONFLICT', 4],
+    ['WORKTREE_CONFLICT', 4],
+    ['STORAGE_READ_ONLY', 4],
+    ['TIMEOUT', 5],
+    ['CONNECTION_ERROR', 5],
+    ['NAVIGATION_TIMEOUT', 5],
+    ['PARTIAL_SUCCESS', 6],
+    ['INTERNAL_ERROR', 1]
+  ])('maps Host Control error %s to exit group %i', async (errorCode, expected) => {
+    const fixture = ioFixture()
+    expect(await runMt(['list'], {}, fixture.io, async () => {
+      throw new HostControlClientError(errorCode, errorCode)
+    })).toBe(expected)
+  })
+
+  it('shows two to five ambiguity candidates and asks for a filter above five', async () => {
+    const small = ioFixture()
+    expect(await runMt(['focus', 'self'], {}, small.io, async () => {
+      throw new HostControlClientError('AMBIGUOUS_TARGET', '匹配多个目标', {
+        candidates: [{ humanPath: '窗口 1 / 工作空间 A' }, { humanPath: '窗口 2 / 工作空间 A' }]
+      })
+    })).toBe(3)
+    expect(small.err[0]).toContain('1. 窗口 1 / 工作空间 A')
+    expect(small.err[0]).toContain('2. 窗口 2 / 工作空间 A')
+
+    const large = ioFixture()
+    expect(await runMt(['focus', 'self'], {}, large.io, async () => {
+      throw new HostControlClientError('AMBIGUOUS_TARGET', '匹配多个目标', {
+        candidates: Array.from({ length: 6 }, (_, index) => ({ humanPath: `候选 ${index + 1}` }))
+      })
+    })).toBe(3)
+    expect(large.err[0]).toContain('超过 5 个')
+    expect(large.err[0]).toContain('补充筛选条件')
+    expect(large.err[0]).not.toContain('候选 1')
+  })
 })
 
 function ioFixture(): { io: MtIo; out: string[]; err: string[] } {
@@ -100,4 +398,56 @@ function targetFixture(): HostTarget {
     session: { id: 'session-2', ordinal: 2, detached: false },
     dag: { depth: 0, childRefs: [], siblingRefs: ['session:session-1', 'session:session-2'] }
   }
+}
+
+function actionRequest(result: HostActionResult = createdResult()) {
+  return vi.fn(async (method: HostControlScope, _params: unknown): Promise<unknown> => {
+    if (method === 'host.list') {
+      return { projectionRevision: 'revision-action', targets: [
+        { ...targetFixture(), ref: 'task:one' }, targetFixture()
+      ] }
+    }
+    return result
+  })
+}
+
+function createdResult(): HostActionResult {
+  const path = resultPath()
+  return { kind: 'created', entity: 'session', createdRef: 'session:secret', path, focusedPath: path }
+}
+
+function batchResult(items: ForkItemInput[]) {
+  return {
+    kind: 'fork-batch' as const,
+    batchKey: 'batch-1', succeeded: items.length, failed: 0,
+    items: items.map((item) => ({ ...item, state: 'ready' as const, sessionRef: `session:${item.itemKey}` }))
+  }
+}
+
+function previewResult(kind: 'removal-preview' | 'canvas-close-preview'): HostActionResult {
+  return {
+    kind,
+    impact: {
+      target: resultPath(), scope: 'subtree', tasks: 1, canvases: 2, sessions: 3,
+      descendants: 2, liveRuns: 1, terminalProcesses: 2,
+      preservesProjectFiles: true, preservesBranches: true, preservesWorktrees: true
+    },
+    confirmationRef: 'confirmation-secret'
+  }
+}
+
+function resultPath() {
+  return {
+    window: { ref: 'window:secret', title: '主窗口' },
+    workspace: { ref: 'workspace:secret', title: '工作空间', path: '/tmp/项目' },
+    task: { ref: 'task:secret', title: '事项' },
+    canvas: { ref: 'scene:secret', title: '画布' },
+    session: { ref: 'session:secret', title: '会话' }
+  }
+}
+
+function jsonArrayOfExactUtf8Bytes(bytes: number): string {
+  const prefix = '[{"itemKey":"one","title":"'
+  const suffix = '","environment":{"mode":"current"}}]'
+  return `${prefix}${'x'.repeat(bytes - Buffer.byteLength(prefix + suffix, 'utf8'))}${suffix}`
 }
