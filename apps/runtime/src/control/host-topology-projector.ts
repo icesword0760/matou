@@ -4,11 +4,18 @@ import {
   type HostCallerIdentity,
   type HostListScope,
   type HostTarget,
+  type HostTargetEnvironment,
   type HostTargetSelector
 } from './host-control-types'
 
 interface TargetRow {
   session_id: string
+  execution_context_id: string
+  execution_context_kind: 'plain-directory' | 'git-worktree'
+  git_state: 'ready' | 'unavailable' | null
+  git_branch: string | null
+  worktree_id: string | null
+  worktree_branch_name: string | null
   title: string
   kind: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
   cwd: string
@@ -112,6 +119,12 @@ export class HostTopologyProjector {
     const rows = this.#database.all<TargetRow>(
       `SELECT
          sessions.id AS session_id,
+         execution_context.id AS execution_context_id,
+         execution_context.kind AS execution_context_kind,
+         git_state.state AS git_state,
+         git_state.branch AS git_branch,
+         worktree.id AS worktree_id,
+         worktree.branch_name AS worktree_branch_name,
          sessions.title,
          sessions.kind,
          sessions.cwd,
@@ -140,6 +153,14 @@ export class HostTopologyProjector {
        FROM session_canvas_memberships AS membership
        JOIN sessions ON sessions.id = membership.session_id
        JOIN scenes ON scenes.id = membership.scene_id
+       JOIN execution_contexts AS execution_context
+         ON execution_context.id = sessions.execution_context_id
+        AND execution_context.archived_at IS NULL
+       LEFT JOIN execution_context_git_states AS git_state
+         ON git_state.execution_context_id = execution_context.id
+       LEFT JOIN worktrees AS worktree
+         ON worktree.execution_context_id = execution_context.id
+        AND worktree.state <> 'removed'
        JOIN tasks ON tasks.id = scenes.task_id
        JOIN workspaces ON workspaces.id = tasks.workspace_id
        LEFT JOIN session_relations_current AS structural
@@ -203,6 +224,7 @@ export class HostTopologyProjector {
         profile: row.kind === 'agent-team-member' ? 'claude-code' : row.kind,
         cwd: row.cwd,
         workStatus: row.work_status,
+        environment: targetEnvironment(row),
         window: {
           id: windowId,
           kind: detached ? 'detached-terminal' : 'main',
@@ -330,4 +352,17 @@ function rankWithin(
 function requireTarget(target: HostTarget | undefined, message: string): HostTarget {
   if (!target) throw new HostControlTargetNotFoundError(message)
   return target
+}
+
+function targetEnvironment(row: TargetRow): HostTargetEnvironment {
+  const branch = row.git_branch ?? row.worktree_branch_name
+  const mode = row.execution_context_kind === 'git-worktree'
+    ? 'git-worktree'
+    : row.git_state === 'ready' ? 'git-checkout' : 'directory'
+  return {
+    executionContextRef: `context:${row.execution_context_id}`,
+    mode,
+    ...(branch === null ? {} : { branch }),
+    ...(row.worktree_id === null ? {} : { worktreeRef: `worktree:${row.worktree_id}` })
+  }
 }

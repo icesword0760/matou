@@ -92,6 +92,7 @@ function targetFixture(): HostTarget {
     ref: 'session:session-2', workspaceId: 'workspace-1', taskId: 'task-1',
     sessionId: 'session-2', mountId: 'mount-2', title: 'Shell', profile: 'shell',
     cwd: '/workspace', workStatus: 'idle',
+    environment: { executionContextRef: 'context:context-1', mode: 'directory' },
     window: { id: 'window-1', kind: 'main', ordinal: 1 },
     workspace: { id: 'workspace-1', name: 'Workspace', ordinal: 1 },
     task: { id: 'task-1', name: 'Task', ordinal: 1 },

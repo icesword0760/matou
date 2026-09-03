@@ -26,6 +26,13 @@ export type HostTargetSelector =
 
 export type HostListScope = 'current-level' | 'all'
 
+export interface HostTargetEnvironment {
+  executionContextRef: string
+  mode: 'directory' | 'git-checkout' | 'git-worktree'
+  branch?: string
+  worktreeRef?: string
+}
+
 export interface HostTarget {
   ref: string
   workspaceId: string
@@ -36,6 +43,7 @@ export interface HostTarget {
   profile: 'shell' | 'claude-code' | 'codex'
   cwd: string
   workStatus: string
+  environment: HostTargetEnvironment
   window: {
     id: string
     kind: 'main' | 'detached-terminal'
