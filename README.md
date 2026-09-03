@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <a href="#从源码运行">快速开始</a> ·
+  <a href="#下载安装">下载安装</a> ·
   <a href="#从混乱的终端到可管理的-ai-工作流">核心场景</a> ·
   <a href="#用-dag-看懂会话从哪里来下一步去哪里">DAG 使用方法</a> ·
   <a href="#架构与质量">架构文档</a>
@@ -29,7 +29,7 @@
 
 码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code 会话、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
 
-> **项目状态**：早期预览版，仅支持 macOS，目前只能从源码运行；预构建安装包稍后提供。
+> **项目状态**：早期预览版，仅支持 macOS（Apple Silicon）。安装包见 [Releases](https://github.com/icesword0760/matou/releases/latest)。
 
 ![码头 Matou 的 Claude Code 多会话桌面工作台](assets/shots/workspace-demo.png)
 
@@ -143,7 +143,7 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 
 规划范围包括创建子卡片、兄弟卡片和批量子卡片；聚焦、切换、移除，以及关闭前的预览确认。
 
-**预构建安装包（未发布）。** 当前只能从源码运行，macOS 安装包会随首个正式版本一起提供。
+**代码签名与公证（未完成）。** 当前安装包未经 Apple 签名，首次打开需要手动放行；Intel Mac 安装包也尚未提供。
 
 ## 适合谁
 
@@ -152,6 +152,18 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 - 需要 DAG visualization 回溯方案分支、上下文来源和决策路径的复杂项目
 - 经常使用 Git Worktree 并行开发、测试、审查和修复的工程师
 - 关注会话恢复、通知分级和上下文用量的重度 AI 编程用户
+
+## 下载安装
+
+1. 到 [Releases](https://github.com/icesword0760/matou/releases/latest) 下载最新的 `Matou-<版本>-mac-arm64.dmg`（Apple Silicon）。
+2. 打开 DMG，把「码头」拖进「应用程序」。
+3. 安装包尚未签名和公证，首次打开时 macOS 会提示无法验证开发者。任选一种方式放行：打开「系统设置 → 隐私与安全性」，在页面底部点击「仍要打开」；或者在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/码头.app
+```
+
+使用前请确认本机已安装并登录 Claude Code CLI。之后有新版本时，应用内会提示更新。
 
 ## 从源码运行
 
@@ -220,6 +232,9 @@ tests/e2e/                真实 Electron 用户旅程
 
 - 在 [Issues](https://github.com/icesword0760/matou/issues) 提交问题或建议。
 - 涉及恢复、分支、通知或多窗口问题时，请附上复现步骤、macOS 版本和可公开的演示数据。
+- 加入 QQ 体验反馈群 **454249629**，或扫码：
+
+<img src="assets/qq-group.png" width="200" alt="码头使用体验反馈群 QQ 群二维码">
 
 ## 许可证
 
