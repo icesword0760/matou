@@ -7,6 +7,7 @@ export interface Migration {
   version: number
   name: string
   sql: string
+  acceptedChecksums?: readonly string[]
 }
 
 export interface MigrationResult {
@@ -74,7 +75,7 @@ export class MigrationRunner {
 
     for (const stored of applied) {
       const migration = this.#migrations.find(({ version }) => version === stored.version)
-      if (!migration || checksum(migration) !== stored.checksum) {
+      if (!migration || !acceptsChecksum(migration, stored.checksum)) {
         throw new Error(`checksum mismatch for applied migration ${stored.version}`)
       }
     }
@@ -129,6 +130,11 @@ function checksum(migration: Migration): string {
   return createHash('sha256')
     .update(`${migration.version}\0${migration.name}\0${migration.sql}`)
     .digest('hex')
+}
+
+function acceptsChecksum(migration: Migration, storedChecksum: string): boolean {
+  return checksum(migration) === storedChecksum ||
+    migration.acceptedChecksums?.includes(storedChecksum) === true
 }
 
 function validateMigrationSequence(migrations: readonly Migration[]): void {

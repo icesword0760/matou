@@ -117,6 +117,23 @@ describe('MigrationRunner', () => {
     })
   })
 
+  it('upgrades a v23 database that records the original migration 18 checksum', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 23)).migrate()
+    database.run(
+      `UPDATE schema_migrations
+       SET name = ?, checksum = ?
+       WHERE version = 18`,
+      'historical-shell-command-blocks',
+      'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd'
+    )
+
+    await expect(new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()).resolves.toMatchObject({
+      appliedVersions: [24, 25, 26, 27, 28],
+      currentVersion: 28
+    })
+  })
+
   it('maps legacy Fork states into durable v27 operation stages', async () => {
     const { database } = await createDatabase()
     await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 26)).migrate()
