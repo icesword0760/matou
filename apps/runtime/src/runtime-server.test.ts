@@ -2434,9 +2434,10 @@ sleep 30
     })
 
     await waitUntil(() => cwdPort.last('terminal.hud')?.hud?.cwd?.endsWith('/outside') === true, 5_000)
-    expect(cwdPort.last('terminal.hud')).toMatchObject({
-      sessionId: 'cwd-hud-session', hud: { mode: 'shell', cwd: join(root, 'outside') }
-    })
+    const hudMessage = cwdPort.last('terminal.hud') as { hud: { cwd: string } }
+    expect(hudMessage).toMatchObject({ sessionId: 'cwd-hud-session', hud: { mode: 'shell' } })
+    // macOS tmpdir lives under /var -> /private/var; the tracker may report either form.
+    expect(await realpath(hudMessage.hud.cwd)).toBe(await realpath(join(root, 'outside')))
     cwdPort.receive({
       type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: 'cwd-hud-session'
     })
