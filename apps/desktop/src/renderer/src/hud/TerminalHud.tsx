@@ -117,21 +117,6 @@ export function TerminalHud(props: {
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {configDisplays(hud).map((item) => <span className="status-field status-config status-priority-5" key={item}>{item}</span>)}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
-      {runningTools(hud).map((tool, index) => <span className="status-field status-tool-running status-priority-4"
-        key={`${tool.name}:${tool.target ?? ''}:${index}`}>
-        <span className="tool-icon tool-icon-running">◐</span><span className="tool-name">{tool.name}</span>
-        {tool.target && <span className="tool-target">: {truncatePath(tool.target)}</span>}
-      </span>)}
-      {recentTool(hud) && <span className={`status-field status-last-tool status-priority-4 is-${recentTool(hud)!.status}`}>
-        <span className="tool-icon">{recentTool(hud)!.status === 'error' ? '⚠' : '✓'}</span>
-        <span className="tool-name">{toolDisplayName(recentTool(hud)!.name)}</span>
-        {recentTool(hud)!.target && recentTool(hud)!.name.toLowerCase() !== 'bash' &&
-          <span className="tool-target">: {truncateText(recentTool(hud)!.target!, 24)}</span>}
-      </span>}
-      {completedTools(hud).map((tool) => <span className="status-field status-tool-done status-priority-4" key={tool.name}>
-        <span className="tool-icon tool-icon-done">✓</span><span className="tool-name">{tool.name}</span>
-        {showToolCount(tool.name) && <span className="tool-count">×{tool.count}</span>}
-      </span>)}
       {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
         <span>{todoDisplay(hud)!.text}</span><span className="tool-count">{todoDisplay(hud)!.progress}</span>
@@ -298,12 +283,6 @@ function configDisplays(hud: SessionHudView): string[] {
     counts.hooks > 0 ? `${counts.hooks} hooks` : ''
   ].filter(Boolean)
 }
-function completedTools(hud: SessionHudView): NonNullable<SessionHudView['toolCounts']> {
-  return [...(hud.toolCounts ?? [])]
-    .filter(({ count }) => count > 0)
-    .sort((left, right) => right.count - left.count)
-    .slice(0, 4)
-}
 function taskStatusLabel(status: SessionHudView['taskStatus']): string {
   if (status === 'running') return '任务中'
   if (status === 'needs-input') return '待输入'
@@ -315,29 +294,6 @@ function teamTone(status: SessionHudView['teamStatus']): string {
   if (status === 'needs-input') return 'input'
   if (status === 'error') return 'error'
   return 'idle'
-}
-function runningTools(hud: SessionHudView) {
-  return (hud.runningTools ?? []).filter(({ name }) => name !== 'Bash' && name !== 'Skill').slice(-2)
-}
-function recentTool(hud: SessionHudView): SessionHudView['lastTool'] {
-  return hud.lastTool?.status === 'running' || hud.lastTool?.name.toLowerCase() === 'bash'
-    ? undefined : hud.lastTool
-}
-function showToolCount(name: string): boolean {
-  return !['bash', 'read'].includes(name.toLowerCase())
-}
-function toolDisplayName(name: string): string {
-  const match = /^mcp__(.+?)__(.+)$/.exec(name)
-  return match ? `${match[1]}: ${match[2]}` : name
-}
-function truncatePath(value: string, maxLength = 20): string {
-  const normalized = value.replace(/\\/g, '/')
-  if (normalized.length <= maxLength) return normalized
-  const file = normalized.split('/').at(-1) ?? normalized
-  return file.length >= maxLength ? `${file.slice(0, maxLength - 3)}...` : `.../${file}`
-}
-function truncateText(value: string, maxLength: number): string {
-  return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value
 }
 function todoDisplay(hud: SessionHudView): { icon: string; text: string; progress: string; done: boolean } | null {
   const todos = hud.todos ?? []
@@ -355,8 +311,7 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
 function hasAgentInfo(hud: SessionHudView): boolean {
   return Boolean(hud.modelStrategy || hud.contextPercent !== undefined || taskStatusLabel(hud.taskStatus) ||
     (hud.usageWindows?.length ?? 0) > 0 || configDisplays(hud).length || (hud.mcpErrors?.length ?? 0) > 0 ||
-    completedTools(hud).length || recentTool(hud) || (hud.subagentCount ?? 0) > 0 || hud.teamRole ||
-    runningTools(hud).length || todoDisplay(hud))
+    (hud.subagentCount ?? 0) > 0 || hud.teamRole || todoDisplay(hud))
 }
 
 function bypassCopy(target: HudPermissionMode, resumable: boolean): string {

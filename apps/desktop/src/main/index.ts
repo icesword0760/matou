@@ -20,7 +20,7 @@ import { secondaryDisplayWindowBounds } from './e2e-window-placement'
 import { installDevelopmentDockIcon } from './app-icon'
 import { downloadManualUpdate } from './manual-update-downloader'
 import { installFinderQuickAction } from './finder-quick-action'
-import { readUpdateBaseUrl } from './update-feed'
+import { configureUpdateFeed } from './update-feed'
 import { WorkspaceOpenRequests } from './workspace-open-requests'
 import {
   DESKTOP_CHANNELS,
@@ -374,15 +374,12 @@ if (primaryInstance) app.whenReady().then(async () => {
       homeDirectory: app.getPath('home')
     }).catch((error) => console.error(`[finder-quick-action] ${String(error)}`))
   }
-  autoUpdater.channel = process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
-  const updateBaseUrl = process.env.MATOU_UPDATE_BASE_URL
-    ?? readUpdateBaseUrl(join(process.resourcesPath, 'app-update.yml'))
-  if (process.env.MATOU_UPDATE_BASE_URL) {
-    autoUpdater.setFeedURL({
-      provider: 'generic', url: process.env.MATOU_UPDATE_BASE_URL,
-      channel: process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
-    })
-  }
+  const updateBaseUrl = configureUpdateFeed(autoUpdater, {
+    ...(process.env.MATOU_UPDATE_BASE_URL
+      ? { overrideUrl: process.env.MATOU_UPDATE_BASE_URL } : {}),
+    packagedConfigPath: join(process.resourcesPath, 'app-update.yml'),
+    channel: process.env.MATOU_UPDATE_CHANNEL ?? 'stable'
+  })
   updateManager = new AppUpdateManager({
     updater: autoUpdater,
     enabled: app.isPackaged && process.env.MATOU_DISABLE_AUTO_UPDATE !== '1',

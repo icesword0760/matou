@@ -115,15 +115,9 @@ describe('PRD 02 bottom HUD', () => {
     expect(text).not.toContain('adaptive-painting-hoare')
     expect(text).toContain('1 CLAUDE.md2 MCPs11 hooks')
     expect(text).toContain('⚠ browser-bridge')
-    expect(text).toContain('✓Read')
-    expect(text).not.toContain('Read×9')
-    expect(text).toContain('✓Bash')
-    expect(text).not.toContain('Bash×9')
-    expect(text).toContain('⚠WebFetch: example.com')
+    expect(container.querySelector('.status-tool-running, .status-last-tool, .status-tool-done')).toBeNull()
+    expect(text).not.toContain('WebFetch')
     expect(text).toContain('任务中Agent:2Leader')
-    expect(text).toContain('Read')
-    expect(text).toContain('Edit')
-    expect([...container.querySelectorAll('.status-tool-running')].map((node) => node.textContent).join('')).not.toContain('Bash')
     expect(text).toContain('▸完成 HUD 实现(1/2)')
     expect(text).toMatch(/~\/projectmain⏱1h1m$/)
     expect(container.querySelector('.context-ring-fg')?.getAttribute('stroke')).toBe('#f85149')
@@ -185,7 +179,7 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByText('Fable 5 (1M context)')).toBeTruthy()
   })
 
-  it('hides duplicate Bash activity and omits Bash and Read counts', () => {
+  it('keeps tool activity out of the compact bottom HUD', () => {
     const { container } = render(<TerminalHud hud={agent({
       sessionName: 'duplicate-card-title',
       lastTool: { name: 'Bash', target: '/Users/demo/project/scripts/verify.sh', status: 'completed' },
@@ -195,12 +189,10 @@ describe('PRD 02 bottom HUD', () => {
     const text = container.querySelector('.status-info')?.textContent ?? ''
     expect(text).not.toContain('duplicate-card-title')
     expect(text).not.toContain('/Users/demo/project/scripts/verify.sh')
-    expect([...container.querySelectorAll('.tool-name')].filter((node) => node.textContent === 'Bash')).toHaveLength(1)
-    expect(text).toContain('✓Bash')
-    expect(text).not.toContain('Bash×5')
-    expect(text).toContain('✓Read')
-    expect(text).not.toContain('Read×2')
-    expect(text).toContain('✓Skill×2')
+    expect(container.querySelector('.status-tool-running, .status-last-tool, .status-tool-done')).toBeNull()
+    expect(text).not.toContain('Bash')
+    expect(text).not.toContain('Read')
+    expect(text).not.toContain('Skill')
   })
 
   it('closes open agent controls immediately when read-only recovery starts', async () => {
