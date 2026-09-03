@@ -103,8 +103,14 @@ test.describe('PRD 06 session fork', () => {
         { id: secondForkSessionId, cwd: fixture.workspaceDirectory, kind: 'claude-code' }
       ]))
       expect(databaseBeforeRestart.intents).toEqual([
-        { sessionId: firstForkSessionId, sourceSessionId, state: 'succeeded' },
-        { sessionId: secondForkSessionId, sourceSessionId: firstForkSessionId, state: 'succeeded' }
+        {
+          sessionId: firstForkSessionId, sourceSessionId,
+          permissionMode: 'bypassPermissions', state: 'succeeded'
+        },
+        {
+          sessionId: secondForkSessionId, sourceSessionId: firstForkSessionId,
+          permissionMode: 'bypassPermissions', state: 'succeeded'
+        }
       ])
       expect(databaseBeforeRestart.relations).toEqual([
         { fromSessionId: firstForkSessionId, toSessionId: sourceSessionId, kind: 'forked-from' },
@@ -114,9 +120,11 @@ test.describe('PRD 06 session fork', () => {
         path: join(evidenceDirectory, 'forked-conversations.png')
       })
 
-      const forkLaunchCount = (await invocationLines(invocationLog))
-        .filter(({ args }) => args.includes('--fork-session')).length
-      expect(forkLaunchCount).toBe(2)
+      const forkLaunches = (await invocationLines(invocationLog))
+        .filter(({ args }) => args.includes('--fork-session'))
+      expect(forkLaunches).toHaveLength(2)
+      expect(forkLaunches.every(({ args }) =>
+        args.includes('--dangerously-skip-permissions'))).toBe(true)
       fixture = await restartMatou(fixture, { env: environment })
       await expectOnlySecondaryColorLcd(fixture)
       await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
@@ -307,7 +315,12 @@ async function readProviderInput(directory: string, providerId: string): Promise
 
 function readForkDatabase(path: string): {
   sessions: Array<{ id: string; cwd: string; kind: string }>
-  intents: Array<{ sessionId: string; sourceSessionId: string; state: string }>
+  intents: Array<{
+    sessionId: string
+    sourceSessionId: string
+    permissionMode: string
+    state: string
+  }>
   relations: Array<{ fromSessionId: string; toSessionId: string; kind: string }>
 } {
   const database = new DatabaseSync(path, { readOnly: true })
@@ -317,10 +330,11 @@ function readForkDatabase(path: string): {
         `SELECT id, cwd, kind FROM sessions WHERE archived_at IS NULL ORDER BY created_at, id`
       ).all().map((row) => ({ id: String(row.id), cwd: String(row.cwd), kind: String(row.kind) })),
       intents: database.prepare(
-        `SELECT session_id, source_session_id, state FROM session_fork_intents ORDER BY created_at, session_id`
+        `SELECT session_id, source_session_id, permission_mode, state
+         FROM session_fork_intents ORDER BY created_at, session_id`
       ).all().map((row) => ({
         sessionId: String(row.session_id), sourceSessionId: String(row.source_session_id),
-        state: String(row.state)
+        permissionMode: String(row.permission_mode), state: String(row.state)
       })),
       relations: database.prepare(
         `SELECT from_session_id, to_session_id, relation_kind

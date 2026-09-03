@@ -66,15 +66,24 @@ describe('ForkWorkflowService', () => {
       relation_kind: 'forked-from'
     })
     expect(database.get(
-      `SELECT source_session_id, source_provider_session_id, state, worktree_mode, stage
+      `SELECT source_session_id, source_provider_session_id, permission_mode,
+              state, worktree_mode, stage
        FROM session_fork_intents WHERE session_id = ?`,
       result.session!.id
     )).toEqual({
       source_session_id: source.sessionId,
       source_provider_session_id: 'provider-parent',
+      permission_mode: 'bypassPermissions',
       state: 'pending',
       worktree_mode: 'current',
       stage: 'queued'
+    })
+    expect(database.get(
+      `SELECT metadata_json FROM provider_bindings
+       WHERE session_id = ? AND provider_session_id = ?`,
+      source.sessionId, 'provider-parent'
+    )).toEqual({
+      metadata_json: JSON.stringify({ canFork: true, permissionMode: 'bypassPermissions' })
     })
     expect(database.get(
       `SELECT local_execution_context_id, managed_worktree_id, active_target, state
@@ -690,7 +699,7 @@ function seedClaudeBinding(sessionId: string, providerSessionId: string, canFork
        metadata_json, created_at, updated_at, validated_at
      ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, ?, ?, ?)`,
     `binding-${providerSessionId}`, sessionId, providerSessionId,
-    JSON.stringify({ canFork }), now, now, now
+    JSON.stringify({ canFork, permissionMode: 'bypassPermissions' }), now, now, now
   )
 }
 

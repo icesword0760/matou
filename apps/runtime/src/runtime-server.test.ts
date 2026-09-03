@@ -3044,8 +3044,8 @@ sleep 30
       database.run(
         `INSERT INTO session_fork_intents (
            session_id, source_session_id, source_provider, source_provider_session_id,
-           state, created_at
-         ) VALUES (?, ?, 'claude-code', ?, 'pending', 1)`,
+           permission_mode, state, created_at
+         ) VALUES (?, ?, 'claude-code', ?, 'bypassPermissions', 'pending', 1)`,
         'fork-derived', 'fork-source', 'provider-source-42'
       )
       const sessions = createTestSessionRegistry()
@@ -3065,7 +3065,8 @@ sleep 30
 
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
-        '--resume', 'provider-source-42', '--fork-session'
+        '--resume', 'provider-source-42', '--fork-session',
+        '--dangerously-skip-permissions'
       ])
       expect(database.get(
         'SELECT state, started_at FROM session_fork_intents WHERE session_id = ?', 'fork-derived'
@@ -3146,7 +3147,8 @@ sleep 30
       intents.accept({
         operationId: 'operation-renderer-gate', submissionKey: 'submission-renderer-gate',
         sessionId: 'fork-durable-derived', sourceSessionId: 'fork-durable-source',
-        sourceProviderSessionId: 'provider-source-durable', displayName: 'Derived',
+        sourceProviderSessionId: 'provider-source-durable',
+        permissionMode: 'bypassPermissions', displayName: 'Derived',
         worktreeMode: 'current', totalSteps: 2, now
       })
       const decision = intents.acquireLease({
@@ -3186,7 +3188,8 @@ sleep 30
       })).resolves.toMatchObject({ kind: 'started' })
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')) !== '')
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
-        '--resume', 'provider-source-durable', '--fork-session'
+        '--resume', 'provider-source-durable', '--fork-session',
+        '--dangerously-skip-permissions'
       ])
       expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
       await new Promise((resolve) => setTimeout(resolve, 75))
@@ -3208,7 +3211,8 @@ sleep 30
       expect(forkPort.sent.filter(({ type }) => type === 'terminal.spawned')).toHaveLength(1)
       expect(sessions.get('fork-durable-derived')?.runId).toBe('run-renderer-gate')
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
-        '--resume', 'provider-source-durable', '--fork-session'
+        '--resume', 'provider-source-durable', '--fork-session',
+        '--dangerously-skip-permissions'
       ])
     } finally {
       forkServer.close()
@@ -3236,7 +3240,7 @@ sleep 30
       intents.accept({
         operationId: 'operation-durable-exit', submissionKey: 'submission-durable-exit',
         sessionId: 'fork-durable-exit-derived', sourceSessionId: 'fork-durable-exit-source',
-        sourceProviderSessionId: 'provider-source-exit', displayName: 'Derived',
+        sourceProviderSessionId: 'provider-source-exit', permissionMode: 'default', displayName: 'Derived',
         worktreeMode: 'current', totalSteps: 2, now
       })
       const decision = intents.acquireLease({
@@ -3287,7 +3291,8 @@ sleep 30
       intents.accept({
         operationId: 'operation-identity-timeout', submissionKey: 'submission-identity-timeout',
         sessionId: 'fork-timeout-derived', sourceSessionId: 'fork-timeout-source',
-        sourceProviderSessionId: 'provider-source-timeout', displayName: 'Identity timeout',
+        sourceProviderSessionId: 'provider-source-timeout', permissionMode: 'default',
+        displayName: 'Identity timeout',
         worktreeMode: 'current', totalSteps: 2, now
       })
       const decision = intents.acquireLease({
@@ -3471,7 +3476,8 @@ sleep 30
       intents.accept({
         operationId: 'fork-graph-operation', submissionKey: 'fork-graph-submission',
         sessionId: 'fork-graph-derived', sourceSessionId: 'fork-graph-source',
-        sourceProviderSessionId: 'missing-provider-graph', displayName: '失败分支',
+        sourceProviderSessionId: 'missing-provider-graph', permissionMode: 'default',
+        displayName: '失败分支',
         worktreeMode: 'current', totalSteps: 2, now: 1
       })
       const leaseDecision = intents.acquireLease({

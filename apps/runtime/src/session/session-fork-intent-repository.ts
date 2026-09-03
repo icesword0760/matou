@@ -1,3 +1,4 @@
+import type { HudPermissionMode } from '@matou/contracts'
 import type { ForkProgress, ForkStage } from '@matou/domain'
 
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
@@ -8,6 +9,7 @@ interface ForkIntentRow {
   session_id: string
   source_session_id: string
   source_provider_session_id: string
+  permission_mode: HudPermissionMode
   state: 'pending' | 'starting' | 'succeeded' | 'failed'
   error_message: string | null
   operation_id: string
@@ -51,6 +53,7 @@ export interface ForkOperationRecord {
 export interface AcceptForkIntentInput extends ForkOperationIdentity {
   sourceSessionId: string
   sourceProviderSessionId: string
+  permissionMode: HudPermissionMode
   displayName: string
   worktreeMode: ForkWorktreeMode
   totalSteps: number
@@ -83,6 +86,7 @@ export type ForkLaunchDecision =
       kind: 'launch'
       sourceSessionId: string
       sourceProviderSessionId: string
+      permissionMode: HudPermissionMode
     }
   | { kind: 'failed'; error: string }
 
@@ -102,17 +106,18 @@ export class SessionForkIntentRepository {
       tx.run(
         `INSERT INTO session_fork_intents (
            session_id, source_session_id, source_provider, source_provider_session_id,
-           state, error_message, created_at, display_name, worktree_mode,
+           permission_mode, state, error_message, created_at, display_name, worktree_mode,
            worktree_id, target_execution_context_id, worktree_path, branch_name,
            attempt_count, updated_at, operation_id, submission_key, stage,
            completed_steps, total_steps, attempt, lease_fence
          ) VALUES (
-           ?, ?, 'claude-code', ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?,
+           ?, ?, 'claude-code', ?, ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?,
            0, ?, ?, ?, 'queued', 0, ?, 0, 0
          )`,
         input.sessionId,
         input.sourceSessionId,
         input.sourceProviderSessionId,
+        input.permissionMode,
         input.now,
         input.displayName,
         input.worktreeMode,
@@ -410,7 +415,8 @@ export class SessionForkIntentRepository {
       return {
         kind: 'launch',
         sourceSessionId: row.source_session_id,
-        sourceProviderSessionId: row.source_provider_session_id
+        sourceProviderSessionId: row.source_provider_session_id,
+        permissionMode: row.permission_mode
       }
     })
   }

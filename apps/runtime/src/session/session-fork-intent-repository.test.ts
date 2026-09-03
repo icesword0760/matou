@@ -44,9 +44,9 @@ beforeEach(async () => {
   database.run(
     `INSERT INTO session_fork_intents (
        session_id, source_session_id, source_provider, source_provider_session_id,
-       state, created_at, started_at, attempt_count, updated_at
+       permission_mode, state, created_at, started_at, attempt_count, updated_at
      ) VALUES ('child-1', 'source-1', 'claude-code', 'provider-source',
-               'starting', 1, 2, 1, 2)`
+               'bypassPermissions', 'starting', 1, 2, 1, 2)`
   )
 })
 
@@ -60,7 +60,7 @@ describe('SessionForkIntentRepository', () => {
   it('relaunches an interrupted provisional Fork from the original source conversation', () => {
     expect(intents.claimForLaunch('child-1', 10)).toEqual({
       kind: 'launch', sourceSessionId: 'source-1',
-      sourceProviderSessionId: 'provider-source'
+      sourceProviderSessionId: 'provider-source', permissionMode: 'bypassPermissions'
     })
     expect(database.get(
       `SELECT state, started_at, attempt_count, updated_at, error_message
@@ -215,6 +215,7 @@ function acceptInput() {
     operationId: 'operation-1', submissionKey: 'submission-1',
     sessionId: 'child-1', sourceSessionId: 'source-1',
     sourceProviderSessionId: 'provider-source', displayName: 'Child',
+    permissionMode: 'bypassPermissions' as const,
     worktreeMode: 'new' as const, worktreeId: 'worktree-1',
     executionContextId: 'worktree-context-1', worktreePath: '/tmp/worktree-1',
     branchName: 'feature/child-1', totalSteps: 5, now: 3

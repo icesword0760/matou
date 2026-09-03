@@ -32,6 +32,11 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     if (identity && input.forkSession) args.push('--fork-session')
     if (input.permissionMode === 'bypassPermissions') {
       args.push('--dangerously-skip-permissions')
+    } else if (
+      input.permissionMode === 'auto' || input.permissionMode === 'acceptEdits' ||
+      input.permissionMode === 'plan'
+    ) {
+      args.push('--permission-mode', input.permissionMode)
     }
     return { file: input.executable, args, resuming: Boolean(identity) }
   }

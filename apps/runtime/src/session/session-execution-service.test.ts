@@ -96,12 +96,14 @@ describe('SessionExecutionService', () => {
       kind: 'started', value: 'launched',
       authority: {
         operationId: 'operation-1', runId: 'run-authoritative', lease,
-        sourceSessionId: 'source-1', sourceProviderSessionId: 'provider-source'
+        sourceSessionId: 'source-1', sourceProviderSessionId: 'provider-source',
+        permissionMode: 'bypassPermissions'
       }
     })
     expect(backend.startOrResume).toHaveBeenCalledWith(descriptor, {
       operationId: 'operation-1', runId: 'run-authoritative', lease,
-      sourceSessionId: 'source-1', sourceProviderSessionId: 'provider-source'
+      sourceSessionId: 'source-1', sourceProviderSessionId: 'provider-source',
+      permissionMode: 'bypassPermissions'
     })
   })
 
@@ -125,6 +127,7 @@ function durableForkAtProviderStage(ttlMs = 20) {
   intents.accept({
     operationId: 'operation-1', submissionKey: 'submission-1', sessionId: 'child-1',
     sourceSessionId: 'source-1', sourceProviderSessionId: 'provider-source',
+    permissionMode: 'bypassPermissions',
     displayName: 'Child', worktreeMode: 'current', totalSteps: 2, now: 2
   })
   const decision = intents.acquireLease({

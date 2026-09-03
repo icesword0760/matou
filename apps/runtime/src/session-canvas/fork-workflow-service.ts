@@ -4,6 +4,7 @@ import { realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
+import type { HudPermissionMode } from '@matou/contracts'
 import type {
   DomainCommandMetadata,
   ForkProgress,
@@ -782,6 +783,7 @@ export class ForkWorkflowService {
         sessionId: ids.sessionId,
         sourceSessionId: source.forkSource.id,
         sourceProviderSessionId: source.binding.provider_session_id,
+        permissionMode: permissionModeFromBinding(source.binding),
         displayName,
         worktreeMode: input.worktreeMode,
         totalSteps: gitPlan ? 5 : 2,
@@ -1085,6 +1087,14 @@ function metadata(value: string): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function permissionModeFromBinding(binding: BindingRow): HudPermissionMode {
+  const value = metadata(binding.metadata_json).permissionMode
+  return value === 'auto' || value === 'acceptEdits' || value === 'plan' ||
+    value === 'bypassPermissions'
+    ? value
+    : 'default'
 }
 
 function activeLevelNamesFrom(

@@ -31,8 +31,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
-    expect(result.currentVersion).toBe(28)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
+    expect(result.currentVersion).toBe(29)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -113,7 +113,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 28,
+      currentVersion: 29,
       backupPath: undefined
     })
     expect(database.all<{ checksum: string }>(
@@ -157,8 +157,8 @@ describe('MigrationRunner', () => {
       'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd')
 
     await expect(new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()).resolves.toMatchObject({
-      appliedVersions: [24, 25, 26, 27, 28],
-      currentVersion: 28
+      appliedVersions: [24, 25, 26, 27, 28, 29],
+      currentVersion: 29
     })
     expect(database.all<{ checksum: string }>(
       'SELECT checksum FROM schema_migrations ORDER BY version'
@@ -207,7 +207,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([27, 28])
+    expect(result.appliedVersions).toEqual([27, 28, 29])
     expect(database.all(
       `SELECT session_id, operation_id, submission_key, stage, completed_steps,
               total_steps, attempt, lease_fence
@@ -221,6 +221,65 @@ describe('MigrationRunner', () => {
       durableLegacyRow('new-pending', 'queued', 0, 5),
       durableLegacyRow('new-starting', 'queued', 0, 5),
       durableLegacyRow('new-succeeded', 'succeeded', 5, 5)
+    ])
+  })
+
+  it('snapshots the exact source conversation permission when upgrading v28 Fork intents', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 28)).migrate()
+    database.run(
+      `INSERT INTO workspaces (id, name, root_directory, created_at, updated_at)
+       VALUES ('workspace', 'Workspace', '/tmp/workspace', 1, 1)`
+    )
+    database.run(
+      `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+       VALUES ('context', 'workspace', 'plain-directory', '/tmp/workspace', 1)`
+    )
+    database.run(
+      `INSERT INTO tasks (
+         id, workspace_id, execution_context_id, title, status, created_at, updated_at
+       ) VALUES ('task', 'workspace', 'context', 'Task', 'active', 1, 1)`
+    )
+    for (const id of ['source', 'child', 'source-default', 'child-default']) {
+      database.run(
+        `INSERT INTO sessions (
+           id, task_id, execution_context_id, kind, status, title, cwd,
+           created_at, updated_at, last_activity_at
+         ) VALUES (?, 'task', 'context', 'claude-code', 'running', ?, '/tmp/workspace', 1, 1, 1)`,
+        id, id
+      )
+    }
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES
+         ('binding-exact', 'source', 'claude-code', 'provider-exact', 'available', 'none',
+          '{"permissionMode":"bypassPermissions"}', 1, 1, 1),
+         ('binding-newer', 'source', 'claude-code', 'provider-newer', 'available', 'none',
+          '{"permissionMode":"plan"}', 2, 2, 2)`
+    )
+    database.run(
+      `INSERT INTO session_fork_intents (
+         session_id, source_session_id, source_provider, source_provider_session_id,
+         state, worktree_mode, created_at, attempt_count, updated_at,
+         operation_id, submission_key
+       ) VALUES
+         ('child', 'source', 'claude-code', 'provider-exact', 'pending', 'current', 1, 0, 1,
+          'operation-child', 'submission-child'),
+         ('child-default', 'source-default', 'claude-code', 'provider-missing',
+          'pending', 'current', 1, 0, 1, 'operation-default', 'submission-default')`
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.appliedVersions).toEqual([29])
+    expect(database.all(
+      `SELECT session_id, permission_mode
+       FROM session_fork_intents ORDER BY session_id`
+    )).toEqual([
+      { session_id: 'child', permission_mode: 'bypassPermissions' },
+      { session_id: 'child-default', permission_mode: 'default' }
     ])
   })
 
@@ -259,7 +318,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26, 27, 28])
+    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29])
     expect(() => database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state,
@@ -345,8 +404,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26, 27, 28])
-    expect(result.currentVersion).toBe(28)
+    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26, 27, 28, 29])
+    expect(result.currentVersion).toBe(29)
     expect(database.all(
       `SELECT session_id, local_execution_context_id, managed_worktree_id,
               active_target, state, error_message, updated_at
@@ -457,7 +516,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([25, 26, 27, 28])
+    expect(result.appliedVersions).toEqual([25, 26, 27, 28, 29])
     expect(database.all(
       `SELECT execution_context_id, repository_root, state, branch, detached_head,
               dirty, error_message, updated_at
@@ -539,7 +598,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[24]!,
       FOUNDATION_MIGRATIONS[25]!,
       FOUNDATION_MIGRATIONS[26]!,
-      FOUNDATION_MIGRATIONS[27]!
+      FOUNDATION_MIGRATIONS[27]!,
+      FOUNDATION_MIGRATIONS[28]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -560,7 +620,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 28')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 29')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -595,7 +655,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
+    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
@@ -659,7 +719,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
+    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
     expect(database.all(
       `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
        FROM session_canvas_memberships ORDER BY sibling_created_seq`
@@ -738,7 +798,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
+    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
     expect(database.get<{ state: string }>(
       `SELECT state FROM session_fork_intents WHERE session_id = 'child'`
     )).toEqual({ state: 'succeeded' })

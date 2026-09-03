@@ -263,7 +263,7 @@ describe('SessionRepository', () => {
     intents.accept({
       operationId: 'operation-authoritative', submissionKey: 'submission-authoritative',
       sessionId: 'session-1', sourceSessionId: 'source-authoritative',
-      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      sourceProviderSessionId: 'provider-source', permissionMode: 'default', displayName: 'Derived',
       worktreeMode: 'current', totalSteps: 2, now: 2
     })
     const decision = intents.acquireLease({
@@ -307,7 +307,7 @@ describe('SessionRepository', () => {
     intents.accept({
       operationId: 'operation-takeover', submissionKey: 'submission-takeover',
       sessionId: 'session-1', sourceSessionId: 'source-takeover',
-      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      sourceProviderSessionId: 'provider-source', permissionMode: 'default', displayName: 'Derived',
       worktreeMode: 'current', totalSteps: 2, now: 2
     })
     const first = intents.acquireLease({

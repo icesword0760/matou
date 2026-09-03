@@ -1591,6 +1591,7 @@ export class RuntimeServer {
         ? new ClaudePermissionModeTracker() : undefined
       if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
+        forkLaunch?.permissionMode ??
         permissionModeFromMetadata(resumeBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({

@@ -1232,5 +1232,34 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX session_relations_structural_lookup_idx
       ON session_relations_current(from_session_id, relation_kind);
     `
+  },
+  {
+    version: 29,
+    name: 'fork-permission-snapshot',
+    sql: `
+      ALTER TABLE session_fork_intents ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default'
+        CHECK (permission_mode IN (
+          'default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'
+        ));
+
+      UPDATE session_fork_intents AS intent
+      SET permission_mode = COALESCE((
+        SELECT CASE
+          WHEN json_valid(binding.metadata_json) THEN CASE
+            WHEN json_extract(binding.metadata_json, '$.permissionMode') IN (
+              'default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'
+            ) THEN json_extract(binding.metadata_json, '$.permissionMode')
+            ELSE 'default'
+          END
+          ELSE 'default'
+        END
+        FROM provider_bindings AS binding
+        WHERE binding.session_id = intent.source_session_id
+          AND binding.provider = intent.source_provider
+          AND binding.provider_session_id = intent.source_provider_session_id
+        ORDER BY binding.updated_at DESC, binding.id DESC
+        LIMIT 1
+      ), 'default');
+    `
   }
 ]

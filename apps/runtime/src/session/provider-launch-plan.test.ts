@@ -70,6 +70,7 @@ describe('PRD 04 provider launch plan', () => {
     expect(resolvePtyCommand({
       profile: 'claude-code', executable: '/fixture/claude',
       providerSessionId: 'claude-source-1', forkSession: true,
+      permissionMode: 'bypassPermissions',
       settingsPath: '/private/matou/settings.json',
       controlAssetRoot: '/private/matou/control-assets'
     })).toEqual({
@@ -77,10 +78,21 @@ describe('PRD 04 provider launch plan', () => {
       args: [
         '--settings', '/private/matou/settings.json',
         '--plugin-dir', '/private/matou/control-assets/providers/claude-plugin',
-        '--resume', 'claude-source-1', '--fork-session'
+        '--resume', 'claude-source-1', '--fork-session',
+        '--dangerously-skip-permissions'
       ],
       resuming: true
     })
+  })
+
+  it.each([
+    ['auto', 'auto'],
+    ['acceptEdits', 'acceptEdits'],
+    ['plan', 'plan']
+  ])('launches Claude Code in the persisted %s permission mode', (permissionMode, cliMode) => {
+    expect(resolvePtyCommand({
+      profile: 'claude-code', executable: '/fixture/claude', permissionMode
+    }).args).toEqual(['--permission-mode', cliMode])
   })
 
   it('keeps Codex permission flags global while loading session-only instructions', () => {

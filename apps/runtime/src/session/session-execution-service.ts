@@ -1,3 +1,4 @@
+import type { HudPermissionMode } from '@matou/contracts'
 import type { ForkStage } from '@matou/domain'
 
 import type { RuntimeDatabase } from '../storage/database'
@@ -22,6 +23,7 @@ export interface ForkExecutionAuthorityInput {
 export interface ForkExecutionAuthority extends ForkExecutionAuthorityInput {
   sourceSessionId: string
   sourceProviderSessionId: string
+  permissionMode: HudPermissionMode
 }
 
 export interface SessionExecutionBackend<T = void> {
@@ -43,6 +45,7 @@ interface DurableForkRow {
   session_id: string
   source_session_id: string
   source_provider_session_id: string
+  permission_mode: HudPermissionMode
   stage: ForkStage
   lease_token: string | null
   lease_fence: number
@@ -109,7 +112,8 @@ export class SessionExecutionService<T = void> {
       const bound: ForkExecutionAuthority = {
         ...authority,
         sourceSessionId: row.source_session_id,
-        sourceProviderSessionId: row.source_provider_session_id
+        sourceProviderSessionId: row.source_provider_session_id,
+        permissionMode: row.permission_mode
       }
       const value = await this.#startBackend(descriptor, bound, undefined, attachView)
       return { kind: 'started', value, authority: bound }
@@ -131,7 +135,7 @@ export class SessionExecutionService<T = void> {
   #durableFork(sessionId: string): DurableForkRow | undefined {
     const row = this.#database.get<DurableForkRow>(
       `SELECT operation_id, session_id, source_session_id, source_provider_session_id,
-              stage, lease_token, lease_fence, lease_expires_at
+              permission_mode, stage, lease_token, lease_fence, lease_expires_at
        FROM session_fork_intents WHERE session_id = ?`,
       sessionId
     )

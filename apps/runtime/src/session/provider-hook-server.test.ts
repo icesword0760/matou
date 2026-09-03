@@ -383,7 +383,7 @@ describe('ProviderHookServer', () => {
     intents.accept({
       operationId: 'operation-fenced', submissionKey: 'submission-fenced',
       sessionId: 'session-1', sourceSessionId: 'session-source-fenced',
-      sourceProviderSessionId: 'provider-source', displayName: 'Derived',
+      sourceProviderSessionId: 'provider-source', permissionMode: 'default', displayName: 'Derived',
       worktreeMode: 'current', totalSteps: 2, now
     })
     const first = intents.acquireLease({
