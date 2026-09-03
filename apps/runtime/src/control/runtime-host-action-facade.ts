@@ -3,6 +3,7 @@ import { access, constants, stat } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 
 import type { DomainCommandMetadata } from '@matou/domain'
+import { ZodError } from 'zod'
 
 import type {
   CoordinateAcceptedForkInput,
@@ -149,8 +150,8 @@ export class RuntimeHostActionFacade {
     caller: HostCallerIdentity,
     rawParams: unknown
   ): Promise<HostActionResult> {
-    const request = parseHostActionRequest(method, rawParams)
     try {
+      const request = parseHostActionRequest(method, rawParams)
       if (isStructuralMutation(request.method)) this.#assertWritable()
       switch (request.method) {
         case 'structure.create.workspace':
@@ -1176,6 +1177,13 @@ function isStructuralMutation(method: HostActionMethod): boolean {
 
 function normalizeFacadeError(error: unknown): unknown {
   if (error instanceof RuntimeHostActionError) return error
+  if (error instanceof ZodError) {
+    return new RuntimeHostActionError(
+      'INVALID_REQUEST',
+      invalidRequestMessage(error),
+      { cause: error }
+    )
+  }
   if (error instanceof HostActionTargetResolverError) {
     return new RuntimeHostActionError(error.code, error.message, {
       candidates: error.candidates,
@@ -1227,6 +1235,33 @@ function normalizeFacadeError(error: unknown): unknown {
     }
   }
   return error
+}
+
+function invalidRequestMessage(error: ZodError): string {
+  const issue = error.issues[0]
+  if (!issue) return '请求参数不符合动作约束'
+  if (issue.code === 'unrecognized_keys') {
+    const fields = issue.keys.slice(0, 3).map(safeFieldName).join(', ')
+    return `请求参数包含不支持的字段: ${fields}`
+  }
+  const field = issue.path.length > 0
+    ? issue.path.map((part) => safeFieldName(String(part))).join('.')
+    : 'params'
+  if (issue.code === 'invalid_type') {
+    return `请求参数 ${field} 缺失或类型不正确`
+  }
+  if (issue.code === 'invalid_value') {
+    return `请求参数 ${field} 的值不受支持`
+  }
+  if (issue.code === 'invalid_union') {
+    return `请求参数 ${field} 不符合可用选择器格式`
+  }
+  return `请求参数 ${field} 不符合约束`
+}
+
+function safeFieldName(value: string): string {
+  const normalized = value.replace(/[^a-zA-Z0-9_.[\]-]/g, '?').slice(0, 80)
+  return normalized || 'params'
 }
 
 function hash(value: string): string {

@@ -8,6 +8,7 @@ import {
   HostControlTargetNotReadyError,
   type AllowedControlKey,
   type HostCallerIdentity,
+  type HostControlErrorDetails,
   type HostControlScope,
   type HostListScope,
   type HostTarget,
@@ -26,6 +27,7 @@ import type {
 export type {
   AllowedControlKey,
   HostCallerIdentity,
+  HostControlErrorDetails,
   HostControlScope,
   HostListScope,
   HostTarget,
@@ -166,9 +168,15 @@ export type ControlErrorCode =
 
 class ControlFault extends Error {
   readonly code: ControlErrorCode
-  constructor(code: ControlErrorCode, message: string) {
+  readonly details: HostControlErrorDetails | undefined
+  constructor(
+    code: ControlErrorCode,
+    message: string,
+    details?: HostControlErrorDetails
+  ) {
     super(message)
     this.code = code
+    this.details = details
   }
 }
 
@@ -271,13 +279,13 @@ export class HostControlServer {
       const fault = error instanceof ControlFault
         ? error
         : isCodedControlError(error)
-          ? new ControlFault(error.code, error.message)
+          ? new ControlFault(error.code, error.message, controlErrorDetails(error))
         : error instanceof HostControlTargetNotFoundError
           ? new ControlFault('TARGET_NOT_FOUND', error.message)
         : error instanceof HostControlTargetNotReadyError
           ? new ControlFault('TARGET_NOT_READY', error.message)
         : new ControlFault('INTERNAL_ERROR', errorMessage(error))
-      await this.#write(socket, errorResponse(requestId, fault.code, fault.message))
+      await this.#write(socket, errorResponse(requestId, fault.code, fault.message, fault.details))
     } finally {
       await runHostControlPostResponseEffects(result).catch((error) => {
         console.error(`[host-control.post-response] ${errorMessage(error)}`)
@@ -494,8 +502,18 @@ function targetRevision(targets: HostTarget[]): string {
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
-function errorResponse(requestId: string, code: ControlErrorCode, message: string): unknown {
-  return { version: CONTROL_VERSION, requestId, ok: false, error: { code, message } }
+function errorResponse(
+  requestId: string,
+  code: ControlErrorCode,
+  message: string,
+  details?: HostControlErrorDetails
+): unknown {
+  return {
+    version: CONTROL_VERSION,
+    requestId,
+    ok: false,
+    error: { code, message, ...(details === undefined ? {} : { details }) }
+  }
 }
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -574,6 +592,22 @@ function isCodedControlError(error: unknown): error is Error & { code: ControlEr
   return error instanceof Error &&
     typeof (error as Error & { code?: unknown }).code === 'string' &&
     CONTROL_ERROR_CODES.includes((error as Error & { code: string }).code as ControlErrorCode)
+}
+function controlErrorDetails(error: Error & { code: ControlErrorCode }): HostControlErrorDetails | undefined {
+  if (error.code !== 'AMBIGUOUS_TARGET') return undefined
+  const rawCandidates = (error as Error & { candidates?: unknown }).candidates
+  if (!Array.isArray(rawCandidates)) return undefined
+  const candidates = rawCandidates.slice(0, 5).flatMap((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return []
+    const humanPath = (candidate as { displayPath?: unknown }).displayPath
+    if (
+      typeof humanPath !== 'string' ||
+      !humanPath.trim() ||
+      Buffer.byteLength(humanPath, 'utf8') > 4_096
+    ) return []
+    return [{ humanPath }]
+  })
+  return candidates.length > 0 ? { candidates } : undefined
 }
 const CONTROL_ERROR_CODES = [
   'INVALID_REQUEST', 'TARGET_NOT_FOUND', 'TARGET_NOT_READY', 'RUNTIME_NOT_READY',

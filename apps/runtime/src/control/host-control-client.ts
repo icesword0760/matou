@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { connect, type Socket } from 'node:net'
 
-import type { HostControlScope } from './host-control-types'
+import type { HostControlErrorDetails, HostControlScope } from './host-control-types'
 
 export interface HostControlClientOptions {
   endpoint: string
@@ -14,15 +14,17 @@ interface ControlResponse {
   requestId: string
   ok: boolean
   result?: unknown
-  error?: { code: string; message: string }
+  error?: { code: string; message: string; details?: unknown }
 }
 
 export class HostControlClientError extends Error {
   readonly code: string
+  readonly details?: HostControlErrorDetails
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, details?: HostControlErrorDetails) {
     super(message)
     this.code = code
+    if (details !== undefined) this.details = details
   }
 }
 
@@ -60,7 +62,8 @@ export class HostControlClient {
       if (!response.ok) {
         throw new HostControlClientError(
           response.error?.code ?? 'INTERNAL_ERROR',
-          response.error?.message ?? 'Host Control 请求失败'
+          response.error?.message ?? 'Host Control 请求失败',
+          parseErrorDetails(response.error?.code, response.error?.details)
         )
       }
       return response.result
@@ -68,6 +71,25 @@ export class HostControlClient {
       socket.end()
     }
   }
+}
+
+function parseErrorDetails(code: string | undefined, value: unknown): HostControlErrorDetails | undefined {
+  if (code !== 'AMBIGUOUS_TARGET' || typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined
+  }
+  const rawCandidates = (value as { candidates?: unknown }).candidates
+  if (!Array.isArray(rawCandidates)) return undefined
+  const candidates = rawCandidates.slice(0, 5).flatMap((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return []
+    const humanPath = (candidate as { humanPath?: unknown }).humanPath
+    if (
+      typeof humanPath !== 'string' ||
+      !humanPath.trim() ||
+      Buffer.byteLength(humanPath, 'utf8') > 4_096
+    ) return []
+    return [{ humanPath }]
+  })
+  return candidates.length > 0 ? { candidates } : undefined
 }
 
 function connectWithin(endpoint: string, timeoutMs: number): Promise<Socket> {

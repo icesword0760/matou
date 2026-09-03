@@ -1,10 +1,20 @@
 import { connect } from 'node:net'
-import { mkdtemp, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { DomainCommandMetadata } from '@matou/domain'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
+import { SessionCanvasService } from '../session-canvas/session-canvas-service'
+import { RuntimeDatabase } from '../storage/database'
+import { DomainTransactionManager } from '../storage/domain-transaction'
+import { MigrationRunner } from '../storage/migration-runner'
+import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { ForkBatchCoordinator } from './fork-batch-coordinator'
+import { HostActionConfirmationService } from './host-action-confirmation-service'
+import { HostActionTargetResolver } from './host-action-target-resolver'
 import {
   CapabilityTokenService,
   HostControlServer,
@@ -17,7 +27,11 @@ import {
   markHostControlCommittedResult,
   withHostControlPostResponseEffect
 } from './host-control-post-response'
-import { RuntimeHostActionError } from './runtime-host-action-facade'
+import { HostTopologyProjector } from './host-topology-projector'
+import {
+  RuntimeHostActionFacade,
+  RuntimeHostActionError
+} from './runtime-host-action-facade'
 
 const HOST_ACTION_SCOPES = [
   'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
@@ -139,6 +153,109 @@ describe('HostControlServer', () => {
       ok: false,
       error: { code, message: `fixture ${code}` }
     })
+  })
+
+  it('maps real facade field validation faults to concise INVALID_REQUEST frames', async () => {
+    const fixture = await realActionFacadeFixture(root)
+    backend.executeHostAction.mockImplementation((method, caller, params) =>
+      fixture.facade.execute(method, caller, params)
+    )
+    const token = tokenService.issue(
+      fixture.caller,
+      ['structure.create.session'],
+      Date.now() + 5_000
+    )
+    const valid = {
+      canvas: { kind: 'current', entity: 'canvas' },
+      profile: 'shell',
+      submissionKey: 'create-session'
+    }
+    const cases = [
+      { label: 'missing field', params: { ...valid, submissionKey: undefined }, field: 'submissionKey' },
+      { label: 'invalid profile', params: { ...valid, profile: 'python' }, field: 'profile' },
+      {
+        label: 'invalid selector',
+        params: {
+          ...valid,
+          canvas: { kind: 'relative', direction: 'up', projectionRevision: 'revision-1' }
+        },
+        field: 'canvas'
+      },
+      { label: 'extra field', params: { ...valid, internalOverride: true }, field: 'internalOverride' }
+    ]
+
+    try {
+      for (const testCase of cases) {
+        const response = await request(socketPath, controlRequest(
+          `invalid-${testCase.label}`,
+          token,
+          'structure.create.session',
+          testCase.params
+        ))
+        const error = response.error as Record<string, unknown>
+
+        expect(response).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } })
+        expect(error.message).toEqual(expect.stringContaining(testCase.field))
+        expect(Object.keys(error)).toEqual(['code', 'message'])
+        expect(String(error.message)).not.toMatch(/ZodError|\[\s*\{|stack|at RuntimeHostActionFacade/)
+        expect(String(error.message).length).toBeLessThan(240)
+      }
+    } finally {
+      fixture.database.close()
+    }
+  })
+
+  it('preserves sorted safe ambiguity candidates from the real resolver through the socket frame', async () => {
+    const fixture = await realActionFacadeFixture(root, true)
+    backend.executeHostAction.mockImplementation((method, caller, params) =>
+      fixture.facade.execute(method, caller, params)
+    )
+    const token = tokenService.issue(
+      fixture.caller,
+      ['structure.remove.preview'],
+      Date.now() + 5_000
+    )
+    const projectionRevision = fixture.resolver.projectionRevision(fixture.caller, 'all')
+
+    try {
+      const response = await request(socketPath, controlRequest(
+        'ambiguous-real-resolver',
+        token,
+        'structure.remove.preview',
+        {
+          target: { kind: 'ref', ref: 'legacy:duplicate', projectionRevision },
+          scope: 'node'
+        }
+      ))
+      const error = response.error as {
+        code: string
+        message: string
+        details: { candidates: Array<Record<string, unknown>> }
+      }
+
+      expect(response).toMatchObject({
+        ok: false,
+        error: {
+          code: 'AMBIGUOUS_TARGET',
+          details: {
+            candidates: fixture.expectedHumanPaths.map((humanPath) => ({
+              humanPath
+            }))
+          }
+        }
+      })
+      expect(Object.keys(error)).toEqual(['code', 'message', 'details'])
+      expect(Object.keys(error.details)).toEqual(['candidates'])
+      for (const candidate of error.details.candidates) {
+        expect(Object.keys(candidate)).toEqual(['humanPath'])
+        expect(candidate).not.toHaveProperty('ref')
+        expect(candidate).not.toHaveProperty('path')
+        expect(candidate).not.toHaveProperty('displayPath')
+        expect(candidate).not.toHaveProperty('sessionId')
+      }
+    } finally {
+      fixture.database.close()
+    }
   })
 
   it('reports an uninstalled action executor as Runtime not ready', async () => {
@@ -410,7 +527,11 @@ class TestBackend implements HostControlBackend {
   writeTaskProgress = vi.fn(async () => undefined)
   appendTaskLog = vi.fn(async () => undefined)
   moveTaskToWindow = vi.fn(async () => ({ state: 'committed' }))
-  executeHostAction = vi.fn(async (_method: HostActionMethod): Promise<HostActionResult> => ({
+  executeHostAction = vi.fn(async (
+    _method: HostActionMethod,
+    _caller: { runId: string; sessionId: string },
+    _params: unknown
+  ): Promise<HostActionResult> => ({
     kind: 'navigated',
     finalPath: {
       windowId: 'window-1', workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1'
@@ -444,6 +565,91 @@ function targetFixture(ordinal: number, title: string): HostTarget {
     session: { id: sessionId, ordinal, detached: false },
     dag: { depth: 0, childRefs: [], siblingRefs: ['surface:1', 'surface:2'] }
   }
+}
+
+class AmbiguousTargetProjector extends HostTopologyProjector {
+  readonly #targets: readonly HostTarget[]
+
+  constructor(database: RuntimeDatabase, targets: readonly HostTarget[]) {
+    super(database)
+    this.#targets = targets
+  }
+
+  override list(
+    _caller: { runId: string; sessionId: string },
+    _scope: 'current-level' | 'all'
+  ): HostTarget[] {
+    return this.#targets.map((target) => ({ ...target }))
+  }
+}
+
+async function realActionFacadeFixture(
+  dataRoot: string,
+  ambiguous = false
+): Promise<{
+  database: RuntimeDatabase
+  facade: RuntimeHostActionFacade
+  resolver: HostActionTargetResolver
+  caller: { runId: string; sessionId: string }
+  expectedHumanPaths: string[]
+}> {
+  const database = RuntimeDatabase.open(join(
+    dataRoot,
+    `action-${ambiguous ? 'ambiguous' : 'validation'}.sqlite`
+  ))
+  await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+  const transactions = new DomainTransactionManager(database)
+  const hierarchy = new HierarchyApplicationService(database, transactions)
+  const sessionCanvas = new SessionCanvasService(database, transactions)
+  const firstRoot = join(dataRoot, `workspace-first-${ambiguous ? 'ambiguous' : 'validation'}`)
+  const secondRoot = join(dataRoot, `workspace-second-${ambiguous ? 'ambiguous' : 'validation'}`)
+  await Promise.all([mkdir(firstRoot), mkdir(secondRoot)])
+  const first = hierarchy.bootstrapWindow(command('action-bootstrap'), {
+    windowId: 'window-1', defaultRootDirectory: firstRoot,
+    defaultName: 'First workspace', now: 1
+  })
+  hierarchy.createWorkspace(command('action-second-window'), {
+    windowId: 'window-2', name: 'Second workspace', rootDirectory: secondRoot,
+    navigation: 'activate', now: 2
+  })
+  const caller = { runId: 'run-real-facade', sessionId: first.session!.id }
+  const projected = new HostTopologyProjector(database).list(caller, 'all')
+  const expectedHumanPaths = projected.map((target) => [
+    target.workspace.name, target.task.name, target.canvas.name, target.title
+  ].join(' / '))
+  const topology = ambiguous
+    ? new AmbiguousTargetProjector(database, projected.slice().reverse().map((target) => ({
+        ...target,
+        ref: 'legacy:duplicate'
+      })))
+    : new HostTopologyProjector(database)
+  const resolver = new HostActionTargetResolver(database, topology)
+  const unexpected = async (): Promise<never> => {
+    throw new Error('unexpected unrelated action dependency')
+  }
+  const forkBatches = new ForkBatchCoordinator({
+    database,
+    createChild: unexpected,
+    retryChild: unexpected,
+    startSession: unexpected,
+    waitUntilReady: unexpected,
+    sendPrompt: unexpected
+  })
+  const facade = new RuntimeHostActionFacade({
+    database,
+    resolver,
+    confirmations: new HostActionConfirmationService(),
+    hierarchy,
+    sessionCanvas,
+    forkWorkflow: { createForkChild: unexpected, createForkSibling: unexpected },
+    forkBatches,
+    disposeSessions: unexpected
+  })
+  return { database, facade, resolver, caller, expectedHumanPaths }
+}
+
+function command(commandId: string): DomainCommandMetadata {
+  return { commandId, commandType: 'test', requestHash: `hash:${commandId}` }
 }
 
 function controlRequest(requestId: string, token: string, method: string, params: unknown) {

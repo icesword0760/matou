@@ -120,3 +120,76 @@ Observed: all exited `0`. Database-backed tests emitted only Node's existing exp
 ## Concerns
 
 No open code concern within Task 8 scope. The Host Control socket path is covered with real framed local sockets and real managed PTY profile launches; packaged-App interaction evidence is intentionally not claimed here.
+
+---
+
+## Fix round 1 — framed validation faults and ambiguity choices
+
+### Status and user impact
+
+The two P2 Host Control response gaps are closed:
+
+- Malformed high-level action fields now return `INVALID_REQUEST` through the framed socket. Missing fields, unsupported profiles, invalid selectors, and extra fields receive a short message naming the field that the caller can correct; Zod issue arrays, schemas, causes, and stacks stay inside Runtime.
+- `AMBIGUOUS_TARGET` now returns `error.details.candidates` in authoritative resolver order. Each candidate contains only `humanPath`, so CLI/AI callers can present the choices without receiving database result paths, stable/internal refs, session IDs, or resolver objects.
+- The Runtime client parses the same documented details shape, preserves order, and strips undeclared candidate/detail properties. Errors other than `AMBIGUOUS_TARGET` retain the existing `{ code, message }` payload shape.
+
+### TDD evidence
+
+Tests were added before production changes. The initial focused run was:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run --testTimeout=30000 \
+  src/control/host-control-server.test.ts \
+  src/control/host-control-client.test.ts
+```
+
+Observed RED: exit code `1`; `3` expected failures and `51` passes. The real facade validation path still returned `INTERNAL_ERROR`, the real resolver ambiguity frame omitted candidates, and the client discarded candidate details.
+
+After the implementation, the same command passed `2` files and `54/54` tests. The broader Task 8 focused run was:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run --testTimeout=120000 \
+  src/control/host-control-server.test.ts \
+  src/control/host-control-client.test.ts \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/runtime-control-backend.test.ts \
+  src/runtime-server.test.ts
+```
+
+Observed: exit code `0`; `5` files and `205/205` tests passed.
+
+### Complete automated verification
+
+```bash
+pnpm --filter @matou/runtime test
+pnpm --filter @matou/runtime typecheck
+pnpm check:identifiers
+git diff --check
+```
+
+Observed:
+
+- complete Runtime regression: exit code `0`, with `105` files / `874` tests in the main phase, `102` RuntimeServer tests, and `9` long journal tests (`985/985` total);
+- TypeScript typecheck: exit code `0`;
+- identifier policy gate: exit code `0`;
+- diff whitespace check: exit code `0`.
+
+Only the repository's existing Node experimental SQLite warnings appeared.
+
+### Coverage and self-review
+
+- The framed validation test installs a real `RuntimeHostActionFacade` and exercises its real strict Zod parser for four field-level failure classes; it does not use the permissive action-result fixture.
+- The ambiguity test uses migrated Runtime storage, two real hierarchy paths, the real `HostActionTargetResolver`, and the real facade. Its controlled projector deliberately returns the two matching surfaces in reverse order; the framed response proves resolver sorting survives while internal candidate fields are removed.
+- The client test feeds extra candidate/detail fields and verifies only ordered `humanPath` values enter `HostControlClientError.details`.
+- Re-read the error boundary to confirm only recognized `AMBIGUOUS_TARGET` faults can receive details. `INVALID_REQUEST` and every other fault still serialize only `code` and `message`.
+- No managed scope, token lifetime/revocation, startup order, terminal dispatch, model selection, or permission persistence path changed in this fix.
+
+### Code / automation / real App boundary
+
+- **Code:** validation normalization, controlled ambiguity serialization, and client parsing are implemented.
+- **Automated verification:** real socket frames, real facade parsing, real resolver ordering, full Runtime regression, typecheck, identifier, and diff gates passed.
+- **Real App:** no packaged Matou App was launched during this fix round; visible CLI/AI choice rendering remains outside Task 8's transport boundary.
+
+### Concerns
+
+No open code concern in Fix round 1 scope. The packaged-App interaction boundary still needs later end-to-end product verification and is not claimed here.

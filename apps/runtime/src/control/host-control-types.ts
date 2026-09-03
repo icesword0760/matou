@@ -19,6 +19,10 @@ export interface HostCallerIdentity {
   sessionId: string
 }
 
+export interface HostControlErrorDetails {
+  candidates: ReadonlyArray<{ readonly humanPath: string }>
+}
+
 export type HostTargetSelector =
   | { kind: 'self' }
   | { kind: 'relative'; direction: 'left' | 'right' }

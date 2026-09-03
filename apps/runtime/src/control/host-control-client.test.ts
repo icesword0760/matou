@@ -48,6 +48,43 @@ describe('HostControlClient', () => {
       expect.objectContaining<Partial<HostControlClientError>>({ code: 'TARGET_NOT_FOUND', message: 'gone' })
     )
   })
+
+  it('preserves only the documented ambiguity candidate fields', async () => {
+    const { endpoint } = await fixtureServer((request) => ({
+      version: 1, requestId: request.requestId, ok: false,
+      error: {
+        code: 'AMBIGUOUS_TARGET',
+        message: 'choose one',
+        details: {
+          candidates: [
+            { humanPath: 'Workspace / Task / Canvas / One', internal: true },
+            { humanPath: 'Workspace / Task / Canvas / Two' }
+          ],
+          internalTrace: 'hidden'
+        }
+      }
+    }))
+    const client = new HostControlClient({ endpoint, token: 'token', timeoutMs: 1000 })
+
+    try {
+      await client.request('host.list', {})
+    } catch (error) {
+      expect(error).toBeInstanceOf(HostControlClientError)
+      expect(error).toMatchObject({
+        code: 'AMBIGUOUS_TARGET',
+        details: {
+          candidates: [
+            { humanPath: 'Workspace / Task / Canvas / One' },
+            { humanPath: 'Workspace / Task / Canvas / Two' }
+          ]
+        }
+      })
+      expect(Object.keys((error as HostControlClientError).details!.candidates[0]!))
+        .toEqual(['humanPath'])
+      return
+    }
+    throw new Error('expected Host Control client fault')
+  })
 })
 
 async function fixtureServer(
