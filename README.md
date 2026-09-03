@@ -13,7 +13,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/icesword0760/matou?color=blue"></a>
   <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white">
-  <img alt="Node >= 22.16" src="https://img.shields.io/badge/node-%E2%89%A5%2022.16-339933?logo=node.js&logoColor=white">
+  <img alt="Node 22.16 or newer" src="https://img.shields.io/badge/node-%E2%89%A5%2022.16-339933?logo=node.js&logoColor=white">
   <img alt="Electron 43" src="https://img.shields.io/badge/electron-43-47848F?logo=electron&logoColor=white">
   <img alt="Status: early preview" src="https://img.shields.io/badge/status-early%20preview-orange">
 </p>
