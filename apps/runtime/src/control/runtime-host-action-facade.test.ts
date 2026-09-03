@@ -28,6 +28,7 @@ import type {
   HostRemovalPreview
 } from './host-action-types'
 import { CapabilityTokenService } from './host-control-server'
+import { runHostControlPostResponseEffects } from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
 import {
   RuntimeHostActionFacade,
@@ -45,7 +46,7 @@ let caller: HostCallerIdentity
 let root: string
 let workspaceRoot: string
 let clock: number
-let stopSessions: ReturnType<typeof vi.fn<(sessionIds: string[]) => Promise<void>>>
+let disposeSessions: ReturnType<typeof vi.fn<(sessionIds: string[]) => Promise<void>>>
 let createForkChild: ReturnType<typeof vi.fn<(
   command: DomainCommandMetadata,
   input: CreateForkInput
@@ -84,7 +85,7 @@ beforeEach(async () => {
     })()
   })
   clock = 100
-  stopSessions = vi.fn(async () => undefined)
+  disposeSessions = vi.fn(async () => undefined)
 
   createForkChild = vi.fn(async (metadata, input) => createForkResult(metadata, input))
   retryFork = vi.fn(async () => { throw new Error('unexpected Fork retry') })
@@ -188,6 +189,39 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
     }), 'PATH_CONFLICT')
   })
 
+  it.each([
+    ['structure.create.task', () => ({
+      workspace: { kind: 'current', entity: 'workspace' },
+      title: '路径失效事项', submissionKey: 'invalid-path-task'
+    })],
+    ['structure.create.canvas', () => ({
+      task: { kind: 'current', entity: 'task' },
+      title: '路径失效画布', submissionKey: 'invalid-path-canvas'
+    })],
+    ['structure.create.session', () => ({
+      canvas: { kind: 'current', entity: 'canvas' }, profile: 'shell',
+      title: '路径失效会话', submissionKey: 'invalid-path-session'
+    })],
+    ['structure.fork.child', () => ({
+      source: { kind: 'self' }, title: '路径失效 Fork',
+      environment: { mode: 'current' }, submissionKey: 'invalid-path-fork'
+    })],
+    ['structure.fork.children', () => ({
+      source: { kind: 'self' }, batchKey: 'invalid-path-batch',
+      items: [{ itemKey: 'one', title: '路径失效批次', environment: { mode: 'current' } }]
+    })]
+  ] as const)('maps an invalid existing Workspace for %s to PATH_CONFLICT', async (method, params) => {
+    database.run(
+      `INSERT INTO workspace_path_state (
+         workspace_id, status, reason, checked_at, validation_generation
+       ) VALUES (?, 'invalid', 'missing', ?, 1)`,
+      resolver.resolveEntity(caller, { kind: 'self' }, '').workspaceId,
+      ++clock
+    )
+
+    await expectFault(facade.execute(method, caller, params()), 'PATH_CONFLICT')
+  })
+
   it('creates three named children through the durable coordinator and restores caller focus', async () => {
     const result = await facade.execute('structure.fork.children', caller, {
       source: { kind: 'self' }, batchKey: 'three-options', items: [
@@ -243,7 +277,7 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
       forkBatches: {
         createChildren,
         retryFailures: createChildren,
-        preflightAccepted: () => false,
+        preflightAccepted: () => undefined,
         coordinateAcceptedFork: createChildren
       }
     })
@@ -310,6 +344,140 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
       }]
     }), 'PATH_CONFLICT')
     expect(createForkChild).toHaveBeenCalledTimes(1)
+  })
+
+  it('replays an explicit-ref batch from its public receipt before a stale projection is resolved', async () => {
+    const request = {
+      source: {
+        kind: 'ref' as const,
+        ref: `session:${caller.sessionId}`,
+        projectionRevision: resolver.projectionRevision(caller)
+      },
+      batchKey: 'explicit-ref-replay',
+      items: [{
+        itemKey: 'one', title: '稳定重放', environment: { mode: 'current' as const }
+      }]
+    }
+    const first = await facade.execute('structure.fork.children', caller, request)
+    const databasePath = database.path
+    database.close()
+    database = RuntimeDatabase.open(databasePath)
+    transactions = new DomainTransactionManager(database)
+    hierarchy = new HierarchyApplicationService(database, transactions)
+    sessionCanvas = new SessionCanvasService(database, transactions)
+    resolver = new HostActionTargetResolver(database)
+    const restartedFacade = createFacade({ forkBatches: createForkBatchCoordinator() })
+
+    const replay = await restartedFacade.execute('structure.fork.children', caller, request)
+
+    expect(replay).toEqual(first)
+    expect(createForkChild).toHaveBeenCalledTimes(1)
+  })
+
+  it('replays a relative source after its positional projection has drifted', async () => {
+    const sceneId = sourceSceneId()
+    const left = sessionCanvas.createShellSibling(command('relative-left'), {
+      windowId: 'window-1', sceneId, sourceSessionId: caller.sessionId,
+      parentSessionId: caller.sessionId, title: 'Left', now: ++clock
+    })
+    const right = sessionCanvas.createShellSibling(command('relative-right'), {
+      windowId: 'window-1', sceneId, sourceSessionId: caller.sessionId,
+      parentSessionId: caller.sessionId, title: 'Right', now: ++clock
+    })
+    const relativeCaller = { runId: 'run-left', sessionId: left.session!.id }
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId, sessionId: left.session!.id, now: ++clock
+    })
+    const request = {
+      source: {
+        kind: 'relative' as const,
+        direction: 'right' as const,
+        projectionRevision: resolver.projectionRevision(relativeCaller, 'current-level')
+      },
+      batchKey: 'relative-replay',
+      items: [{ itemKey: 'one', title: '相对来源', environment: { mode: 'current' as const } }]
+    }
+    const first = await facade.execute('structure.fork.children', relativeCaller, request)
+    database.run(
+      'UPDATE session_canvas_memberships SET last_user_interaction_seq = ? WHERE session_id = ?',
+      ++clock, right.session!.id
+    )
+
+    const replay = await createFacade({
+      resolver: new HostActionTargetResolver(database),
+      forkBatches: createForkBatchCoordinator()
+    }).execute('structure.fork.children', relativeCaller, request)
+
+    expect(replay).toEqual(first)
+  })
+
+  it('binds a durable batch key to the original selector even when another selector finds the same Session', async () => {
+    const items = [{
+      itemKey: 'one', title: '原始选择器', environment: { mode: 'current' as const }
+    }]
+    await facade.execute('structure.fork.children', caller, {
+      source: { kind: 'self' }, batchKey: 'selector-bound', items
+    })
+
+    await expectFault(facade.execute('structure.fork.children', caller, {
+      source: { kind: 'session', sessionId: caller.sessionId },
+      batchKey: 'selector-bound', items
+    }), 'PATH_CONFLICT')
+    expect(createForkChild).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores caller and cross-window target focus before slow startup waits', async () => {
+    const target = seedSecondWindow()
+    const readiness = deferred<void>()
+    const startSession = vi.fn(async () => undefined)
+    const slowFacade = createFacade({
+      forkBatches: createForkBatchCoordinator({
+        startSession,
+        waitUntilReady: () => readiness.promise
+      })
+    })
+    const operation = slowFacade.execute('structure.fork.children', caller, {
+      source: { kind: 'session', sessionId: target.sourceSessionId },
+      batchKey: 'cross-window-focus',
+      items: [{
+        itemKey: 'one', title: '后台启动', environment: { mode: 'current' }, start: true
+      }]
+    })
+
+    await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(1))
+    expect(activeSession('window-1', sourceSceneId())).toBe(caller.sessionId)
+    expect(activeSession('window-2', target.sceneId)).toBe(target.focusedSessionId)
+
+    readiness.resolve()
+    await expect(operation).resolves.toMatchObject({ kind: 'fork-batch', failed: 0 })
+    expect(activeSession('window-2', target.sceneId)).toBe(target.focusedSessionId)
+  })
+
+  it('restores the target window immediately after every child mutation', async () => {
+    const target = seedSecondWindow()
+    const focusBeforeMutation: Array<string | undefined> = []
+    createForkChild.mockImplementation(async (metadata, input) => {
+      focusBeforeMutation.push(activeSession('window-2', target.sceneId))
+      return createForkResult(metadata, input)
+    })
+
+    await facade.execute('structure.fork.children', caller, {
+      source: { kind: 'session', sessionId: target.sourceSessionId },
+      batchKey: 'focus-each-child',
+      items: [
+        { itemKey: 'one', title: '方案一', environment: { mode: 'current' } },
+        { itemKey: 'two', title: '方案二', environment: { mode: 'current' } },
+        { itemKey: 'three', title: '方案三', environment: { mode: 'current' } }
+      ]
+    })
+
+    expect(focusBeforeMutation).toEqual([
+      target.focusedSessionId,
+      target.focusedSessionId,
+      target.focusedSessionId
+    ])
+    expect(activeSession('window-1', sourceSceneId())).toBe(caller.sessionId)
+    expect(activeSession('window-2', target.sceneId)).toBe(target.focusedSessionId)
   })
 
   it('normalizes a single Fork result, keeps focus, and maps typed workflow errors', async () => {
@@ -413,6 +581,65 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
     expect(restartedSend).not.toHaveBeenCalled()
   })
 
+  it('resumes accepted single-Fork startup after the projection changes before its receipt exists', async () => {
+    const revision = resolver.projectionRevision(caller)
+    const request = {
+      source: {
+        kind: 'ref' as const,
+        ref: `session:${caller.sessionId}`,
+        projectionRevision: revision
+      },
+      title: '补偿启动', environment: { mode: 'current' as const },
+      prompt: '继续任务', start: true, submissionKey: 'single-start-gap'
+    }
+    const interrupted = createFacade({
+      forkBatches: {
+        createChildren: vi.fn(), retryFailures: vi.fn(), preflightAccepted: vi.fn(),
+        coordinateAcceptedFork: vi.fn(async () => { throw new Error('simulated interruption') })
+      }
+    })
+    await expect(interrupted.execute('structure.fork.child', caller, request))
+      .rejects.toThrow('simulated interruption')
+
+    const startSession = vi.fn(async () => undefined)
+    const sendPrompt = vi.fn(async () => undefined)
+    const restarted = createFacade({
+      forkBatches: createForkBatchCoordinator({ startSession, sendPrompt })
+    })
+    const replay = await restarted.execute('structure.fork.child', caller, request)
+
+    expect(replay).toMatchObject({ kind: 'forked', state: 'started' })
+    expect(createForkChild).toHaveBeenCalledTimes(2)
+    expect(startSession).toHaveBeenCalledTimes(1)
+    expect(sendPrompt).toHaveBeenCalledWith(
+      replay.kind === 'forked' ? replay.sessionRef.slice('session:'.length) : '',
+      '继续任务'
+    )
+  })
+
+  it('restores cross-window focus for a single Fork before readiness waits', async () => {
+    const target = seedSecondWindow()
+    const readiness = deferred<void>()
+    const startSession = vi.fn(async () => undefined)
+    const singleFacade = createFacade({
+      forkBatches: createForkBatchCoordinator({
+        startSession,
+        waitUntilReady: () => readiness.promise
+      })
+    })
+    const operation = singleFacade.execute('structure.fork.child', caller, {
+      source: { kind: 'session', sessionId: target.sourceSessionId },
+      title: '跨窗口单节点', environment: { mode: 'current' },
+      start: true, submissionKey: 'cross-window-single'
+    })
+
+    await vi.waitFor(() => expect(startSession).toHaveBeenCalledTimes(1))
+    expect(activeSession('window-1', sourceSceneId())).toBe(caller.sessionId)
+    expect(activeSession('window-2', target.sceneId)).toBe(target.focusedSessionId)
+    readiness.resolve(undefined)
+    await expect(operation).resolves.toMatchObject({ kind: 'forked', state: 'ready' })
+  })
+
   it('rejects concurrent changed input for one single-Fork key before a second workflow call', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -464,9 +691,10 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       kind: 'removed', removedTasks: 0, removedCanvases: 0, removedSessions: 3,
       activePath: { session: { title: 'Survivor' } }
     })
-    expect(stopSessions).toHaveBeenCalledWith(expect.arrayContaining([
-      caller.sessionId, child, grandchild
-    ]))
+    expect(disposeSessions).toHaveBeenCalledWith(expect.arrayContaining([child, grandchild]))
+    expect(disposeSessions).not.toHaveBeenCalledWith(expect.arrayContaining([caller.sessionId]))
+    await runHostControlPostResponseEffects(committed)
+    expect(disposeSessions).toHaveBeenCalledWith([caller.sessionId])
     await expect(access(join(workspaceRoot, 'README.md'))).resolves.toBeUndefined()
     expect(execFileSync('git', ['branch', '--show-current'], { cwd: workspaceRoot, encoding: 'utf8' }).trim())
       .toBe('main')
@@ -541,7 +769,7 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       kind: 'removed', removedTasks: 1, removedCanvases: 1, removedSessions: 1,
       activePath: { session: { ref: `session:${caller.sessionId}` } }
     })
-    expect(stopSessions).toHaveBeenCalledWith([created.path.session!.ref.slice('session:'.length)])
+    expect(disposeSessions).toHaveBeenCalledWith([created.path.session!.ref.slice('session:'.length)])
   })
 
   it('uses node-only removal semantics for a leaf even when subtree was requested', async () => {
@@ -624,7 +852,7 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       removedSessions: 1,
       activePath: { canvas: { ref: `scene:${sourceSceneId()}` } }
     })
-    expect(stopSessions).toHaveBeenCalledWith([target.created.session.id])
+    expect(disposeSessions).toHaveBeenCalledWith([target.created.session.id])
   })
 
   it('inherits the existing last-canvas rule instead of deleting its only Session', async () => {
@@ -641,7 +869,7 @@ describe('RuntimeHostActionFacade destructive actions', () => {
       removedSessions: 0,
       activePath: { session: { ref: `session:${caller.sessionId}` } }
     })
-    expect(stopSessions).not.toHaveBeenCalled()
+    expect(disposeSessions).not.toHaveBeenCalled()
     expect(database.get('SELECT id FROM sessions WHERE id = ? AND archived_at IS NULL', caller.sessionId))
       .toBeDefined()
   })
@@ -712,15 +940,7 @@ describe('RuntimeHostActionFacade destructive actions', () => {
 function createFacade(
   overrides: Partial<RuntimeHostActionFacadeDependencies> = {}
 ): RuntimeHostActionFacade {
-  const forkBatches = new ForkBatchCoordinator({
-    database,
-    createChild: createForkChild,
-    retryChild: retryFork,
-    startSession: async () => undefined,
-    waitUntilReady: async () => undefined,
-    sendPrompt: async () => undefined,
-    now: () => ++clock
-  })
+  const forkBatches = createForkBatchCoordinator()
   return new RuntimeHostActionFacade({
     database,
     resolver,
@@ -732,10 +952,63 @@ function createFacade(
       createForkSibling: createForkChild
     },
     forkBatches,
-    stopSessions,
+    disposeSessions,
     now: () => ++clock,
     ...overrides
   })
+}
+
+function createForkBatchCoordinator(overrides: Partial<{
+  startSession(sessionId: string): Promise<void>
+  waitUntilReady(sessionId: string, signal?: AbortSignal): Promise<unknown>
+  sendPrompt(sessionId: string, prompt: string): Promise<void>
+}> = {}, targetDatabase = database): ForkBatchCoordinator {
+  return new ForkBatchCoordinator({
+    database: targetDatabase,
+    createChild: createForkChild,
+    retryChild: retryFork,
+    startSession: async () => undefined,
+    waitUntilReady: async () => undefined,
+    sendPrompt: async () => undefined,
+    now: () => ++clock,
+    ...overrides
+  })
+}
+
+function seedSecondWindow(): {
+  sourceSessionId: string
+  focusedSessionId: string
+  sceneId: string
+} {
+  const secondRoot = join(root, 'second-window-workspace')
+  execFileSync('mkdir', ['-p', secondRoot])
+  const second = hierarchy.createWorkspace(command('second-window'), {
+    windowId: 'window-2', name: 'Second window', rootDirectory: secondRoot,
+    navigation: 'activate', now: ++clock
+  })
+  const sourceSessionId = second.session!.id
+  const sceneId = second.scene!.id
+  const focused = sessionCanvas.createShellSibling(command('second-window-focus'), {
+    windowId: 'window-2', sceneId, sourceSessionId,
+    title: 'Target focus', now: ++clock
+  })
+  sessionCanvas.setFocusedSession({
+    windowId: 'window-1', sceneId: sourceSceneId(), sessionId: caller.sessionId, now: ++clock
+  })
+  return { sourceSessionId, focusedSessionId: focused.session!.id, sceneId }
+}
+
+function activeSession(windowId: string, sceneId: string): string | undefined {
+  return database.get<{ active_session_id: string }>(
+    `SELECT active_session_id FROM window_scene_focus WHERE window_id = ? AND scene_id = ?`,
+    windowId, sceneId
+  )?.active_session_id
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
 }
 
 async function createForkResult(

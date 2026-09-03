@@ -24,6 +24,7 @@ import {
 } from './host-action-target-resolver'
 import {
   parseHostActionRequest,
+  type ForkItemInput,
   type ForkEnvironmentChoice,
   type HostActionErrorCode,
   type HostActionMethod,
@@ -33,6 +34,7 @@ import {
   type HostImpactSummary,
   type HostResultPath
 } from './host-action-types'
+import { withHostControlPostResponseEffect } from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
 import {
   HierarchyApplicationService,
@@ -81,7 +83,7 @@ export interface RuntimeHostActionFacadeDependencies {
   sessionCanvas: SessionCanvasActions
   forkWorkflow: ForkWorkflowActions
   forkBatches: ForkBatchActions
-  stopSessions(sessionIds: string[]): void | Promise<void>
+  disposeSessions(sessionIds: string[]): void | Promise<void>
   now?: () => number
 }
 
@@ -110,7 +112,7 @@ export class RuntimeHostActionFacade {
   readonly #sessionCanvas: SessionCanvasActions
   readonly #forkWorkflow: ForkWorkflowActions
   readonly #forkBatches: ForkBatchActions
-  readonly #stopSessions: RuntimeHostActionFacadeDependencies['stopSessions']
+  readonly #disposeManagedSessions: RuntimeHostActionFacadeDependencies['disposeSessions']
   readonly #now: () => number
   readonly #singleForks = new Map<string, ActiveSingleFork>()
 
@@ -122,7 +124,7 @@ export class RuntimeHostActionFacade {
     this.#sessionCanvas = dependencies.sessionCanvas
     this.#forkWorkflow = dependencies.forkWorkflow
     this.#forkBatches = dependencies.forkBatches
-    this.#stopSessions = dependencies.stopSessions
+    this.#disposeManagedSessions = dependencies.disposeSessions
     this.#now = dependencies.now ?? Date.now
   }
 
@@ -288,16 +290,17 @@ export class RuntimeHostActionFacade {
       method: 'structure.fork.child' | 'structure.fork.sibling'
     }>
   ): Promise<HostActionResult> {
-    const callerSession = this.#callerSession(caller)
     const source = requireEntity(this.#resolve(caller, request.source), 'session')
+    this.#assertWorkspacePathAvailable(source.workspaceId)
     const environment = this.#resolver.resolveForkEnvironment(source, request.environment)
+    const restoreFocus = this.#forkFocusRestorer(caller, source)
     let result: ForkWorkflowResult
     try {
       result = await (request.method === 'structure.fork.child'
         ? this.#forkWorkflow.createForkChild(command, forkInput(source, request.title, environment, request.submissionKey, this.#now()))
         : this.#forkWorkflow.createForkSibling(command, forkInput(source, request.title, environment, request.submissionKey, this.#now())))
     } finally {
-      this.#restoreFocus(callerSession)
+      restoreFocus()
     }
     const forked = this.#forkedResult(result, environment)
     if (request.start !== true) return forked
@@ -307,7 +310,8 @@ export class RuntimeHostActionFacade {
       source,
       environment,
       result,
-      forked
+      forked,
+      restoreFocus
     )
   }
 
@@ -325,6 +329,17 @@ export class RuntimeHostActionFacade {
         '已接受的 Fork 结果缺少稳定会话路径'
       )
     }
+    const publicItem = singleForkPublicItem(request)
+    const accepted = this.#forkBatches.preflightAccepted({
+      caller,
+      source: request.source,
+      batchKey: singleForkBatchKey(request.submissionKey),
+      items: [publicItem]
+    })
+    const source = accepted?.source ?? this.#acceptedForkSource(stored)
+    const environment = accepted?.items[0]?.environment ??
+      this.#acceptedBatchEnvironment(source, request.environment)
+    const restoreFocus = this.#forkFocusRestorer(caller, source)
     // The workflow checks its durable submission intent before inspecting this
     // compatibility input. Re-entering it refreshes current Fork progress while
     // avoiding a fresh branch/Worktree reservation check for the accepted key.
@@ -340,20 +355,24 @@ export class RuntimeHostActionFacade {
       submissionKey: request.submissionKey,
       now: this.#now()
     }
-    const result = await (request.method === 'structure.fork.child'
-      ? this.#forkWorkflow.createForkChild(command, replayInput)
-      : this.#forkWorkflow.createForkSibling(command, replayInput))
+    let result: ForkWorkflowResult
+    try {
+      result = await (request.method === 'structure.fork.child'
+        ? this.#forkWorkflow.createForkChild(command, replayInput)
+        : this.#forkWorkflow.createForkSibling(command, replayInput))
+    } finally {
+      restoreFocus()
+    }
     const forked = this.#forkedResult(result, request.environment)
     if (request.start !== true) return forked
-    const source = this.#singleForkStartSource(request, caller)
-    const environment = this.#acceptedBatchEnvironment(source, request.environment)
     return this.#coordinateSingleForkStart(
       caller,
       request,
       source,
       environment,
       result,
-      forked
+      forked,
+      restoreFocus
     )
   }
 
@@ -365,7 +384,8 @@ export class RuntimeHostActionFacade {
     source: ResolvedHostEntity & { kind: 'session' },
     environment: ResolvedForkEnvironment,
     result: ForkWorkflowResult,
-    forked: Extract<HostActionResult, { kind: 'forked' }>
+    forked: Extract<HostActionResult, { kind: 'forked' }>,
+    restoreFocus: () => void
   ): Promise<HostActionResult> {
     const input: CoordinateAcceptedForkInput = {
       caller,
@@ -378,6 +398,11 @@ export class RuntimeHostActionFacade {
         ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         start: true
       }],
+      publicRequest: {
+        source: request.source,
+        items: [singleForkPublicItem(request)]
+      },
+      restoreFocus,
       sessionId: result.session!.id,
       state: result.forkState === 'succeeded' ? 'ready' : 'created'
     }
@@ -392,22 +417,29 @@ export class RuntimeHostActionFacade {
     }
   }
 
-  #singleForkStartSource(
-    request: Extract<HostActionRequest, {
-      method: 'structure.fork.child' | 'structure.fork.sibling'
-    }>,
-    caller: HostCallerIdentity
+  #acceptedForkSource(
+    stored: ForkWorkflowResult
   ): ResolvedHostEntity & { kind: 'session' } {
-    const accepted = this.#database.get<{ source_session_id: string }>(
-      'SELECT source_session_id FROM fork_batch_ledger WHERE batch_key = ?',
-      singleForkBatchKey(request.submissionKey)
-    )
-    if (accepted) {
-      return requireEntity(this.#resolve(caller, {
-        kind: 'session', sessionId: accepted.source_session_id
-      }), 'session')
+    const sourceSessionId = this.#database.get<{ source_session_id: string }>(
+      `SELECT to_session_id AS source_session_id
+       FROM session_relations_current
+       WHERE from_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')`,
+      stored.session!.id
+    )?.source_session_id
+    if (sourceSessionId !== undefined) {
+      return requireEntity(this.#resolve({
+        runId: sourceSessionId,
+        sessionId: sourceSessionId
+      }, { kind: 'session', sessionId: sourceSessionId }), 'session')
     }
-    return requireEntity(this.#resolve(caller, request.source), 'session')
+    return {
+      kind: 'session',
+      windowId: stored.navigation.windowId,
+      workspaceId: stored.workspace!.id,
+      taskId: stored.task!.id,
+      sceneId: stored.scene!.id,
+      sessionId: stored.session!.id
+    }
   }
 
   #forkedResult(
@@ -432,27 +464,29 @@ export class RuntimeHostActionFacade {
     caller: HostCallerIdentity,
     request: Extract<HostActionRequest, { method: 'structure.fork.children' }>
   ): Promise<HostActionResult> {
-    const callerSession = this.#callerSession(caller)
-    const source = requireEntity(this.#resolve(caller, request.source), 'session')
     const accepted = this.#forkBatches.preflightAccepted({
       caller,
-      source,
+      source: request.source,
       batchKey: request.batchKey,
       items: request.items
     })
     // Complete every environment preflight before the durable coordinator can
     // accept its first item, so an invalid later choice never causes a partial batch.
-    const items = request.items.map((item) => ({
+    const source = accepted?.source ??
+      requireEntity(this.#resolve(caller, request.source), 'session')
+    if (accepted === undefined) this.#assertWorkspacePathAvailable(source.workspaceId)
+    const items = accepted?.items ?? request.items.map((item) => ({
       ...item,
-      environment: accepted
-        ? this.#acceptedBatchEnvironment(source, item.environment)
-        : this.#resolver.resolveForkEnvironment(source, item.environment)
+      environment: this.#resolver.resolveForkEnvironment(source, item.environment)
     }))
+    const restoreFocus = this.#forkFocusRestorer(caller, source)
     const input: CreateForkBatchInput = {
       caller,
       source,
       batchKey: request.batchKey,
-      items
+      items,
+      publicRequest: { source: request.source, items: request.items },
+      restoreFocus
     }
     try {
       if (request.retryItemKeys !== undefined) {
@@ -464,7 +498,7 @@ export class RuntimeHostActionFacade {
       }
       return await this.#forkBatches.createChildren(input)
     } finally {
-      this.#restoreFocus(callerSession)
+      restoreFocus()
     }
   }
 
@@ -554,8 +588,7 @@ export class RuntimeHostActionFacade {
       removedSessions = result.removedSessionIds.length
     }
 
-    await this.#disposeSessions(disposedSessionIds)
-    return {
+    const result: HostActionResult = {
       kind: 'removed',
       targetRef: confirmed.record.targetRef,
       removedTasks: confirmed.record.impact.tasks,
@@ -563,6 +596,7 @@ export class RuntimeHostActionFacade {
       removedSessions,
       activePath: this.#hostPath(active)
     }
+    return this.#applySessionDisposals(caller, result, disposedSessionIds)
   }
 
   async #commitCanvasClose(
@@ -581,13 +615,13 @@ export class RuntimeHostActionFacade {
         now
       }
     )
-    await this.#disposeSessions(result.disposedSessionIds)
-    return {
+    const response: HostActionResult = {
       kind: 'canvas-closed',
       targetRef: confirmed.record.targetRef,
       removedSessions: result.disposedSessionIds.length,
       activePath: this.#hostPath(result)
     }
+    return this.#applySessionDisposals(caller, response, result.disposedSessionIds)
   }
 
   #revalidateConfirmation(
@@ -791,6 +825,41 @@ export class RuntimeHostActionFacade {
     })
   }
 
+  #forkFocusRestorer(
+    caller: HostCallerIdentity,
+    source: ResolvedHostEntity & { kind: 'session' }
+  ): () => void {
+    const callerFocus = this.#callerSession(caller)
+    const byWindow = new Map<string, ResolvedHostEntity & { kind: 'session' }>([
+      [callerFocus.windowId, callerFocus]
+    ])
+    if (!byWindow.has(source.windowId)) {
+      const current = readHierarchyResult(this.#database, source.windowId)
+      byWindow.set(source.windowId, current.workspace && current.task && current.scene && current.session
+        ? {
+            kind: 'session',
+            windowId: source.windowId,
+            workspaceId: current.workspace.id,
+            taskId: current.task.id,
+            sceneId: current.scene.id,
+            sessionId: current.session.id,
+            ...(current.mount === null ? {} : { mountId: current.mount.id })
+          }
+        : source)
+    }
+    return () => {
+      for (const focus of byWindow.values()) this.#restoreFocus(focus)
+    }
+  }
+
+  #assertWorkspacePathAvailable(workspaceId: string): void {
+    const invalid = this.#database.get<{ status: 'valid' | 'invalid' }>(
+      'SELECT status FROM workspace_path_state WHERE workspace_id = ?',
+      workspaceId
+    )?.status === 'invalid'
+    if (invalid) throw new WorkspacePathInvalidError(workspaceId)
+  }
+
   #assertRemovalTarget(target: ResolvedHostEntity): asserts target is Exclude<
     ResolvedHostEntity,
     { kind: 'canvas' }
@@ -853,9 +922,19 @@ export class RuntimeHostActionFacade {
     return JSON.parse(stored.response_json) as T
   }
 
-  async #disposeSessions(sessionIds: string[]): Promise<void> {
+  async #applySessionDisposals<T extends HostActionResult>(
+    caller: HostCallerIdentity,
+    result: T,
+    sessionIds: string[]
+  ): Promise<T> {
     const unique = [...new Set(sessionIds)]
-    if (unique.length > 0) await this.#stopSessions(unique)
+    const immediate = unique.filter((sessionId) => sessionId !== caller.sessionId)
+    if (immediate.length > 0) await this.#disposeManagedSessions(immediate)
+    if (unique.includes(caller.sessionId)) {
+      withHostControlPostResponseEffect(result, () =>
+        this.#disposeManagedSessions([caller.sessionId]))
+    }
+    return result
   }
 
   #assertWritable(): void {
@@ -880,6 +959,20 @@ function actionCommand(
 
 function singleForkBatchKey(submissionKey: string): string {
   return `host-single-fork:${hash(submissionKey)}`
+}
+
+function singleForkPublicItem(
+  request: Extract<HostActionRequest, {
+    method: 'structure.fork.child' | 'structure.fork.sibling'
+  }>
+): ForkItemInput {
+  return {
+    itemKey: request.method,
+    title: request.title,
+    environment: request.environment,
+    ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
+    start: true
+  }
 }
 
 function destructiveCommand(

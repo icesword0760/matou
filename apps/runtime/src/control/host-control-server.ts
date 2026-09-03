@@ -13,6 +13,10 @@ import {
   type HostTarget,
   type HostTargetSelector
 } from './host-control-types'
+import {
+  hasHostControlPostResponseEffects,
+  runHostControlPostResponseEffects
+} from './host-control-post-response'
 
 export type {
   AllowedControlKey,
@@ -212,7 +216,7 @@ export class HostControlServer {
       while (buffered.byteLength >= 4) {
         const length = buffered.readUInt32BE(0)
         if (length > this.#maxFrameBytes) {
-          this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame exceeds size limit'))
+          void this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame exceeds size limit'))
           socket.end()
           return
         }
@@ -229,10 +233,11 @@ export class HostControlServer {
     try {
       raw = JSON.parse(body.toString('utf8')) as unknown
     } catch {
-      this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame is not valid JSON'))
+      await this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame is not valid JSON'))
       return
     }
     let requestId = 'unknown'
+    let result: unknown
     try {
       const request = parseRequest(raw)
       requestId = request.requestId
@@ -241,9 +246,12 @@ export class HostControlServer {
       if (!capability) {
         throw new ControlFault('CAPABILITY_DENIED', 'capability token is missing, expired, or out of scope')
       }
-      const result = await this.#dispatch(request.method, request.params, capability.caller)
-      if (Date.now() > request.deadlineAt) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
-      this.#write(socket, { version: CONTROL_VERSION, requestId, ok: true, result })
+      result = await this.#dispatch(request.method, request.params, capability.caller)
+      if (
+        Date.now() > request.deadlineAt &&
+        !hasHostControlPostResponseEffects(result)
+      ) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
+      await this.#write(socket, { version: CONTROL_VERSION, requestId, ok: true, result })
     } catch (error) {
       const fault = error instanceof ControlFault
         ? error
@@ -252,7 +260,11 @@ export class HostControlServer {
         : error instanceof HostControlTargetNotReadyError
           ? new ControlFault('TARGET_NOT_READY', error.message)
         : new ControlFault('INTERNAL_ERROR', errorMessage(error))
-      this.#write(socket, errorResponse(requestId, fault.code, fault.message))
+      await this.#write(socket, errorResponse(requestId, fault.code, fault.message))
+    } finally {
+      await runHostControlPostResponseEffects(result).catch((error) => {
+        console.error(`[host-control.post-response] ${errorMessage(error)}`)
+      })
     }
   }
 
@@ -353,12 +365,14 @@ export class HostControlServer {
     throw new ControlFault('UNSUPPORTED', `unsupported control method ${method}`)
   }
 
-  #write(socket: Socket, value: unknown): void {
-    if (socket.destroyed) return
+  #write(socket: Socket, value: unknown): Promise<void> {
+    if (socket.destroyed) return Promise.resolve()
     const body = Buffer.from(JSON.stringify(value))
     const prefix = Buffer.alloc(4)
     prefix.writeUInt32BE(body.byteLength)
-    socket.write(Buffer.concat([prefix, body]))
+    return new Promise<void>((resolveWrite) => {
+      socket.write(Buffer.concat([prefix, body]), () => resolveWrite())
+    })
   }
 }
 

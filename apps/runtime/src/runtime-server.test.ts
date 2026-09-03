@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/contracts'
 
@@ -66,6 +66,119 @@ afterEach(async () => {
 })
 
 describe('RuntimeServer domain RPC', () => {
+  it('retires a removed Session across backend, token, HUD, and queued recovery state', async () => {
+    server.close()
+    const executable = join(root, 'structure-removal-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "ready\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    registerSession(database, 'structure-removal-session')
+    const registry = createTestSessionRegistry()
+    const removedPort = new MockPort()
+    const revoked = vi.fn()
+    const tokens = new CapabilityTokenService(database.runtimeGeneration, {
+      onRunRevoked: revoked
+    })
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+    const recoveryStart = vi.fn(async () => undefined)
+    const recovery = new RuntimeRecoveryCoordinator({
+      concurrency: 1,
+      jobs: [{
+        sessionId: 'structure-removal-session', sceneId: 'scene-removed',
+        priority: 'active-session', enqueueSequence: 1
+      }],
+      start: recoveryStart
+    })
+    const hud = new SessionHudRegistry()
+    const removedServer = new RuntimeServer(
+      removedPort, root, database, undefined,
+      { backend, tokens, endpoint: join(root, 'control.sock') },
+      registry, undefined, undefined, { recoveryCoordinator: recovery, hudRegistry: hud }
+    )
+    try {
+      removedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'structure-removal-renderer'
+      })
+      removedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'structure-removal-session', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => registry.has('structure-removal-session'))
+      const runId = registry.get('structure-removal-session')!.runId!
+      const token = tokens.issue(
+        { runId, sessionId: 'structure-removal-session' },
+        ['host.identify'], Date.now() + 1_000
+      )
+      expect(hud.snapshot('structure-removal-session')).toBeDefined()
+
+      await removedServer.disposeSessions(['structure-removal-session'])
+      recovery.start()
+      await settle()
+
+      expect(registry.has('structure-removal-session')).toBe(false)
+      expect(tokens.validate(token, 'host.identify')).toBeUndefined()
+      expect(revoked).toHaveBeenCalledTimes(1)
+      expect(revoked).toHaveBeenCalledWith(runId)
+      expect(hud.snapshot('structure-removal-session')).toBeUndefined()
+      expect(recoveryStart).not.toHaveBeenCalled()
+      await expect(backend.sendText('structure-removal-session', 'stale', false))
+        .rejects.toThrow('目标会话当前没有可输入的终端进程')
+    } finally {
+      removedServer.close()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
+  it('retires a structurally removed Session while journal durability is paused', async () => {
+    server.close()
+    const executable = join(root, 'structure-removal-paused-shell.sh')
+    await writeFile(executable, '#!/bin/sh\nprintf "pause-me\\n"\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    registerSession(database, 'structure-removal-paused')
+    const registry = createTestSessionRegistry()
+    const pausedPort = new MockPort()
+    const pausedServer = new RuntimeServer(
+      pausedPort, root, database, undefined, undefined, registry,
+      undefined, undefined, {
+        journalOptionsForSession: () => ({
+          writeFrame: async () => {
+            throw Object.assign(new Error('disk quota reached'), { code: 'ENOSPC' })
+          }
+        })
+      }
+    )
+    try {
+      pausedPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'structure-removal-paused-renderer'
+      })
+      pausedPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'structure-removal-paused', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => pausedPort.last('terminal.storage-fault') !== undefined)
+
+      await pausedServer.disposeSessions(['structure-removal-paused'])
+
+      expect(registry.has('structure-removal-paused')).toBe(false)
+      expect(database.get<{ status: string }>(
+        `SELECT status FROM session_runs
+         WHERE session_id = 'structure-removal-paused' ORDER BY ordinal DESC LIMIT 1`
+      )).toEqual({ status: 'interrupted' })
+    } finally {
+      pausedServer.close()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('injects a run-bound mt identity into an ordinary managed Shell', async () => {
     server.close()
     const executable = join(root, 'control-env-shell.sh')

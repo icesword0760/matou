@@ -12,6 +12,7 @@ import {
   type HostControlBackend,
   type HostTarget
 } from './host-control-server'
+import { withHostControlPostResponseEffect } from './host-control-post-response'
 
 let root: string
 let socketPath: string
@@ -83,6 +84,65 @@ describe('HostControlServer', () => {
         result: { caller: { runId: 'run-caller', sessionId: 'session-2' }, target: { title: 'Two' } }
       })
     expect(backend.identify).toHaveBeenCalledWith({ runId: 'run-caller', sessionId: 'session-2' })
+  })
+
+  it('writes the authoritative Host Control result before running caller disposal', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-self-remove', sessionId: 'session-1' },
+      ['host.identify'],
+      Date.now() + 1000
+    )
+    const disposed = vi.fn(async () => {
+      await server.stop()
+    })
+    backend.identify.mockResolvedValueOnce(withHostControlPostResponseEffect(
+      { kind: 'removed', targetRef: 'session:session-1' },
+      disposed
+    ) as never)
+
+    const response = await request(
+      socketPath,
+      controlRequest('self-remove', token, 'host.identify', {})
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: { kind: 'removed', targetRef: 'session:session-1' }
+    })
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps the authoritative mutation result when caller disposal is queued after the deadline', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-deadline-remove', sessionId: 'session-1' },
+      ['host.identify'],
+      Date.now() + 5_000
+    )
+    const deadlineAt = Date.now() + 1_000
+    const disposed = vi.fn(async () => undefined)
+    let now: ReturnType<typeof vi.spyOn> | undefined
+    backend.identify.mockImplementationOnce(async () => {
+      now = vi.spyOn(Date, 'now').mockReturnValue(deadlineAt + 1)
+      return withHostControlPostResponseEffect(
+        { kind: 'removed', targetRef: 'session:session-1' },
+        disposed
+      ) as never
+    })
+
+    try {
+      const response = await request(socketPath, {
+        version: 1, requestId: 'deadline-self-remove', token, method: 'host.identify',
+        params: {}, deadlineAt
+      })
+
+      expect(response).toMatchObject({
+        ok: true,
+        result: { kind: 'removed', targetRef: 'session:session-1' }
+      })
+      await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
+    } finally {
+      now?.mockRestore()
+    }
   })
 
   it('passes relative and relation selectors to the topology backend with caller context', async () => {

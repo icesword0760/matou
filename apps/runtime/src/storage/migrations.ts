@@ -1405,5 +1405,16 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
             AND item.result_failure_generation > item.failure_generation
         );
     `
+  },
+  {
+    version: 32,
+    name: 'fork-public-request-receipts',
+    sql: `
+      ALTER TABLE fork_batch_ledger ADD COLUMN public_request_fingerprint TEXT;
+      ALTER TABLE fork_batch_ledger ADD COLUMN resolved_request_json TEXT;
+
+      CREATE INDEX fork_batch_public_request_idx
+      ON fork_batch_ledger(public_request_fingerprint);
+    `
   }
 ]

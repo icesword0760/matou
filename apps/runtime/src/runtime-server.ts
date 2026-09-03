@@ -463,6 +463,54 @@ export class RuntimeServer {
     return this.#execution.startOrResume(descriptor.sessionId, descriptor, authority, false)
   }
 
+  /** Fully retires structurally removed Sessions across every attached view. */
+  async disposeSessions(sessionIds: readonly string[]): Promise<void> {
+    const unique = [...new Set(sessionIds)]
+    const peers = [...RuntimeServer.#instances]
+      .filter((server) => server.#sessions === this.#sessions)
+    const backends = new Set(peers.flatMap((server) =>
+      server.#control ? [server.#control.backend] : []))
+    const tokenServices = new Set(peers.flatMap((server) =>
+      server.#control ? [server.#control.tokens] : []))
+    const recoveryCoordinators = new Set(peers.flatMap((server) =>
+      server.#recoveryCoordinator ? [server.#recoveryCoordinator] : []))
+    for (const recovery of recoveryCoordinators) recovery.cancel(unique)
+    for (const sessionId of unique) {
+      await this.#sessions.runExclusive(sessionId, async () => {
+        const session = this.#sessions.get(sessionId)
+        const activeRuns = this.#database.all<{
+          id: string
+          status: 'starting' | 'running' | 'interrupted'
+        }>(
+          `SELECT id, status FROM session_runs
+           WHERE session_id = ? AND status IN ('starting', 'running', 'interrupted')`,
+          sessionId
+        )
+        const runIds = new Set(activeRuns.map(({ id }) => id))
+        if (session?.runId) runIds.add(session.runId)
+        for (const run of activeRuns) {
+          if (run.status === 'interrupted') continue
+          this.#sessionRepository.interruptRun({
+            commandId: `runtime-structure-removal-${run.id}`,
+            commandType: 'session.structure-run-interrupted',
+            requestHash: `structure-removal:${run.id}`
+          }, run.id, Date.now())
+        }
+        for (const peer of peers) peer.#clearStructurallyRemovedSession(sessionId, session)
+        if (session) {
+          for (const backend of backends) backend.unregister(sessionId, session)
+          this.#sessions.delete(sessionId, session)
+        }
+        for (const runId of runIds) {
+          for (const tokens of tokenServices) tokens.revokeRun(runId)
+        }
+        if (!session) return
+        session.dispose({ notifyExit: false, reason: 'structure-removal' })
+        await session.whenClosed()
+      })
+    }
+  }
+
   close(): void {
     if (this.#closed) return
     for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
@@ -1767,7 +1815,13 @@ export class RuntimeServer {
             this.#sessions.providerIdentityConfirmed(exited.runId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
           hookRegistration?.retire()
-          if (exitReason === 'runtime-shutdown' || exitReason === 'environment-transition') {
+          // Structural disposal has already removed every peer attachment,
+          // backend registration, capability, recovery job and Runtime map.
+          if (exitReason === 'structure-removal') return false
+          if (
+            exitReason === 'runtime-shutdown' ||
+            exitReason === 'environment-transition'
+          ) {
             this.#sessions.delete(message.sessionId, exited)
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
@@ -2511,6 +2565,41 @@ export class RuntimeServer {
     this.#attachedSessionIds.delete(sessionId)
     session.dispose()
     await session.whenClosed()
+  }
+
+  #clearStructurallyRemovedSession(sessionId: string, session?: PtySession): void {
+    this.#clearProviderResumeTimer(sessionId)
+    const cwdTimer = this.#cwdTimers.get(sessionId)
+    if (cwdTimer) clearTimeout(cwdTimer)
+    this.#cwdTimers.delete(sessionId)
+    const summaryTimer = this.#summaryTimers.get(sessionId)
+    if (summaryTimer) clearTimeout(summaryTimer)
+    this.#summaryTimers.delete(sessionId)
+    this.#summaryBuffers.delete(sessionId)
+    this.#settleProviderRecovery(
+      sessionId,
+      new Error('Session was removed from the product structure')
+    )
+    this.#forgetProviderLaunch(sessionId, session?.runId)
+    this.#endedSessionIds.delete(sessionId)
+    this.#completedReplayThrough.delete(sessionId)
+    this.#replayRequestGenerations.delete(sessionId)
+    this.#replays.delete(sessionId)
+    this.#spawnDescriptors.delete(sessionId)
+    this.#environmentResumeDescriptors.delete(sessionId)
+    this.#permissionOverrides.delete(sessionId)
+    this.#shellInputBuffers.delete(sessionId)
+    this.#terminalInputTails.delete(sessionId)
+    this.#providerInputBuffers.delete(sessionId)
+    this.#lastProviderInputs.delete(sessionId)
+    this.#workStatusTrackers.delete(sessionId)
+    this.#permissionModeTrackers.delete(sessionId)
+    this.#skipResumeSessionIds.delete(sessionId)
+    this.#closeHudFileWatchers(sessionId)
+    this.#hud.delete(sessionId)
+    this.publishSessionHud(sessionId)
+    this.#attachedSessionIds.delete(sessionId)
+    if (session) session.detach(this.#sendToPort)
   }
 
   async #pauseForEnvironmentTransition(sessionId: string): Promise<void> {

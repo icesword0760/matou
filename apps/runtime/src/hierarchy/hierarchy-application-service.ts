@@ -13,7 +13,7 @@ import type {
 } from '@matou/domain'
 
 import { createHierarchyIds, type HierarchyIds } from './hierarchy-ids'
-import { WORKSPACE_PATH_INVALID_MESSAGE } from './workspace-path-service'
+import { WorkspacePathInvalidError } from './workspace-path-service'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type {
   DomainMutationContext,
@@ -2739,7 +2739,7 @@ function workspacePathIsAvailable(tx: DatabaseTransaction, workspaceId: string):
 
 export function assertWorkspacePathAvailable(tx: DatabaseTransaction, workspaceId: string): void {
   if (!workspacePathIsAvailable(tx, workspaceId)) {
-    throw new Error(WORKSPACE_PATH_INVALID_MESSAGE)
+    throw new WorkspacePathInvalidError(workspaceId)
   }
 }
 

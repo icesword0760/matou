@@ -464,7 +464,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
       }),
       ...(e2eJournalOptionsForSession ? {
         journalOptionsForSession: e2eJournalOptionsForSession
-      } : {})
+      } : {}),
+      recoveryCoordinator
     }
   )
   servers.add(backgroundServer)
@@ -497,7 +498,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     sessionCanvas,
     forkWorkflow,
     forkBatches: forkBatchCoordinator,
-    stopSessions
+    disposeSessions: (sessionIds) => backgroundServer.disposeSessions(sessionIds)
   })
   forkCoordinator = new ForkOperationCoordinator(
     new SessionForkIntentRepository(database),

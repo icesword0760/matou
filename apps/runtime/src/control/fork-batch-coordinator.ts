@@ -5,7 +5,8 @@ import type { DomainCommandMetadata } from '@matou/domain'
 import type {
   ForkBatchResult,
   ForkEnvironmentChoice,
-  ForkItemInput
+  ForkItemInput,
+  HostActionTargetSelector
 } from './host-action-types'
 import type {
   ResolvedForkEnvironment,
@@ -28,6 +29,8 @@ export interface CreateForkBatchInput {
   source: ResolvedHostEntity & { kind: 'session' }
   batchKey: string
   items: ResolvedForkItemInput[]
+  publicRequest?: ForkBatchPublicRequest
+  restoreFocus?: () => void
 }
 
 export interface RetryForkBatchInput extends CreateForkBatchInput {
@@ -36,9 +39,24 @@ export interface RetryForkBatchInput extends CreateForkBatchInput {
 
 export interface ForkBatchPreflightInput {
   caller: HostCallerIdentity
-  source: ResolvedHostEntity & { kind: 'session' }
+  source: HostActionTargetSelector
   batchKey: string
   items: ForkItemInput[]
+}
+
+export interface ForkBatchPublicRequest {
+  source: HostActionTargetSelector
+  items: ForkItemInput[]
+}
+
+export interface AcceptedForkBatchRequest {
+  source: ResolvedHostEntity & { kind: 'session' }
+  items: ResolvedForkItemInput[]
+}
+
+interface StoredResolvedForkBatchRequest {
+  source: ResolvedHostEntity & { kind: 'session' }
+  environments: ResolvedForkEnvironment[]
 }
 
 export interface CoordinateAcceptedForkInput extends CreateForkBatchInput {
@@ -69,6 +87,8 @@ interface BatchLedgerRow {
   source_session_id: string
   source_scene_id: string
   item_count: number
+  public_request_fingerprint: string | null
+  resolved_request_json: string | null
 }
 
 interface BatchItemRow {
@@ -180,33 +200,33 @@ export class ForkBatchCoordinator {
    * facade reuses its resolved environment reservations. The full resolved
    * fingerprint is still checked by createChildren/retryFailures afterward.
    */
-  preflightAccepted(input: ForkBatchPreflightInput): boolean {
+  preflightAccepted(input: ForkBatchPreflightInput): AcceptedForkBatchRequest | undefined {
     const accepted = this.#database.get<BatchLedgerRow>(
       'SELECT * FROM fork_batch_ledger WHERE batch_key = ?',
       input.batchKey
     )
-    if (!accepted) return false
-    const rows = this.#itemRows(input.batchKey)
-    const compatible =
-      accepted.caller_session_id === input.caller.sessionId &&
-      accepted.source_session_id === input.source.sessionId &&
-      accepted.source_scene_id === input.source.sceneId &&
-      accepted.item_count === input.items.length &&
-      rows.length === input.items.length &&
-      input.items.every((item, index) => {
-        const prior = rows[index]
-        return prior?.item_key === item.itemKey &&
-          prior.title === item.title &&
-          prior.environment_json === canonicalJson(item.environment) &&
-          prior.start_requested === (item.start === true ? 1 : 0) &&
-          prior.prompt_fingerprint === (
-            item.prompt === undefined ? null : hash(item.prompt)
-          )
-      })
-    if (!compatible) {
+    if (!accepted) return undefined
+    const publicFingerprint = publicRequestFingerprint(input.caller, input.batchKey, {
+      source: input.source,
+      items: input.items
+    })
+    if (
+      accepted.public_request_fingerprint !== publicFingerprint ||
+      accepted.resolved_request_json === null
+    ) throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+    const resolved = JSON.parse(
+      accepted.resolved_request_json
+    ) as StoredResolvedForkBatchRequest
+    if (resolved.environments.length !== input.items.length) {
       throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
     }
-    return true
+    return {
+      source: resolved.source,
+      items: input.items.map((item, index) => ({
+        ...item,
+        environment: resolved.environments[index]!
+      }))
+    }
   }
 
   async retryFailures(input: RetryForkBatchInput): Promise<ForkBatchResult> {
@@ -295,7 +315,7 @@ export class ForkBatchCoordinator {
       throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
     }
     if (shouldResumeStart(row)) {
-      await this.#startItem(input.batchKey, item, row)
+      await this.#startItem(input.batchKey, item, row, input.restoreFocus)
     }
     return this.#result(input)
   }
@@ -308,7 +328,9 @@ export class ForkBatchCoordinator {
           input, item, `initial-create:${itemSubmissionKey(input.batchKey, item.itemKey)}`
         )
       }
-      if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+      if (shouldResumeStart(row)) {
+        await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+      }
     }
     this.#refreshAll(input)
     return this.#result(input)
@@ -335,7 +357,9 @@ export class ForkBatchCoordinator {
         continue
       }
       if (row.state !== 'failed') {
-        if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+        if (shouldResumeStart(row)) {
+          await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+        }
         row = this.#refreshItem(input.batchKey, item)
         this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'completed', row)
         continue
@@ -362,7 +386,9 @@ export class ForkBatchCoordinator {
           input, item, `retry-create:${attempt.attempt_id}:${item.itemKey}`
         )
       }
-      if (shouldResumeStart(row)) await this.#startItem(input.batchKey, item, row)
+      if (shouldResumeStart(row)) {
+        await this.#startItem(input.batchKey, item, row, input.restoreFocus)
+      }
       row = this.#refreshItem(input.batchKey, item)
       this.#recordRetryItem(
         attempt.attempt_id,
@@ -418,6 +444,8 @@ export class ForkBatchCoordinator {
         sessionId: null, error: errorMessage(error), receipt: failureReceipt
       })
       return this.#itemRow(input.batchKey, item.itemKey)
+    } finally {
+      input.restoreFocus?.()
     }
   }
 
@@ -466,6 +494,8 @@ export class ForkBatchCoordinator {
           : `retry-call:${attemptId}:${item.itemKey}`
       })
       return this.#itemRow(input.batchKey, item.itemKey)
+    } finally {
+      input.restoreFocus?.()
     }
   }
 
@@ -504,13 +534,15 @@ export class ForkBatchCoordinator {
   async #startItem(
     batchKey: string,
     item: ResolvedForkItemInput,
-    row: BatchItemRow
+    row: BatchItemRow,
+    restoreFocus?: () => void
   ): Promise<void> {
     const sessionId = row.session_id
     if (!sessionId) return
     const abort = new AbortController()
     let readiness: Promise<unknown> | undefined
     try {
+      restoreFocus?.()
       this.#writeItem(batchKey, item.itemKey, {
         startState: 'waiting', error: null
       })
@@ -520,6 +552,7 @@ export class ForkBatchCoordinator {
       // transiently unhandled during that interval.
       void readiness.catch(() => undefined)
       await this.#dependencies.startSession(sessionId)
+      restoreFocus?.()
       await readiness
       if (item.prompt === undefined) {
         this.#writeItem(batchKey, item.itemKey, {
@@ -550,6 +583,7 @@ export class ForkBatchCoordinator {
           : `节点已创建，任务仍待启动：${errorMessage(error)}`
       })
     } finally {
+      restoreFocus?.()
       abort.abort(new Error('provider readiness completed'))
     }
   }
@@ -561,6 +595,7 @@ export class ForkBatchCoordinator {
       )
       if (existing) {
         assertSameBatch(input.batchKey, existing.request_fingerprint, fingerprint)
+        this.#assertPublicRequest(input, existing)
         if (existing.item_count !== input.items.length) {
           throw new Error(`批次 ${input.batchKey} 的持久条目数量不一致`)
         }
@@ -577,17 +612,26 @@ export class ForkBatchCoordinator {
       if (!create) throw new Error(`批次 ${input.batchKey} 没有可重试的上一轮结果`)
 
       const now = this.#now()
+      const publicFingerprint = input.publicRequest === undefined
+        ? null
+        : publicRequestFingerprint(input.caller, input.batchKey, input.publicRequest)
+      const resolvedJson = input.publicRequest === undefined
+        ? null
+        : resolvedRequestJson(input)
       tx.run(
         `INSERT INTO fork_batch_ledger (
            batch_key, request_fingerprint, caller_session_id, source_session_id,
-           source_scene_id, item_count, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           source_scene_id, item_count, public_request_fingerprint,
+           resolved_request_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.batchKey,
         fingerprint,
         input.caller.sessionId,
         input.source.sessionId,
         input.source.sceneId,
         input.items.length,
+        publicFingerprint,
+        resolvedJson,
         now,
         now
       )
@@ -613,6 +657,18 @@ export class ForkBatchCoordinator {
         )
       }
     })
+  }
+
+  #assertPublicRequest(input: CreateForkBatchInput, existing: BatchLedgerRow): void {
+    if (input.publicRequest === undefined) return
+    if (
+      existing.public_request_fingerprint !== publicRequestFingerprint(
+        input.caller,
+        input.batchKey,
+        input.publicRequest
+      ) ||
+      existing.resolved_request_json !== resolvedRequestJson(input)
+    ) throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
   }
 
   #resolveRetryAttempt(
@@ -1118,6 +1174,27 @@ function batchFingerprint(input: CreateForkBatchInput): string {
     batchKey: input.batchKey,
     items: input.items
   }))
+}
+
+function publicRequestFingerprint(
+  caller: HostCallerIdentity,
+  batchKey: string,
+  request: ForkBatchPublicRequest
+): string {
+  return hash(canonicalJson({
+    callerSessionId: caller.sessionId,
+    batchKey,
+    source: request.source,
+    // Array order is part of the public identity; object keys are canonicalized.
+    items: request.items
+  }))
+}
+
+function resolvedRequestJson(input: CreateForkBatchInput): string {
+  return canonicalJson({
+    source: input.source,
+    environments: input.items.map(({ environment }) => environment)
+  })
 }
 
 function itemFingerprint(item: ResolvedForkItemInput): string {

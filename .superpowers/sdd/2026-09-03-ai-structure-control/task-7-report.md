@@ -159,3 +159,71 @@ Results: Runtime TypeScript check passed, identifier policy passed, and diff whi
 ## Concerns
 
 No open concern within Task 7. Host Control dispatch and capability exposure are deliberately handed to Task 8; navigation execution is deliberately handed to Task 11; real-App evidence remains in the later acceptance tasks.
+
+---
+
+## Fix round 1 addendum (2026-09-03)
+
+This addendum supersedes the earlier test counts and records the replay, focus, and Runtime-lifecycle hardening completed after review.
+
+### Code changes
+
+- **Durable public Fork identity:** migration 32 adds an opaque public-request fingerprint and a resolved replay receipt to `fork_batch_ledger`. The fingerprint binds caller Session, batch key, the original source selector, and the ordered public item fields. Resolved window, mount, current projection, and environment lookup state stay outside that identity. The resolved receipt stores the stable source plus resolved environments and omits prompt text.
+- **Receipt-first replay:** batch replay checks the durable public receipt before source or environment resolution. Explicit-ref and relative selectors therefore replay after projection drift and after a database/facade reconstruction. A different selector that currently reaches the same Session conflicts with the accepted public input.
+- **Single-Fork compensation:** accepted workflow results re-enter the Task 6 coordinator for readiness, start, and prompt receipts. The workflow-to-ledger interruption gap derives the stable accepted source from the durable Fork relation, then completes start and prompt delivery once.
+- **Focus stability:** caller-window and mutation-target-window focus are snapshotted independently. Each child mutation restores both windows immediately; the same restoration runs before and after start/readiness/prompt waits, including cross-window single and batch Forks.
+- **Unified structural disposal:** `RuntimeServer.disposeSessions` cancels queued recovery, serializes against spawn/recovery, interrupts active Run records, clears provider/CWD/summary timers and recovery waiters, detaches all Runtime views, clears replay/input/HUD state, unregisters terminal backends, revokes Run capabilities and confirmations, and then ends the PTY even while journal durability is paused.
+- **Caller response ordering:** a Runtime-local, non-serialized post-response effect carries caller retirement through the Host Control result. `HostControlServer` writes the authoritative success frame before executing the effect; an elapsed post-dispatch deadline does not replace an already-committed self-removal result.
+- **Path faults:** existing invalid Workspace path state now raises `WorkspacePathInvalidError` throughout create and Fork entry points and maps uniformly to `PATH_CONFLICT`.
+- **Existing product rules retained:** failed-only Task 6 retries, at-most-once prompt delivery, leaf node removal, the final-Canvas rule, and project directory/Git branch/Worktree retention remain delegated to their existing services.
+
+### TDD evidence for the review findings
+
+- The paused-journal lifecycle regression was added first and failed with Run status `running` where `interrupted` was expected; the unified disposal transition made it pass.
+- The post-dispatch deadline regression was added first and received a `TIMEOUT` response where the committed removal result was expected; post-response effect detection made it pass.
+- Receipt-first explicit-ref, relative-source, changed-selector, workflow-to-ledger compensation, per-child focus, and cross-window slow-readiness cases were added before the associated facade/coordinator changes.
+
+### Current automated verification
+
+Focused Task 7 suite:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run \
+  src/control/runtime-host-action-facade.test.ts
+```
+
+Result: `1` file, `36/36` tests passed.
+
+Related create/Fork/remove/close/Host Control/Runtime/migration regressions:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run \
+  src/control/fork-batch-coordinator.test.ts \
+  src/control/runtime-host-action-facade.test.ts \
+  src/control/host-control-server.test.ts \
+  src/storage/migration-runner.test.ts \
+  src/hierarchy/hierarchy-application-service.test.ts \
+  src/session-canvas/session-canvas-service.test.ts \
+  src/session-canvas/fork-workflow-service.test.ts \
+  src/runtime-server.test.ts
+```
+
+Result: `8` files, `265/265` tests passed.
+
+Complete Runtime regression:
+
+```bash
+pnpm --filter @matou/runtime exec vitest run
+```
+
+Result: `107` files, `932/932` tests passed. Output contained the existing Node experimental SQLite warning only.
+
+### Task 8 handoff boundary
+
+Task 7 continues to expose the fully constructed facade as `WritableRuntimeState.hostActions` and keeps `HostControlServer.start()` behind the completed preflight graph. Task 8 owns `RuntimeControlBackend.setHostActionExecutor(executor)`, installs that executor before `hostControl.start()`, and returns the facade result object directly so its Runtime-local post-response effect reaches `HostControlServer`. This round adds the response-ordering primitive and Runtime disposal API only; it leaves backend structure-method dispatch to Task 8.
+
+### Code / automation / real App boundary after fix round 1
+
+- **Code:** review findings 1–4 are implemented and self-reviewed in the Task 7 boundary plus the narrow Host Control response/disposal lifecycle seam.
+- **Automated verification:** focused, related, and complete Runtime suites passed at the counts above. `pnpm --filter @matou/runtime typecheck`, `pnpm check:identifiers`, and `git diff --check` also passed after the final code and report update.
+- **Real App:** 本 Task 未验收；真实 CLI 自移除与完整 UI interaction acceptance remain in the later integration and acceptance tasks.
