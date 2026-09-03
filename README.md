@@ -1,8 +1,8 @@
-# 码头 Matou — Claude Code / Codex 多智能体桌面工作台
+# 码头 Matou — Claude Code 多智能体桌面工作台
 
-**Matou is a macOS desktop workbench for running many Claude Code and Codex coding agents side by side: session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.**
+**Matou is a macOS desktop workbench for running many Claude Code agents side by side: session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.**
 
-码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code、Codex、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
+码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code 会话、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
 
 > **项目状态**：早期预览版，仅支持 macOS，目前只能从源码运行；预构建安装包稍后提供。协议为 [GPL-3.0](LICENSE)。
 
@@ -35,13 +35,13 @@
 | **工作空间 Workspace** | 一个代码仓库、产品或客户环境 | 同时维护多个项目时，隔离目录、任务和通知 |
 | **事项 Task** | 一项能交付的工作，例如“发布 Matou 0.1” | 按就绪、运行中、阻塞、完成推进工作，而不是寻找窗口 |
 | **画布 Canvas** | 一个事项里的阶段或场景 | 把方案探索、实现、回归放到不同页签，减少视觉噪音 |
-| **会话卡片 Session** | 一个独立 Claude Code / Codex Agent | 并行编码、审查、测试或调研；每张卡片保留自己的输入、输出和状态 |
+| **会话卡片 Session** | 一个独立的 Claude Code Agent | 并行编码、审查、测试或调研；每张卡片保留自己的输入、输出和状态 |
 
 事项支持新建、重命名、排序与看板流转；画布支持页签、水平分屏和垂直分屏；会话卡片可以独立运行、聚焦、脱出窗口或回到原画布。
 
 ### 2. 直接用自然语言获取其他卡片的信息
 
-当结果在另一张卡片里时，你不必逐个切换、滚动、复制。可以直接对当前 Claude Code 或 Codex 说：
+当结果在另一张卡片里时，你不必逐个切换、滚动、复制。可以直接对当前 Claude Code 说：
 
 > “看看右边那张卡片的测试跑到哪了，给我结论。”
 
@@ -124,7 +124,7 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 
 ## 适合谁
 
-- 同时运行多个 Claude Code 或 Codex 会话的独立开发者
+- 同时运行多个 Claude Code 会话的独立开发者
 - 希望把 AI coding agent 从“聊天窗口”变成可管理工作流的团队
 - 需要 DAG visualization 回溯方案分支、上下文来源和决策路径的复杂项目
 - 经常使用 Git Worktree 并行开发、测试、审查和修复的工程师
@@ -137,7 +137,7 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 - macOS（目前唯一支持的平台；Linux 和 Windows 未经验证）
 - Node.js `>=22.16.0`
 - pnpm `10.17.1`（通过 `corepack enable` 启用）
-- 已安装并登录的 Claude Code 或 Codex CLI
+- 已安装并登录的 Claude Code CLI
 
 ### 启动
 
