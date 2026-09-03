@@ -166,6 +166,62 @@ describe('WorktreeService', () => {
       .toBe(frozenRevision)
   })
 
+  it('rejects an existing checkout when its branch ref is missing', async () => {
+    const path = join(root, 'worktrees', 'missing-existing-ref')
+    const setupMarker = join(root, 'missing-existing-ref-setup-must-not-start')
+    const branch = 'missing-existing-ref'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    seedCreatingWorktreeClaim({
+      id: 'worktree-missing-existing-ref',
+      executionContextId: 'context-missing-existing-ref',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', branch, path, frozenRevision
+    ])
+    await exec('git', ['-C', path, 'checkout', '--detach', frozenRevision])
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    await exec('git', ['-C', repositoryRoot, 'update-ref', '-d', `refs/heads/${branch}`])
+    await expect(exec('git', [
+      '-C', repositoryRoot, 'rev-parse', '--verify', `refs/heads/${branch}`
+    ])).rejects.toThrow()
+    const onSetupStarted = vi.fn()
+    const onCheckpoint = vi.fn()
+
+    await expect(service.create(command('missing-existing-ref'), {
+      id: 'worktree-missing-existing-ref',
+      executionContextId: 'context-missing-existing-ref',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision,
+      setupPolicy: [{
+        idempotencyKey: 'must-not-start', command: '/usr/bin/touch', args: [setupMarker]
+      }],
+      onSetupStarted,
+      onCheckpoint,
+      now: 20
+    })).rejects.toThrow('is missing')
+
+    expect(database.get(
+      'SELECT state FROM worktrees WHERE id = ?', 'worktree-missing-existing-ref'
+    )).toEqual({ state: 'failed' })
+    expect(onCheckpoint).not.toHaveBeenCalled()
+    expect(onSetupStarted).not.toHaveBeenCalled()
+    await expect(realpath(setupMarker)).rejects.toThrow()
+    await expect(realpath(path)).resolves.toEqual(
+      expect.stringContaining('missing-existing-ref')
+    )
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    await expect(exec('git', [
+      '-C', repositoryRoot, 'rev-parse', '--verify', `refs/heads/${branch}`
+    ])).rejects.toThrow()
+  })
+
   it('rejects an existing checkout when its branch ref moved away from the frozen HEAD', async () => {
     const path = join(root, 'worktrees', 'moved-existing-checkout')
     const setupMarker = join(root, 'existing-checkout-setup-must-not-start')
