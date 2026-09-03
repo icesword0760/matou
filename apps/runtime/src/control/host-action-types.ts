@@ -186,6 +186,16 @@ const hostActionRequestSchema = z.discriminatedUnion('method', [
       }
       itemKeys.add(item.itemKey)
     }
+    const retryItemKeys = new Set<string>()
+    for (const [index, itemKey] of (request.retryItemKeys ?? []).entries()) {
+      if (retryItemKeys.has(itemKey)) {
+        context.addIssue({ code: 'custom', path: ['retryItemKeys', index], message: 'retry itemKey must be unique' })
+      }
+      if (!itemKeys.has(itemKey)) {
+        context.addIssue({ code: 'custom', path: ['retryItemKeys', index], message: 'retry itemKey must belong to items' })
+      }
+      retryItemKeys.add(itemKey)
+    }
   }),
   z.object({ method: z.literal('structure.remove.preview'), target: entitySelectorSchema, scope: z.enum(['node', 'subtree']) }).strict(),
   z.object({ method: z.literal('structure.remove.commit'), confirmationRef: referenceSchema }).strict(),
