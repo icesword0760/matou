@@ -15,6 +15,9 @@ const state = vi.hoisted(() => ({
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
   terminalResize: vi.fn(),
+  fit: vi.fn(),
+  resizeTerminal: vi.fn(),
+  resizeObserverCallback: undefined as ResizeObserverCallback | undefined,
   terminalWrite: vi.fn((_data: unknown, done?: () => void) => done?.()),
   terminalReset: vi.fn(),
   terminalConstructed: vi.fn(),
@@ -62,7 +65,7 @@ vi.mock('@xterm/xterm', () => ({
   }
 }))
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: class { fit = vi.fn() }
+  FitAddon: class { fit = state.fit }
 }))
 vi.mock('@xterm/addon-search', () => ({
   SearchAddon: class {
@@ -98,7 +101,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({
     },
     acknowledgeTerminal: state.acknowledgeTerminal,
     requestTerminalReplay: state.requestTerminalReplay,
-    resizeTerminal: vi.fn(),
+    resizeTerminal: state.resizeTerminal,
     sendTerminalInput: state.sendTerminalInput,
     updateTerminalProfile: state.updateTerminalProfile,
     recordTerminalInteraction: state.recordTerminalInteraction,
@@ -126,6 +129,9 @@ describe('TerminalSurface focus continuity', () => {
     state.updateTerminalProfile.mockClear()
     state.recordTerminalInteraction.mockClear()
     state.terminalResize.mockClear()
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    state.resizeObserverCallback = undefined
     state.terminalWrite.mockClear()
     state.terminalReset.mockClear()
     state.terminalConstructed.mockClear()
@@ -143,6 +149,7 @@ describe('TerminalSurface focus continuity', () => {
     state.acknowledgeTerminal.mockClear()
     state.requestTerminalReplay.mockClear()
     vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { state.resizeObserverCallback = callback }
       observe() {}
       disconnect() {}
     })
@@ -177,6 +184,33 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.webglDisposed).toHaveBeenCalledTimes(1)
     expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
       .toBe(false)
+  })
+
+  it('fits and resizes the PTY once after a burst of card width changes settles', () => {
+    vi.useFakeTimers()
+    render(<TerminalSurface sessionId="session-resize-settle" active visible />)
+    act(() => { vi.runOnlyPendingTimers() })
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(40)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(40)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(79)
+    })
+
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+
+    act(() => { vi.advanceTimersByTime(1) })
+
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    act(() => { vi.runOnlyPendingTimers() })
+    expect(state.resizeTerminal).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-resize-settle', 80, 24)
   })
 
   it('spreads cold WebGL setup for inactive moving cards across animation frames', async () => {

@@ -27,6 +27,7 @@ const REFERENCE_FILE_TREE_MIME = 'application/x-file-tree-nodes'
 const CHECKPOINT_QUIET_MS = 500
 const CHECKPOINT_SCROLLBACK_LINES = 10_000
 const INACTIVE_VIEWPORT_SETTLE_MS = 500
+const TERMINAL_RESIZE_SETTLE_MS = 80
 const NOOP = () => {}
 
 interface QueuedWebglActivation {
@@ -780,13 +781,20 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         setArchivedSearch(undefined)
       })
     })
-    const observer = new ResizeObserver(() => {
+    let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined
+    const settleTerminalResize = () => {
+      resizeSettleTimer = undefined
       if (!visibleRef.current) return
       fit.fit()
       publishTerminalDimensions()
       if (validTerminalDimensions(terminal.cols, terminal.rows)) {
         resizeCoalescer.offer(terminal.cols, terminal.rows)
       }
+    }
+    const observer = new ResizeObserver(() => {
+      if (!visibleRef.current) return
+      if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
+      resizeSettleTimer = setTimeout(settleTerminalResize, TERMINAL_RESIZE_SETTLE_MS)
     })
     observer.observe(container)
     const wheel = (event: WheelEvent) => {
@@ -815,6 +823,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       checkpointNowRef.current = NOOP
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
+      if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
       resizeCoalescer.flush()
       resizeCoalescer.dispose()
       input.dispose()
