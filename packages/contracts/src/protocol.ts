@@ -22,7 +22,8 @@ const helloSchema = z.object({
 })
 
 const hostNavigationPathSchema = z.object({
-  windowId: identifier,
+  routeWindowId: identifier,
+  targetWindowId: identifier,
   workspaceId: identifier,
   taskId: identifier,
   sceneId: identifier,
@@ -33,7 +34,9 @@ const hostNavigationResultSchema = z.object({
   type: z.literal('host.navigation-result'),
   protocolVersion,
   requestId: identifier,
-  windowId: identifier,
+  attemptId: identifier,
+  routeWindowId: identifier,
+  targetWindowId: identifier,
   ok: z.boolean(),
   finalPath: hostNavigationPathSchema.optional(),
   error: z.string().min(1).max(4096).optional()
@@ -345,7 +348,9 @@ export type RuntimeMessage =
       type: 'host.navigation-request'
       protocolVersion: typeof PROTOCOL_VERSION
       requestId: string
-      windowId: string
+      attemptId: string
+      routeWindowId: string
+      targetWindowId: string
       workspaceId: string
       taskId: string
       sceneId: string

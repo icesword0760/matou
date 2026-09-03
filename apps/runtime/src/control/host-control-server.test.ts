@@ -696,7 +696,8 @@ class TestBackend implements HostControlBackend {
   ): Promise<HostActionResult> => ({
     kind: 'navigated',
     finalPath: {
-      windowId: 'window-1', workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1'
+      routeWindowId: 'window-1', targetWindowId: 'window-1',
+      workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1'
     }
   }))
   identify = vi.fn(async (caller: { sessionId: string }) => ({

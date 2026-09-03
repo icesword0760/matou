@@ -7,7 +7,12 @@ import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { PROTOCOL_VERSION, type RpcMethod, type RuntimeMessage } from '@matou/contracts'
+import {
+  PROTOCOL_VERSION,
+  type HostNavigationRequestWire,
+  type RpcMethod,
+  type RuntimeMessage
+} from '@matou/contracts'
 
 import { SegmentJournal, readSegmentFrames, readSessionFrames } from './journal/segment-journal'
 import {
@@ -98,15 +103,13 @@ describe('RuntimeServer host navigation registration', () => {
       })
       await settle()
       const pending = navigation.navigate(navigationInput('runtime-nav'))
-      expect(mainPort.last('host.navigation-request')).toMatchObject({
-        requestId: 'runtime-nav', windowId: 'main-window-2'
+      const request = mainPort.last('host.navigation-request')!
+      expect(request).toMatchObject({
+        requestId: 'runtime-nav', attemptId: expect.any(String),
+        routeWindowId: 'main-window-2', targetWindowId: 'main-window-2'
       })
 
-      mainPort.receive({
-        type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'runtime-nav', windowId: 'main-window-2', ok: true,
-        finalPath: navigationPath()
-      })
+      mainPort.receive(navigationResult(request))
       await expect(pending).resolves.toEqual({ finalPath: navigationPath() })
     } finally {
       mainServer.close()
@@ -169,19 +172,12 @@ describe('RuntimeServer host navigation registration', () => {
 
       const pending = navigation.navigate(navigationInput('reconnected-nav'))
       expect(firstPort.last('host.navigation-request')).toBeUndefined()
-      expect(secondPort.last('host.navigation-request')).toMatchObject({ requestId: 'reconnected-nav' })
+      const request = secondPort.last('host.navigation-request')!
+      expect(request).toMatchObject({ requestId: 'reconnected-nav' })
 
-      firstPort.receive({
-        type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'reconnected-nav', windowId: 'main-window-2', ok: true,
-        finalPath: navigationPath()
-      })
+      firstPort.receive(navigationResult(request))
       await Promise.resolve()
-      secondPort.receive({
-        type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
-        requestId: 'reconnected-nav', windowId: 'main-window-2', ok: true,
-        finalPath: navigationPath()
-      })
+      secondPort.receive(navigationResult(request))
       await expect(pending).resolves.toEqual({ finalPath: navigationPath() })
     } finally {
       firstServer.close()
@@ -5666,7 +5662,8 @@ function mainWindowHello(clientId: string) {
 function navigationInput(requestId: string) {
   return {
     requestId,
-    windowId: 'main-window-2',
+    routeWindowId: 'main-window-2',
+    targetWindowId: 'main-window-2',
     workspaceId: 'workspace-2',
     taskId: 'task-2',
     sceneId: 'scene-2',
@@ -5678,11 +5675,25 @@ function navigationInput(requestId: string) {
 
 function navigationPath() {
   return {
-    windowId: 'main-window-2',
+    routeWindowId: 'main-window-2',
+    targetWindowId: 'main-window-2',
     workspaceId: 'workspace-2',
     taskId: 'task-2',
     sceneId: 'scene-2',
     sessionId: 'session-2'
+  }
+}
+
+function navigationResult(request: HostNavigationRequestWire) {
+  return {
+    type: 'host.navigation-result' as const,
+    protocolVersion: PROTOCOL_VERSION,
+    requestId: request.requestId,
+    attemptId: request.attemptId,
+    routeWindowId: request.routeWindowId,
+    targetWindowId: request.targetWindowId,
+    ok: true,
+    finalPath: navigationPath()
   }
 }
 

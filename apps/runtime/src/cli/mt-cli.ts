@@ -765,23 +765,37 @@ async function formatNavigationResult(value: unknown, request: MtRequest): Promi
 
 function isNavigatedWithoutPublicPath(value: unknown): value is {
   kind: 'navigated'
-  finalPath: { windowId: string; workspaceId: string; taskId: string; sceneId: string; sessionId?: string }
+  finalPath: {
+    routeWindowId: string
+    targetWindowId: string
+    workspaceId: string
+    taskId: string
+    sceneId: string
+    sessionId?: string
+  }
 } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const result = value as Record<string, unknown>
   if (result.kind !== 'navigated' || result.path !== undefined || result.publicPath !== undefined) return false
   if (typeof result.finalPath !== 'object' || result.finalPath === null || Array.isArray(result.finalPath)) return false
   const path = result.finalPath as Record<string, unknown>
-  return typeof path.windowId === 'string' && typeof path.workspaceId === 'string' &&
+  return typeof path.routeWindowId === 'string' && typeof path.targetWindowId === 'string' &&
+    typeof path.workspaceId === 'string' &&
     typeof path.taskId === 'string' && typeof path.sceneId === 'string' &&
     (path.sessionId === undefined || typeof path.sessionId === 'string')
 }
 
 function navigationTargetMatches(
   target: HostTarget,
-  path: { windowId: string; workspaceId: string; taskId: string; sceneId: string; sessionId?: string }
+  path: {
+    targetWindowId: string
+    workspaceId: string
+    taskId: string
+    sceneId: string
+    sessionId?: string
+  }
 ): boolean {
-  return target.window.id === path.windowId && target.workspaceId === path.workspaceId &&
+  return target.window.id === path.targetWindowId && target.workspaceId === path.workspaceId &&
     target.taskId === path.taskId && target.canvas.id === path.sceneId &&
     (path.sessionId === undefined || target.sessionId === path.sessionId)
 }

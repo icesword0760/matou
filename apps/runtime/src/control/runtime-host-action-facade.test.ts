@@ -8,6 +8,7 @@ import type { HostNavigationPath } from '@matou/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
+import { DetachedSessionService } from '../hierarchy/detached-session-service'
 import { SessionCanvasService } from '../session-canvas/session-canvas-service'
 import type {
   CreateForkInput,
@@ -99,7 +100,8 @@ beforeEach(async () => {
   disposeSessions = vi.fn(async () => undefined)
   navigate = vi.fn(async (request) => ({
     finalPath: {
-      windowId: request.windowId,
+      routeWindowId: request.routeWindowId,
+      targetWindowId: request.targetWindowId,
       workspaceId: request.workspaceId,
       taskId: request.taskId,
       sceneId: request.sceneId,
@@ -967,7 +969,8 @@ describe('RuntimeHostActionFacade navigation actions', () => {
       kind: 'session', sessionId: target.focusedSessionId
     }, '')
     const finalPath: HostNavigationPath = {
-      windowId: resolved.windowId,
+      routeWindowId: resolved.windowId,
+      targetWindowId: resolved.windowId,
       workspaceId: resolved.workspaceId,
       taskId: resolved.taskId,
       sceneId: resolved.sceneId,
@@ -984,7 +987,8 @@ describe('RuntimeHostActionFacade navigation actions', () => {
 
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
       requestId: expect.any(String),
-      windowId: resolved.windowId,
+      routeWindowId: resolved.windowId,
+      targetWindowId: resolved.windowId,
       workspaceId: resolved.workspaceId,
       taskId: resolved.taskId,
       sceneId: resolved.sceneId,
@@ -1022,20 +1026,23 @@ describe('RuntimeHostActionFacade navigation actions', () => {
     const result = await facade.execute(method, caller, { target: selector })
 
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
-      windowId: resolved.windowId,
+      routeWindowId: resolved.windowId,
+      targetWindowId: resolved.windowId,
       workspaceId: resolved.workspaceId,
       taskId: resolved.taskId,
       sceneId: resolved.sceneId,
+      sessionId: target.focusedSessionId,
       focusTerminal: false
     }))
-    expect(navigate.mock.calls[0]![0]).not.toHaveProperty('sessionId')
     expect(result).toEqual({
       kind: 'navigated',
       finalPath: {
-        windowId: resolved.windowId,
+        routeWindowId: resolved.windowId,
+        targetWindowId: resolved.windowId,
         workspaceId: resolved.workspaceId,
         taskId: resolved.taskId,
-        sceneId: resolved.sceneId
+        sceneId: resolved.sceneId,
+        sessionId: target.focusedSessionId
       }
     })
   })
@@ -1050,11 +1057,135 @@ describe('RuntimeHostActionFacade navigation actions', () => {
       target: { kind: 'session', sessionId: target.focusedSessionId }
     })).resolves.toMatchObject({ kind: 'navigated' })
     expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
-      windowId: resolved.windowId,
+      routeWindowId: resolved.windowId,
+      targetWindowId: resolved.windowId,
       workspaceId: resolved.workspaceId,
       taskId: resolved.taskId,
       sceneId: resolved.sceneId,
+      sessionId: target.focusedSessionId,
       focusTerminal: false
+    }))
+  })
+
+  it('restores the saved non-first Task, Canvas, and Session for every switch level', async () => {
+    const workspaceId = database.get<{ workspace_id: string }>(
+      'SELECT workspace_id FROM tasks WHERE id = ?', sourceTaskId()
+    )!.workspace_id
+    const activeTask = hierarchy.createTask(command('navigation-active-task'), {
+      windowId: 'window-1', workspaceId, title: 'Second task',
+      navigation: 'activate', now: ++clock
+    })
+    const activeCanvas = sessionCanvas.createCanvas(command('navigation-active-canvas'), {
+      windowId: 'window-1', taskId: activeTask.created.task.id, title: 'Second Canvas',
+      navigation: 'activate', now: ++clock
+    })
+    const activeSessionResult = sessionCanvas.createShellSibling(command('navigation-active-session'), {
+      windowId: 'window-1', sceneId: activeCanvas.created.scene.id,
+      sourceSessionId: activeCanvas.created.session.id, title: 'Second Session', now: ++clock
+    })
+    const activeSessionId = activeSessionResult.session!.id
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: activeCanvas.created.scene.id,
+      sessionId: activeSessionId, now: ++clock
+    })
+    navigate.mockClear()
+    const revision = resolver.projectionRevision(caller)
+
+    await facade.execute('navigation.switch.workspace', caller, {
+      target: { kind: 'ref', ref: `workspace:${workspaceId}`, projectionRevision: revision }
+    })
+    await facade.execute('navigation.switch.task', caller, {
+      target: {
+        kind: 'ref', ref: `task:${activeTask.created.task.id}`, projectionRevision: revision
+      }
+    })
+    await facade.execute('navigation.switch.canvas', caller, {
+      target: {
+        kind: 'ref', ref: `scene:${activeCanvas.created.scene.id}`, projectionRevision: revision
+      }
+    })
+
+    expect(navigate).toHaveBeenCalledTimes(3)
+    for (const [request] of navigate.mock.calls) {
+      expect(request).toMatchObject({
+        routeWindowId: 'window-1', targetWindowId: 'window-1',
+        workspaceId, taskId: activeTask.created.task.id,
+        sceneId: activeCanvas.created.scene.id, sessionId: activeSessionId,
+        focusTerminal: false
+      })
+    }
+  })
+
+  it('uses stable descendants only when saved focus rows point outside the requested hierarchy', async () => {
+    const foreign = seedSecondWindow()
+    const workspaceId = database.get<{ workspace_id: string }>(
+      'SELECT workspace_id FROM tasks WHERE id = ?', sourceTaskId()
+    )!.workspace_id
+    const foreignTaskId = database.get<{ task_id: string }>(
+      'SELECT task_id FROM sessions WHERE id = ?', foreign.focusedSessionId
+    )!.task_id
+    database.run(
+      `UPDATE window_workspace_focus SET active_task_id = ?
+       WHERE window_id = 'window-1' AND workspace_id = ?`,
+      foreignTaskId, workspaceId
+    )
+    database.run(
+      `UPDATE window_task_focus SET active_scene_id = ?
+       WHERE window_id = 'window-1' AND task_id = ?`,
+      foreign.sceneId, sourceTaskId()
+    )
+    database.run(
+      `UPDATE window_scene_focus SET active_session_id = ?
+       WHERE window_id = 'window-1' AND scene_id = ?`,
+      foreign.focusedSessionId, sourceSceneId()
+    )
+    navigate.mockClear()
+    const revision = resolver.projectionRevision(caller)
+
+    await facade.execute('navigation.switch.workspace', caller, {
+      target: { kind: 'ref', ref: `workspace:${workspaceId}`, projectionRevision: revision }
+    })
+    await facade.execute('navigation.switch.task', caller, {
+      target: { kind: 'ref', ref: `task:${sourceTaskId()}`, projectionRevision: revision }
+    })
+    await facade.execute('navigation.switch.canvas', caller, {
+      target: { kind: 'ref', ref: `scene:${sourceSceneId()}`, projectionRevision: revision }
+    })
+
+    expect(navigate).toHaveBeenCalledTimes(3)
+    for (const [request] of navigate.mock.calls) {
+      expect(request).toMatchObject({
+        routeWindowId: 'window-1', targetWindowId: 'window-1',
+        workspaceId, taskId: sourceTaskId(), sceneId: sourceSceneId(),
+        sessionId: caller.sessionId, focusTerminal: false
+      })
+    }
+  })
+
+  it('routes detached Session focus through the owning main Renderer with a native target', async () => {
+    const detachedTarget = sessionCanvas.createShellSibling(command('navigation-detached-target'), {
+      windowId: 'window-1', sceneId: sourceSceneId(), sourceSessionId: caller.sessionId,
+      title: 'Detached target', now: ++clock
+    })
+    new DetachedSessionService(database, transactions).detach(command('navigation-detach'), {
+      mainWindowId: 'window-1', sceneWindowId: 'detached-scene-window',
+      sceneId: sourceSceneId(), mountId: detachedTarget.mount!.id,
+      sessionId: detachedTarget.session!.id, nativeWindowKey: 'native-detached-window',
+      now: ++clock
+    })
+
+    await facade.execute('navigation.focus.session', caller, {
+      target: { kind: 'session', sessionId: detachedTarget.session!.id }
+    })
+
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      routeWindowId: 'window-1',
+      targetWindowId: 'native-detached-window',
+      workspaceId: expect.any(String),
+      taskId: sourceTaskId(),
+      sceneId: sourceSceneId(),
+      sessionId: detachedTarget.session!.id,
+      focusTerminal: true
     }))
   })
 

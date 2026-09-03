@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+
 import {
   PROTOCOL_VERSION,
   type HostNavigationPath,
@@ -23,7 +25,7 @@ export class HostNavigationBrokerError extends Error {
 
 export type HostNavigationRequestInput = Omit<
   HostNavigationRequestWire,
-  'type' | 'protocolVersion'
+  'type' | 'protocolVersion' | 'attemptId'
 >
 
 export type HostNavigationSender = (message: HostNavigationRequestWire) => void
@@ -38,30 +40,46 @@ export interface HostNavigationAcknowledgement {
   finalPath: HostNavigationPath
 }
 
+export interface HostNavigationBrokerOptions {
+  now?: () => number
+}
+
 interface PendingNavigation {
   readonly key: string
-  readonly input: HostNavigationRequestInput
+  readonly request: HostNavigationRequestWire
   readonly registration: HostNavigationRegistration
   readonly resolve: (result: HostNavigationAcknowledgement) => void
   readonly reject: (error: HostNavigationBrokerError) => void
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
-type RegistrationIdentity = HostNavigationRegistration | HostNavigationSender
+const TARGET_NOT_READY_MESSAGE = '目标窗口当前未就绪，请稍后重试'
+const REQUEST_IN_PROGRESS_MESSAGE = '导航请求正在处理中，请稍后重试'
+const SEND_FAILED_MESSAGE = '导航请求发送失败，请稍后重试'
+const RENDERER_REJECTED_MESSAGE = '目标窗口未完成导航，请重试'
+const INVALID_ACK_MESSAGE = '目标窗口返回的导航结果无效，请重试'
+const TIMEOUT_MESSAGE = '目标窗口响应超时，请重试'
+const CLOSED_MESSAGE = '导航服务已停止，请稍后重试'
 
 /**
  * Process-scoped request broker between Host Control and authenticated main-window ports.
- * Pending acknowledgements retain the exact registration generation that received the request.
+ * Pending acknowledgements retain the exact registration and per-attempt identity that received
+ * each request. Detached/native destination keys are payload only and never registration keys.
  */
 export class HostNavigationBroker {
   readonly #registrations = new Map<string, HostNavigationRegistration>()
   readonly #pending = new Map<string, PendingNavigation>()
+  readonly #now: () => number
   #nextGeneration = 0
   #closed = false
 
+  constructor(options: HostNavigationBrokerOptions = {}) {
+    this.#now = options.now ?? Date.now
+  }
+
   registerWindow(windowId: string, sender: HostNavigationSender): HostNavigationRegistration {
     if (this.#closed) {
-      throw new HostNavigationBrokerError('TARGET_NOT_READY', 'Runtime 导航服务已关闭')
+      throw new HostNavigationBrokerError('TARGET_NOT_READY', CLOSED_MESSAGE)
     }
     const previous = this.#registrations.get(windowId)
     const registration = Object.freeze({
@@ -73,47 +91,57 @@ export class HostNavigationBroker {
     if (previous) {
       this.#rejectRegistration(
         previous,
-        new HostNavigationBrokerError('TARGET_NOT_READY', '目标窗口已重新连接，请重试导航')
+        new HostNavigationBrokerError('TARGET_NOT_READY', TARGET_NOT_READY_MESSAGE, {
+          cause: diagnostic(`replaced route window ${windowId}`)
+        })
       )
     }
     return registration
   }
 
-  unregisterWindow(windowId: string, identity?: RegistrationIdentity): boolean {
+  unregisterWindow(windowId: string, registration: HostNavigationRegistration): boolean {
     const current = this.#registrations.get(windowId)
-    if (!current || (identity !== undefined && !sameRegistration(current, identity))) return false
+    if (!current || current !== registration) return false
     this.#registrations.delete(windowId)
     this.#rejectRegistration(
       current,
-      new HostNavigationBrokerError('TARGET_NOT_READY', '目标窗口导航连接已断开')
+      new HostNavigationBrokerError('TARGET_NOT_READY', TARGET_NOT_READY_MESSAGE, {
+        cause: diagnostic(`disconnected route window ${windowId}`)
+      })
     )
     return true
   }
 
   navigate(input: HostNavigationRequestInput): Promise<HostNavigationAcknowledgement> {
     if (this.#closed) {
-      return Promise.reject(
-        new HostNavigationBrokerError('TARGET_NOT_READY', 'Runtime 导航服务已关闭')
-      )
+      return Promise.reject(new HostNavigationBrokerError('TARGET_NOT_READY', CLOSED_MESSAGE))
     }
-    if (input.deadlineAt <= Date.now()) {
-      return Promise.reject(this.#timeoutError(input))
+    if (input.deadlineAt <= this.#now()) {
+      return Promise.reject(this.#timeoutError(input.requestId))
     }
-    const registration = this.#registrations.get(input.windowId)
+    const registration = this.#registrations.get(input.routeWindowId)
     if (!registration) {
       return Promise.reject(new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        `目标窗口 ${input.windowId} 当前离线`
+        TARGET_NOT_READY_MESSAGE,
+        { cause: diagnostic(`offline route=${input.routeWindowId} target=${input.targetWindowId}`) }
       ))
     }
-    const key = pendingKey(input.windowId, input.requestId)
+    const key = pendingKey(input.routeWindowId, input.requestId)
     if (this.#pending.has(key)) {
       return Promise.reject(new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        `导航请求 ${input.requestId} 正在处理中`
+        REQUEST_IN_PROGRESS_MESSAGE,
+        { cause: diagnostic(`duplicate navigation request ${input.requestId}`) }
       ))
     }
 
+    const request: HostNavigationRequestWire = {
+      type: 'host.navigation-request',
+      protocolVersion: PROTOCOL_VERSION,
+      attemptId: `navigation-attempt-${randomUUID()}`,
+      ...input
+    }
     let resolve!: PendingNavigation['resolve']
     let reject!: PendingNavigation['reject']
     const promise = new Promise<HostNavigationAcknowledgement>((done, fail) => {
@@ -121,65 +149,62 @@ export class HostNavigationBroker {
       reject = fail
     })
     const pending: PendingNavigation = {
-      key, input, registration, resolve, reject, timer: undefined
+      key, request, registration, resolve, reject, timer: undefined
     }
     this.#pending.set(key, pending)
-    this.#armDeadline(pending)
+    if (!this.#armDeadline(pending)) return promise
+
     try {
-      registration.sender({
-        type: 'host.navigation-request',
-        protocolVersion: PROTOCOL_VERSION,
-        ...input
-      })
+      registration.sender(request)
     } catch (error) {
       this.#reject(pending, new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        `目标窗口发送导航请求失败: ${errorMessage(error)}`,
+        SEND_FAILED_MESSAGE,
         { cause: error }
       ))
     }
     return promise
   }
 
-  acknowledge(result: HostNavigationResultWire, identity?: RegistrationIdentity): boolean {
-    const pending = this.#pending.get(pendingKey(result.windowId, result.requestId))
+  acknowledge(
+    result: HostNavigationResultWire,
+    registration: HostNavigationRegistration
+  ): boolean {
+    const pending = this.#pendingForAcknowledgement(result, registration)
     if (!pending) return false
-    const current = this.#registrations.get(result.windowId)
+    const current = this.#registrations.get(pending.request.routeWindowId)
     if (
       current !== pending.registration ||
-      (identity !== undefined && !sameRegistration(pending.registration, identity))
+      pending.registration !== registration ||
+      result.attemptId !== pending.request.attemptId
     ) {
       return false
     }
-    if (pending.input.deadlineAt <= Date.now()) {
-      this.#reject(pending, this.#timeoutError(pending.input))
-      return false
+    if (pending.request.deadlineAt <= this.#now()) {
+      this.#reject(pending, this.#timeoutError(pending.request.requestId))
+      return true
+    }
+    if (
+      result.routeWindowId !== pending.request.routeWindowId ||
+      result.targetWindowId !== pending.request.targetWindowId
+    ) {
+      this.#rejectInvalidAcknowledgement(pending, result)
+      return true
     }
     if (!result.ok) {
       this.#reject(pending, new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        result.error ?? '目标窗口未完成导航'
+        RENDERER_REJECTED_MESSAGE,
+        { cause: result.error === undefined ? undefined : diagnostic(result.error) }
       ))
       return true
     }
-    if (!result.finalPath || result.finalPath.windowId !== pending.input.windowId) {
-      this.#reject(pending, new HostNavigationBrokerError(
-        'TARGET_NOT_READY',
-        '目标窗口返回的导航路径无效'
-      ))
+    if (!result.finalPath || !sameNavigationPath(result.finalPath, pending.request)) {
+      this.#rejectInvalidAcknowledgement(pending, result)
       return true
     }
-    this.#resolve(pending, {
-      finalPath: {
-        windowId: result.finalPath.windowId,
-        workspaceId: result.finalPath.workspaceId,
-        taskId: result.finalPath.taskId,
-        sceneId: result.finalPath.sceneId,
-        ...(result.finalPath.sessionId === undefined
-          ? {}
-          : { sessionId: result.finalPath.sessionId })
-      }
-    })
+
+    this.#resolve(pending, { finalPath: copyNavigationPath(result.finalPath) })
     return true
   }
 
@@ -187,25 +212,37 @@ export class HostNavigationBroker {
     if (this.#closed) return
     this.#closed = true
     this.#registrations.clear()
-    const error = new HostNavigationBrokerError('TARGET_NOT_READY', 'Runtime 导航服务已关闭')
+    const error = new HostNavigationBrokerError('TARGET_NOT_READY', CLOSED_MESSAGE)
     for (const pending of [...this.#pending.values()]) this.#reject(pending, error)
   }
 
-  #armDeadline(pending: PendingNavigation): void {
-    const remaining = pending.input.deadlineAt - Date.now()
+  #pendingForAcknowledgement(
+    result: HostNavigationResultWire,
+    registration: HostNavigationRegistration
+  ): PendingNavigation | undefined {
+    return [...this.#pending.values()].find((pending) =>
+      pending.registration === registration &&
+      pending.request.requestId === result.requestId &&
+      pending.request.attemptId === result.attemptId
+    )
+  }
+
+  #armDeadline(pending: PendingNavigation): boolean {
+    const remaining = pending.request.deadlineAt - this.#now()
     if (remaining <= 0) {
-      this.#reject(pending, this.#timeoutError(pending.input))
-      return
+      this.#reject(pending, this.#timeoutError(pending.request.requestId))
+      return false
     }
     pending.timer = setTimeout(() => {
       pending.timer = undefined
       if (this.#pending.get(pending.key) !== pending) return
-      if (pending.input.deadlineAt > Date.now()) {
+      if (pending.request.deadlineAt > this.#now()) {
         this.#armDeadline(pending)
         return
       }
-      this.#reject(pending, this.#timeoutError(pending.input))
+      this.#reject(pending, this.#timeoutError(pending.request.requestId))
     }, Math.min(remaining, 2_147_483_647))
+    return true
   }
 
   #resolve(pending: PendingNavigation, result: HostNavigationAcknowledgement): void {
@@ -235,27 +272,55 @@ export class HostNavigationBroker {
     }
   }
 
-  #timeoutError(input: HostNavigationRequestInput): HostNavigationBrokerError {
+  #rejectInvalidAcknowledgement(
+    pending: PendingNavigation,
+    result: HostNavigationResultWire
+  ): void {
+    this.#reject(pending, new HostNavigationBrokerError(
+      'TARGET_NOT_READY',
+      INVALID_ACK_MESSAGE,
+      { cause: diagnostic(`invalid navigation acknowledgement ${JSON.stringify(result)}`) }
+    ))
+  }
+
+  #timeoutError(requestId: string): HostNavigationBrokerError {
     return new HostNavigationBrokerError(
       'NAVIGATION_TIMEOUT',
-      `导航请求 ${input.requestId} 已超过确认截止时间`
+      TIMEOUT_MESSAGE,
+      { cause: diagnostic(`navigation request ${requestId} exceeded its deadline`) }
     )
   }
 }
 
-function sameRegistration(
-  registration: HostNavigationRegistration,
-  identity: RegistrationIdentity
+function sameNavigationPath(
+  path: NonNullable<HostNavigationResultWire['finalPath']>,
+  request: HostNavigationRequestWire
 ): boolean {
-  return typeof identity === 'function'
-    ? registration.sender === identity
-    : registration === identity
+  return path.routeWindowId === request.routeWindowId &&
+    path.targetWindowId === request.targetWindowId &&
+    path.workspaceId === request.workspaceId &&
+    path.taskId === request.taskId &&
+    path.sceneId === request.sceneId &&
+    path.sessionId === request.sessionId
 }
 
-function pendingKey(windowId: string, requestId: string): string {
-  return `${windowId}\u0000${requestId}`
+function copyNavigationPath(
+  path: NonNullable<HostNavigationResultWire['finalPath']>
+): HostNavigationPath {
+  return {
+    routeWindowId: path.routeWindowId,
+    targetWindowId: path.targetWindowId,
+    workspaceId: path.workspaceId,
+    taskId: path.taskId,
+    sceneId: path.sceneId,
+    ...(path.sessionId === undefined ? {} : { sessionId: path.sessionId })
+  }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+function pendingKey(routeWindowId: string, requestId: string): string {
+  return `${routeWindowId}\u0000${requestId}`
+}
+
+function diagnostic(message: string): Error {
+  return new Error(message)
 }

@@ -52,22 +52,30 @@ describe('parseRendererMessage', () => {
       type: 'host.navigation-result',
       protocolVersion: PROTOCOL_VERSION,
       requestId: 'nav-1',
-      windowId: 'main-window-2',
+      attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'native-detached-2',
       ok: true,
       finalPath: {
-        windowId: 'main-window-2',
+        routeWindowId: 'main-window-2',
+        targetWindowId: 'native-detached-2',
         workspaceId: 'workspace-2',
         taskId: 'task-2',
         sceneId: 'scene-2',
         sessionId: 'session-2'
       }
-    })).toMatchObject({ type: 'host.navigation-result', requestId: 'nav-1', ok: true })
+    })).toMatchObject({
+      type: 'host.navigation-result', requestId: 'nav-1', attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2', targetWindowId: 'native-detached-2', ok: true
+    })
 
     expect(parseRendererMessage({
       type: 'host.navigation-result',
       protocolVersion: PROTOCOL_VERSION,
       requestId: 'nav-2',
-      windowId: 'main-window-2',
+      attemptId: 'attempt-2',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'main-window-2',
       ok: false,
       error: 'target card is no longer mounted'
     })).toMatchObject({ type: 'host.navigation-result', requestId: 'nav-2', ok: false })
@@ -76,7 +84,9 @@ describe('parseRendererMessage', () => {
       type: 'host.navigation-result',
       protocolVersion: PROTOCOL_VERSION,
       requestId: 'nav-missing-path',
-      windowId: 'main-window-2',
+      attemptId: 'attempt-3',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'main-window-2',
       ok: true
     })).toMatchObject({ requestId: 'nav-missing-path', ok: true })
   })
@@ -86,7 +96,9 @@ describe('parseRendererMessage', () => {
       type: 'host.navigation-request',
       protocolVersion: PROTOCOL_VERSION,
       requestId: 'nav-1',
-      windowId: 'main-window-2',
+      attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'native-detached-2',
       workspaceId: 'workspace-2',
       taskId: 'task-2',
       sceneId: 'scene-2',
@@ -98,6 +110,9 @@ describe('parseRendererMessage', () => {
     expect(message).toMatchObject({
       type: 'host.navigation-request',
       requestId: 'nav-1',
+      attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'native-detached-2',
       deadlineAt: 5_000
     })
   })

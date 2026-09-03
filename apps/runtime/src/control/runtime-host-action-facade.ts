@@ -702,23 +702,131 @@ export class RuntimeHostActionFacade {
     }>
   ): Promise<HostActionResult> {
     const resolved = this.#resolve(caller, request.target)
-    const target = request.method === 'navigation.focus.session'
-      ? requireEntity(resolved, 'session')
-      : resolved
+    const target = this.#navigationTarget(request.method, resolved)
     const now = this.#now()
     const acknowledgement = await this.#navigation.navigate({
       requestId: `host-navigation-${randomUUID()}`,
-      windowId: target.windowId,
-      workspaceId: target.workspaceId,
-      taskId: target.taskId,
-      sceneId: target.sceneId,
-      ...(request.method === 'navigation.focus.session'
-        ? { sessionId: target.sessionId }
-        : {}),
+      ...target,
       focusTerminal: request.method === 'navigation.focus.session',
       deadlineAt: now + HOST_NAVIGATION_TIMEOUT_MS
     })
     return { kind: 'navigated', finalPath: acknowledgement.finalPath }
+  }
+
+  #navigationTarget(
+    method: Extract<HostActionRequest, { method: `navigation.${string}` }>['method'],
+    resolved: ResolvedHostEntity
+  ): {
+      routeWindowId: string
+      targetWindowId: string
+      workspaceId: string
+      taskId: string
+      sceneId: string
+      sessionId: string
+    } {
+    const routeWindowId = this.#mainRouteWindow(resolved.taskId)
+    if (method === 'navigation.focus.session') {
+      const session = requireEntity(resolved, 'session')
+      return {
+        routeWindowId,
+        targetWindowId: session.windowId,
+        workspaceId: session.workspaceId,
+        taskId: session.taskId,
+        sceneId: session.sceneId,
+        sessionId: session.sessionId
+      }
+    }
+
+    const taskId = method === 'navigation.switch.workspace'
+      ? this.#activeTask(routeWindowId, resolved.workspaceId)
+      : resolved.taskId
+    const sceneId = method === 'navigation.switch.canvas'
+      ? resolved.sceneId
+      : this.#activeScene(routeWindowId, taskId)
+    return {
+      routeWindowId,
+      targetWindowId: routeWindowId,
+      workspaceId: resolved.workspaceId,
+      taskId,
+      sceneId,
+      sessionId: this.#canvasAnchor(routeWindowId, sceneId)
+    }
+  }
+
+  #mainRouteWindow(taskId: string): string {
+    const route = this.#database.get<{ window_id: string }>(
+      `SELECT placement.window_id
+       FROM window_task_placements AS placement
+       JOIN app_windows AS windows
+         ON windows.id = placement.window_id
+        AND windows.kind = 'main'
+        AND windows.state <> 'closed'
+       WHERE placement.task_id = ?`,
+      taskId
+    )
+    if (!route) {
+      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标当前没有可用的主窗口')
+    }
+    return route.window_id
+  }
+
+  #activeTask(windowId: string, workspaceId: string): string {
+    const focused = this.#database.get<{ task_id: string }>(
+      `SELECT tasks.id AS task_id
+       FROM window_workspace_focus AS focus
+       JOIN tasks
+         ON tasks.id = focus.active_task_id
+        AND tasks.workspace_id = focus.workspace_id
+        AND tasks.archived_at IS NULL
+       JOIN window_task_placements AS placement
+         ON placement.task_id = tasks.id AND placement.window_id = focus.window_id
+       WHERE focus.window_id = ? AND focus.workspace_id = ?`,
+      windowId,
+      workspaceId
+    )
+    if (focused) return focused.task_id
+    const fallback = this.#database.get<{ task_id: string }>(
+      `SELECT tasks.id AS task_id
+       FROM tasks
+       JOIN window_task_placements AS placement
+         ON placement.task_id = tasks.id AND placement.window_id = ?
+       WHERE tasks.workspace_id = ? AND tasks.archived_at IS NULL
+       ORDER BY placement.ordinal, tasks.sort_key, tasks.created_at, tasks.id
+       LIMIT 1`,
+      windowId,
+      workspaceId
+    )
+    if (!fallback) {
+      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标工作空间没有可用事项')
+    }
+    return fallback.task_id
+  }
+
+  #activeScene(windowId: string, taskId: string): string {
+    const focused = this.#database.get<{ scene_id: string }>(
+      `SELECT scenes.id AS scene_id
+       FROM window_task_focus AS focus
+       JOIN scenes
+         ON scenes.id = focus.active_scene_id
+        AND scenes.task_id = focus.task_id
+        AND scenes.archived_at IS NULL
+       WHERE focus.window_id = ? AND focus.task_id = ?`,
+      windowId,
+      taskId
+    )
+    if (focused) return focused.scene_id
+    const fallback = this.#database.get<{ scene_id: string }>(
+      `SELECT scenes.id AS scene_id
+       FROM scenes
+       WHERE scenes.task_id = ? AND scenes.archived_at IS NULL
+       ORDER BY scenes.sort_key, scenes.created_at, scenes.id
+       LIMIT 1`,
+      taskId
+    )
+    if (!fallback) {
+      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标事项没有可用画布')
+    }
+    return fallback.scene_id
   }
 
   #resolveStable(caller: HostCallerIdentity, ref: string): ResolvedHostEntity {
