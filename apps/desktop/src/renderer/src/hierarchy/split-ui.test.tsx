@@ -33,6 +33,18 @@ describe('Scene tabs and split actions', () => {
     expect(commands.createShellSibling).toHaveBeenCalledWith('scene-1', 'session-1')
   })
 
+  it('creates a Shell inside the currently open child level after its last card was removed', async () => {
+    const user = userEvent.setup()
+    const commands = sceneCommands()
+    render(<SceneTabBar projection={fixture(2)} commands={commands}
+      levelParentSessionId="parent-session" />)
+
+    await user.click(screen.getByRole('button', { name: '横向新增 Shell' }))
+    expect(commands.createShellSibling).toHaveBeenCalledWith(
+      'scene-1', 'session-1', 'parent-session'
+    )
+  })
+
   it('removes the downward split entry from the session-canvas toolbar', () => {
     render(<SceneTabBar projection={fixture(2)} commands={sceneCommands()} />)
     expect(screen.queryByRole('button', { name: '垂直分屏' })).toBeNull()

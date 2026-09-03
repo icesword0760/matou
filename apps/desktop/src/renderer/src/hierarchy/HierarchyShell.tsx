@@ -694,7 +694,9 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   }
   const shortcutHandlers = useMemo(() => ({
     splitHorizontal: () => {
-      if (!activeSessionMutationBlocked && pathValid && activeSceneId && focusedSessionId) run(commands.createShellSibling(activeSceneId, focusedSessionId))
+      if (!activeSessionMutationBlocked && pathValid && activeSceneId && focusedSessionId) {
+        run(commands.createShellSibling(activeSceneId, focusedSessionId, activeLevelParentId))
+      }
     },
     splitVertical: () => {},
     nextPane: () => focusPane(1),
@@ -736,7 +738,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
       if (shortcutPanelOpen) setTerminalFocusRequest((value) => value + 1)
       setShortcutPanelOpen(!shortcutPanelOpen)
     }
-  }), [activeGraphIndex, activeRatios, activeSceneId, activeSessionMutationBlocked, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
+  }), [activeGraphIndex, activeLevelParentId, activeRatios, activeSceneId, activeSessionMutationBlocked, activeSnapshot, commands, focusedSessionId, paneSessionIds.join(':'), pathValid, readOnly, scenes, shortcutPanelOpen, task])
   const isMac = useTerminalShortcuts(shortcutHandlers)
   const openDag = () => {
     if (!activeSceneId || !dagFocusSessionId) return
@@ -843,6 +845,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
         {task && <>
           {!settingsActive && <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
             readOnly={readOnly}
+            {...(activeLevelParentId ? { levelParentSessionId: activeLevelParentId } : {})}
             onOpenDag={openDag} trailingControl={appUpdateControl} />}
           <div className="scene-stack terminals-area">
             {scenes.map((scene) => {

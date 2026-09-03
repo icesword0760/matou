@@ -18,6 +18,50 @@ import {
 test.describe('session node removal scopes', () => {
   test.setTimeout(120_000)
 
+  test('adds a replacement Shell to an empty child level instead of the parent level', async () => {
+    let fixture: MatouFixture = await launchSessionCanvas()
+    try {
+      await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+
+      const root = fixture.rootDirectory
+      const dataDirectory = fixture.dataDirectory
+      await stopMatouPreservingData(fixture)
+      const graph = seedSingleChild(dataDirectory)
+      fixture = await launchMatou({ root })
+
+      await expectVisibleWindowsOnColorLcd(fixture)
+      await expect(fixture.page.getByRole('navigation', { name: '会话层级' }))
+        .toContainText('Shell 的子会话 · 1 个会话')
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
+
+      // Enter the child level through the same visible navigation used by a
+      // person. This keeps the level open when its final card is removed.
+      await fixture.page.getByRole('button', { name: '返回父会话' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveAttribute('data-session-id', graph.parent)
+      await fixture.page.getByRole('button', { name: '查看 1 个子会话' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveAttribute('data-session-id', graph.child)
+
+      await openRemovalDialog(fixture.page, graph.child)
+      await fixture.page.getByRole('button', { name: '移除', exact: true }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(0)
+      await expect(fixture.page.getByRole('navigation', { name: '会话层级' }))
+        .toContainText('Shell 的子会话 · 0 个会话')
+
+      await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
+      const replacement = await visibleSurfaces(fixture.page).getAttribute('data-session-id')
+      expect(replacement).toBeTruthy()
+      await expect.poll(() => structuralParent(dataDirectory, replacement!)).toBe(graph.parent)
+
+      await fixture.page.getByRole('button', { name: '返回父会话' }).click()
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(1)
+      await expect(visibleSurfaces(fixture.page)).toHaveAttribute('data-session-id', graph.parent)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('reconnects descendants or removes the complete branch and keeps both results after restart', async () => {
     let fixture: MatouFixture = await launchSessionCanvas()
     try {
@@ -167,6 +211,31 @@ function seedTwoRemovalBranches(dataDirectory: string): {
       secondChild: secondChild!.id,
       secondGrandchild: secondGrandchild!.id
     }
+  } finally {
+    database.close()
+  }
+}
+
+function seedSingleChild(dataDirectory: string): { parent: string; child: string } {
+  const database = new DatabaseSync(join(dataDirectory, 'matou.sqlite'))
+  try {
+    const sessions = database.prepare(
+      `SELECT id, task_id FROM sessions
+       WHERE archived_at IS NULL ORDER BY created_at, id`
+    ).all() as Array<{ id: string; task_id: string }>
+    if (sessions.length !== 2) throw new Error(`Expected 2 live Sessions, received ${sessions.length}`)
+    const [parent, child] = sessions
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      insertRelation(database, child!, parent!)
+      database.prepare('UPDATE window_scene_focus SET active_session_id = ?')
+        .run(child!.id)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+    return { parent: parent!.id, child: child!.id }
   } finally {
     database.close()
   }

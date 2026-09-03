@@ -16,14 +16,15 @@ export interface SceneCommands {
   reorderScene(sceneId: string, beforeSceneId?: string): unknown
   closeScene(sceneId: string, confirmed?: boolean): unknown
   splitSession(sceneId: string, sessionId: string, direction: 'horizontal' | 'vertical'): unknown
-  createShellSibling?(sceneId: string, sessionId: string): unknown
+  createShellSibling?(sceneId: string, sessionId: string, parentSessionId?: string): unknown
 }
 
-export function SceneTabBar({ projection, commands, pathValid = true, readOnly = false, onOpenDag, trailingControl }: {
+export function SceneTabBar({ projection, commands, pathValid = true, readOnly = false, levelParentSessionId, onOpenDag, trailingControl }: {
   projection: HierarchyProjection
   commands: SceneCommands
   pathValid?: boolean
   readOnly?: boolean
+  levelParentSessionId?: string
   onOpenDag?(): void
   trailingControl?: ReactNode
 }) {
@@ -202,7 +203,10 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
       title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
       onClick={() => {
         if (!activeSceneId || !activeSessionId) return
-        if (commands.createShellSibling) commands.createShellSibling(activeSceneId, activeSessionId)
+        if (commands.createShellSibling) {
+          if (levelParentSessionId) commands.createShellSibling(activeSceneId, activeSessionId, levelParentSessionId)
+          else commands.createShellSibling(activeSceneId, activeSessionId)
+        }
         else commands.splitSession(activeSceneId, activeSessionId, 'horizontal')
       }}>
       <AppIcon name="panel-right-open" />
