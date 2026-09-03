@@ -33,9 +33,13 @@ mt switch canvas TARGET [--json]
 
 目标支持 `current`（命令支持时）、`self`、`left`、`right`、`parent`、`child:N`、`sibling:N`，以及 `mt list --json` 返回的稳定目标引用。
 
+分支与 Worktree 环境选择前统一运行 `mt list --all --json`，按 `executionContextRef`、`worktreeRef` 去重。父节点当前环境已承载目标分支时使用 `current`，否则使用去重后的 `existing-worktree`；多个真实候选才询问。
+
 ## 三方案批量示例
 
-先向用户总结“轻量适配方案”“服务层重构方案”“完整架构升级”三个节点标题，再集中确认三个环境。确认后提交：
+先向用户总结“轻量适配方案”“服务层重构方案”“完整架构升级”三个节点标题，再集中确认仍缺失的环境。确认后提交：
+
+仅在至少一个方案缺环境时集中询问全部缺失项；用户已逐项给出环境或说“全部 main”时直接解析并提交。
 
 ```bash
 cat <<'JSON' | mt fork children self --items-json - --batch-key three-options-v1 --json
@@ -49,7 +53,7 @@ JSON
 
 “创建”时条目不带 `start`，节点保持待命。“创建并执行”时每个条目带自己的 `prompt` 和 `"start":true`。
 
-稳定 key 由对话意图生成并在同一逻辑操作中保持不变。部分成功时只重试失败项，仍提交原始条目定义，并复用原 batch key 和失败条目的 item key：
+稳定 key 由对话意图生成并在同一逻辑操作中保持不变。部分成功时只重试失败项，仍提交原始条目定义，并复用原 batch key、原 item key：
 
 ```bash
 cat <<'JSON' | mt fork children self --items-json - --batch-key three-options-v1 --retry-item-key service --json
@@ -85,7 +89,9 @@ mt remove commit CONFIRMATION_REF --json
 mt close canvas-commit CONFIRMATION_REF --json
 ```
 
-不向用户展示确认引用。确认过期或结构变化时重新预览，不复用旧引用。
+明确确认后才执行 commit；确认过期或结构变化时重新预览，不复用旧引用。项目文件、Git 分支和 Worktree 保持不变。
+
+不向用户展示确认引用、内部引用或控制凭据；这些值只在当前 `--json` 流程中使用。
 
 ## 读取与输入
 
