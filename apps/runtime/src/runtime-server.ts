@@ -1604,7 +1604,9 @@ export class RuntimeServer {
           ...(permissionMode === undefined ? {} : { permissionMode })
         })
       }
-      const resumeMonitor = providerSessionId === undefined ? undefined : new ProviderResumeMonitor()
+      const resumeMonitor = providerSessionId === undefined
+        ? undefined
+        : new ProviderResumeMonitor(providerSessionId)
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
       let emittedTerminalOutput = false

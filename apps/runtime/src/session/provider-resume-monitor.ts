@@ -1,16 +1,20 @@
 const RESUME_FAILURE_PATTERNS = [
-  /no session found/i,
-  /session not found/i,
-  /no conversation found/i,
+  /no session.{0,96}found/i,
+  /session.{0,96}not found/i,
+  /no conversation.{0,96}found/i,
   /invalid session/i,
-  /error[^\r\n]*resume/i,
   /failed to resume/i
 ]
 
 export class ProviderResumeMonitor {
+  readonly #expectedProviderSessionId: string
   #recentOutput = ''
   #failed = false
   #settled = false
+
+  constructor(expectedProviderSessionId: string) {
+    this.#expectedProviderSessionId = expectedProviderSessionId.trim().toLowerCase()
+  }
 
   get isMonitoring(): boolean {
     return !this.#failed && !this.#settled
@@ -24,7 +28,7 @@ export class ProviderResumeMonitor {
     if (this.#failed || this.#settled) return undefined
     this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
       .slice(-8_192)
-    if (RESUME_FAILURE_PATTERNS.some((pattern) => pattern.test(this.#recentOutput))) {
+    if (matchesExpectedResumeFailure(this.#recentOutput, this.#expectedProviderSessionId)) {
       this.#failed = true
       return 'provider session not found'
     }
@@ -40,6 +44,18 @@ export class ProviderResumeMonitor {
     this.#failed = true
     return 'provider resume timed out'
   }
+}
+
+function matchesExpectedResumeFailure(output: string, expectedProviderSessionId: string): boolean {
+  if (!expectedProviderSessionId) return false
+  const normalized = output.toLowerCase()
+  const identityAt = normalized.lastIndexOf(expectedProviderSessionId)
+  if (identityAt < 0) return false
+  const context = normalized.slice(
+    Math.max(0, identityAt - 320),
+    Math.min(normalized.length, identityAt + expectedProviderSessionId.length + 320)
+  )
+  return RESUME_FAILURE_PATTERNS.some((pattern) => pattern.test(context))
 }
 
 function normalizeProviderOutput(output: string): string {

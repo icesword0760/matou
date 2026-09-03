@@ -3409,7 +3409,7 @@ sleep 30
 
   it('keeps a failed fork panel inert and never falls back to Shell or repeats the fork', async () => {
     const executable = join(root, 'provider-fork-failure.sh')
-    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id missing-provider-42\\n"\nsleep 30\n')
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
@@ -3465,7 +3465,7 @@ sleep 30
 
   it('publishes the failed Fork graph when the authoritative provider launch rejects its source', async () => {
     const executable = join(root, 'provider-fork-graph-failure.sh')
-    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id\\n"\nsleep 30\n')
+    await writeFile(executable, '#!/bin/sh\nprintf "No session found for requested id missing-provider-graph\\n"\nsleep 30\n')
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
@@ -4445,7 +4445,7 @@ sleep 30
     await writeFile(executable, [
       '#!/bin/sh',
       'printf "invoked\\n" >> "$MATOU_TEST_LAUNCH_MARKER"',
-      'printf "No session found for requested id\\n"',
+      'printf "No session found for requested id missing-provider-42\\n"',
       'sleep 30',
       ''
     ].join('\n'))
