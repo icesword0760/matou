@@ -33,7 +33,7 @@
 
 ![码头 Matou 的 Claude Code 多会话桌面工作台](assets/shots/workspace-demo.png)
 
-> 本文所有截图均为隔离演示数据：工作空间、事项名称、终端输出和通知都是一次性演示内容。
+> 上图：一个事项下并行三个 Claude Code——左侧在实现 Redis 幂等键（运行中），中间的回归测试在等你确认一条断言，右侧的审查会话直接用 `mt read left` 读取了回归结果并给出结论。本文截图均来自隔离演示环境，项目、终端输出和通知都是为演示构造的。
 
 ---
 
@@ -93,7 +93,7 @@ Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt hi
 
 ![Claude Code 会话分支 DAG 可视化](assets/shots/session-dag-demo.png)
 
-> 父会话派生出方案 A、方案 B 两条 Fork 路线；更深层的节点会被自动聚合，避免大图过载。
+> 基线会话 Fork 出方案 A、方案 B 两条路线（实线，继承对话），一个跑回归的 Shell 通过普通关联挂在同一父节点下（虚线）。不打开任何终端就能看到：A 还在跑，B 在等决定，回归以退出码 1 失败。
 
 ### 4. AI 通知：只在需要你时打断你
 
@@ -112,7 +112,7 @@ Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt hi
 
 ![Claude Code AI HUD 与分级通知中心](assets/shots/agent-hud-notifications-demo.png)
 
-> 左侧为通知中心，右侧卡片刚收到新通知，底部为 Agent HUD。
+> 通知中心按「工作空间 / 事项」标注来源，出错、等待输入、任务完成分级显示，另一个工作空间的完成事件也会进来；右侧两张卡片带「新通知」角标；底部 HUD 显示当前会话的模型、上下文用量、周用量、待办进度和分支状态。
 
 ### 6. Fork + Git Worktree：放心比较多种实现
 
