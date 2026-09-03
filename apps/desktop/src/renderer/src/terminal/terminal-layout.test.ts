@@ -24,6 +24,14 @@ describe('terminal grid layout', () => {
     )
   })
 
+  it('keeps the focused terminal canvas at one-to-one scale for sharp text', () => {
+    const canvasCss = css('session-canvas/session-canvas.css')
+    const focusedCardRule = canvasCss.match(/\.session-card\.is-focused\s*\{([^}]*)\}/)?.[1]
+
+    expect(focusedCardRule).toContain('transform: translateY(-4px);')
+    expect(focusedCardRule).not.toContain('scale(')
+  })
+
   it('aligns the sidebar footer to the 38px terminal status bar', () => {
     const hierarchyCss = css('hierarchy/hierarchy.css')
 
