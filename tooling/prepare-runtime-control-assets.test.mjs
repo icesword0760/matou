@@ -73,6 +73,11 @@ test('copies executable mt wrappers and complete provider guidance', async () =>
   assert.match(shared, /TARGET_NOT_READY/)
   assert.match(targetRules, /当前画布.*当前 DAG level/)
   assert.match(commands, /不切换焦点/)
+  assert.match(claudeSkill, /mt fork children/)
+  assert.match(claudeSkill, /创建并分别实现/)
+  assert.match(codex, /mt remove preview/)
+  assert.match(codex, /只重试失败项/)
+  assert.doesNotMatch(codex, /MATOU_CONTROL_TOKEN/)
   if (process.platform !== 'win32') {
     assert.equal((await stat(join(destination, 'bin/mt'))).mode & 0o777, 0o755)
   }
