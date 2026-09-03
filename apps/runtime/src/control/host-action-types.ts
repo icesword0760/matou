@@ -130,7 +130,7 @@ export type HostActionResult =
       removedCanvases: number; removedSessions: number; activePath: HostResultPath }
   | { kind: 'canvas-closed'; targetRef: string; removedSessions: number;
       activePath: HostResultPath }
-  | { kind: 'navigated'; finalPath: HostNavigationPath }
+  | { kind: 'navigated'; finalPath: HostNavigationPath; path?: HostResultPath }
 
 const utf8Text = (minimum: number, maximum: number) => z.string().superRefine((value, context) => {
   const bytes = Buffer.byteLength(value, 'utf8')

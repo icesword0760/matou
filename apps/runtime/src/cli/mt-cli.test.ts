@@ -1,8 +1,18 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ForkItemInput, HostActionResult } from '../control/host-action-types'
 import type { HostControlScope, HostTarget } from '../control/host-control-types'
 import { HostControlClientError } from '../control/host-control-client'
+import {
+  CapabilityTokenService,
+  controlEndpointForPlatform,
+  HostControlServer,
+  type HostControlBackend
+} from '../control/host-control-server'
 import { runMt, type MtIo } from './mt-cli'
 
 describe('mt CLI', () => {
@@ -377,6 +387,210 @@ describe('mt CLI', () => {
     expect(large.err[0]).toContain('补充筛选条件')
     expect(large.err[0]).not.toContain('候选 1')
   })
+
+  it('transports exactly 1 MiB of stdin JSON through the real client and server envelope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-mt-frame-'))
+    const endpoint = controlEndpointForPlatform(root)
+    const tokens = new CapabilityTokenService('runtime-task-9')
+    const token = tokens.issue(
+      { runId: 'run-task-9', sessionId: 'session-task-9' },
+      ['structure.fork.children'],
+      Date.now() + 10_000
+    )
+    const received: Array<{ method: HostControlScope; params: unknown }> = []
+    const backend = hostControlBackend(async (method, _caller, params) => {
+      received.push({ method, params })
+      const request = params as { items: ForkItemInput[] }
+      return batchResult(request.items)
+    })
+    const server = new HostControlServer({ socketPath: endpoint, tokenService: tokens, backend })
+    const fixture = ioFixture()
+    const batch = validBatchJsonOfExactUtf8Bytes(1024 * 1024)
+    await server.start()
+    try {
+      expect(await runMt(
+        ['fork', 'children', 'self', '--items-json', '-', '--batch-key', 'frame-boundary', '--json'],
+        { MATOU_CONTROL_ENDPOINT: endpoint, MATOU_CONTROL_TOKEN: token },
+        fixture.io,
+        { readStdin: async () => batch.json }
+      )).toBe(0)
+      expect(received).toEqual([{
+        method: 'structure.fork.children',
+        params: { source: { kind: 'self' }, batchKey: 'frame-boundary', items: batch.items }
+      }])
+      expect(JSON.parse(fixture.out[0]!)).toMatchObject({ kind: 'fork-batch', failed: 0 })
+    } finally {
+      await server.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    {
+      label: 'usage',
+      argv: ['create', 'workspace', '--title', '缺路径', '--json'],
+      error: undefined,
+      expected: { code: 'INVALID_REQUEST', message: expect.stringContaining('--path') }
+    },
+    {
+      label: 'transport',
+      argv: ['list', '--json'],
+      error: new HostControlClientError('CONNECTION_ERROR', '本地连接中断'),
+      expected: { code: 'CONNECTION_ERROR', message: '本地连接中断' }
+    },
+    {
+      label: 'ambiguity',
+      argv: ['focus', 'self', '--json'],
+      error: new HostControlClientError('AMBIGUOUS_TARGET', '匹配多个目标', {
+        candidates: [{ humanPath: '窗口 1 / 事项 A' }, { humanPath: '窗口 2 / 事项 A' }]
+      }),
+      expected: {
+        code: 'AMBIGUOUS_TARGET', message: '匹配多个目标',
+        details: { candidates: [{ humanPath: '窗口 1 / 事项 A' }, { humanPath: '窗口 2 / 事项 A' }] }
+      }
+    }
+  ])('prints stable JSON for $label failures', async ({ argv, error, expected }) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => {
+      if (error) throw error
+      return undefined
+    })
+    expect(await runMt(argv, {}, fixture.io, request)).not.toBe(0)
+    expect(fixture.out).toEqual([])
+    expect(JSON.parse(fixture.err[0]!)).toEqual(expected)
+  })
+
+  it('treats help-like and option-like tokens as exact values after value flags', async () => {
+    const fixture = ioFixture()
+    const request = actionRequest()
+    const environment = '--foo'
+    const items = '--help'
+
+    expect(await runMt([
+      'create', 'workspace', '--path', '-h', '--title', '--help', '--submission-key', '--foo', '--json'
+    ], {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenCalledWith('structure.create.workspace', {
+      path: '-h', title: '--help', submissionKey: '--foo'
+    })
+
+    expect(await runMt([
+      'fork', 'child', 'self', '--title', '--foo', '--environment-json', environment,
+      '--prompt', '--help', '--submission-key', 'dash-values', '--json'
+    ], {}, fixture.io, request)).toBe(2)
+    expect(JSON.parse(fixture.err.at(-1)!)).toMatchObject({ code: 'INVALID_REQUEST' })
+
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', items, '--batch-key', 'dash-json', '--json'
+    ], {}, fixture.io, request)).toBe(2)
+    expect(JSON.parse(fixture.err.at(-1)!)).toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it('preserves dash-leading Chinese values and inline JSON instead of parsing them as help', async () => {
+    const fixture = ioFixture()
+    const request = actionRequest()
+    const items: ForkItemInput[] = [{
+      itemKey: 'dash', title: '--中文方案', environment: { mode: 'current' }, prompt: '-h 仍是任务'
+    }]
+    expect(await runMt([
+      'fork', 'child', 'self', '--title', '--中文标题',
+      '--environment-json', '{"mode":"new-worktree","branch":"--中文分支"}',
+      '--prompt', '--help 仍是提示', '--submission-key', 'dash-child', '--json'
+    ], {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenCalledWith('structure.fork.child', {
+      source: { kind: 'self' }, title: '--中文标题',
+      environment: { mode: 'new-worktree', branch: '--中文分支' },
+      prompt: '--help 仍是提示', submissionKey: 'dash-child'
+    })
+
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', JSON.stringify(items), '--batch-key', 'dash-batch', '--json'
+    ], {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenCalledWith('structure.fork.children', {
+      source: { kind: 'self' }, items, batchKey: 'dash-batch'
+    })
+  })
+
+  it.each([
+    ['--retry-item-key', 'one'],
+    ['--retry-item-keys-json', '[]']
+  ])('requires the original batch key whenever %s appears', async (flag, value) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => batchResult([]))
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', '[]', flag, value, '--json'
+    ], {}, fixture.io, request)).toBe(2)
+    expect(request).not.toHaveBeenCalled()
+    expect(JSON.parse(fixture.err[0]!)).toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it.each([
+    '[{"itemKey":"bad-high","title":"\\ud800","environment":{"mode":"current"}}]',
+    '[{"itemKey":"bad-low","title":"\\udfff","environment":{"mode":"current"}}]'
+  ])('rejects escaped isolated surrogates recursively after JSON parsing', async (json) => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => batchResult([]))
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', json, '--batch-key', 'surrogate', '--json'
+    ], {}, fixture.io, request)).toBe(2)
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('preserves escaped surrogate pairs and emoji after JSON parsing', async () => {
+    const fixture = ioFixture()
+    const request = vi.fn(async () => batchResult([]))
+    const json = '[{"itemKey":"pair","title":"\\ud83d\\ude80 🧪","environment":{"mode":"current"}}]'
+    expect(await runMt([
+      'fork', 'children', 'self', '--items-json', json, '--batch-key', 'surrogate-pair', '--json'
+    ], {}, fixture.io, request)).toBe(0)
+    expect(request).toHaveBeenCalledWith('structure.fork.children', {
+      source: { kind: 'self' }, batchKey: 'surrogate-pair',
+      items: [{ itemKey: 'pair', title: '🚀 🧪', environment: { mode: 'current' } }]
+    })
+  })
+
+  it('maps RUNTIME_NOT_READY to the state exit group', async () => {
+    const fixture = ioFixture()
+    expect(await runMt(['focus', 'self'], {}, fixture.io, async () => {
+      throw new HostControlClientError('RUNTIME_NOT_READY', '导航服务正在启动')
+    })).toBe(4)
+  })
+
+  it('prints the public final navigation hierarchy without internal refs', async () => {
+    const fixture = ioFixture()
+    const request = vi.fn(async (method: HostControlScope) => method === 'host.list'
+      ? { projectionRevision: 'revision-navigation', targets: [targetFixture()] }
+      : {
+          kind: 'navigated',
+          finalPath: {
+            windowId: 'window-1', workspaceId: 'workspace-1', taskId: 'task-1',
+            sceneId: 'scene-1', sessionId: 'session-2'
+          }
+        })
+    expect(await runMt(['focus', 'self'], {}, fixture.io, request)).toBe(0)
+    expect(fixture.out[0]).toBe(
+      '已切换到：窗口 1 / 工作空间 Workspace / 事项 Task / 画布 Canvas / 会话 2（Shell）'
+    )
+    expect(fixture.out[0]).not.toMatch(/(?:window|workspace|task|scene|session)[-:][a-z0-9]/i)
+    expect(request).toHaveBeenLastCalledWith('host.list', { scope: 'all' })
+  })
+
+  it('uses operation-specific human wording for removal and Canvas-close previews', async () => {
+    const removal = ioFixture()
+    await runMt(
+      ['remove', 'preview', 'self', '--scope', 'node'], {}, removal.io,
+      actionRequest(previewResult('removal-preview'))
+    )
+    expect(removal.out[0]).toContain('移除预览')
+    expect(removal.out[0]).not.toContain('关闭画布预览')
+
+    const closing = ioFixture()
+    await runMt(
+      ['close', 'canvas-preview', 'self'], {}, closing.io,
+      actionRequest(previewResult('canvas-close-preview'))
+    )
+    expect(closing.out[0]).toContain('关闭画布预览')
+    expect(closing.out[0]).toContain('项目文件、Git 分支和 Worktree 保持不变')
+  })
 })
 
 function ioFixture(): { io: MtIo; out: string[]; err: string[] } {
@@ -450,4 +664,44 @@ function jsonArrayOfExactUtf8Bytes(bytes: number): string {
   const prefix = '[{"itemKey":"one","title":"'
   const suffix = '","environment":{"mode":"current"}}]'
   return `${prefix}${'x'.repeat(bytes - Buffer.byteLength(prefix + suffix, 'utf8'))}${suffix}`
+}
+
+function validBatchJsonOfExactUtf8Bytes(bytes: number): { json: string; items: ForkItemInput[] } {
+  const items: ForkItemInput[] = Array.from({ length: 16 }, (_, index) => ({
+    itemKey: `item-${index + 1}`,
+    title: `方案 ${index + 1}`,
+    environment: { mode: 'current' },
+    prompt: ''
+  }))
+  let remaining = bytes - Buffer.byteLength(JSON.stringify(items), 'utf8')
+  for (const item of items) {
+    const size = Math.min(64 * 1024, remaining)
+    item.prompt = 'x'.repeat(size)
+    remaining -= size
+  }
+  const json = JSON.stringify(items)
+  if (remaining !== 0 || Buffer.byteLength(json, 'utf8') !== bytes) {
+    throw new Error('test batch did not reach exact byte boundary')
+  }
+  return { json, items }
+}
+
+function hostControlBackend(
+  executeHostAction: HostControlBackend['executeHostAction']
+): HostControlBackend {
+  return {
+    identify: async () => ({}),
+    listTargets: async () => [],
+    resolveTarget: async () => 'session-task-9',
+    readCurrent: async () => ({}),
+    readHistory: async () => ({}),
+    readCommands: async () => [],
+    sendText: async () => undefined,
+    sendKey: async () => undefined,
+    writeTaskStatus: async () => undefined,
+    writeTaskProgress: async () => undefined,
+    appendTaskLog: async () => undefined,
+    moveTaskToWindow: async () => ({}),
+    executeHostAction
+  }
 }

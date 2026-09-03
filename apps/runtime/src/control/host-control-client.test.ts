@@ -136,6 +136,16 @@ describe('HostControlClient', () => {
     expect(validError.details?.candidates).toEqual([{ humanPath: valid }])
     expect(invalidError).not.toHaveProperty('details')
   })
+
+  it('reads a valid response whose protocol envelope is larger than 1 MiB', async () => {
+    const payload = 'x'.repeat(1024 * 1024)
+    const { endpoint } = await fixtureServer((request) => ({
+      version: 1, requestId: request.requestId, ok: true, result: { payload }
+    }))
+    const client = new HostControlClient({ endpoint, token: 'token', timeoutMs: 1000 })
+
+    await expect(client.request('host.identify', {})).resolves.toEqual({ payload })
+  })
 })
 
 async function captureClientError(client: HostControlClient): Promise<HostControlClientError> {

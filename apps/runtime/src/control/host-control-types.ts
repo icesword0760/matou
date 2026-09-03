@@ -1,5 +1,8 @@
 import type { HostActionMethod } from './host-action-types'
 
+/** Shared request/response budget; CLI payload limits leave room for the protocol envelope. */
+export const HOST_CONTROL_MAX_FRAME_BYTES = 2 * 1024 * 1024
+
 export type HostControlScope =
   | 'host.identify'
   | 'host.list'

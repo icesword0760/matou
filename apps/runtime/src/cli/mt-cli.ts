@@ -49,8 +49,9 @@ export async function runMt(
   dependencies: MtDependencies | MtRequest = {},
   legacyReadStdin?: () => Promise<string>
 ): Promise<number> {
+  const json = jsonOutputRequested(argv)
   try {
-    if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
+    if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
       io.stdout(HELP_TEXT)
       return 0
     }
@@ -58,7 +59,6 @@ export async function runMt(
     const request = resolvedDependencies.request ?? requestFromEnvironment(environment)
     const readStdin = resolvedDependencies.readStdin ?? readProcessStdin
     const command = argv[0]
-    const json = argv.includes('--json')
     if (command === 'identify') {
       const result = await request('host.identify', {})
       printResult(result, json, io, formatIdentity)
@@ -82,7 +82,13 @@ export async function runMt(
               : undefined
     if (action) {
       const result = await request(action.method, action.params)
-      printResult(result, action.json, io, formatActionResult)
+      if (action.json) {
+        io.stdout(JSON.stringify(result, null, 2))
+      } else if (action.method.startsWith('navigation.')) {
+        io.stdout(await formatNavigationResult(result, request))
+      } else {
+        io.stdout(formatActionResult(result))
+      }
       return partialSuccessExitCode(result)
     }
     if (!['read', 'history', 'commands', 'send', 'key'].includes(command ?? '')) {
@@ -127,9 +133,41 @@ export async function runMt(
     printResult(result, json, io, () => `已发送按键 ${key}`)
     return 0
   } catch (error) {
-    io.stderr(formatError(error))
+    io.stderr(formatError(error, json))
     return exitCode(error)
   }
+}
+
+function jsonOutputRequested(argv: string[]): boolean {
+  const command = argv[0]
+  const optionStart = command === 'create'
+    ? 2
+    : command === 'fork' || command === 'remove' || command === 'close'
+      ? 3
+      : command === 'switch'
+        ? 3
+        : command === 'focus' || command === 'read' || command === 'history' || command === 'commands'
+          ? 2
+          : command === 'key'
+            ? 3
+            : command === 'send'
+              ? 2
+              : 1
+  const valueFlags = new Set([
+    '--path', '--workspace', '--task', '--canvas', '--profile', '--title', '--submission-key',
+    '--environment-json', '--prompt', '--items-json', '--batch-key', '--retry-item-key',
+    '--retry-item-keys-json', '--retry-items-json', '--scope', '--lines', '--bytes', '--limit'
+  ])
+  for (let index = optionStart; index < argv.length; index += 1) {
+    const token = argv[index]!
+    if (token === '--') return false
+    if (valueFlags.has(token)) {
+      index += 1
+      continue
+    }
+    if (token === '--json') return true
+  }
+  return false
 }
 
 function normalizeDependencies(
@@ -252,6 +290,10 @@ async function parseForkCommand(
       ? []
       : parseJsonStringArray(options.values.retryItemKeysJson, '--retry-item-keys-json')
     const retryItemKeys = [...repeatedRetryKeys, ...jsonRetryKeys]
+    const retryFlagPresent = repeatedRetryKeys.length > 0 || options.values.retryItemKeysJson !== undefined
+    if (retryFlagPresent && options.values.batchKey === undefined) {
+      throw new MtUsageError('重试失败项时必须显式提供原 --batch-key')
+    }
     return {
       method: 'structure.fork.children',
       params: {
@@ -429,6 +471,11 @@ function parseOptions(
   const repeated: Record<string, string[] | undefined> = {}
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index]!
+    if (flag === '--') {
+      const extra = argv[index + 1]
+      if (extra !== undefined) throw new MtUsageError(`-- 之后存在多余参数：${extra}`)
+      break
+    }
     const valueName = valueFlags[flag]
     const repeatedName = repeatedValueFlags[flag]
     if (booleanFlags.includes(flag)) {
@@ -438,7 +485,7 @@ function parseOptions(
     }
     if (valueName || repeatedName) {
       const value = argv[index + 1]
-      if (value === undefined || value.startsWith('--')) throw new MtUsageError(`${flag} 需要值`)
+      if (value === undefined) throw new MtUsageError(`${flag} 需要值`)
       index += 1
       if (valueName) {
         if (values[valueName] !== undefined) throw new MtUsageError(`${flag} 不得重复`)
@@ -491,9 +538,28 @@ function parseJsonStringArray(text: string, flag: string): string[] {
 function parseJson(text: string, flag: string): unknown {
   if (!hasWellFormedUtf16(text)) throw new MtUsageError(`${flag} 包含无效 UTF-8 文本`)
   try {
-    return JSON.parse(text)
-  } catch {
+    const value: unknown = JSON.parse(text)
+    assertJsonStringsWellFormed(value, flag)
+    return value
+  } catch (error) {
+    if (error instanceof MtUsageError) throw error
     throw new MtUsageError(`${flag} 需要有效 JSON`)
+  }
+}
+
+function assertJsonStringsWellFormed(value: unknown, flag: string): void {
+  if (typeof value === 'string') {
+    if (!hasWellFormedUtf16(value)) throw new MtUsageError(`${flag} 包含孤立 surrogate`)
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) assertJsonStringsWellFormed(item, flag)
+    return
+  }
+  if (typeof value !== 'object' || value === null) return
+  for (const [key, item] of Object.entries(value)) {
+    if (!hasWellFormedUtf16(key)) throw new MtUsageError(`${flag} 包含孤立 surrogate`)
+    assertJsonStringsWellFormed(item, flag)
   }
 }
 
@@ -528,6 +594,7 @@ function hasWellFormedUtf16(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index)
     if (code >= 0xd800 && code <= 0xdbff) {
+      if (index + 1 >= value.length) return false
       const next = value.charCodeAt(index + 1)
       if (next < 0xdc00 || next > 0xdfff) return false
       index += 1
@@ -641,7 +708,10 @@ function formatActionResult(value: unknown): string {
   }
   if (result.kind === 'fork-batch') return formatForkBatch(value as ForkBatchResult)
   if (result.kind === 'removal-preview' || result.kind === 'canvas-close-preview') {
-    return formatImpactPreview(result.impact)
+    return formatImpactPreview(
+      result.impact,
+      result.kind === 'canvas-close-preview' ? '关闭画布' : '移除'
+    )
   }
   if (result.kind === 'removed') {
     return [
@@ -657,8 +727,56 @@ function formatActionResult(value: unknown): string {
       '项目文件、Git 分支和 Worktree 保持不变。'
     ].join('\n')
   }
-  if (result.kind === 'navigated') return '已切换到目标位置并完成聚焦'
+  if (result.kind === 'navigated') {
+    const path = formatResultPath(result.path ?? result.publicPath)
+    return path ? `已切换到：${path}` : '已切换到目标位置并完成聚焦'
+  }
   return '操作已完成'
+}
+
+async function formatNavigationResult(value: unknown, request: MtRequest): Promise<string> {
+  const direct = formatActionResult(value)
+  if (!isNavigatedWithoutPublicPath(value)) return direct
+  try {
+    const listing = asListing(await request('host.list', { scope: 'all' }))
+    const target = listing.targets.find((candidate) => navigationTargetMatches(candidate, value.finalPath))
+    return target ? `已切换到：${formatPublicTargetPath(target, value.finalPath.sessionId !== undefined)}` : direct
+  } catch {
+    return direct
+  }
+}
+
+function isNavigatedWithoutPublicPath(value: unknown): value is {
+  kind: 'navigated'
+  finalPath: { windowId: string; workspaceId: string; taskId: string; sceneId: string; sessionId?: string }
+} {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const result = value as Record<string, unknown>
+  if (result.kind !== 'navigated' || result.path !== undefined || result.publicPath !== undefined) return false
+  if (typeof result.finalPath !== 'object' || result.finalPath === null || Array.isArray(result.finalPath)) return false
+  const path = result.finalPath as Record<string, unknown>
+  return typeof path.windowId === 'string' && typeof path.workspaceId === 'string' &&
+    typeof path.taskId === 'string' && typeof path.sceneId === 'string' &&
+    (path.sessionId === undefined || typeof path.sessionId === 'string')
+}
+
+function navigationTargetMatches(
+  target: HostTarget,
+  path: { windowId: string; workspaceId: string; taskId: string; sceneId: string; sessionId?: string }
+): boolean {
+  return target.window.id === path.windowId && target.workspaceId === path.workspaceId &&
+    target.taskId === path.taskId && target.canvas.id === path.sceneId &&
+    (path.sessionId === undefined || target.sessionId === path.sessionId)
+}
+
+function formatPublicTargetPath(target: HostTarget, includeSession: boolean): string {
+  return [
+    `窗口 ${target.window.ordinal}`,
+    `工作空间 ${target.workspace.name}`,
+    `事项 ${target.task.name}`,
+    `画布 ${target.canvas.name}`,
+    includeSession ? `会话 ${target.session.ordinal}（${target.title}）` : ''
+  ].filter(Boolean).join(' / ')
 }
 
 function formatForkBatch(result: ForkBatchResult): string {
@@ -687,15 +805,15 @@ function formatForkState(value: unknown): string {
   return typeof value === 'string' ? (states[value] ?? value) : '未知'
 }
 
-function formatImpactPreview(value: unknown): string {
+function formatImpactPreview(value: unknown, operation: '移除' | '关闭画布'): string {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return '已生成影响预览。\n项目文件、Git 分支和 Worktree 保持不变。'
+    return `已生成${operation}影响预览。\n项目文件、Git 分支和 Worktree 保持不变。`
   }
   const impact = value as unknown as HostImpactSummary
   const target = formatResultPath(impact.target)
   const scope = impact.scope === 'subtree' ? '当前节点及全部子节点' : '当前节点'
   return [
-    `预览目标：${target || '已选定对象'}`,
+    `${operation}预览目标：${target || '已选定对象'}`,
     `操作范围：${scope}`,
     `影响：事项 ${numberField(impact.tasks)}，画布 ${numberField(impact.canvases)}，会话 ${numberField(impact.sessions)}，子节点 ${numberField(impact.descendants)}`,
     `将结束：运行或等待中会话 ${numberField(impact.liveRuns)}，终端进程 ${numberField(impact.terminalProcesses)}`,
@@ -728,8 +846,21 @@ function partialSuccessExitCode(value: unknown): number {
   return result.kind === 'fork-batch' && typeof result.failed === 'number' && result.failed > 0 ? 6 : 0
 }
 
-function formatError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
+function formatError(error: unknown, json: boolean): string {
+  const message = error instanceof Error ? error.message : 'mt 命令执行失败'
+  if (json) {
+    const code = error instanceof MtUsageError
+      ? 'INVALID_REQUEST'
+      : error instanceof HostControlClientError
+        ? error.code
+        : 'INTERNAL_ERROR'
+    const details = error instanceof HostControlClientError ? error.details : undefined
+    return JSON.stringify({
+      code,
+      message,
+      ...(details === undefined ? {} : { details })
+    }, null, 2)
+  }
   if (!(error instanceof HostControlClientError) || error.code !== 'AMBIGUOUS_TARGET') return message
   const candidates = error.details?.candidates ?? []
   if (candidates.length > 5) {
@@ -781,7 +912,7 @@ function exitCode(error: unknown): number {
   if (error.code === 'INVALID_REQUEST') return 2
   if (['TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET', 'STALE_PROJECTION', 'CONFLICT'].includes(error.code)) return 3
   if ([
-    'CAPABILITY_DENIED', 'TARGET_NOT_READY', 'UNSUPPORTED',
+    'CAPABILITY_DENIED', 'TARGET_NOT_READY', 'RUNTIME_NOT_READY', 'UNSUPPORTED',
     'CONFIRMATION_REQUIRED', 'CONFIRMATION_EXPIRED', 'CONFIRMATION_STALE',
     'PATH_CONFLICT', 'BRANCH_CONFLICT', 'WORKTREE_CONFLICT', 'STORAGE_READ_ONLY'
   ].includes(error.code)) return 4
@@ -824,7 +955,9 @@ Usage:
 
 Targets: current (where supported), self, left, right, parent, child:N, sibling:N, or a ref from mt list --json
 
-Batch JSON can be read from standard input with --items-json - (maximum 1 MiB).`
+Batch JSON can be read from standard input with --items-json - (maximum 1 MiB).
+Retry flags require the original explicit --batch-key.
+Option values are consumed verbatim and may begin with '-'; standalone -- ends options with no trailing arguments.`
 
 if (typeof require !== 'undefined' && require.main === module) {
   void runMt(

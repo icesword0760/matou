@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { connect, type Socket } from 'node:net'
 
-import type { HostControlErrorDetails, HostControlScope } from './host-control-types'
+import {
+  HOST_CONTROL_MAX_FRAME_BYTES,
+  type HostControlErrorDetails,
+  type HostControlScope
+} from './host-control-types'
 
 export interface HostControlClientOptions {
   endpoint: string
@@ -42,16 +46,19 @@ export class HostControlClient {
   async request(method: HostControlScope, params: unknown): Promise<unknown> {
     const requestId = randomUUID()
     const deadlineAt = Date.now() + this.#timeoutMs
+    const body = Buffer.from(JSON.stringify({
+      version: 1,
+      requestId,
+      token: this.#token,
+      method,
+      params,
+      deadlineAt
+    }))
+    if (body.byteLength > HOST_CONTROL_MAX_FRAME_BYTES) {
+      throw new HostControlClientError('INVALID_REQUEST', 'Host Control 请求超过大小限制')
+    }
     const socket = await connectWithin(this.#endpoint, this.#timeoutMs)
     try {
-      const body = Buffer.from(JSON.stringify({
-        version: 1,
-        requestId,
-        token: this.#token,
-        method,
-        params,
-        deadlineAt
-      }))
       const prefix = Buffer.allocUnsafe(4)
       prefix.writeUInt32BE(body.byteLength)
       socket.write(Buffer.concat([prefix, body]))
@@ -122,7 +129,7 @@ function readFrame(socket: Socket, timeoutMs: number): Promise<Buffer> {
       buffered = Buffer.concat([buffered, chunk])
       if (buffered.byteLength < 4) return
       const length = buffered.readUInt32BE(0)
-      if (length > 1024 * 1024) {
+      if (length > HOST_CONTROL_MAX_FRAME_BYTES) {
         cleanup()
         reject(new HostControlClientError('INVALID_RESPONSE', 'Host Control 响应超过大小限制'))
         return

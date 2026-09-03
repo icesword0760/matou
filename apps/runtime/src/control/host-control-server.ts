@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path'
 import {
   HostControlTargetNotFoundError,
   HostControlTargetNotReadyError,
+  HOST_CONTROL_MAX_FRAME_BYTES,
   type AllowedControlKey,
   type HostCallerIdentity,
   type HostControlErrorDetails,
@@ -35,7 +36,7 @@ export type {
 } from './host-control-types'
 
 const CONTROL_VERSION = 1
-const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
+const DEFAULT_MAX_FRAME_BYTES = HOST_CONTROL_MAX_FRAME_BYTES
 
 export interface HostControlBackend {
   identify(caller: HostCallerIdentity): unknown | Promise<unknown>
