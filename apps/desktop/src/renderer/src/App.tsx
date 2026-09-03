@@ -54,13 +54,7 @@ export function App() {
           window.matouDesktop.startWithEmptyDatabase(expectedRecoveryId)
       }} />
     }
-    return <main className="database-recovery-page" aria-label="正在打开 Matou 数据库">
-      <section className="database-recovery-card">
-        <p className="database-recovery-eyebrow">Matou</p>
-        <h1>正在打开工作区…</h1>
-        <p>正在检查本地数据并恢复上次状态。</p>
-      </section>
-    </main>
+    return <main className="hierarchy-loading" aria-busy="true" />
   }
 
   if (detached) return <DetachedTerminalApp runtimeMode={presentedLifecycle.snapshot.mode} />

@@ -27,6 +27,14 @@ afterEach(() => {
 })
 
 describe('App database lifecycle gate', () => {
+  it('keeps an ordinary healthy startup silent instead of flashing an internal data-check page', () => {
+    installPendingApi()
+    render(<App />)
+
+    expect(screen.queryByText('正在打开工作区…')).toBeNull()
+    expect(screen.queryByText('正在检查本地数据并恢复上次状态。')).toBeNull()
+  })
+
   it('never flashes the ordinary workspace before a recovery-required state is loaded', async () => {
     installApi(recoveryState())
     render(<App />)
@@ -153,6 +161,21 @@ function installApi(initial: RuntimeLifecyclePresentation): void {
     configurable: true,
     value: {
       getRuntimeLifecycle: vi.fn().mockResolvedValue(initial),
+      onRuntimeLifecycle: vi.fn(() => () => undefined),
+      restoreDatabaseBackup: vi.fn(),
+      exportDatabaseRecoveryBundle: vi.fn(),
+      retryDatabaseOpen: vi.fn(),
+      startWithEmptyDatabase: vi.fn(),
+      retryRuntimeStart: vi.fn().mockResolvedValue(undefined)
+    }
+  })
+}
+
+function installPendingApi(): void {
+  Object.defineProperty(window, 'matouDesktop', {
+    configurable: true,
+    value: {
+      getRuntimeLifecycle: vi.fn(() => new Promise(() => undefined)),
       onRuntimeLifecycle: vi.fn(() => () => undefined),
       restoreDatabaseBackup: vi.fn(),
       exportDatabaseRecoveryBundle: vi.fn(),

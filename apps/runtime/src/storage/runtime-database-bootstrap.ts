@@ -29,6 +29,7 @@ import {
   type Migration,
   type MigrationRunnerObserver
 } from './migration-runner'
+import { assertStartupIntegrity } from './database-integrity'
 
 export interface RuntimeDatabaseRecoveryError {
   code: 'BACKUP_LIST_FAILED' | 'RECOVERY_MARKER_FAILED' | 'RECOVERY_MOVE_FAILED'
@@ -109,7 +110,7 @@ export async function openRecoverableRuntimeDatabaseWithOwnership(
     assertWalBundleReady(databasePath)
     database = ownership.openWritable()
     observer.onDatabaseOpened?.(database, dataRoot, backups)
-    assertFullIntegrity(database)
+    assertStartupIntegrity(database)
     await new MigrationRunner(database, migrations, backups, observer.migrationObserver).migrate()
     return { kind: 'writable', database, dataRoot }
   } catch (error) {
@@ -145,6 +146,7 @@ export async function openRecoverableRuntimeDatabase(
 
   let database: RuntimeDatabase | undefined
   let ownership: RuntimeDatabaseOwnership | undefined
+  let integrityVerified = false
   try {
     if (existsSync(databasePath)) {
       if (isWritable(dataRoot)) {
@@ -162,7 +164,7 @@ export async function openRecoverableRuntimeDatabase(
       assertWalBundleReady(databasePath)
       if (!isWritable(dataRoot) || !isWritable(databasePath)) {
         database = ownership?.openReadOnly() ?? RuntimeDatabase.openReadOnly(databasePath)
-        assertFullIntegrity(database)
+        assertStartupIntegrity(database)
         observer.onDatabaseOpened?.(database, dataRoot, backups)
         ownership?.release()
         ownership = undefined
@@ -177,7 +179,8 @@ export async function openRecoverableRuntimeDatabase(
       const inspection = ownership!.openReadOnly()
       let currentVersion: number
       try {
-        assertFullIntegrity(inspection)
+        assertStartupIntegrity(inspection)
+        integrityVerified = true
         currentVersion = readSchemaVersion(inspection)
       } finally {
         inspection.close()
@@ -188,7 +191,6 @@ export async function openRecoverableRuntimeDatabase(
       )
       if (currentVersion > supportedVersion) {
         database = ownership!.openReadOnly()
-        assertFullIntegrity(database)
         observer.onDatabaseOpened?.(database, dataRoot, backups)
         ownership!.release()
         ownership = undefined
@@ -217,7 +219,7 @@ export async function openRecoverableRuntimeDatabase(
     }
 
     observer.onDatabaseOpened?.(database, dataRoot, backups)
-    assertFullIntegrity(database)
+    if (!integrityVerified) assertStartupIntegrity(database)
     await new MigrationRunner(database, migrations, backups, observer.migrationObserver).migrate()
     return { kind: 'writable', database, dataRoot }
   } catch (error) {
@@ -244,7 +246,7 @@ export async function openRecoverableRuntimeDatabase(
     if (isWriteDenied(error) && !recoveryReason) {
       try {
         const readOnly = ownership?.openReadOnly() ?? RuntimeDatabase.openReadOnly(databasePath)
-        assertFullIntegrity(readOnly)
+        assertStartupIntegrity(readOnly)
         observer.onDatabaseOpened?.(readOnly, dataRoot, backups)
         ownership?.release()
         ownership = undefined
@@ -271,7 +273,7 @@ export async function openRecoverableRuntimeDatabase(
     }
     if (isNewerSchema(error)) {
       const readOnly = ownership?.openReadOnly() ?? RuntimeDatabase.openReadOnly(databasePath)
-      assertFullIntegrity(readOnly)
+      assertStartupIntegrity(readOnly)
       observer.onDatabaseOpened?.(readOnly, dataRoot, backups)
       ownership?.release()
       ownership = undefined
@@ -1060,14 +1062,6 @@ function assertWalBundleReady(databasePath: string): void {
 
 function walRecoveryError(message: string): Error & { code: 'WAL_RECOVERY_REQUIRED' } {
   return Object.assign(new Error(message), { code: 'WAL_RECOVERY_REQUIRED' as const })
-}
-
-function assertFullIntegrity(database: RuntimeDatabase): void {
-  const rows = database.all<Record<string, unknown>>('PRAGMA integrity_check')
-  const result = rows.map((row) => String(Object.values(row)[0] ?? ''))
-  if (result.length !== 1 || result[0]?.toLowerCase() !== 'ok') {
-    throw new Error(`database corrupt: integrity_check failed: ${result.slice(0, 3).join('; ')}`)
-  }
 }
 
 function readSchemaVersion(database: RuntimeDatabase): number {

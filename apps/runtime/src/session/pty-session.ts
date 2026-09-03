@@ -17,6 +17,7 @@ import {
 } from './session-durability-gate'
 import { PtyExecutionPauser } from './pty-execution-pauser'
 import { PtyOutputBatcher } from './pty-output-batcher'
+import { resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
 
@@ -174,16 +175,23 @@ export class PtySession {
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)
       : {}
+    const baseEnvironment = {
+      ...process.env,
+      ...integrationEnvironment,
+      ...options.env,
+      TERM: 'xterm-256color'
+    }
+    const providerCommandEnvironment = profile === 'shell'
+      ? {}
+      : await resolveProviderCommandEnvironment(command.file, baseEnvironment)
     const terminal = pty.spawn(command.file, command.args, {
       name: 'xterm-256color',
       cols: options.cols,
       rows: options.rows,
       cwd: options.cwd,
       env: {
-        ...process.env,
-        ...integrationEnvironment,
-        ...options.env,
-        TERM: 'xterm-256color'
+        ...baseEnvironment,
+        ...providerCommandEnvironment
       }
     })
     return new PtySession(options, journal, terminal)
