@@ -26,7 +26,7 @@ describe('storage dependency boundary', () => {
 async function collectSourceFiles(directory: string): Promise<string[]> {
   const results: string[] = []
   for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (['node_modules', 'dist', 'out', 'release', 'package-resources', 'test-results', '.git'].includes(entry.name)) {
+    if (['node_modules', 'dist', 'out', 'release', 'package-resources', 'test-results', '.git', '.worktrees'].includes(entry.name)) {
       continue
     }
     const path = join(directory, entry.name)
