@@ -34,6 +34,18 @@ export interface RetryForkBatchInput extends CreateForkBatchInput {
   retryItemKeys: string[]
 }
 
+export interface ForkBatchPreflightInput {
+  caller: HostCallerIdentity
+  source: ResolvedHostEntity & { kind: 'session' }
+  batchKey: string
+  items: ForkItemInput[]
+}
+
+export interface CoordinateAcceptedForkInput extends CreateForkBatchInput {
+  sessionId: string
+  state: 'created' | 'ready'
+}
+
 export interface ForkBatchCoordinatorDependencies {
   database: RuntimeDatabase
   createChild(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult>
@@ -112,7 +124,7 @@ interface ForkIntentSnapshot {
 
 interface ActiveBatchOperation {
   fingerprint: string
-  kind: 'create' | 'retry'
+  kind: 'create' | 'retry' | 'accepted'
   retryKey?: string
   promise: Promise<ForkBatchResult>
 }
@@ -163,6 +175,40 @@ export class ForkBatchCoordinator {
     }
   }
 
+  /**
+   * Validates the public request shape of an already accepted batch before the
+   * facade reuses its resolved environment reservations. The full resolved
+   * fingerprint is still checked by createChildren/retryFailures afterward.
+   */
+  preflightAccepted(input: ForkBatchPreflightInput): boolean {
+    const accepted = this.#database.get<BatchLedgerRow>(
+      'SELECT * FROM fork_batch_ledger WHERE batch_key = ?',
+      input.batchKey
+    )
+    if (!accepted) return false
+    const rows = this.#itemRows(input.batchKey)
+    const compatible =
+      accepted.caller_session_id === input.caller.sessionId &&
+      accepted.source_session_id === input.source.sessionId &&
+      accepted.source_scene_id === input.source.sceneId &&
+      accepted.item_count === input.items.length &&
+      rows.length === input.items.length &&
+      input.items.every((item, index) => {
+        const prior = rows[index]
+        return prior?.item_key === item.itemKey &&
+          prior.title === item.title &&
+          prior.environment_json === canonicalJson(item.environment) &&
+          prior.start_requested === (item.start === true ? 1 : 0) &&
+          prior.prompt_fingerprint === (
+            item.prompt === undefined ? null : hash(item.prompt)
+          )
+      })
+    if (!compatible) {
+      throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+    }
+    return true
+  }
+
   async retryFailures(input: RetryForkBatchInput): Promise<ForkBatchResult> {
     validateBatch(input)
     validateRetryKeys(input)
@@ -192,6 +238,66 @@ export class ForkBatchCoordinator {
         this.#operations.delete(input.batchKey)
       }
     }
+  }
+
+  /**
+   * Applies the coordinator's durable start/readiness/prompt receipt semantics
+   * to a Fork node that the single-Fork workflow has already accepted.
+   */
+  async coordinateAcceptedFork(
+    input: CoordinateAcceptedForkInput
+  ): Promise<ForkBatchResult> {
+    validateBatch(input)
+    if (input.items.length !== 1) {
+      throw new Error('已接受的单节点 Fork 必须只有一个项目')
+    }
+    requiredText(input.sessionId, 'sessionId')
+    const ledgerFingerprint = batchFingerprint(input)
+    const operationFingerprint = hash(canonicalJson({
+      ledgerFingerprint,
+      sessionId: input.sessionId
+    }))
+    const active = this.#operations.get(input.batchKey)
+    if (active) {
+      assertSameBatch(input.batchKey, active.fingerprint, operationFingerprint)
+      return active.promise
+    }
+
+    this.#ensureLedger(input, ledgerFingerprint, true)
+    const operation = this.#resumeAcceptedFork(input)
+    this.#operations.set(input.batchKey, {
+      fingerprint: operationFingerprint,
+      kind: 'accepted',
+      promise: operation
+    })
+    try {
+      return await operation
+    } finally {
+      if (this.#operations.get(input.batchKey)?.promise === operation) {
+        this.#operations.delete(input.batchKey)
+      }
+    }
+  }
+
+  async #resumeAcceptedFork(
+    input: CoordinateAcceptedForkInput
+  ): Promise<ForkBatchResult> {
+    const item = input.items[0]!
+    let row = this.#refreshItem(input.batchKey, item)
+    if (row.state === 'unsubmitted') {
+      this.#writeItem(input.batchKey, item.itemKey, {
+        state: input.state,
+        sessionId: input.sessionId,
+        error: null
+      })
+      row = this.#itemRow(input.batchKey, item.itemKey)
+    } else if (row.session_id !== input.sessionId) {
+      throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+    }
+    if (shouldResumeStart(row)) {
+      await this.#startItem(input.batchKey, item, row)
+    }
+    return this.#result(input)
   }
 
   async #resumeCreate(input: CreateForkBatchInput): Promise<ForkBatchResult> {

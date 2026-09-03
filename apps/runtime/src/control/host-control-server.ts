@@ -74,9 +74,14 @@ interface CapabilityRecord {
 export class CapabilityTokenService {
   readonly #runtimeGeneration: string
   readonly #records = new Map<string, CapabilityRecord>()
+  readonly #onRunRevoked: ((runId: string) => void) | undefined
 
-  constructor(runtimeGeneration: string) {
+  constructor(
+    runtimeGeneration: string,
+    options: { onRunRevoked?: (runId: string) => void } = {}
+  ) {
     this.#runtimeGeneration = runtimeGeneration
+    this.#onRunRevoked = options.onRunRevoked
   }
 
   issue(callerOrRunId: HostCallerIdentity | string, scopes: HostControlScope[], expiresAt: number): string {
@@ -113,6 +118,7 @@ export class CapabilityTokenService {
     for (const [hash, record] of this.#records) {
       if (record.runId === runId) this.#records.delete(hash)
     }
+    this.#onRunRevoked?.(runId)
   }
 }
 

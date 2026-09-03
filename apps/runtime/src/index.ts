@@ -20,6 +20,9 @@ import {
 import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { ForkBatchCoordinator } from './control/fork-batch-coordinator'
 import { ProviderReadyRegistry } from './control/provider-ready-registry'
+import { HostActionConfirmationService } from './control/host-action-confirmation-service'
+import { HostActionTargetResolver } from './control/host-action-target-resolver'
+import { RuntimeHostActionFacade } from './control/runtime-host-action-facade'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
@@ -40,6 +43,7 @@ import {
   type RuntimeDatabaseBootstrapResult
 } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
+import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeAccessPolicy } from './storage/runtime-access-policy'
 import { NotificationProjection } from './product/experience-foundation'
@@ -115,6 +119,7 @@ interface WritableRuntimeState extends RuntimeStateBase {
   providerReady: ProviderReadyRegistry
   forkCoordinator: ForkOperationCoordinator
   forkBatchCoordinator: ForkBatchCoordinator
+  hostActions: RuntimeHostActionFacade
   recoveryCoordinator: RuntimeRecoveryCoordinator
 }
 
@@ -219,18 +224,23 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
   const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
-  const stopRuns = async (runIds: string[]) => {
-    for (const runId of runIds) {
-      const sessionId = database.get<{ session_id: string }>(
-        'SELECT session_id FROM session_runs WHERE id = ?', runId
-      )?.session_id
-      if (!sessionId) continue
+  const stopSessions = async (sessionIds: string[]) => {
+    for (const sessionId of new Set(sessionIds)) {
       const live = sessions.get(sessionId)
       if (!live) continue
       live.dispose({ notifyExit: false })
       await live.whenClosed()
       sessions.delete(sessionId, live)
     }
+  }
+  const stopRuns = async (runIds: string[]) => {
+    const sessionIds = runIds.flatMap((runId) => {
+      const sessionId = database.get<{ session_id: string }>(
+        'SELECT session_id FROM session_runs WHERE id = ?', runId
+      )?.session_id
+      return sessionId === undefined ? [] : [sessionId]
+    })
+    await stopSessions(sessionIds)
   }
   const worktreeService = new WorktreeService(database, transactions, { stopRuns })
   const worktreeReconciliation = await new WorktreeReconciler(
@@ -289,8 +299,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionRepository = new SessionRepository(database, transactions)
   const providerModes = new ProviderModeService(database, transactions)
   const workStatuses = new SessionWorkStatusService(database, transactions)
+  const hierarchy = new HierarchyApplicationService(database, transactions)
   const sessionCanvas = new SessionCanvasService(database, transactions)
-  const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
+  const hostActionResolver = new HostActionTargetResolver(database)
+  const hostActionConfirmations = new HostActionConfirmationService()
+  const controlTokens = new CapabilityTokenService(database.runtimeGeneration, {
+    onRunRevoked: (runId) => hostActionConfirmations.revokeRun(runId)
+  })
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
   const providerReady = new ProviderReadyRegistry()
   const hostControl = new HostControlServer({
@@ -425,8 +440,6 @@ async function initializeRuntime(): Promise<RuntimeState> {
   recoveryCoordinator.start()
   telemetry.purgeStaleGenerations()
   lifecycleCoordinator.assertStartupActive()
-  await hostControl.start()
-  lifecycleCoordinator.assertStartupActive()
   await providerHooks.start()
   lifecycleCoordinator.assertStartupActive()
   const backgroundPort = new BackgroundRuntimePort()
@@ -476,6 +489,16 @@ async function initializeRuntime(): Promise<RuntimeState> {
     waitUntilReady: (sessionId, signal) => providerReady.wait(sessionId, 60_000, signal),
     sendPrompt: (sessionId, prompt) => controlBackend.sendText(sessionId, prompt, true)
   })
+  const hostActions = new RuntimeHostActionFacade({
+    database,
+    resolver: hostActionResolver,
+    confirmations: hostActionConfirmations,
+    hierarchy,
+    sessionCanvas,
+    forkWorkflow,
+    forkBatches: forkBatchCoordinator,
+    stopSessions
+  })
   forkCoordinator = new ForkOperationCoordinator(
     new SessionForkIntentRepository(database),
     {
@@ -522,6 +545,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
       ...(e2eForkCrashObserver ? { observer: e2eForkCrashObserver } : {})
     }
   )
+  // Keep this preflight boundary before accepting Host Control requests so the
+  // backend action executor can be installed only after the facade is complete.
+  await hostControl.start()
+  lifecycleCoordinator.assertStartupActive()
   forkCoordinator.start()
   return {
     mode: 'normal',
@@ -538,6 +565,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     providerReady,
     forkCoordinator,
     forkBatchCoordinator,
+    hostActions,
     recoveryCoordinator,
     providerConfigs
   }

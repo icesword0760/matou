@@ -32,6 +32,12 @@ export interface ConfirmationConsumeInput extends ConfirmationIssueInput {
   ref: string
 }
 
+export interface ConfirmationInspectInput {
+  ref: string
+  caller: HostCallerIdentity
+  now: number
+}
+
 export interface ConfirmationRecord extends ConfirmationIssueInput {
   impactHash: string
   expiresAt: number
@@ -79,7 +85,7 @@ export class HostActionConfirmationService {
     return ref
   }
 
-  consume(input: ConfirmationConsumeInput): ConfirmationRecord {
+  inspect(input: ConfirmationInspectInput): ConfirmationRecord {
     const record = this.#records.get(input.ref)
     const requestedRecordExpired = record !== undefined && input.now >= record.expiresAt
     // Purge before any outcome, including a caller mismatch. Keep the local
@@ -111,6 +117,12 @@ export class HostActionConfirmationService {
       )
     }
 
+    return cloneRecord(record)
+  }
+
+  consume(input: ConfirmationConsumeInput): ConfirmationRecord {
+    const record = this.inspect(input)
+
     const submittedHash = impactHash(input.action, input.targetRef, input.scope, input.impact)
     if (
       record.action !== input.action
@@ -128,7 +140,7 @@ export class HostActionConfirmationService {
     // Consume is one-time. Delete before returning so reentrant callers cannot
     // successfully consume the same reference again.
     this.#records.delete(input.ref)
-    return cloneRecord(record)
+    return record
   }
 
   revokeRun(runId: string): void {
