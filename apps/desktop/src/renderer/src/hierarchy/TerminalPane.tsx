@@ -83,6 +83,7 @@ export function TerminalPane(props: {
   onOpenChildren?(sessionId: string): unknown
   onLoadSession?(sessionId: string): unknown
   onFork?(sessionId: string): unknown
+  onForkPeer?(sessionId: string): unknown
   onForkSibling?(sessionId: string): unknown
   onDetach?(sessionId: string): unknown
   onRemoveBranch?(sessionId: string, scope: RemoveNodeScope): unknown
@@ -105,7 +106,7 @@ export function TerminalPane(props: {
     searchRequest, onSearchResults, focusRequest = 0,
     onDiagnosticsStatusChange,
     onStorageFaultChange,
-    onActivate, onDelete, onFork, onForkSibling, onDetach,
+    onActivate, onDelete, onFork, onForkPeer, onForkSibling, onDetach,
     onRemoveBranch, onRestoreEnvironment, onLocateEnvironment, onHandoffEnvironment,
     onRename, onRestoreAutoTitle
   } = props
@@ -564,16 +565,11 @@ export function TerminalPane(props: {
           }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>
             恢复 Claude 自动标题
           </button>}
-        {canFork && <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
+        {canFork && onForkPeer && <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
           title={actionBlockedReason} onClick={() => {
-          setContextMenu(null)
-          void onFork?.(session.id)
-        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
-        {canForkSibling && <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
-          title={actionBlockedReason} onClick={() => {
-          setContextMenu(null)
-          void onForkSibling?.(session.id)
-        }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 兄弟分支</button>}
+            setContextMenu(null)
+            void onForkPeer(session.id)
+          }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
         {canDetach && <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
           title={actionBlockedReason} onClick={() => {
           setContextMenu(null)

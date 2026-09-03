@@ -10,10 +10,13 @@ const exec = promisify(execFile)
 test.describe('real Claude Fork and Git worktree', () => {
   test.setTimeout(240_000)
 
-  test('forks a real resumable Claude conversation into a real isolated worktree', async () => {
+  test('Forks a real Claude conversation beside the selected card and still creates a child in an isolated worktree', async () => {
     const fixture = await launchSessionCanvas()
     try {
-      const source = activeSurface(fixture.page)
+      const initiallyActive = activeSurface(fixture.page)
+      const sourceSessionId = await initiallyActive.getAttribute('data-session-id')
+      expect(sourceSessionId).toBeTruthy()
+      const source = fixture.page.locator(`.terminal-surface[data-session-id="${sourceSessionId}"]`)
       await terminalCommand(source, 'claude --dangerously-skip-permissions')
       await expect(fixture.page.locator('.pane-title').filter({ hasText: 'Claude' })).toBeVisible({ timeout: 60_000 })
       await expect(source).toHaveAttribute('data-profile', 'claude-code', { timeout: 60_000 })
@@ -49,10 +52,28 @@ test.describe('real Claude Fork and Git worktree', () => {
         const text = await source.locator('.xterm-rows').textContent() ?? ''
         return text.split(marker).length - 1
       }, { timeout: 120_000 }).toBeGreaterThanOrEqual(2)
-      const fork = fixture.page.getByRole('button', { name: /创建子分支/ })
+
+      const sourcePane = source.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]')
+      await sourcePane.locator('.terminal-pane-header').click({ button: 'right' })
+      await expect(fixture.page.getByRole('menuitem', { name: '⑂ Fork 兄弟分支' })).toHaveCount(0)
+      await fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' }).click()
+      await expect(fixture.page.getByRole('dialog', { name: 'Fork 会话' })).toBeVisible()
+      await fixture.page.getByLabel('分支名称').fill('真实横向副本')
+      await fixture.page.getByRole('button', { name: '创建分支', exact: true }).click()
+      const peerPane = fixture.page.getByRole('article', { name: '会话：真实横向副本' })
+      await expect(peerPane.getByRole('status', { name: /正在创建分支/ }))
+        .toHaveCount(0, { timeout: 90_000 })
+      await expect(peerPane.locator('.terminal-surface')).toHaveAttribute('data-profile', 'claude-code')
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+      await expect(fixture.page.getByRole('navigation', { name: '会话层级' }))
+        .toContainText('根会话 · 2 个会话')
+
+      await source.click({ position: { x: 12, y: 12 } })
+      await expect(sourcePane).toHaveAttribute('data-active', 'true')
+      const fork = sourcePane.getByRole('button', { name: /创建子分支/ })
       await expect(fork).toBeEnabled({ timeout: 60_000 })
-      await fork.focus()
-      await fixture.page.keyboard.press('Enter')
+      await fork.click()
+      await expect(fixture.page.getByRole('dialog', { name: '创建子会话分支' })).toBeVisible()
       await fixture.page.getByLabel('分支名称').fill('真实工作树分支')
       await fixture.page.getByText('从新工作树创建').click()
       await fixture.page.getByRole('button', { name: '创建分支', exact: true }).click()
@@ -69,6 +90,32 @@ test.describe('real Claude Fork and Git worktree', () => {
       }, { timeout: 90_000 }).toBe(2)
       expect(worktrees.stdout.match(/^worktree /gm)?.length ?? 0).toBe(2)
       expect(worktrees.stdout).toContain('真实工作树分支')
+
+      const childSessionId = await childPane.locator('.terminal-surface').getAttribute('data-session-id')
+      expect(childSessionId).toBeTruthy()
+      const childSurface = fixture.page.locator(
+        `.terminal-surface[data-session-id="${childSessionId}"]`
+      )
+      const stableChildPane = childSurface.locator(
+        'xpath=ancestor::*[@data-testid="terminal-pane"][1]'
+      )
+      const childMarker = `CHILD_${Date.now()}`
+      await terminalCommand(childSurface, `Reply only with ${childMarker}`)
+      await expect.poll(async () => {
+        const text = await childSurface.locator('.xterm-rows').textContent() ?? ''
+        return text.split(childMarker).length - 1
+      }, { timeout: 120_000 }).toBeGreaterThanOrEqual(2)
+      await stableChildPane.locator('.terminal-pane-header').click({ button: 'right' })
+      await fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' }).click()
+      await fixture.page.getByLabel('分支名称').fill('真实子层副本')
+      await fixture.page.getByRole('button', { name: '创建分支', exact: true }).click()
+      const childPeer = fixture.page.getByRole('article', { name: '会话：真实子层副本' })
+      await expect(childPeer.getByRole('status', { name: /正在创建分支/ }))
+        .toHaveCount(0, { timeout: 90_000 })
+      await expect(childPeer.locator('.terminal-surface')).toHaveAttribute('data-profile', 'claude-code')
+      await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
+      await expect(fixture.page.getByRole('navigation', { name: '会话层级' }))
+        .toContainText('2 个会话')
     } finally {
       await fixture.close()
     }

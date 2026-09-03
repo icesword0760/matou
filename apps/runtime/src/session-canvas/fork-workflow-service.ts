@@ -145,7 +145,13 @@ interface SourceContext {
   selectedMount: MountRow
   forkSource: SessionRow
   binding: BindingRow
+  structuralParent?: {
+    sessionId: string
+    relationKind: 'derived-from' | 'forked-from'
+  }
 }
+
+type ForkPlacement = 'child' | 'sibling' | 'peer'
 
 interface GitPlan {
   repositoryRoot: string
@@ -209,6 +215,10 @@ export class ForkWorkflowService {
 
   createForkSibling(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
     return this.#accept(command, input, 'sibling')
+  }
+
+  createForkPeer(command: DomainCommandMetadata, input: CreateForkInput): Promise<ForkWorkflowResult> {
+    return this.#accept(command, input, 'peer')
   }
 
   async executeFork(command: DomainCommandMetadata, input: ExecuteForkInput): Promise<ForkWorkflowResult> {
@@ -445,12 +455,12 @@ export class ForkWorkflowService {
       const relation = tx.get<{
         relation_id: string
         to_session_id: string
-        relation_kind: 'forked-from'
+        relation_kind: 'derived-from' | 'forked-from'
         metadata_json: string
       }>(
         `SELECT relation_id, to_session_id, relation_kind, metadata_json
          FROM session_relations_current
-         WHERE from_session_id = ? AND relation_kind = 'forked-from'`,
+         WHERE from_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')`,
         input.sessionId
       )
       const mount = tx.get<{ id: string; scene_node_id: string | null }>(
@@ -481,7 +491,12 @@ export class ForkWorkflowService {
         input.now, input.now, input.sessionId
       )
       registerWindow(tx, input.windowId, input.now)
-      if (relation) activateSessionInTransaction(tx, input.windowId, relation.to_session_id, input.now)
+      const sourceStillActive = tx.get<{ id: string }>(
+        'SELECT id FROM sessions WHERE id = ? AND archived_at IS NULL', intent.source_session_id
+      )
+      if (sourceStillActive) {
+        activateSessionInTransaction(tx, input.windowId, sourceStillActive.id, input.now)
+      }
       const hierarchy = readHierarchyResult(tx, input.windowId)
       const graph = projectSceneGraphFrom(tx, input.sceneId, input.windowId)
       emit({
@@ -497,7 +512,7 @@ export class ForkWorkflowService {
   #accept(
     command: DomainCommandMetadata,
     input: CreateForkInput,
-    placement: 'child' | 'sibling'
+    placement: ForkPlacement
   ): Promise<ForkWorkflowResult> {
     const submissionKey = input.submissionKey ?? command.commandId
     const accepted = this.#forkIntents.findBySubmissionKey(submissionKey)
@@ -525,14 +540,16 @@ export class ForkWorkflowService {
   async #acceptNew(
     command: DomainCommandMetadata,
     input: CreateForkInput,
-    placement: 'child' | 'sibling',
+    placement: ForkPlacement,
     submissionKey: string
   ): Promise<ForkWorkflowResult> {
     const ids = createHierarchyIds()
     const relationId = randomUUID()
     const operationId = randomUUID()
     const source = this.#resolveSource(input, placement)
-    const activeNames = this.#activeChildNames(source.forkSource.id)
+    const activeNames = this.#activeLevelNames(
+      source.scene.id, source.structuralParent?.sessionId
+    )
     const name = validateDisplayName(input.name, activeNames)
     if (!name.ok) throw displayNameError(name.code, name.message, name.input)
 
@@ -566,7 +583,7 @@ export class ForkWorkflowService {
     })
   }
 
-  #resolveSource(input: CreateForkInput, placement: 'child' | 'sibling'): SourceContext {
+  #resolveSource(input: CreateForkInput, placement: ForkPlacement): SourceContext {
     const scene = requireRow(this.#database.get<SceneRow>(
       'SELECT id, task_id FROM scenes WHERE id = ? AND archived_at IS NULL', input.sceneId
     ), 'Scene')
@@ -592,6 +609,10 @@ export class ForkWorkflowService {
     }
 
     let forkSource = selected
+    let structuralParent: SourceContext['structuralParent'] = {
+      sessionId: selected.id,
+      relationKind: 'forked-from'
+    }
     if (placement === 'sibling') {
       const parent = this.#database.get<{ parent_session_id: string }>(
         `SELECT to_session_id AS parent_session_id FROM session_relations_current
@@ -606,9 +627,25 @@ export class ForkWorkflowService {
          FROM sessions WHERE id = ? AND archived_at IS NULL`,
         parent.parent_session_id
       ), 'Parent Session')
+      structuralParent = {
+        sessionId: parent.parent_session_id,
+        relationKind: 'forked-from'
+      }
+    } else if (placement === 'peer') {
+      const parent = this.#database.get<{ parent_session_id: string }>(
+        `SELECT to_session_id AS parent_session_id FROM session_relations_current
+         WHERE from_session_id = ? AND relation_kind IN ('derived-from', 'forked-from')`,
+        selected.id
+      )
+      structuralParent = parent
+        ? { sessionId: parent.parent_session_id, relationKind: 'derived-from' }
+        : undefined
     }
     const binding = this.#validForkBinding(forkSource)
-    return { scene, task, selected, selectedMount, forkSource, binding }
+    return {
+      scene, task, selected, selectedMount, forkSource, binding,
+      ...(structuralParent ? { structuralParent } : {})
+    }
   }
 
   #validForkBinding(source: SessionRow): BindingRow {
@@ -634,16 +671,8 @@ export class ForkWorkflowService {
     return binding
   }
 
-  #activeChildNames(parentSessionId: string): string[] {
-    return this.#database.all<{ title: string }>(
-      `SELECT sessions.title
-       FROM session_relations_current AS relation
-       JOIN sessions ON sessions.id = relation.from_session_id
-       WHERE relation.to_session_id = ?
-         AND relation.relation_kind IN ('derived-from', 'forked-from')
-         AND sessions.archived_at IS NULL`,
-      parentSessionId
-    ).map(({ title }) => title)
+  #activeLevelNames(sceneId: string, parentSessionId?: string): string[] {
+    return activeLevelNamesFrom(this.#database, sceneId, parentSessionId)
   }
 
   async #resolveGitPlan(
@@ -699,7 +728,7 @@ export class ForkWorkflowService {
       registerWindow(tx, input.windowId, input.now)
       const acceptedName = validateDisplayName(
         displayName,
-        activeChildNamesFrom(tx, source.forkSource.id)
+        activeLevelNamesFrom(tx, source.scene.id, source.structuralParent?.sessionId)
       )
       if (!acceptedName.ok) {
         throw displayNameError(acceptedName.code, acceptedName.message, acceptedName.input)
@@ -772,28 +801,36 @@ export class ForkWorkflowService {
           gitPlan.worktreeId, input.now, ids.sessionId
         )
       }
-      const relationInsertion = tx.run(
-        `INSERT INTO session_relation_events (
-           event_id, relation_id, operation, task_id, from_session_id, to_session_id,
-           relation_kind, metadata_json, command_id, occurred_at
-         ) VALUES (?, ?, 'created', ?, ?, ?, 'forked-from', ?, ?, ?)`,
-        `${command.commandId}:fork-relation-created`, relationId, source.task.id,
-        ids.sessionId, source.forkSource.id,
-        JSON.stringify({ worktreeMode: input.worktreeMode }), command.commandId, input.now
-      )
-      tx.run(
-        `INSERT INTO session_relations_current (
-           relation_id, task_id, from_session_id, to_session_id, relation_kind,
-           metadata_json, created_at, updated_at, source_event_sequence
-         ) VALUES (?, ?, ?, ?, 'forked-from', ?, ?, ?, ?)`,
-        relationId, source.task.id, ids.sessionId, source.forkSource.id,
-        JSON.stringify({ worktreeMode: input.worktreeMode }), input.now, input.now,
-        Number(relationInsertion.lastInsertRowid)
-      )
+      if (source.structuralParent) {
+        const relationInsertion = tx.run(
+          `INSERT INTO session_relation_events (
+             event_id, relation_id, operation, task_id, from_session_id, to_session_id,
+             relation_kind, metadata_json, command_id, occurred_at
+           ) VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?)`,
+          `${command.commandId}:fork-relation-created`, relationId, source.task.id,
+          ids.sessionId, source.structuralParent.sessionId,
+          source.structuralParent.relationKind,
+          JSON.stringify({ worktreeMode: input.worktreeMode }), command.commandId, input.now
+        )
+        tx.run(
+          `INSERT INTO session_relations_current (
+             relation_id, task_id, from_session_id, to_session_id, relation_kind,
+             metadata_json, created_at, updated_at, source_event_sequence
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          relationId, source.task.id, ids.sessionId, source.structuralParent.sessionId,
+          source.structuralParent.relationKind,
+          JSON.stringify({ worktreeMode: input.worktreeMode }), input.now, input.now,
+          Number(relationInsertion.lastInsertRowid)
+        )
+      }
       const result = readCreatedForkResult(
         tx, input.windowId, input.sceneId, ids.sessionId, input.now, preserveFocusedSessionId
       )
-      emitForkEvents(emit, command.commandId, source, result, relationId, input.now)
+      emitForkEvents(
+        emit, command.commandId, source, result,
+        source.structuralParent ? relationId : undefined,
+        input.now
+      )
       return {
         ...result,
         forkState: 'pending' as const,
@@ -1000,7 +1037,7 @@ function emitForkEvents(
   commandId: string,
   source: SourceContext,
   result: WorkspaceHierarchyResult & { graph: SceneSessionGraph },
-  relationId: string,
+  relationId: string | undefined,
   now: number
 ): void {
   const session = result.session!
@@ -1010,12 +1047,14 @@ function emitForkEvents(
     workspaceId: source.task.workspace_id, taskId: source.task.id, sessionId: session.id,
     payload: session, occurredAt: now
   })
-  emit({
-    eventId: `${commandId}:relation-created`, eventType: 'session.structural-relation-created',
-    aggregateType: 'session-relation', aggregateId: relationId,
-    workspaceId: source.task.workspace_id, taskId: source.task.id, sessionId: session.id,
-    payload: { graph: result.graph }, occurredAt: now
-  })
+  if (relationId) {
+    emit({
+      eventId: `${commandId}:relation-created`, eventType: 'session.structural-relation-created',
+      aggregateType: 'session-relation', aggregateId: relationId,
+      workspaceId: source.task.workspace_id, taskId: source.task.id, sessionId: session.id,
+      payload: { graph: result.graph }, occurredAt: now
+    })
+  }
   emit({
     eventId: `${commandId}:fork-created`, eventType: 'session.graph-summary-changed',
     aggregateType: 'scene', aggregateId: source.scene.id,
@@ -1048,15 +1087,34 @@ function metadata(value: string): Record<string, unknown> {
   }
 }
 
-function activeChildNamesFrom(tx: DatabaseTransaction, parentSessionId: string): string[] {
+function activeLevelNamesFrom(
+  tx: Pick<DatabaseTransaction, 'all'>,
+  sceneId: string,
+  parentSessionId?: string
+): string[] {
+  if (parentSessionId) {
+    return tx.all<{ title: string }>(
+      `SELECT sessions.title
+       FROM session_relations_current AS relation
+       JOIN sessions ON sessions.id = relation.from_session_id
+       JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
+       WHERE membership.scene_id = ? AND relation.to_session_id = ?
+         AND relation.relation_kind IN ('derived-from', 'forked-from')
+         AND sessions.archived_at IS NULL`,
+      sceneId, parentSessionId
+    ).map(({ title }) => title)
+  }
   return tx.all<{ title: string }>(
     `SELECT sessions.title
-     FROM session_relations_current AS relation
-     JOIN sessions ON sessions.id = relation.from_session_id
-     WHERE relation.to_session_id = ?
-       AND relation.relation_kind IN ('derived-from', 'forked-from')
-       AND sessions.archived_at IS NULL`,
-    parentSessionId
+     FROM session_canvas_memberships AS membership
+     JOIN sessions ON sessions.id = membership.session_id
+     WHERE membership.scene_id = ? AND sessions.archived_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM session_relations_current AS relation
+         WHERE relation.from_session_id = sessions.id
+           AND relation.relation_kind IN ('derived-from', 'forked-from')
+       )`,
+    sceneId
   ).map(({ title }) => title)
 }
 

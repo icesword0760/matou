@@ -133,7 +133,8 @@ describe('Terminal pane', () => {
     const onFork = vi.fn()
     const onDetach = vi.fn()
     const user = userEvent.setup()
-    render(<TerminalPane {...fixture()} resumable onFork={onFork} onDetach={onDetach} />)
+    render(<TerminalPane {...fixture()} resumable onFork={onFork} onForkPeer={onFork}
+      onDetach={onDetach} />)
 
     expect(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })).toBeTruthy()
 
@@ -289,17 +290,29 @@ describe('Terminal pane', () => {
     expect(onRemoveBranch).toHaveBeenCalledWith('session-1', 'node-only')
   })
 
-  it('opens pane actions only from the card header', async () => {
+  it('keeps sibling Fork in the card header and uses only current-session Fork in the right-click menu', async () => {
     const user = userEvent.setup()
-    render(<TerminalPane {...fixture()} resumable onFork={vi.fn()} onDetach={vi.fn()} />)
+    const onFork = vi.fn()
+    const onForkPeer = vi.fn()
+    const onForkSibling = vi.fn()
+    render(<TerminalPane {...fixture()} resumable forkReady onFork={onFork}
+      onForkPeer={onForkPeer} onForkSibling={onForkSibling} onDetach={vi.fn()} />)
 
     await user.pointer({ keys: '[MouseRight]', target: screen.getByTestId('surface-session-1') })
     expect(screen.queryByRole('menu')).toBeNull()
 
     await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
 
-    expect(screen.getByRole('menuitem', { name: '⑂ Fork 会话' })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: '⑂ Fork 兄弟分支' })).toBeNull()
     expect(screen.getByRole('menuitem', { name: '↗ 独立窗口' })).toBeTruthy()
+    await user.click(screen.getByRole('menuitem', { name: '⑂ Fork 会话' }))
+    expect(onForkPeer).toHaveBeenCalledWith('session-1')
+    expect(onFork).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', {
+      name: '从共同父会话创建“Claude 主会话”的兄弟分支'
+    }))
+    expect(onForkSibling).toHaveBeenCalledWith('session-1')
   })
 
   it('renames a card from its header menu and lets a manual Claude title return to the provider title', async () => {

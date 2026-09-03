@@ -17,6 +17,15 @@ describe('BranchDialog', () => {
     expect((screen.getByRole('radio', { name: /使用当前工作树/ }) as HTMLInputElement).checked).toBe(true)
   })
 
+  it('explains that current-session Fork stays in the current list', () => {
+    render(<BranchDialog relationMode="peer" sourceTitle="当前会话"
+      gitAvailable onCancel={() => undefined} onConfirm={async () => undefined} />)
+
+    expect(screen.getByRole('dialog', { name: 'Fork 会话' })).toBeTruthy()
+    expect(screen.getByText('复制“当前会话”的当前对话并加入当前列表')).toBeTruthy()
+    expect(screen.getByText('和当前会话使用同一目录，适合连续处理同一份改动')).toBeTruthy()
+  })
+
   it('submits the trimmed display name and selected new worktree mode', async () => {
     const onConfirm = vi.fn(async () => undefined)
     render(<BranchDialog relationMode="child" sourceTitle="Claude"

@@ -110,6 +110,9 @@ export function createHierarchyCommands(
     createForkSibling: (sceneId, sourceSessionId, name, worktreeMode, submissionKey) => command('hierarchy.create-fork-sibling', {
       sceneId, sourceSessionId, name, worktreeMode, submissionKey
     }),
+    createForkPeer: (sceneId, sourceSessionId, name, worktreeMode, submissionKey) => command('hierarchy.create-fork-peer', {
+      sceneId, sourceSessionId, name, worktreeMode, submissionKey
+    }),
     retryFork: (sceneId, sessionId) => command('hierarchy.retry-fork', { sceneId, sessionId }),
     removeFailedFork: (sceneId, sessionId) => command('hierarchy.remove-failed-fork', {
       sceneId, sessionId
@@ -265,6 +268,7 @@ export function createReadOnlyHierarchyCommands(
     createShellSibling: blocked,
     createForkChild: blocked,
     createForkSibling: blocked,
+    createForkPeer: blocked,
     retryFork: blocked,
     removeFailedFork: blocked,
     retryProviderRestore: blocked,

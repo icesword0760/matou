@@ -162,6 +162,7 @@ export const RPC_METHODS = [
   'hierarchy.create-shell-sibling',
   'hierarchy.create-fork-child',
   'hierarchy.create-fork-sibling',
+  'hierarchy.create-fork-peer',
   'hierarchy.retry-fork',
   'hierarchy.remove-failed-fork',
   'hierarchy.record-session-interaction',

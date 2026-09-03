@@ -408,7 +408,7 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
     sceneId: string
     sourceSessionId: string
     sourceTitle: string
-    relationMode: 'child' | 'sibling'
+    relationMode: 'child' | 'sibling' | 'peer'
     gitAvailable: boolean
   } | null>(null)
   const [levelParentByScene, setLevelParentByScene] = useState<Record<string, string | null | undefined>>({})
@@ -994,6 +994,10 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
                     sceneId: scene.id, sourceSessionId: session.id, sourceTitle: session.title,
                     relationMode: 'child', gitAvailable: Boolean(sessionHud?.gitBranch)
                   })}
+                  onForkPeer={() => setBranchDialog({
+                    sceneId: scene.id, sourceSessionId: session.id, sourceTitle: session.title,
+                    relationMode: 'peer', gitAvailable: Boolean(sessionHud?.gitBranch)
+                  })}
                   {...(parentGraphNode?.canFork === true ? { onForkSibling: () => {
                     const parentHud = sessionHudById.get(parentGraphNode.sessionId)
                     setBranchDialog({
@@ -1186,8 +1190,13 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
                       ...current,
                       [sceneId]: sourceSessionId
                     }))
-                  } else {
+                  } else if (relationMode === 'sibling') {
                     await Promise.resolve(commands.createForkSibling(
+                      sceneId, sourceSessionId, input.name, input.worktreeMode,
+                      input.submissionKey
+                    ))
+                  } else {
+                    await Promise.resolve(commands.createForkPeer(
                       sceneId, sourceSessionId, input.name, input.worktreeMode,
                       input.submissionKey
                     ))
@@ -1453,7 +1462,7 @@ function createFixtureCommands(
     }),
     createCanvas: createFixtureCanvas,
     createShellSibling: (sceneId, sourceSessionId) => createFixtureSibling(sceneId, sourceSessionId),
-    createForkChild: createFixtureForkChild, createForkSibling: NOOP,
+    createForkChild: createFixtureForkChild, createForkSibling: NOOP, createForkPeer: NOOP,
     retryFork: NOOP, removeFailedFork: NOOP,
     retryProviderRestore: NOOP, startFreshProvider: NOOP, restartStoppedSession: NOOP,
     removeSessionBranch: (_sceneId, sessionId) => removeFixtureSession(sessionId),

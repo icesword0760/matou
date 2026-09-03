@@ -7,7 +7,7 @@ export interface BranchDialogSubmit {
 }
 
 export function BranchDialog(props: {
-  relationMode: 'child' | 'sibling'
+  relationMode: 'child' | 'sibling' | 'peer'
   sourceTitle: string
   gitAvailable: boolean
   onCancel(): void
@@ -23,7 +23,9 @@ export function BranchDialog(props: {
   const submissionKey = submissionKeyRef.current ?? crypto.randomUUID()
   submissionKeyRef.current = submissionKey
   const inputRef = useRef<HTMLInputElement>(null)
-  const title = relationMode === 'child' ? '创建子会话分支' : '创建同级分支'
+  const title = relationMode === 'child'
+    ? '创建子会话分支'
+    : relationMode === 'sibling' ? '创建同级分支' : 'Fork 会话'
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
@@ -64,7 +66,9 @@ export function BranchDialog(props: {
       <header className="branch-dialog__header">
         <div>
           <h2 id="branch-dialog-title">{title}</h2>
-          <p>从“{sourceTitle}”继续一条独立工作路径</p>
+          <p>{relationMode === 'peer'
+            ? `复制“${sourceTitle}”的当前对话并加入当前列表`
+            : `从“${sourceTitle}”继续一条独立工作路径`}</p>
         </div>
         <button type="button" aria-label="关闭创建分支" disabled={submitting} onClick={onCancel}>×</button>
       </header>
@@ -86,7 +90,9 @@ export function BranchDialog(props: {
         <label className={`branch-worktree-card${worktreeMode === 'current' ? ' is-selected' : ''}`}>
           <input type="radio" name="worktree-mode" checked={worktreeMode === 'current'}
             disabled={submitting} onChange={() => setWorktreeMode('current')} />
-          <span><strong>使用当前工作树</strong><small>和父会话使用同一目录，适合连续处理同一份改动</small></span>
+          <span><strong>使用当前工作树</strong><small>{relationMode === 'peer'
+            ? '和当前会话使用同一目录，适合连续处理同一份改动'
+            : '和父会话使用同一目录，适合连续处理同一份改动'}</small></span>
         </label>
         <label className={`branch-worktree-card${worktreeMode === 'new' ? ' is-selected' : ''}${gitAvailable ? '' : ' is-disabled'}`}>
           <input type="radio" name="worktree-mode" checked={worktreeMode === 'new'}

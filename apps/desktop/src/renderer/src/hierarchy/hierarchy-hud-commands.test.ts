@@ -51,6 +51,9 @@ describe('PRD 02 HUD commands', () => {
     await commands.createForkSibling(
       'scene-1', 'source-1', '同级分支', 'new', 'stable-sibling-submission'
     )
+    await commands.createForkPeer(
+      'scene-1', 'source-1', '当前会话副本', 'current', 'stable-peer-submission'
+    )
 
     expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
       ['hierarchy.create-fork-child', expect.objectContaining({
@@ -58,6 +61,9 @@ describe('PRD 02 HUD commands', () => {
       })],
       ['hierarchy.create-fork-sibling', expect.objectContaining({
         submissionKey: 'stable-sibling-submission'
+      })],
+      ['hierarchy.create-fork-peer', expect.objectContaining({
+        submissionKey: 'stable-peer-submission'
       })]
     ])
   })

@@ -547,7 +547,7 @@ describe('RuntimeRpcRouter', () => {
     expect(focused.focusedSessionId).toBe(canvas.session.id)
   })
 
-  it('routes named Claude Fork child and sibling workflows through the canvas graph', async () => {
+  it('routes named Claude Fork child, sibling, and current-level workflows through the canvas graph', async () => {
     const workspaceRoot = join(testRoot, 'fork-workspace')
     await mkdir(workspaceRoot)
     const initial = await router.handle('hierarchy.bootstrap-window', payload('fork-bootstrap', {
@@ -582,6 +582,11 @@ describe('RuntimeRpcRouter', () => {
       sourceSessionId: child.session.id, name: '第二分支', worktreeMode: 'current', now: 6,
       submissionKey: 'router-sibling-submission'
     })) as { session: { id: string }; graph: { nodes: Array<{ title: string }> } }
+    const peer = await router.handle('hierarchy.create-fork-peer', payload('fork-peer', {
+      windowId: 'window-fork', sceneId: initial.scene.id,
+      sourceSessionId: initial.session.id, name: '并行根会话', worktreeMode: 'current', now: 7,
+      submissionKey: 'router-peer-submission'
+    })) as { session: { id: string }; graph: { nodes: Array<{ title: string }> } }
 
     expect(child.session.title).toBe('第一分支')
     expect(duplicate.session.id).toBe(child.session.id)
@@ -589,6 +594,12 @@ describe('RuntimeRpcRouter', () => {
     expect(database.get(
       'SELECT source_session_id FROM session_fork_intents WHERE session_id = ?', sibling.session.id
     )).toEqual({ source_session_id: initial.session.id })
+    expect(peer.graph.nodes.map(({ title }) => title)).toEqual([
+      'Claude', '并行根会话', '第一分支', '第二分支'
+    ])
+    expect(database.get(
+      'SELECT relation_id FROM session_relations_current WHERE from_session_id = ?', peer.session.id
+    )).toBeUndefined()
   })
 
   it('rejects malformed payloads before reaching repositories', async () => {

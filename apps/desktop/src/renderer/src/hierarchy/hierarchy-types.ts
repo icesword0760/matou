@@ -199,6 +199,10 @@ export interface HierarchyCommands {
     sceneId: string, sessionId: string, name: string,
     worktreeMode: 'current' | 'new', submissionKey: string
   ): unknown
+  createForkPeer(
+    sceneId: string, sessionId: string, name: string,
+    worktreeMode: 'current' | 'new', submissionKey: string
+  ): unknown
   retryFork(sceneId: string, sessionId: string): unknown
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown

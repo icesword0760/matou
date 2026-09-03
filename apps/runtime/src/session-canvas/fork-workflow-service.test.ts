@@ -235,6 +235,59 @@ describe('ForkWorkflowService', () => {
       .map(({ sessionId }) => sessionId)).toEqual([first.session!.id, sibling.session!.id])
   })
 
+  it('Forks the selected root conversation into a parallel root Session without a source relation', async () => {
+    const root = bootstrapClaude('provider-root')
+
+    const peer = await service.createForkPeer(command('fork-root-peer'), {
+      windowId: 'window-1', sceneId: root.sceneId, sourceSessionId: root.sessionId,
+      name: '并行根会话', worktreeMode: 'current', now: 30
+    })
+
+    expect(database.get(
+      `SELECT source_session_id, source_provider_session_id
+       FROM session_fork_intents WHERE session_id = ?`, peer.session!.id
+    )).toEqual({
+      source_session_id: root.sessionId,
+      source_provider_session_id: 'provider-root'
+    })
+    expect(database.get(
+      `SELECT to_session_id, relation_kind FROM session_relations_current
+       WHERE from_session_id = ?`, peer.session!.id
+    )).toBeUndefined()
+    expect(peer.graph.nodes.filter(({ parentSessionId }) => parentSessionId === undefined)
+      .map(({ title }) => title)).toEqual(['Claude', '并行根会话'])
+    expect(peer.graph.focusedSessionId).toBe(peer.session!.id)
+  })
+
+  it('Forks the selected child conversation beside it while retaining their common parent', async () => {
+    const parent = bootstrapClaude('provider-parent')
+    const selected = await service.createForkChild(command('selected-child'), {
+      windowId: 'window-1', sceneId: parent.sceneId, sourceSessionId: parent.sessionId,
+      name: '当前子会话', worktreeMode: 'current', now: 30
+    })
+    seedClaudeBinding(selected.session!.id, 'provider-selected-child', true, 31)
+
+    const peer = await service.createForkPeer(command('fork-child-peer'), {
+      windowId: 'window-1', sceneId: parent.sceneId, sourceSessionId: selected.session!.id,
+      name: '同层副本', worktreeMode: 'current', now: 32
+    })
+
+    expect(database.get(
+      `SELECT source_session_id, source_provider_session_id
+       FROM session_fork_intents WHERE session_id = ?`, peer.session!.id
+    )).toEqual({
+      source_session_id: selected.session!.id,
+      source_provider_session_id: 'provider-selected-child'
+    })
+    expect(database.get(
+      `SELECT to_session_id, relation_kind FROM session_relations_current
+       WHERE from_session_id = ?`, peer.session!.id
+    )).toEqual({ to_session_id: parent.sessionId, relation_kind: 'derived-from' })
+    expect(peer.graph.nodes.filter(({ parentSessionId }) => parentSessionId === parent.sessionId)
+      .map(({ title }) => title)).toEqual(['当前子会话', '同层副本'])
+    expect(peer.graph.focusedSessionId).toBe(peer.session!.id)
+  })
+
   it('returns typed product errors for root sibling Fork and ineligible Claude attempts', async () => {
     const root = bootstrapShell()
 
