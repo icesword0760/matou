@@ -430,6 +430,17 @@ export class RuntimeRpcRouter {
           title: text(input.title, 'title'),
           now: integer(input.now, 'now', 0)
         })
+      case 'hierarchy.rename-session':
+        return this.#sessions.renameSession(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          title: text(input.title, 'title'),
+          now: integer(input.now, 'now', 0)
+        }).result
+      case 'hierarchy.restore-session-auto-title':
+        return this.#sessions.restoreProviderTitle(command, {
+          sessionId: text(input.sessionId, 'sessionId'),
+          now: integer(input.now, 'now', 0)
+        }).result
       case 'hierarchy.reorder-task':
         return this.#hierarchy.reorderTask(command, {
           windowId: text(input.windowId, 'windowId'),

@@ -47,6 +47,24 @@ describe('RuntimeProjectionStore', () => {
     expect(store.applyTerminalHud('session-a', { sessionId: 'session-a' })).toBe(false)
   })
 
+  it('shows a renamed Session immediately from the successful command result', () => {
+    const store = new RuntimeProjectionStore()
+    store.replace({
+      runtimeGeneration: 'generation-1', eventSequence: 1,
+      workspaces: [], tasks: [], relations: [], scenes: [],
+      sessions: [{ id: 'session-1', title: 'Old title' }]
+    })
+
+    store.applyCommandResult(
+      { id: 'session-1', title: '码头的 Git 提交' },
+      { type: 'hierarchy.rename-session', input: { sessionId: 'session-1' } }
+    )
+
+    expect(store.view().sessions).toContainEqual({
+      id: 'session-1', title: '码头的 Git 提交'
+    })
+  })
+
   it('keeps an active hierarchy projection and removes archived entities from it', () => {
     const store = new RuntimeProjectionStore()
     store.replace({

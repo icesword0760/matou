@@ -304,6 +304,32 @@ describe('RuntimeRpcRouter', () => {
       .toEqual({ archived_at: null })
   })
 
+  it('renames a live Session and restores its latest automatic title through hierarchy RPC', async () => {
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('rename-session-bootstrap', {
+      windowId: 'window-rename-session', defaultRootDirectory: '/tmp/rename-session-workspace',
+      defaultName: 'rename-session-workspace', now: 1
+    })) as { session: { id: string } }
+
+    const renamed = await router.handle('hierarchy.rename-session', payload('rename-session', {
+      sessionId: initial.session.id, title: '码头的 Git 提交', now: 2
+    })) as { id: string; title: string; titleSource: string }
+    expect(renamed).toMatchObject({
+      id: initial.session.id, title: '码头的 Git 提交', titleSource: 'manual'
+    })
+
+    database.run(
+      `UPDATE sessions SET provider_title = '自动生成的提交说明', title_source = 'manual' WHERE id = ?`,
+      initial.session.id
+    )
+    const restored = await router.handle(
+      'hierarchy.restore-session-auto-title',
+      payload('restore-session-title', { sessionId: initial.session.id, now: 3 })
+    ) as { id: string; title: string; titleSource: string }
+    expect(restored).toMatchObject({
+      id: initial.session.id, title: '自动生成的提交说明', titleSource: 'auto'
+    })
+  })
+
   it('creates, modifies, archives, and projects the authoritative hierarchy', async () => {
     await router.handle('workspace.create', payload('workspace', {
       id: 'workspace-1', name: 'Workspace', rootDirectory: '/tmp/workspace', now: 1

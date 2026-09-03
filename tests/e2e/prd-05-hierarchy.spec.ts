@@ -80,6 +80,22 @@ test('creates and renames a Task, adds a Scene, appends a sibling, and deletes o
   } finally { await fixture.close() }
 })
 
+test('renames a Session from its real card menu and restores the name after restart', async () => {
+  let fixture = await launchMatou()
+  try {
+    const pane = fixture.page.getByTestId('terminal-pane').first()
+    await pane.locator('.pane-title').click({ button: 'right' })
+    await fixture.page.getByRole('menuitem', { name: '重命名…' }).click()
+    await fixture.page.getByRole('textbox', { name: '会话名称' }).fill('码头的 Git 提交')
+    await fixture.page.getByRole('button', { name: '确定' }).click()
+    await expect(pane.locator('.pane-title')).toHaveText('码头的 Git 提交')
+
+    fixture = await restartMatou(fixture)
+    await expect(fixture.page.getByTestId('terminal-pane').first().locator('.pane-title'))
+      .toHaveText('码头的 Git 提交')
+  } finally { await fixture.close() }
+})
+
 test('keeps navigation order stable on clicks, then promotes the Task after real terminal input', async () => {
   const fixture = await launchMatou()
   try {

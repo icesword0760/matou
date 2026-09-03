@@ -709,7 +709,10 @@ function commandEntityTarget(
   ].includes(type)) return workspaces
   if (['hierarchy.rename-task', 'hierarchy.set-task-pinned'].includes(type)) return tasks
   if (['hierarchy.rename-scene'].includes(type)) return scenes
-  if (['session.set-permission-mode', 'session.set-model'].includes(type)) return sessions
+  if ([
+    'hierarchy.rename-session', 'hierarchy.restore-session-auto-title',
+    'session.set-permission-mode', 'session.set-model'
+  ].includes(type)) return sessions
   return undefined
 }
 function unarchiveEntity(target: ProjectionCollection, id: string, patch: unknown): void {

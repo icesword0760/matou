@@ -144,6 +144,8 @@ export const RPC_METHODS = [
   'hierarchy.validate-workspace-path',
   'hierarchy.create-task',
   'hierarchy.rename-task',
+  'hierarchy.rename-session',
+  'hierarchy.restore-session-auto-title',
   'hierarchy.reorder-task',
   'hierarchy.delete-task',
   'hierarchy.activate-task',
