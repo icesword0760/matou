@@ -556,6 +556,13 @@ describe('ForkWorkflowService', () => {
       accepted.forkProgress!.operationId
     )!
     expect(claim.base_revision).toBe(frozenRevision)
+    await exec('git', [
+      '-C', workspaceRoot, 'worktree', 'add', '-b', branch,
+      claim.worktree_path, frozenRevision
+    ])
+    await exec('git', [
+      '-C', claim.worktree_path, 'checkout', '--detach', frozenRevision
+    ])
 
     await writeFile(join(workspaceRoot, 'README.md'), 'external branch revision\n')
     await exec('git', ['-C', workspaceRoot, 'add', 'README.md'])
@@ -563,7 +570,9 @@ describe('ForkWorkflowService', () => {
     const externalRevision = (await exec(
       'git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']
     )).stdout.trim()
-    await exec('git', ['-C', workspaceRoot, 'branch', branch, externalRevision])
+    await exec('git', [
+      '-C', workspaceRoot, 'update-ref', `refs/heads/${branch}`, externalRevision
+    ])
 
     const worktrees = new WorktreeService(
       database, new DomainTransactionManager(database), { stopRuns: async () => undefined }
@@ -588,12 +597,17 @@ describe('ForkWorkflowService', () => {
     )
 
     expect(failed).toMatchObject({
-      forkState: 'failed', error: expect.stringContaining('frozen revision')
+      forkState: 'failed',
+      forkProgress: { stage: 'failed' },
+      error: expect.stringContaining('frozen revision')
     })
     expect(database.get(
       'SELECT state, base_revision FROM worktrees WHERE id = ?', claim.worktree_id
     )).toEqual({ state: 'failed', base_revision: frozenRevision })
-    await expect(realpath(claim.worktree_path)).rejects.toThrow()
+    await expect(realpath(claim.worktree_path)).resolves.toEqual(expect.any(String))
+    expect((await exec('git', [
+      '-C', claim.worktree_path, 'rev-parse', 'HEAD'
+    ])).stdout.trim()).toBe(frozenRevision)
     expect((await exec('git', [
       '-C', workspaceRoot, 'rev-parse', `refs/heads/${branch}`
     ])).stdout.trim()).toBe(externalRevision)

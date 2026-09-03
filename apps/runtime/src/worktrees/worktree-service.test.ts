@@ -134,6 +134,102 @@ describe('WorktreeService', () => {
     })
   })
 
+  it('recovers an existing checkout when its branch ref and HEAD still equal the frozen revision', async () => {
+    const path = join(root, 'worktrees', 'retry-existing-checkout')
+    const branch = 'retry-existing-checkout'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    seedCreatingWorktreeClaim({
+      id: 'worktree-retry-existing-checkout',
+      executionContextId: 'context-retry-existing-checkout',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', branch, path, frozenRevision
+    ])
+
+    const recovered = await service.create(command('retry-existing-checkout'), {
+      id: 'worktree-retry-existing-checkout',
+      executionContextId: 'context-retry-existing-checkout',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision, setupPolicy: [], now: 20
+    })
+
+    expect(recovered).toMatchObject({ state: 'ready', branch, path })
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(frozenRevision)
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+  })
+
+  it('rejects an existing checkout when its branch ref moved away from the frozen HEAD', async () => {
+    const path = join(root, 'worktrees', 'moved-existing-checkout')
+    const setupMarker = join(root, 'existing-checkout-setup-must-not-start')
+    const branch = 'moved-existing-checkout'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    seedCreatingWorktreeClaim({
+      id: 'worktree-moved-existing-checkout',
+      executionContextId: 'context-moved-existing-checkout',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', branch, path, frozenRevision
+    ])
+    await exec('git', ['-C', path, 'checkout', '--detach', frozenRevision])
+    await writeFile(join(repositoryRoot, 'README.md'), 'external existing-checkout revision\n')
+    await exec('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await exec('git', ['-C', repositoryRoot, 'commit', '-m', 'external existing checkout'])
+    const externalRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await exec('git', [
+      '-C', repositoryRoot, 'update-ref', `refs/heads/${branch}`, externalRevision
+    ])
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
+    const onSetupStarted = vi.fn()
+    const onCheckpoint = vi.fn()
+
+    await expect(service.create(command('moved-existing-checkout'), {
+      id: 'worktree-moved-existing-checkout',
+      executionContextId: 'context-moved-existing-checkout',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision,
+      setupPolicy: [{
+        idempotencyKey: 'must-not-start', command: '/usr/bin/touch', args: [setupMarker]
+      }],
+      onSetupStarted,
+      onCheckpoint,
+      now: 20
+    })).rejects.toThrow('frozen revision')
+
+    expect(database.get(
+      'SELECT state FROM worktrees WHERE id = ?', 'worktree-moved-existing-checkout'
+    )).toEqual({ state: 'failed' })
+    expect(onCheckpoint).not.toHaveBeenCalled()
+    expect(onSetupStarted).not.toHaveBeenCalled()
+    await expect(realpath(setupMarker)).rejects.toThrow()
+    await expect(realpath(path)).resolves.toEqual(
+      expect.stringContaining('moved-existing-checkout')
+    )
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
+  })
+
   it('does not adopt an externally created branch without a prior matching durable claim', async () => {
     const path = join(root, 'worktrees', 'external-competition')
     await exec('git', ['-C', repositoryRoot, 'branch', 'external-competition', 'HEAD'])

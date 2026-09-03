@@ -134,29 +134,35 @@ export class WorktreeService {
       const baseRevision = await resolveCommit(repository, worktree.baseRevision ?? input.baseRef)
       input.beforeExternalSideEffect?.()
       let createdWorktreePath = false
-      if (!(await pathIsGitWorktree(input.path))) {
+      const existingWorktreePath = await pathIsGitWorktree(input.path)
+      const branchExists = await localBranchExists(repository, input.branch)
+      if (branchExists && !durableRecoveryClaim) {
+        throw new Error(
+          `Worktree ${input.id} existing branch is not reserved by this Worktree`
+        )
+      }
+      if (!branchExists && existingWorktreePath) {
+        throw new Error(
+          `Worktree ${input.id} branch ${input.branch} is missing; expected frozen revision ${baseRevision}`
+        )
+      }
+      if (branchExists) {
+        input.beforeExternalSideEffect?.()
+        const branchRevision = await resolveCommit(
+          repository, `refs/heads/${input.branch}`
+        )
+        input.beforeExternalSideEffect?.()
+        if (branchRevision !== baseRevision) {
+          throw revisionMismatchError(input.id, input.branch, branchRevision, baseRevision)
+        }
+      }
+      if (!existingWorktreePath) {
         // `git worktree add -b` creates the branch before it creates the target
         // directory. A permission or disk failure can therefore leave the ref
         // behind while no usable worktree exists. Retrying with `-b` can never
         // recover that valid partial result; reuse the same operation-owned
         // branch and let Git still reject it if another worktree has it checked
         // out.
-        const branchExists = await localBranchExists(repository, input.branch)
-        if (branchExists && !durableRecoveryClaim) {
-          throw new Error(
-            `Worktree ${input.id} existing branch is not reserved by this Worktree`
-          )
-        }
-        if (branchExists) {
-          input.beforeExternalSideEffect?.()
-          const branchRevision = await resolveCommit(
-            repository, `refs/heads/${input.branch}`
-          )
-          input.beforeExternalSideEffect?.()
-          if (branchRevision !== baseRevision) {
-            throw revisionMismatchError(input.id, input.branch, branchRevision, baseRevision)
-          }
-        }
         const args = branchExists
           ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
           : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
@@ -167,11 +173,16 @@ export class WorktreeService {
       }
       input.beforeExternalSideEffect?.()
       let worktreeRevision: string
+      let finalBranchRevision: string
       try {
         worktreeRevision = await resolveCommit(input.path, 'HEAD')
+        input.beforeExternalSideEffect?.()
+        finalBranchRevision = await resolveCommit(
+          repository, `refs/heads/${input.branch}`
+        )
       } catch (error) {
         const verificationError = new Error(
-          `Worktree ${input.id} did not expose its frozen revision ${baseRevision}: ${errorMessage(error)}`
+          `Worktree ${input.id} did not expose its branch and checkout at frozen revision ${baseRevision}: ${errorMessage(error)}`
         )
         if (createdWorktreePath) {
           await cleanupCreatedWorktree(repository, input.path, verificationError)
@@ -182,6 +193,15 @@ export class WorktreeService {
       if (worktreeRevision !== baseRevision) {
         const verificationError = revisionMismatchError(
           input.id, input.branch, worktreeRevision, baseRevision
+        )
+        if (createdWorktreePath) {
+          await cleanupCreatedWorktree(repository, input.path, verificationError)
+        }
+        throw verificationError
+      }
+      if (finalBranchRevision !== baseRevision) {
+        const verificationError = revisionMismatchError(
+          input.id, input.branch, finalBranchRevision, baseRevision
         )
         if (createdWorktreePath) {
           await cleanupCreatedWorktree(repository, input.path, verificationError)
