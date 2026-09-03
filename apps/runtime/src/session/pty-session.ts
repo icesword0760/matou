@@ -175,11 +175,16 @@ export class PtySession {
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)
       : {}
-    const baseEnvironment = {
+    const baseEnvironment: NodeJS.ProcessEnv = {
       ...process.env,
       ...integrationEnvironment,
       ...options.env,
       TERM: 'xterm-256color'
+    }
+    if (profile === 'claude-code') {
+      delete baseEnvironment.NO_COLOR
+      baseEnvironment.COLORTERM = 'truecolor'
+      baseEnvironment.FORCE_COLOR = '1'
     }
     const providerCommandEnvironment = profile === 'shell'
       ? {}

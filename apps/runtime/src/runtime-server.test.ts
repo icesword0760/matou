@@ -4075,10 +4075,19 @@ sleep 30
   it('promotes a Shell panel to bypass Claude when a real-world zsh config loads slowly', async () => {
     const executable = join(root, 'claude')
     const argumentFile = join(root, 'shell-promoted-provider-arguments.txt')
-    await writeFile(executable, '#!/bin/sh\nprintf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"\nstty raw -echo\ncat\n')
+    const sizeFile = join(root, 'shell-promoted-provider-size.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" > "$MATOU_TEST_ARGUMENT_FILE"',
+      'stty size > "$MATOU_TEST_SIZE_FILE"',
+      'stty raw -echo',
+      'cat',
+      ''
+    ].join('\n'))
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    const previousSizeFile = process.env.MATOU_TEST_SIZE_FILE
     const previousPath = process.env.PATH
     const previousShell = process.env.SHELL
     const previousZdotdir = process.env.ZDOTDIR
@@ -4091,6 +4100,7 @@ sleep 30
     ].join('\n'))
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    process.env.MATOU_TEST_SIZE_FILE = sizeFile
     process.env.PATH = `${root}:${previousPath ?? ''}`
     process.env.SHELL = '/bin/zsh'
     process.env.ZDOTDIR = root
@@ -4110,6 +4120,11 @@ sleep 30
       await waitUntil(() => sessions.get('shell-promoted-provider')?.profile === 'shell')
       await waitUntilAsync(async () => (await readFile(aliasReadyFile, 'utf8').catch(() => '')) === 'ready\n', 6_000)
       await new Promise((resolve) => setTimeout(resolve, 50))
+      promotedPort.receive({
+        type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'shell-promoted-provider', resizeId: 1, cols: 132, rows: 43
+      })
+      await waitUntil(() => promotedPort.last('terminal.resized')?.resizeId === 1)
 
       const submittedAt = Date.now()
       promotedPort.receive({
@@ -4123,6 +4138,7 @@ sleep 30
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
         '--dangerously-skip-permissions'
       ])
+      expect((await readFile(sizeFile, 'utf8')).trim()).toBe('43 132')
       expect(database.get<{ kind: string; title: string }>(
         'SELECT kind, title FROM sessions WHERE id = ?', 'shell-promoted-provider'
       )).toEqual({ kind: 'claude-code', title: 'Claude' })
@@ -4140,6 +4156,7 @@ sleep 30
       await settle()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+      restoreEnv('MATOU_TEST_SIZE_FILE', previousSizeFile)
       restoreEnv('PATH', previousPath)
       restoreEnv('SHELL', previousShell)
       restoreEnv('ZDOTDIR', previousZdotdir)
@@ -4149,6 +4166,7 @@ sleep 30
   it('keeps a Shell to Claude replacement atomic across Renderer connections', async () => {
     const slowShell = join(root, 'slow-closing-shell.sh')
     const provider = join(root, 'atomic-provider.sh')
+    const sizeFile = join(root, 'atomic-provider-size.txt')
     await writeFile(slowShell, [
       '#!/bin/sh',
       "trap 'sleep 0.35; exit 0' HUP TERM",
@@ -4156,13 +4174,15 @@ sleep 30
       'while :; do sleep 1; done',
       ''
     ].join('\n'))
-    await writeFile(provider, '#!/bin/sh\nstty raw -echo\ncat\n')
+    await writeFile(provider, '#!/bin/sh\nstty size > "$MATOU_TEST_SIZE_FILE"\nstty raw -echo\ncat\n')
     await chmod(slowShell, 0o755)
     await chmod(provider, 0o755)
     const previousShell = process.env.SHELL
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousSizeFile = process.env.MATOU_TEST_SIZE_FILE
     process.env.SHELL = slowShell
     process.env.MATOU_CLAUDE_COMMAND = provider
+    process.env.MATOU_TEST_SIZE_FILE = sizeFile
     const sessions = createTestSessionRegistry()
     const firstPort = new MockPort()
     const secondPort = new MockPort()
@@ -4195,6 +4215,14 @@ sleep 30
         sessionId: 'atomic-shell-promotion', data: 'AFTER_PROMOTION'
       })
       await waitUntil(() => !sessions.has('atomic-shell-promotion'))
+      firstPort.receive({
+        type: 'terminal.resize', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion', resizeId: 1, cols: 132, rows: 43
+      })
+      firstPort.receive({
+        type: 'terminal.user-interaction', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'atomic-shell-promotion', interactionKind: 'submit', deferOrdering: true
+      })
       secondPort.receive(spawn)
 
       await waitUntil(() => sessions.get('atomic-shell-promotion')?.profile === 'claude-code', 4_000)
@@ -4208,6 +4236,8 @@ sleep 30
       expect(frames.every((frame, index) => index === 0 || frame.sequence > frames[index - 1]!.sequence))
         .toBe(true)
       await waitUntil(() => terminalText(firstPort).includes('AFTER_PROMOTION'))
+      expect((await readFile(sizeFile, 'utf8')).trim()).toBe('43 132')
+      expect(firstPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(0)
     } finally {
       firstPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -4218,6 +4248,7 @@ sleep 30
       secondServer.close()
       restoreEnv('SHELL', previousShell)
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_SIZE_FILE', previousSizeFile)
     }
   })
 

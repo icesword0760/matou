@@ -128,12 +128,62 @@ describe('PtySession resize deduplication', () => {
   })
 })
 
+describe('PtySession Claude color environment', () => {
+  it('uses a deterministic color-capable environment for Claude regardless of its launcher', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-claude-color-'))
+    roots.push(root)
+    const executable = join(root, 'claude-color-environment.sh')
+    await writeFile(executable, `#!/bin/sh
+printf 'NO_COLOR=%s\\n' "\${NO_COLOR-unset}"
+printf 'COLORTERM=%s\\n' "\${COLORTERM-unset}"
+printf 'FORCE_COLOR=%s\\n' "\${FORCE_COLOR-unset}"
+sleep 5
+`)
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousNoColor = process.env.NO_COLOR
+    const previousColorTerm = process.env.COLORTERM
+    const previousForceColor = process.env.FORCE_COLOR
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.NO_COLOR = '1'
+    process.env.COLORTERM = ''
+    process.env.FORCE_COLOR = '0'
+    let session: PtySession | undefined
+    let output = ''
+    try {
+      session = await PtySession.create({
+        sessionId: 'claude-color-environment', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'claude-code',
+        send: () => {},
+        onOutput: (data) => { output += data }
+      })
+      await waitUntil(() => output.includes('FORCE_COLOR='))
+
+      expect(output).toContain('NO_COLOR=unset')
+      expect(output).toContain('COLORTERM=truecolor')
+      expect(output).toContain('FORCE_COLOR=1')
+    } finally {
+      session?.dispose({ notifyExit: false, reason: 'runtime-shutdown' })
+      await session?.whenClosed()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('NO_COLOR', previousNoColor)
+      restoreEnv('COLORTERM', previousColorTerm)
+      restoreEnv('FORCE_COLOR', previousForceColor)
+    }
+  })
+})
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('condition did not become true')
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
 }
 
 describe('PtySession durability recovery', () => {

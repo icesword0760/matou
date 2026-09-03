@@ -586,7 +586,13 @@ export class RuntimeServer {
         this.#recoveryCoordinator?.retry(message.sessionId)
         break
       case 'terminal.user-interaction': {
-        const session = this.#session(message.sessionId)
+        // This message is telemetry for task ordering, not terminal control.
+        // Shell -> provider promotion briefly swaps the live PTY while the
+        // logical Session stays attached, so an interaction arriving in that
+        // window must not be surfaced as a Session startup failure.
+        const session = this.#attachedSessionIds.has(message.sessionId)
+          ? this.#sessions.get(message.sessionId)
+          : undefined
         if (!session) break
         const now = Date.now()
         this.#sessionInteractions.record({
@@ -635,6 +641,12 @@ export class RuntimeServer {
       }
       case 'terminal.resize':
         if (this.#attachedSessionIds.has(message.sessionId)) {
+          const descriptor = this.#spawnDescriptors.get(message.sessionId)
+          if (descriptor) {
+            this.#spawnDescriptors.set(message.sessionId, {
+              ...descriptor, cols: message.cols, rows: message.rows
+            })
+          }
           const session = this.#sessions.get(message.sessionId)
           if (session?.durabilityState === 'healthy') {
             session.resize(message.cols, message.rows)
@@ -2919,7 +2931,8 @@ export class RuntimeServer {
         })
         this.publishSessionHud(session.sessionId)
         this.#skipResumeSessionIds.add(session.sessionId)
-        await this.#spawn({ ...descriptor, profile: 'claude-code' })
+        const latestDescriptor = this.#spawnDescriptors.get(session.sessionId) ?? descriptor
+        await this.#spawn({ ...latestDescriptor, profile: 'claude-code' })
         const replacement = this.#sessions.get(session.sessionId)
         if (!replacement || replacement.profile !== 'claude-code') {
           throw new Error('Claude process did not start')
