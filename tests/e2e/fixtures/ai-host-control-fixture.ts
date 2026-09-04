@@ -37,8 +37,14 @@ export interface BranchCollisionSetup {
   collisionBranch: string
 }
 
+export interface LaunchAiHostControlOptions {
+  branchCollision?: BranchCollisionSetup
+  confirmationTtlMs?: number
+  forkProviderReadyDelayMs?: number
+}
+
 export async function launchAiHostControl(
-  options: { branchCollision?: BranchCollisionSetup } = {}
+  options: LaunchAiHostControlOptions = {}
 ): Promise<AiHostControlFixture> {
   const root = await mkdtemp('/tmp/matou-ai-control-e2e-')
   const repositoryDirectory = join(root, 'matou_workspace')
@@ -54,6 +60,12 @@ export async function launchAiHostControl(
     // These acceptance cases verify real Runtime/Desktop behavior rather than
     // collecting display-specific screenshot evidence.
     MATOU_E2E_DISPLAY: 'primary'
+  }
+  if (options.confirmationTtlMs !== undefined) {
+    environment.MATOU_E2E_CONFIRMATION_TTL_MS = String(options.confirmationTtlMs)
+  }
+  if (options.forkProviderReadyDelayMs !== undefined) {
+    environment.MATOU_AI_CONTROL_FORK_READY_DELAY_MS = String(options.forkProviderReadyDelayMs)
   }
 
   try {
@@ -317,6 +329,9 @@ def post(payload):
 def hook(name):
     post({'hook_event_name':name,'session_id':provider_id,'cwd':os.getcwd()})
 
+if fork:
+    delay_ms=int(os.environ.get('MATOU_AI_CONTROL_FORK_READY_DELAY_MS', '0'))
+    if delay_ms > 0: time.sleep(delay_ms / 1000)
 print('READY:' + provider_id, flush=True)
 record('ready')
 post({'session_id':provider_id,'cwd':os.getcwd()})

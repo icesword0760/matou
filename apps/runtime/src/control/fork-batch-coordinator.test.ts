@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResolvedForkEnvironment, ResolvedHostEntity } from './host-action-target-resolver'
 import type { HostCallerIdentity } from './host-control-types'
 import { ForkBatchCoordinator, type CreateForkBatchInput } from './fork-batch-coordinator'
+import { ForkSettlementWaitError } from './fork-settlement-waiter'
 import { ProviderReadyRegistry } from './provider-ready-registry'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { SessionForkIntentRepository } from '../session/session-fork-intent-repository'
@@ -196,6 +197,117 @@ describe('ForkBatchCoordinator', () => {
     expect(waitUntilForkSettled).toHaveBeenCalledWith(
       result.items[0]!.sessionRef!.slice('session:'.length)
     )
+  })
+
+  it.each([
+    [
+      'timeout',
+      new ForkSettlementWaitError(
+        'FORK_SETTLEMENT_TIMEOUT',
+        'Fork 状态确认超时',
+        'timeout for private-session-id'
+      ),
+      'Fork 状态确认超时，请稍后仅重试此项'
+    ],
+    [
+      'missing intent',
+      new ForkSettlementWaitError(
+        'FORK_SETTLEMENT_MISSING',
+        'Fork 状态记录不可用',
+        'missing intent for private-session-id'
+      ),
+      'Fork 状态记录不可用，请仅重试此项'
+    ]
+  ])('keeps successful receipts when settlement reports %s', async (_label, failure, publicError) => {
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const { coordinator } = coordinatorFixture({
+      createChild: async (_command, input) => input.name === '等待确认'
+        ? forkResult('private-session-id', 'pending')
+        : forkResult('stable-success'),
+      waitUntilForkSettled: async () => { throw failure }
+    })
+
+    const result = await coordinator.createChildren(batchFixture([{
+      itemKey: 'waiting', title: '等待确认', environment: current
+    }, {
+      itemKey: 'success', title: '成功项目', environment: current
+    }], `settlement-${_label}`))
+
+    expect(result.items).toEqual([
+      expect.objectContaining({ itemKey: 'waiting', state: 'failed', error: publicError }),
+      expect.objectContaining({
+        itemKey: 'success', state: 'ready', sessionRef: 'session:stable-success'
+      })
+    ])
+    expect(result.retry).toEqual({
+      batchKey: `settlement-${_label}`,
+      itemKeys: ['waiting']
+    })
+    expect(result.items[0]?.error).not.toContain('private-session-id')
+    expect(diagnostic).toHaveBeenCalledWith(expect.stringContaining('private-session-id'))
+    diagnostic.mockRestore()
+  })
+
+  it('retries only a timed-out settlement item and monitors its durable intent', async () => {
+    const real = await realForkFixture()
+    const createChild = vi.fn<CreateChild>((command, input) => input.name === '等待确认'
+      ? real.workflow.createForkChild(command, input)
+      : Promise.resolve(forkResult('stable-success')))
+    let waitAttempt = 0
+    const waitUntilForkSettled = vi.fn(async (sessionId: string) => {
+      waitAttempt += 1
+      if (waitAttempt === 1) {
+        throw new ForkSettlementWaitError(
+          'FORK_SETTLEMENT_TIMEOUT',
+          'Fork 状态确认超时',
+          `timeout for ${sessionId}`
+        )
+      }
+      database.run(
+        `UPDATE session_fork_intents
+         SET state = 'succeeded', stage = 'succeeded', completed_steps = total_steps,
+             completed_at = 130, updated_at = 130
+         WHERE session_id = ?`,
+        sessionId
+      )
+    })
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const coordinator = new ForkBatchCoordinator({
+      database,
+      createChild,
+      retryChild: (command, input) => real.workflow.retryFork(command, input),
+      startSession: async () => undefined,
+      waitUntilReady: async () => undefined,
+      waitUntilForkSettled,
+      sendPrompt: async () => undefined,
+      now: () => 123
+    })
+    const input: CreateForkBatchInput = {
+      caller: { runId: 'run-real-parent', sessionId: real.source.sessionId },
+      source: real.source,
+      batchKey: 'settlement-timeout-retry',
+      items: [{
+        itemKey: 'waiting', title: '等待确认', environment: real.environment
+      }, {
+        itemKey: 'success', title: '成功项目', environment: real.environment
+      }]
+    }
+
+    const first = await coordinator.createChildren(input)
+    const retried = await coordinator.retryFailures({ ...input, retryItemKeys: ['waiting'] })
+
+    expect(first.retry).toEqual({
+      batchKey: 'settlement-timeout-retry', itemKeys: ['waiting']
+    })
+    expect(retried.items).toEqual([
+      expect.objectContaining({ itemKey: 'waiting', state: 'ready' }),
+      expect.objectContaining({
+        itemKey: 'success', state: 'ready', sessionRef: 'session:stable-success'
+      })
+    ])
+    expect(createChild).toHaveBeenCalledTimes(2)
+    expect(waitUntilForkSettled).toHaveBeenCalledTimes(2)
+    diagnostic.mockRestore()
   })
 
   it('replays a completed batch result without creating successful nodes again', async () => {

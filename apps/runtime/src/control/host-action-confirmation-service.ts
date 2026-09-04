@@ -50,6 +50,23 @@ interface StoredConfirmation extends ConfirmationRecord {
 
 const DEFAULT_TTL_MS = 120_000
 
+interface HostActionConfirmationEnvironment {
+  MATOU_E2E?: string
+  MATOU_E2E_CONFIRMATION_TTL_MS?: string
+}
+
+export function createE2eHostActionConfirmationOptions(
+  environment: HostActionConfirmationEnvironment
+): { ttlMs: number } | undefined {
+  const rawTtl = environment.MATOU_E2E_CONFIRMATION_TTL_MS
+  if (environment.MATOU_E2E !== '1' || rawTtl === undefined) return undefined
+  const ttlMs = Number(rawTtl)
+  if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
+    throw new Error('MATOU_E2E_CONFIRMATION_TTL_MS must be a positive integer')
+  }
+  return { ttlMs }
+}
+
 /**
  * Keeps destructive-action confirmations in Runtime memory only.
  *

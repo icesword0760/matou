@@ -402,7 +402,7 @@ export class ForkBatchCoordinator {
           )
         }
       } else {
-        if (row.session_id !== null) {
+        if (row.session_id !== null && !isSettlementFailureReceipt(row.failure_receipt)) {
           throw new Error(`项目 ${item.itemKey} 的失败 Fork 记录缺失`)
         }
         row = await this.#createItem(
@@ -432,10 +432,24 @@ export class ForkBatchCoordinator {
   ): Promise<BatchItemRow> {
     let row = this.#refreshItem(batchKey, item)
     if (
-      item.start === true || row.state !== 'created' || row.session_id === null ||
+      item.start === true ||
+      (row.state !== 'created' && !isSettlementFailureReceipt(row.failure_receipt)) ||
+      row.session_id === null ||
       this.#dependencies.waitUntilForkSettled === undefined
     ) return row
-    await this.#dependencies.waitUntilForkSettled(row.session_id)
+    const sessionId = row.session_id
+    try {
+      await this.#dependencies.waitUntilForkSettled(sessionId)
+    } catch (error) {
+      const failure = settlementFailure(error, sessionId)
+      console.error(`[fork-batch.settlement] ${failure.diagnostic}`)
+      this.#recordFailure(batchKey, item.itemKey, {
+        sessionId: failure.keepSession ? sessionId : null,
+        error: failure.publicMessage,
+        receipt: failure.receipt
+      })
+      return this.#itemRow(batchKey, item.itemKey)
+    }
     row = this.#refreshItem(batchKey, item)
     return row
   }
@@ -930,6 +944,11 @@ export class ForkBatchCoordinator {
     const intent = this.#intent(row.submission_key)
     if (!intent) return row
 
+    if (
+      row.state === 'failed' && isSettlementFailureReceipt(row.failure_receipt) &&
+      intent.stage !== 'succeeded' && intent.stage !== 'failed'
+    ) return row
+
     if (intent.stage === 'failed') {
       if (isRetryCallReceiptFor(row.failure_receipt, intent)) return row
       this.#recordFailure(batchKey, item.itemKey, {
@@ -1308,6 +1327,39 @@ function isRetryCallReceiptFor(
   intent: ForkIntentSnapshot
 ): boolean {
   return receipt?.startsWith(`retry-call:${intent.operation_id}:${intent.attempt}:`) === true
+}
+
+function settlementFailure(error: unknown, sessionId: string): {
+  publicMessage: string
+  diagnostic: string
+  keepSession: boolean
+  receipt: string
+} {
+  const candidate = typeof error === 'object' && error !== null
+    ? error as { code?: unknown; diagnostic?: unknown }
+    : undefined
+  const code = candidate?.code === 'FORK_SETTLEMENT_TIMEOUT' ||
+    candidate?.code === 'FORK_SETTLEMENT_MISSING'
+    ? candidate.code
+    : 'FORK_SETTLEMENT_FAILED'
+  const publicMessage = code === 'FORK_SETTLEMENT_TIMEOUT'
+    ? 'Fork 状态确认超时，请稍后仅重试此项'
+    : code === 'FORK_SETTLEMENT_MISSING'
+      ? 'Fork 状态记录不可用，请仅重试此项'
+      : 'Fork 状态确认失败，请稍后仅重试此项'
+  const diagnostic = typeof candidate?.diagnostic === 'string'
+    ? candidate.diagnostic
+    : `${errorMessage(error)}; session=${sessionId}`
+  return {
+    publicMessage,
+    diagnostic,
+    keepSession: code !== 'FORK_SETTLEMENT_MISSING',
+    receipt: `fork-settlement:${code}:${hash(sessionId)}`
+  }
+}
+
+function isSettlementFailureReceipt(receipt: string | null): boolean {
+  return receipt?.startsWith('fork-settlement:') === true
 }
 
 function requireValue<T>(value: T | undefined, message: string): T {

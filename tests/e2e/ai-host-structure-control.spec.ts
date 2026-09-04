@@ -58,6 +58,31 @@ interface RemovedResult {
   removedSessions: number
 }
 
+interface CreatedResult {
+  kind: 'created'
+  createdRef: string
+  path: {
+    canvas?: { ref: string; title: string }
+  }
+}
+
+interface CanvasClosePreview {
+  kind: 'canvas-close-preview'
+  impact: {
+    canvases: number
+    sessions: number
+    preservesProjectFiles: true
+    preservesBranches: true
+    preservesWorktrees: true
+  }
+  confirmationRef: string
+}
+
+interface CanvasClosedResult {
+  kind: 'canvas-closed'
+  removedSessions: number
+}
+
 interface ErrorResult {
   code: string
   message: string
@@ -267,6 +292,33 @@ test.describe('AI Host structure control in the real app', () => {
     }
   })
 
+  test('keeps a real start request connected while provider readiness exceeds five seconds', async () => {
+    const fixture = await launchAiHostControl({ forkProviderReadyDelayMs: 5_500 })
+    try {
+      const parent = await seedResumableProviderSession(fixture)
+      const prompt = '执行慢启动方案'
+      const startedAt = Date.now()
+      const result = await forkChildren(fixture, parent.sessionId, [{
+        itemKey: 'slow-start', title: '慢启动实施方案', environment: { mode: 'current' },
+        prompt, start: true
+      }], 'e2e-slow-start')
+
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(5_000)
+      expect(result.items).toEqual([expect.objectContaining({
+        itemKey: 'slow-start', title: '慢启动实施方案', state: 'started'
+      })])
+      const providerId = providerForSession(
+        fixture, sessionId(result.items[0]?.sessionRef)
+      )
+      await expect.poll(() => providerInput(fixture, providerId), {
+        message: '等待慢启动 provider 收到首个任务', timeout: 30_000
+      }).toContain(prompt)
+      await expectCallerFocus(fixture, parent.sessionId)
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('revalidates a changed subtree and preserves project files, branches, and Worktrees', async () => {
     const fixture = await launchAiHostControl()
     try {
@@ -328,6 +380,60 @@ test.describe('AI Host structure control in the real app', () => {
       expect(worktreeForId(fixture, worktree.id)).toMatchObject({
         path: worktree.path, branch: worktree.branch
       })
+      await expectCallerFocus(fixture, parent.sessionId)
+    } finally {
+      await fixture.close()
+    }
+  })
+
+  test('expires and consumes one-time canvas close confirmations without extra mutation', async () => {
+    const fixture = await launchAiHostControl({ confirmationTtlMs: 2_000 })
+    try {
+      const parent = await seedResumableProviderSession(fixture)
+      const created = (await runMtInSession<CreatedResult>(fixture, parent.sessionId, [
+        'create', 'canvas', '--task', 'current', '--title', '一次性确认画布',
+        '--submission-key', 'e2e-canvas-close-confirmation', '--json'
+      ])).value
+      const canvasRef = created.path.canvas?.ref
+      if (!canvasRef?.startsWith('scene:')) {
+        throw new Error(`Expected scene ref, received ${String(canvasRef)}`)
+      }
+      const sceneId = canvasRef.slice('scene:'.length)
+      const original = canvasStructureSnapshot(fixture, sceneId)
+      expect(original).toMatchObject({ activeCanvas: 1, activeSessions: 1 })
+
+      const expiring = (await runMtInSession<CanvasClosePreview>(fixture, parent.sessionId, [
+        'close', 'canvas-preview', canvasRef, '--json'
+      ])).value
+      expect(expiring.impact).toMatchObject({
+        canvases: 1,
+        sessions: 1,
+        preservesProjectFiles: true,
+        preservesBranches: true,
+        preservesWorktrees: true
+      })
+      await fixture.page.waitForTimeout(2_200)
+      const expired = await runMtInSession<ErrorResult>(fixture, parent.sessionId, [
+        'close', 'canvas-commit', expiring.confirmationRef, '--json'
+      ], 4)
+      expect(expired.value.code).toBe('CONFIRMATION_EXPIRED')
+      expect(canvasStructureSnapshot(fixture, sceneId)).toEqual(original)
+
+      const consumable = (await runMtInSession<CanvasClosePreview>(fixture, parent.sessionId, [
+        'close', 'canvas-preview', canvasRef, '--json'
+      ])).value
+      const closed = (await runMtInSession<CanvasClosedResult>(fixture, parent.sessionId, [
+        'close', 'canvas-commit', consumable.confirmationRef, '--json'
+      ])).value
+      expect(closed).toMatchObject({ kind: 'canvas-closed', removedSessions: 1 })
+      const committed = canvasStructureSnapshot(fixture, sceneId)
+      expect(committed).toMatchObject({ activeCanvas: 0, activeSessions: 0 })
+
+      const consumed = await runMtInSession<ErrorResult>(fixture, parent.sessionId, [
+        'close', 'canvas-commit', consumable.confirmationRef, '--json'
+      ], 4)
+      expect(consumed.value.code).toBe('CONFIRMATION_REQUIRED')
+      expect(canvasStructureSnapshot(fixture, sceneId)).toEqual(committed)
       await expectCallerFocus(fixture, parent.sessionId)
     } finally {
       await fixture.close()
@@ -487,5 +593,29 @@ function archivedSessionCount(fixture: AiHostControlFixture, sessionIds: string[
       `SELECT COUNT(*) AS count FROM sessions WHERE id IN (${placeholders}) AND archived_at IS NOT NULL`
     ).get(...sessionIds) as { count: number }
     return row.count
+  })
+}
+
+function canvasStructureSnapshot(
+  fixture: AiHostControlFixture,
+  sceneId: string
+): { activeCanvas: number; activeSessions: number; totalSessions: number } {
+  return readDatabase(fixture, (database) => {
+    const activeCanvas = database.prepare(
+      'SELECT COUNT(*) AS count FROM scenes WHERE id = ? AND archived_at IS NULL'
+    ).get(sceneId) as { count: number }
+    const sessions = database.prepare(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN sessions.archived_at IS NULL THEN 1 ELSE 0 END) AS active
+       FROM session_canvas_memberships AS memberships
+       JOIN sessions ON sessions.id = memberships.session_id
+       WHERE memberships.scene_id = ?`
+    ).get(sceneId) as { total: number; active: number | null }
+    return {
+      activeCanvas: activeCanvas.count,
+      activeSessions: sessions.active ?? 0,
+      totalSessions: sessions.total
+    }
   })
 }

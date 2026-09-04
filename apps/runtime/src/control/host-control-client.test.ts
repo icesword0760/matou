@@ -33,6 +33,31 @@ describe('HostControlClient', () => {
     expect(requests[0]!.deadlineAt).toBeGreaterThan(Date.now() - 1000)
   })
 
+  it('extends the default deadline for Fork settlement and provider readiness', async () => {
+    const { endpoint, requests } = await fixtureServer((request) => ({
+      version: 1, requestId: request.requestId, ok: true, result: { accepted: true }
+    }))
+    const client = new HostControlClient({ endpoint, token: 'token' })
+    const startedAt = Date.now()
+
+    await client.request('structure.fork.children', {
+      items: [
+        { itemKey: 'start', start: true },
+        { itemKey: 'settle', start: false }
+      ]
+    })
+
+    const timeoutMs = requests[0]!.deadlineAt - startedAt
+    expect(timeoutMs).toBeGreaterThanOrEqual(145_000)
+    expect(timeoutMs).toBeLessThan(150_000)
+
+    const singleStartedAt = Date.now()
+    await client.request('structure.fork.child', { start: true })
+    const singleTimeoutMs = requests[1]!.deadlineAt - singleStartedAt
+    expect(singleTimeoutMs).toBeGreaterThanOrEqual(75_000)
+    expect(singleTimeoutMs).toBeLessThan(80_000)
+  })
+
   it('reads a response delivered across partial socket frames', async () => {
     const { endpoint } = await fixtureServer((request) => ({
       version: 1, requestId: request.requestId, ok: true, result: { targets: [1, 2] }

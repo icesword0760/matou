@@ -6,6 +6,10 @@ import {
   type HostControlErrorDetails,
   type HostControlScope
 } from './host-control-types'
+import {
+  HOST_CONTROL_DEFAULT_TIMEOUT_MS,
+  hostControlResponseTimeoutMs
+} from './host-control-deadlines'
 
 export interface HostControlClientOptions {
   endpoint: string
@@ -35,17 +39,19 @@ export class HostControlClientError extends Error {
 export class HostControlClient {
   readonly #endpoint: string
   readonly #token: string
-  readonly #timeoutMs: number
+  readonly #timeoutOverrideMs: number | undefined
 
   constructor(options: HostControlClientOptions) {
     this.#endpoint = options.endpoint
     this.#token = options.token
-    this.#timeoutMs = options.timeoutMs ?? 5_000
+    this.#timeoutOverrideMs = options.timeoutMs
   }
 
   async request(method: HostControlScope, params: unknown): Promise<unknown> {
     const requestId = randomUUID()
-    const deadlineAt = Date.now() + this.#timeoutMs
+    const responseTimeoutMs = this.#timeoutOverrideMs ?? hostControlResponseTimeoutMs(method, params)
+    const connectTimeoutMs = this.#timeoutOverrideMs ?? HOST_CONTROL_DEFAULT_TIMEOUT_MS
+    const deadlineAt = Date.now() + responseTimeoutMs
     const body = Buffer.from(JSON.stringify({
       version: 1,
       requestId,
@@ -57,12 +63,12 @@ export class HostControlClient {
     if (body.byteLength > HOST_CONTROL_MAX_FRAME_BYTES) {
       throw new HostControlClientError('INVALID_REQUEST', 'Host Control 请求超过大小限制')
     }
-    const socket = await connectWithin(this.#endpoint, this.#timeoutMs)
+    const socket = await connectWithin(this.#endpoint, connectTimeoutMs)
     try {
       const prefix = Buffer.allocUnsafe(4)
       prefix.writeUInt32BE(body.byteLength)
       socket.write(Buffer.concat([prefix, body]))
-      const response = parseControlResponse(await readFrame(socket, this.#timeoutMs))
+      const response = parseControlResponse(await readFrame(socket, responseTimeoutMs))
       if (response.requestId !== requestId) {
         throw new HostControlClientError('INVALID_RESPONSE', 'Host Control 返回了不匹配的请求标识')
       }

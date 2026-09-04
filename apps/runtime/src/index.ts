@@ -3,7 +3,6 @@ import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import { resolve } from 'node:path'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
-import { setTimeout as delay } from 'node:timers/promises'
 
 import {
   PROTOCOL_VERSION,
@@ -20,8 +19,13 @@ import {
 } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
 import { ForkBatchCoordinator } from './control/fork-batch-coordinator'
+import { waitUntilForkSettled } from './control/fork-settlement-waiter'
+import { HOST_CONTROL_FORK_PROVIDER_READY_TIMEOUT_MS } from './control/host-control-deadlines'
 import { ProviderReadyRegistry } from './control/provider-ready-registry'
-import { HostActionConfirmationService } from './control/host-action-confirmation-service'
+import {
+  createE2eHostActionConfirmationOptions,
+  HostActionConfirmationService
+} from './control/host-action-confirmation-service'
 import { HostActionTargetResolver } from './control/host-action-target-resolver'
 import { RuntimeHostActionFacade } from './control/runtime-host-action-facade'
 import { HostNavigationBroker } from './control/host-navigation-broker'
@@ -305,7 +309,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const hierarchy = new HierarchyApplicationService(database, transactions)
   const sessionCanvas = new SessionCanvasService(database, transactions)
   const hostActionResolver = new HostActionTargetResolver(database)
-  const hostActionConfirmations = new HostActionConfirmationService()
+  const hostActionConfirmations = new HostActionConfirmationService(
+    createE2eHostActionConfirmationOptions(process.env)
+  )
   const controlTokens = new CapabilityTokenService(database.runtimeGeneration, {
     onRunRevoked: (runId) => hostActionConfirmations.revokeRun(runId)
   })
@@ -491,7 +497,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
       if (!descriptor) throw new Error(`会话 ${sessionId} 尚未准备完成`)
       await backgroundServer.startOrResumeSession(descriptor)
     },
-    waitUntilReady: (sessionId, signal) => providerReady.wait(sessionId, 60_000, signal),
+    waitUntilReady: (sessionId, signal) => providerReady.wait(
+      sessionId, HOST_CONTROL_FORK_PROVIDER_READY_TIMEOUT_MS, signal
+    ),
     waitUntilForkSettled: (sessionId) => waitUntilForkSettled(database, sessionId),
     sendPrompt: (sessionId, prompt) => controlBackend.sendText(sessionId, prompt, true)
   })
@@ -808,23 +816,6 @@ function validTerminalSize(
   return Number.isInteger(value) && value !== null && value >= minimum && value <= maximum
     ? value
     : fallback
-}
-
-async function waitUntilForkSettled(
-  database: RuntimeDatabase,
-  sessionId: string,
-  timeoutMs = 70_000
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (true) {
-    const stage = database.get<{ stage: string }>(
-      'SELECT stage FROM session_fork_intents WHERE session_id = ?', sessionId
-    )?.stage
-    if (stage === 'succeeded' || stage === 'failed') return
-    if (stage === undefined) throw new Error(`Fork 会话 ${sessionId} 缺少执行记录`)
-    if (Date.now() >= deadline) throw new Error(`等待 Fork 会话 ${sessionId} 完成超时`)
-    await delay(25)
-  }
 }
 
 class BackgroundRuntimePort implements RuntimePort {

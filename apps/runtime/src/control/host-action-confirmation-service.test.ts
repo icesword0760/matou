@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { HostImpactSummary } from './host-action-types'
 import {
+  createE2eHostActionConfirmationOptions,
   HostActionConfirmationError,
   HostActionConfirmationService
 } from './host-action-confirmation-service'
@@ -52,6 +53,18 @@ function issueInput(overrides: Partial<{
 }
 
 describe('HostActionConfirmationService', () => {
+  it('uses a confirmation TTL override only for explicit E2E runs', () => {
+    expect(createE2eHostActionConfirmationOptions({
+      MATOU_E2E: '0', MATOU_E2E_CONFIRMATION_TTL_MS: '250'
+    })).toBeUndefined()
+    expect(createE2eHostActionConfirmationOptions({
+      MATOU_E2E: '1', MATOU_E2E_CONFIRMATION_TTL_MS: '250'
+    })).toEqual({ ttlMs: 250 })
+    expect(() => createE2eHostActionConfirmationOptions({
+      MATOU_E2E: '1', MATOU_E2E_CONFIRMATION_TTL_MS: '0'
+    })).toThrow('MATOU_E2E_CONFIRMATION_TTL_MS')
+  })
+
   it('generates 24-byte base64url references by default', () => {
     const service = new HostActionConfirmationService()
     const ref = service.issue(issueInput())
