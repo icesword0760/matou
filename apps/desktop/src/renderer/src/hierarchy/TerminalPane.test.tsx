@@ -222,6 +222,8 @@ describe('Terminal pane', () => {
     const actions = header.querySelector('.terminal-pane-actions')
     expect(actions?.querySelector('.child-session-badge')).not.toBeNull()
     expect(actions?.firstElementChild?.classList.contains('child-session-badge-wrap')).toBe(true)
+    expect(screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })
+      .querySelector('svg')?.dataset.icon).toBe('git-branch')
     expect(screen.queryByRole('button', { name: '删除终端：Claude 主会话' })).toBeNull()
 
     const user = userEvent.setup()
