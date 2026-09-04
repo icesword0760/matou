@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type {
-  ProviderCli, ProviderConfigInput, ProviderConfigSnapshot, ProviderConfigView, RpcMethod
+  ProviderCli, ProviderConfigActivationResult, ProviderConfigInput,
+  ProviderConfigSnapshot, ProviderConfigView, RpcMethod
 } from '@matou/contracts'
 
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
@@ -85,11 +86,20 @@ export function ModelSwitchSettings({ client, onClose }: {
     try {
       const next = await client.request('provider-config.activate', {
         cli, providerId: provider.id
-      }) as ProviderConfigSnapshot
+      }) as ProviderConfigActivationResult
       setSnapshot(next); announceChange()
-      setToast(cli === 'claude-code'
-        ? `已切换为 ${provider.name}；Claude Code 会话已更新`
-        : `已切换为 ${provider.name}；Codex 新会话直接生效`)
+      if (cli === 'claude-code') {
+        const transitions = next.sessionTransitions ?? []
+        const updated = transitions.filter(({ status }) => status === 'updated').length
+        const deferred = transitions.length - updated
+        setToast(deferred > 0
+          ? `已切换为 ${provider.name}；${updated} 个 Claude Code 会话已更新，${deferred} 个会话暂缓并保持原配置`
+          : updated > 0
+            ? `已切换为 ${provider.name}；${updated} 个 Claude Code 会话已更新`
+            : `已切换为 ${provider.name}；Claude Code 新会话直接生效`)
+      } else {
+        setToast(`已切换为 ${provider.name}；Codex 新会话直接生效`)
+      }
     } catch (error) {
       setToast(message(error, '切换失败'))
     }
@@ -178,7 +188,7 @@ export function ModelSwitchSettings({ client, onClose }: {
               </article>
             })}
           </div>
-          <p className="model-settings__impact"><span>ⓘ</span><b>切换会影响所有 {APP_DISPLAY_NAME} 窗口。</b> Claude Code 会话自动更新；Codex 新会话直接生效，运行中的会话需要重启。</p>
+          <p className="model-settings__impact"><span>ⓘ</span><b>切换会影响所有 {APP_DISPLAY_NAME} 窗口。</b> 符合条件的 Claude Code 会话自动更新，暂缓会话保持原配置；Codex 新会话直接生效，运行中的会话需要重启。</p>
         </>}
       </main>
     </div>

@@ -46,6 +46,7 @@ import { HostNavigationBroker } from './control/host-navigation-broker'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
+import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
 
 let root: string
 let database: RuntimeDatabase
@@ -758,6 +759,132 @@ sleep 30
     }
   })
 
+  it('atomically activates an eligible provider and fences a delayed old-run hook', async () => {
+    server.close()
+    const executable = join(root, 'provider-config-atomic-hook.sh')
+    const launchLog = join(root, 'provider-config-atomic-hook-launches.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" >> ${JSON.stringify(launchLog)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Atomic provider A',
+      endpoint: 'https://atomic-a.example/', model: 'claude-atomic-a', apiKey: 'KEY_A'
+    })
+    const providerB = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Atomic provider B',
+      endpoint: 'https://atomic-b.example/', model: 'claude-atomic-b', apiKey: 'KEY_B'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    registerSession(database, 'provider-config-atomic-hook', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+      'binding-provider-config-atomic-hook', 'provider-config-atomic-hook',
+      'identity-provider-config-atomic-hook', JSON.stringify({
+        providerConfigId: providerA.id, model: 'claude-atomic-a', permissionMode: 'plan'
+      })
+    )
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    let atomicServer: RuntimeServer | undefined
+    const providerHooks = new ProviderHookServer(root, repository, {
+      onIdentityRecorded: ({ sessionId, runId }) => atomicServer?.providerIdentityRecorded(sessionId, runId)
+    })
+    await providerHooks.start()
+    const sessions = createTestSessionRegistry()
+    const atomicPort = new MockPort()
+    atomicServer = new RuntimeServer(
+      atomicPort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, providerHooks, undefined,
+      { providerConfigs, providerResumeTimeoutMs: 30_000 }
+    )
+    atomicPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-config-atomic-hook-renderer'
+    })
+    try {
+      atomicPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-atomic-hook', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => Boolean((await readFile(launchLog, 'utf8').catch(() => '')).trim()))
+      const firstLaunch = (await readFile(launchLog, 'utf8')).trim().split('\n')[0]!
+      const firstArguments = firstLaunch.split('|')[0]!.split(' ')
+      const settingsIndex = firstArguments.indexOf('--settings')
+      expect(settingsIndex).toBeGreaterThanOrEqual(0)
+      const firstSettings = JSON.parse(await readFile(firstArguments[settingsIndex + 1]!, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const oldHookUrl = firstSettings.hooks.Stop[0]!.hooks[0]!.url
+      expect((await fetch(oldHookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'Stop', session_id: 'identity-provider-config-atomic-hook',
+          model: { id: 'claude-atomic-a' }
+        })
+      })).status).toBe(200)
+      await waitUntil(() => !sessions.providerIdentityPending('provider-config-atomic-hook'))
+      const oldSession = sessions.get('provider-config-atomic-hook')!
+      const oldPid = oldSession.pid
+      const dispose = oldSession.dispose.bind(oldSession)
+      const disposeSpy = vi.spyOn(oldSession, 'dispose').mockImplementation((options) => {
+        setTimeout(() => dispose(options), 150)
+      })
+
+      atomicPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-atomic-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId: providerB.id }
+      })
+      await waitUntil(() => providerBindingMetadata('binding-provider-config-atomic-hook')
+        .providerConfigId === providerB.id)
+      expect((await fetch(oldHookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'Stop', session_id: 'identity-provider-config-atomic-hook',
+          model: { id: 'claude-atomic-a' }
+        })
+      })).status).toBe(200)
+      await waitUntil(() => atomicPort.findRpcResponse('provider-config-atomic-activate') !== undefined)
+      await waitUntilAsync(async () => (await readFile(launchLog, 'utf8').catch(() => ''))
+        .trim().split('\n').length === 2)
+      disposeSpy.mockRestore()
+
+      expect((atomicPort.findRpcResponse('provider-config-atomic-activate') as {
+        result: { sessionTransitions: unknown[] }
+      }).result.sessionTransitions).toContainEqual({
+        sessionId: 'provider-config-atomic-hook', status: 'updated'
+      })
+      expect(providerBindingMetadata('binding-provider-config-atomic-hook')).toMatchObject({
+        providerConfigId: providerB.id, model: 'claude-atomic-b', permissionMode: 'plan'
+      })
+      expect(sessions.get('provider-config-atomic-hook')?.pid).not.toBe(oldPid)
+      expect(atomicPort.last('terminal.hud')).toMatchObject({
+        hud: { model: 'claude-atomic-b', permissionMode: 'plan' }
+      })
+      const secondLaunch = (await readFile(launchLog, 'utf8')).trim().split('\n')[1]!
+      expect(secondLaunch).toContain('--model claude-atomic-b')
+      expect(secondLaunch).toContain('--resume identity-provider-config-atomic-hook')
+      expect(secondLaunch).toContain('|https://atomic-b.example|KEY_B')
+    } finally {
+      await sessions.shutdownAll()
+      atomicServer.close()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('restores a Session with its bound provider configuration and model after global defaults change', async () => {
     const executable = join(root, 'provider-bound-restore.sh')
     const log = join(root, 'provider-bound-restore-invocations.txt')
@@ -1010,6 +1137,26 @@ sleep 30
     let writable = false
     const sessions = createTestSessionRegistry()
     const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Storage baseline provider',
+      endpoint: 'https://storage-a.example/', model: 'claude-model-a', apiKey: 'KEY_A'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    for (const [sessionId, bindingId] of [
+      ['provider-config-faulted', 'binding-provider-config-faulted'],
+      ['provider-config-healthy', 'binding-provider-config-healthy']
+    ] as const) {
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           metadata_json, created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+        bindingId, sessionId, `identity-${sessionId}`,
+        JSON.stringify({
+          providerConfigId: providerA.id, model: 'claude-model-a', permissionMode: 'default'
+        })
+      )
+    }
     const providerPort = new MockPort()
     const providerRouter = new RuntimeRpcRouter(database, undefined, { providerConfigs })
     const providerServer = new RuntimeServer(
@@ -1040,6 +1187,9 @@ sleep 30
       }
       await waitUntil(() => providerPort.last('terminal.storage-fault')?.sessionId === 'provider-config-faulted')
       await waitUntil(() => sessions.has('provider-config-healthy'))
+      for (const sessionId of ['provider-config-faulted', 'provider-config-healthy']) {
+        providerServer.providerIdentityRecorded(sessionId, sessions.get(sessionId)!.runId!)
+      }
       const faultedPid = sessions.get('provider-config-faulted')!.pid
       const healthyPid = sessions.get('provider-config-healthy')!.pid
 
@@ -1065,12 +1215,102 @@ sleep 30
       await waitUntil(() => providerPort.findRpcResponse('provider-config-storage-activate') !== undefined)
       await waitUntil(() => sessions.get('provider-config-healthy')?.pid !== healthyPid)
 
+      const activation = providerPort.findRpcResponse('provider-config-storage-activate') as {
+        result: { sessionTransitions: unknown[] }
+      }
+      expect(activation.result.sessionTransitions).toEqual(expect.arrayContaining([
+        {
+          sessionId: 'provider-config-faulted', status: 'deferred',
+          reason: 'durability-fault'
+        },
+        { sessionId: 'provider-config-healthy', status: 'updated' }
+      ]))
+      expect(providerBindingMetadata('binding-provider-config-faulted')).toMatchObject({
+        providerConfigId: providerA.id, model: 'claude-model-a'
+      })
+      expect(providerBindingMetadata('binding-provider-config-healthy')).toMatchObject({
+        providerConfigId: providerId, model: 'claude-team'
+      })
       expect(sessions.get('provider-config-faulted')?.pid).toBe(faultedPid)
       expect(sessions.get('provider-config-healthy')?.pid).not.toBe(healthyPid)
     } finally {
       writable = true
       await sessions.shutdownAll()
       providerServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('defers provider activation while a restored Session identity is still pending', async () => {
+    server.close()
+    const executable = join(root, 'provider-config-pending-identity.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Pending identity provider A',
+      endpoint: 'https://pending-a.example/', model: 'claude-pending-a', apiKey: 'KEY_A'
+    })
+    const providerB = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Pending identity provider B',
+      endpoint: 'https://pending-b.example/', model: 'claude-pending-b', apiKey: 'KEY_B'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    registerSession(database, 'provider-config-pending-identity', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+      'binding-provider-config-pending-identity', 'provider-config-pending-identity',
+      'identity-provider-config-pending', JSON.stringify({
+        providerConfigId: providerA.id, model: 'claude-pending-a', permissionMode: 'default'
+      })
+    )
+    const sessions = createTestSessionRegistry()
+    const pendingPort = new MockPort()
+    const pendingServer = new RuntimeServer(
+      pendingPort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined,
+      { providerConfigs, providerResumeTimeoutMs: 30_000 }
+    )
+    pendingPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'provider-config-pending-identity-renderer'
+    })
+    try {
+      pendingPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-config-pending-identity', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('provider-config-pending-identity') &&
+        sessions.providerIdentityPending('provider-config-pending-identity'))
+      const originalPid = sessions.get('provider-config-pending-identity')!.pid
+      const bindingBefore = providerBindingMetadata('binding-provider-config-pending-identity')
+
+      pendingPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'provider-config-pending-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId: providerB.id }
+      })
+      await waitUntil(() => pendingPort.findRpcResponse('provider-config-pending-activate') !== undefined)
+
+      expect((pendingPort.findRpcResponse('provider-config-pending-activate') as {
+        result: { sessionTransitions: unknown[] }
+      }).result.sessionTransitions).toContainEqual({
+        sessionId: 'provider-config-pending-identity', status: 'deferred',
+        reason: 'provider-identity-pending'
+      })
+      expect(providerBindingMetadata('binding-provider-config-pending-identity')).toEqual(bindingBefore)
+      expect(sessions.get('provider-config-pending-identity')?.pid).toBe(originalPid)
+    } finally {
+      await sessions.shutdownAll()
+      pendingServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
@@ -4456,7 +4696,8 @@ sleep 30
       await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).includes('--dangerously-skip-permissions'))
 
       expect((await readFile(argumentFile, 'utf8')).trim().split('\n')).toEqual([
-        '--resume', 'provider-live-42', '--dangerously-skip-permissions'
+        '--model', 'claude-sonnet-4-6', '--resume', 'provider-live-42',
+        '--dangerously-skip-permissions'
       ])
       expect(terminalText(livePort)).toContain('\u001b[2J\u001b[3J\u001b[H')
       expect(livePort.last('terminal.hud')).toMatchObject({
@@ -4472,6 +4713,302 @@ sleep 30
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
       restoreEnv('MATOU_TEST_INPUT_FILE', previousInputFile)
+    }
+  })
+
+  it('persists a successful live model change for an immediate Fork binding and launch', async () => {
+    server.close()
+    const executable = join(root, 'session-model-fork.sh')
+    const launchLog = join(root, 'session-model-fork-launches.txt')
+    const inputFile = join(root, 'session-model-fork-input.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" >> ${JSON.stringify(launchLog)}`,
+      'stty raw -echo',
+      "printf 'model-fork-ready\\n'",
+      `cat >> ${JSON.stringify(inputFile)}`
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Session model provider A',
+      endpoint: 'https://provider-a.example/', model: 'claude-opus-4-6', apiKey: 'KEY_A'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    registerCanvasSession(database, 'session-model-fork-source', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+      'binding-session-model-fork-source', 'session-model-fork-source', 'provider-model-source',
+      JSON.stringify({
+        providerConfigId: providerA.id, model: 'claude-opus-4-6',
+        permissionMode: 'default', canFork: true
+      })
+    )
+    const sessions = createTestSessionRegistry()
+    const modelPort = new MockPort()
+    const modelServer = new RuntimeServer(
+      modelPort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined,
+      { providerConfigs, forkProviderIdentityTimeoutMs: 30_000 }
+    )
+    modelPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'session-model-fork-renderer'
+    })
+    try {
+      modelPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-model-fork-source', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('session-model-fork-source'))
+      modelServer.providerIdentityRecorded(
+        'session-model-fork-source', sessions.get('session-model-fork-source')!.runId!
+      )
+      await waitUntil(() => terminalText(modelPort).includes('model-fork-ready'))
+
+      modelPort.receive(rpc('session-model-fork-switch', 'session.set-model', {
+        sessionId: 'session-model-fork-source', modelStrategy: 'claude-sonnet-4-6'
+      }))
+      await waitUntil(() => modelPort.findRpcResponse('session-model-fork-switch') !== undefined)
+      await waitUntilAsync(async () => (await readFile(inputFile, 'utf8').catch(() => ''))
+        .includes('/model claude-sonnet-4-6'))
+      expect(providerBindingMetadata('binding-session-model-fork-source')).toMatchObject({
+        providerConfigId: providerA.id, model: 'claude-sonnet-4-6',
+        permissionMode: 'default', canFork: true
+      })
+
+      const workflow = new ForkWorkflowService(
+        root, database, new DomainTransactionManager(database),
+        { stopRuns: async () => undefined, providerConfigs }
+      )
+      const accepted = await workflow.createForkChild({
+        commandId: 'session-model-fork-create', commandType: 'session.fork-child',
+        requestHash: 'session-model-fork-create'
+      }, {
+        windowId: 'session-model-fork-window', sceneId: 'scene-session-model-fork-source',
+        sourceSessionId: 'session-model-fork-source', name: 'Model B child',
+        worktreeMode: 'current', now: 5
+      })
+      const childId = accepted.session!.id
+      expect(latestProviderBindingMetadata(childId)).toMatchObject({
+        providerConfigId: providerA.id, model: 'claude-sonnet-4-6',
+        permissionMode: 'default', inheritedConversation: true
+      })
+
+      const intents = new SessionForkIntentRepository(database)
+      const operationId = accepted.forkProgress!.operationId
+      const leaseNow = Date.now()
+      const lease = intents.acquireLease({
+        operationId, owner: 'session-model-fork-test', now: leaseNow, ttlMs: 60_000
+      })
+      if (lease.kind !== 'acquired') throw new Error('Session model Fork lease missing')
+      intents.advanceStage({
+        operationId, lease: lease.lease, stage: 'restoring-provider', now: leaseNow
+      })
+      await modelServer.startOrResumeSession({
+        sessionId: childId, executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      }, {
+        operationId, runId: 'session-model-fork-child-run', lease: lease.lease
+      })
+      await waitUntilAsync(async () => (await readFile(launchLog, 'utf8').catch(() => ''))
+        .trim().split('\n').length === 2)
+      expect((await readFile(launchLog, 'utf8')).trim().split('\n')[1]).toBe(
+        '--model claude-sonnet-4-6 --resume provider-model-source --fork-session|' +
+        'https://provider-a.example|KEY_A'
+      )
+    } finally {
+      await sessions.shutdownAll()
+      modelServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('restores a successful Session model change instead of a later global default', async () => {
+    server.close()
+    const executable = join(root, 'session-model-restart.sh')
+    const launchLog = join(root, 'session-model-restart-launches.txt')
+    const inputFile = join(root, 'session-model-restart-input.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" >> ${JSON.stringify(launchLog)}`,
+      'stty raw -echo',
+      "printf 'model-restart-ready\\n'",
+      `cat >> ${JSON.stringify(inputFile)}`
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Restart provider A',
+      endpoint: 'https://restart-a.example/', model: 'claude-opus-4-6', apiKey: 'KEY_A'
+    })
+    const providerC = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Restart provider C',
+      endpoint: 'https://restart-c.example/', model: 'claude-haiku-c', apiKey: 'KEY_C'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    registerSession(database, 'session-model-restart', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+      'binding-session-model-restart', 'session-model-restart', 'provider-model-restart',
+      JSON.stringify({
+        providerConfigId: providerA.id, model: 'claude-opus-4-6', permissionMode: 'default'
+      })
+    )
+    const firstSessions = createTestSessionRegistry()
+    const firstPort = new MockPort()
+    const firstServer = new RuntimeServer(
+      firstPort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, firstSessions, undefined, undefined, { providerConfigs }
+    )
+    firstPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'session-model-restart-first-renderer'
+    })
+    let restoredServer: RuntimeServer | undefined
+    let restoredSessions: RuntimeSessionRegistry | undefined
+    try {
+      firstPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-model-restart', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => firstSessions.has('session-model-restart'))
+      firstServer.providerIdentityRecorded(
+        'session-model-restart', firstSessions.get('session-model-restart')!.runId!
+      )
+      await waitUntil(() => terminalText(firstPort).includes('model-restart-ready'))
+      await waitUntilAsync(async () => (await readFile(launchLog, 'utf8').catch(() => ''))
+        .trim().split('\n').length === 1)
+      firstPort.receive(rpc('session-model-restart-switch', 'session.set-model', {
+        sessionId: 'session-model-restart', modelStrategy: 'claude-sonnet-4-6'
+      }))
+      await waitUntil(() => firstPort.findRpcResponse('session-model-restart-switch') !== undefined)
+      firstPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-model-restart'
+      })
+      await waitUntil(() => !firstSessions.has('session-model-restart'))
+      firstServer.close()
+
+      await providerConfigs.activate('claude-code', providerC.id)
+      restoredSessions = createTestSessionRegistry()
+      const restoredPort = new MockPort()
+      restoredServer = new RuntimeServer(
+        restoredPort, root, database,
+        new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+        undefined, restoredSessions, undefined, undefined, { providerConfigs }
+      )
+      restoredPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'session-model-restart-second-renderer'
+      })
+      restoredPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-model-restart', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => (await readFile(launchLog, 'utf8').catch(() => ''))
+        .trim().split('\n').length === 2)
+
+      expect((await readFile(launchLog, 'utf8')).trim().split('\n')[1]).toBe(
+        '--model claude-sonnet-4-6 --resume provider-model-restart|' +
+        'https://restart-a.example|KEY_A'
+      )
+      expect(restoredPort.last('terminal.hud')).toMatchObject({
+        hud: {
+          modelStrategy: 'claude-sonnet-4-6', model: 'claude-sonnet-4-6',
+          permissionMode: 'default'
+        }
+      })
+    } finally {
+      await firstSessions.shutdownAll()
+      await restoredSessions?.shutdownAll()
+      firstServer.close()
+      restoredServer?.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('keeps the prior binding and HUD model when sending the model command fails', async () => {
+    server.close()
+    const executable = join(root, 'session-model-send-failure.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const providerA = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Model failure provider A',
+      endpoint: 'https://failure-a.example/', model: 'claude-opus-4-6', apiKey: 'KEY_A'
+    })
+    await providerConfigs.activate('claude-code', providerA.id)
+    registerSession(database, 'session-model-send-failure', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, 1, 1, 1)`,
+      'binding-session-model-send-failure', 'session-model-send-failure',
+      'provider-model-send-failure', JSON.stringify({
+        providerConfigId: providerA.id, model: 'claude-opus-4-6', permissionMode: 'default'
+      })
+    )
+    const sessions = createTestSessionRegistry()
+    const failurePort = new MockPort()
+    const failureServer = new RuntimeServer(
+      failurePort, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined, { providerConfigs }
+    )
+    failurePort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'session-model-send-failure-renderer'
+    })
+    try {
+      failurePort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'session-model-send-failure', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('session-model-send-failure'))
+      failureServer.providerIdentityRecorded(
+        'session-model-send-failure', sessions.get('session-model-send-failure')!.runId!
+      )
+      expect(failurePort.last('terminal.hud')).toMatchObject({
+        hud: { modelStrategy: 'claude-opus-4-6', model: 'claude-opus-4-6' }
+      })
+      const write = vi.spyOn(sessions.get('session-model-send-failure')!, 'write')
+        .mockImplementation(() => { throw new Error('model command send failed') })
+
+      failurePort.receive(rpc('session-model-send-failure-switch', 'session.set-model', {
+        sessionId: 'session-model-send-failure', modelStrategy: 'claude-sonnet-4-6'
+      }))
+      await waitUntil(() => failurePort.findRpcError('session-model-send-failure-switch') !== undefined)
+      expect(providerBindingMetadata('binding-session-model-send-failure')).toMatchObject({
+        providerConfigId: providerA.id, model: 'claude-opus-4-6', permissionMode: 'default'
+      })
+      expect(failurePort.last('terminal.hud')).toMatchObject({
+        hud: { modelStrategy: 'claude-opus-4-6', model: 'claude-opus-4-6' }
+      })
+      write.mockRestore()
+    } finally {
+      await sessions.shutdownAll()
+      failureServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
     }
   })
 
@@ -5428,7 +5965,7 @@ describe('RuntimeServer session-scoped journal recovery', () => {
     }
   })
 
-  it('leaves a recovering Claude process and its saved permission unchanged', async () => {
+  it('leaves a recovering Claude process, permission, and provider binding unchanged', async () => {
     server.close()
     registerSession(database, 'recovering-agent-session', 'claude-code')
     database.run(
@@ -5454,10 +5991,13 @@ describe('RuntimeServer session-scoped journal recovery', () => {
     })
     coordinator.start()
     const sessions = createTestSessionRegistry()
+    const providerConfigs = new ProviderConfigStore(root)
     port = new MockPort()
     server = new RuntimeServer(
-      port, root, database, undefined, undefined, sessions, undefined, undefined,
-      { recoveryCoordinator: coordinator }
+      port, root, database,
+      new RuntimeRpcRouter(database, undefined, { providerConfigs }),
+      undefined, sessions, undefined, undefined,
+      { recoveryCoordinator: coordinator, providerConfigs }
     )
     try {
       port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'recovery-permission-test' })
@@ -5485,13 +6025,35 @@ describe('RuntimeServer session-scoped journal recovery', () => {
       }))
       await waitUntil(() => port.findRpcError('recovering-permission-bypass') !== undefined)
 
-      expect(database.get<{ metadata_json: string }>(
-        'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-recovering-agent'
-      )).toEqual({
-        metadata_json: JSON.stringify({
-          permissionMode: 'default', providerConfigId: 'anthropic-official', model: ''
-        })
+      const bindingBeforeActivation = providerBindingMetadata('binding-recovering-agent')
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'recovering-provider-upsert', method: 'provider-config.upsert',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { provider: {
+          cli: 'claude-code', name: 'Recovery deferred provider',
+          endpoint: 'https://recovery-b.example/', model: 'claude-recovery-b', apiKey: 'KEY_B'
+        } }
       })
+      await waitUntil(() => port.findRpcResponse('recovering-provider-upsert') !== undefined)
+      const providerId = (port.findRpcResponse('recovering-provider-upsert') as {
+        result: { provider: { id: string } }
+      }).result.provider.id
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'recovering-provider-activate', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: { cli: 'claude-code', providerId }
+      })
+      await waitUntil(() => port.findRpcResponse('recovering-provider-activate') !== undefined)
+      expect((port.findRpcResponse('recovering-provider-activate') as {
+        result: { sessionTransitions: unknown[] }
+      }).result.sessionTransitions).toContainEqual({
+        sessionId: 'recovering-agent-session', status: 'deferred',
+        reason: 'recovery-not-ready'
+      })
+
+      expect(providerBindingMetadata('binding-recovering-agent')).toEqual(bindingBeforeActivation)
       expect(sessions.get('recovering-agent-session')?.pid).toBe(originalPid)
     } finally {
       server.close()
@@ -5830,6 +6392,19 @@ function registerCanvasSession(
      VALUES (?, ?, ?, ?, 1)`,
     `mount-${sessionId}`, `scene-${sessionId}`, `node-${sessionId}`, sessionId
   )
+}
+
+function providerBindingMetadata(bindingId: string): Record<string, unknown> {
+  return JSON.parse(database.get<{ metadata_json: string }>(
+    'SELECT metadata_json FROM provider_bindings WHERE id = ?', bindingId
+  )!.metadata_json) as Record<string, unknown>
+}
+
+function latestProviderBindingMetadata(sessionId: string): Record<string, unknown> {
+  return JSON.parse(database.get<{ metadata_json: string }>(
+    `SELECT metadata_json FROM provider_bindings
+     WHERE session_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1`, sessionId
+  )!.metadata_json) as Record<string, unknown>
 }
 
 function rpc(requestId: string, method: RpcMethod, input: Record<string, unknown>) {

@@ -625,6 +625,49 @@ describe('ProviderHookServer', () => {
     })
   })
 
+  it('does not let an old launch registration overwrite a newer persisted model', async () => {
+    sessions.recordResumableProviderIdentity(command('existing-model-binding'), {
+      id: 'binding-existing-model', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'claude-existing-model',
+      metadata: { model: 'claude-opus-4-6', permissionMode: 'default' }, now: 3
+    })
+    const oldRun = await hooks.registerClaudeSession({
+      runId: 'run-old-model', sessionId: 'session-1', model: 'claude-opus-4-6'
+    })
+    sessions.updateProviderLaunchSettings(command('switch-model'), {
+      bindingId: 'binding-existing-model', providerConfigId: 'anthropic-official',
+      model: 'claude-sonnet-4-6', permissionMode: 'default', now: 4
+    })
+
+    expect((await postHook(oldRun.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'claude-existing-model'
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'claude-existing-model',
+      metadata: { model: 'claude-sonnet-4-6', lastHookEvent: 'Stop' }
+    })
+  })
+
+  it('reconciles an exact model id reported by the current provider hook', async () => {
+    sessions.recordResumableProviderIdentity(command('existing-hook-model-binding'), {
+      id: 'binding-hook-model', sessionId: 'session-1', provider: 'claude-code',
+      providerSessionId: 'claude-hook-model',
+      metadata: { model: 'claude-opus-4-6', permissionMode: 'default' }, now: 3
+    })
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-hook-model', sessionId: 'session-1', model: 'claude-opus-4-6'
+    })
+
+    expect((await postHook(registration.hookUrl, {
+      hook_event_name: 'Stop', session_id: 'claude-hook-model',
+      model: { id: 'claude-sonnet-4-6', display_name: 'Claude Sonnet 4.6' }
+    })).status).toBe(200)
+    expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
+      providerSessionId: 'claude-hook-model',
+      metadata: { model: 'claude-sonnet-4-6', lastHookEvent: 'Stop' }
+    })
+  })
+
   it('uses a transcript UUID when a hook version omits the direct session field', async () => {
     const registration = await hooks.registerClaudeSession({ runId: 'run-1', sessionId: 'session-1' })
 

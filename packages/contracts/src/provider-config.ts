@@ -16,6 +16,25 @@ export interface ProviderConfigSnapshot {
   activeProviderIds: Record<ProviderCli, string>
 }
 
+export type ProviderSessionActivationDeferredReason =
+  | 'durability-fault'
+  | 'recovery-not-ready'
+  | 'provider-identity-pending'
+  | 'session-not-running'
+  | 'restart-unavailable'
+
+export type ProviderSessionActivationTransition =
+  | { sessionId: string; status: 'updated' }
+  | {
+      sessionId: string
+      status: 'deferred'
+      reason: ProviderSessionActivationDeferredReason
+    }
+
+export interface ProviderConfigActivationResult extends ProviderConfigSnapshot {
+  sessionTransitions: ProviderSessionActivationTransition[]
+}
+
 export interface ProviderConfigInput {
   id?: string
   cli: ProviderCli

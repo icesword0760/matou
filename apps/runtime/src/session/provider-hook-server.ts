@@ -349,6 +349,11 @@ export class ProviderHookServer {
         // mode selected after this provider run started.
         const permissionMode = hookPermissionMode ??
           (isKnownIdentity ? undefined : registration.permissionMode)
+        const hookModel = providerCurrentModel(payload)
+        // Like permission, a registration model is only the launch-time fallback
+        // for a new identity. A known conversation keeps its durable Session choice
+        // unless the live provider reports an exact model id.
+        const model = hookModel ?? (isKnownIdentity ? undefined : registration.model)
         const now = Date.now()
         const forkAuthority = registration.forkAuthority
         try {
@@ -365,7 +370,7 @@ export class ProviderHookServer {
               ...(registration.providerConfigId === undefined
                 ? {}
                 : { providerConfigId: registration.providerConfigId }),
-              ...(registration.model === undefined ? {} : { model: registration.model }),
+              ...(model === undefined ? {} : { model }),
               ...(permissionMode === undefined ? {} : { permissionMode }),
               ...(cwd === undefined ? {} : { cwd }),
               lastHookEvent: eventName,
@@ -608,6 +613,12 @@ export function providerTranscriptPath(payload: Record<string, unknown>): string
   return nonEmptyText(payload.transcript_path) ??
     nonEmptyText(payload.transcriptPath) ??
     nonEmptyText(payload.agent_transcript_path)
+}
+
+export function providerCurrentModel(payload: Record<string, unknown>): string | undefined {
+  const model = payload.model
+  if (typeof model === 'string') return nonEmptyText(model)
+  return nonEmptyText(record(model)?.id)
 }
 
 const MAX_TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024

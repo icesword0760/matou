@@ -178,6 +178,15 @@ export class SessionHudRegistry {
     current.model = modelNameForStrategy(normalized)
   }
 
+  updateProviderModel(sessionId: string, model: string): void {
+    const current = this.#states.get(sessionId)
+    if (!current || current.mode !== 'agent' || !model.trim()) return
+    current.model = model
+    const strategy = normalizeModelStrategy(model)
+    if (strategy) current.modelStrategy = strategy
+    current.providerModelObserved = false
+  }
+
   updateSessionName(sessionId: string, name: string): void {
     const current = this.#states.get(sessionId)
     const normalized = text(name)

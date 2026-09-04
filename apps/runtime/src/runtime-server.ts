@@ -12,7 +12,9 @@ import {
   type RendererMessage,
   type RpcMethod,
   type RuntimeMessage,
-  type ProviderCli
+  type ProviderCli,
+  type ProviderSessionActivationDeferredReason,
+  type ProviderSessionActivationTransition
 } from '@matou/contracts'
 
 import { DomainEventStore } from './events/domain-event-store'
@@ -993,14 +995,17 @@ export class RuntimeServer {
         : undefined
       const permissionSessionId = message.method === 'session.set-permission-mode'
         ? textFromRpcInput(message.payload, 'sessionId') : undefined
+      const providerMutationSessionId = message.method === 'session.set-permission-mode' ||
+        message.method === 'session.set-model'
+        ? textFromRpcInput(message.payload, 'sessionId') : undefined
       const permissionSession = permissionSessionId === undefined
         ? undefined : this.#sessions.get(permissionSessionId)
       const ephemeralPermission = permissionSessionId !== undefined && permissionSession !== undefined &&
         permissionSession.profile !== 'shell' &&
         this.#sessionRepository.getResumeBinding(permissionSessionId, 'claude-code') === undefined
       this.#accessPolicy.assertRpcAllowed(message.method)
-      if (permissionSessionId !== undefined) {
-        this.#assertProviderMutationAllowed(permissionSessionId)
+      if (providerMutationSessionId !== undefined) {
+        this.#assertProviderMutationAllowed(providerMutationSessionId)
       }
       let result = ephemeralPermission
         ? {
@@ -1017,12 +1022,16 @@ export class RuntimeServer {
         const input = isRecord(message.payload) ? message.payload : undefined
         const cli = input?.cli === 'claude-code' || input?.cli === 'codex' ? input.cli : undefined
         const providerId = typeof input?.providerId === 'string' ? input.providerId : undefined
+        let sessionTransitions: ProviderSessionActivationTransition[] = []
         if (cli === 'claude-code' && providerId) {
-          await RuntimeServer.#restartProviderSessions(
+          sessionTransitions = await RuntimeServer.#restartProviderSessions(
             this.#sessions,
             cli,
             await this.#providerConfigs.launchSelection(cli, providerId)
           )
+        }
+        if (cli && providerId && isRecord(result)) {
+          result = { ...result, sessionTransitions }
         }
       }
       if (isGitMutation(message.method)) {
@@ -1715,6 +1724,19 @@ export class RuntimeServer {
       if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         permissionModeFromMetadata(providerSettingsBinding?.metadata)
+      const providerSelection = message.profile === 'shell'
+        ? undefined
+        : await this.#providerConfigs.launchSelection(
+            message.profile,
+            boundProviderSettings.providerConfigId
+          )
+      const providerModel = boundProviderSettings.model ?? providerSelection?.model
+      const providerLaunch = providerSelection === undefined
+        ? { env: {} as Record<string, string> }
+        : {
+            ...(providerModel ? { model: providerModel } : {}),
+            env: providerSelection.env
+          }
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -1723,7 +1745,8 @@ export class RuntimeServer {
           cwd,
           startedAt: Date.now(),
           resumable: Boolean(resumeBinding),
-          ...(permissionMode === undefined ? {} : { permissionMode })
+          ...(permissionMode === undefined ? {} : { permissionMode }),
+          ...(providerModel === undefined ? {} : { model: providerModel })
         })
       }
       const resumeMonitor = providerSessionId === undefined ? undefined : new ProviderResumeMonitor()
@@ -1750,19 +1773,6 @@ export class RuntimeServer {
           })
         }
       }
-      const providerSelection = message.profile === 'shell'
-        ? undefined
-        : await this.#providerConfigs.launchSelection(
-            message.profile,
-            boundProviderSettings.providerConfigId
-          )
-      const providerModel = boundProviderSettings.model ?? providerSelection?.model
-      const providerLaunch = providerSelection === undefined
-        ? { env: {} as Record<string, string> }
-        : {
-            ...(providerModel ? { model: providerModel } : {}),
-            env: providerSelection.env
-          }
       if (providerSettingsBinding && providerSelection && (
         boundProviderSettings.providerConfigId !== providerSelection.providerConfigId ||
         boundProviderSettings.model === undefined ||
@@ -3054,9 +3064,49 @@ export class RuntimeServer {
     const session = this.#sessions.get(sessionId)
     if (method === 'session.set-model') {
       const strategy = typeof input.modelStrategy === 'string' ? input.modelStrategy : ''
-      this.#hud.updateModel(sessionId, strategy)
-      session?.write(`/model ${strategy}\r`)
-      this.publishSessionHud(sessionId)
+      await this.#sessions.runExclusive(sessionId, async () => {
+        const active = this.#sessions.get(sessionId)
+        if (!active || active !== session || active.profile === 'shell') {
+          throw new RpcFault('CONFLICT', 'active AI Session is required for model change')
+        }
+        const binding = this.#sessionRepository.getProviderSettingsBinding(
+          sessionId,
+          active.profile
+        )
+        const launchSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
+        const selection = binding !== undefined && launchSettings.providerConfigId === undefined
+          ? await this.#providerConfigs.launchSelection(
+              active.profile,
+              launchSettings.providerConfigId
+            )
+          : undefined
+        if (this.#sessions.get(sessionId) !== active) {
+          throw new RpcFault('CONFLICT', 'AI Session changed before model update')
+        }
+        active.write(`/model ${strategy}\r`)
+        if (binding) {
+          try {
+            this.#sessionRepository.updateProviderLaunchSettings({
+              commandId: `session-model-${sessionId}-${randomUUID()}`,
+              commandType: 'provider-binding.launch-settings',
+              requestHash: `${sessionId}:${strategy}`
+            }, {
+              bindingId: binding.id,
+              providerConfigId: launchSettings.providerConfigId ?? selection!.providerConfigId,
+              model: strategy,
+              permissionMode: permissionModeFromMetadata(binding.metadata) ?? 'default',
+              now: Date.now()
+            })
+          } catch (error) {
+            if (launchSettings.model) {
+              try { active.write(`/model ${launchSettings.model}\r`) } catch { /* best-effort rollback */ }
+            }
+            throw error
+          }
+        }
+        this.#hud.updateModel(sessionId, strategy)
+        this.publishSessionHud(sessionId)
+      })
       return
     }
     if (method !== 'session.set-permission-mode') return
@@ -3087,7 +3137,7 @@ export class RuntimeServer {
     ) {
       throw new RpcFault(
         'CONFLICT',
-        'Session recovery must finish before changing permissions',
+        'Session recovery must finish before changing provider settings',
         true
       )
     }
@@ -3138,68 +3188,159 @@ export class RuntimeServer {
     sessions: RuntimeSessionRegistry,
     cli: ProviderCli,
     selection: ProviderLaunchSelection
-  ): Promise<void> {
-    const restarted = new Set<string>()
-    for (const server of RuntimeServer.#instances) {
-      if (server.#sessions !== sessions) continue
-      for (const [sessionId, descriptor] of server.#spawnDescriptors) {
-        if (descriptor.profile !== cli || restarted.has(sessionId)) continue
-        restarted.add(sessionId)
-        server.#rebindProviderLaunchSettings(sessionId, cli, selection)
-        await server.#respawnForProviderConfig(sessionId, descriptor)
+  ): Promise<ProviderSessionActivationTransition[]> {
+    const peers = [...RuntimeServer.#instances]
+      .filter((server) => server.#sessions === sessions)
+    const liveSessionIds = [...sessions.values()]
+      .filter((session) => session.profile === cli)
+      .map(({ sessionId }) => sessionId)
+    const transitions: ProviderSessionActivationTransition[] = []
+    for (const sessionId of liveSessionIds) {
+      const owners = peers.flatMap((server) => {
+        const descriptor = server.#spawnDescriptors.get(sessionId)
+        return descriptor?.profile === cli ? [{ server, descriptor }] : []
+      }).sort((left, right) => {
+        const revision = (right.descriptor.spawnRevision ?? 0) -
+          (left.descriptor.spawnRevision ?? 0)
+        if (revision !== 0) return revision
+        return Number(right.server.#attachedSessionIds.has(sessionId)) -
+          Number(left.server.#attachedSessionIds.has(sessionId))
+      })
+      const owner = owners[0]
+      if (!owner) {
+        transitions.push({
+          sessionId, status: 'deferred', reason: 'restart-unavailable'
+        })
+        continue
       }
+      transitions.push(await owner.server.#activateProviderForSession(
+        sessionId,
+        owner.descriptor,
+        selection,
+        peers
+      ))
     }
+    return transitions
   }
 
-  #rebindProviderLaunchSettings(
+  async #activateProviderForSession(
     sessionId: string,
-    cli: ProviderCli,
-    selection: ProviderLaunchSelection
-  ): void {
-    const binding = this.#sessionRepository.getProviderSettingsBinding(sessionId, cli)
-    if (!binding) return
-    this.#sessionRepository.updateProviderLaunchSettings({
-      commandId: `provider-config-activate-${sessionId}-${randomUUID()}`,
-      commandType: 'provider-binding.launch-settings',
-      requestHash: `${sessionId}:${selection.providerConfigId}:${selection.model}`
-    }, {
-      bindingId: binding.id,
-      providerConfigId: selection.providerConfigId,
-      model: selection.model,
-      permissionMode: permissionModeFromMetadata(binding.metadata) ?? 'default',
-      now: Date.now()
-    })
-  }
-
-  async #respawnForProviderConfig(
-    sessionId: string,
-    descriptor: TerminalSpawnMessage
-  ): Promise<void> {
-    await this.#sessions.runExclusive(sessionId, async () => {
+    descriptor: TerminalSpawnMessage,
+    selection: ProviderLaunchSelection,
+    peers: RuntimeServer[]
+  ): Promise<ProviderSessionActivationTransition> {
+    return this.#sessions.runExclusive(sessionId, async () => {
       const session = this.#sessions.get(sessionId)
-      if (!session || session.profile !== descriptor.profile) return
-      const recovery = this.#recoveryCoordinator?.snapshot()
-        .find((job) => job.sessionId === sessionId)
-      if (
-        session.durabilityState !== 'healthy' ||
-        (recovery !== undefined && recovery.state !== 'ready') ||
-        this.#sessions.providerIdentityPending(sessionId)
-      ) return
+      const deferredReason = this.#providerActivationDeferredReason(
+        sessionId,
+        descriptor.profile,
+        session,
+        peers
+      )
+      if (deferredReason) {
+        return { sessionId, status: 'deferred', reason: deferredReason }
+      }
+      const active = session!
+      const binding = this.#sessionRepository.getProviderSettingsBinding(
+        sessionId,
+        descriptor.profile as ProviderCli
+      )
+      const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
+      const previousPermission = permissionModeFromMetadata(binding?.metadata) ?? 'default'
+
+      // Stop the old run from contributing provider identity before its durable
+      // launch settings change. The endpoint stays alive for graceful final hooks,
+      // but its identity writes are fenced during this transition.
+      if (active.runId) {
+        for (const peer of peers) {
+          const registration = peer.#providerHookRegistrations
+            .get(sessionId)?.get(active.runId)?.registration
+          peer.#retireProviderHook(sessionId, active.runId, registration)
+        }
+      }
+      if (binding) {
+        this.#sessionRepository.updateProviderLaunchSettings({
+          commandId: `provider-config-activate-${sessionId}-${randomUUID()}`,
+          commandType: 'provider-binding.launch-settings',
+          requestHash: `${sessionId}:${selection.providerConfigId}:${selection.model}`
+        }, {
+          bindingId: binding.id,
+          providerConfigId: selection.providerConfigId,
+          model: selection.model,
+          permissionMode: previousPermission,
+          now: Date.now()
+        })
+      }
+
       const wasAttached = this.#attachedSessionIds.has(sessionId)
-      this.#clearProviderResumeTimer(sessionId)
-      this.#sessions.delete(sessionId, session)
-      this.#control?.backend.unregister(sessionId, session)
-      this.#control?.tokens.revokeRun(session.runId ?? sessionId)
-      this.#providerInputBuffers.delete(sessionId)
-      this.#workStatusTrackers.delete(sessionId)
-      session.dispose({ notifyExit: false })
-      await session.whenClosed()
-      await this.#spawn(descriptor, undefined, undefined, wasAttached)
-      const replacement = this.#sessions.get(sessionId)
-      if (replacement && replacement.profile === descriptor.profile) {
+      for (const peer of peers) {
+        peer.#clearProviderResumeTimer(sessionId)
+        peer.#control?.backend.unregister(sessionId, active)
+        peer.#control?.tokens.revokeRun(active.runId ?? sessionId)
+        peer.#providerInputBuffers.delete(sessionId)
+        peer.#workStatusTrackers.delete(sessionId)
+        peer.#permissionModeTrackers.delete(sessionId)
+      }
+      this.#sessions.delete(sessionId, active)
+      active.dispose({ notifyExit: false })
+      await active.whenClosed()
+
+      try {
+        await this.#spawn(descriptor, undefined, undefined, wasAttached)
+        const replacement = this.#sessions.get(sessionId)
+        if (!replacement || replacement === active || replacement.profile !== descriptor.profile) {
+          throw new Error('provider Session restart did not produce a matching process')
+        }
+        await Promise.race([
+          replacement.whenClosed(),
+          new Promise<void>((resolve) => setTimeout(resolve, 150))
+        ])
+        if (this.#sessions.get(sessionId) !== replacement) {
+          throw new Error('provider Session replacement exited during startup')
+        }
         replacement.display('\u001b[2J\u001b[3J\u001b[H')
+        this.#hud.updateProviderModel(sessionId, selection.model)
+        RuntimeServer.#publishAttachedSessionHud(sessionId)
+        return { sessionId, status: 'updated' }
+      } catch (error) {
+        if (
+          binding && previousSettings.providerConfigId !== undefined &&
+          previousSettings.model !== undefined
+        ) {
+          this.#sessionRepository.updateProviderLaunchSettings({
+            commandId: `provider-config-rollback-${sessionId}-${randomUUID()}`,
+            commandType: 'provider-binding.launch-settings',
+            requestHash: `${sessionId}:${previousSettings.providerConfigId}:${previousSettings.model}`
+          }, {
+            bindingId: binding.id,
+            providerConfigId: previousSettings.providerConfigId,
+            model: previousSettings.model,
+            permissionMode: previousPermission,
+            now: Date.now()
+          })
+          if (!this.#sessions.has(sessionId)) {
+            await this.#spawn(descriptor, undefined, undefined, wasAttached)
+          }
+        }
+        console.error(`[provider-config.activate] ${errorMessage(error)}`)
+        return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
       }
     })
+  }
+
+  #providerActivationDeferredReason(
+    sessionId: string,
+    profile: TerminalSpawnMessage['profile'],
+    session: PtySession | undefined,
+    peers: RuntimeServer[]
+  ): ProviderSessionActivationDeferredReason | undefined {
+    if (!session || session.profile !== profile) return 'session-not-running'
+    if (session.durabilityState !== 'healthy') return 'durability-fault'
+    const recovery = peers.flatMap((peer) => peer.#recoveryCoordinator?.snapshot() ?? [])
+      .find((job) => job.sessionId === sessionId && job.state !== 'ready')
+    if (recovery) return 'recovery-not-ready'
+    if (this.#sessions.providerIdentityPending(sessionId)) return 'provider-identity-pending'
+    return undefined
   }
 
   async #maybePromoteShellAgent(session: PtySession, data: string): Promise<boolean> {

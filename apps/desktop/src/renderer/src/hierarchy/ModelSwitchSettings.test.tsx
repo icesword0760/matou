@@ -3,7 +3,10 @@ import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { ProviderConfigSnapshot } from '@matou/contracts'
+import type {
+  ProviderConfigSnapshot,
+  ProviderSessionActivationTransition
+} from '@matou/contracts'
 import { ModelSwitchSettings, type ProviderConfigClient } from './ModelSwitchSettings'
 
 afterEach(cleanup)
@@ -49,9 +52,33 @@ describe('ModelSwitchSettings', () => {
       }
     })
   })
+
+  it('reports Sessions that keep their old provider while activation is deferred', async () => {
+    const client = fakeClient([
+      { sessionId: 'session-updated', status: 'updated' },
+      {
+        sessionId: 'session-storage', status: 'deferred',
+        reason: 'durability-fault'
+      },
+      {
+        sessionId: 'session-recovery', status: 'deferred',
+        reason: 'recovery-not-ready'
+      }
+    ])
+    render(<ModelSwitchSettings client={client} onClose={vi.fn()} />)
+
+    await screen.findAllByText('Anthropic 官方')
+    await userEvent.setup().click(screen.getByRole('button', { name: '切换到 Team Gateway' }))
+
+    expect(await screen.findByText(
+      '已切换为 Team Gateway；1 个 Claude Code 会话已更新，2 个会话暂缓并保持原配置'
+    )).toBeTruthy()
+  })
 })
 
-function fakeClient(): ProviderConfigClient {
+function fakeClient(
+  sessionTransitions: ProviderSessionActivationTransition[] = []
+): ProviderConfigClient {
   let state: ProviderConfigSnapshot = {
     revision: 1,
     activeProviderIds: { 'claude-code': 'anthropic', codex: 'openai' },
@@ -59,6 +86,9 @@ function fakeClient(): ProviderConfigClient {
       'claude-code': [{
         id: 'anthropic', cli: 'claude-code', name: 'Anthropic 官方',
         endpoint: 'https://api.anthropic.com', model: 'opus', hasApiKey: false
+      }, {
+        id: 'team-claude', cli: 'claude-code', name: 'Team Gateway',
+        endpoint: 'https://gateway.example', model: 'claude-team', hasApiKey: true
       }],
       codex: [{
         id: 'openai', cli: 'codex', name: 'OpenAI 官方', endpoint: 'https://api.openai.com/v1',
@@ -75,7 +105,7 @@ function fakeClient(): ProviderConfigClient {
       if (method === 'provider-config.activate') {
         const input = payload as { cli: 'claude-code' | 'codex'; providerId: string }
         state = { ...state, activeProviderIds: { ...state.activeProviderIds, [input.cli]: input.providerId } }
-        return state
+        return { ...state, sessionTransitions }
       }
       if (method === 'provider-config.upsert') {
         return { provider: { id: 'created' } }
