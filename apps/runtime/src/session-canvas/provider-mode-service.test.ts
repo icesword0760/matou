@@ -90,6 +90,32 @@ describe('ProviderModeService', () => {
     ].sort())
   })
 
+  it('enables Fork after a loaded catalog conversation is confirmed live', () => {
+    const initial = bootstrapClaudeTree({ canFork: false })
+
+    const loaded = providerModes.loadClaudeSession(command('load-forkable-history'), {
+      sessionId: initial.childSessionId,
+      bindingId: 'binding-loaded-history',
+      providerSessionId: 'provider-loaded-history',
+      title: '已有内容的会话',
+      permissionMode: 'default',
+      now: 30
+    })
+    expect(loaded.graph.nodes.find(({ sessionId }) => sessionId === initial.childSessionId))
+      .toMatchObject({ providerRestoreState: 'restoring', canFork: false })
+
+    const active = providerModes.observeHook(command('loaded-history-live'), {
+      sessionId: initial.childSessionId,
+      providerSessionId: 'provider-loaded-history',
+      eventName: 'unknown',
+      now: 31
+    })
+
+    expect(active.binding.metadata).toMatchObject({ loadedFromCatalog: true, canFork: true })
+    expect(active.graph.nodes.find(({ sessionId }) => sessionId === initial.childSessionId))
+      .toMatchObject({ providerRestoreState: 'none', workStatus: 'idle', canFork: true })
+  })
+
   it('returns a manually exited Claude node to ordinary Shell and preserves its children', () => {
     const initial = bootstrapClaudeTree()
 

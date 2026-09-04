@@ -398,7 +398,7 @@ export function projectSceneGraphFrom(
           providerSpawnRevision: providerSpawnRevision(row.provider_metadata_json)!
         }),
         canFork: row.kind === 'claude-code' &&
-          row.restore_state !== 'failed' &&
+          row.restore_state === 'none' &&
           providerCanFork(row.provider_metadata_json),
         title: row.title,
         cwd: row.cwd,
