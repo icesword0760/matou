@@ -381,14 +381,17 @@ function HierarchyProduct({
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
+  const loaderTitleRevision = useMemo(() => projection.sessions
+    .map(({ id, title }) => `${id}\u0000${title}`)
+    .join('\u0001'), [projection.sessions])
   const listLoaderSessions = useCallback((query: string, searchScope?: 'metadata' | 'all') => {
     if (!loaderSessionId) return Promise.resolve({ sessions: [], total: 0 })
     return commands.listClaudeSessions(loaderSessionId, query, searchScope)
-  }, [commands, loaderSessionId])
+  }, [commands, loaderSessionId, loaderTitleRevision])
   const loadLoaderDetail = useCallback((providerSessionId: string, query: string) => {
     if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, query)
-  }, [commands, loaderSessionId])
+  }, [commands, loaderSessionId, loaderTitleRevision])
   const cancelSessionLoader = useCallback(() => {
     setSessionLoader(null)
     setTerminalFocusRequest((value) => value + 1)
@@ -1368,7 +1371,8 @@ function HierarchyProduct({
                   setTerminalFocusRequest((value) => value + 1)
                 }} />
               {sessionLoader && !readOnly && <SessionLoaderDialog
-                targetTitle={sessionLoader.title}
+                targetTitle={projection.sessions.find(({ id }) => id === sessionLoader.sessionId)?.title ??
+                  sessionLoader.title}
                 targetRunning={sessionLoader.running}
                 {...(workspaceStageRef.current ? { portalTarget: workspaceStageRef.current } : {})}
                 listSessions={listLoaderSessions}
