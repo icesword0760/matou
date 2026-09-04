@@ -94,7 +94,7 @@ export function TerminalHud(props: {
   }
 
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
-    {hud?.mode === 'agent' && <button type="button"
+    {hud?.mode === 'agent' && hud.configCounts?.projectInstructionFileExists === true && <button type="button"
       className="status-field status-instructions is-clickable"
       aria-label="编辑 ClaudeMd" disabled={!gitClient}
       title="编辑当前项目的 CLAUDE.md"
@@ -222,7 +222,18 @@ function EnvironmentButton(props: {
 function HudDetail(props: { label: string; title: string; items: string[] }) {
   const [open, setOpen] = useState(false)
   const [style, setStyle] = useState<CSSProperties>({})
+  const closeTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(closeTimer.current), [])
+  const cancelClose = () => {
+    window.clearTimeout(closeTimer.current)
+    closeTimer.current = undefined
+  }
+  const scheduleClose = () => {
+    cancelClose()
+    closeTimer.current = window.setTimeout(() => setOpen(false), 140)
+  }
   const show = (target: HTMLElement) => {
+    cancelClose()
     const rect = target.getBoundingClientRect()
     setStyle({ left: rect.left + rect.width / 2, top: rect.top - 8 })
     setOpen(true)
@@ -230,9 +241,10 @@ function HudDetail(props: { label: string; title: string; items: string[] }) {
   return <>
     <span className="status-field status-detail status-config" role="button" tabIndex={0}
       aria-label={`查看${props.title}列表`}
-      onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={() => setOpen(false)}
-      onFocus={(event) => show(event.currentTarget)} onBlur={() => setOpen(false)}>{props.label}</span>
-    {open && createPortal(<div className="hud-detail-tooltip" role="tooltip" style={style}>
+      onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={scheduleClose}
+      onFocus={(event) => show(event.currentTarget)} onBlur={scheduleClose}>{props.label}</span>
+    {open && createPortal(<div className="hud-detail-tooltip" role="tooltip" style={style}
+      onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
       <strong>{props.title}</strong>
       <ul>{(props.items.length > 0 ? props.items : ['详情将在状态刷新后显示']).map((item, index) =>
         <li key={`${item}:${index}`}>{item}</li>)}</ul>

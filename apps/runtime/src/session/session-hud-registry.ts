@@ -12,6 +12,7 @@ export interface HudToolCount { name: string; count: number }
 export interface HudToolActivity { name: string; target?: string; status: 'running' | 'completed' | 'error' }
 export interface HudConfigCounts {
   instructionFiles: number
+  projectInstructionFileExists: boolean
   mcpServers: number
   hooks: number
   mcpServerNames: string[]
@@ -328,6 +329,7 @@ export class SessionHudRegistry {
     current.configCwd = current.cwd
     current.configCheckedAt = this.#now()
     return !previous || previous.instructionFiles !== next.instructionFiles ||
+      previous.projectInstructionFileExists !== next.projectInstructionFileExists ||
       previous.mcpServers !== next.mcpServers || previous.hooks !== next.hooks ||
       previous.mcpServerNames.join('\0') !== next.mcpServerNames.join('\0') ||
       previous.hookNames.join('\0') !== next.hookNames.join('\0')
@@ -364,6 +366,7 @@ export class SessionHudRegistry {
 
 export function inspectProviderConfig(cwd: string, configDir: string): HudConfigCounts {
   let instructionFiles = 0
+  const projectInstructionFileExists = existsSync(join(cwd, 'CLAUDE.md'))
   const hookNames = new Set<string>()
   const userMcp = new Set<string>()
   const projectMcp = new Set<string>()
@@ -400,6 +403,7 @@ export function inspectProviderConfig(cwd: string, configDir: string): HudConfig
   const mcpServerNames = [...userMcp, ...projectMcp]
   return {
     instructionFiles,
+    projectInstructionFileExists,
     mcpServers: mcpServerNames.length,
     hooks: hookNames.size,
     mcpServerNames,

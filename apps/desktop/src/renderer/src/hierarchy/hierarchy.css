@@ -366,7 +366,7 @@ button { -webkit-app-region: no-drag; }
 .team-role-badge.team-input { color: #ff9500; background: rgba(255,149,0,.15); }
 .team-role-badge.team-error { color: #ff3b30; background: rgba(255,59,48,.15); }
 .team-role-badge.team-idle { color: #8e8e93; background: rgba(142,142,147,.15); }
-.hud-detail-tooltip { position: fixed; z-index: 11020; min-width: 156px; max-width: 320px; padding: 9px 11px; transform: translate(-50%,-100%); border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; background: #1c2128; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 11px; line-height: 1.45; pointer-events: none; }
+.hud-detail-tooltip { position: fixed; z-index: 11020; min-width: 156px; max-width: 320px; padding: 9px 11px; transform: translate(-50%,-100%); border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; background: #1c2128; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 11px; line-height: 1.45; pointer-events: auto; }
 .hud-detail-tooltip strong { display: block; margin-bottom: 5px; color: #f0f3f6; font-size: 11px; }
 .hud-detail-tooltip ul { display: grid; max-height: 210px; margin: 0; padding: 0; overflow: hidden auto; list-style: none; gap: 3px; }
 .hud-detail-tooltip li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

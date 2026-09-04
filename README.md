@@ -113,8 +113,8 @@ Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt hi
 
 - 当前模型、权限模式、上下文窗口与已用比例
 - 周期用量、重置时间、当前目录、Git 分支与脏状态
-- MCP、工具和 Agent 数量；悬停即可查看对应明细，不会再被右侧长文本挤掉
-- 最左侧 `ClaudeMd` 入口，可直接编辑并保存当前项目的 `CLAUDE.md`
+- MCP、工具和 Agent 数量；悬停后可把鼠标移入明细框滚动查看，不会再被右侧长文本挤掉
+- 当前项目存在 `CLAUDE.md` 时，最左侧显示 `ClaudeMd` 入口，可直接编辑并保存
 - 待办进度、需要输入、错误状态与 MCP 异常；普通“任务中”和 `Local` 不再占用空间
 
 ![Claude Code AI HUD 与分级通知中心](assets/shots/agent-hud-notifications-demo.png)

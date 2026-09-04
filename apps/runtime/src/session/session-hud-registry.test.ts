@@ -234,12 +234,12 @@ describe('PRD 02 authoritative Session HUD state', () => {
 
     const inspectProviderConfig = (module as unknown as {
       inspectProviderConfig(cwd: string, configDir: string): {
-        instructionFiles: number; mcpServers: number; hooks: number
+        instructionFiles: number; projectInstructionFileExists: boolean; mcpServers: number; hooks: number
         mcpServerNames: string[]; hookNames: string[]
       }
     }).inspectProviderConfig
     expect(inspectProviderConfig(cwd, configDir)).toEqual({
-      instructionFiles: 3, mcpServers: 3, hooks: 3,
+      instructionFiles: 3, projectInstructionFileExists: false, mcpServers: 3, hooks: 3,
       mcpServerNames: ['user_bridge', 'project_bridge', 'local_bridge'],
       hookNames: ['Stop', 'Notification', 'PreToolUse']
     })
@@ -268,16 +268,18 @@ describe('PRD 02 authoritative Session HUD state', () => {
     const registry = new SessionHudRegistry(Date.now, configDir)
     registry.spawn({ sessionId: 'agent-live', profile: 'claude-code', cwd })
     expect(registry.snapshot('agent-live')?.configCounts).toEqual({
-      instructionFiles: 0, mcpServers: 0, hooks: 0, mcpServerNames: [], hookNames: []
+      instructionFiles: 0, projectInstructionFileExists: false,
+      mcpServers: 0, hooks: 0, mcpServerNames: [], hookNames: []
     })
 
+    await writeFile(join(cwd, 'CLAUDE.md'), 'project instructions')
     await writeFile(join(configDir, 'settings.json'), JSON.stringify({
       mcpServers: { live_bridge: {} }, hooks: { Stop: [] }
     }))
 
     expect(registry.refreshConfig('agent-live')).toBe(true)
     expect(registry.snapshot('agent-live')?.configCounts).toEqual({
-      instructionFiles: 0, mcpServers: 1, hooks: 1,
+      instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 1, hooks: 1,
       mcpServerNames: ['live_bridge'], hookNames: ['Stop']
     })
     expect(registry.configWatchTargets('agent-live')).toEqual(expect.arrayContaining([

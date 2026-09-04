@@ -81,6 +81,7 @@ export interface HudToolCount { name: string; count: number }
 export interface HudToolActivity { name: string; target?: string; status: 'running' | 'completed' | 'error' }
 export interface HudConfigCounts {
   instructionFiles: number
+  projectInstructionFileExists?: boolean
   mcpServers: number
   hooks: number
   mcpServerNames?: string[]

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { GitRepositoryStatus, RpcMethod } from '@matou/contracts'
@@ -9,7 +9,10 @@ import type { GitRequestClient } from './GitControlMenu'
 import type { SessionHudView } from '../hierarchy/hierarchy-types'
 import type { SessionEnvironmentActions } from './EnvironmentControlMenu'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 describe('PRD 02 bottom HUD', () => {
   it('renders the reference product Shell field order and hides unavailable data silently', () => {
@@ -95,7 +98,7 @@ describe('PRD 02 bottom HUD', () => {
       teamRole: 'Leader', teamStatus: 'running',
       usageWindows: [{ label: 'Weekly', percent: 8, resetsAt: Date.now() + 4 * 86_400_000 + 22 * 3_600_000 }],
       configCounts: {
-        instructionFiles: 1, mcpServers: 2, hooks: 11,
+        instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 2, hooks: 11,
         mcpServerNames: ['browser-bridge', 'filesystem'],
         hookNames: ['Stop', 'Notification']
       },
@@ -133,7 +136,8 @@ describe('PRD 02 bottom HUD', () => {
 
   it('keeps ClaudeMd first and removes Local and elapsed time from the compact HUD', () => {
     const { container } = render(<TerminalHud hud={agent({
-      cwd: '/Users/demo/project', startedAt: Date.now() - 90_000, taskStatus: 'running'
+      cwd: '/Users/demo/project', startedAt: Date.now() - 90_000, taskStatus: 'running',
+      configCounts: { instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 0, hooks: 0 }
     })} environment={{
       kind: 'local', state: 'ready', path: '/Users/demo/project', localExecutionContextId: 'local-context'
     }} environmentActions={environmentActions()} runtimeClient={{ request: vi.fn() }} />)
@@ -145,11 +149,20 @@ describe('PRD 02 bottom HUD', () => {
     expect(container.querySelector('.status-info')?.textContent).not.toContain('⏱')
   })
 
+  it('hides ClaudeMd when the current project has no root instruction file', () => {
+    render(<TerminalHud hud={agent({
+      cwd: '/Users/demo/project',
+      configCounts: { instructionFiles: 1, projectInstructionFileExists: false, mcpServers: 0, hooks: 0 }
+    })} runtimeClient={{ request: vi.fn() }} />)
+
+    expect(screen.queryByRole('button', { name: '编辑 ClaudeMd' })).toBeNull()
+  })
+
   it('shows MCP, Tool and Agent detail lists on hover or keyboard focus', async () => {
     const user = userEvent.setup()
     render(<TerminalHud hud={agent({
       configCounts: {
-        instructionFiles: 1, mcpServers: 2, hooks: 1,
+        instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 2, hooks: 1,
         mcpServerNames: ['browser-bridge', 'filesystem'], hookNames: ['Stop']
       },
       runningTools: [{ name: 'Edit', target: '/repo/src/App.tsx' }],
@@ -162,15 +175,39 @@ describe('PRD 02 bottom HUD', () => {
     expect(screen.getByRole('tooltip').textContent).toContain('browser-bridge')
     expect(screen.getByRole('tooltip').textContent).toContain('filesystem')
     await user.unhover(screen.getByText('2 MCPs'))
+    await new Promise((resolve) => window.setTimeout(resolve, 160))
 
     fireEvent.focus(screen.getByText('6 Tools'))
     expect(screen.getByRole('tooltip').textContent).toContain('Edit · 运行中')
     expect(screen.getByRole('tooltip').textContent).toContain('Read · 3 次')
     fireEvent.blur(screen.getByText('6 Tools'))
+    await new Promise((resolve) => window.setTimeout(resolve, 160))
 
     await user.hover(screen.getByText('2 Agents'))
     expect(screen.getByRole('tooltip').textContent).toContain('reviewer')
     expect(screen.getByRole('tooltip').textContent).toContain('test-runner')
+  })
+
+  it('keeps a detail list open while the pointer moves into and scrolls the popover', () => {
+    vi.useFakeTimers()
+    render(<TerminalHud hud={agent({
+      configCounts: {
+        instructionFiles: 0, projectInstructionFileExists: false, mcpServers: 8, hooks: 0,
+        mcpServerNames: Array.from({ length: 8 }, (_, index) => `server-${index + 1}`)
+      }
+    })} />)
+
+    const trigger = screen.getByText('8 MCPs')
+    fireEvent.mouseEnter(trigger)
+    const tooltip = screen.getByRole('tooltip')
+    fireEvent.mouseLeave(trigger)
+    fireEvent.mouseEnter(tooltip)
+    act(() => vi.advanceTimersByTime(300))
+    expect(screen.getByRole('tooltip').textContent).toContain('server-8')
+
+    fireEvent.mouseLeave(tooltip)
+    act(() => vi.advanceTimersByTime(300))
+    expect(screen.queryByRole('tooltip')).toBeNull()
   })
 
   it('opens the current project instruction file, edits it and saves it', async () => {
@@ -189,7 +226,10 @@ describe('PRD 02 bottom HUD', () => {
         return await request(method, payload, options) as T
       }
     }
-    render(<TerminalHud hud={agent({ cwd: '/Users/demo/project' })}
+    render(<TerminalHud hud={agent({
+      cwd: '/Users/demo/project',
+      configCounts: { instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 0, hooks: 0 }
+    })}
       runtimeClient={runtimeClient} />)
 
     await user.click(screen.getByRole('button', { name: '编辑 ClaudeMd' }))

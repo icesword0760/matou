@@ -170,7 +170,10 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
     await expect(hud).not.toContainText('任务中')
     await expect(hud).toContainText('▸实现 HUD(1/2)')
     await hud.getByText('1 MCPs').hover()
-    await expect(fixture.page.getByRole('tooltip')).toContainText('browser_bridge')
+    const mcpTooltip = fixture.page.getByRole('tooltip')
+    await expect(mcpTooltip).toContainText('browser_bridge')
+    await mcpTooltip.hover()
+    await expect(mcpTooltip).toBeVisible()
     await fixture.page.mouse.move(900, 500)
 
     await hud.getByRole('button', { name: '编辑 ClaudeMd' }).click()
@@ -194,6 +197,8 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
     await writeFile(join(evidenceDirectory, 'agent-hud.json'), JSON.stringify(
       await hudGeometry(fixture.page.locator('body')), null, 2
     ))
+    await rm(join(fixture.workspaceDirectory, 'CLAUDE.md'))
+    await expect(hud.getByRole('button', { name: '编辑 ClaudeMd' })).toHaveCount(0)
 
     await fixture.page.getByRole('button', { name: '设置' }).click()
     const providerSettings = fixture.page.getByRole('region', { name: '模型切换设置' })
