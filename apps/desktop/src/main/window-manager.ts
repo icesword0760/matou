@@ -8,6 +8,11 @@ export interface ManagedWindow {
 
 export class WindowManager {
   readonly #windows = new Map<string, ManagedWindow>()
+  readonly #activateApplication: () => void
+
+  constructor(activateApplication: () => void = () => undefined) {
+    this.#activateApplication = activateApplication
+  }
 
   register(windowId: string, window: ManagedWindow): void {
     this.#windows.set(windowId, window)
@@ -23,6 +28,7 @@ export class WindowManager {
 
   showWindow(windowId: string): void {
     const window = this.#require(windowId)
+    this.#activateApplication()
     window.show()
     window.focus()
   }

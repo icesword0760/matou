@@ -32,7 +32,7 @@ import {
 import { APP_DISPLAY_NAME, APP_STORAGE_DIRECTORY_NAME } from '../shared/brand'
 
 let runtimeHost: RuntimeHost | undefined
-const windows = new WindowManager()
+const windows = new WindowManager(() => app.focus({ steal: true }))
 const workspaceOpenRequests = new WorkspaceOpenRequests()
 const browserWindows = new Map<string, BrowserWindow>()
 const dagBrowserWindows = new Map<string, BrowserWindow>()

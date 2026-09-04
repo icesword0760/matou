@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import os from 'node:os'
 import { resolve } from 'node:path'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import {
   PROTOCOL_VERSION,
@@ -491,6 +492,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
       await backgroundServer.startOrResumeSession(descriptor)
     },
     waitUntilReady: (sessionId, signal) => providerReady.wait(sessionId, 60_000, signal),
+    waitUntilForkSettled: (sessionId) => waitUntilForkSettled(database, sessionId),
     sendPrompt: (sessionId, prompt) => controlBackend.sendText(sessionId, prompt, true)
   })
   const hostActions = new RuntimeHostActionFacade({
@@ -806,6 +808,23 @@ function validTerminalSize(
   return Number.isInteger(value) && value !== null && value >= minimum && value <= maximum
     ? value
     : fallback
+}
+
+async function waitUntilForkSettled(
+  database: RuntimeDatabase,
+  sessionId: string,
+  timeoutMs = 70_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const stage = database.get<{ stage: string }>(
+      'SELECT stage FROM session_fork_intents WHERE session_id = ?', sessionId
+    )?.stage
+    if (stage === 'succeeded' || stage === 'failed') return
+    if (stage === undefined) throw new Error(`Fork 会话 ${sessionId} 缺少执行记录`)
+    if (Date.now() >= deadline) throw new Error(`等待 Fork 会话 ${sessionId} 完成超时`)
+    await delay(25)
+  }
 }
 
 class BackgroundRuntimePort implements RuntimePort {

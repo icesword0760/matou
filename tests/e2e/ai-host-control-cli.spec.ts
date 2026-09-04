@@ -4,11 +4,12 @@ import { join } from 'node:path'
 import { expect, test, type Locator } from '@playwright/test'
 
 import { launchMatou } from './matou-fixture'
+import { runShellMtJson, shellQuote } from './fixtures/ai-host-control-fixture'
 import { terminalCommand, visibleSurfaces, waitForShell } from './fixtures/session-canvas-fixture'
 
 test('identifies the caller and sends to a sibling without moving the Matou UI', async () => {
   test.setTimeout(60_000)
-  const fixture = await launchMatou()
+  const fixture = await launchMatou({ env: { MATOU_E2E_DISPLAY: 'primary' } })
   try {
     await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
     const first = visibleSurfaces(fixture.page).first()
@@ -29,7 +30,7 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     expect(firstSessionId).toBeTruthy()
 
     const identifyFile = join(fixture.rootDirectory, 'mt-identify.json')
-    const identity = await runMtJson(first, 'mt identify --json', identifyFile) as {
+    const identity = await runShellMtJson(first, 'mt identify --json', identifyFile) as {
       target: { session: { id: string }; canvas: { name: string }; dag: { depth: number } }
     }
     expect(identity.target.session.id).toBe(firstSessionId)
@@ -47,7 +48,7 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     await focusTerminal(stableFirst)
     const uiBefore = await uiState(fixture.page.locator('body'))
     const resultFile = join(fixture.rootDirectory, 'mt-send.json')
-    const result = await runMtJson(
+    const result = await runShellMtJson(
       stableFirst,
       'mt send right "printf __MT_REMOTE_OK__" --enter --json',
       resultFile
@@ -57,7 +58,7 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     expect(await uiState(fixture.page.locator('body'))).toEqual(uiBefore)
 
     const readFilePath = join(fixture.rootDirectory, 'mt-read.json')
-    const current = await runMtJson(stableFirst, 'mt read right --json', readFilePath) as {
+    const current = await runShellMtJson(stableFirst, 'mt read right --json', readFilePath) as {
       source: string
       text: string
     }
@@ -73,54 +74,6 @@ async function focusTerminal(surface: Locator): Promise<void> {
   await surface.click({ position: { x: 12, y: 12 } })
   await expect(pane).toHaveAttribute('data-active', 'true')
   await surface.locator('.xterm-helper-textarea').focus()
-}
-
-async function typeCommand(surface: Locator, command: string): Promise<void> {
-  const textarea = surface.locator('.xterm-helper-textarea')
-  await textarea.focus()
-  await textarea.pressSequentially(command, { delay: 1 })
-  await textarea.press('Enter')
-}
-
-async function runMtJson(surface: Locator, command: string, outputPath: string): Promise<unknown> {
-  const statusPath = `${outputPath}.status`
-  const stderrPath = `${outputPath}.stderr`
-  await typeCommand(
-    surface,
-    `${command} > ${shellQuote(outputPath)} 2> ${shellQuote(stderrPath)}; ` +
-      `printf '%s' $? > ${shellQuote(statusPath)}`
-  )
-
-  await expect.poll(async () => {
-    try {
-      return (await readFile(statusPath, 'utf8')).trim()
-    } catch {
-      return undefined
-    }
-  }, {
-    message: `等待真实 mt 命令结束：${command}`,
-    timeout: 12_000
-  }).not.toBeUndefined()
-  const status = (await readFile(statusPath, 'utf8')).trim()
-
-  if (status !== '0') {
-    const stderr = await readFile(stderrPath, 'utf8').catch(() => '')
-    const terminal = await surface.locator('.xterm-rows').innerText().catch(() => '')
-    throw new Error(
-      `mt command exited with ${status}: ${command}\nstderr: ${stderr.trim()}\nterminal:\n${terminal}`
-    )
-  }
-
-  const json = await readFile(outputPath, 'utf8')
-  try {
-    return JSON.parse(json)
-  } catch {
-    throw new Error(`mt command returned invalid JSON: ${command}\nstdout: ${json}`)
-  }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`
 }
 
 async function uiState(root: Locator): Promise<Record<string, unknown>> {

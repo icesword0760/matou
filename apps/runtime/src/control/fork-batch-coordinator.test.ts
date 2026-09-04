@@ -97,6 +97,7 @@ function coordinatorFixture(overrides: Partial<{
   retryChild: RetryChild
   startSession: (sessionId: string) => Promise<void>
   waitUntilReady: (sessionId: string, signal?: AbortSignal) => Promise<unknown>
+  waitUntilForkSettled: (sessionId: string) => Promise<void>
   sendPrompt: (sessionId: string, prompt: string) => Promise<void>
 }> = {}) {
   const createChild = vi.fn<CreateChild>(overrides.createChild ?? (async (_command, input) => (
@@ -105,11 +106,19 @@ function coordinatorFixture(overrides: Partial<{
   const retryChild = vi.fn<RetryChild>(overrides.retryChild ?? (async () => forkResult('retried-session')))
   const startSession = vi.fn(overrides.startSession ?? (async () => undefined))
   const waitUntilReady = vi.fn(overrides.waitUntilReady ?? (async () => undefined))
+  const waitUntilForkSettled = overrides.waitUntilForkSettled === undefined
+    ? undefined
+    : vi.fn(overrides.waitUntilForkSettled)
   const sendPrompt = vi.fn(overrides.sendPrompt ?? (async () => undefined))
   const coordinator = new ForkBatchCoordinator({
-    database, createChild, retryChild, startSession, waitUntilReady, sendPrompt, now: () => 123
+    database, createChild, retryChild, startSession, waitUntilReady,
+    ...(waitUntilForkSettled === undefined ? {} : { waitUntilForkSettled }),
+    sendPrompt, now: () => 123
   })
-  return { coordinator, createChild, retryChild, startSession, waitUntilReady, sendPrompt }
+  return {
+    coordinator, createChild, retryChild, startSession,
+    waitUntilReady, waitUntilForkSettled, sendPrompt
+  }
 }
 
 describe('ForkBatchCoordinator', () => {
@@ -154,6 +163,39 @@ describe('ForkBatchCoordinator', () => {
     ])
     expect(result.retry).toEqual({ batchKey: 'batch-1', itemKeys: ['one'] })
     expect(result).toMatchObject({ succeeded: 2, failed: 1 })
+  })
+
+  it('waits for pending create-only Forks to reach a terminal result', async () => {
+    const real = await realForkFixture()
+    const waitUntilForkSettled = vi.fn(async (sessionId: string) => {
+      database.run(
+        `UPDATE session_fork_intents
+         SET state = 'succeeded', stage = 'succeeded', completed_steps = total_steps,
+             completed_at = 130, updated_at = 130
+         WHERE session_id = ?`,
+        sessionId
+      )
+    })
+    const input = realBatchInput(real.source, {
+      itemKey: 'settled', title: '等待就绪方案', environment: real.environment
+    }, 'settled-create-only')
+    const coordinator = new ForkBatchCoordinator({
+      database,
+      createChild: (command, forkInput) => real.workflow.createForkChild(command, forkInput),
+      retryChild: (command, forkInput) => real.workflow.retryFork(command, forkInput),
+      startSession: async () => undefined,
+      waitUntilReady: async () => undefined,
+      waitUntilForkSettled,
+      sendPrompt: async () => undefined,
+      now: () => 123
+    })
+
+    const result = await coordinator.createChildren(input)
+
+    expect(result.items[0]).toMatchObject({ state: 'ready' })
+    expect(waitUntilForkSettled).toHaveBeenCalledWith(
+      result.items[0]!.sessionRef!.slice('session:'.length)
+    )
   })
 
   it('replays a completed batch result without creating successful nodes again', async () => {

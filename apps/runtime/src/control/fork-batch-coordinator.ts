@@ -74,6 +74,7 @@ export interface ForkBatchCoordinatorDependencies {
   retryChild(command: DomainCommandMetadata, input: RetryForkInput): Promise<ForkWorkflowResult>
   startSession(sessionId: string): Promise<void>
   waitUntilReady(sessionId: string, signal?: AbortSignal): Promise<unknown>
+  waitUntilForkSettled?(sessionId: string): Promise<void>
   sendPrompt(sessionId: string, prompt: string): Promise<void>
   now?: () => number
 }
@@ -348,6 +349,7 @@ export class ForkBatchCoordinator {
         await this.#startItem(input.batchKey, item, row)
       }
     }
+    await Promise.all(input.items.map((item) => this.#settleCreateOnlyItem(input.batchKey, item)))
     this.#refreshAll(input)
     return this.#result(input)
   }
@@ -376,8 +378,13 @@ export class ForkBatchCoordinator {
         if (shouldResumeStart(row)) {
           await this.#startItem(input.batchKey, item, row)
         }
-        row = this.#refreshItem(input.batchKey, item)
-        this.#recordRetryItem(attempt.attempt_id, item.itemKey, 'completed', row)
+        row = await this.#settleCreateOnlyItem(input.batchKey, item)
+        this.#recordRetryItem(
+          attempt.attempt_id,
+          item.itemKey,
+          row.state === 'failed' ? 'failed' : 'completed',
+          row
+        )
         continue
       }
 
@@ -405,6 +412,7 @@ export class ForkBatchCoordinator {
       if (shouldResumeStart(row)) {
         await this.#startItem(input.batchKey, item, row)
       }
+      row = await this.#settleCreateOnlyItem(input.batchKey, item)
       row = this.#refreshItem(input.batchKey, item)
       this.#recordRetryItem(
         attempt.attempt_id,
@@ -416,6 +424,20 @@ export class ForkBatchCoordinator {
     this.#completeRetryAttempt(attempt.attempt_id)
     this.#refreshAll(input)
     return this.#result(input)
+  }
+
+  async #settleCreateOnlyItem(
+    batchKey: string,
+    item: ResolvedForkItemInput
+  ): Promise<BatchItemRow> {
+    let row = this.#refreshItem(batchKey, item)
+    if (
+      item.start === true || row.state !== 'created' || row.session_id === null ||
+      this.#dependencies.waitUntilForkSettled === undefined
+    ) return row
+    await this.#dependencies.waitUntilForkSettled(row.session_id)
+    row = this.#refreshItem(batchKey, item)
+    return row
   }
 
   async #createItem(
