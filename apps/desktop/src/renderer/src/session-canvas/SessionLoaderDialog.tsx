@@ -219,10 +219,14 @@ export function SessionLoaderDialog(props: {
                 if (element) eventRefs.current.set(event.index, element)
                 else eventRefs.current.delete(event.index)
               }}
-              className={`session-loader-event is-${event.kind}${event.matched ? ' matched' : ''}`}>
-              <div><strong>{event.kind === 'tool' ? event.toolName ?? '工具' : event.role === 'user' ? '你' : 'Claude'}</strong>
+              className={`session-loader-event is-${event.kind}${event.matched ? ' matched' : ''}${
+                matchedEvents[activeMatch]?.index === event.index ? ' active-match' : ''}`}>
+              <div><strong>{highlightMatches(
+                event.kind === 'tool' ? event.toolName ?? '工具' : event.role === 'user' ? '你' : 'Claude',
+                effectiveContentQuery
+              )}</strong>
                 <span>#{event.index}</span></div>
-              <p>{event.text}</p>
+              <p>{highlightMatches(event.text, effectiveContentQuery)}</p>
             </article>)}
             {loadingDetail && <div className="session-loader-empty">正在载入预览…</div>}
           </div>
@@ -266,6 +270,30 @@ function permissionLabel(mode: ClaudeSessionSummary['permissionMode']): string {
   if (mode === 'acceptEdits') return '自动接受编辑'
   if (mode === 'plan') return '计划模式'
   return '默认权限'
+}
+
+function highlightMatches(text: string, query: string) {
+  const needle = query.trim()
+  if (!needle) return text
+  const normalizedText = text.toLocaleLowerCase()
+  const normalizedNeedle = needle.toLocaleLowerCase()
+  const parts: Array<string | ReturnType<typeof markMatch>> = []
+  let cursor = 0
+  let matchIndex = normalizedText.indexOf(normalizedNeedle)
+  while (matchIndex >= 0) {
+    if (matchIndex > cursor) parts.push(text.slice(cursor, matchIndex))
+    const end = matchIndex + normalizedNeedle.length
+    parts.push(markMatch(text.slice(matchIndex, end), matchIndex))
+    cursor = end
+    matchIndex = normalizedText.indexOf(normalizedNeedle, cursor)
+  }
+  if (cursor === 0) return text
+  if (cursor < text.length) parts.push(text.slice(cursor))
+  return parts
+}
+
+function markMatch(text: string, key: number) {
+  return <mark key={key}>{text}</mark>
 }
 
 function relativeTime(timestamp: number): string {

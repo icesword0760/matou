@@ -63,6 +63,7 @@ describe('SessionLoaderDialog', () => {
     const contentSearch = screen.getByRole('searchbox', { name: '查找右侧会话内容' })
     fireEvent.change(contentSearch, { target: { value: 'hover width' } })
     await waitFor(() => expect(screen.getByLabelText('右侧内容匹配位置')).toBeTruthy())
+    expect(await screen.findByText('hover width', { selector: 'mark' })).toBeTruthy()
     expect(listSessions).not.toHaveBeenCalledWith('hover width', expect.anything())
 
     fireEvent.keyDown(window, { key: 'f', metaKey: true })
