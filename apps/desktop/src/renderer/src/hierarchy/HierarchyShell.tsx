@@ -97,7 +97,9 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal', terminalDiagno
     const snapshot = await client.request<RuntimeProjectionSnapshot>('projection.snapshot', { windowId })
     storeRef.current.replace(snapshot)
     client.startProjection(snapshot.eventSequence)
-    setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
+    const nextProjection = toHierarchyProjection(storeRef.current.view().hierarchy)
+    setProjection(nextProjection)
+    return nextProjection
   }, [client, windowId])
 
   const applyCommandResult = useCallback(async (
@@ -280,18 +282,21 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal', terminalDiagno
     <HierarchyProduct projection={projection} commands={commands} readOnly={readOnly}
       routeWindowId={windowId}
       eventSequence={storeRef.current.eventSequence}
+      {...(!fixture ? { refreshProjection: refresh } : {})}
       {...(terminalDiagnostics ? { terminalDiagnostics } : {})} />
   </NotificationProvider>
 }
 
 function HierarchyProduct({
-  projection, commands, readOnly, routeWindowId, eventSequence, terminalDiagnostics
+  projection, commands, readOnly, routeWindowId, eventSequence, refreshProjection,
+  terminalDiagnostics
 }: {
   projection: HierarchyProjection
   commands: HierarchyCommands
   readOnly: boolean
   routeWindowId: string
   eventSequence: number
+  refreshProjection?: () => Promise<HierarchyProjection | undefined>
   terminalDiagnostics?: HierarchyTerminalDiagnostics
 }) {
   const client = useRuntimeClient()
@@ -456,11 +461,23 @@ function HierarchyProduct({
       delete document.documentElement.dataset.hostNavigationTerminalFocus
       try {
         assertHostNavigationActive(alive, request)
-        const target = validateHostNavigationTarget(
-          projectionRef.current,
-          routeWindowId,
-          request
-        )
+        let target: ReturnType<typeof validateHostNavigationTarget>
+        try {
+          target = validateHostNavigationTarget(projectionRef.current, routeWindowId, request)
+        } catch (initialError) {
+          // Host Control can create a target in a background Canvas immediately before
+          // navigation. Entity events arrive incrementally, while that Canvas snapshot
+          // and graph may still be absent from this Renderer. Rebuild once from the
+          // authoritative projection before rejecting an otherwise fresh request.
+          if (!refreshProjection || !(initialError instanceof HostNavigationExecutionError)) {
+            throw initialError
+          }
+          assertHostNavigationActive(alive, request)
+          const refreshedProjection = await refreshProjection()
+          assertHostNavigationActive(alive, request)
+          if (!refreshedProjection) throw initialError
+          target = validateHostNavigationTarget(refreshedProjection, routeWindowId, request)
+        }
         suppressTerminalFocusRef.current = !request.focusTerminal
         if (!request.focusTerminal) {
           document.documentElement.dataset.hostNavigationTerminalFocus = 'suppressed'
@@ -588,7 +605,7 @@ function HierarchyProduct({
       delete document.documentElement.dataset.hostNavigationTerminalFocus
       unsubscribe()
     }
-  }, [client, routeWindowId])
+  }, [client, refreshProjection, routeWindowId])
   const clearDetachedReturnRetries = useCallback(() => {
     for (const timer of detachedReturnTimers.current.values()) window.clearTimeout(timer)
     detachedReturnTimers.current.clear()

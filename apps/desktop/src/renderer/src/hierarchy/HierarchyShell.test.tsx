@@ -1800,6 +1800,33 @@ describe('PRD 05 hierarchy shell', () => {
 })
 
 describe('Runtime host navigation', () => {
+  it('refreshes a newly created background target before current-window navigation', async () => {
+    const ready = hostNavigationFixture('window-1')
+    const stale = structuredClone(ready)
+    stale.sceneSnapshots = stale.sceneSnapshots!.filter(({ scene }) => scene.id !== 'scene-b1')
+    delete stale.sessionGraphs?.['scene-b1']
+    let snapshots = 0
+    const host = installCommandHostNavigationRuntime(
+      ready,
+      undefined,
+      () => snapshots++ === 0 ? stale : ready
+    )
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest())
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(snapshots).toBe(2)
+    expect(host.acknowledge).toHaveBeenLastCalledWith(expect.objectContaining({ ok: true }))
+    expect(screen.getByRole('region', { name: 'Workspace B 工作现场' })).toBeTruthy()
+  })
+
   it.each([
     ['current main window', 'window-1'],
     ['another main window', 'window-2']
@@ -2177,12 +2204,13 @@ function installHostNavigationRuntime(request = vi.fn()) {
 
 function installCommandHostNavigationRuntime(
   data: HierarchyProjection,
-  failureMethod?: string
+  failureMethod?: string,
+  snapshotProjection: () => HierarchyProjection = () => data
 ) {
   const request = vi.fn(async (method: string, payload: any) => {
     if (method === failureMethod) throw new Error(`raw failure detail for ${method}`)
     if (method === 'hierarchy.bootstrap-window') return {}
-    if (method === 'projection.snapshot') return projectionSnapshot(data)
+    if (method === 'projection.snapshot') return projectionSnapshot(snapshotProjection())
     if (method === 'hierarchy.validate-workspace-path') {
       return { workspaceId: payload.input.workspaceId, status: 'valid', reason: '' }
     }
