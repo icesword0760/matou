@@ -2630,19 +2630,26 @@ sleep 30
   it('applies buffered Claude output to durable projections only after identity confirmation', async () => {
     const executable = join(root, 'provider-confirmed-derivation-fixture.sh')
     const confirmedCwd = join(root, 'confirmed-provider-cwd')
+    const postConfirmFile = join(root, 'provider-confirmed-derivation-ready')
     await mkdir(confirmedCwd)
     await writeFile(executable, [
       '#!/bin/sh',
       "printf 'CONFIRMED_PROVIDER_DAG_SUMMARY\\n'",
+      "printf 'API Error: 529 Overloaded. This is historical restored output.\\n'",
+      "printf '✻ Baked for 4m 4s · done Thursday 11:07 PM\\n❯ '",
       "printf '\\033]7;file://host%s\\033\\\\' \"$MATOU_TEST_CONFIRMED_CWD\"",
+      'while [ ! -f "$MATOU_TEST_POST_CONFIRM_FILE" ]; do sleep 0.05; done',
+      "printf '✻ Connection refused (ConnectionRefused) · Retrying in 34s · attempt 10/10\\n'",
       'sleep 30',
       ''
     ].join('\n'))
     await chmod(executable, 0o755)
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     const previousConfirmedCwd = process.env.MATOU_TEST_CONFIRMED_CWD
+    const previousPostConfirmFile = process.env.MATOU_TEST_POST_CONFIRM_FILE
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_TEST_CONFIRMED_CWD = confirmedCwd
+    process.env.MATOU_TEST_POST_CONFIRM_FILE = postConfirmFile
     const sessions = createTestSessionRegistry()
     const confirmedPort = new MockPort()
     const confirmedServer = new RuntimeServer(
@@ -2699,10 +2706,18 @@ sleep 30
         'SELECT latest_lines_json FROM session_graph_summaries WHERE session_id = ?',
         'confirmed-derivation-session'
       )?.latest_lines_json.includes('CONFIRMED_PROVIDER_DAG_SUMMARY') === true)
+      expect(database.get<{ work_status: string }>(
+        'SELECT work_status FROM sessions WHERE id = ?', 'confirmed-derivation-session'
+      )?.work_status).not.toBe('error')
+      await writeFile(postConfirmFile, 'ready')
+      await waitUntil(() => database.get<{ work_status: string }>(
+        'SELECT work_status FROM sessions WHERE id = ?', 'confirmed-derivation-session'
+      )?.work_status === 'error')
     } finally {
       confirmedServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_CONFIRMED_CWD', previousConfirmedCwd)
+      restoreEnv('MATOU_TEST_POST_CONFIRM_FILE', previousPostConfirmFile)
     }
   })
 

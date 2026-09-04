@@ -1654,7 +1654,10 @@ export class RuntimeServer {
           this.#providerLaunchRunIds.set(message.sessionId, runId)
         }
       }
-      const applyDerivedOutput = (data: string) => {
+      const applyDerivedOutput = (
+        data: string,
+        options: { deriveWorkStatus?: boolean } = {}
+      ) => {
         this.#recordSessionSummary(message.sessionId, data)
         let completedShellBlock = false
         for (const block of shellBlockCollector?.ingest(data) ?? []) {
@@ -1682,9 +1685,11 @@ export class RuntimeServer {
         if (completedShellBlock) this.#flushSessionSummary(message.sessionId)
         const reportedCwd = cwdTracker.ingest(data)
         if (reportedCwd) void this.#persistCwd(message.sessionId, reportedCwd)
-        for (const status of workStatusTracker?.ingest(data) ?? []) {
-          if (status === 'error') this.#flushSessionSummary(message.sessionId)
-          this.#setWorkStatus(message.sessionId, status)
+        if (options.deriveWorkStatus !== false) {
+          for (const status of workStatusTracker?.ingest(data) ?? []) {
+            if (status === 'error') this.#flushSessionSummary(message.sessionId)
+            this.#setWorkStatus(message.sessionId, status)
+          }
         }
         const visiblePermissionMode = permissionModeTracker?.ingest(data)
         if (visiblePermissionMode) {
@@ -1714,7 +1719,12 @@ export class RuntimeServer {
             }
             const acceptedOutput = pendingProviderOutput
             pendingProviderOutput = ''
-            if (acceptedOutput) applyDerivedOutput(acceptedOutput)
+            // A resumed provider redraws its conversation before identity is
+            // confirmed. Keep that history for the card summary and cwd, but
+            // do not reinterpret an old final error as a failure of this new
+            // live run. Work status starts deriving from output emitted after
+            // the resumed identity is accepted.
+            if (acceptedOutput) applyDerivedOutput(acceptedOutput, { deriveWorkStatus: false })
           },
           reject: () => {
             providerDerivationState = 'rejected'
