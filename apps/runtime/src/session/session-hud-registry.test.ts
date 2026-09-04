@@ -103,12 +103,18 @@ describe('PRD 02 authoritative Session HUD state', () => {
     const registry = new SessionHudRegistry(() => Date.parse('2026-09-02T12:00:00.000Z'))
     registry.spawn({ sessionId: 'agent-1', profile: 'claude-code', cwd: '/tmp/project' })
     const refreshTranscript = (registry as unknown as {
-      refreshTranscript?(sessionId: string, transcriptPath: string): Promise<boolean>
+      refreshTranscript?(
+        sessionId: string,
+        transcriptPath: string,
+        ownership: { runId: string; currentRunId(): string | undefined }
+      ): Promise<boolean>
     }).refreshTranscript
 
     expect(typeof refreshTranscript).toBe('function')
     if (!refreshTranscript) return
-    await refreshTranscript.call(registry, 'agent-1', transcriptPath)
+    await refreshTranscript.call(registry, 'agent-1', transcriptPath, {
+      runId: 'run-agent-1', currentRunId: () => 'run-agent-1'
+    })
     expect(registry.snapshot('agent-1')).toMatchObject({
       sessionName: 'nested-squishing-map', permissionMode: 'auto', model: 'claude-fable-5',
       startedAt: Date.parse('2026-09-02T10:00:00.000Z'),

@@ -4,11 +4,12 @@ import { join } from 'node:path'
 import { expect, test, type Locator } from '@playwright/test'
 
 import { launchMatou } from './matou-fixture'
+import { runShellMtJson, shellQuote } from './fixtures/ai-host-control-fixture'
 import { terminalCommand, visibleSurfaces, waitForShell } from './fixtures/session-canvas-fixture'
 
 test('identifies the caller and sends to a sibling without moving the Matou UI', async () => {
   test.setTimeout(60_000)
-  const fixture = await launchMatou()
+  const fixture = await launchMatou({ env: { MATOU_E2E_DISPLAY: 'primary' } })
   try {
     await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1500, 820))
     const first = visibleSurfaces(fixture.page).first()
@@ -28,13 +29,16 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     const firstSessionId = await first.getAttribute('data-session-id')
     expect(firstSessionId).toBeTruthy()
 
+    await focusTerminal(first)
+    const beforeIdentify = await uiState(fixture.page.locator('body'))
     const identifyFile = join(fixture.rootDirectory, 'mt-identify.json')
-    const identity = await runMtJson(first, 'mt identify --json', identifyFile) as {
+    const identity = await runShellMtJson(first, 'mt identify --json', identifyFile) as {
       target: { session: { id: string }; canvas: { name: string }; dag: { depth: number } }
     }
     expect(identity.target.session.id).toBe(firstSessionId)
     expect(identity.target.canvas.name).toBeTruthy()
     expect(identity.target.dag.depth).toBe(0)
+    expect(await uiState(fixture.page.locator('body'))).toEqual(beforeIdentify)
 
     await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
     await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
@@ -45,24 +49,26 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     await waitForShell(second)
 
     await focusTerminal(stableFirst)
-    const uiBefore = await uiState(fixture.page.locator('body'))
+    const beforeSend = await uiState(fixture.page.locator('body'))
     const resultFile = join(fixture.rootDirectory, 'mt-send.json')
-    const result = await runMtJson(
+    const result = await runShellMtJson(
       stableFirst,
       'mt send right "printf __MT_REMOTE_OK__" --enter --json',
       resultFile
     ) as { sent: boolean }
     await expect(second.locator('.xterm-rows')).toContainText('__MT_REMOTE_OK__')
     expect(result.sent).toBe(true)
-    expect(await uiState(fixture.page.locator('body'))).toEqual(uiBefore)
+    expect(await uiState(fixture.page.locator('body'))).toEqual(beforeSend)
 
+    const beforeRead = await uiState(fixture.page.locator('body'))
     const readFilePath = join(fixture.rootDirectory, 'mt-read.json')
-    const current = await runMtJson(stableFirst, 'mt read right --json', readFilePath) as {
+    const current = await runShellMtJson(stableFirst, 'mt read right --json', readFilePath) as {
       source: string
       text: string
     }
     expect(current.source).toBe('screen')
     expect(current.text).toContain('__MT_REMOTE_OK__')
+    expect(await uiState(fixture.page.locator('body'))).toEqual(beforeRead)
   } finally {
     await fixture.close()
   }
@@ -75,60 +81,22 @@ async function focusTerminal(surface: Locator): Promise<void> {
   await surface.locator('.xterm-helper-textarea').focus()
 }
 
-async function typeCommand(surface: Locator, command: string): Promise<void> {
-  const textarea = surface.locator('.xterm-helper-textarea')
-  await textarea.focus()
-  await textarea.pressSequentially(command, { delay: 1 })
-  await textarea.press('Enter')
-}
-
-async function runMtJson(surface: Locator, command: string, outputPath: string): Promise<unknown> {
-  const statusPath = `${outputPath}.status`
-  const stderrPath = `${outputPath}.stderr`
-  await typeCommand(
-    surface,
-    `${command} > ${shellQuote(outputPath)} 2> ${shellQuote(stderrPath)}; ` +
-      `printf '%s' $? > ${shellQuote(statusPath)}`
-  )
-
-  await expect.poll(async () => {
-    try {
-      return (await readFile(statusPath, 'utf8')).trim()
-    } catch {
-      return undefined
-    }
-  }, {
-    message: `等待真实 mt 命令结束：${command}`,
-    timeout: 12_000
-  }).not.toBeUndefined()
-  const status = (await readFile(statusPath, 'utf8')).trim()
-
-  if (status !== '0') {
-    const stderr = await readFile(stderrPath, 'utf8').catch(() => '')
-    const terminal = await surface.locator('.xterm-rows').innerText().catch(() => '')
-    throw new Error(
-      `mt command exited with ${status}: ${command}\nstderr: ${stderr.trim()}\nterminal:\n${terminal}`
-    )
-  }
-
-  const json = await readFile(outputPath, 'utf8')
-  try {
-    return JSON.parse(json)
-  } catch {
-    throw new Error(`mt command returned invalid JSON: ${command}\nstdout: ${json}`)
-  }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`
-}
-
 async function uiState(root: Locator): Promise<Record<string, unknown>> {
   return root.evaluate((element) => {
     const focused = element.querySelector<HTMLElement>('.session-card.is-focused')
     const carousel = element.querySelector<HTMLElement>('[aria-label="同级会话列表"]')
+    const activeElement = element.ownerDocument.activeElement as HTMLElement | null
     return {
+      activeWorkspaceId: element.querySelector<HTMLElement>(
+        '[data-workspace-id] .workspace-group__header[aria-current="location"]'
+      )?.closest<HTMLElement>('[data-workspace-id]')?.dataset.workspaceId ?? null,
+      activeTaskId: element.querySelector<HTMLElement>('[data-testid^="task-"][aria-current="true"]')
+        ?.dataset.testid?.replace(/^task-/, '') ?? null,
+      activeSceneId: element.querySelector<HTMLElement>('[data-scene-id] [role="tab"][aria-selected="true"]')
+        ?.closest<HTMLElement>('[data-scene-id]')?.dataset.sceneId ?? null,
       focusedSessionId: focused?.dataset.sessionCard ?? null,
+      activeElementSessionId: activeElement?.closest<HTMLElement>('.terminal-surface[data-session-id]')
+        ?.dataset.sessionId ?? null,
       scrollLeft: carousel?.scrollLeft ?? 0,
       notifyingCards: element.querySelectorAll('.session-card.is-notifying').length,
       notificationBadges: element.querySelectorAll('[data-testid="notification-badge"]').length

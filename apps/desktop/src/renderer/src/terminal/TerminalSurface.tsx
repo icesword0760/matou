@@ -975,7 +975,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const container = containerRef.current
     if (!container) return
     const frame = requestAnimationFrame(() => {
-      if (!terminalFocusBlockedByDialog()) terminalRef.current?.focus()
+      if (!hostNavigationTerminalFocusSuppressed() && !terminalFocusBlockedByDialog()) {
+        terminalRef.current?.focus()
+      }
     })
     return () => cancelAnimationFrame(frame)
   }, [active, focusRequest, visible])
@@ -1206,9 +1208,13 @@ function structuredFileTreePaths(value: string): string[] {
 }
 
 function terminalFocusAllowed(container: HTMLElement): boolean {
-  if (terminalFocusBlockedByDialog()) return false
+  if (hostNavigationTerminalFocusSuppressed() || terminalFocusBlockedByDialog()) return false
   const focused = document.activeElement as HTMLElement | null
   return !focused || focused === document.body || container.contains(focused)
+}
+
+function hostNavigationTerminalFocusSuppressed(): boolean {
+  return document.documentElement.dataset.hostNavigationTerminalFocus === 'suppressed'
 }
 
 function terminalFocusBlockedByDialog(): boolean {

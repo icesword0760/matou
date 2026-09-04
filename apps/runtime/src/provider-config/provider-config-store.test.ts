@@ -70,6 +70,29 @@ describe('ProviderConfigStore', () => {
     })
   })
 
+  it('resolves a Session-bound provider by stable configuration identity after the global default changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-provider-config-'))
+    const store = new ProviderConfigStore(root)
+    const bound = await store.upsert({
+      cli: 'claude-code', name: 'Bound gateway', endpoint: 'https://bound.example/',
+      model: 'bound-default-model', apiKey: 'BOUND_TOKEN'
+    })
+    const laterDefault = await store.upsert({
+      cli: 'claude-code', name: 'Later gateway', endpoint: 'https://later.example/',
+      model: 'later-default-model', apiKey: 'LATER_TOKEN'
+    })
+    await store.activate('claude-code', laterDefault.id)
+
+    expect(await store.launchSelection('claude-code', bound.id)).toEqual({
+      providerConfigId: bound.id,
+      model: 'bound-default-model',
+      env: {
+        ANTHROPIC_API_KEY: 'BOUND_TOKEN', ANTHROPIC_AUTH_TOKEN: 'BOUND_TOKEN',
+        ANTHROPIC_BASE_URL: 'https://bound.example'
+      }
+    })
+  })
+
   it('keeps an existing secret when an edit leaves the key blank and protects active configs', async () => {
     const store = new ProviderConfigStore(await mkdtemp(join(tmpdir(), 'matou-provider-config-')))
     const saved = await store.upsert({

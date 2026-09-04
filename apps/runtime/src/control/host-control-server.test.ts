@@ -1,10 +1,22 @@
 import { connect } from 'node:net'
-import { mkdtemp, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { DomainCommandMetadata } from '@matou/domain'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { runMt } from '../cli/mt-cli'
+import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
+import { SessionCanvasService } from '../session-canvas/session-canvas-service'
+import { RuntimeDatabase } from '../storage/database'
+import { DomainTransactionManager } from '../storage/domain-transaction'
+import { MigrationRunner } from '../storage/migration-runner'
+import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { ForkBatchCoordinator } from './fork-batch-coordinator'
+import { HostActionConfirmationService } from './host-action-confirmation-service'
+import { HostActionTargetResolver } from './host-action-target-resolver'
+import { HostControlClient, HostControlClientError } from './host-control-client'
 import {
   CapabilityTokenService,
   HostControlServer,
@@ -12,6 +24,25 @@ import {
   type HostControlBackend,
   type HostTarget
 } from './host-control-server'
+import type { HostActionMethod, HostActionResult } from './host-action-types'
+import {
+  markHostControlCommittedResult,
+  withHostControlPostResponseEffect
+} from './host-control-post-response'
+import { HostTopologyProjector } from './host-topology-projector'
+import {
+  RuntimeHostActionFacade,
+  RuntimeHostActionError
+} from './runtime-host-action-facade'
+
+const HOST_ACTION_SCOPES = [
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+] as const satisfies readonly HostActionMethod[]
 
 let root: string
 let socketPath: string
@@ -85,6 +116,461 @@ describe('HostControlServer', () => {
     expect(backend.identify).toHaveBeenCalledWith({ runId: 'run-caller', sessionId: 'session-2' })
   })
 
+  it.each(HOST_ACTION_SCOPES)('authorizes %s independently before terminal target resolution', async (scope) => {
+    const caller = { runId: `run-${scope}`, sessionId: 'session-2' }
+    const token = tokenService.issue(caller, [scope], Date.now() + 1_000)
+    const otherScope = HOST_ACTION_SCOPES[(HOST_ACTION_SCOPES.indexOf(scope) + 1) % HOST_ACTION_SCOPES.length]!
+
+    await expect(request(socketPath, controlRequest(`allow-${scope}`, token, scope, {
+      fixture: scope
+    }))).resolves.toMatchObject({ ok: true })
+    expect(backend.executeHostAction).toHaveBeenLastCalledWith(scope, caller, { fixture: scope })
+    expect(backend.listTargets).not.toHaveBeenCalled()
+
+    await expect(request(socketPath, controlRequest(`deny-${scope}`, token, otherScope, {
+      fixture: otherScope
+    }))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'CAPABILITY_DENIED' }
+    })
+  })
+
+  it.each([
+    'TARGET_NOT_FOUND', 'AMBIGUOUS_TARGET', 'STALE_PROJECTION', 'TARGET_NOT_READY',
+    'CAPABILITY_DENIED', 'CONFIRMATION_REQUIRED', 'CONFIRMATION_EXPIRED',
+    'CONFIRMATION_STALE', 'PATH_CONFLICT', 'BRANCH_CONFLICT', 'WORKTREE_CONFLICT',
+    'PARTIAL_SUCCESS', 'NAVIGATION_TIMEOUT', 'STORAGE_READ_ONLY'
+  ] as const)('preserves the facade error code %s', async (code) => {
+    const token = tokenService.issue('run-facade-error', ['structure.create.task'], Date.now() + 1_000)
+    backend.executeHostAction.mockRejectedValueOnce(
+      new RuntimeHostActionError(code, `fixture ${code}`)
+    )
+
+    await expect(request(socketPath, controlRequest(
+      `facade-error-${code}`,
+      token,
+      'structure.create.task',
+      { workspace: { kind: 'current', entity: 'workspace' }, submissionKey: 'fixture' }
+    ))).resolves.toMatchObject({
+      ok: false,
+      error: { code, message: `fixture ${code}` }
+    })
+  })
+
+  it('maps real facade field validation faults to concise INVALID_REQUEST frames', async () => {
+    const fixture = await realActionFacadeFixture(root)
+    backend.executeHostAction.mockImplementation((method, caller, params) =>
+      fixture.facade.execute(method, caller, params)
+    )
+    const token = tokenService.issue(
+      fixture.caller,
+      ['structure.create.session'],
+      Date.now() + 5_000
+    )
+    const valid = {
+      canvas: { kind: 'current', entity: 'canvas' },
+      profile: 'shell',
+      submissionKey: 'create-session'
+    }
+    const cases = [
+      { label: 'missing field', params: { ...valid, submissionKey: undefined }, field: 'submissionKey' },
+      { label: 'invalid profile', params: { ...valid, profile: 'python' }, field: 'profile' },
+      {
+        label: 'invalid selector',
+        params: {
+          ...valid,
+          canvas: { kind: 'relative', direction: 'up', projectionRevision: 'revision-1' }
+        },
+        field: 'canvas'
+      },
+      { label: 'extra field', params: { ...valid, internalOverride: true }, field: 'internalOverride' },
+      {
+        label: 'matching inner method',
+        params: { ...valid, method: 'structure.create.session' },
+        field: 'method'
+      },
+      {
+        label: 'different inner method',
+        params: { ...valid, method: 'structure.remove.commit' },
+        field: 'method'
+      }
+    ]
+
+    try {
+      for (const testCase of cases) {
+        const response = await request(socketPath, controlRequest(
+          `invalid-${testCase.label}`,
+          token,
+          'structure.create.session',
+          testCase.params
+        ))
+        const error = response.error as Record<string, unknown>
+
+        expect(response).toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } })
+        expect(error.message).toEqual(expect.stringContaining(testCase.field))
+        expect(Object.keys(error)).toEqual(['code', 'message'])
+        expect(String(error.message)).not.toMatch(/ZodError|\[\s*\{|stack|at RuntimeHostActionFacade/)
+        expect(String(error.message).length).toBeLessThan(240)
+      }
+    } finally {
+      fixture.database.close()
+    }
+  })
+
+  it.each([
+    { label: 'empty retry set', itemKeys: [] },
+    { label: 'nonempty retry set', itemKeys: ['failed'] }
+  ])('preserves a missing durable batch TARGET_NOT_FOUND through the real $label chain', async ({ itemKeys }) => {
+    const fixture = await realActionFacadeFixture(root)
+    backend.executeHostAction.mockImplementation((method, caller, params) =>
+      fixture.facade.execute(method, caller, params)
+    )
+    const token = tokenService.issue(
+      fixture.caller,
+      ['structure.fork.children'],
+      Date.now() + 5_000
+    )
+    const batchKey = `missing-socket-${itemKeys.length}`
+    const items = itemKeys.map((itemKey) => ({
+      itemKey, title: '待重试方案', environment: { mode: 'current' as const }
+    }))
+    const args = [
+      'fork', 'children', 'self', '--items-json', JSON.stringify(items), '--batch-key', batchKey,
+      '--retry-item-keys-json', JSON.stringify(itemKeys)
+    ]
+
+    try {
+      const jsonOut: string[] = []
+      const jsonErr: string[] = []
+      expect(await runMt(
+        [...args, '--json'],
+        { MATOU_CONTROL_ENDPOINT: socketPath, MATOU_CONTROL_TOKEN: token },
+        { stdout: (text) => jsonOut.push(text), stderr: (text) => jsonErr.push(text) }
+      )).toBe(3)
+      expect(jsonOut).toEqual([])
+      expect(JSON.parse(jsonErr[0]!)).toEqual({
+        code: 'TARGET_NOT_FOUND',
+        message: `批次 ${batchKey} 没有可重试的上一轮结果`
+      })
+
+      const humanOut: string[] = []
+      const humanErr: string[] = []
+      expect(await runMt(
+        args,
+        { MATOU_CONTROL_ENDPOINT: socketPath, MATOU_CONTROL_TOKEN: token },
+        { stdout: (text) => humanOut.push(text), stderr: (text) => humanErr.push(text) }
+      )).toBe(3)
+      expect(humanOut).toEqual([])
+      expect(humanErr).toEqual([`批次 ${batchKey} 没有可重试的上一轮结果`])
+    } finally {
+      fixture.database.close()
+    }
+  })
+
+  it('preserves sorted safe ambiguity candidates from the real resolver through the socket frame', async () => {
+    const fixture = await realActionFacadeFixture(root, true, 6)
+    backend.executeHostAction.mockImplementation((method, caller, params) =>
+      fixture.facade.execute(method, caller, params)
+    )
+    const token = tokenService.issue(
+      fixture.caller,
+      ['structure.remove.preview'],
+      Date.now() + 5_000
+    )
+    const projectionRevision = fixture.resolver.projectionRevision(fixture.caller, 'all')
+
+    try {
+      const response = await request(socketPath, controlRequest(
+        'ambiguous-real-resolver',
+        token,
+        'structure.remove.preview',
+        {
+          target: { kind: 'ref', ref: 'legacy:duplicate', projectionRevision },
+          scope: 'node'
+        }
+      ))
+      const error = response.error as {
+        code: string
+        message: string
+        details: { candidates: Array<Record<string, unknown>> }
+      }
+
+      expect(response).toMatchObject({
+        ok: false,
+        error: {
+          code: 'AMBIGUOUS_TARGET',
+          details: {
+            candidates: fixture.expectedHumanPaths.map((humanPath) => ({
+              humanPath
+            }))
+          }
+        }
+      })
+      expect(Object.keys(error)).toEqual(['code', 'message', 'details'])
+      expect(Object.keys(error.details)).toEqual(['candidates'])
+      for (const candidate of error.details.candidates) {
+        expect(Object.keys(candidate)).toEqual(['humanPath'])
+        expect(candidate).not.toHaveProperty('ref')
+        expect(candidate).not.toHaveProperty('path')
+        expect(candidate).not.toHaveProperty('displayPath')
+        expect(candidate).not.toHaveProperty('sessionId')
+      }
+
+      const client = new HostControlClient({ endpoint: socketPath, token, timeoutMs: 5_000 })
+      let clientError: HostControlClientError | undefined
+      try {
+        await client.request('structure.remove.preview', {
+          target: { kind: 'ref', ref: 'legacy:duplicate', projectionRevision },
+          scope: 'node'
+        })
+      } catch (caught) {
+        expect(caught).toBeInstanceOf(HostControlClientError)
+        clientError = caught as HostControlClientError
+      }
+      expect(clientError).toMatchObject({
+        code: 'AMBIGUOUS_TARGET',
+        details: {
+          candidates: fixture.expectedHumanPaths.map((humanPath) => ({ humanPath }))
+        }
+      })
+    } finally {
+      fixture.database.close()
+    }
+  })
+
+  it('fails closed on mixed invalid candidates and enforces the 4096-byte path limit', async () => {
+    const token = tokenService.issue(
+      'run-ambiguity-details', ['structure.create.task'], Date.now() + 5_000
+    )
+    const requestAction = (requestId: string) => request(socketPath, controlRequest(
+      requestId,
+      token,
+      'structure.create.task',
+      { workspace: { kind: 'current', entity: 'workspace' }, submissionKey: requestId }
+    ))
+    const atLimit = 'v'.repeat(4_096)
+
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      { candidates: [{ displayPath: atLimit }] }
+    ))
+    const valid = await requestAction('candidate-at-limit')
+    expect(valid).toMatchObject({
+      ok: false,
+      error: { details: { candidates: [{ humanPath: atLimit }] } }
+    })
+
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      {
+        candidates: [
+          { displayPath: 'Workspace / Valid' },
+          { displayPath: 42, internalPath: { sessionId: 'secret' } },
+          { displayPath: 'Workspace / Also valid' }
+        ]
+      }
+    ))
+    const mixed = await requestAction('candidate-mixed-invalid')
+    expect(mixed).toMatchObject({ ok: false, error: { code: 'AMBIGUOUS_TARGET' } })
+    expect(Object.keys(mixed.error as object)).toEqual(['code', 'message'])
+
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      { candidates: [{ displayPath: 'x'.repeat(4_097) }] }
+    ))
+    const tooLong = await requestAction('candidate-over-limit')
+    expect(tooLong).toMatchObject({ ok: false, error: { code: 'AMBIGUOUS_TARGET' } })
+    expect(Object.keys(tooLong.error as object)).toEqual(['code', 'message'])
+  })
+
+  it('returns a deterministic framed fault when complete ambiguity details exceed the frame limit', async () => {
+    await server.stop()
+    server = new HostControlServer({ socketPath, tokenService, backend, maxFrameBytes: 512 })
+    await server.start()
+    const token = tokenService.issue(
+      'run-oversized-ambiguity', ['structure.create.task'], Date.now() + 5_000
+    )
+    backend.executeHostAction.mockRejectedValueOnce(new RuntimeHostActionError(
+      'AMBIGUOUS_TARGET',
+      'choose one',
+      {
+        candidates: Array.from({ length: 6 }, (_, index) => ({
+          displayPath: `${index + 1}-${'candidate'.repeat(40)}`
+        }))
+      }
+    ))
+
+    const response = await request(socketPath, controlRequest(
+      'oversized-ambiguity',
+      token,
+      'structure.create.task',
+      { workspace: { kind: 'current', entity: 'workspace' }, submissionKey: 'oversized' }
+    ))
+    expect(response).toEqual({
+      version: 1,
+      requestId: 'oversized-ambiguity',
+      ok: false,
+      error: {
+        code: 'AMBIGUOUS_TARGET',
+        message: 'ambiguity candidates exceed control frame size; refine the target filter'
+      }
+    })
+  })
+
+  it('reports an uninstalled action executor as Runtime not ready', async () => {
+    const token = tokenService.issue(
+      'run-not-ready', ['structure.create.workspace'], Date.now() + 1_000
+    )
+    backend.executeHostAction.mockRejectedValueOnce(Object.assign(
+      new Error('Host Action facade is not installed'),
+      { code: 'RUNTIME_NOT_READY' as const }
+    ))
+
+    await expect(request(socketPath, controlRequest(
+      'action-not-ready', token, 'structure.create.workspace',
+      { path: '/fixture', submissionKey: 'fixture' }
+    ))).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'RUNTIME_NOT_READY' }
+    })
+  })
+
+  it('returns a self-removal success frame before running the action post-response disposal', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-self-remove-action', sessionId: 'session-1' },
+      ['structure.remove.commit'],
+      Date.now() + 1_000
+    )
+    const disposed = vi.fn(async () => server.stop())
+    backend.executeHostAction.mockResolvedValueOnce(markHostControlCommittedResult(
+      withHostControlPostResponseEffect(
+        { kind: 'removed', targetRef: 'session:session-1' },
+        disposed
+      )
+    ) as never)
+
+    await expect(request(socketPath, controlRequest(
+      'self-remove-action', token, 'structure.remove.commit',
+      { confirmationRef: 'confirmation-1' }
+    ))).resolves.toMatchObject({
+      ok: true,
+      result: { kind: 'removed', targetRef: 'session:session-1' }
+    })
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
+  })
+
+  it('writes the authoritative Host Control result before running caller disposal', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-self-remove', sessionId: 'session-1' },
+      ['host.identify'],
+      Date.now() + 1000
+    )
+    const disposed = vi.fn(async () => {
+      await server.stop()
+    })
+    backend.identify.mockResolvedValueOnce(withHostControlPostResponseEffect(
+      { kind: 'removed', targetRef: 'session:session-1' },
+      disposed
+    ) as never)
+
+    const response = await request(
+      socketPath,
+      controlRequest('self-remove', token, 'host.identify', {})
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: { kind: 'removed', targetRef: 'session:session-1' }
+    })
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
+  })
+
+  it('keeps the authoritative mutation result when caller disposal is queued after the deadline', async () => {
+    const token = tokenService.issue(
+      { runId: 'run-deadline-remove', sessionId: 'session-1' },
+      ['host.identify'],
+      Date.now() + 5_000
+    )
+    const deadlineAt = Date.now() + 1_000
+    const disposed = vi.fn(async () => undefined)
+    let now: ReturnType<typeof vi.spyOn> | undefined
+    backend.identify.mockImplementationOnce(async () => {
+      now = vi.spyOn(Date, 'now').mockReturnValue(deadlineAt + 1)
+      return markHostControlCommittedResult(withHostControlPostResponseEffect(
+        { kind: 'removed', targetRef: 'session:session-1' },
+        disposed
+      )) as never
+    })
+
+    try {
+      const response = await request(socketPath, {
+        version: 1, requestId: 'deadline-self-remove', token, method: 'host.identify',
+        params: {}, deadlineAt
+      })
+
+      expect(response).toMatchObject({
+        ok: true,
+        result: { kind: 'removed', targetRef: 'session:session-1' }
+      })
+      await vi.waitFor(() => expect(disposed).toHaveBeenCalledTimes(1))
+    } finally {
+      now?.mockRestore()
+    }
+  })
+
+  it.each([
+    { label: 'create', result: { kind: 'created', entity: 'task' } },
+    { label: 'slow Fork batch', result: { kind: 'fork-batch', batchKey: 'slow-batch' } },
+    { label: 'non-caller removal', result: { kind: 'removed', targetRef: 'session:other' } }
+  ])('keeps a committed $label result across the post-dispatch deadline', async ({ label, result }) => {
+    const token = tokenService.issue(`run-${label}`, ['host.identify'], Date.now() + 5_000)
+    const deadlineAt = Date.now() + 1_000
+    let now: ReturnType<typeof vi.spyOn> | undefined
+    backend.identify.mockImplementationOnce(async () => {
+      await Promise.resolve()
+      now = vi.spyOn(Date, 'now').mockReturnValue(deadlineAt + 1)
+      return markHostControlCommittedResult({ ...result }) as never
+    })
+
+    try {
+      await expect(request(socketPath, {
+        version: 1, requestId: `committed-${label}`, token, method: 'host.identify',
+        params: {}, deadlineAt
+      })).resolves.toMatchObject({ ok: true, result })
+    } finally {
+      now?.mockRestore()
+    }
+  })
+
+  it('reports disposal failure after returning the committed structure result', async () => {
+    const token = tokenService.issue('run-cleanup-error', ['host.identify'], Date.now() + 1_000)
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    backend.identify.mockResolvedValueOnce(markHostControlCommittedResult(
+      withHostControlPostResponseEffect(
+        { kind: 'removed', targetRef: 'session:other' },
+        async () => { throw new Error('cleanup diagnostic') }
+      )
+    ) as never)
+
+    try {
+      await expect(request(
+        socketPath,
+        controlRequest('cleanup-error', token, 'host.identify', {})
+      )).resolves.toMatchObject({
+        ok: true,
+        result: { kind: 'removed', targetRef: 'session:other' }
+      })
+      await vi.waitFor(() => expect(diagnostic).toHaveBeenCalledWith(
+        '[host-control.post-response] cleanup diagnostic'
+      ))
+    } finally {
+      diagnostic.mockRestore()
+    }
+  })
+
   it('passes relative and relation selectors to the topology backend with caller context', async () => {
     const token = tokenService.issue(
       { runId: 'run-caller', sessionId: 'session-1' },
@@ -114,7 +600,7 @@ describe('HostControlServer', () => {
       target: { ref: 'surface:1', projectionRevision: listing.result.projectionRevision },
       maxLines: 100, maxBytes: 4096
     }))
-    expect(stale).toMatchObject({ ok: false, error: { code: 'CONFLICT' } })
+    expect(stale).toMatchObject({ ok: false, error: { code: 'STALE_PROJECTION' } })
   })
 
   it('bounds terminal reads and allowlists control keys', async () => {
@@ -203,6 +689,17 @@ class TestBackend implements HostControlBackend {
   writeTaskProgress = vi.fn(async () => undefined)
   appendTaskLog = vi.fn(async () => undefined)
   moveTaskToWindow = vi.fn(async () => ({ state: 'committed' }))
+  executeHostAction = vi.fn(async (
+    _method: HostActionMethod,
+    _caller: { runId: string; sessionId: string },
+    _params: unknown
+  ): Promise<HostActionResult> => ({
+    kind: 'navigated',
+    finalPath: {
+      routeWindowId: 'window-1', targetWindowId: 'window-1',
+      workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1'
+    }
+  }))
   identify = vi.fn(async (caller: { sessionId: string }) => ({
     caller,
     target: this.targets.find(({ sessionId }) => sessionId === caller.sessionId)
@@ -215,7 +712,7 @@ class TestBackend implements HostControlBackend {
     if (selector.kind === 'relative' && selector.direction === 'right') return targets[1]!.sessionId
     return targets[0]!.sessionId
   })
-  listTargets(): HostTarget[] { return this.targets.map((target) => ({ ...target })) }
+  listTargets = vi.fn((): HostTarget[] => this.targets.map((target) => ({ ...target })))
 }
 
 function targetFixture(ordinal: number, title: string): HostTarget {
@@ -223,6 +720,7 @@ function targetFixture(ordinal: number, title: string): HostTarget {
   return {
     ref: `surface:${ordinal}`, workspaceId: 'workspace-1', taskId: 'task-1', sessionId,
     mountId: `mount-${ordinal}`, title, profile: 'shell', cwd: '/fixture', workStatus: 'idle',
+    environment: { executionContextRef: 'context:context-1', mode: 'directory' },
     window: { id: 'window-1', kind: 'main', ordinal: 1 },
     workspace: { id: 'workspace-1', name: 'Workspace', ordinal: 1 },
     task: { id: 'task-1', name: 'Task', ordinal: 1 },
@@ -230,6 +728,102 @@ function targetFixture(ordinal: number, title: string): HostTarget {
     session: { id: sessionId, ordinal, detached: false },
     dag: { depth: 0, childRefs: [], siblingRefs: ['surface:1', 'surface:2'] }
   }
+}
+
+class AmbiguousTargetProjector extends HostTopologyProjector {
+  readonly #targets: readonly HostTarget[]
+
+  constructor(database: RuntimeDatabase, targets: readonly HostTarget[]) {
+    super(database)
+    this.#targets = targets
+  }
+
+  override list(
+    _caller: { runId: string; sessionId: string },
+    _scope: 'current-level' | 'all'
+  ): HostTarget[] {
+    return this.#targets.map((target) => ({ ...target }))
+  }
+}
+
+async function realActionFacadeFixture(
+  dataRoot: string,
+  ambiguous = false,
+  candidateCount = 2
+): Promise<{
+  database: RuntimeDatabase
+  facade: RuntimeHostActionFacade
+  resolver: HostActionTargetResolver
+  caller: { runId: string; sessionId: string }
+  expectedHumanPaths: string[]
+}> {
+  const database = RuntimeDatabase.open(join(
+    dataRoot,
+    `action-${ambiguous ? 'ambiguous' : 'validation'}.sqlite`
+  ))
+  await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+  const transactions = new DomainTransactionManager(database)
+  const hierarchy = new HierarchyApplicationService(database, transactions)
+  const sessionCanvas = new SessionCanvasService(database, transactions)
+  const firstRoot = join(dataRoot, `workspace-first-${ambiguous ? 'ambiguous' : 'validation'}`)
+  const otherRoots = Array.from({ length: candidateCount - 1 }, (_, index) => join(
+    dataRoot,
+    `workspace-${index + 2}-${ambiguous ? 'ambiguous' : 'validation'}`
+  ))
+  await Promise.all([mkdir(firstRoot), ...otherRoots.map((path) => mkdir(path))])
+  const first = hierarchy.bootstrapWindow(command('action-bootstrap'), {
+    windowId: 'window-1', defaultRootDirectory: firstRoot,
+    defaultName: 'First workspace', now: 1
+  })
+  for (const [index, rootDirectory] of otherRoots.entries()) {
+    const ordinal = index + 2
+    hierarchy.createWorkspace(command(`action-window-${ordinal}`), {
+      windowId: `window-${ordinal}`,
+      name: `Workspace ${ordinal}`,
+      rootDirectory,
+      navigation: 'activate',
+      now: ordinal
+    })
+  }
+  const caller = { runId: 'run-real-facade', sessionId: first.session!.id }
+  const projected = new HostTopologyProjector(database).list(caller, 'all')
+  const expectedHumanPaths = projected.map((target) => [
+    target.workspace.name, target.task.name, target.canvas.name, target.title
+  ].join(' / '))
+  const topology = ambiguous
+    ? new AmbiguousTargetProjector(database, projected.slice().reverse().map((target) => ({
+        ...target,
+        ref: 'legacy:duplicate'
+      })))
+    : new HostTopologyProjector(database)
+  const resolver = new HostActionTargetResolver(database, topology)
+  const unexpected = async (): Promise<never> => {
+    throw new Error('unexpected unrelated action dependency')
+  }
+  const forkBatches = new ForkBatchCoordinator({
+    database,
+    createChild: unexpected,
+    retryChild: unexpected,
+    startSession: unexpected,
+    waitUntilReady: unexpected,
+    sendPrompt: unexpected
+  })
+  const facade = new RuntimeHostActionFacade({
+    database,
+    resolver,
+    confirmations: new HostActionConfirmationService(),
+    hierarchy,
+    sessionCanvas,
+    forkWorkflow: { createForkChild: unexpected, createForkSibling: unexpected },
+    forkBatches,
+    navigation: { navigate: unexpected },
+    disposeSessions: unexpected
+  })
+  return { database, facade, resolver, caller, expectedHumanPaths }
+}
+
+function command(commandId: string): DomainCommandMetadata {
+  return { commandId, commandType: 'test', requestHash: `hash:${commandId}` }
 }
 
 function controlRequest(requestId: string, token: string, method: string, params: unknown) {

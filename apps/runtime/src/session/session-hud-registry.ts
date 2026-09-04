@@ -19,6 +19,10 @@ export interface HudConfigCounts {
   hookNames: string[]
 }
 export interface HudConfigWatchTarget { directory: string; names: string[] }
+export interface SessionHudRunOwnership {
+  runId: string
+  currentRunId(): string | undefined
+}
 
 export interface SessionHudSnapshot {
   sessionId: string
@@ -187,6 +191,15 @@ export class SessionHudRegistry {
     current.model = modelNameForStrategy(normalized)
   }
 
+  updateProviderModel(sessionId: string, model: string): void {
+    const current = this.#states.get(sessionId)
+    if (!current || current.mode !== 'agent' || !model.trim()) return
+    current.model = model
+    const strategy = normalizeModelStrategy(model)
+    if (strategy) current.modelStrategy = strategy
+    current.providerModelObserved = false
+  }
+
   updateSessionName(sessionId: string, name: string): void {
     const current = this.#states.get(sessionId)
     const normalized = text(name)
@@ -296,11 +309,17 @@ export class SessionHudRegistry {
     current.mcpErrors = [...current.failedMcpServers]
   }
 
-  async refreshTranscript(sessionId: string, transcriptPath: string): Promise<boolean> {
+  async refreshTranscript(
+    sessionId: string,
+    transcriptPath: string,
+    ownership: SessionHudRunOwnership
+  ): Promise<boolean> {
     const current = this.#states.get(sessionId)
-    if (!current || current.mode !== 'agent') return false
+    if (!current || current.mode !== 'agent' || !ownsCurrentRun(ownership)) return false
     const history = await this.#transcripts.read(transcriptPath)
-    if (!history) return false
+    // Transcript I/O can outlive the provider process that requested it. Recheck
+    // both run ownership and HUD object identity immediately before any write.
+    if (!history || !ownsCurrentRun(ownership) || this.#states.get(sessionId) !== current) return false
     if (history.sessionName) current.sessionName = history.sessionName.slice(0, 120)
     if (history.startedAt !== undefined) current.startedAt = Math.min(current.startedAt, history.startedAt)
     const permission = normalizePermission(history.permissionMode)
@@ -362,6 +381,10 @@ export class SessionHudRegistry {
       return value ? [value] : []
     })
   }
+}
+
+function ownsCurrentRun(ownership: SessionHudRunOwnership): boolean {
+  return ownership.currentRunId() === ownership.runId
 }
 
 export function inspectProviderConfig(cwd: string, configDir: string): HudConfigCounts {

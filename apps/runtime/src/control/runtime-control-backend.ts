@@ -4,6 +4,10 @@ import {
   type HostTarget,
   type HostTargetSelector
 } from './host-control-server'
+import type {
+  HostActionMethod,
+  HostActionResult
+} from './host-action-types'
 import { HostTopologyProjector } from './host-topology-projector'
 import { CommandBoundaryRepository } from '../anchors/anchor-resolver'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
@@ -17,6 +21,21 @@ import { TerminalScreenProjector } from './terminal-screen-projector'
 import { CONTROL_KEY_SEQUENCES, TerminalInputQueue } from './terminal-input-queue'
 import { HostControlTargetNotReadyError } from './host-control-types'
 
+export type HostActionExecutor = (
+  method: HostActionMethod,
+  caller: HostCallerIdentity,
+  params: unknown
+) => Promise<HostActionResult>
+
+export class RuntimeControlBackendNotReadyError extends Error {
+  readonly code = 'RUNTIME_NOT_READY' as const
+
+  constructor() {
+    super('Host Action facade is not installed')
+    this.name = 'RuntimeControlBackendNotReadyError'
+  }
+}
+
 export class RuntimeControlBackend implements HostControlBackend {
   readonly #database: RuntimeDatabase
   readonly #dataRoot: string
@@ -27,6 +46,7 @@ export class RuntimeControlBackend implements HostControlBackend {
   readonly #taskMigrations: TaskWindowMigrationService
   readonly #topology: HostTopologyProjector
   readonly #inputQueue = new TerminalInputQueue()
+  #hostActionExecutor: HostActionExecutor | undefined
 
   constructor(
     database: RuntimeDatabase,
@@ -54,6 +74,20 @@ export class RuntimeControlBackend implements HostControlBackend {
       this.#active.delete(sessionId)
       this.#inputQueue.clear(sessionId)
     }
+  }
+
+  setHostActionExecutor(executor: HostActionExecutor): void {
+    this.#hostActionExecutor = executor
+  }
+
+  executeHostAction(
+    method: HostActionMethod,
+    caller: HostCallerIdentity,
+    params: unknown
+  ): Promise<HostActionResult> {
+    const executor = this.#hostActionExecutor
+    if (!executor) return Promise.reject(new RuntimeControlBackendNotReadyError())
+    return executor(method, caller, params)
   }
 
   identify(caller: HostCallerIdentity): unknown {

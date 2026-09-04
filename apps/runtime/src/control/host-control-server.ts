@@ -6,17 +6,30 @@ import { dirname, resolve } from 'node:path'
 import {
   HostControlTargetNotFoundError,
   HostControlTargetNotReadyError,
+  HOST_CONTROL_MAX_FRAME_BYTES,
   type AllowedControlKey,
   type HostCallerIdentity,
+  type HostControlErrorDetails,
   type HostControlScope,
   type HostListScope,
   type HostTarget,
   type HostTargetSelector
 } from './host-control-types'
+import {
+  isHostControlCommittedResult,
+  runHostControlPostResponseEffects
+} from './host-control-post-response'
+import type {
+  HostActionErrorCode,
+  HostActionMethod,
+  HostActionResult
+} from './host-action-types'
+import { hostTargetRevision } from './host-target-revision'
 
 export type {
   AllowedControlKey,
   HostCallerIdentity,
+  HostControlErrorDetails,
   HostControlScope,
   HostListScope,
   HostTarget,
@@ -24,7 +37,7 @@ export type {
 } from './host-control-types'
 
 const CONTROL_VERSION = 1
-const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024
+const DEFAULT_MAX_FRAME_BYTES = HOST_CONTROL_MAX_FRAME_BYTES
 
 export interface HostControlBackend {
   identify(caller: HostCallerIdentity): unknown | Promise<unknown>
@@ -49,6 +62,11 @@ export interface HostControlBackend {
     sourceWindowId: string
     targetWindowId: string
   }): Promise<unknown>
+  executeHostAction(
+    method: HostActionMethod,
+    caller: HostCallerIdentity,
+    params: unknown
+  ): Promise<HostActionResult>
 }
 
 export function controlEndpointForPlatform(
@@ -74,12 +92,21 @@ interface CapabilityRecord {
 export class CapabilityTokenService {
   readonly #runtimeGeneration: string
   readonly #records = new Map<string, CapabilityRecord>()
+  readonly #onRunRevoked: ((runId: string) => void) | undefined
 
-  constructor(runtimeGeneration: string) {
+  constructor(
+    runtimeGeneration: string,
+    options: { onRunRevoked?: (runId: string) => void } = {}
+  ) {
     this.#runtimeGeneration = runtimeGeneration
+    this.#onRunRevoked = options.onRunRevoked
   }
 
-  issue(callerOrRunId: HostCallerIdentity | string, scopes: HostControlScope[], expiresAt: number): string {
+  issue(
+    callerOrRunId: HostCallerIdentity | string,
+    scopes: readonly HostControlScope[],
+    expiresAt: number
+  ): string {
     const caller = typeof callerOrRunId === 'string'
       ? { runId: callerOrRunId, sessionId: callerOrRunId }
       : callerOrRunId
@@ -113,6 +140,7 @@ export class CapabilityTokenService {
     for (const [hash, record] of this.#records) {
       if (record.runId === runId) this.#records.delete(hash)
     }
+    this.#onRunRevoked?.(runId)
   }
 }
 
@@ -127,7 +155,7 @@ interface ControlRequest {
   deadlineAt: number
 }
 
-type ControlErrorCode =
+export type ControlErrorCode =
   | 'INVALID_REQUEST'
   | 'TARGET_NOT_FOUND'
   | 'TARGET_NOT_READY'
@@ -138,12 +166,19 @@ type ControlErrorCode =
   | 'CONFLICT'
   | 'UNSUPPORTED'
   | 'INTERNAL_ERROR'
+  | HostActionErrorCode
 
 class ControlFault extends Error {
   readonly code: ControlErrorCode
-  constructor(code: ControlErrorCode, message: string) {
+  readonly details: HostControlErrorDetails | undefined
+  constructor(
+    code: ControlErrorCode,
+    message: string,
+    details?: HostControlErrorDetails
+  ) {
     super(message)
     this.code = code
+    this.details = details
   }
 }
 
@@ -206,7 +241,7 @@ export class HostControlServer {
       while (buffered.byteLength >= 4) {
         const length = buffered.readUInt32BE(0)
         if (length > this.#maxFrameBytes) {
-          this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame exceeds size limit'))
+          void this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame exceeds size limit'))
           socket.end()
           return
         }
@@ -223,10 +258,11 @@ export class HostControlServer {
     try {
       raw = JSON.parse(body.toString('utf8')) as unknown
     } catch {
-      this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame is not valid JSON'))
+      await this.#write(socket, errorResponse('unknown', 'INVALID_REQUEST', 'control frame is not valid JSON'))
       return
     }
     let requestId = 'unknown'
+    let result: unknown
     try {
       const request = parseRequest(raw)
       requestId = request.requestId
@@ -235,18 +271,27 @@ export class HostControlServer {
       if (!capability) {
         throw new ControlFault('CAPABILITY_DENIED', 'capability token is missing, expired, or out of scope')
       }
-      const result = await this.#dispatch(request.method, request.params, capability.caller)
-      if (Date.now() > request.deadlineAt) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
-      this.#write(socket, { version: CONTROL_VERSION, requestId, ok: true, result })
+      result = await this.#dispatch(request.method, request.params, capability.caller)
+      if (
+        Date.now() > request.deadlineAt &&
+        !isHostControlCommittedResult(result)
+      ) throw new ControlFault('TIMEOUT', 'request deadline elapsed')
+      await this.#write(socket, { version: CONTROL_VERSION, requestId, ok: true, result })
     } catch (error) {
       const fault = error instanceof ControlFault
         ? error
+        : isCodedControlError(error)
+          ? new ControlFault(error.code, error.message, controlErrorDetails(error))
         : error instanceof HostControlTargetNotFoundError
           ? new ControlFault('TARGET_NOT_FOUND', error.message)
         : error instanceof HostControlTargetNotReadyError
           ? new ControlFault('TARGET_NOT_READY', error.message)
         : new ControlFault('INTERNAL_ERROR', errorMessage(error))
-      this.#write(socket, errorResponse(requestId, fault.code, fault.message))
+      await this.#write(socket, errorResponse(requestId, fault.code, fault.message, fault.details))
+    } finally {
+      await runHostControlPostResponseEffects(result).catch((error) => {
+        console.error(`[host-control.post-response] ${errorMessage(error)}`)
+      })
     }
   }
 
@@ -257,12 +302,15 @@ export class HostControlServer {
   ): Promise<unknown> {
     const params = record(rawParams)
     if (method === 'host.identify') return this.#backend.identify(caller)
+    if (isHostActionMethod(method)) {
+      return this.#backend.executeHostAction(method, caller, rawParams)
+    }
 
     const listScope = method === 'host.list'
       ? enumerationWithDefault(params.scope, ['current-level', 'all'] as const, 'scope', 'current-level')
       : targetListScope(params.target)
     const targets = await this.#backend.listTargets(caller, listScope)
-    const projectionRevision = targetRevision(targets)
+    const projectionRevision = hostTargetRevision(targets)
     if (method === 'host.list') return { projectionRevision, scope: listScope, targets }
 
     if (method === 'task.status.write') {
@@ -313,7 +361,7 @@ export class HostControlServer {
       (selector.kind === 'ref' || selector.kind === 'sibling') &&
       selector.projectionRevision !== projectionRevision
     ) {
-      throw new ControlFault('CONFLICT', 'target ordinal projection is stale; list targets again')
+      throw new ControlFault('STALE_PROJECTION', 'target ordinal projection is stale; list targets again')
     }
     const sessionId = await this.#backend.resolveTarget(caller, selector, targets, projectionRevision)
     if (method === 'terminal.read-current' || method === 'terminal.read-history') {
@@ -347,12 +395,17 @@ export class HostControlServer {
     throw new ControlFault('UNSUPPORTED', `unsupported control method ${method}`)
   }
 
-  #write(socket: Socket, value: unknown): void {
-    if (socket.destroyed) return
-    const body = Buffer.from(JSON.stringify(value))
+  #write(socket: Socket, value: unknown): Promise<void> {
+    if (socket.destroyed) return Promise.resolve()
+    let body = Buffer.from(JSON.stringify(value))
+    if (body.byteLength > this.#maxFrameBytes) {
+      body = Buffer.from(JSON.stringify(responseSizeFault(value)))
+    }
     const prefix = Buffer.alloc(4)
     prefix.writeUInt32BE(body.byteLength)
-    socket.write(Buffer.concat([prefix, body]))
+    return new Promise<void>((resolveWrite) => {
+      socket.write(Buffer.concat([prefix, body]), () => resolveWrite())
+    })
   }
 }
 
@@ -443,19 +496,38 @@ function targetListScope(raw: unknown): HostListScope {
     : 'current-level'
 }
 
-function targetRevision(targets: HostTarget[]): string {
-  return createHash('sha256')
-    .update(JSON.stringify(targets.map(({ ref, workspaceId, taskId, sessionId, mountId }) => ({
-      ref, workspaceId, taskId, sessionId, mountId
-    }))))
-    .digest('hex')
-}
-
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
-function errorResponse(requestId: string, code: ControlErrorCode, message: string): unknown {
-  return { version: CONTROL_VERSION, requestId, ok: false, error: { code, message } }
+function errorResponse(
+  requestId: string,
+  code: ControlErrorCode,
+  message: string,
+  details?: HostControlErrorDetails
+): unknown {
+  return {
+    version: CONTROL_VERSION,
+    requestId,
+    ok: false,
+    error: { code, message, ...(details === undefined ? {} : { details }) }
+  }
+}
+function responseSizeFault(value: unknown): unknown {
+  const response = typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as { requestId?: unknown; error?: unknown }
+    : {}
+  const requestId = typeof response.requestId === 'string' ? response.requestId : 'unknown'
+  const error = typeof response.error === 'object' && response.error !== null && !Array.isArray(response.error)
+    ? response.error as { code?: unknown }
+    : {}
+  if (error.code === 'AMBIGUOUS_TARGET') {
+    return errorResponse(
+      requestId,
+      'AMBIGUOUS_TARGET',
+      'ambiguity candidates exceed control frame size; refine the target filter'
+    )
+  }
+  return errorResponse(requestId, 'INTERNAL_ERROR', 'control response exceeds size limit')
 }
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -515,9 +587,50 @@ function isControlScope(value: unknown): value is HostControlScope {
   return typeof value === 'string' && [
     'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history', 'terminal.read-commands',
     'terminal.send-text', 'terminal.send-key', 'task.status.write',
-    'task.progress.write', 'task.log.append', 'task.move-to-window'
+    'task.progress.write', 'task.log.append', 'task.move-to-window',
+    ...HOST_ACTION_METHODS
   ].includes(value)
 }
+const HOST_ACTION_METHODS = [
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+] as const satisfies readonly HostActionMethod[]
+function isHostActionMethod(value: HostControlScope): value is HostActionMethod {
+  return (HOST_ACTION_METHODS as readonly string[]).includes(value)
+}
+function isCodedControlError(error: unknown): error is Error & { code: ControlErrorCode } {
+  return error instanceof Error &&
+    typeof (error as Error & { code?: unknown }).code === 'string' &&
+    CONTROL_ERROR_CODES.includes((error as Error & { code: string }).code as ControlErrorCode)
+}
+function controlErrorDetails(error: Error & { code: ControlErrorCode }): HostControlErrorDetails | undefined {
+  if (error.code !== 'AMBIGUOUS_TARGET') return undefined
+  const rawCandidates = (error as Error & { candidates?: unknown }).candidates
+  if (!Array.isArray(rawCandidates)) return undefined
+  const candidates: Array<{ humanPath: string }> = []
+  for (const candidate of rawCandidates) {
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return undefined
+    const humanPath = (candidate as { displayPath?: unknown }).displayPath
+    if (
+      typeof humanPath !== 'string' ||
+      !humanPath.trim() ||
+      Buffer.byteLength(humanPath, 'utf8') > 4_096
+    ) return undefined
+    candidates.push({ humanPath })
+  }
+  return candidates.length > 0 ? { candidates } : undefined
+}
+const CONTROL_ERROR_CODES = [
+  'INVALID_REQUEST', 'TARGET_NOT_FOUND', 'TARGET_NOT_READY', 'RUNTIME_NOT_READY',
+  'AMBIGUOUS_TARGET', 'TIMEOUT', 'CAPABILITY_DENIED', 'CONFLICT', 'UNSUPPORTED',
+  'INTERNAL_ERROR', 'STALE_PROJECTION', 'CONFIRMATION_REQUIRED',
+  'CONFIRMATION_EXPIRED', 'CONFIRMATION_STALE', 'PATH_CONFLICT', 'BRANCH_CONFLICT',
+  'WORKTREE_CONFLICT', 'PARTIAL_SUCCESS', 'NAVIGATION_TIMEOUT', 'STORAGE_READ_ONLY'
+] as const satisfies readonly ControlErrorCode[]
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }

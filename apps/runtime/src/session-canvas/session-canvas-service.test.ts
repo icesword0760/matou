@@ -30,6 +30,56 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('SessionCanvasService', () => {
+  it('creates a named canvas while preserving the previously focused canvas', () => {
+    const initial = bootstrap()
+
+    const result = service.createCanvas(command('named-canvas'), {
+      windowId: 'window-1', taskId: initial.task!.id,
+      title: '发布检查', navigation: 'preserve', now: 20
+    })
+
+    expect(result.created.scene).toMatchObject({ name: '发布检查', titlePinned: true })
+    expect(result.created.session).toMatchObject({ kind: 'shell', title: 'Shell' })
+    expect(result.scene?.id).toBe(initial.scene?.id)
+    expect(result.navigation.sceneByTask[initial.task!.id]).toBe(initial.scene?.id)
+    const createdEvent = database.get<{ payload_json: string }>(
+      `SELECT payload_json FROM domain_events
+       WHERE event_type = 'scene.created' AND aggregate_id = ?`,
+      result.created.scene.id
+    )
+    expect(JSON.parse(createdEvent!.payload_json)).toMatchObject({ name: '发布检查' })
+  })
+
+  it.each(['shell', 'claude-code', 'codex'] as const)(
+    'creates a %s sibling with its final title and no provider history while preserving focus',
+    (profile) => {
+      const initial = bootstrap()
+
+      const result = service.createSessionSibling(command(`named-${profile}`), {
+        windowId: 'window-1', sceneId: initial.scene!.id,
+        sourceSessionId: initial.session!.id, profile, title: `New ${profile}`,
+        navigation: 'preserve', now: 20
+      })
+
+      expect(result.created.session).toMatchObject({ kind: profile, title: `New ${profile}` })
+      expect(result.session?.id).toBe(initial.session?.id)
+      expect(result.navigation.sessionByScene[initial.scene!.id]).toBe(initial.session?.id)
+      expect(result.graph.focusedSessionId).toBe(initial.session?.id)
+      expect(database.get(
+        'SELECT id FROM provider_bindings WHERE session_id = ?',
+        result.created.session.id
+      )).toBeUndefined()
+      const createdEvent = database.get<{ payload_json: string }>(
+        `SELECT payload_json FROM domain_events
+         WHERE event_type = 'session.created' AND aggregate_id = ?`,
+        result.created.session.id
+      )
+      expect(JSON.parse(createdEvent!.payload_json)).toMatchObject({
+        kind: profile, title: `New ${profile}`
+      })
+    }
+  )
+
   it('creates a sequentially named Scene and focused root Shell atomically', () => {
     const initial = bootstrap()
 

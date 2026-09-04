@@ -11,6 +11,7 @@ import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
+import { WorktreeService } from '../worktrees/worktree-service'
 import {
   ForkWorkflowError,
   ForkWorkflowService,
@@ -42,6 +43,173 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('ForkWorkflowService', () => {
+  it('reserves one repository branch for only one durable Fork before background execution', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-branch-reservation')
+    seedReadyGitState(source.executionContextId)
+    const environment = {
+      mode: 'new-worktree' as const,
+      branch: 'feature/reserved-before-execution'
+    }
+    const first = await service.createForkChild(command('reserve-first'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '首个预留', environment, submissionKey: 'reservation-first', now: 30
+    })
+    const beforeSecond = database.get<{ sessions: number; nodes: number }>(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )!
+
+    await expect(service.createForkChild(command('reserve-second'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '第二个预留', environment, submissionKey: 'reservation-second', now: 31
+    })).rejects.toMatchObject({
+      code: 'BRANCH_CONFLICT', input: environment.branch
+    } satisfies Partial<ForkWorkflowError>)
+
+    expect(database.get(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )).toEqual(beforeSecond)
+    expect(database.all(
+      `SELECT operation_id, submission_key, branch_name
+       FROM session_fork_intents WHERE branch_name = ?`, environment.branch
+    )).toEqual([{
+      operation_id: first.forkProgress!.operationId,
+      submission_key: 'reservation-first',
+      branch_name: environment.branch
+    }])
+  })
+
+  it('keeps the Fork source cwd for the Renderer current-mode compatibility path', async () => {
+    const source = bootstrapClaude('provider-renderer-current-cwd')
+    const contextCwd = join(dataRoot, 'context-row-cwd')
+    database.run(
+      'UPDATE execution_contexts SET cwd = ? WHERE id = ?',
+      contextCwd, source.executionContextId
+    )
+
+    const result = await service.createForkChild(command('renderer-current-cwd'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '继续当前会话', worktreeMode: 'current', now: 30
+    })
+
+    expect(result.session).toMatchObject({
+      executionContextId: source.executionContextId,
+      cwd: workspaceRoot
+    })
+    expect(result.session!.cwd).not.toBe(contextCwd)
+  })
+
+  it('uses the submitted branch when creating a new Worktree', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-explicit-branch')
+    seedReadyGitState(source.executionContextId)
+
+    const accepted = await service.createForkChild(command('fork-explicit-branch'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '服务层重构', environment: {
+        mode: 'new-worktree', branch: 'feature/service-refactor'
+      }, submissionKey: 'fork-explicit-branch', now: 30
+    })
+    const result = await executeAccepted(
+      accepted, source.sceneId, 'fork-explicit-branch-execute', 31
+    )
+
+    expect(result.worktree?.branch).toBe('feature/service-refactor')
+    expect(database.get(
+      'SELECT worktree_mode, branch_name FROM session_fork_intents WHERE session_id = ?',
+      result.session!.id
+    )).toEqual({ worktree_mode: 'new', branch_name: 'feature/service-refactor' })
+  })
+
+  it('reuses an existing Worktree context and leaves its ownership unchanged', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-existing-worktree')
+    seedReadyGitState(source.executionContextId)
+    const existing = await seedExistingOwnedWorktree(source.sessionId, 'feature/existing-context')
+
+    const accepted = await service.createForkChild(command('fork-existing-worktree'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: 'Main 环境方案', environment: {
+        mode: 'existing-worktree', branch: existing.branch,
+        worktreeRef: `worktree:${existing.worktreeId}`,
+        worktreeId: existing.worktreeId,
+        executionContextId: existing.executionContextId
+      }, submissionKey: 'fork-existing-worktree', now: 30
+    })
+    const result = await executeAccepted(
+      accepted, source.sceneId, 'fork-existing-worktree-execute', 31
+    )
+
+    expect(result.session).toMatchObject({
+      executionContextId: existing.executionContextId,
+      cwd: existing.path
+    })
+    expect(result.forkProgress).toMatchObject({ stage: 'restoring-provider' })
+    expect(database.get(
+      `SELECT source_provider_session_id, worktree_mode, worktree_id, target_execution_context_id
+       FROM session_fork_intents WHERE session_id = ?`,
+      result.session!.id
+    )).toEqual({
+      source_provider_session_id: 'provider-existing-worktree',
+      worktree_mode: 'current', worktree_id: null,
+      target_execution_context_id: existing.executionContextId
+    })
+    expect(database.all(
+      `SELECT session_id, managed_worktree_id, active_target
+       FROM session_environment_bindings
+       WHERE managed_worktree_id = ? OR session_id = ?
+       ORDER BY session_id`,
+      existing.worktreeId, result.session!.id
+    )).toEqual([
+      { session_id: existing.ownerSessionId, managed_worktree_id: existing.worktreeId, active_target: 'worktree' },
+      { session_id: result.session!.id, managed_worktree_id: null, active_target: 'local' }
+    ].sort((left, right) => left.session_id.localeCompare(right.session_id)))
+    expect(database.get(
+      'SELECT state, branch_name FROM worktrees WHERE id = ?', existing.worktreeId
+    )).toEqual({ state: 'ready', branch_name: existing.branch })
+  })
+
+  it('rejects an existing Worktree whose recorded Git branch changes before final acceptance', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-existing-branch-switch')
+    seedReadyGitState(source.executionContextId)
+    const existing = await seedExistingOwnedWorktree(source.sessionId, 'feature/stable-existing')
+    const before = database.get<{ sessions: number; nodes: number }>(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )!
+
+    const pending = service.createForkChild(command('existing-branch-switch'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '切换中的工作树', environment: {
+        mode: 'existing-worktree', branch: existing.branch,
+        worktreeRef: `worktree:${existing.worktreeId}`,
+        worktreeId: existing.worktreeId,
+        executionContextId: existing.executionContextId
+      }, now: 30
+    })
+    database.run(
+      `UPDATE execution_context_git_states
+       SET branch = 'feature/switched-elsewhere', updated_at = 31
+       WHERE execution_context_id = ?`,
+      existing.executionContextId
+    )
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'BRANCH_CONFLICT', input: existing.branch
+    } satisfies Partial<ForkWorkflowError>)
+    expect(database.get(
+      `SELECT
+         (SELECT COUNT(*) FROM sessions) AS sessions,
+         (SELECT COUNT(*) FROM scene_nodes) AS nodes`
+    )).toEqual(before)
+  })
+
   it('creates a current-worktree Fork child from a valid Claude conversation', async () => {
     await initializeGitRepository(workspaceRoot)
     const source = bootstrapClaude('provider-parent')
@@ -100,6 +268,41 @@ describe('ForkWorkflowService', () => {
         git: { state: 'ready', branch: 'main', dirty: false }
       })
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
+  })
+
+  it.each([
+    ['claude-code', 'anthropic-official'] as const,
+    ['codex', 'openai-official'] as const
+  ])('freezes the %s profile, provider configuration, model, permission, and source context at acceptance', async (
+    profile,
+    providerConfigId
+  ) => {
+    const source = bootstrapProvider(profile, `provider-context-${profile}`, {
+      providerConfigId,
+      model: `${profile}-session-model`,
+      permissionMode: 'bypassPermissions'
+    })
+
+    const result = await service.createForkChild(command(`frozen-${profile}-child`), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: `${profile} child`, worktreeMode: 'current', now: 30
+    })
+
+    expect(result.session).toMatchObject({ kind: profile })
+    expect(database.get<{ provider: string; provider_session_id: string; metadata_json: string }>(
+      `SELECT provider, provider_session_id, metadata_json
+       FROM provider_bindings WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`,
+      result.session!.id
+    )).toEqual({
+      provider: profile,
+      provider_session_id: `provider-context-${profile}`,
+      metadata_json: JSON.stringify({
+        providerConfigId,
+        model: `${profile}-session-model`,
+        permissionMode: 'bypassPermissions',
+        inheritedConversation: true
+      })
+    })
   })
 
   it('durably accepts one complete Fork asset set for repeated submission keys', async () => {
@@ -418,6 +621,95 @@ describe('ForkWorkflowService', () => {
     expect(forkRevision).toBe(acceptedRevision)
   })
 
+  it('fails a durable Fork when its reserved branch moves after acceptance', async () => {
+    await initializeGitRepository(workspaceRoot)
+    const source = bootstrapClaude('provider-branch-moved-after-acceptance')
+    seedReadyGitState(source.executionContextId)
+    const branch = 'feature/moved-after-acceptance'
+    const frozenRevision = (await exec(
+      'git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+
+    const accepted = await service.createForkChild(command('branch-moved-accept'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '接受后分支竞争', environment: { mode: 'new-worktree', branch },
+      submissionKey: 'branch-moved-after-acceptance', now: 30
+    })
+    const claim = database.get<{
+      worktree_id: string
+      worktree_path: string
+      base_revision: string
+      execution_context_id: string
+      repository_root: string
+      workspace_id: string
+    }>(
+      `SELECT intent.worktree_id, intent.worktree_path, worktrees.base_revision,
+              worktrees.execution_context_id, worktrees.repository_root,
+              execution_contexts.workspace_id
+       FROM session_fork_intents AS intent
+       JOIN worktrees ON worktrees.id = intent.worktree_id
+       JOIN execution_contexts ON execution_contexts.id = worktrees.execution_context_id
+       WHERE intent.operation_id = ?`,
+      accepted.forkProgress!.operationId
+    )!
+    expect(claim.base_revision).toBe(frozenRevision)
+    await exec('git', [
+      '-C', workspaceRoot, 'worktree', 'add', '-b', branch,
+      claim.worktree_path, frozenRevision
+    ])
+    await exec('git', [
+      '-C', claim.worktree_path, 'checkout', '--detach', frozenRevision
+    ])
+
+    await writeFile(join(workspaceRoot, 'README.md'), 'external branch revision\n')
+    await exec('git', ['-C', workspaceRoot, 'add', 'README.md'])
+    await exec('git', ['-C', workspaceRoot, 'commit', '-m', 'external branch revision'])
+    const externalRevision = (await exec(
+      'git', ['-C', workspaceRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await exec('git', [
+      '-C', workspaceRoot, 'update-ref', `refs/heads/${branch}`, externalRevision
+    ])
+
+    const worktrees = new WorktreeService(
+      database, new DomainTransactionManager(database), { stopRuns: async () => undefined }
+    )
+    await expect(worktrees.create(command('branch-moved-worktree-create'), {
+      id: claim.worktree_id,
+      executionContextId: claim.execution_context_id,
+      workspaceId: claim.workspace_id,
+      repositoryRoot: claim.repository_root,
+      path: claim.worktree_path,
+      branch,
+      baseRef: frozenRevision,
+      setupPolicy: [],
+      now: 31
+    })).rejects.toThrow('frozen revision')
+    expect(database.get(
+      'SELECT state, base_revision FROM worktrees WHERE id = ?', claim.worktree_id
+    )).toEqual({ state: 'failed', base_revision: frozenRevision })
+
+    const failed = await executeAccepted(
+      accepted, source.sceneId, 'branch-moved-execute', 32
+    )
+
+    expect(failed).toMatchObject({
+      forkState: 'failed',
+      forkProgress: { stage: 'failed' },
+      error: expect.stringContaining('frozen revision')
+    })
+    expect(database.get(
+      'SELECT state, base_revision FROM worktrees WHERE id = ?', claim.worktree_id
+    )).toEqual({ state: 'failed', base_revision: frozenRevision })
+    await expect(realpath(claim.worktree_path)).resolves.toEqual(expect.any(String))
+    expect((await exec('git', [
+      '-C', claim.worktree_path, 'rev-parse', 'HEAD'
+    ])).stdout.trim()).toBe(frozenRevision)
+    expect((await exec('git', [
+      '-C', workspaceRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
+  })
+
   it('does not start external work or mutate the accepted assets with an already expired lease', async () => {
     await initializeGitRepository(workspaceRoot)
     const source = bootstrapClaude('provider-parent')
@@ -683,23 +975,49 @@ function bootstrapShell() {
 }
 
 function bootstrapClaude(providerSessionId: string) {
+  return bootstrapProvider('claude-code', providerSessionId, {
+    permissionMode: 'bypassPermissions'
+  })
+}
+
+function bootstrapProvider(
+  profile: 'claude-code' | 'codex',
+  providerSessionId: string,
+  settings: Record<string, unknown> = {}
+) {
   const result = bootstrapShell()
   database.run(
-    "UPDATE sessions SET kind = 'claude-code', title = 'Claude' WHERE id = ?",
-    result.sessionId
+    'UPDATE sessions SET kind = ?, title = ? WHERE id = ?',
+    profile, profile === 'claude-code' ? 'Claude' : 'Codex', result.sessionId
   )
-  seedClaudeBinding(result.sessionId, providerSessionId, true, 20)
+  seedProviderBinding(result.sessionId, profile, providerSessionId, {
+    canFork: true,
+    ...settings
+  }, 20)
   return result
 }
 
 function seedClaudeBinding(sessionId: string, providerSessionId: string, canFork: boolean, now: number) {
+  seedProviderBinding(sessionId, 'claude-code', providerSessionId, {
+    canFork,
+    permissionMode: 'bypassPermissions'
+  }, now)
+}
+
+function seedProviderBinding(
+  sessionId: string,
+  provider: 'claude-code' | 'codex',
+  providerSessionId: string,
+  metadata: Record<string, unknown>,
+  now: number
+) {
   database.run(
     `INSERT INTO provider_bindings (
        id, session_id, provider, provider_session_id, resume_state, restore_state,
        metadata_json, created_at, updated_at, validated_at
-     ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, ?, ?, ?)`,
-    `binding-${providerSessionId}`, sessionId, providerSessionId,
-    JSON.stringify({ canFork, permissionMode: 'bypassPermissions' }), now, now, now
+     ) VALUES (?, ?, ?, ?, 'available', 'none', ?, ?, ?, ?)`,
+    `binding-${providerSessionId}`, sessionId, provider, providerSessionId,
+    JSON.stringify(metadata), now, now, now
   )
 }
 
@@ -741,6 +1059,55 @@ async function initializeGitRepository(path: string): Promise<void> {
   await writeFile(join(path, 'README.md'), 'root\n')
   await exec('git', ['-C', path, 'add', 'README.md'])
   await exec('git', ['-C', path, 'commit', '-m', 'initial'])
+}
+
+async function seedExistingOwnedWorktree(sourceSessionId: string, branch: string) {
+  const ownerSessionId = 'existing-worktree-owner'
+  const executionContextId = 'context-existing-worktree'
+  const worktreeId = 'existing-worktree'
+  const path = join(dataRoot, 'existing-worktree')
+  const taskId = database.get<{ task_id: string }>(
+    'SELECT task_id FROM sessions WHERE id = ?', sourceSessionId
+  )!.task_id
+  const workspaceId = database.get<{ workspace_id: string }>(
+    'SELECT workspace_id FROM tasks WHERE id = ?', taskId
+  )!.workspace_id
+  await exec('git', ['-C', workspaceRoot, 'worktree', 'add', '-b', branch, path, 'HEAD'])
+  const revision = (await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim()
+  database.run(
+    `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+     VALUES (?, ?, 'git-worktree', ?, 20)`,
+    executionContextId, workspaceId, path
+  )
+  database.run(
+    `INSERT INTO worktrees (
+       id, execution_context_id, repository_root, worktree_path, branch_name,
+       base_ref, base_revision, state, setup_policy_json, setup_result_json,
+       cleanup_policy, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', '[]', '[]', 'retain-dirty', 20, 20)`,
+    worktreeId, executionContextId, workspaceRoot, path, branch, revision, revision
+  )
+  database.run(
+    `INSERT INTO execution_context_git_states (
+       execution_context_id, repository_root, state, branch, detached_head,
+       dirty, error_message, updated_at
+     ) VALUES (?, ?, 'ready', ?, NULL, 0, NULL, 20)`,
+    executionContextId, workspaceRoot, branch
+  )
+  database.run(
+    `INSERT INTO sessions (
+       id, task_id, execution_context_id, kind, status, title, cwd,
+       created_at, updated_at, last_activity_at
+     ) VALUES (?, ?, ?, 'shell', 'running', 'Existing owner', ?, 20, 20, 20)`,
+    ownerSessionId, taskId, executionContextId, path
+  )
+  database.run(
+    `UPDATE session_environment_bindings
+     SET managed_worktree_id = ?, active_target = 'worktree', state = 'ready', updated_at = 20
+     WHERE session_id = ?`,
+    worktreeId, ownerSessionId
+  )
+  return { ownerSessionId, executionContextId, worktreeId, branch, path }
 }
 
 function command(commandId: string) {

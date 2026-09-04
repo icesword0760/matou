@@ -81,6 +81,17 @@ describe('RuntimeSessionRegistry', () => {
     expect(registry.providerIdentityConfirmed('run-1')).toBe(false)
   })
 
+  it('records identity confirmation for the current fresh run without a pending output gate', () => {
+    const registry = new RuntimeSessionRegistry()
+    const fresh = session('fresh-provider')
+    registry.set(fresh.value)
+
+    expect(registry.providerIdentityPending('fresh-provider')).toBe(false)
+    expect(registry.confirmProviderIdentity('fresh-provider', 'stale-run')).toBe(false)
+    expect(registry.confirmProviderIdentity('fresh-provider', 'run-fresh-provider')).toBe(true)
+    expect(registry.providerIdentityConfirmed('run-fresh-provider')).toBe(true)
+  })
+
   it('waits for every PTY journal to close during a graceful Runtime shutdown', async () => {
     const registry = new RuntimeSessionRegistry()
     const first = session('first')
@@ -113,6 +124,7 @@ function session(sessionId: string) {
   return {
     value: {
       sessionId,
+      runId: `run-${sessionId}`,
       pid: 101,
       shutdownForRuntime,
       whenClosed: () => closed

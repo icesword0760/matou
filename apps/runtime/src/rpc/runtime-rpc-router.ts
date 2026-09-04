@@ -405,6 +405,13 @@ export class RuntimeRpcRouter {
           windowId: text(input.windowId, 'windowId'),
           name: text(input.name, 'name'),
           rootDirectory: text(input.rootDirectory, 'rootDirectory'),
+          ...(optionalEnumeration(
+            input.navigation, ['activate', 'preserve'] as const, 'navigation'
+          ) === undefined ? {} : {
+            navigation: optionalEnumeration(
+              input.navigation, ['activate', 'preserve'] as const, 'navigation'
+            )!
+          }),
           now: integer(input.now, 'now', 0)
         }))
       case 'hierarchy.rename-workspace':
@@ -454,6 +461,16 @@ export class RuntimeRpcRouter {
         return this.#hierarchy.createTask(command, {
           windowId: text(input.windowId, 'windowId'),
           workspaceId: text(input.workspaceId, 'workspaceId'),
+          ...(optionalText(input.title, 'title') === undefined
+            ? {}
+            : { title: optionalText(input.title, 'title')! }),
+          ...(optionalEnumeration(
+            input.navigation, ['activate', 'preserve'] as const, 'navigation'
+          ) === undefined ? {} : {
+            navigation: optionalEnumeration(
+              input.navigation, ['activate', 'preserve'] as const, 'navigation'
+            )!
+          }),
           now: integer(input.now, 'now', 0)
         })
       case 'hierarchy.rename-task':
@@ -538,6 +555,16 @@ export class RuntimeRpcRouter {
         return this.#withActivePathState(this.#sessionCanvas.createCanvas(command, {
           windowId: text(input.windowId, 'windowId'),
           taskId: text(input.taskId, 'taskId'),
+          ...(optionalText(input.title, 'title') === undefined
+            ? {}
+            : { title: optionalText(input.title, 'title')! }),
+          ...(optionalEnumeration(
+            input.navigation, ['activate', 'preserve'] as const, 'navigation'
+          ) === undefined ? {} : {
+            navigation: optionalEnumeration(
+              input.navigation, ['activate', 'preserve'] as const, 'navigation'
+            )!
+          }),
           now: integer(input.now, 'now', 0)
         }))
       case 'hierarchy.rename-scene':
@@ -600,6 +627,16 @@ export class RuntimeRpcRouter {
           ...(optionalText(input.parentSessionId, 'parentSessionId') === undefined
             ? {}
             : { parentSessionId: optionalText(input.parentSessionId, 'parentSessionId')! }),
+          ...(optionalText(input.title, 'title') === undefined
+            ? {}
+            : { title: optionalText(input.title, 'title')! }),
+          ...(optionalEnumeration(
+            input.navigation, ['activate', 'preserve'] as const, 'navigation'
+          ) === undefined ? {} : {
+            navigation: optionalEnumeration(
+              input.navigation, ['activate', 'preserve'] as const, 'navigation'
+            )!
+          }),
           now: integer(input.now, 'now', 0)
         }))
       case 'hierarchy.record-session-interaction':
@@ -1097,6 +1134,13 @@ function textValue(value: unknown, label: string): string {
 }
 function optionalText(value: unknown, label: string): string | undefined {
   return value === undefined ? undefined : text(value, label)
+}
+function optionalEnumeration<const T extends readonly string[]>(
+  value: unknown,
+  values: T,
+  label: string
+): T[number] | undefined {
+  return value === undefined ? undefined : enumeration(value, values, label)
 }
 function optionalString(value: unknown): string {
   if (value === undefined) return ''

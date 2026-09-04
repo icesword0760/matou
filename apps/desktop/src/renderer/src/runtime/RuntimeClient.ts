@@ -1,5 +1,7 @@
 import {
   PROTOCOL_VERSION,
+  type HostNavigationRequestWire,
+  type HostNavigationResultWire,
   type RpcMethod,
   type RuntimeMessage,
   type RuntimeMode,
@@ -29,6 +31,17 @@ export interface TerminalAttachment {
 }
 
 export type SessionRecoveryStatus = Extract<RuntimeMessage, { type: 'session.recovery-status' }>
+export type HostNavigationResultInput = Omit<
+  HostNavigationResultWire,
+  'type' | 'protocolVersion'
+>
+
+export interface RuntimeClientOptions {
+  clientId?: string
+  requestTimeoutMs?: number
+  windowId?: string
+  windowKind?: 'main' | 'detached-terminal'
+}
 
 interface PendingRequest {
   resolve(value: unknown): void
@@ -55,6 +68,15 @@ interface TerminalCheckpointQueue {
   pending?: TerminalCheckpoint
 }
 
+interface UndeliveredHostNavigation {
+  request: HostNavigationRequestWire
+  sourcePort: RuntimeClientPort
+  expiryTimer?: ReturnType<typeof setTimeout>
+}
+
+const HOST_NAVIGATION_ATTEMPT_LIMIT = 256
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
 export class RuntimeClient {
   readonly #clientId: string
   readonly #requestTimeoutMs: number
@@ -64,6 +86,9 @@ export class RuntimeClient {
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #terminalResizeIds = new Map<string, number>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
+  readonly #hostNavigationListeners = new Set<(request: HostNavigationRequestWire) => void>()
+  readonly #hostNavigationPorts = new Map<string, RuntimeClientPort>()
+  readonly #undeliveredHostNavigations = new Map<string, UndeliveredHostNavigation>()
   readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
   readonly #recoveryResetListeners = new Set<() => void>()
   readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
@@ -73,19 +98,26 @@ export class RuntimeClient {
   #readOnly = false
   #projectionAfterSequence: number | undefined
   #requiresRecoverySnapshot = true
+  readonly #windowIdentity: Pick<RuntimeClientOptions, 'windowId' | 'windowKind'>
+  #disposed = false
 
   constructor(
     port: RuntimeClientPort,
-    options: { clientId?: string; requestTimeoutMs?: number } = {}
+    options: RuntimeClientOptions = {}
   ) {
     this.#port = port
     this.#clientId = options.clientId ?? crypto.randomUUID()
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 10_000
+    this.#windowIdentity = options.windowId !== undefined && options.windowKind !== undefined
+      ? { windowId: options.windowId, windowKind: options.windowKind }
+      : {}
     this.#bindPort(port)
   }
 
   replacePort(port: RuntimeClientPort): void {
-    this.#port.close()
+    const previousPort = this.#port
+    previousPort.onmessage = null
+    previousPort.close()
     this.#port = port
     this.#ready = false
     this.#requiresRecoverySnapshot = true
@@ -96,12 +128,32 @@ export class RuntimeClient {
     // have seen it, so discard transport state and let the next replay/output
     // snapshot establish a fresh authoritative checkpoint.
     this.#terminalCheckpoints.clear()
+    this.#clearUndeliveredHostNavigations()
+    this.#hostNavigationPorts.clear()
     for (const [requestId, pending] of this.#requests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Runtime channel replaced before the request completed'))
       this.#requests.delete(requestId)
     }
     this.#bindPort(port)
+  }
+
+  dispose(): void {
+    if (this.#disposed) return
+    this.#disposed = true
+    this.#port.onmessage = null
+    this.#port.close()
+    this.#clearUndeliveredHostNavigations()
+    this.#hostNavigationPorts.clear()
+    this.#hostNavigationListeners.clear()
+    this.#projectionListeners.clear()
+    this.#recoveryListeners.clear()
+    this.#recoveryResetListeners.clear()
+    for (const [requestId, pending] of this.#requests) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error('Runtime client was disposed before the request completed'))
+      this.#requests.delete(requestId)
+    }
   }
 
   setRuntimeMode(mode: RuntimeMode): void {
@@ -191,6 +243,22 @@ export class RuntimeClient {
   subscribeProjection(listener: (message: RuntimeMessage) => void): () => void {
     this.#projectionListeners.add(listener)
     return () => this.#projectionListeners.delete(listener)
+  }
+
+  subscribeHostNavigation(listener: (request: HostNavigationRequestWire) => void): () => void {
+    if (this.#disposed) return () => undefined
+    const firstSubscriber = this.#hostNavigationListeners.size === 0
+    this.#hostNavigationListeners.add(listener)
+    if (firstSubscriber) this.#replayUndeliveredHostNavigations()
+    return () => this.#hostNavigationListeners.delete(listener)
+  }
+
+  acknowledgeHostNavigation(result: HostNavigationResultInput): void {
+    const sourcePort = this.#hostNavigationPorts.get(hostNavigationAttemptKey(result))
+    if (this.#disposed || sourcePort === undefined || sourcePort !== this.#port) return
+    sourcePort.postMessage({
+      type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION, ...result
+    } satisfies HostNavigationResultWire)
   }
 
   subscribeSessionRecovery(
@@ -392,14 +460,18 @@ export class RuntimeClient {
   }
 
   #bindPort(port: RuntimeClientPort): void {
-    port.onmessage = (event) => this.#receive(event.data)
+    port.onmessage = (event) => {
+      if (this.#disposed || this.#port !== port) return
+      this.#receive(event.data, port)
+    }
     port.start()
     port.postMessage({
-      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: this.#clientId
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: this.#clientId,
+      ...this.#windowIdentity
     })
   }
 
-  #receive(message: RuntimeMessage): void {
+  #receive(message: RuntimeMessage, port: RuntimeClientPort): void {
     if (message.type === 'protocol.ready') {
       this.#ready = true
       for (const resolve of this.#readyWaiters) resolve()
@@ -412,6 +484,10 @@ export class RuntimeClient {
       if (this.#projectionAfterSequence !== undefined) {
         this.#subscribeEvents(this.#projectionAfterSequence)
       }
+      return
+    }
+    if (message.type === 'host.navigation-request') {
+      this.#receiveHostNavigation(message, port)
       return
     }
     if (message.type === 'session.recovery-snapshot') {
@@ -549,9 +625,92 @@ export class RuntimeClient {
     })
   }
 
+  #receiveHostNavigation(
+    request: HostNavigationRequestWire,
+    sourcePort: RuntimeClientPort
+  ): void {
+    const key = hostNavigationAttemptKey(request)
+    if (!this.#hostNavigationPorts.has(key) &&
+      this.#hostNavigationPorts.size >= HOST_NAVIGATION_ATTEMPT_LIMIT) {
+      const oldest = this.#hostNavigationPorts.keys().next().value as string | undefined
+      if (oldest !== undefined) this.#forgetUndeliveredHostNavigation(oldest, true)
+    }
+    this.#hostNavigationPorts.set(key, sourcePort)
+    if (this.#hostNavigationListeners.size > 0) {
+      for (const listener of this.#hostNavigationListeners) listener(request)
+      return
+    }
+    if (request.deadlineAt <= Date.now()) {
+      this.#hostNavigationPorts.delete(key)
+      return
+    }
+    // A Runtime can answer the hello before React commits HierarchyProduct's
+    // subscription effect. Retain the first copy of that transport attempt so
+    // the first listener observes it exactly once.
+    if (this.#undeliveredHostNavigations.has(key)) return
+    const pending: UndeliveredHostNavigation = { request, sourcePort }
+    this.#undeliveredHostNavigations.set(key, pending)
+    this.#armUndeliveredHostNavigationExpiry(key, pending)
+  }
+
+  #replayUndeliveredHostNavigations(): void {
+    for (const [key, pending] of this.#undeliveredHostNavigations) {
+      if (
+        pending.sourcePort !== this.#port ||
+        pending.request.deadlineAt <= Date.now()
+      ) {
+        this.#forgetUndeliveredHostNavigation(key, true)
+        continue
+      }
+      this.#forgetUndeliveredHostNavigation(key, false)
+      for (const listener of this.#hostNavigationListeners) listener(pending.request)
+    }
+  }
+
+  #armUndeliveredHostNavigationExpiry(
+    key: string,
+    pending: UndeliveredHostNavigation
+  ): void {
+    const remaining = pending.request.deadlineAt - Date.now()
+    if (remaining <= 0) {
+      this.#forgetUndeliveredHostNavigation(key, true)
+      return
+    }
+    pending.expiryTimer = setTimeout(() => {
+      if (this.#undeliveredHostNavigations.get(key) !== pending) return
+      this.#armUndeliveredHostNavigationExpiry(key, pending)
+    }, Math.min(remaining, MAX_TIMER_DELAY_MS))
+  }
+
+  #forgetUndeliveredHostNavigation(key: string, forgetSourcePort: boolean): void {
+    const pending = this.#undeliveredHostNavigations.get(key)
+    if (pending?.expiryTimer !== undefined) clearTimeout(pending.expiryTimer)
+    this.#undeliveredHostNavigations.delete(key)
+    if (
+      forgetSourcePort &&
+      (pending === undefined || this.#hostNavigationPorts.get(key) === pending.sourcePort)
+    ) {
+      this.#hostNavigationPorts.delete(key)
+    }
+  }
+
+  #clearUndeliveredHostNavigations(): void {
+    for (const pending of this.#undeliveredHostNavigations.values()) {
+      if (pending.expiryTimer !== undefined) clearTimeout(pending.expiryTimer)
+    }
+    this.#undeliveredHostNavigations.clear()
+  }
+
   #post(message: unknown): void {
     this.#port.postMessage(message)
   }
+}
+
+function hostNavigationAttemptKey(value: {
+  requestId: string
+  attemptId: string
+}): string {
+  return `${value.requestId}\u0000${value.attemptId}`
 }
 
 function effectiveTerminalConfig(

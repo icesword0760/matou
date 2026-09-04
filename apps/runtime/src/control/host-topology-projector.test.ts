@@ -131,3 +131,38 @@ function graphFixture() {
 function command(commandId: string) {
   return { commandId, commandType: commandId, requestHash: `hash:${commandId}` }
 }
+
+describe('HostTopologyProjector environments', () => {
+  it('includes branch and stable worktree refs in all-scope topology', () => {
+    const fixture = graphFixture()
+    const executionContextId = fixture.child1.session!.executionContextId
+    database.run("UPDATE execution_contexts SET kind = 'git-worktree' WHERE id = ?", executionContextId)
+    database.run(
+      `INSERT INTO worktrees (
+         id, execution_context_id, repository_root, worktree_path, branch_name,
+         state, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, 'ready', 2, 2)`,
+      'worktree-2', executionContextId, workspaceRoot, join(workspaceRoot, 'service-refactor'),
+      'feature/service-refactor'
+    )
+    database.run(
+      `INSERT INTO execution_context_git_states (
+         execution_context_id, repository_root, state, branch, detached_head,
+         dirty, error_message, updated_at
+       ) VALUES (?, ?, 'ready', ?, NULL, 0, NULL, 2)`,
+      executionContextId, workspaceRoot, 'feature/service-refactor'
+    )
+
+    const target = projector.list(
+      { runId: 'run-child-1', sessionId: fixture.child1.session!.id },
+      'all'
+    ).find(({ sessionId }) => sessionId === fixture.child1.session!.id)
+
+    expect(target?.environment).toEqual({
+      executionContextRef: `context:${executionContextId}`,
+      mode: 'git-worktree',
+      branch: 'feature/service-refactor',
+      worktreeRef: 'worktree:worktree-2'
+    })
+  })
+})

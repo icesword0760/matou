@@ -1261,5 +1261,189 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
         LIMIT 1
       ), 'default');
     `
+  },
+  {
+    version: 30,
+    name: 'durable-fork-batch-ledger',
+    sql: `
+      CREATE TABLE fork_batch_ledger (
+        batch_key TEXT PRIMARY KEY,
+        request_fingerprint TEXT NOT NULL,
+        caller_session_id TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        source_scene_id TEXT NOT NULL,
+        item_count INTEGER NOT NULL CHECK (item_count >= 0 AND item_count <= 50),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+
+      CREATE TABLE fork_batch_items (
+        batch_key TEXT NOT NULL REFERENCES fork_batch_ledger(batch_key) ON DELETE CASCADE,
+        item_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        item_fingerprint TEXT NOT NULL,
+        submission_key TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        environment_json TEXT NOT NULL,
+        start_requested INTEGER NOT NULL CHECK (start_requested IN (0, 1)),
+        prompt_fingerprint TEXT,
+        session_id TEXT,
+        state TEXT NOT NULL CHECK (
+          state IN ('unsubmitted', 'created', 'ready', 'started', 'failed')
+        ),
+        start_state TEXT NOT NULL CHECK (
+          start_state IN (
+            'not-requested', 'pending', 'waiting', 'delivering',
+            'completed', 'failed', 'uncertain'
+          )
+        ),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (batch_key, item_key),
+        UNIQUE (batch_key, ordinal)
+      ) STRICT;
+
+      CREATE INDEX fork_batch_items_session_idx
+      ON fork_batch_items(session_id);
+    `
+  },
+  {
+    version: 31,
+    name: 'durable-fork-batch-retry-attempts',
+    sql: `
+      ALTER TABLE fork_batch_items
+      ADD COLUMN failure_generation INTEGER NOT NULL DEFAULT 0
+        CHECK (failure_generation >= 0);
+      ALTER TABLE fork_batch_items ADD COLUMN failure_receipt TEXT;
+
+      UPDATE fork_batch_items
+      SET failure_generation = 1,
+          failure_receipt = COALESCE(
+            (
+              SELECT 'fork-intent:' || intent.operation_id || ':' || intent.attempt
+              FROM session_fork_intents AS intent
+              WHERE intent.submission_key = fork_batch_items.submission_key
+                AND intent.stage = 'failed'
+            ),
+            'migration-30:' || submission_key
+          )
+      WHERE state = 'failed';
+
+      CREATE TABLE fork_batch_retry_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        batch_key TEXT NOT NULL REFERENCES fork_batch_ledger(batch_key) ON DELETE CASCADE,
+        batch_request_fingerprint TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        retry_keys_json TEXT NOT NULL,
+        failure_generations_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (batch_key, request_fingerprint)
+      ) STRICT;
+
+      CREATE TABLE fork_batch_retry_items (
+        attempt_id TEXT NOT NULL
+          REFERENCES fork_batch_retry_attempts(attempt_id) ON DELETE CASCADE,
+        batch_key TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        failure_generation INTEGER NOT NULL CHECK (failure_generation > 0),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'executing', 'completed', 'failed')),
+        session_id TEXT,
+        result_state TEXT CHECK (
+          result_state IS NULL OR result_state IN ('created', 'ready', 'started', 'failed')
+        ),
+        result_failure_generation INTEGER CHECK (
+          result_failure_generation IS NULL OR result_failure_generation > 0
+        ),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (attempt_id, item_key),
+        UNIQUE (attempt_id, ordinal),
+        FOREIGN KEY (batch_key, item_key)
+          REFERENCES fork_batch_items(batch_key, item_key) ON DELETE CASCADE
+      ) STRICT;
+
+      CREATE INDEX fork_batch_retry_attempts_batch_idx
+      ON fork_batch_retry_attempts(batch_key, created_at, attempt_id);
+    `
+  },
+  {
+    version: 32,
+    name: 'fork-batch-interrupted-retry-replay',
+    sql: `
+      ALTER TABLE fork_batch_retry_attempts
+      ADD COLUMN replay_pending INTEGER NOT NULL DEFAULT 0
+        CHECK (replay_pending IN (0, 1));
+
+      UPDATE fork_batch_retry_items
+      SET state = 'failed',
+          session_id = (
+            SELECT item.session_id FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          ),
+          result_state = 'failed',
+          result_failure_generation = (
+            SELECT item.failure_generation FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          ),
+          error_message = (
+            SELECT item.error_message FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          ),
+          updated_at = (
+            SELECT MAX(fork_batch_retry_items.updated_at, item.updated_at)
+            FROM fork_batch_items AS item
+            WHERE item.batch_key = fork_batch_retry_items.batch_key
+              AND item.item_key = fork_batch_retry_items.item_key
+          )
+      WHERE state IN ('pending', 'executing')
+        AND EXISTS (
+          SELECT 1 FROM fork_batch_items AS item
+          WHERE item.batch_key = fork_batch_retry_items.batch_key
+            AND item.item_key = fork_batch_retry_items.item_key
+            AND item.state = 'failed'
+            AND item.failure_generation > fork_batch_retry_items.failure_generation
+        );
+
+      UPDATE fork_batch_retry_attempts
+      SET state = 'completed', replay_pending = 1,
+          updated_at = MAX(
+            updated_at,
+            COALESCE((
+              SELECT MAX(item.updated_at) FROM fork_batch_retry_items AS item
+              WHERE item.attempt_id = fork_batch_retry_attempts.attempt_id
+            ), updated_at)
+          )
+      WHERE state = 'pending'
+        AND NOT EXISTS (
+          SELECT 1 FROM fork_batch_retry_items AS item
+          WHERE item.attempt_id = fork_batch_retry_attempts.attempt_id
+            AND item.state IN ('pending', 'executing')
+        )
+        AND EXISTS (
+          SELECT 1 FROM fork_batch_retry_items AS item
+          WHERE item.attempt_id = fork_batch_retry_attempts.attempt_id
+            AND item.state = 'failed'
+            AND item.result_failure_generation > item.failure_generation
+        );
+    `
+  },
+  {
+    version: 33,
+    name: 'fork-public-request-receipts',
+    sql: `
+      ALTER TABLE fork_batch_ledger ADD COLUMN public_request_fingerprint TEXT;
+      ALTER TABLE fork_batch_ledger ADD COLUMN resolved_request_json TEXT;
+
+      CREATE INDEX fork_batch_public_request_idx
+      ON fork_batch_ledger(public_request_fingerprint);
+    `
   }
 ]

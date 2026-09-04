@@ -15,6 +15,7 @@ import { applyApplicationBrand } from './application-brand'
 import { resolveDefaultWorkspacePath } from './default-workspace-policy'
 import { claimSingleInstance, workspacePathFromArguments } from './single-instance-policy'
 import { WindowManager } from './window-manager'
+import { DetachedTerminalFocusCoordinator } from './detached-terminal-focus-coordinator'
 import { DagWindowManager, type DagWindowAdapter, type Rectangle } from './dag-window-manager'
 import { secondaryDisplayWindowBounds } from './e2e-window-placement'
 import { installDevelopmentDockIcon } from './app-icon'
@@ -26,15 +27,18 @@ import {
   DESKTOP_CHANNELS,
   type DagNodeSelection,
   type DagWindowContext,
+  type DetachedTerminalFocusRequest,
+  type DetachedTerminalFocusResult,
   type DetachedTerminalWindowInput,
   type DetachedWindowClosedEvent
 } from '../shared/desktop-api'
 import { APP_DISPLAY_NAME, APP_STORAGE_DIRECTORY_NAME } from '../shared/brand'
 
 let runtimeHost: RuntimeHost | undefined
-const windows = new WindowManager()
+const windows = new WindowManager(() => app.focus({ steal: true }))
 const workspaceOpenRequests = new WorkspaceOpenRequests()
 const browserWindows = new Map<string, BrowserWindow>()
+const detachedWindowContexts = new Map<string, DetachedTerminalWindowInput>()
 const dagBrowserWindows = new Map<string, BrowserWindow>()
 let tray: Tray | undefined
 let quitting = false
@@ -47,6 +51,26 @@ const { autoUpdater } = electronUpdater
 const isPackagedApplication = resolvePackagedApplication({
   electronPackaged: app.isPackaged,
   developmentBundle: process.env.MATOU_DEV_BUNDLE
+})
+
+const detachedTerminalFocus = new DetachedTerminalFocusCoordinator({
+  resolveTarget: (windowId) => {
+    const window = browserWindows.get(windowId)
+    const context = detachedWindowContexts.get(windowId)
+    if (!window || window.isDestroyed() || !context) return undefined
+    return {
+      windowId,
+      mainWindowId: context.mainWindowId,
+      sessionId: context.sessionId,
+      webContentsId: window.webContents.id,
+      showAndFocus: () => windows.showWindow(windowId),
+      send: (request) => window.webContents.send(
+        DESKTOP_CHANNELS.detachedTerminalFocusRequested,
+        request
+      ),
+      isFocused: () => !window.isDestroyed() && window.isFocused()
+    }
+  }
 })
 
 applyApplicationBrand(app, APP_DISPLAY_NAME)
@@ -220,6 +244,7 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   })
   windows.register(input.windowId, window)
   browserWindows.set(input.windowId, window)
+  detachedWindowContexts.set(input.windowId, input)
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
   installNativeDagShortcut(window)
@@ -240,8 +265,10 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   // leave a stale detached placeholder until the next app restart.
   window.on('close', notifyOwner)
   window.on('closed', () => {
+    detachedTerminalFocus.cancelWindow(input.windowId)
     windows.unregister(input.windowId)
     browserWindows.delete(input.windowId)
+    detachedWindowContexts.delete(input.windowId)
     notifyOwner()
   })
   const query = {
@@ -465,6 +492,22 @@ ipcMain.handle(DESKTOP_CHANNELS.hideWindow, (_event, windowId: string) => {
 })
 ipcMain.handle(DESKTOP_CHANNELS.showWindow, (_event, windowId: string) => {
   windows.showWindow(windowId)
+})
+ipcMain.handle(DESKTOP_CHANNELS.requestDetachedTerminalFocus, (
+  event,
+  input: DetachedTerminalFocusRequest
+) => {
+  const route = browserWindows.get(input.routeWindowId)
+  if (!route || route.isDestroyed() || route.webContents.id !== event.sender.id) return false
+  return detachedTerminalFocus.request(input)
+})
+ipcMain.handle(DESKTOP_CHANNELS.acknowledgeDetachedTerminalFocus, (
+  event,
+  result: DetachedTerminalFocusResult
+) => detachedTerminalFocus.acknowledge(result, event.sender.id))
+ipcMain.handle(DESKTOP_CHANNELS.isCurrentWindowFocused, (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  return Boolean(window && !window.isDestroyed() && window.isFocused())
 })
 ipcMain.handle(DESKTOP_CHANNELS.createDetachedTerminalWindow, (
   _event, input: DetachedTerminalWindowInput

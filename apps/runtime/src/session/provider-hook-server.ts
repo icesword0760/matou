@@ -18,13 +18,17 @@ const MAX_HOOK_BYTES = 1024 * 1024
 interface HookRegistrationRecord {
   runId: string
   sessionId: string
+  provider: 'claude-code' | 'codex'
   permissionMode?: string
+  providerConfigId?: string
+  model?: string
   acceptStatuslineIdentity: boolean
   expectedProviderSessionId?: string
   identityRejected?: boolean
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
   acceptIdentity: boolean
+  acceptSideEffects: boolean
   settingsPath: string
   statusScriptPath: string
   retirementTimer?: ReturnType<typeof setTimeout>
@@ -49,7 +53,7 @@ export interface ProviderHookNotification {
 export interface ProviderIdentityMismatch {
   runId: string
   sessionId: string
-  provider: 'claude-code'
+  provider: 'claude-code' | 'codex'
   expectedProviderSessionId: string
   actualProviderSessionId: string
   eventName: string
@@ -66,6 +70,7 @@ export interface AgentTeamObservation {
 }
 
 export interface ProviderHookServerOptions {
+  currentRunId?: (sessionId: string) => string | undefined
   onNotification?: (notification: ProviderHookNotification) => void
   onHudPayload?: (event: {
     runId: string
@@ -76,7 +81,7 @@ export interface ProviderHookServerOptions {
   onIdentityRecorded?: (event: {
     runId: string
     sessionId: string
-    provider: 'claude-code'
+    provider: 'claude-code' | 'codex'
     providerSessionId: string
     eventName: string
     forkAuthority?: ProviderIdentityForkAuthority
@@ -94,8 +99,9 @@ export interface ProviderHookServerOptions {
 
 export interface ProviderHookRegistration {
   settingsPath: string
+  codexHooksConfig?: string
   hookUrl: string
-  retire(graceMs?: number): void
+  retire(graceMs?: number, options?: { suppressSideEffects?: boolean }): void
   dispose(): Promise<void>
 }
 
@@ -107,6 +113,7 @@ export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
   readonly #registrations = new Map<string, HookRegistrationRecord>()
+  readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
@@ -119,6 +126,7 @@ export class ProviderHookServer {
   constructor(dataRoot: string, sessions: SessionRepository, options: ProviderHookServerOptions = {}) {
     this.#dataRoot = dataRoot
     this.#sessions = sessions
+    this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
@@ -165,11 +173,43 @@ export class ProviderHookServer {
     runId: string
     sessionId: string
     permissionMode?: string
+    providerConfigId?: string
+    model?: string
     acceptStatuslineIdentity?: boolean
     expectedProviderSessionId?: string
     inheritedConversation?: boolean
     forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
+    return this.#registerProviderSession('claude-code', input)
+  }
+
+  async registerCodexSession(input: {
+    runId: string
+    sessionId: string
+    permissionMode?: string
+    providerConfigId?: string
+    model?: string
+    expectedProviderSessionId?: string
+    inheritedConversation?: boolean
+    forkAuthority?: ProviderIdentityForkAuthority
+  }): Promise<ProviderHookRegistration> {
+    return this.#registerProviderSession('codex', input)
+  }
+
+  async #registerProviderSession(
+    provider: 'claude-code' | 'codex',
+    input: {
+      runId: string
+      sessionId: string
+      permissionMode?: string
+      providerConfigId?: string
+      model?: string
+      acceptStatuslineIdentity?: boolean
+      expectedProviderSessionId?: string
+      inheritedConversation?: boolean
+      forkAuthority?: ProviderIdentityForkAuthority
+    }
+  ): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
     if (input.forkAuthority && input.forkAuthority.runId !== input.runId) {
       throw new Error('Fork provider hook run identity does not match its authority')
@@ -179,12 +219,15 @@ export class ProviderHookServer {
     const directory = join(this.#dataRoot, 'provider-hooks')
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
-    const settingsPath = join(directory, `${token}.settings.json`)
+    const settingsPath = join(directory, `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
     const statusScriptPath = join(directory, `${token}.statusline.sh`)
     const temporaryPath = `${settingsPath}.tmp`
     await writeFile(statusScriptPath, statusLineScript(hookUrl), { encoding: 'utf8', mode: 0o700 })
     await chmod(statusScriptPath, 0o700)
-    await writeFile(temporaryPath, JSON.stringify(claudeHookSettings(hookUrl, statusScriptPath), null, 2), {
+    const settings = provider === 'claude-code'
+      ? claudeHookSettings(hookUrl, statusScriptPath)
+      : codexHookSettings(statusScriptPath)
+    await writeFile(temporaryPath, JSON.stringify(settings, null, 2), {
       encoding: 'utf8', mode: 0o600
     })
     await rename(temporaryPath, settingsPath)
@@ -192,37 +235,46 @@ export class ProviderHookServer {
     const record: HookRegistrationRecord = {
       runId: input.runId,
       sessionId: input.sessionId,
+      provider,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
-      acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
+      ...(input.providerConfigId === undefined
+        ? {}
+        : { providerConfigId: input.providerConfigId }),
+      ...(input.model === undefined ? {} : { model: input.model }),
+      acceptStatuslineIdentity: provider === 'codex' || input.acceptStatuslineIdentity === true,
       ...(input.expectedProviderSessionId === undefined
         ? {}
         : { expectedProviderSessionId: input.expectedProviderSessionId }),
       inheritedConversation: input.inheritedConversation === true,
       ...(input.forkAuthority === undefined ? {} : { forkAuthority: input.forkAuthority }),
       acceptIdentity: true,
+      acceptSideEffects: true,
       settingsPath,
       statusScriptPath
     }
     this.#registrations.set(token, record)
-    let disposed = false
-    const dispose = async () => {
-      if (disposed) return
-      disposed = true
-      clearTimeout(record.retirementTimer)
-      this.#stopTitleWatch(record)
-      this.#registrations.delete(token)
-      await Promise.all([
-        rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
-      ])
+    let disposePromise: Promise<void> | undefined
+    const dispose = (): Promise<void> => {
+      disposePromise ??= (async () => {
+        clearTimeout(record.retirementTimer)
+        this.#stopTitleWatch(record)
+        this.#registrations.delete(token)
+        await Promise.all([
+          rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+        ])
+      })()
+      return disposePromise
     }
     return {
       settingsPath,
+      ...(provider === 'codex' ? { codexHooksConfig: codexInlineHookConfig(statusScriptPath) } : {}),
       hookUrl,
-      retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS) => {
-        if (disposed || record.retirementTimer) return
+      retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS, options = {}) => {
+        if (options.suppressSideEffects) record.acceptSideEffects = false
+        if (disposePromise || record.retirementTimer) return
         // Keep the endpoint alive briefly for the final HUD/notification hooks, while
         // preventing a process that has already returned to Shell from resurrecting
-        // its Claude conversation identity.
+        // its provider conversation identity.
         record.acceptIdentity = false
         record.retirementTimer = setTimeout(() => { void dispose() }, Math.max(0, graceMs))
         record.retirementTimer.unref?.()
@@ -248,6 +300,11 @@ export class ProviderHookServer {
       // Session. Acknowledge later hooks so the provider is not stalled, but do
       // not let them mutate the original card's HUD, notifications or DAG.
       if (registration.identityRejected) {
+        sendJson(response, 200, {})
+        return
+      }
+      if (!this.#acceptsSideEffects(registration)) {
+        this.#stopTitleWatch(registration)
         sendJson(response, 200, {})
         return
       }
@@ -280,7 +337,7 @@ export class ProviderHookServer {
           this.#onIdentityMismatch({
             runId: registration.runId,
             sessionId: registration.sessionId,
-            provider: 'claude-code',
+            provider: registration.provider,
             expectedProviderSessionId: registration.expectedProviderSessionId,
             actualProviderSessionId: providerSessionId,
             eventName
@@ -295,7 +352,7 @@ export class ProviderHookServer {
           nonEmptyText(payload.permissionMode)
         const currentBinding = this.#sessions.getResumeBinding(
           registration.sessionId,
-          'claude-code'
+          registration.provider
         )
         const isKnownIdentity = currentBinding?.providerSessionId === providerSessionId
         // The registration mode is only a launch-time fallback for a newly observed
@@ -303,6 +360,11 @@ export class ProviderHookServer {
         // mode selected after this provider run started.
         const permissionMode = hookPermissionMode ??
           (isKnownIdentity ? undefined : registration.permissionMode)
+        const hookModel = providerCurrentModel(payload)
+        // Like permission, a registration model is only the launch-time fallback
+        // for a new identity. A known conversation keeps its durable Session choice
+        // unless the live provider reports an exact model id.
+        const model = hookModel ?? (isKnownIdentity ? undefined : registration.model)
         const now = Date.now()
         const forkAuthority = registration.forkAuthority
         try {
@@ -313,9 +375,13 @@ export class ProviderHookServer {
           }, {
             id: `provider-binding-${randomUUID()}`,
             sessionId: registration.sessionId,
-            provider: 'claude-code',
+            provider: registration.provider,
             providerSessionId,
             metadata: {
+              ...(registration.providerConfigId === undefined
+                ? {}
+                : { providerConfigId: registration.providerConfigId }),
+              ...(model === undefined ? {} : { model }),
               ...(permissionMode === undefined ? {} : { permissionMode }),
               ...(cwd === undefined ? {} : { cwd }),
               lastHookEvent: eventName,
@@ -339,7 +405,7 @@ export class ProviderHookServer {
           this.#onIdentityRecorded({
             runId: registration.runId,
             sessionId: registration.sessionId,
-            provider: 'claude-code',
+            provider: registration.provider,
             providerSessionId,
             eventName,
             ...(forkAuthority === undefined
@@ -356,6 +422,15 @@ export class ProviderHookServer {
           sendJson(response, 200, {})
           return
         }
+      }
+      if (registration.provider === 'codex') {
+        sendJson(response, 200, {})
+        return
+      }
+      if (!this.#acceptsSideEffects(registration)) {
+        this.#stopTitleWatch(registration)
+        sendJson(response, 200, {})
+        return
       }
       this.#onHudPayload({
         runId: registration.runId,
@@ -377,7 +452,17 @@ export class ProviderHookServer {
           runId: registration.runId,
           leadSessionId: registration.sessionId
         })
+        if (!this.#acceptsSideEffects(registration)) {
+          this.#stopTitleWatch(registration)
+          sendJson(response, 200, {})
+          return
+        }
         if (observations.length > 0) await this.#onTeamObservations(observations)
+      }
+      if (!this.#acceptsSideEffects(registration)) {
+        this.#stopTitleWatch(registration)
+        sendJson(response, 200, {})
+        return
       }
       const notificationEvent = toProviderNotificationEvent(payload)
       if (notificationEvent) {
@@ -399,7 +484,15 @@ export class ProviderHookServer {
     providerSessionId: string,
     transcriptPath: string
   ): Promise<boolean> {
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return false
+    }
     const transcript = await readTranscriptTail(transcriptPath).catch(() => '')
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return false
+    }
     const title = latestClaudeAutoTitle(transcript, providerSessionId)
     if (!title) return false
     if (registration.observedTitle === title) {
@@ -423,6 +516,10 @@ export class ProviderHookServer {
     providerSessionId: string,
     transcriptPath: string
   ): Promise<void> {
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return
+    }
     const current = registration.titleWatch
     if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) return
     this.#stopTitleWatch(registration)
@@ -450,6 +547,16 @@ export class ProviderHookServer {
 
     // Close the gap between the first read and installing the file watcher.
     await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)
+  }
+
+  #acceptsSideEffects(registration: HookRegistrationRecord): boolean {
+    if (!registration.acceptSideEffects) return false
+    try {
+      const currentRunId = this.#currentRunId(registration.sessionId)
+      return currentRunId === undefined || currentRunId === registration.runId
+    } catch {
+      return false
+    }
   }
 
   #stopTitleWatch(registration: HookRegistrationRecord): void {
@@ -481,6 +588,36 @@ function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown 
     },
     statusLine: { type: 'command', command: statusScriptPath, padding: 0 }
   }
+}
+
+function codexHookSettings(statusScriptPath: string): unknown {
+  return {
+    hooks: {
+      SessionStart: [{ hooks: [codexCommandHook(statusScriptPath, 5)] }],
+      SessionEnd: [{ hooks: [codexCommandHook(statusScriptPath, 3)] }]
+    }
+  }
+}
+
+function codexInlineHookConfig(statusScriptPath: string): string {
+  const command = JSON.stringify(shellCommandPath(statusScriptPath))
+  const statusMessage = JSON.stringify('正在确认会话')
+  const event = (timeout: number) =>
+    `{ hooks = [{ type = "command", command = ${command}, timeout = ${timeout}, statusMessage = ${statusMessage} }] }`
+  return `{ SessionStart = [${event(5)}], SessionEnd = [${event(3)}] }`
+}
+
+function codexCommandHook(statusScriptPath: string, timeout: number): Record<string, unknown> {
+  return {
+    type: 'command',
+    command: shellCommandPath(statusScriptPath),
+    timeout,
+    statusMessage: '正在确认会话'
+  }
+}
+
+function shellCommandPath(path: string): string {
+  return `'${path.replaceAll("'", `'\\''`)}'`
 }
 
 function statusLineScript(hookUrl: string): string {
@@ -524,6 +661,12 @@ export function providerTranscriptPath(payload: Record<string, unknown>): string
   return nonEmptyText(payload.transcript_path) ??
     nonEmptyText(payload.transcriptPath) ??
     nonEmptyText(payload.agent_transcript_path)
+}
+
+export function providerCurrentModel(payload: Record<string, unknown>): string | undefined {
+  const model = payload.model
+  if (typeof model === 'string') return nonEmptyText(model)
+  return nonEmptyText(record(model)?.id)
 }
 
 const MAX_TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024

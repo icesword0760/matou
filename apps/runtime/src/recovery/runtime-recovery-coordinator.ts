@@ -6,6 +6,7 @@ import {
 
 export class RuntimeRecoveryCoordinator {
   readonly #jobs = new Map<string, RecoveryJob>()
+  readonly #cancelledSessionIds = new Set<string>()
   readonly #scheduler: RuntimeSessionRecoveryScheduler
   #started = false
 
@@ -42,16 +43,21 @@ export class RuntimeRecoveryCoordinator {
   }
 
   settleExternal(sessionId: string, state: 'ready' | 'failed', error?: string): void {
+    if (this.#cancelledSessionIds.has(sessionId)) return
     this.#scheduler.settleExternal(sessionId, state, error)
   }
 
   trackExternal(job: RecoveryJob & { recoveryAuthority: 'fork' }): void {
+    if (this.#cancelledSessionIds.has(job.sessionId)) return
     this.#jobs.set(job.sessionId, job)
     if (this.#started) this.#scheduler.enqueue([job])
   }
 
   cancel(sessionIds: readonly string[]): void {
-    for (const sessionId of sessionIds) this.#jobs.delete(sessionId)
+    for (const sessionId of sessionIds) {
+      this.#cancelledSessionIds.add(sessionId)
+      this.#jobs.delete(sessionId)
+    }
     this.#scheduler.cancel(sessionIds)
   }
 

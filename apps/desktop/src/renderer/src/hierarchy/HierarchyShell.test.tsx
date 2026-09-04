@@ -2,45 +2,65 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PROTOCOL_VERSION } from '@matou/contracts'
+import { useEffect, useRef } from 'react'
+import {
+  PROTOCOL_VERSION, type HostNavigationRequestWire, type HostNavigationResultWire
+} from '@matou/contracts'
 
 import { HierarchyShell, preferredActiveChild, requiresFreshSceneSnapshot } from './HierarchyShell'
 import type { HierarchyProjection } from './hierarchy-types'
 import type { SessionRecoveryStatus } from '../runtime/RuntimeClient'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, inputDisabled, readOnly, themeKey, fontSize, searchRequest, focusRequest, onStorageFault }: {
+  TerminalSurface: (props: {
     sessionId: string; inputDisabled: boolean; readOnly?: boolean; themeKey?: string; fontSize?: number
     searchRequest?: { query: string; direction: string; sequence: number }
-    focusRequest?: number
+    focusRequest?: number; active?: boolean; visible?: boolean
     onStorageFault?(fault: {
       type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
       code: 'STORAGE_WRITE_FAILED'; message: string; retainedBytes: number
     }): void
-  }) => <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled} data-read-only={readOnly}
-    data-theme={themeKey} data-font-size={fontSize} data-search-query={searchRequest?.query}
-    data-search-direction={searchRequest?.direction} data-focus-request={focusRequest}>
-    <button type="button" aria-label={`触发存储异常：${sessionId}`} onClick={() => onStorageFault?.({
-      type: 'terminal.storage-fault', protocolVersion: 1, sessionId, sequence: 1,
+  }) => {
+    const inputRef = useRef<HTMLSpanElement>(null)
+    useEffect(() => {
+      if (props.focusRequest && props.active !== false && props.visible !== false && !terminalFocus.blocked) {
+        inputRef.current?.focus()
+      }
+    }, [props.active, props.focusRequest, props.visible])
+    return <div className="terminal-surface" data-session-id={props.sessionId}
+      data-testid={`xterm-${props.sessionId}`} data-input-disabled={props.inputDisabled} data-read-only={props.readOnly}
+      data-theme={props.themeKey} data-font-size={props.fontSize} data-search-query={props.searchRequest?.query}
+      data-search-direction={props.searchRequest?.direction} data-focus-request={props.focusRequest}>
+      <span tabIndex={-1} data-terminal-input ref={inputRef} />
+      <button type="button" aria-label={`触发存储异常：${props.sessionId}`} onClick={() => props.onStorageFault?.({
+      type: 'terminal.storage-fault', protocolVersion: 1, sessionId: props.sessionId, sequence: 1,
       code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
-    })} />
-  </div>
+      })} />
+    </div>
+  }
 }))
+
+const terminalFocus = vi.hoisted(() => ({ blocked: false }))
 
 const runtime = vi.hoisted(() => ({
   current: null as null | {
     request: ReturnType<typeof vi.fn>
     startProjection: ReturnType<typeof vi.fn>
     subscribeProjection: ReturnType<typeof vi.fn>
+    subscribeHostNavigation?: ReturnType<typeof vi.fn>
+    acknowledgeHostNavigation?: ReturnType<typeof vi.fn>
     subscribeSessionRecovery?: ReturnType<typeof vi.fn>
     prioritizeSessionRecovery?: ReturnType<typeof vi.fn>
     retrySessionRecovery?: ReturnType<typeof vi.fn>
+    setForegroundTerminalSessions?: ReturnType<typeof vi.fn>
+    refreshTerminalHud?: ReturnType<typeof vi.fn>
   }
 }))
 vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.current }))
 
 beforeEach(() => {
   runtime.current = null
+  terminalFocus.blocked = false
   Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
   Object.defineProperty(Element.prototype, 'scrollIntoView', {
     configurable: true,
@@ -741,12 +761,16 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
       .toBe('session-a1')
     await user.click(screen.getByRole('button', { name: '从“Depth-2”创建子分支' }))
-    await user.type(screen.getByRole('textbox', { name: '分支名称' }), 'Depth-3')
+    fireEvent.change(screen.getByRole('textbox', { name: '分支名称' }), {
+      target: { value: 'Depth-3' }
+    })
     await user.click(screen.getByRole('button', { name: '创建分支' }))
 
-    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
-      .toBe('session-depth2')
-    expect(screen.getByTestId('xterm-fixture-fork-session-scene-a1-3')).toBeTruthy()
+    await waitFor(() => {
+      expect(screen.getByTestId('xterm-fixture-fork-session-scene-a1-3')).toBeTruthy()
+      expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+        .toBe('session-depth2')
+    })
   })
 
   it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
@@ -1797,6 +1821,361 @@ describe('PRD 05 hierarchy shell', () => {
   })
 })
 
+describe('Runtime host navigation', () => {
+  it('refreshes a newly created background target before current-window navigation', async () => {
+    const ready = hostNavigationFixture('window-1')
+    const stale = structuredClone(ready)
+    stale.sceneSnapshots = stale.sceneSnapshots!.filter(({ scene }) => scene.id !== 'scene-b1')
+    delete stale.sessionGraphs?.['scene-b1']
+    let snapshots = 0
+    const host = installCommandHostNavigationRuntime(
+      ready,
+      undefined,
+      () => snapshots++ === 0 ? stale : ready
+    )
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest())
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(snapshots).toBe(2)
+    expect(host.acknowledge).toHaveBeenLastCalledWith(expect.objectContaining({ ok: true }))
+    expect(screen.getByRole('region', { name: 'Workspace B 工作现场' })).toBeTruthy()
+  })
+
+  it.each([
+    ['current main window', 'window-1'],
+    ['another main window', 'window-2']
+  ])('activates and acknowledges the complete path in the %s', async (_case, routeWindowId) => {
+    const data = hostNavigationFixture(routeWindowId)
+    const host = installHostNavigationRuntime()
+    const showWindow = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    const request = hostNavigationRequest({ routeWindowId, targetWindowId: routeWindowId })
+
+    host.emit(request)
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(showWindow).toHaveBeenCalledWith(routeWindowId)
+    expect(screen.getByRole('region', { name: 'Workspace B 工作现场' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: '页签 B1' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByLabelText('会话：终端 B1').getAttribute('aria-current')).toBe('true')
+    expect(host.acknowledge).toHaveBeenLastCalledWith({
+      requestId: request.requestId,
+      attemptId: request.attemptId,
+      routeWindowId,
+      targetWindowId: routeWindowId,
+      ok: true,
+      finalPath: {
+        routeWindowId,
+        targetWindowId: routeWindowId,
+        workspaceId: request.workspaceId,
+        taskId: request.taskId,
+        sceneId: request.sceneId,
+        sessionId: request.sessionId
+      }
+    })
+  })
+
+  it('waits for attempt-bound detached Renderer focus proof before acknowledging', async () => {
+    const data = hostNavigationFixture('window-1')
+    const target = data.sessionGraphs!['scene-b1']!.nodes[0]!
+    target.detachedWindowId = 'native-detached-1'
+    const snapshot = data.sceneSnapshots!.find(({ scene }) => scene.id === 'scene-b1')!
+    snapshot.mounts[0]!.sceneWindowId = 'scene-window-detached-1'
+    snapshot.windows.push({
+      id: 'scene-window-detached-1', sceneId: 'scene-b1', state: 'detached'
+    })
+    const host = installHostNavigationRuntime()
+    const showWindow = vi.fn(async () => undefined)
+    let proveFocus!: (focused: boolean) => void
+    const focusProof = new Promise<boolean>((resolve) => { proveFocus = resolve })
+    const requestDetachedTerminalFocus = vi.fn(() => focusProof)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: {
+        showWindow, requestDetachedTerminalFocus,
+        onDetachedWindowClosed: vi.fn(() => () => {})
+      }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    const request = hostNavigationRequest({ targetWindowId: 'native-detached-1' })
+
+    host.emit(request)
+
+    await waitFor(() => expect(requestDetachedTerminalFocus).toHaveBeenCalledWith({
+      requestId: request.requestId,
+      attemptId: request.attemptId,
+      routeWindowId: request.routeWindowId,
+      targetWindowId: request.targetWindowId,
+      sessionId: request.sessionId,
+      deadlineAt: request.deadlineAt
+    }))
+    expect(host.acknowledge).not.toHaveBeenCalled()
+    proveFocus(true)
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(showWindow).toHaveBeenCalledWith('native-detached-1')
+    expect(screen.getByTestId('detached-placeholder')).toBeTruthy()
+    expect(host.acknowledge).toHaveBeenLastCalledWith(expect.objectContaining({
+      requestId: request.requestId,
+      attemptId: request.attemptId,
+      routeWindowId: 'window-1',
+      targetWindowId: 'native-detached-1',
+      ok: true,
+      finalPath: expect.objectContaining({ targetWindowId: 'native-detached-1' })
+    }))
+  })
+
+  it('rejects main-window Session focus when the target terminal never owns input focus', async () => {
+    terminalFocus.blocked = true
+    const data = hostNavigationFixture('window-1')
+    const host = installHostNavigationRuntime()
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    const request = hostNavigationRequest({ deadlineAt: Date.now() + 150 })
+
+    host.emit(request)
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(host.acknowledge).toHaveBeenLastCalledWith(expect.objectContaining({
+      requestId: request.requestId,
+      attemptId: request.attemptId,
+      ok: false,
+      error: '导航目标终端尚未获得输入焦点'
+    }))
+  })
+
+  it('reveals a child card and requests terminal input focus only for session focus', async () => {
+    const data = hostNavigationChildFixture()
+    const host = installHostNavigationRuntime()
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest({ sessionId: 'session-b-child', focusTerminal: true }))
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+      .toBe('session-b-parent')
+    expect(screen.getByLabelText('会话：目标子会话').getAttribute('aria-current')).toBe('true')
+    expect(Number(screen.getByTestId('xterm-session-b-child').getAttribute('data-focus-request')))
+      .toBeGreaterThan(0)
+  })
+
+  it('switches the path and reveals its saved Session without requesting terminal input focus', async () => {
+    const data = hostNavigationChildFixture()
+    const host = installHostNavigationRuntime()
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest({ sessionId: 'session-b-child', focusTerminal: false }))
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(screen.getByLabelText('会话：目标子会话').getAttribute('aria-current')).toBe('true')
+    expect(screen.getByTestId('xterm-session-b-child').getAttribute('data-focus-request')).toBe('0')
+  })
+
+  it.each([
+    ['Workspace board', '看板', /看板$/],
+    ['settings', '设置', '模型切换设置']
+  ])('closes the %s so the acknowledged target is actually visible', async (_case, buttonName, surfaceName) => {
+    const host = installHostNavigationRuntime()
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={hostNavigationFixture('window-1')} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    await userEvent.setup().click(screen.getByRole('button', { name: buttonName }))
+    expect(screen.getByRole('region', { name: surfaceName })).toBeTruthy()
+
+    host.emit(hostNavigationRequest())
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('region', { name: surfaceName })).toBeNull()
+    expect(screen.getByLabelText('会话：终端 B1').getAttribute('aria-current')).toBe('true')
+  })
+
+  it('deduplicates one transport attempt, replays its result, and executes a new attempt', async () => {
+    const data = hostNavigationFixture('window-1')
+    const host = installHostNavigationRuntime()
+    const showWindow = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    const first = hostNavigationRequest()
+
+    host.emit(first)
+    host.emit(first)
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(2))
+    expect(showWindow).toHaveBeenCalledTimes(1)
+    expect(host.acknowledge.mock.calls[1]?.[0]).toEqual(host.acknowledge.mock.calls[0]?.[0])
+
+    host.emit({ ...first, attemptId: 'attempt-2' })
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(3))
+    expect(showWindow).toHaveBeenCalledTimes(2)
+    expect(host.acknowledge.mock.calls[2]?.[0]).toMatchObject({
+      requestId: first.requestId, attemptId: 'attempt-2', ok: true
+    })
+  })
+
+  it('serializes concurrent requests and skips a queued request after its deadline', async () => {
+    const data = hostNavigationFixture('window-1')
+    const host = installHostNavigationRuntime()
+    let releaseFirst!: () => void
+    const firstWindow = new Promise<void>((resolve) => { releaseFirst = resolve })
+    const showWindow = vi.fn()
+      .mockReturnValueOnce(firstWindow)
+      .mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    const first = hostNavigationRequest({ requestId: 'nav-first', attemptId: 'attempt-first' })
+    const expiredWhileQueued = hostNavigationRequest({
+      requestId: 'nav-expired', attemptId: 'attempt-expired', deadlineAt: Date.now() + 5
+    })
+
+    host.emit(first)
+    host.emit(expiredWhileQueued)
+    await waitFor(() => expect(showWindow).toHaveBeenCalledTimes(1))
+    await new Promise((resolve) => window.setTimeout(resolve, 10))
+    releaseFirst()
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(2))
+    expect(showWindow).toHaveBeenCalledTimes(1)
+    expect(host.acknowledge).toHaveBeenLastCalledWith(expect.objectContaining({
+      requestId: 'nav-expired', attemptId: 'attempt-expired', ok: false,
+      error: '导航请求已过期'
+    }))
+  })
+
+  it('ignores requests routed to a different main projection', async () => {
+    const host = installHostNavigationRuntime()
+    const showWindow = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={hostNavigationFixture('window-1')} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest({ routeWindowId: 'window-2', targetWindowId: 'window-2' }))
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 20)) })
+
+    expect(showWindow).not.toHaveBeenCalled()
+    expect(host.acknowledge).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an unavailable hierarchy path', { workspaceId: 'workspace-missing' }, '导航目标层级当前不可用'],
+    ['a mismatched native target', { targetWindowId: 'native-missing' }, '导航目标窗口与当前路径不匹配'],
+    ['an already expired deadline', { deadlineAt: Date.now() - 1 }, '导航请求已过期']
+  ])('rejects %s before moving any window', async (_case, overrides, error) => {
+    const host = installHostNavigationRuntime()
+    const showWindow = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={hostNavigationFixture('window-1')} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest(overrides))
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(showWindow).not.toHaveBeenCalled()
+    expect(host.acknowledge).toHaveBeenCalledWith(expect.objectContaining({ ok: false, error }))
+  })
+
+  it.each([
+    ['native window activation', 'showWindow'],
+    ['workspace activation', 'hierarchy.activate-workspace'],
+    ['task activation', 'hierarchy.activate-task'],
+    ['Canvas activation', 'hierarchy.activate-scene'],
+    ['Session focus', 'hierarchy.set-focused-session']
+  ])('acknowledges a controlled failure when %s fails', async (_case, failureStep) => {
+    const data = hostNavigationFixture('window-1')
+    const host = installCommandHostNavigationRuntime(
+      data,
+      failureStep === 'showWindow' ? undefined : failureStep
+    )
+    const showWindow = failureStep === 'showWindow'
+      ? vi.fn(async () => { throw new Error('raw native target detail') })
+      : vi.fn(async () => undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    window.history.replaceState({}, '', '/?windowId=window-1')
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest())
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    const result = host.acknowledge.mock.calls[0]?.[0] as HostNavigationResultInput
+    expect(result).toMatchObject({
+      requestId: 'nav-1', attemptId: 'attempt-1',
+      routeWindowId: 'window-1', targetWindowId: 'window-1', ok: false
+    })
+    expect(result.error).toMatch(/^导航/)
+    expect(result.error).not.toContain('raw')
+  })
+
+  it('unsubscribes and leaves an in-flight request unacknowledged after unmount', async () => {
+    const host = installHostNavigationRuntime()
+    let releaseWindow!: () => void
+    const showing = new Promise<void>((resolve) => { releaseWindow = resolve })
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: {
+        showWindow: vi.fn(() => showing),
+        onDetachedWindowClosed: vi.fn(() => () => {})
+      }
+    })
+    const view = render(<HierarchyShell fixture={hostNavigationFixture('window-1')} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+
+    host.emit(hostNavigationRequest())
+    view.unmount()
+    releaseWindow()
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    expect(host.unsubscribe).toHaveBeenCalledTimes(1)
+    expect(host.acknowledge).not.toHaveBeenCalled()
+  })
+})
+
 function fixture(): HierarchyProjection {
   return {
     windowId: 'window-1',
@@ -1840,6 +2219,169 @@ function projectionSnapshot(hierarchy: HierarchyProjection) {
     sessions: hierarchy.sessions, relations: [], scenes: hierarchy.scenes,
     sessionGraphs: hierarchy.sessionGraphs ?? {}, hierarchy
   }
+}
+
+type HostNavigationResultInput = Omit<HostNavigationResultWire, 'type' | 'protocolVersion'>
+
+function hostNavigationRequest(
+  overrides: Partial<HostNavigationRequestWire> = {}
+): HostNavigationRequestWire {
+  return {
+    type: 'host.navigation-request', protocolVersion: PROTOCOL_VERSION,
+    requestId: 'nav-1', attemptId: 'attempt-1',
+    routeWindowId: 'window-1', targetWindowId: 'window-1',
+    workspaceId: 'workspace-b', taskId: 'task-b1', sceneId: 'scene-b1',
+    sessionId: 'session-b1', focusTerminal: true,
+    deadlineAt: Date.now() + 5_000,
+    ...overrides
+  }
+}
+
+function installHostNavigationRuntime(request = vi.fn()) {
+  let navigationListener: ((request: HostNavigationRequestWire) => void) | undefined
+  const acknowledge = vi.fn()
+  const unsubscribe = vi.fn(() => { navigationListener = undefined })
+  runtime.current = {
+    request,
+    startProjection: vi.fn(),
+    subscribeProjection: vi.fn(() => () => {}),
+    subscribeHostNavigation: vi.fn((listener) => {
+      navigationListener = listener
+      return unsubscribe
+    }),
+    acknowledgeHostNavigation: acknowledge,
+    setForegroundTerminalSessions: vi.fn()
+  }
+  return {
+    request,
+    acknowledge,
+    unsubscribe,
+    listener: () => navigationListener,
+    emit: (message: HostNavigationRequestWire) => {
+      act(() => navigationListener?.(message))
+    }
+  }
+}
+
+function installCommandHostNavigationRuntime(
+  data: HierarchyProjection,
+  failureMethod?: string,
+  snapshotProjection: () => HierarchyProjection = () => data
+) {
+  const request = vi.fn(async (method: string, payload: any) => {
+    if (method === failureMethod) throw new Error(`raw failure detail for ${method}`)
+    if (method === 'hierarchy.bootstrap-window') return {}
+    if (method === 'projection.snapshot') return projectionSnapshot(snapshotProjection())
+    if (method === 'hierarchy.validate-workspace-path') {
+      return { workspaceId: payload.input.workspaceId, status: 'valid', reason: '' }
+    }
+    if (method === 'hierarchy.get-scene-snapshot') {
+      return structuredClone(data.sceneSnapshots?.find(({ scene }) => scene.id === payload.sceneId))
+    }
+    if (method === 'hierarchy.get-scene-session-graph') {
+      return structuredClone(data.sessionGraphs?.[payload.sceneId])
+    }
+    const input = payload.input as Record<string, string>
+    if (method === 'hierarchy.activate-workspace') {
+      data.navigation.activeWorkspaceId = input.workspaceId!
+      return { navigation: structuredClone(data.navigation) }
+    }
+    if (method === 'hierarchy.activate-task') {
+      const task = data.tasks.find(({ id }) => id === input.taskId)!
+      data.navigation.activeWorkspaceId = task.workspaceId
+      data.navigation.taskByWorkspace[task.workspaceId] = task.id
+      return { navigation: structuredClone(data.navigation) }
+    }
+    if (method === 'hierarchy.activate-scene') {
+      const scene = data.scenes.find(({ id }) => id === input.sceneId)!
+      const task = data.tasks.find(({ id }) => id === scene.taskId)!
+      data.navigation.activeWorkspaceId = task.workspaceId
+      data.navigation.taskByWorkspace[task.workspaceId] = task.id
+      data.navigation.sceneByTask[task.id] = scene.id
+      return { navigation: structuredClone(data.navigation) }
+    }
+    if (method === 'hierarchy.set-focused-session') {
+      data.navigation.sessionByScene[input.sceneId!] = input.sessionId!
+      const graph = data.sessionGraphs?.[input.sceneId!]
+      if (graph) graph.focusedSessionId = input.sessionId!
+      return {
+        navigation: structuredClone(data.navigation),
+        ...(graph ? { graph: structuredClone(graph) } : {})
+      }
+    }
+    throw new Error(`unexpected Runtime request: ${method}`)
+  })
+  return installHostNavigationRuntime(request)
+}
+
+function hostNavigationFixture(windowId: string): HierarchyProjection {
+  const data = fixture()
+  data.windowId = windowId
+  data.navigation.windowId = windowId
+  data.taskPlacements = data.tasks.map((task, ordinal) => ({ windowId, taskId: task.id, ordinal }))
+  data.sessionGraphs = {
+    'scene-a1': {
+      sceneId: 'scene-a1', focusedSessionId: 'session-a1', edges: [],
+      nodes: [{ ...graphNode('session-a1', '终端 A1'), sceneId: 'scene-a1' }]
+    },
+    'scene-a2': {
+      sceneId: 'scene-a2', focusedSessionId: 'session-a2', edges: [],
+      nodes: [{ ...graphNode('session-a2', '终端 A2'), sceneId: 'scene-a2' }]
+    },
+    'scene-b1': {
+      sceneId: 'scene-b1', focusedSessionId: 'session-b1', edges: [],
+      nodes: [{ ...graphNode('session-b1', '终端 B1'), sceneId: 'scene-b1' }]
+    }
+  }
+  return data
+}
+
+function hostNavigationChildFixture(): HierarchyProjection {
+  const data = hostNavigationFixture('window-1')
+  data.sessions.push(
+    { id: 'session-b-parent', taskId: 'task-b1', title: '父会话', executionContextId: 'context-b' },
+    { id: 'session-b-child', taskId: 'task-b1', title: '目标子会话', executionContextId: 'context-b' }
+  )
+  const snapshot = data.sceneSnapshots!.find(({ scene }) => scene.id === 'scene-b1')!
+  snapshot.nodes.push(
+    { id: 'node-b-parent', sceneId: 'scene-b1', kind: 'mount', ordinal: 1 },
+    { id: 'node-b-child', sceneId: 'scene-b1', kind: 'mount', ordinal: 2 }
+  )
+  snapshot.mounts.push(
+    {
+      id: 'mount-b-parent', sceneId: 'scene-b1', sceneNodeId: 'node-b-parent',
+      sessionId: 'session-b-parent'
+    },
+    {
+      id: 'mount-b-child', sceneId: 'scene-b1', sceneNodeId: 'node-b-child',
+      sessionId: 'session-b-child'
+    }
+  )
+  data.sessionGraphs!['scene-b1'] = {
+    sceneId: 'scene-b1', focusedSessionId: 'session-b1',
+    nodes: [
+      { ...graphNode('session-b-parent', '父会话'), sceneId: 'scene-b1' },
+      {
+        ...graphNode('session-b1', '终端 B1'), sceneId: 'scene-b1',
+        parentSessionId: 'session-b-parent'
+      },
+      {
+        ...graphNode('session-b-child', '目标子会话'), sceneId: 'scene-b1',
+        parentSessionId: 'session-b-parent'
+      }
+    ],
+    edges: [
+      {
+        parentSessionId: 'session-b-parent', childSessionId: 'session-b1',
+        relationKind: 'derived-from', createdAt: 1
+      },
+      {
+        parentSessionId: 'session-b-parent', childSessionId: 'session-b-child',
+        relationKind: 'forked-from', createdAt: 2
+      }
+    ]
+  }
+  return data
 }
 
 function snapshot(sceneId: string, taskId: string, name: string, nodeId: string, mountId: string, sessionId: string) {

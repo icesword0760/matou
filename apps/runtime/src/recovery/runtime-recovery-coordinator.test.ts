@@ -9,6 +9,12 @@ async function settle(): Promise<void> {
   await Promise.resolve()
 }
 
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 describe('RuntimeRecoveryCoordinator', () => {
   it('publishes durable job identity and lets one failed card retry independently', async () => {
     const snapshots: Array<readonly RecoveryJobSnapshot[]> = []
@@ -57,6 +63,40 @@ describe('RuntimeRecoveryCoordinator', () => {
 
     expect(started).toEqual([])
     expect(coordinator.snapshot()).toEqual([])
+  })
+
+  it('tombstones an actively restoring Session and ignores its late completion', async () => {
+    const active = deferred()
+    const snapshots: Array<readonly RecoveryJobSnapshot[]> = []
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 1,
+      jobs: [{
+        sessionId: 'removed-active', sceneId: 'scene-a',
+        priority: 'active-session', enqueueSequence: 1
+      }],
+      start: () => active.promise,
+      publish: (snapshot) => snapshots.push(snapshot)
+    })
+    coordinator.start()
+    await settle()
+    expect(coordinator.snapshot()).toContainEqual(expect.objectContaining({
+      sessionId: 'removed-active', state: 'restoring'
+    }))
+
+    coordinator.cancel(['removed-active'])
+    const cancelledAt = snapshots.length
+    expect(coordinator.snapshot()).toEqual([])
+    active.resolve()
+    await coordinator.whenIdle()
+    coordinator.trackExternal({
+      sessionId: 'removed-active', sceneId: 'scene-a',
+      priority: 'active-session', enqueueSequence: 2, recoveryAuthority: 'fork'
+    })
+    coordinator.settleExternal('removed-active', 'ready')
+
+    expect(coordinator.snapshot()).toEqual([])
+    expect(snapshots.slice(cancelledAt).every((snapshot) =>
+      snapshot.every(({ sessionId }) => sessionId !== 'removed-active'))).toBe(true)
   })
 
   it('converges a durable Fork card from external restore to ready or failed', async () => {

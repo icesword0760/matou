@@ -177,6 +177,7 @@ describe('TerminalSurface focus continuity', () => {
     vi.useRealTimers()
     cleanup()
     Reflect.deleteProperty(window, 'matouDesktop')
+    delete document.documentElement.dataset.hostNavigationTerminalFocus
     vi.unstubAllGlobals()
   })
 
@@ -259,6 +260,19 @@ describe('TerminalSurface focus continuity', () => {
     })
     state.onRender?.({ start: 0, end: 1 })
     expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a switch-only host navigation from moving terminal input focus', async () => {
+    document.documentElement.dataset.hostNavigationTerminalFocus = 'suppressed'
+    const view = render(<TerminalSurface sessionId="session-1" active visible focusRequest={1} />)
+    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+
+    state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([65]), sequence: 1 })
+
+    expect(state.focus).not.toHaveBeenCalled()
+    delete document.documentElement.dataset.hostNavigationTerminalFocus
+    view.rerender(<TerminalSurface sessionId="session-1" active visible focusRequest={2} />)
+    await waitFor(() => expect(state.focus).toHaveBeenCalledTimes(1))
   })
 
   it('uses WebGL after opening xterm and falls back when the GPU context is lost', async () => {

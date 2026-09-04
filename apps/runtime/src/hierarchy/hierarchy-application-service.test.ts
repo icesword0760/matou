@@ -30,6 +30,26 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('HierarchyApplicationService Workspace workflows', () => {
+  it('creates a Workspace hierarchy while preserving the previously focused path', async () => {
+    const initial = await bootstrap('workspace-preserve-bootstrap')
+    const createdRoot = join(testRoot, 'created-workspace')
+    await mkdir(createdRoot)
+
+    const result = await service.createWorkspace(command('workspace-preserve-create'), {
+      windowId: 'window-1', name: 'Created Workspace', rootDirectory: createdRoot,
+      navigation: 'preserve', now: 20
+    })
+
+    expect(result.created.workspace).toMatchObject({
+      name: 'Created Workspace', rootDirectory: createdRoot
+    })
+    expect(result.created).toMatchObject({
+      task: { title: '默认' }, session: { kind: 'shell', title: 'Shell' }
+    })
+    expect(result.workspace?.id).toBe(initial.workspace?.id)
+    expect(result.navigation.activeWorkspaceId).toBe(initial.workspace?.id)
+  })
+
   it('creates one complete default hierarchy in one idempotent command', async () => {
     const first = await service.bootstrapWindow(command('bootstrap-1'), {
       windowId: 'window-1',
@@ -205,6 +225,31 @@ describe('HierarchyApplicationService Workspace workflows', () => {
 })
 
 describe('HierarchyApplicationService Task workflows', () => {
+  it('creates a named Task hierarchy while preserving the previously focused path', async () => {
+    const initial = await bootstrap('named-task-bootstrap')
+    markPathValid(initial.workspace!.id)
+
+    const result = await service.createTask(command('named-task-create'), {
+      windowId: 'window-1', workspaceId: initial.workspace!.id,
+      title: '服务层重构', navigation: 'preserve', now: 20
+    })
+
+    expect(result.created).toMatchObject({
+      task: { title: '服务层重构' },
+      scene: { taskId: result.created.task.id },
+      session: { kind: 'shell', title: 'Shell' }
+    })
+    expect(result.created.mount.sessionId).toBe(result.created.session.id)
+    expect(result.task?.id).toBe(initial.task?.id)
+    expect(result.navigation.taskByWorkspace[initial.workspace!.id]).toBe(initial.task?.id)
+    const createdEvent = database.get<{ payload_json: string }>(
+      `SELECT payload_json FROM domain_events
+       WHERE event_type = 'task.created' AND aggregate_id = ?`,
+      result.created.task.id
+    )
+    expect(JSON.parse(createdEvent!.payload_json)).toMatchObject({ title: '服务层重构' })
+  })
+
   it('updates navigation recency only after terminal input is submitted', async () => {
     const initial = await bootstrap('recency-bootstrap')
     markPathValid(initial.workspace!.id)

@@ -26,13 +26,185 @@ async function createDatabase(): Promise<{ database: RuntimeDatabase; path: stri
 }
 
 describe('MigrationRunner', () => {
+  it('adds public Fork request receipts in migration 33 without rewriting accepted batches', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 32)).migrate()
+    database.run(
+      `INSERT INTO fork_batch_ledger (
+         batch_key, request_fingerprint, caller_session_id, source_session_id,
+         source_scene_id, item_count, created_at, updated_at
+       ) VALUES ('accepted', 'resolved-fingerprint', 'caller', 'source', 'scene', 0, 1, 2)`
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result).toMatchObject({ appliedVersions: [33], currentVersion: 33 })
+    expect(database.all<{ name: string }>(
+      `SELECT name FROM pragma_table_info('fork_batch_ledger')
+       WHERE name IN ('public_request_fingerprint', 'resolved_request_json')
+       ORDER BY name`
+    )).toEqual([
+      { name: 'public_request_fingerprint' },
+      { name: 'resolved_request_json' }
+    ])
+    expect(database.get(
+      `SELECT request_fingerprint, public_request_fingerprint,
+              resolved_request_json
+       FROM fork_batch_ledger WHERE batch_key = 'accepted'`
+    )).toEqual({
+      request_fingerprint: 'resolved-fingerprint',
+      public_request_fingerprint: null,
+      resolved_request_json: null
+    })
+  })
+
+  it('adds an interrupted retry replay marker in migration 32', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 31)).migrate()
+    database.run(
+      `INSERT INTO fork_batch_ledger (
+         batch_key, request_fingerprint, caller_session_id, source_session_id,
+         source_scene_id, item_count, created_at, updated_at
+       ) VALUES ('interrupted', 'batch-fingerprint', 'caller', 'source', 'scene', 1, 1, 2)`
+    )
+    database.run(
+      `INSERT INTO fork_batch_items (
+         batch_key, item_key, ordinal, item_fingerprint, submission_key, title,
+         environment_json, start_requested, prompt_fingerprint, session_id,
+         state, start_state, error_message, created_at, updated_at,
+         failure_generation, failure_receipt
+       ) VALUES (
+         'interrupted', 'item', 0, 'item-fingerprint', 'submission', 'Item',
+         '{"mode":"current"}', 0, NULL, 'session', 'failed', 'not-requested',
+         'new authoritative failure', 1, 2, 2, 'fork-intent:operation:2'
+       )`
+    )
+    database.run(
+      `INSERT INTO fork_batch_retry_attempts (
+         attempt_id, batch_key, batch_request_fingerprint, request_fingerprint,
+         retry_keys_json, failure_generations_json, state, created_at, updated_at
+       ) VALUES (
+         'attempt', 'interrupted', 'batch-fingerprint', 'retry-fingerprint',
+         '["item"]', '[{"itemKey":"item","failureGeneration":1}]', 'pending', 1, 1
+       )`
+    )
+    database.run(
+      `INSERT INTO fork_batch_retry_items (
+         attempt_id, batch_key, item_key, ordinal, failure_generation, state,
+         session_id, result_state, result_failure_generation, error_message,
+         created_at, updated_at
+       ) VALUES (
+         'attempt', 'interrupted', 'item', 0, 1, 'executing', 'session',
+         NULL, NULL, NULL, 1, 1
+       )`
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result).toMatchObject({ appliedVersions: [32, 33], currentVersion: 33 })
+    expect(database.get<{ name: string; notnull: number; dflt_value: string }>(
+      "SELECT name, [notnull], dflt_value FROM pragma_table_info('fork_batch_retry_attempts') " +
+      "WHERE name = 'replay_pending'"
+    )).toEqual({ name: 'replay_pending', notnull: 1, dflt_value: '0' })
+    expect(database.get(
+      `SELECT state, session_id, result_state, result_failure_generation, error_message
+       FROM fork_batch_retry_items WHERE attempt_id = 'attempt' AND item_key = 'item'`
+    )).toEqual({
+      state: 'failed',
+      session_id: 'session',
+      result_state: 'failed',
+      result_failure_generation: 2,
+      error_message: 'new authoritative failure'
+    })
+    expect(database.get(
+      "SELECT state, replay_pending FROM fork_batch_retry_attempts WHERE attempt_id = 'attempt'"
+    )).toEqual({ state: 'completed', replay_pending: 1 })
+  })
+
+  it('adds durable retry attempts and failure generations in migration 31', async () => {
+    const { database } = await createDatabase()
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.currentVersion).toBe(33)
+    expect(database.all<{ name: string }>(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name LIKE 'fork_batch_retry_%' ORDER BY name`
+    )).toEqual([
+      { name: 'fork_batch_retry_attempts' },
+      { name: 'fork_batch_retry_items' }
+    ])
+    expect(database.all<{ name: string }>(
+      "SELECT name FROM pragma_table_info('fork_batch_items') WHERE name LIKE 'failure_%' ORDER BY name"
+    )).toEqual([
+      { name: 'failure_generation' },
+      { name: 'failure_receipt' }
+    ])
+  })
+
+  it('backfills one stable failure generation when upgrading a migration 30 ledger', async () => {
+    const { database } = await createDatabase()
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 30)).migrate()
+    database.run(
+      `INSERT INTO fork_batch_ledger (
+         batch_key, request_fingerprint, caller_session_id, source_session_id,
+         source_scene_id, item_count, created_at, updated_at
+       ) VALUES ('batch-upgrade', 'request', 'caller', 'source', 'scene', 2, 1, 1)`
+    )
+    database.run(
+      `INSERT INTO fork_batch_items (
+         batch_key, item_key, ordinal, item_fingerprint, submission_key, title,
+         environment_json, start_requested, prompt_fingerprint, session_id,
+         state, start_state, error_message, created_at, updated_at
+       ) VALUES
+         ('batch-upgrade', 'failed', 0, 'item-failed', 'submission-failed', '失败项',
+          '{"mode":"current"}', 0, NULL, NULL, 'failed', 'not-requested', 'failed', 1, 1),
+         ('batch-upgrade', 'ready', 1, 'item-ready', 'submission-ready', '成功项',
+          '{"mode":"current"}', 0, NULL, 'session-ready', 'ready', 'not-requested', NULL, 1, 1)`
+    )
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result).toMatchObject({ appliedVersions: [31, 32, 33], currentVersion: 33 })
+    expect(database.all(
+      `SELECT item_key, failure_generation, failure_receipt
+       FROM fork_batch_items WHERE batch_key = 'batch-upgrade' ORDER BY ordinal`
+    )).toEqual([
+      {
+        item_key: 'failed',
+        failure_generation: 1,
+        failure_receipt: 'migration-30:submission-failed'
+      },
+      { item_key: 'ready', failure_generation: 0, failure_receipt: null }
+    ])
+    expect(database.get<{ checksum: string }>(
+      'SELECT checksum FROM schema_migrations WHERE version = 31'
+    )?.checksum).toMatch(/^v2:[a-f0-9]{64}$/)
+  })
+
+  it('installs the durable Fork batch ledger as migration 30', async () => {
+    const { database } = await createDatabase()
+
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+
+    expect(result.currentVersion).toBe(33)
+    expect(database.all<{ name: string }>(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name IN ('fork_batch_items', 'fork_batch_ledger')
+       ORDER BY name`
+    )).toEqual([
+      { name: 'fork_batch_items' },
+      { name: 'fork_batch_ledger' }
+    ])
+  })
+
   it('creates the complete foundation schema from an empty database', async () => {
     const { database } = await createDatabase()
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
-    expect(result.currentVersion).toBe(29)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
+    expect(result.currentVersion).toBe(33)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -113,7 +285,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 29,
+      currentVersion: 33,
       backupPath: undefined
     })
     expect(database.all<{ checksum: string }>(
@@ -157,8 +329,8 @@ describe('MigrationRunner', () => {
       'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd')
 
     await expect(new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()).resolves.toMatchObject({
-      appliedVersions: [24, 25, 26, 27, 28, 29],
-      currentVersion: 29
+      appliedVersions: [24, 25, 26, 27, 28, 29, 30, 31, 32, 33],
+      currentVersion: 33
     })
     expect(database.all<{ checksum: string }>(
       'SELECT checksum FROM schema_migrations ORDER BY version'
@@ -207,7 +379,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([27, 28, 29])
+    expect(result.appliedVersions).toEqual([27, 28, 29, 30, 31, 32, 33])
     expect(database.all(
       `SELECT session_id, operation_id, submission_key, stage, completed_steps,
               total_steps, attempt, lease_fence
@@ -271,7 +443,7 @@ describe('MigrationRunner', () => {
           'pending', 'current', 1, 0, 1, 'operation-default', 'submission-default')`
     )
 
-    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS.slice(0, 29)).migrate()
 
     expect(result.appliedVersions).toEqual([29])
     expect(database.all(
@@ -318,7 +490,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29])
+    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
     expect(() => database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state,
@@ -404,8 +576,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26, 27, 28, 29])
-    expect(result.currentVersion).toBe(29)
+    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
+    expect(result.currentVersion).toBe(33)
     expect(database.all(
       `SELECT session_id, local_execution_context_id, managed_worktree_id,
               active_target, state, error_message, updated_at
@@ -516,7 +688,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([25, 26, 27, 28, 29])
+    expect(result.appliedVersions).toEqual([25, 26, 27, 28, 29, 30, 31, 32, 33])
     expect(database.all(
       `SELECT execution_context_id, repository_root, state, branch, detached_head,
               dirty, error_message, updated_at
@@ -599,7 +771,11 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[25]!,
       FOUNDATION_MIGRATIONS[26]!,
       FOUNDATION_MIGRATIONS[27]!,
-      FOUNDATION_MIGRATIONS[28]!
+      FOUNDATION_MIGRATIONS[28]!,
+      FOUNDATION_MIGRATIONS[29]!,
+      FOUNDATION_MIGRATIONS[30]!,
+      FOUNDATION_MIGRATIONS[31]!,
+      FOUNDATION_MIGRATIONS[32]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -620,7 +796,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 29')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 33')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -655,7 +831,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
+    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
@@ -719,7 +895,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
+    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
     expect(database.all(
       `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
        FROM session_canvas_memberships ORDER BY sibling_created_seq`
@@ -798,7 +974,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29])
+    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33])
     expect(database.get<{ state: string }>(
       `SELECT state FROM session_fork_intents WHERE session_id = 'child'`
     )).toEqual({ state: 'succeeded' })

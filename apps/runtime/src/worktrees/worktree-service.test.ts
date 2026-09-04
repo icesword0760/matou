@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -116,6 +116,10 @@ describe('WorktreeService', () => {
 
   it('reuses its existing branch when a prior add failed before linking the worktree directory', async () => {
     const path = join(root, 'worktrees', 'retry-partial')
+    seedCreatingWorktreeClaim({
+      id: 'worktree-retry-partial', executionContextId: 'context-retry-partial',
+      path, branch: 'retry-partial', baseRef: 'HEAD'
+    })
     await exec('git', ['-C', repositoryRoot, 'branch', 'retry-partial', 'HEAD'])
 
     const retried = await service.create(command('retry-partial'), {
@@ -128,6 +132,230 @@ describe('WorktreeService', () => {
     await expect(exec('git', ['-C', path, 'branch', '--show-current'])).resolves.toMatchObject({
       stdout: 'retry-partial\n'
     })
+  })
+
+  it('recovers an existing checkout when its branch ref and HEAD still equal the frozen revision', async () => {
+    const path = join(root, 'worktrees', 'retry-existing-checkout')
+    const branch = 'retry-existing-checkout'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    seedCreatingWorktreeClaim({
+      id: 'worktree-retry-existing-checkout',
+      executionContextId: 'context-retry-existing-checkout',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', branch, path, frozenRevision
+    ])
+
+    const recovered = await service.create(command('retry-existing-checkout'), {
+      id: 'worktree-retry-existing-checkout',
+      executionContextId: 'context-retry-existing-checkout',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision, setupPolicy: [], now: 20
+    })
+
+    expect(recovered).toMatchObject({ state: 'ready', branch, path })
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(frozenRevision)
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+  })
+
+  it('rejects an existing checkout when its branch ref is missing', async () => {
+    const path = join(root, 'worktrees', 'missing-existing-ref')
+    const setupMarker = join(root, 'missing-existing-ref-setup-must-not-start')
+    const branch = 'missing-existing-ref'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    seedCreatingWorktreeClaim({
+      id: 'worktree-missing-existing-ref',
+      executionContextId: 'context-missing-existing-ref',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', branch, path, frozenRevision
+    ])
+    await exec('git', ['-C', path, 'checkout', '--detach', frozenRevision])
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    await exec('git', ['-C', repositoryRoot, 'update-ref', '-d', `refs/heads/${branch}`])
+    await expect(exec('git', [
+      '-C', repositoryRoot, 'rev-parse', '--verify', `refs/heads/${branch}`
+    ])).rejects.toThrow()
+    const onSetupStarted = vi.fn()
+    const onCheckpoint = vi.fn()
+
+    await expect(service.create(command('missing-existing-ref'), {
+      id: 'worktree-missing-existing-ref',
+      executionContextId: 'context-missing-existing-ref',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision,
+      setupPolicy: [{
+        idempotencyKey: 'must-not-start', command: '/usr/bin/touch', args: [setupMarker]
+      }],
+      onSetupStarted,
+      onCheckpoint,
+      now: 20
+    })).rejects.toThrow('is missing')
+
+    expect(database.get(
+      'SELECT state FROM worktrees WHERE id = ?', 'worktree-missing-existing-ref'
+    )).toEqual({ state: 'failed' })
+    expect(onCheckpoint).not.toHaveBeenCalled()
+    expect(onSetupStarted).not.toHaveBeenCalled()
+    await expect(realpath(setupMarker)).rejects.toThrow()
+    await expect(realpath(path)).resolves.toEqual(
+      expect.stringContaining('missing-existing-ref')
+    )
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    await expect(exec('git', [
+      '-C', repositoryRoot, 'rev-parse', '--verify', `refs/heads/${branch}`
+    ])).rejects.toThrow()
+  })
+
+  it('rejects an existing checkout when its branch ref moved away from the frozen HEAD', async () => {
+    const path = join(root, 'worktrees', 'moved-existing-checkout')
+    const setupMarker = join(root, 'existing-checkout-setup-must-not-start')
+    const branch = 'moved-existing-checkout'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    seedCreatingWorktreeClaim({
+      id: 'worktree-moved-existing-checkout',
+      executionContextId: 'context-moved-existing-checkout',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    await exec('git', [
+      '-C', repositoryRoot, 'worktree', 'add', '-b', branch, path, frozenRevision
+    ])
+    await exec('git', ['-C', path, 'checkout', '--detach', frozenRevision])
+    await writeFile(join(repositoryRoot, 'README.md'), 'external existing-checkout revision\n')
+    await exec('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await exec('git', ['-C', repositoryRoot, 'commit', '-m', 'external existing checkout'])
+    const externalRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await exec('git', [
+      '-C', repositoryRoot, 'update-ref', `refs/heads/${branch}`, externalRevision
+    ])
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
+    const onSetupStarted = vi.fn()
+    const onCheckpoint = vi.fn()
+
+    await expect(service.create(command('moved-existing-checkout'), {
+      id: 'worktree-moved-existing-checkout',
+      executionContextId: 'context-moved-existing-checkout',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision,
+      setupPolicy: [{
+        idempotencyKey: 'must-not-start', command: '/usr/bin/touch', args: [setupMarker]
+      }],
+      onSetupStarted,
+      onCheckpoint,
+      now: 20
+    })).rejects.toThrow('frozen revision')
+
+    expect(database.get(
+      'SELECT state FROM worktrees WHERE id = ?', 'worktree-moved-existing-checkout'
+    )).toEqual({ state: 'failed' })
+    expect(onCheckpoint).not.toHaveBeenCalled()
+    expect(onSetupStarted).not.toHaveBeenCalled()
+    await expect(realpath(setupMarker)).rejects.toThrow()
+    await expect(realpath(path)).resolves.toEqual(
+      expect.stringContaining('moved-existing-checkout')
+    )
+    expect((await exec('git', ['-C', path, 'rev-parse', 'HEAD'])).stdout.trim())
+      .toBe(frozenRevision)
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
+  })
+
+  it('does not adopt an externally created branch without a prior matching durable claim', async () => {
+    const path = join(root, 'worktrees', 'external-competition')
+    await exec('git', ['-C', repositoryRoot, 'branch', 'external-competition', 'HEAD'])
+
+    await expect(service.create(command('external-competition'), {
+      id: 'worktree-external-competition',
+      executionContextId: 'context-external-competition',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch: 'external-competition', baseRef: 'HEAD', setupPolicy: [], now: 20
+    })).rejects.toThrow('existing branch is not reserved by this Worktree')
+    await expect(realpath(path)).rejects.toThrow()
+  })
+
+  it('removes a just-created worktree when its reserved branch moves before revision verification', async () => {
+    const path = join(root, 'worktrees', 'moved-after-add')
+    const setupMarker = join(root, 'setup-must-not-start')
+    const branch = 'moved-after-add'
+    const frozenRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await writeFile(join(repositoryRoot, 'README.md'), 'external revision\n')
+    await exec('git', ['-C', repositoryRoot, 'add', 'README.md'])
+    await exec('git', ['-C', repositoryRoot, 'commit', '-m', 'external revision'])
+    const externalRevision = (await exec(
+      'git', ['-C', repositoryRoot, 'rev-parse', 'HEAD']
+    )).stdout.trim()
+    await exec('git', ['-C', repositoryRoot, 'reset', '--hard', frozenRevision])
+    seedCreatingWorktreeClaim({
+      id: 'worktree-moved-after-add',
+      executionContextId: 'context-moved-after-add',
+      path,
+      branch,
+      baseRef: frozenRevision
+    })
+    let externalEffects = 0
+    const onSetupStarted = vi.fn()
+
+    await expect(service.create(command('moved-after-add'), {
+      id: 'worktree-moved-after-add',
+      executionContextId: 'context-moved-after-add',
+      workspaceId: 'workspace-1', repositoryRoot, path,
+      branch, baseRef: frozenRevision,
+      setupPolicy: [{
+        idempotencyKey: 'must-not-start', command: '/usr/bin/touch', args: [setupMarker]
+      }],
+      onSetupStarted,
+      now: 20,
+      beforeExternalSideEffect: () => {
+        externalEffects += 1
+        if (externalEffects === 5) {
+          // This callback runs immediately after `git worktree add`.
+          execFileSync('git', [
+            '-C', repositoryRoot, 'update-ref', `refs/heads/${branch}`, externalRevision
+          ])
+        }
+      }
+    })).rejects.toThrow('frozen revision')
+
+    expect(database.get(
+      'SELECT state, base_revision FROM worktrees WHERE id = ?',
+      'worktree-moved-after-add'
+    )).toEqual({ state: 'failed', base_revision: null })
+    expect(onSetupStarted).not.toHaveBeenCalled()
+    await expect(realpath(setupMarker)).rejects.toThrow()
+    await expect(realpath(path)).rejects.toThrow()
+    expect((await exec('git', ['-C', repositoryRoot, 'worktree', 'list', '--porcelain']))
+      .stdout).not.toContain(path)
+    expect((await exec('git', [
+      '-C', repositoryRoot, 'rev-parse', `refs/heads/${branch}`
+    ])).stdout.trim()).toBe(externalRevision)
   })
 
   it('checkpoints idempotent setup and skips a completed step after restart', async () => {
@@ -184,4 +412,26 @@ function seedBoundRun(db: RuntimeDatabase, contextId: string): void {
     tx.run('INSERT INTO sessions (id, task_id, execution_context_id, kind, status, title, created_at, updated_at, last_activity_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', 'session-1', 'task-1', contextId, 'shell', 'running', 'Shell', 1, 1, 1)
     tx.run('INSERT INTO session_runs (id, session_id, ordinal, runtime_generation, status, started_at) VALUES (?, ?, ?, ?, ?, ?)', 'run-1', 'session-1', 1, 'generation', 'running', 1)
   })
+}
+
+function seedCreatingWorktreeClaim(input: {
+  id: string
+  executionContextId: string
+  path: string
+  branch: string
+  baseRef: string
+}): void {
+  database.run(
+    `INSERT INTO execution_contexts (id, workspace_id, kind, cwd, created_at)
+     VALUES (?, 'workspace-1', 'git-worktree', ?, 10)`,
+    input.executionContextId, input.path
+  )
+  database.run(
+    `INSERT INTO worktrees (
+       id, execution_context_id, repository_root, worktree_path, branch_name,
+       base_ref, state, setup_policy_json, setup_result_json, cleanup_policy,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, 'creating', '[]', '[]', 'retain-dirty', 10, 10)`,
+    input.id, input.executionContextId, repositoryRoot, input.path, input.branch, input.baseRef
+  )
 }

@@ -1,3 +1,8 @@
+import type { HostActionMethod } from './host-action-types'
+
+/** Shared request/response budget; CLI payload limits leave room for the protocol envelope. */
+export const HOST_CONTROL_MAX_FRAME_BYTES = 2 * 1024 * 1024
+
 export type HostControlScope =
   | 'host.identify'
   | 'host.list'
@@ -10,10 +15,15 @@ export type HostControlScope =
   | 'task.progress.write'
   | 'task.log.append'
   | 'task.move-to-window'
+  | HostActionMethod
 
 export interface HostCallerIdentity {
   runId: string
   sessionId: string
+}
+
+export interface HostControlErrorDetails {
+  candidates: ReadonlyArray<{ readonly humanPath: string }>
 }
 
 export type HostTargetSelector =
@@ -26,6 +36,13 @@ export type HostTargetSelector =
 
 export type HostListScope = 'current-level' | 'all'
 
+export interface HostTargetEnvironment {
+  executionContextRef: string
+  mode: 'directory' | 'git-checkout' | 'git-worktree'
+  branch?: string
+  worktreeRef?: string
+}
+
 export interface HostTarget {
   ref: string
   workspaceId: string
@@ -36,6 +53,7 @@ export interface HostTarget {
   profile: 'shell' | 'claude-code' | 'codex'
   cwd: string
   workStatus: string
+  environment: HostTargetEnvironment
   window: {
     id: string
     kind: 'main' | 'detached-terminal'

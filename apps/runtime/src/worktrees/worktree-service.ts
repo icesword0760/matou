@@ -84,7 +84,11 @@ export class WorktreeService {
     }
   ): Promise<Worktree> {
     validateSetupPolicy(input.setupPolicy)
+    const durableRecoveryClaim = this.#matchesDurableCreateClaim(input)
     let worktree = this.get(input.id)
+    if (worktree && !durableRecoveryClaim) {
+      throw new Error(`Worktree ${input.id} durable creation claim does not match`)
+    }
     if (!worktree) {
       worktree = this.#transactions.execute(command, ({ tx, emit }) => {
         const workspace = tx.get<{ id: string }>('SELECT id FROM workspaces WHERE id = ?', input.workspaceId)
@@ -127,21 +131,82 @@ export class WorktreeService {
       input.beforeExternalSideEffect?.()
       const repository = (await exec('git', ['-C', input.repositoryRoot, 'rev-parse', '--show-toplevel'])).stdout.trim()
       input.beforeExternalSideEffect?.()
-      const baseRevision = (await exec('git', ['-C', repository, 'rev-parse', input.baseRef])).stdout.trim()
+      const baseRevision = await resolveCommit(repository, worktree.baseRevision ?? input.baseRef)
       input.beforeExternalSideEffect?.()
-      if (!(await pathIsGitWorktree(input.path))) {
+      let createdWorktreePath = false
+      const existingWorktreePath = await pathIsGitWorktree(input.path)
+      const branchExists = await localBranchExists(repository, input.branch)
+      if (branchExists && !durableRecoveryClaim) {
+        throw new Error(
+          `Worktree ${input.id} existing branch is not reserved by this Worktree`
+        )
+      }
+      if (!branchExists && existingWorktreePath) {
+        throw new Error(
+          `Worktree ${input.id} branch ${input.branch} is missing; expected frozen revision ${baseRevision}`
+        )
+      }
+      if (branchExists) {
+        input.beforeExternalSideEffect?.()
+        const branchRevision = await resolveCommit(
+          repository, `refs/heads/${input.branch}`
+        )
+        input.beforeExternalSideEffect?.()
+        if (branchRevision !== baseRevision) {
+          throw revisionMismatchError(input.id, input.branch, branchRevision, baseRevision)
+        }
+      }
+      if (!existingWorktreePath) {
         // `git worktree add -b` creates the branch before it creates the target
         // directory. A permission or disk failure can therefore leave the ref
         // behind while no usable worktree exists. Retrying with `-b` can never
         // recover that valid partial result; reuse the same operation-owned
         // branch and let Git still reject it if another worktree has it checked
         // out.
-        const args = await localBranchExists(repository, input.branch)
+        const args = branchExists
           ? ['-C', repository, 'worktree', 'add', input.path, input.branch]
           : ['-C', repository, 'worktree', 'add', '-b', input.branch, input.path, input.baseRef]
         input.beforeExternalSideEffect?.()
         await exec('git', args)
+        createdWorktreePath = true
         input.beforeExternalSideEffect?.()
+      }
+      input.beforeExternalSideEffect?.()
+      let worktreeRevision: string
+      let finalBranchRevision: string
+      try {
+        worktreeRevision = await resolveCommit(input.path, 'HEAD')
+        input.beforeExternalSideEffect?.()
+        finalBranchRevision = await resolveCommit(
+          repository, `refs/heads/${input.branch}`
+        )
+      } catch (error) {
+        const verificationError = new Error(
+          `Worktree ${input.id} did not expose its branch and checkout at frozen revision ${baseRevision}: ${errorMessage(error)}`
+        )
+        if (createdWorktreePath) {
+          await cleanupCreatedWorktree(repository, input.path, verificationError)
+        }
+        throw verificationError
+      }
+      input.beforeExternalSideEffect?.()
+      if (worktreeRevision !== baseRevision) {
+        const verificationError = revisionMismatchError(
+          input.id, input.branch, worktreeRevision, baseRevision
+        )
+        if (createdWorktreePath) {
+          await cleanupCreatedWorktree(repository, input.path, verificationError)
+        }
+        throw verificationError
+      }
+      if (finalBranchRevision !== baseRevision) {
+        const verificationError = revisionMismatchError(
+          input.id, input.branch, finalBranchRevision, baseRevision
+        )
+        if (createdWorktreePath) {
+          await cleanupCreatedWorktree(repository, input.path, verificationError)
+        }
+        throw verificationError
       }
       await input.onCheckpoint?.('branch-created')
       await input.onCheckpoint?.('path-created')
@@ -281,7 +346,7 @@ export class WorktreeService {
         emitWorktree(emit, command.commandId, 'worktree.removal-started', removing, undefined, now)
         return null
       })
-      await exec('git', ['-C', worktree.repositoryRoot, 'worktree', 'remove', worktree.path])
+      await removeGitWorktree(worktree.repositoryRoot, worktree.path)
       return this.#completeRemoval(command, worktreeId, worktree.executionContextId, now)
     } catch (error) {
       this.#transactions.execute(derivedCommand(command, 'remove-failed'), ({ tx, emit }) => {
@@ -305,6 +370,39 @@ export class WorktreeService {
   get(id: string): Worktree | undefined {
     const row = this.#database.get<WorktreeRow>('SELECT * FROM worktrees WHERE id = ?', id)
     return row ? mapWorktree(row) : undefined
+  }
+
+  #matchesDurableCreateClaim(input: {
+    id: string
+    executionContextId: string
+    workspaceId: string
+    repositoryRoot: string
+    path: string
+    branch: string
+    baseRef: string
+  }): boolean {
+    return this.#database.get(
+      `SELECT 1
+       FROM worktrees
+       JOIN execution_contexts ON execution_contexts.id = worktrees.execution_context_id
+       WHERE worktrees.id = ? AND worktrees.execution_context_id = ?
+         AND execution_contexts.workspace_id = ?
+         AND worktrees.repository_root = ? AND worktrees.worktree_path = ?
+         AND worktrees.branch_name = ? AND worktrees.base_ref = ?
+         AND worktrees.state <> 'removed'
+         AND NOT EXISTS (
+           SELECT 1 FROM session_fork_intents AS fork
+           WHERE fork.worktree_id = worktrees.id
+             AND (
+               fork.operation_id = '' OR fork.submission_key = '' OR
+               fork.target_execution_context_id IS NOT worktrees.execution_context_id OR
+               fork.worktree_path IS NOT worktrees.worktree_path OR
+               fork.branch_name IS NOT worktrees.branch_name
+             )
+         )`,
+      input.id, input.executionContextId, input.workspaceId,
+      input.repositoryRoot, input.path, input.branch, input.baseRef
+    ) !== undefined
   }
 
   async registerExisting(
@@ -463,6 +561,51 @@ async function localBranchExists(repository: string, branch: string): Promise<bo
       return false
     }
     throw error
+  }
+}
+
+async function resolveCommit(repository: string, ref: string): Promise<string> {
+  return (await exec('git', [
+    '-C', repository, 'rev-parse', '--verify', `${ref}^{commit}`
+  ])).stdout.trim()
+}
+
+function revisionMismatchError(
+  worktreeId: string,
+  branch: string,
+  actualRevision: string,
+  frozenRevision: string
+): Error {
+  return new Error(
+    `Worktree ${worktreeId} branch ${branch} resolved to ${actualRevision}, not frozen revision ${frozenRevision}`
+  )
+}
+
+async function removeGitWorktree(
+  repository: string,
+  path: string,
+  force = false
+): Promise<void> {
+  await exec('git', [
+    '-C', repository, 'worktree', 'remove', ...(force ? ['--force'] : []), path
+  ])
+}
+
+async function cleanupCreatedWorktree(
+  repository: string,
+  path: string,
+  verificationError: Error
+): Promise<void> {
+  try {
+    // This path was created by the current invocation and setup has not started.
+    // Use Git's Worktree removal instead of deleting the directory directly so
+    // its administrative metadata is cleaned atomically with the checkout.
+    await removeGitWorktree(repository, path, true)
+  } catch (cleanupError) {
+    throw new Error(
+      `${verificationError.message}; cleanup failed: ${errorMessage(cleanupError)}`,
+      { cause: verificationError }
+    )
   }
 }
 

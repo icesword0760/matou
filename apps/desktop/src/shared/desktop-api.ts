@@ -14,6 +14,10 @@ export interface MatouDesktopApi {
   openDirectoryInTerminal(path: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
   showWindow(windowId: string): Promise<void>
+  requestDetachedTerminalFocus(input: DetachedTerminalFocusRequest): Promise<boolean>
+  onDetachedTerminalFocusRequested(listener: (request: DetachedTerminalFocusRequest) => void): () => void
+  acknowledgeDetachedTerminalFocus(result: DetachedTerminalFocusResult): Promise<boolean>
+  isCurrentWindowFocused(): Promise<boolean>
   createDetachedTerminalWindow(input: DetachedTerminalWindowInput): Promise<void>
   closeDetachedTerminalWindow(windowId: string): Promise<void>
   detachedTerminalWindowExists(windowId: string): Promise<boolean>
@@ -135,6 +139,19 @@ export interface DetachedTerminalWindowInput {
   title: string
 }
 
+export interface DetachedTerminalFocusRequest {
+  requestId: string
+  attemptId: string
+  routeWindowId: string
+  targetWindowId: string
+  sessionId: string
+  deadlineAt: number
+}
+
+export interface DetachedTerminalFocusResult extends DetachedTerminalFocusRequest {
+  focused: boolean
+}
+
 export interface DetachedWindowClosedEvent {
   windowId: string
   mainWindowId: string
@@ -166,6 +183,10 @@ export const DESKTOP_CHANNELS = {
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
   hideWindow: 'matou:hide-window',
   showWindow: 'matou:show-window',
+  requestDetachedTerminalFocus: 'matou:request-detached-terminal-focus',
+  detachedTerminalFocusRequested: 'matou:detached-terminal-focus-requested',
+  acknowledgeDetachedTerminalFocus: 'matou:acknowledge-detached-terminal-focus',
+  isCurrentWindowFocused: 'matou:is-current-window-focused',
   createDetachedTerminalWindow: 'matou:create-detached-terminal-window',
   closeDetachedTerminalWindow: 'matou:close-detached-terminal-window',
   detachedTerminalWindowExists: 'matou:detached-terminal-window-exists',

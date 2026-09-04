@@ -33,6 +33,7 @@ export interface PtySessionOptions {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  codexHooksConfig?: string
   controlAssetRoot?: string
   model?: string
   env?: Record<string, string>
@@ -41,7 +42,7 @@ export interface PtySessionOptions {
     session: PtySession,
     exitCode: number,
     signal?: number,
-    reason?: 'runtime-shutdown' | 'environment-transition'
+    reason?: 'runtime-shutdown' | 'environment-transition' | 'structure-removal'
   ) => boolean | void
   onOutput?: (data: string) => void
   onDurabilityFault?: (event: SessionDurabilityFaultEvent) => void
@@ -67,7 +68,7 @@ export class PtySession {
     session: PtySession,
     exitCode: number,
     signal?: number,
-    reason?: 'runtime-shutdown' | 'environment-transition'
+    reason?: 'runtime-shutdown' | 'environment-transition' | 'structure-removal'
   ) => boolean | void) | undefined
   readonly #onOutput: ((data: string) => void) | undefined
   readonly #encoder = new TextEncoder()
@@ -78,7 +79,7 @@ export class PtySession {
   #writeChain = Promise.resolve()
   #disposed = false
   #notifyExit = true
-  #exitReason: 'runtime-shutdown' | 'environment-transition' | undefined
+  #exitReason: 'runtime-shutdown' | 'environment-transition' | 'structure-removal' | undefined
   #forceFinalized = false
   #closedResolved = false
   #exitFinalized = false
@@ -166,6 +167,9 @@ export class PtySession {
       }),
       ...(options.settingsPath === undefined ? {} : {
         settingsPath: options.settingsPath
+      }),
+      ...(options.codexHooksConfig === undefined ? {} : {
+        codexHooksConfig: options.codexHooksConfig
       }),
       ...(options.controlAssetRoot === undefined ? {} : {
         controlAssetRoot: options.controlAssetRoot
@@ -366,7 +370,7 @@ export class PtySession {
 
   dispose(options: {
     notifyExit?: boolean
-    reason?: 'runtime-shutdown' | 'environment-transition'
+    reason?: 'runtime-shutdown' | 'environment-transition' | 'structure-removal'
   } = {}): void {
     if (this.#disposed) {
       return

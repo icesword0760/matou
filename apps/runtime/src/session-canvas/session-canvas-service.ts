@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type {
   DomainCommandMetadata,
   SceneSessionGraph,
+  Session,
   SessionCanvasMembership
 } from '@matou/domain'
 import type { RemoveNodeScope } from '@matou/contracts'
@@ -10,8 +11,12 @@ import type { RemoveNodeScope } from '@matou/contracts'
 import {
   activateSessionInTransaction,
   assertWorkspacePathAvailable,
+  readCreatedHierarchyPathForSession,
   readHierarchyResult,
   registerWindow,
+  restoreNavigationInTransaction,
+  type CreateHierarchyResult,
+  type CreateNavigationOptions,
   type WorkspaceHierarchyResult
 } from '../hierarchy/hierarchy-application-service'
 import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
@@ -63,17 +68,30 @@ interface MembershipRow {
   updated_at: number
 }
 
-export interface CreateCanvasInput {
+export interface CreateCanvasInput extends CreateNavigationOptions {
   windowId: string
   taskId: string
+  title?: string
   now: number
 }
 
-export interface CreateShellSiblingInput {
+export interface CreateShellSiblingInput extends CreateNavigationOptions {
   windowId: string
   sceneId: string
   sourceSessionId: string
   parentSessionId?: string
+  executionContextId?: string
+  title?: string
+  now: number
+}
+
+export interface CreateSessionSiblingInput extends CreateNavigationOptions {
+  windowId: string
+  sceneId: string
+  sourceSessionId: string
+  parentSessionId?: string
+  profile: Extract<Session['kind'], 'shell' | 'claude-code' | 'codex'>
+  title?: string
   executionContextId?: string
   now: number
 }
@@ -82,6 +100,15 @@ export interface SetFocusedSessionInput {
   windowId: string
   sceneId: string
   sessionId: string
+  now: number
+}
+
+export interface RestoreFocusedSessionIfCurrentInput {
+  windowId: string
+  sceneId: string
+  sessionId: string
+  expectedSessionId: string
+  expectedFocusUpdatedAt?: number
   now: number
 }
 
@@ -121,7 +148,11 @@ export interface UpsertAgentTeamMemberResult {
   graph: SceneSessionGraph
 }
 
-export interface SessionCanvasMutationResult extends WorkspaceHierarchyResult {
+export interface SessionCanvasGraphResult extends WorkspaceHierarchyResult {
+  graph: SceneSessionGraph
+}
+
+export interface SessionCanvasMutationResult extends CreateHierarchyResult {
   graph: SceneSessionGraph
 }
 
@@ -141,6 +172,7 @@ export class SessionCanvasService {
     const ids = createHierarchyIds()
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
+      const navigationBefore = readHierarchyResult(tx, input.windowId).navigation
       const task = requireRow(tx.get<TaskRow>(
         `SELECT id, workspace_id, execution_context_id FROM tasks
          WHERE id = ? AND archived_at IS NULL`,
@@ -153,7 +185,17 @@ export class SessionCanvasService {
       ), 'Workspace')
       assertWorkspacePathAvailable(tx, workspace.id)
 
-      const sceneName = nextCanvasName(tx, task.id)
+      const sceneName = input.title === undefined
+        ? nextCanvasName(tx, task.id)
+        : requiredTitle(input.title, 'Canvas title')
+      if (input.title !== undefined && tx.get(
+        `SELECT id FROM scenes
+         WHERE task_id = ? AND name = ? AND title_pinned = 1 AND archived_at IS NULL`,
+        task.id,
+        sceneName
+      )) {
+        throw new Error('当前事项下已存在同名页签')
+      }
       const sceneOrdinal = tx.get<{ count: number }>(
         `SELECT COUNT(*) AS count FROM scenes
          WHERE task_id = ? AND archived_at IS NULL`,
@@ -163,9 +205,9 @@ export class SessionCanvasService {
         `INSERT INTO scenes (
            id, task_id, name, mode, root_node_id, title_pinned, sort_key,
            layout_revision, created_at, updated_at
-         ) VALUES (?, ?, ?, 'tile', ?, 0, ?, 1, ?, ?)`,
+         ) VALUES (?, ?, ?, 'tile', ?, ?, ?, 1, ?, ?)`,
         ids.sceneId, task.id, sceneName, ids.rootNodeId,
-        sortKey(sceneOrdinal), input.now, input.now
+        input.title === undefined ? 0 : 1, sortKey(sceneOrdinal), input.now, input.now
       )
       tx.run(
         `INSERT INTO scene_nodes (id, scene_id, kind, ordinal, created_at)
@@ -188,26 +230,30 @@ export class SessionCanvasService {
       )
       activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
 
-      const hierarchy = readHierarchyResult(tx, input.windowId)
+      const created = readCreatedHierarchyPathForSession(tx, ids.sessionId)
       const membership = readMembership(tx, ids.sessionId)
+      if (input.navigation === 'preserve') {
+        restoreNavigationInTransaction(tx, navigationBefore, input.now)
+      }
+      const hierarchy = readHierarchyResult(tx, input.windowId)
       const graph = projectSceneGraphFrom(tx, ids.sceneId, input.windowId)
       emit({
         eventId: `${command.commandId}:scene-created`,
         eventType: 'scene.created', aggregateType: 'scene', aggregateId: ids.sceneId,
         workspaceId: workspace.id, taskId: task.id,
-        payload: hierarchy.scene, occurredAt: input.now
+        payload: created.scene, occurredAt: input.now
       })
       emit({
         eventId: `${command.commandId}:session-created`,
         eventType: 'session.created', aggregateType: 'session', aggregateId: ids.sessionId,
         workspaceId: workspace.id, taskId: task.id, sessionId: ids.sessionId,
-        payload: hierarchy.session, occurredAt: input.now
+        payload: created.session, occurredAt: input.now
       })
       emit({
         eventId: `${command.commandId}:session-mounted`,
         eventType: 'scene.session-mounted', aggregateType: 'scene', aggregateId: ids.sceneId,
         workspaceId: workspace.id, taskId: task.id, sessionId: ids.sessionId,
-        payload: hierarchy.mount, occurredAt: input.now
+        payload: created.mount, occurredAt: input.now
       })
       emitMembership(command.commandId, membership, workspace.id, task.id, emit, input.now)
       emit({
@@ -216,7 +262,7 @@ export class SessionCanvasService {
         workspaceId: workspace.id, taskId: task.id, sessionId: ids.sessionId,
         payload: { graph }, occurredAt: input.now
       })
-      return { ...hierarchy, graph }
+      return { ...hierarchy, created, graph }
     }).result
   }
 
@@ -224,10 +270,18 @@ export class SessionCanvasService {
     command: DomainCommandMetadata,
     input: CreateShellSiblingInput
   ): SessionCanvasMutationResult {
+    return this.createSessionSibling(command, { ...input, profile: 'shell' })
+  }
+
+  createSessionSibling(
+    command: DomainCommandMetadata,
+    input: CreateSessionSiblingInput
+  ): SessionCanvasMutationResult {
     const ids = createHierarchyIds()
     const relationId = randomUUID()
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
+      const navigationBefore = readHierarchyResult(tx, input.windowId).navigation
       const scene = requireRow(tx.get<SceneRow>(
         `SELECT id, task_id FROM scenes
          WHERE id = ? AND archived_at IS NULL`,
@@ -282,6 +336,9 @@ export class SessionCanvasService {
            AND relation_kind IN ('derived-from', 'forked-from')`,
         source.id
       )
+      const title = input.title === undefined
+        ? defaultSessionTitle(input.profile)
+        : requiredTitle(input.title, 'Session title')
 
       // Keep the legacy split tree renderable while the new horizontal graph UI becomes authoritative.
       tx.run(
@@ -305,10 +362,11 @@ export class SessionCanvasService {
       )
       tx.run(
         `INSERT INTO sessions (
-           id, task_id, execution_context_id, kind, status, title, cwd,
+           id, task_id, execution_context_id, kind, status, title, title_source, cwd,
            created_at, updated_at, last_activity_at, version
-         ) VALUES (?, ?, ?, 'shell', 'created', 'Shell', ?, ?, ?, ?, 1)`,
-        ids.sessionId, task.id, executionContext.id, executionContext.cwd,
+         ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, 1)`,
+        ids.sessionId, task.id, executionContext.id, input.profile, title,
+        input.title === undefined ? 'default' : 'manual', executionContext.cwd,
         input.now, input.now, input.now
       )
       tx.run(
@@ -345,20 +403,24 @@ export class SessionCanvasService {
       }
 
       activateSessionInTransaction(tx, input.windowId, ids.sessionId, input.now)
-      const hierarchy = readHierarchyResult(tx, input.windowId)
+      const created = readCreatedHierarchyPathForSession(tx, ids.sessionId)
       const membership = readMembership(tx, ids.sessionId)
+      if (input.navigation === 'preserve') {
+        restoreNavigationInTransaction(tx, navigationBefore, input.now)
+      }
+      const hierarchy = readHierarchyResult(tx, input.windowId)
       const graph = projectSceneGraphFrom(tx, scene.id, input.windowId)
       emit({
         eventId: `${command.commandId}:session-created`,
         eventType: 'session.created', aggregateType: 'session', aggregateId: ids.sessionId,
         workspaceId: task.workspace_id, taskId: task.id, sessionId: ids.sessionId,
-        payload: hierarchy.session, occurredAt: input.now
+        payload: created.session, occurredAt: input.now
       })
       emit({
         eventId: `${command.commandId}:session-mounted`,
         eventType: 'scene.session-mounted', aggregateType: 'scene', aggregateId: scene.id,
         workspaceId: task.workspace_id, taskId: task.id, sessionId: ids.sessionId,
-        payload: hierarchy.mount, occurredAt: input.now
+        payload: created.mount, occurredAt: input.now
       })
       emitMembership(command.commandId, membership, task.workspace_id, task.id, emit, input.now)
       if (structuralParent) {
@@ -382,14 +444,14 @@ export class SessionCanvasService {
         sessionId: ids.sessionId,
         payload: { graph, sourceSessionId: source.id }, occurredAt: input.now
       })
-      return { ...hierarchy, graph }
+      return { ...hierarchy, created, graph }
     }).result
   }
 
   restartStoppedSession(
     command: DomainCommandMetadata,
     input: RestartStoppedSessionInput
-  ): SessionCanvasMutationResult {
+  ): SessionCanvasGraphResult {
     const ids = createHierarchyIds()
     return this.#transactions.execute(command, ({ tx, emit }) => {
       registerWindow(tx, input.windowId, input.now)
@@ -869,6 +931,40 @@ export class SessionCanvasService {
       return projectSceneGraphFrom(tx, input.sceneId, input.windowId)
     })
   }
+
+  /**
+   * Restores a pre-operation focus only while the window still shows the
+   * exact operation-owned temporary focus. A concurrent user navigation or a
+   * removed snapshot simply makes the comparison fail.
+   */
+  restoreFocusedSessionIfCurrent(
+    input: RestoreFocusedSessionIfCurrentInput
+  ): boolean {
+    return this.#database.transaction((tx) => {
+      const current = readHierarchyResult(tx, input.windowId)
+      if (current.session?.id !== input.expectedSessionId || !current.scene) return false
+      if (input.expectedFocusUpdatedAt !== undefined) {
+        const focus = tx.get<{ updated_at: number }>(
+          `SELECT updated_at FROM window_scene_focus
+           WHERE window_id = ? AND scene_id = ? AND active_session_id = ?`,
+          input.windowId, current.scene.id, input.expectedSessionId
+        )
+        if (focus?.updated_at !== input.expectedFocusUpdatedAt) return false
+      }
+      const target = tx.get(
+        `SELECT 1 FROM sessions
+         JOIN session_mounts ON session_mounts.session_id = sessions.id
+         JOIN scenes ON scenes.id = session_mounts.scene_id
+         WHERE sessions.id = ? AND session_mounts.scene_id = ?
+           AND sessions.archived_at IS NULL
+           AND scenes.archived_at IS NULL LIMIT 1`,
+        input.sessionId, input.sceneId
+      )
+      if (!target) return false
+      activateSessionInTransaction(tx, input.windowId, input.sessionId, input.now)
+      return true
+    })
+  }
 }
 
 function emitMembership(
@@ -923,6 +1019,18 @@ function nextCanvasName(tx: DatabaseTransaction, taskId: string): string {
     const candidate = `新画布 ${suffix}`
     if (!names.has(candidate)) return candidate
   }
+}
+
+function defaultSessionTitle(profile: CreateSessionSiblingInput['profile']): string {
+  if (profile === 'claude-code') return 'Claude'
+  if (profile === 'codex') return 'Codex'
+  return 'Shell'
+}
+
+function requiredTitle(value: string, label: string): string {
+  const normalized = value.trim()
+  if (!normalized) throw new Error(`${label} must not be empty`)
+  return normalized
 }
 
 function sortKey(index: number): string {

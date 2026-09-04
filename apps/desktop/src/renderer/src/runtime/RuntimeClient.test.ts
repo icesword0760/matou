@@ -1,10 +1,181 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { PROTOCOL_VERSION, parseRendererMessage } from '@matou/contracts'
+import {
+  PROTOCOL_VERSION, parseRendererMessage,
+  type HostNavigationRequestWire, type HostNavigationResultWire
+} from '@matou/contracts'
 
 import { RuntimeClient, type RuntimeClientPort } from './RuntimeClient'
+import { runtimeWindowIdentityFromSearch } from './RuntimeProvider'
 
 describe('RuntimeClient', () => {
+  it('publishes Runtime navigation requests and posts an exact Renderer acknowledgement', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, {
+      clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+    })
+    const request = navigationRequestFixture()
+    const listener = vi.fn()
+
+    const unsubscribe = client.subscribeHostNavigation(listener)
+    port.deliver(request)
+    expect(listener).toHaveBeenCalledWith(request)
+
+    const result = navigationResultFixture()
+    client.acknowledgeHostNavigation(result)
+    expect(port.sent.at(-1)).toEqual({
+      type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION, ...result
+    })
+
+    unsubscribe()
+    port.deliver({ ...request, requestId: 'nav-after-unsubscribe' })
+    expect(listener).toHaveBeenCalledTimes(1)
+    client.dispose()
+  })
+
+  it('replays one request attempt that arrives before the first navigation subscriber', () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, {
+      clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+    })
+    const request = navigationRequestFixture()
+    const listener = vi.fn()
+
+    port.deliver(request)
+    port.deliver(request)
+    expect(listener).not.toHaveBeenCalled()
+
+    client.subscribeHostNavigation(listener)
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith(request)
+    client.acknowledgeHostNavigation(navigationResultFixture())
+    expect(port.sent.at(-1)).toEqual({
+      type: 'host.navigation-result', protocolVersion: PROTOCOL_VERSION,
+      ...navigationResultFixture()
+    })
+  })
+
+  it('expires an undelivered request and its acknowledgement origin before subscription', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    try {
+      const port = new FakePort()
+      const client = new RuntimeClient(port, {
+        clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+      })
+      const listener = vi.fn()
+      port.deliver(navigationRequestFixture({ deadlineAt: 1_050 }))
+
+      await vi.advanceTimersByTimeAsync(51)
+      client.subscribeHostNavigation(listener)
+      client.acknowledgeHostNavigation(navigationResultFixture())
+
+      expect(listener).not.toHaveBeenCalled()
+      expect(port.sent).toHaveLength(1)
+      expect(port.sent[0]?.type).toBe('protocol.hello')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears undelivered attempts on port replacement and dispose without accepting stale delivery', () => {
+    vi.useFakeTimers()
+    try {
+      const first = new FakePort()
+      const client = new RuntimeClient(first, {
+        clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+      })
+      const staleDelivery = first.onmessage!
+      first.deliver(navigationRequestFixture({ requestId: 'nav-old' }))
+      expect(vi.getTimerCount()).toBe(1)
+
+      const second = new FakePort()
+      client.replacePort(second)
+      staleDelivery({ data: navigationRequestFixture({ requestId: 'nav-stale' }) } as MessageEvent)
+      expect(vi.getTimerCount()).toBe(0)
+      const afterReplacement = vi.fn()
+      const unsubscribe = client.subscribeHostNavigation(afterReplacement)
+      expect(afterReplacement).not.toHaveBeenCalled()
+      unsubscribe()
+
+      second.deliver(navigationRequestFixture({ requestId: 'nav-before-dispose' }))
+      expect(vi.getTimerCount()).toBe(1)
+      client.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+      const afterDispose = vi.fn()
+      client.subscribeHostNavigation(afterDispose)
+
+      expect(afterDispose).not.toHaveBeenCalled()
+      expect(first.onmessage).toBeNull()
+      expect(second.onmessage).toBeNull()
+      expect(first.closed).toBe(true)
+      expect(second.closed).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('sends the route identity in every hello and leaves background routes anonymous', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, {
+      clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+    })
+    expect(first.sent[0]).toEqual({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+    })
+
+    const second = new FakePort()
+    client.replacePort(second)
+    expect(second.sent[0]).toEqual(first.sent[0])
+
+    const background = new FakePort()
+    new RuntimeClient(background, { clientId: 'renderer-background' })
+    expect(background.sent[0]).toEqual({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'renderer-background'
+    })
+  })
+
+  it('derives only main and detached-terminal identities from Renderer routes', () => {
+    expect(runtimeWindowIdentityFromSearch('?windowId=main-window-2&e2e=1')).toEqual({
+      windowId: 'main-window-2', windowKind: 'main'
+    })
+    expect(runtimeWindowIdentityFromSearch(
+      '?kind=detached-terminal&windowId=detached-window-2&mainWindowId=main-window-2'
+    )).toEqual({
+      windowId: 'detached-window-2', windowKind: 'detached-terminal'
+    })
+    expect(runtimeWindowIdentityFromSearch('?kind=dag&windowId=dag-window-2')).toEqual({})
+    expect(runtimeWindowIdentityFromSearch('')).toEqual({})
+  })
+
+  it('does not deliver or acknowledge an old Runtime message through a replacement port', () => {
+    const first = new FakePort()
+    const client = new RuntimeClient(first, {
+      clientId: 'renderer-main-1', windowId: 'main-window-1', windowKind: 'main'
+    })
+    const listener = vi.fn()
+    client.subscribeHostNavigation(listener)
+    const staleDelivery = first.onmessage!
+    first.deliver(navigationRequestFixture())
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    const second = new FakePort()
+    client.replacePort(second)
+    staleDelivery({ data: {
+      ...navigationRequestFixture(), requestId: 'nav-from-closed-port'
+    } } as MessageEvent)
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    client.acknowledgeHostNavigation(navigationResultFixture())
+    expect(second.sent).toHaveLength(1)
+    expect(second.sent[0]?.type).toBe('protocol.hello')
+    expect(first.closed).toBe(true)
+    expect(first.onmessage).toBeNull()
+  })
+
   it('queries archived terminal history through the typed Runtime RPC', async () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })
@@ -645,9 +816,39 @@ describe('RuntimeClient', () => {
 
 class FakePort implements RuntimeClientPort {
   readonly sent: any[] = []
+  closed = false
   onmessage: ((event: MessageEvent) => void) | null = null
   postMessage(message: any): void { this.sent.push(message) }
   start(): void {}
-  close(): void {}
+  close(): void { this.closed = true }
   deliver(data: any): void { this.onmessage?.({ data } as MessageEvent) }
+}
+
+function navigationRequestFixture(
+  overrides: Partial<HostNavigationRequestWire> = {}
+): HostNavigationRequestWire {
+  return {
+    type: 'host.navigation-request', protocolVersion: PROTOCOL_VERSION,
+    requestId: 'nav-1', attemptId: 'attempt-1',
+    routeWindowId: 'main-window-1', targetWindowId: 'main-window-1',
+    workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1',
+    sessionId: 'session-1', focusTerminal: true,
+    deadlineAt: Date.now() + 10_000,
+    ...overrides
+  }
+}
+
+function navigationResultFixture(
+  overrides: Partial<Omit<HostNavigationResultWire, 'type' | 'protocolVersion'>> = {}
+): Omit<HostNavigationResultWire, 'type' | 'protocolVersion'> {
+  return {
+    requestId: 'nav-1', attemptId: 'attempt-1',
+    routeWindowId: 'main-window-1', targetWindowId: 'main-window-1', ok: true,
+    finalPath: {
+      routeWindowId: 'main-window-1', targetWindowId: 'main-window-1',
+      workspaceId: 'workspace-1', taskId: 'task-1', sceneId: 'scene-1',
+      sessionId: 'session-1'
+    },
+    ...overrides
+  }
 }

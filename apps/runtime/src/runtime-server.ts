@@ -12,7 +12,9 @@ import {
   type RendererMessage,
   type RpcMethod,
   type RuntimeMessage,
-  type ProviderCli
+  type ProviderCli,
+  type ProviderSessionActivationDeferredReason,
+  type ProviderSessionActivationTransition
 } from '@matou/contracts'
 
 import { DomainEventStore } from './events/domain-event-store'
@@ -31,8 +33,15 @@ import {
   CheckpointManager,
   type LoadedCheckpoint
 } from './checkpoints/checkpoint-manager'
-import type { CapabilityTokenService } from './control/host-control-server'
+import type {
+  CapabilityTokenService,
+  HostControlScope
+} from './control/host-control-server'
 import type { RuntimeControlBackend } from './control/runtime-control-backend'
+import {
+  type HostNavigationBroker,
+  type HostNavigationRegistration
+} from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { PtySession } from './session/pty-session'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
@@ -90,7 +99,10 @@ import type {
   RecoveryJobSnapshot
 } from './recovery/runtime-session-recovery-scheduler'
 import type { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
-import { ProviderConfigStore } from './provider-config/provider-config-store'
+import {
+  ProviderConfigStore,
+  type ProviderLaunchSelection
+} from './provider-config/provider-config-store'
 
 export interface PortMessageEvent {
   data: unknown
@@ -129,6 +141,7 @@ export interface RuntimeServerOptions {
   controlAssetRoot?: string
   controlNodeExecutable?: string
   providerConfigs?: ProviderConfigStore
+  navigationBroker?: HostNavigationBroker
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -138,6 +151,17 @@ const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const execFileAsync = promisify(execFile)
 
+export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Object.freeze([
+  'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history',
+  'terminal.read-commands', 'terminal.send-text', 'terminal.send-key',
+  'structure.create.workspace', 'structure.create.task', 'structure.create.canvas',
+  'structure.create.session', 'structure.fork.child', 'structure.fork.sibling',
+  'structure.fork.children', 'structure.remove.preview', 'structure.remove.commit',
+  'structure.canvas-close.preview', 'structure.canvas-close.commit',
+  'navigation.focus.session', 'navigation.switch.workspace',
+  'navigation.switch.task', 'navigation.switch.canvas'
+])
+
 interface InteractiveClaudeLaunch {
   permissionMode: HudPermissionMode
 }
@@ -146,6 +170,17 @@ interface ProviderRecoveryWaiter {
   resolve(): void
   reject(error: Error): void
 }
+
+interface TrackedProviderHookRegistration {
+  registration: ProviderHookRegistration
+  retirementTimer?: ReturnType<typeof setTimeout>
+}
+
+const PROVIDER_HOOK_RETIREMENT_GRACE_MS = 2_000
+const PROVIDER_HOOK_REGISTRATIONS = new WeakMap<
+  RuntimeSessionRegistry,
+  Map<string, Map<string, TrackedProviderHookRegistration>>
+>()
 
 // Resolving an interactive alias starts the user's login shell and may execute
 // a costly zsh configuration. Start it with the Runtime instead of making the
@@ -209,6 +244,10 @@ export class RuntimeServer {
   readonly #hudFileRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
   readonly #providerHooks: ProviderHookServer | undefined
+  readonly #providerHookRegistrations: Map<
+    string,
+    Map<string, TrackedProviderHookRegistration>
+  >
   readonly #providerResumeTimeoutMs: number
   readonly #forkProviderIdentityTimeoutMs: number
   #portClosed = false
@@ -221,6 +260,8 @@ export class RuntimeServer {
   readonly #recoveryCoordinator: RuntimeRecoveryCoordinator | undefined
   readonly #controlAssetRoot: string | undefined
   readonly #controlNodeExecutable: string
+  readonly #navigationBroker: HostNavigationBroker | undefined
+  #navigationRegistration: HostNavigationRegistration | undefined
   #handshakeComplete = false
   #closed = false
 
@@ -303,6 +344,9 @@ export class RuntimeServer {
     )
     this.#control = control
     this.#sessions = sessions
+    this.#providerHookRegistrations = PROVIDER_HOOK_REGISTRATIONS.get(sessions) ??
+      new Map<string, Map<string, TrackedProviderHookRegistration>>()
+    PROVIDER_HOOK_REGISTRATIONS.set(sessions, this.#providerHookRegistrations)
     this.#execution = new SessionExecutionService(database, sessions, {
       startOrResume: (descriptor, authority, mode, attachView) => this.#spawn({
         ...descriptor,
@@ -319,6 +363,7 @@ export class RuntimeServer {
     this.#controlAssetRoot = options.controlAssetRoot ?? process.env.MATOU_CONTROL_ASSET_ROOT
     this.#controlNodeExecutable = options.controlNodeExecutable ??
       process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
+    this.#navigationBroker = options.navigationBroker
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
@@ -467,11 +512,69 @@ export class RuntimeServer {
     return this.#execution.startOrResume(descriptor.sessionId, descriptor, authority, false)
   }
 
+  /** Fully retires structurally removed Sessions across every attached view. */
+  async disposeSessions(sessionIds: readonly string[]): Promise<void> {
+    const unique = [...new Set(sessionIds)]
+    const peers = [...RuntimeServer.#instances]
+      .filter((server) => server.#sessions === this.#sessions)
+    const backends = new Set(peers.flatMap((server) =>
+      server.#control ? [server.#control.backend] : []))
+    const tokenServices = new Set(peers.flatMap((server) =>
+      server.#control ? [server.#control.tokens] : []))
+    const recoveryCoordinators = new Set(peers.flatMap((server) =>
+      server.#recoveryCoordinator ? [server.#recoveryCoordinator] : []))
+    const disposalErrors: unknown[] = []
+    for (const recovery of recoveryCoordinators) recovery.cancel(unique)
+    for (const sessionId of unique) {
+      await this.#sessions.runExclusive(sessionId, async () => {
+        try {
+          await this.#disposeProviderHooks(sessionId)
+        } catch (error) {
+          disposalErrors.push(error)
+        }
+        const session = this.#sessions.get(sessionId)
+        const activeRuns = this.#database.all<{
+          id: string
+          status: 'starting' | 'running' | 'interrupted'
+        }>(
+          `SELECT id, status FROM session_runs
+           WHERE session_id = ? AND status IN ('starting', 'running', 'interrupted')`,
+          sessionId
+        )
+        const runIds = new Set(activeRuns.map(({ id }) => id))
+        if (session?.runId) runIds.add(session.runId)
+        for (const run of activeRuns) {
+          if (run.status === 'interrupted') continue
+          this.#sessionRepository.interruptRun({
+            commandId: `runtime-structure-removal-${run.id}`,
+            commandType: 'session.structure-run-interrupted',
+            requestHash: `structure-removal:${run.id}`
+          }, run.id, Date.now())
+        }
+        for (const peer of peers) peer.#clearStructurallyRemovedSession(sessionId, session)
+        if (session) {
+          for (const backend of backends) backend.unregister(sessionId, session)
+          this.#sessions.delete(sessionId, session)
+        }
+        for (const runId of runIds) {
+          for (const tokens of tokenServices) tokens.revokeRun(runId)
+        }
+        if (!session) return
+        session.dispose({ notifyExit: false, reason: 'structure-removal' })
+        await session.whenClosed()
+      })
+    }
+    if (disposalErrors.length > 0) {
+      throw new AggregateError(disposalErrors, 'Session structure-removal cleanup failed')
+    }
+  }
+
   close(): void {
     if (this.#closed) return
     for (const timer of this.#summaryTimers.values()) clearTimeout(timer)
     this.#summaryTimers.clear()
     for (const sessionId of this.#summaryBuffers.keys()) this.#flushSessionSummary(sessionId)
+    this.#unregisterNavigationWindow()
     this.#closed = true
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
@@ -496,6 +599,7 @@ export class RuntimeServer {
 
   #disconnectPort(): void {
     if (this.#portClosed) return
+    this.#unregisterNavigationWindow()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
     this.#subscriptions.clear()
@@ -532,6 +636,12 @@ export class RuntimeServer {
         runtimeId: this.#runtimeId,
         capabilities: this.#accessPolicy.capabilities
       })
+      if (message.windowKind === 'main' && message.windowId !== undefined) {
+        this.#navigationRegistration = this.#navigationBroker?.registerWindow(
+          message.windowId,
+          this.#sendToPort
+        )
+      }
       this.publishRecoverySnapshot(this.#recoveryCoordinator?.snapshot() ?? [])
       return
     }
@@ -541,6 +651,11 @@ export class RuntimeServer {
     switch (message.type) {
       case 'protocol.hello':
         this.#sendError('INVALID_MESSAGE', 'protocol handshake is already complete')
+        break
+      case 'host.navigation-result':
+        if (this.#navigationRegistration !== undefined) {
+          this.#navigationBroker?.acknowledge(message, this.#navigationRegistration)
+        }
         break
       case 'terminal.spawn':
         await this.#spawnSerialized(message)
@@ -723,6 +838,13 @@ export class RuntimeServer {
     }
   }
 
+  #unregisterNavigationWindow(): void {
+    const registration = this.#navigationRegistration
+    if (registration === undefined) return
+    this.#navigationRegistration = undefined
+    this.#navigationBroker?.unregisterWindow(registration.windowId, registration)
+  }
+
   #scheduleCwdCapture(session: PtySession): void {
     const pending = this.#cwdTimers.get(session.sessionId)
     if (pending) clearTimeout(pending)
@@ -889,14 +1011,17 @@ export class RuntimeServer {
         : undefined
       const permissionSessionId = message.method === 'session.set-permission-mode'
         ? textFromRpcInput(message.payload, 'sessionId') : undefined
+      const providerMutationSessionId = message.method === 'session.set-permission-mode' ||
+        message.method === 'session.set-model'
+        ? textFromRpcInput(message.payload, 'sessionId') : undefined
       const permissionSession = permissionSessionId === undefined
         ? undefined : this.#sessions.get(permissionSessionId)
       const ephemeralPermission = permissionSessionId !== undefined && permissionSession !== undefined &&
         permissionSession.profile !== 'shell' &&
         this.#sessionRepository.getResumeBinding(permissionSessionId, 'claude-code') === undefined
       this.#accessPolicy.assertRpcAllowed(message.method)
-      if (permissionSessionId !== undefined) {
-        this.#assertProviderMutationAllowed(permissionSessionId)
+      if (providerMutationSessionId !== undefined) {
+        this.#assertProviderMutationAllowed(providerMutationSessionId)
       }
       let result = ephemeralPermission
         ? {
@@ -912,7 +1037,18 @@ export class RuntimeServer {
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
         const cli = input?.cli === 'claude-code' || input?.cli === 'codex' ? input.cli : undefined
-        if (cli === 'claude-code') await RuntimeServer.#restartProviderSessions(cli)
+        const providerId = typeof input?.providerId === 'string' ? input.providerId : undefined
+        let sessionTransitions: ProviderSessionActivationTransition[] = []
+        if (cli === 'claude-code' && providerId) {
+          sessionTransitions = await RuntimeServer.#restartProviderSessions(
+            this.#sessions,
+            cli,
+            await this.#providerConfigs.launchSelection(cli, providerId)
+          )
+        }
+        if (cli && providerId && isRecord(result)) {
+          result = { ...result, sessionTransitions }
+        }
       }
       if (isGitMutation(message.method)) {
         await Promise.all([...this.#attachedSessionIds].map((sessionId) =>
@@ -1554,7 +1690,7 @@ export class RuntimeServer {
       }
     }
 
-    const forkDecision = message.profile === 'claude-code' && forkAuthority === undefined
+    const forkDecision = message.profile !== 'shell' && forkAuthority === undefined
       ? this.#forkIntents.claimForLaunch(message.sessionId, Date.now())
       : undefined
     if (forkDecision?.kind === 'failed') {
@@ -1573,6 +1709,12 @@ export class RuntimeServer {
     const resumeBinding = message.profile === 'shell' || skipResume || forkLaunch
       ? undefined
       : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
+    const providerSettingsBinding = message.profile === 'shell'
+      ? undefined
+      : this.#sessionRepository.getProviderSettingsBinding(message.sessionId, message.profile)
+    const boundProviderSettings = providerLaunchSettingsFromMetadata(
+      providerSettingsBinding?.metadata
+    )
     const providerSessionId = forkLaunch?.sourceProviderSessionId ?? resumeBinding?.providerSessionId
     const supersedesRestoreFailure = message.profile === 'claude-code' &&
       providerSessionId === undefined && Boolean(this.#database.get(
@@ -1590,8 +1732,10 @@ export class RuntimeServer {
     }
     let providerProcessStarted = false
     let hookRegistration: ProviderHookRegistration | undefined
+    let hookRunId: string | undefined
     try {
       const runId = forkAuthority?.runId ?? randomUUID()
+      hookRunId = runId
       const shellBlockCollector = persistOrdinaryShellHistory
         ? new ShellCommandBlockCollector()
         : undefined
@@ -1606,7 +1750,21 @@ export class RuntimeServer {
       if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
         forkLaunch?.permissionMode ??
+        permissionModeFromMetadata(providerSettingsBinding?.metadata) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
+      const providerSelection = message.profile === 'shell'
+        ? undefined
+        : await this.#providerConfigs.launchSelection(
+            message.profile,
+            boundProviderSettings.providerConfigId
+          )
+      const providerModel = boundProviderSettings.model ?? providerSelection?.model
+      const providerLaunch = providerSelection === undefined
+        ? { env: {} as Record<string, string> }
+        : {
+            ...(providerModel ? { model: providerModel } : {}),
+            env: providerSelection.env
+          }
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -1615,7 +1773,8 @@ export class RuntimeServer {
           cwd,
           startedAt: Date.now(),
           resumable: Boolean(resumeBinding),
-          ...(permissionMode === undefined ? {} : { permissionMode })
+          ...(permissionMode === undefined ? {} : { permissionMode }),
+          ...(providerModel === undefined ? {} : { model: providerModel })
         })
       }
       const resumeMonitor = providerSessionId === undefined
@@ -1628,10 +1787,7 @@ export class RuntimeServer {
       if (this.#control) {
         const token = this.#control.tokens.issue(
           { runId, sessionId: message.sessionId },
-          [
-            'host.identify', 'host.list', 'terminal.read-current', 'terminal.read-history',
-            'terminal.read-commands', 'terminal.send-text', 'terminal.send-key'
-          ],
+          MANAGED_SESSION_CONTROL_SCOPES,
           Date.now() + 24 * 60 * 60 * 1000
         )
         controlEnvironment = {
@@ -1647,23 +1803,47 @@ export class RuntimeServer {
           })
         }
       }
-      const providerLaunch = message.profile === 'shell'
-        ? { env: {} as Record<string, string> }
-        : await this.#providerConfigs.launchConfig(message.profile)
-      if (message.profile === 'claude-code' && runId && this.#providerHooks) {
-        hookRegistration = await this.#providerHooks.registerClaudeSession({
+      if (providerSettingsBinding && providerSelection && (
+        boundProviderSettings.providerConfigId !== providerSelection.providerConfigId ||
+        boundProviderSettings.model === undefined ||
+        permissionModeFromMetadata(providerSettingsBinding.metadata) === undefined
+      )) {
+        this.#sessionRepository.updateProviderLaunchSettings({
+          commandId: `provider-launch-settings-${message.sessionId}-${randomUUID()}`,
+          commandType: 'provider-binding.launch-settings',
+          requestHash: `${message.sessionId}:${providerSelection.providerConfigId}:${providerModel ?? ''}:${permissionMode ?? 'default'}`
+        }, {
+          bindingId: providerSettingsBinding.id,
+          providerConfigId: providerSelection.providerConfigId,
+          model: providerModel ?? '',
+          permissionMode: permissionMode ?? 'default',
+          now: Date.now()
+        })
+      }
+      if (message.profile !== 'shell' && runId && this.#providerHooks) {
+        const providerHookInput = {
           runId,
           sessionId: message.sessionId,
-          // A fresh Claude process that replaces an invalid resume is already live
-          // when its statusline arrives. Accept that new identity immediately.
-          acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
           ...(resumeBinding === undefined || forkLaunch !== undefined
             ? {}
             : { expectedProviderSessionId: resumeBinding.providerSessionId }),
           inheritedConversation: forkLaunch !== undefined,
           ...(forkAuthority === undefined ? {} : { forkAuthority }),
-          ...(permissionMode === undefined ? {} : { permissionMode })
-        })
+          ...(permissionMode === undefined ? {} : { permissionMode }),
+          ...(providerSelection === undefined ? {} : {
+            providerConfigId: providerSelection.providerConfigId,
+            model: providerModel ?? ''
+          })
+        }
+        hookRegistration = message.profile === 'claude-code'
+          ? await this.#providerHooks.registerClaudeSession({
+              ...providerHookInput,
+              // A fresh Claude process that replaces an invalid resume is already live
+              // when its statusline arrives. Accept that new identity immediately.
+              acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure
+            })
+          : await this.#providerHooks.registerCodexSession(providerHookInput)
+        this.#trackProviderHook(message.sessionId, runId, hookRegistration)
         if (providerSessionId !== undefined) {
           this.#providerLaunchRunIds.set(message.sessionId, runId)
         }
@@ -1712,7 +1892,7 @@ export class RuntimeServer {
         }
       }
       let providerDerivationState: 'pending' | 'confirmed' | 'rejected' =
-        message.profile === 'claude-code' && providerSessionId !== undefined && runId !== undefined
+        message.profile !== 'shell' && providerSessionId !== undefined && runId !== undefined
           ? 'pending'
           : 'confirmed'
       let pendingProviderOutput = ''
@@ -1761,7 +1941,9 @@ export class RuntimeServer {
         ...(forkLaunch === undefined ? {} : { forkSession: true }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
         ...(hookRegistration === undefined ? {} : {
-          settingsPath: hookRegistration.settingsPath
+          ...(message.profile === 'claude-code'
+            ? { settingsPath: hookRegistration.settingsPath }
+            : { codexHooksConfig: hookRegistration.codexHooksConfig! })
         }),
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
@@ -1784,10 +1966,10 @@ export class RuntimeServer {
           if (resumeFailure) {
             pendingResumeFailure = resumeFailure
             if (activeSession && forkLaunch) {
-              hookRegistration?.retire()
+              this.#retireProviderHook(message.sessionId, runId, hookRegistration)
               this.#beginForkFailure(message, activeSession, resumeFailure, forkAuthority)
             } else if (activeSession && resumeBinding) {
-              hookRegistration?.retire()
+              this.#retireProviderHook(message.sessionId, runId, hookRegistration)
               this.#parkResumeFailure(message, activeSession, resumeBinding.id, resumeFailure)
             }
           } else if (resumeMonitor?.isSettled || resumeMonitor?.hasVisibleOutput) {
@@ -1805,8 +1987,14 @@ export class RuntimeServer {
           const providerIdentityConfirmed = exited.runId !== undefined &&
             this.#sessions.providerIdentityConfirmed(exited.runId)
           this.#forgetProviderLaunch(message.sessionId, exited.runId)
-          hookRegistration?.retire()
-          if (exitReason === 'runtime-shutdown' || exitReason === 'environment-transition') {
+          this.#retireProviderHook(message.sessionId, runId, hookRegistration)
+          // Structural disposal has already removed every peer attachment,
+          // backend registration, capability, recovery job and Runtime map.
+          if (exitReason === 'structure-removal') return false
+          if (
+            exitReason === 'runtime-shutdown' ||
+            exitReason === 'environment-transition'
+          ) {
             this.#sessions.delete(message.sessionId, exited)
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
@@ -1992,7 +2180,7 @@ export class RuntimeServer {
       }
     } catch (error) {
       this.#rejectProviderDerivedOutput(message.sessionId)
-      await hookRegistration?.dispose()
+      await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
       if (forkLaunch && !providerProcessStarted) {
         const reason = `Fork 会话进程启动失败：${errorMessage(error)}`
         await this.#presentForkFailure(message, reason, forkAuthority, attachView)
@@ -2212,10 +2400,11 @@ export class RuntimeServer {
     if (!mismatch || !session || !message || session.runId !== mismatch.runId) return false
     const binding = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
-       WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?
+       WHERE session_id = ? AND provider = ? AND provider_session_id = ?
          AND resume_state NOT IN ('failed', 'expired')
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
       sessionId,
+      mismatch.provider,
       mismatch.expectedProviderSessionId
     )
     this.#providerIdentityMismatches.delete(sessionId)
@@ -2224,7 +2413,7 @@ export class RuntimeServer {
       message,
       session,
       binding.id,
-      'Claude Code 返回的会话与待恢复会话不一致，请重试恢复'
+      'AI 会话返回的上下文与待恢复会话不一致，请重试恢复'
     )
     this.flushSemanticEvents()
     return true
@@ -2556,6 +2745,123 @@ export class RuntimeServer {
     await session.whenClosed()
   }
 
+  #trackProviderHook(
+    sessionId: string,
+    runId: string,
+    registration: ProviderHookRegistration
+  ): void {
+    const byRun = this.#providerHookRegistrations.get(sessionId) ??
+      new Map<string, TrackedProviderHookRegistration>()
+    const existing = byRun.get(runId)
+    if (existing && existing.registration !== registration) {
+      clearTimeout(existing.retirementTimer)
+      void existing.registration.dispose().catch((error) => {
+        console.error(`[provider-hook.dispose] ${errorMessage(error)}`)
+      })
+    }
+    byRun.set(runId, { registration })
+    this.#providerHookRegistrations.set(sessionId, byRun)
+  }
+
+  #retireProviderHook(
+    sessionId: string,
+    runId: string,
+    registration?: ProviderHookRegistration,
+    suppressSideEffects = false
+  ): void {
+    if (!registration) return
+    const tracked = this.#providerHookRegistrations.get(sessionId)?.get(runId)
+    if (!tracked || tracked.registration !== registration) return
+    registration.retire(PROVIDER_HOOK_RETIREMENT_GRACE_MS, { suppressSideEffects })
+    if (tracked.retirementTimer) return
+    const timer = setTimeout(() => {
+      void registration.dispose().catch((error) => {
+        console.error(`[provider-hook.dispose] ${errorMessage(error)}`)
+      }).finally(() => this.#forgetProviderHook(sessionId, runId, registration))
+    }, PROVIDER_HOOK_RETIREMENT_GRACE_MS)
+    timer.unref?.()
+    tracked.retirementTimer = timer
+  }
+
+  async #disposeProviderHook(
+    sessionId: string,
+    runId: string | undefined,
+    registration?: ProviderHookRegistration
+  ): Promise<void> {
+    if (!registration) return
+    if (runId !== undefined) {
+      const tracked = this.#providerHookRegistrations.get(sessionId)?.get(runId)
+      clearTimeout(tracked?.retirementTimer)
+    }
+    try {
+      await registration.dispose()
+    } finally {
+      if (runId !== undefined) this.#forgetProviderHook(sessionId, runId, registration)
+    }
+  }
+
+  async #disposeProviderHooks(sessionId: string): Promise<void> {
+    const byRun = this.#providerHookRegistrations.get(sessionId)
+    if (!byRun) return
+    this.#providerHookRegistrations.delete(sessionId)
+    const registrations = [...byRun.values()]
+    for (const tracked of registrations) clearTimeout(tracked.retirementTimer)
+    const settled = await Promise.allSettled(
+      registrations.map(({ registration }) => registration.dispose())
+    )
+    const errors = settled.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [])
+    if (errors.length > 0) throw new AggregateError(errors, 'Provider hook cleanup failed')
+  }
+
+  #forgetProviderHook(
+    sessionId: string,
+    runId: string,
+    registration: ProviderHookRegistration
+  ): void {
+    const byRun = this.#providerHookRegistrations.get(sessionId)
+    const tracked = byRun?.get(runId)
+    if (!byRun || !tracked || tracked.registration !== registration) return
+    clearTimeout(tracked.retirementTimer)
+    byRun.delete(runId)
+    if (byRun.size === 0) this.#providerHookRegistrations.delete(sessionId)
+  }
+
+  #clearStructurallyRemovedSession(sessionId: string, session?: PtySession): void {
+    this.#clearProviderResumeTimer(sessionId)
+    const cwdTimer = this.#cwdTimers.get(sessionId)
+    if (cwdTimer) clearTimeout(cwdTimer)
+    this.#cwdTimers.delete(sessionId)
+    const summaryTimer = this.#summaryTimers.get(sessionId)
+    if (summaryTimer) clearTimeout(summaryTimer)
+    this.#summaryTimers.delete(sessionId)
+    this.#summaryBuffers.delete(sessionId)
+    this.#settleProviderRecovery(
+      sessionId,
+      new Error('Session was removed from the product structure')
+    )
+    this.#forgetProviderLaunch(sessionId, session?.runId)
+    this.#endedSessionIds.delete(sessionId)
+    this.#completedReplayThrough.delete(sessionId)
+    this.#replayRequestGenerations.delete(sessionId)
+    this.#replays.delete(sessionId)
+    this.#spawnDescriptors.delete(sessionId)
+    this.#environmentResumeDescriptors.delete(sessionId)
+    this.#permissionOverrides.delete(sessionId)
+    this.#shellInputBuffers.delete(sessionId)
+    this.#terminalInputTails.delete(sessionId)
+    this.#providerInputBuffers.delete(sessionId)
+    this.#lastProviderInputs.delete(sessionId)
+    this.#workStatusTrackers.delete(sessionId)
+    this.#permissionModeTrackers.delete(sessionId)
+    this.#skipResumeSessionIds.delete(sessionId)
+    this.#closeHudFileWatchers(sessionId)
+    this.#hud.delete(sessionId)
+    this.publishSessionHud(sessionId)
+    this.#attachedSessionIds.delete(sessionId)
+    if (session) session.detach(this.#sendToPort)
+  }
+
   async #pauseForEnvironmentTransition(sessionId: string): Promise<void> {
     this.#clearProviderResumeTimer(sessionId)
     const cwdTimer = this.#cwdTimers.get(sessionId)
@@ -2804,9 +3110,49 @@ export class RuntimeServer {
     const session = this.#sessions.get(sessionId)
     if (method === 'session.set-model') {
       const strategy = typeof input.modelStrategy === 'string' ? input.modelStrategy : ''
-      this.#hud.updateModel(sessionId, strategy)
-      session?.write(`/model ${strategy}\r`)
-      this.publishSessionHud(sessionId)
+      await this.#sessions.runExclusive(sessionId, async () => {
+        const active = this.#sessions.get(sessionId)
+        if (!active || active !== session || active.profile === 'shell') {
+          throw new RpcFault('CONFLICT', 'active AI Session is required for model change')
+        }
+        const binding = this.#sessionRepository.getProviderSettingsBinding(
+          sessionId,
+          active.profile
+        )
+        const launchSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
+        const selection = binding !== undefined && launchSettings.providerConfigId === undefined
+          ? await this.#providerConfigs.launchSelection(
+              active.profile,
+              launchSettings.providerConfigId
+            )
+          : undefined
+        if (this.#sessions.get(sessionId) !== active) {
+          throw new RpcFault('CONFLICT', 'AI Session changed before model update')
+        }
+        active.write(`/model ${strategy}\r`)
+        if (binding) {
+          try {
+            this.#sessionRepository.updateProviderLaunchSettings({
+              commandId: `session-model-${sessionId}-${randomUUID()}`,
+              commandType: 'provider-binding.launch-settings',
+              requestHash: `${sessionId}:${strategy}`
+            }, {
+              bindingId: binding.id,
+              providerConfigId: launchSettings.providerConfigId ?? selection!.providerConfigId,
+              model: strategy,
+              permissionMode: permissionModeFromMetadata(binding.metadata) ?? 'default',
+              now: Date.now()
+            })
+          } catch (error) {
+            if (launchSettings.model) {
+              try { active.write(`/model ${launchSettings.model}\r`) } catch { /* best-effort rollback */ }
+            }
+            throw error
+          }
+        }
+        this.#hud.updateModel(sessionId, strategy)
+        this.publishSessionHud(sessionId)
+      })
       return
     }
     if (method !== 'session.set-permission-mode') return
@@ -2837,7 +3183,7 @@ export class RuntimeServer {
     ) {
       throw new RpcFault(
         'CONFLICT',
-        'Session recovery must finish before changing permissions',
+        'Session recovery must finish before changing provider settings',
         true
       )
     }
@@ -2884,46 +3230,178 @@ export class RuntimeServer {
     replacement.display('\u001b[2J\u001b[3J\u001b[H')
   }
 
-  static async #restartProviderSessions(cli: ProviderCli): Promise<void> {
-    const restarted = new Set<string>()
-    for (const server of RuntimeServer.#instances) {
-      for (const [sessionId, descriptor] of server.#spawnDescriptors) {
-        if (descriptor.profile !== cli || restarted.has(sessionId)) continue
-        restarted.add(sessionId)
-        await server.#respawnForProviderConfig(sessionId, descriptor)
+  static async #restartProviderSessions(
+    sessions: RuntimeSessionRegistry,
+    cli: ProviderCli,
+    selection: ProviderLaunchSelection
+  ): Promise<ProviderSessionActivationTransition[]> {
+    const peers = [...RuntimeServer.#instances]
+      .filter((server) => server.#sessions === sessions)
+    const liveSessionIds = [...sessions.values()]
+      .filter((session) => session.profile === cli)
+      .map(({ sessionId }) => sessionId)
+    const transitions: ProviderSessionActivationTransition[] = []
+    for (const sessionId of liveSessionIds) {
+      const owners = peers.flatMap((server) => {
+        const descriptor = server.#spawnDescriptors.get(sessionId)
+        return descriptor?.profile === cli ? [{ server, descriptor }] : []
+      }).sort((left, right) => {
+        const revision = (right.descriptor.spawnRevision ?? 0) -
+          (left.descriptor.spawnRevision ?? 0)
+        if (revision !== 0) return revision
+        return Number(right.server.#attachedSessionIds.has(sessionId)) -
+          Number(left.server.#attachedSessionIds.has(sessionId))
+      })
+      const owner = owners[0]
+      if (!owner) {
+        transitions.push({
+          sessionId, status: 'deferred', reason: 'restart-unavailable'
+        })
+        continue
       }
+      transitions.push(await owner.server.#activateProviderForSession(
+        sessionId,
+        owner.descriptor,
+        selection,
+        peers
+      ))
     }
+    return transitions
   }
 
-  async #respawnForProviderConfig(
+  async #activateProviderForSession(
     sessionId: string,
-    descriptor: TerminalSpawnMessage
-  ): Promise<void> {
-    await this.#sessions.runExclusive(sessionId, async () => {
+    descriptor: TerminalSpawnMessage,
+    selection: ProviderLaunchSelection,
+    peers: RuntimeServer[]
+  ): Promise<ProviderSessionActivationTransition> {
+    return this.#sessions.runExclusive(sessionId, async () => {
       const session = this.#sessions.get(sessionId)
-      if (!session || session.profile !== descriptor.profile) return
-      const recovery = this.#recoveryCoordinator?.snapshot()
-        .find((job) => job.sessionId === sessionId)
-      if (
-        session.durabilityState !== 'healthy' ||
-        (recovery !== undefined && recovery.state !== 'ready') ||
-        this.#sessions.providerIdentityPending(sessionId)
-      ) return
+      const binding = session?.profile === descriptor.profile && descriptor.profile !== 'shell'
+        ? this.#sessionRepository.getResumeBinding(
+            sessionId,
+            descriptor.profile
+          )
+        : undefined
+      const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
+      const deferredReason = this.#providerActivationDeferredReason(
+        sessionId,
+        descriptor.profile,
+        session,
+        peers,
+        binding !== undefined &&
+          previousSettings.providerConfigId !== undefined
+      )
+      if (deferredReason) {
+        return { sessionId, status: 'deferred', reason: deferredReason }
+      }
+      const active = session!
+      const currentBinding = binding!
+      const previousPermission = permissionModeFromMetadata(binding?.metadata) ?? 'default'
+      let bindingUpdated = false
       const wasAttached = this.#attachedSessionIds.has(sessionId)
-      this.#clearProviderResumeTimer(sessionId)
-      this.#sessions.delete(sessionId, session)
-      this.#control?.backend.unregister(sessionId, session)
-      this.#control?.tokens.revokeRun(session.runId ?? sessionId)
-      this.#providerInputBuffers.delete(sessionId)
-      this.#workStatusTrackers.delete(sessionId)
-      session.dispose({ notifyExit: false })
-      await session.whenClosed()
-      await this.#spawn(descriptor, undefined, undefined, wasAttached)
-      const replacement = this.#sessions.get(sessionId)
-      if (replacement && replacement.profile === descriptor.profile) {
+      try {
+        // Persist while the old process and hook are still fully authoritative.
+        // A storage failure therefore leaves every live side effect untouched.
+        this.#sessionRepository.updateProviderLaunchSettings({
+          commandId: `provider-config-activate-${sessionId}-${randomUUID()}`,
+          commandType: 'provider-binding.launch-settings',
+          requestHash: `${sessionId}:${selection.providerConfigId}:${selection.model}`
+        }, {
+          bindingId: currentBinding.id,
+          providerConfigId: selection.providerConfigId,
+          model: selection.model,
+          permissionMode: previousPermission,
+          now: Date.now()
+        })
+        bindingUpdated = true
+
+        // The binding is durable now. Retire every old-run endpoint before the
+        // process can emit a final hook, and suppress all of its product effects.
+        if (active.runId) {
+          for (const peer of peers) {
+            const registration = peer.#providerHookRegistrations
+              .get(sessionId)?.get(active.runId)?.registration
+            peer.#retireProviderHook(sessionId, active.runId, registration, true)
+          }
+        }
+
+        for (const peer of peers) {
+          peer.#clearProviderResumeTimer(sessionId)
+          peer.#control?.backend.unregister(sessionId, active)
+          peer.#control?.tokens.revokeRun(active.runId ?? sessionId)
+          peer.#providerInputBuffers.delete(sessionId)
+          peer.#workStatusTrackers.delete(sessionId)
+          peer.#permissionModeTrackers.delete(sessionId)
+        }
+        this.#sessions.delete(sessionId, active)
+        active.dispose({ notifyExit: false })
+        await active.whenClosed()
+
+        await this.#spawn(descriptor, undefined, undefined, wasAttached)
+        const replacement = this.#sessions.get(sessionId)
+        if (!replacement || replacement === active || replacement.profile !== descriptor.profile) {
+          throw new Error('provider Session restart did not produce a matching process')
+        }
+        await Promise.race([
+          replacement.whenClosed(),
+          new Promise<void>((resolve) => setTimeout(resolve, 150))
+        ])
+        if (this.#sessions.get(sessionId) !== replacement) {
+          throw new Error('provider Session replacement exited during startup')
+        }
         replacement.display('\u001b[2J\u001b[3J\u001b[H')
+        this.#hud.updateProviderModel(sessionId, selection.model)
+        RuntimeServer.#publishAttachedSessionHud(sessionId)
+        return { sessionId, status: 'updated' }
+      } catch (error) {
+        if (!bindingUpdated) {
+          console.error(`[provider-config.activate] ${errorMessage(error)}`)
+          return { sessionId, status: 'deferred', reason: 'binding-update-failed' }
+        }
+        try {
+          this.#sessionRepository.updateProviderLaunchSettings({
+            commandId: `provider-config-rollback-${sessionId}-${randomUUID()}`,
+            commandType: 'provider-binding.launch-settings',
+            requestHash: `${sessionId}:${previousSettings.providerConfigId}:${previousSettings.model}`
+          }, {
+            bindingId: currentBinding.id,
+            providerConfigId: previousSettings.providerConfigId!,
+            model: previousSettings.model ?? '',
+            permissionMode: previousPermission,
+            now: Date.now()
+          })
+          if (!this.#sessions.has(sessionId)) {
+            await this.#spawn(descriptor, undefined, undefined, wasAttached)
+          }
+        } catch (rollbackError) {
+          console.error(`[provider-config.rollback] ${errorMessage(rollbackError)}`)
+        }
+        console.error(`[provider-config.activate] ${errorMessage(error)}`)
+        return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
       }
     })
+  }
+
+  #providerActivationDeferredReason(
+    sessionId: string,
+    profile: TerminalSpawnMessage['profile'],
+    session: PtySession | undefined,
+    peers: RuntimeServer[],
+    hasValidBinding: boolean
+  ): ProviderSessionActivationDeferredReason | undefined {
+    if (!session || session.profile !== profile) return 'session-not-running'
+    if (session.durabilityState !== 'healthy') return 'durability-fault'
+    const recovery = peers.flatMap((peer) => peer.#recoveryCoordinator?.snapshot() ?? [])
+      .find((job) => job.sessionId === sessionId && job.state !== 'ready')
+    if (recovery) return 'recovery-not-ready'
+    if (
+      !session.runId ||
+      this.#sessions.providerIdentityPending(sessionId) ||
+      !this.#sessions.providerIdentityConfirmed(session.runId) ||
+      !hasValidBinding
+    ) return 'provider-identity-pending'
+    return undefined
   }
 
   async #maybePromoteShellAgent(session: PtySession, data: string): Promise<boolean> {
@@ -3043,11 +3521,33 @@ function prependedPathEnvironment(
   return { [pathKey]: inherited ? `${entry}${delimiter}${inherited}` : entry }
 }
 
-function permissionModeFromMetadata(metadata: unknown): string | undefined {
+function permissionModeFromMetadata(metadata: unknown): HudPermissionMode | undefined {
   if (typeof metadata !== 'object' || metadata === null || !('permissionMode' in metadata)) {
     return undefined
   }
-  return typeof metadata.permissionMode === 'string' ? metadata.permissionMode : undefined
+  const value = metadata.permissionMode
+  return value === 'default' || value === 'auto' || value === 'acceptEdits' ||
+    value === 'plan' || value === 'bypassPermissions'
+    ? value
+    : undefined
+}
+
+function providerLaunchSettingsFromMetadata(metadata: unknown): {
+  providerConfigId?: string
+  model?: string
+} {
+  if (typeof metadata !== 'object' || metadata === null) return {}
+  const providerConfigId = 'providerConfigId' in metadata &&
+    typeof metadata.providerConfigId === 'string' && metadata.providerConfigId.trim()
+    ? metadata.providerConfigId
+    : undefined
+  const model = 'model' in metadata && typeof metadata.model === 'string'
+    ? metadata.model
+    : undefined
+  return {
+    ...(providerConfigId === undefined ? {} : { providerConfigId }),
+    ...(model === undefined ? {} : { model })
+  }
 }
 
 function isMissingFile(error: unknown): boolean {

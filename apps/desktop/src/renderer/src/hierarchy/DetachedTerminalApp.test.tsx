@@ -2,23 +2,33 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useEffect, useRef } from 'react'
 
 import { DetachedTerminalApp } from './DetachedTerminalApp'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, themeKey, fontSize, readOnly, inputDisabled, onStorageFault }: {
+  TerminalSurface: (props: {
     sessionId: string; themeKey?: string; fontSize?: number; readOnly?: boolean; inputDisabled?: boolean
+    focusRequest?: number
     onStorageFault?(fault: {
       type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
       code: 'STORAGE_WRITE_FAILED'; message: string; retainedBytes: number
     }): void
-  }) => <div data-testid={`terminal-${sessionId}`} data-theme={themeKey} data-font-size={fontSize}
-    data-read-only={readOnly} data-input-disabled={inputDisabled}>
-    <button type="button" aria-label="触发独立窗口存储异常" onClick={() => onStorageFault?.({
-      type: 'terminal.storage-fault', protocolVersion: 1, sessionId, sequence: 1,
+  }) => {
+    const inputRef = useRef<HTMLSpanElement>(null)
+    useEffect(() => {
+      if (props.focusRequest) inputRef.current?.focus()
+    }, [props.focusRequest])
+    return <div className="terminal-surface" data-session-id={props.sessionId}
+      data-testid={`terminal-${props.sessionId}`} data-theme={props.themeKey} data-font-size={props.fontSize}
+      data-read-only={props.readOnly} data-input-disabled={props.inputDisabled}>
+      <span tabIndex={-1} data-terminal-input ref={inputRef} />
+      <button type="button" aria-label="触发独立窗口存储异常" onClick={() => props.onStorageFault?.({
+      type: 'terminal.storage-fault', protocolVersion: 1, sessionId: props.sessionId, sequence: 1,
       code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
-    })} />
-  </div>
+      })} />
+    </div>
+  }
 }))
 const runtime = vi.hoisted(() => ({
   request: vi.fn(async (method: string) => method === 'projection.snapshot' ? { hierarchy: {} } : {}),
@@ -37,6 +47,37 @@ afterEach(() => {
 })
 
 describe('PRD 02 detached HUD', () => {
+  it('acknowledges an exact focus attempt only after its terminal owns native and DOM focus', async () => {
+    let listener: ((request: {
+      requestId: string; attemptId: string; routeWindowId: string
+      targetWindowId: string; sessionId: string; deadlineAt: number
+    }) => void) | undefined
+    const acknowledgeDetachedTerminalFocus = vi.fn(async () => true)
+    window.matouDesktop = {
+      onDetachedTerminalFocusRequested: vi.fn((next) => {
+        listener = next
+        return () => { listener = undefined }
+      }),
+      acknowledgeDetachedTerminalFocus,
+      isCurrentWindowFocused: vi.fn(async () => true)
+    } as unknown as typeof window.matouDesktop
+    window.history.replaceState({}, '',
+      '/?kind=detached-terminal&windowId=detached-1&mainWindowId=main-1&sceneId=scene-1&sessionId=agent-1&profile=claude-code')
+    render(<DetachedTerminalApp />)
+    const request = {
+      requestId: 'nav-1', attemptId: 'attempt-7', routeWindowId: 'main-1',
+      targetWindowId: 'detached-1', sessionId: 'agent-1', deadlineAt: Date.now() + 1_000
+    }
+
+    await waitFor(() => expect(listener).toBeTypeOf('function'))
+    listener?.(request)
+
+    await waitFor(() => expect(acknowledgeDetachedTerminalFocus).toHaveBeenCalledWith({
+      ...request, focused: true
+    }))
+    expect(document.activeElement?.hasAttribute('data-terminal-input')).toBe(true)
+  })
+
   it('uses and updates the persisted terminal font size', () => {
     window.localStorage.setItem('matou:terminal-font-size', '14')
     Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })

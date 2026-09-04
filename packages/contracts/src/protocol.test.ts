@@ -4,7 +4,8 @@ import {
   MAX_CHECKPOINT_SNAPSHOT_BYTES,
   PROTOCOL_VERSION,
   RPC_METHODS,
-  parseRendererMessage
+  parseRendererMessage,
+  type RuntimeMessage
 } from './protocol'
 
 describe('parseRendererMessage', () => {
@@ -19,6 +20,100 @@ describe('parseRendererMessage', () => {
       type: 'protocol.hello',
       protocolVersion: 1,
       clientId: 'renderer-1'
+    })
+  })
+
+  it('accepts an optional main-window identity during the protocol transition', () => {
+    expect(parseRendererMessage({
+      type: 'protocol.hello',
+      protocolVersion: PROTOCOL_VERSION,
+      clientId: 'renderer-main-2',
+      windowId: 'main-window-2',
+      windowKind: 'main'
+    })).toEqual({
+      type: 'protocol.hello',
+      protocolVersion: PROTOCOL_VERSION,
+      clientId: 'renderer-main-2',
+      windowId: 'main-window-2',
+      windowKind: 'main'
+    })
+
+    expect(parseRendererMessage({
+      type: 'protocol.hello',
+      protocolVersion: PROTOCOL_VERSION,
+      clientId: 'renderer-detached-1',
+      windowId: 'detached-window-1',
+      windowKind: 'detached-terminal'
+    })).toMatchObject({ windowKind: 'detached-terminal' })
+  })
+
+  it('accepts bounded navigation acknowledgements with optional result details', () => {
+    expect(parseRendererMessage({
+      type: 'host.navigation-result',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'nav-1',
+      attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'native-detached-2',
+      ok: true,
+      finalPath: {
+        routeWindowId: 'main-window-2',
+        targetWindowId: 'native-detached-2',
+        workspaceId: 'workspace-2',
+        taskId: 'task-2',
+        sceneId: 'scene-2',
+        sessionId: 'session-2'
+      }
+    })).toMatchObject({
+      type: 'host.navigation-result', requestId: 'nav-1', attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2', targetWindowId: 'native-detached-2', ok: true
+    })
+
+    expect(parseRendererMessage({
+      type: 'host.navigation-result',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'nav-2',
+      attemptId: 'attempt-2',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'main-window-2',
+      ok: false,
+      error: 'target card is no longer mounted'
+    })).toMatchObject({ type: 'host.navigation-result', requestId: 'nav-2', ok: false })
+
+    expect(parseRendererMessage({
+      type: 'host.navigation-result',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'nav-missing-path',
+      attemptId: 'attempt-3',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'main-window-2',
+      ok: true
+    })).toMatchObject({ requestId: 'nav-missing-path', ok: true })
+  })
+
+  it('exposes a complete absolute-deadline navigation request to the Renderer', () => {
+    const message = {
+      type: 'host.navigation-request',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: 'nav-1',
+      attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'native-detached-2',
+      workspaceId: 'workspace-2',
+      taskId: 'task-2',
+      sceneId: 'scene-2',
+      sessionId: 'session-2',
+      focusTerminal: true,
+      deadlineAt: 5_000
+    } satisfies RuntimeMessage
+
+    expect(message).toMatchObject({
+      type: 'host.navigation-request',
+      requestId: 'nav-1',
+      attemptId: 'attempt-1',
+      routeWindowId: 'main-window-2',
+      targetWindowId: 'native-detached-2',
+      deadlineAt: 5_000
     })
   })
 

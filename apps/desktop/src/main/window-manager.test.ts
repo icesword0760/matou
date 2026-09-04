@@ -4,8 +4,9 @@ import { WindowManager, type ManagedWindow } from './window-manager'
 
 describe('WindowManager', () => {
   it('hides only the protected main window and restores it independently', () => {
-    const manager = new WindowManager()
-    const first = new FakeWindow()
+    const activationOrder: string[] = []
+    const manager = new WindowManager(() => { activationOrder.push('application') })
+    const first = new FakeWindow(activationOrder)
     const second = new FakeWindow()
     manager.register('window-1', first)
     manager.register('window-2', second)
@@ -15,6 +16,7 @@ describe('WindowManager', () => {
     expect(second.isVisible()).toBe(true)
     manager.showWindow('window-1')
     expect(first.isVisible()).toBe(true)
+    expect(activationOrder).toEqual(['application', 'window', 'focus'])
   })
 
   it('tracks a detached window independently from its owning main window', () => {
@@ -33,9 +35,11 @@ describe('WindowManager', () => {
 
 class FakeWindow implements ManagedWindow {
   #visible = true
+  readonly #activationOrder: string[] | undefined
+  constructor(activationOrder?: string[]) { this.#activationOrder = activationOrder }
   hide(): void { this.#visible = false }
-  show(): void { this.#visible = true }
-  focus(): void {}
+  show(): void { this.#visible = true; this.#activationOrder?.push('window') }
+  focus(): void { this.#activationOrder?.push('focus') }
   isVisible(): boolean { return this.#visible }
   isDestroyed(): boolean { return false }
 }

@@ -295,8 +295,12 @@ describe('RuntimeRpcRouter', () => {
     )
     const createdTask = await router.handle('hierarchy.create-task', payload('create-task', {
       windowId: 'window-2', workspaceId: custom.workspace.id, now: 5
-    })) as { task: { id: string; title: string } }
+    })) as {
+      task: { id: string; title: string }
+      created: { task: { id: string; title: string } }
+    }
     expect(createdTask.task.title).toBe('新事项')
+    expect(createdTask.created.task).toEqual(createdTask.task)
     await router.handle('hierarchy.rename-task', payload('rename-task', {
       taskId: createdTask.task.id, title: '实施事项', now: 5
     }))
@@ -317,6 +321,38 @@ describe('RuntimeRpcRouter', () => {
     expect(database.get<{ status: string }>(
       'SELECT status FROM tasks WHERE id = ?', createdTask.task.id
     )?.status).toBe('blocked')
+  })
+
+  it('routes final create titles and explicit focus preservation without changing old defaults', async () => {
+    const workspaceRoot = join(testRoot, 'named-create-workspace')
+    await mkdir(workspaceRoot)
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('named-create-bootstrap', {
+      windowId: 'window-named-create', defaultRootDirectory: workspaceRoot,
+      defaultName: 'workspace', now: 1
+    })) as { workspace: { id: string }; task: { id: string }; scene: { id: string } }
+    const task = await router.handle('hierarchy.create-task', payload('named-create-task', {
+      windowId: 'window-named-create', workspaceId: initial.workspace.id,
+      title: '路由事项', navigation: 'preserve', now: 2
+    })) as {
+      task: { id: string }
+      created: { task: { id: string; title: string } }
+      navigation: { taskByWorkspace: Record<string, string> }
+    }
+    expect(task.created.task.title).toBe('路由事项')
+    expect(task.task.id).toBe(initial.task.id)
+    expect(task.navigation.taskByWorkspace[initial.workspace.id]).toBe(initial.task.id)
+
+    const canvas = await router.handle('hierarchy.create-canvas', payload('named-create-canvas', {
+      windowId: 'window-named-create', taskId: initial.task.id,
+      title: '路由画布', navigation: 'preserve', now: 3
+    })) as {
+      scene: { id: string }
+      created: { scene: { name: string } }
+      navigation: { sceneByTask: Record<string, string> }
+    }
+    expect(canvas.created.scene.name).toBe('路由画布')
+    expect(canvas.scene.id).toBe(initial.scene.id)
+    expect(canvas.navigation.sceneByTask[initial.task.id]).toBe(initial.scene.id)
   })
 
   it('keeps the final canvas as history when a detached native window closes', async () => {

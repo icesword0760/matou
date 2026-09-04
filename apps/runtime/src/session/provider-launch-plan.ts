@@ -7,6 +7,7 @@ export interface PtyCommandInput {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  codexHooksConfig?: string
   controlAssetRoot?: string
   codexDeveloperInstructions?: string
   model?: string
@@ -42,6 +43,13 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
   }
   if (input.profile === 'codex') {
     const args: string[] = []
+    if (input.codexHooksConfig?.trim()) {
+      args.push(
+        '-c',
+        `hooks=${input.codexHooksConfig.trim()}`,
+        '--dangerously-bypass-hook-trust'
+      )
+    }
     if (input.codexDeveloperInstructions) {
       args.push(
         '-c',
@@ -52,7 +60,7 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
     if (input.permissionMode === 'bypassPermissions') {
       args.push('--dangerously-bypass-approvals-and-sandbox')
     }
-    if (identity) args.push('resume', identity)
+    if (identity) args.push(input.forkSession ? 'fork' : 'resume', identity)
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
   return {

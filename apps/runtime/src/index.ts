@@ -18,6 +18,17 @@ import {
   controlEndpointForPlatform
 } from './control/host-control-server'
 import { RuntimeControlBackend } from './control/runtime-control-backend'
+import { ForkBatchCoordinator } from './control/fork-batch-coordinator'
+import { waitUntilForkSettled } from './control/fork-settlement-waiter'
+import { HOST_CONTROL_FORK_PROVIDER_READY_TIMEOUT_MS } from './control/host-control-deadlines'
+import { ProviderReadyRegistry } from './control/provider-ready-registry'
+import {
+  createE2eHostActionConfirmationOptions,
+  HostActionConfirmationService
+} from './control/host-action-confirmation-service'
+import { HostActionTargetResolver } from './control/host-action-target-resolver'
+import { RuntimeHostActionFacade } from './control/runtime-host-action-facade'
+import { HostNavigationBroker } from './control/host-navigation-broker'
 import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import type { RuntimeDatabase } from './storage/database'
 import { RuntimeRecoveryService } from './recovery/runtime-recovery-service'
@@ -25,7 +36,8 @@ import { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordina
 import type { RecoveryJob } from './recovery/runtime-session-recovery-scheduler'
 import { RuntimeRecoveryE2eObserver } from './recovery/runtime-recovery-e2e-observer'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
-import { ProviderHookServer, providerTranscriptPath } from './session/provider-hook-server'
+import { ProviderHookServer } from './session/provider-hook-server'
+import { createProviderHudPayloadHandler } from './session/provider-hud-payload-handler'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { SessionRepository } from './domain/session-repository'
 import { FOUNDATION_MIGRATIONS } from './storage/migrations'
@@ -38,6 +50,7 @@ import {
   type RuntimeDatabaseBootstrapResult
 } from './storage/runtime-database-bootstrap'
 import { DetachedSessionService } from './hierarchy/detached-session-service'
+import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeAccessPolicy } from './storage/runtime-access-policy'
 import { NotificationProjection } from './product/experience-foundation'
@@ -80,6 +93,7 @@ if (!parentPort) {
 const servers = new Set<RuntimeServer>()
 const recoveryServerWaiters = new Set<(server: RuntimeServer) => void>()
 const sessions = new RuntimeSessionRegistry()
+const hostNavigation = new HostNavigationBroker()
 const recoveryE2eObserver = process.env.MATOU_E2E === '1'
   ? new RuntimeRecoveryE2eObserver()
   : undefined
@@ -110,7 +124,10 @@ interface WritableRuntimeState extends RuntimeStateBase {
   controlBackend: RuntimeControlBackend
   hostControl: HostControlServer
   providerHooks: ProviderHookServer
+  providerReady: ProviderReadyRegistry
   forkCoordinator: ForkOperationCoordinator
+  forkBatchCoordinator: ForkBatchCoordinator
+  hostActions: RuntimeHostActionFacade
   recoveryCoordinator: RuntimeRecoveryCoordinator
 }
 
@@ -215,18 +232,23 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
   const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
-  const stopRuns = async (runIds: string[]) => {
-    for (const runId of runIds) {
-      const sessionId = database.get<{ session_id: string }>(
-        'SELECT session_id FROM session_runs WHERE id = ?', runId
-      )?.session_id
-      if (!sessionId) continue
+  const stopSessions = async (sessionIds: string[]) => {
+    for (const sessionId of new Set(sessionIds)) {
       const live = sessions.get(sessionId)
       if (!live) continue
       live.dispose({ notifyExit: false })
       await live.whenClosed()
       sessions.delete(sessionId, live)
     }
+  }
+  const stopRuns = async (runIds: string[]) => {
+    const sessionIds = runIds.flatMap((runId) => {
+      const sessionId = database.get<{ session_id: string }>(
+        'SELECT session_id FROM session_runs WHERE id = ?', runId
+      )?.session_id
+      return sessionId === undefined ? [] : [sessionId]
+    })
+    await stopSessions(sessionIds)
   }
   const worktreeService = new WorktreeService(database, transactions, { stopRuns })
   const worktreeReconciliation = await new WorktreeReconciler(
@@ -285,9 +307,17 @@ async function initializeRuntime(): Promise<RuntimeState> {
   const sessionRepository = new SessionRepository(database, transactions)
   const providerModes = new ProviderModeService(database, transactions)
   const workStatuses = new SessionWorkStatusService(database, transactions)
+  const hierarchy = new HierarchyApplicationService(database, transactions)
   const sessionCanvas = new SessionCanvasService(database, transactions)
-  const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
+  const hostActionResolver = new HostActionTargetResolver(database)
+  const hostActionConfirmations = new HostActionConfirmationService(
+    createE2eHostActionConfirmationOptions(process.env)
+  )
+  const controlTokens = new CapabilityTokenService(database.runtimeGeneration, {
+    onRunRevoked: (runId) => hostActionConfirmations.revokeRun(runId)
+  })
   const controlBackend = new RuntimeControlBackend(database, runtimeDataRoot, telemetry, notifications)
+  const providerReady = new ProviderReadyRegistry()
   const hostControl = new HostControlServer({
     socketPath: controlEndpoint,
     tokenService: controlTokens,
@@ -295,7 +325,16 @@ async function initializeRuntime(): Promise<RuntimeState> {
   })
   lifecycleCoordinator.registerHostControl(hostControl)
   const agentNotifications = new AgentNotificationRepository(database, transactions)
+  const onProviderHudPayload = createProviderHudPayloadHandler({
+    hud: sessionHuds,
+    currentRunId: (sessionId) => sessions.get(sessionId)?.runId,
+    publish: (sessionId) => {
+      for (const server of servers) void server.refreshSessionHud(sessionId)
+    },
+    reportError: (error) => console.error(`[provider-hud-history] ${errorMessage(error)}`)
+  })
   const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository, {
+    currentRunId: (sessionId) => sessions.get(sessionId)?.runId,
     onNotification: (notification) => {
       const now = Date.now()
       const eventId = `agent-notification-${randomUUID()}`
@@ -321,14 +360,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
       }
       for (const server of servers) server.flushSemanticEvents()
     },
-    onHudPayload: ({ sessionId, payload }) => {
-      sessionHuds.ingestProvider(sessionId, payload)
-      for (const server of servers) void server.refreshSessionHud(sessionId)
-      const transcriptPath = providerTranscriptPath(payload)
-      if (transcriptPath) void sessionHuds.refreshTranscript(sessionId, transcriptPath).then((changed) => {
-        if (changed) for (const server of servers) void server.refreshSessionHud(sessionId)
-      }).catch((error) => console.error(`[provider-hud-history] ${errorMessage(error)}`))
-    },
+    onHudPayload: onProviderHudPayload,
     onTitleObserved: ({ sessionId, providerSessionId, title, runId }) => {
       const now = Date.now()
       sessionHuds.updateSessionName(sessionId, title)
@@ -369,18 +401,21 @@ async function initializeRuntime(): Promise<RuntimeState> {
       if (changed) for (const server of servers) server.flushSemanticEvents()
     },
     onIdentityRecorded: ({
-      sessionId, runId, providerSessionId, eventName, forkAuthority
+      sessionId, runId, provider, providerSessionId, eventName, forkAuthority
     }) => {
+      providerReady.record(sessionId, runId, sessions.get(sessionId)?.runId ?? '')
       sessionHuds.markResumable(sessionId)
       const now = Date.now()
-      try {
-        providerModes.observeHook({
-          commandId: `provider-mode-${runId}-${eventName}-${randomUUID()}`,
-          commandType: 'provider-hook.mode',
-          requestHash: `${sessionId}:${providerSessionId}:${eventName}:${now}`
-        }, { sessionId, providerSessionId, eventName, now })
-      } catch (error) {
-        console.error(`[provider-mode] ${errorMessage(error)}`)
+      if (provider === 'claude-code') {
+        try {
+          providerModes.observeHook({
+            commandId: `provider-mode-${runId}-${eventName}-${randomUUID()}`,
+            commandType: 'provider-hook.mode',
+            requestHash: `${sessionId}:${providerSessionId}:${eventName}:${now}`
+          }, { sessionId, providerSessionId, eventName, now })
+        } catch (error) {
+          console.error(`[provider-mode] ${errorMessage(error)}`)
+        }
       }
       for (const server of servers) {
         server.providerIdentityRecorded(sessionId, runId)
@@ -419,8 +454,6 @@ async function initializeRuntime(): Promise<RuntimeState> {
   recoveryCoordinator.start()
   telemetry.purgeStaleGenerations()
   lifecycleCoordinator.assertStartupActive()
-  await hostControl.start()
-  lifecycleCoordinator.assertStartupActive()
   await providerHooks.start()
   lifecycleCoordinator.assertStartupActive()
   const backgroundPort = new BackgroundRuntimePort()
@@ -445,12 +478,15 @@ async function initializeRuntime(): Promise<RuntimeState> {
       }),
       ...(e2eJournalOptionsForSession ? {
         journalOptionsForSession: e2eJournalOptionsForSession
-      } : {})
+      } : {}),
+      recoveryCoordinator,
+      navigationBroker: hostNavigation
     }
   )
   servers.add(backgroundServer)
   const forkWorkflow = new ForkWorkflowService(runtimeDataRoot, database, transactions, {
     stopRuns,
+    providerConfigs,
     ...(e2eForkSetupPolicyForWorkspace ? {
       setupPolicyForWorkspace: e2eForkSetupPolicyForWorkspace
     } : {}),
@@ -458,6 +494,36 @@ async function initializeRuntime(): Promise<RuntimeState> {
       for (const server of servers) server.flushSemanticEvents()
     }
   })
+  const forkBatchCoordinator = new ForkBatchCoordinator({
+    database,
+    createChild: (command, input) => forkWorkflow.createForkChild(command, input),
+    retryChild: (command, input) => forkWorkflow.retryFork(command, input),
+    startSession: async (sessionId) => {
+      const descriptor = forkExecutionDescriptor(database, sessionId)
+      if (!descriptor) throw new Error(`会话 ${sessionId} 尚未准备完成`)
+      await backgroundServer.startOrResumeSession(descriptor)
+    },
+    waitUntilReady: (sessionId, signal) => providerReady.wait(
+      sessionId, HOST_CONTROL_FORK_PROVIDER_READY_TIMEOUT_MS, signal
+    ),
+    waitUntilForkSettled: (sessionId) => waitUntilForkSettled(database, sessionId),
+    sendPrompt: (sessionId, prompt) => controlBackend.sendText(sessionId, prompt, true)
+  })
+  const hostActions = new RuntimeHostActionFacade({
+    database,
+    resolver: hostActionResolver,
+    confirmations: hostActionConfirmations,
+    hierarchy,
+    sessionCanvas,
+    forkWorkflow,
+    forkBatches: forkBatchCoordinator,
+    navigation: hostNavigation,
+    disposeSessions: (sessionIds) => backgroundServer.disposeSessions(sessionIds)
+  })
+  // Do not accept Host Control requests until the complete facade owns every action.
+  controlBackend.setHostActionExecutor((method, caller, params) =>
+    hostActions.execute(method, caller, params)
+  )
   forkCoordinator = new ForkOperationCoordinator(
     new SessionForkIntentRepository(database),
     {
@@ -504,6 +570,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
       ...(e2eForkCrashObserver ? { observer: e2eForkCrashObserver } : {})
     }
   )
+  await hostControl.start()
+  lifecycleCoordinator.assertStartupActive()
   forkCoordinator.start()
   return {
     mode: 'normal',
@@ -517,7 +585,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
     accessPolicy,
     hostControl,
     providerHooks,
+    providerReady,
     forkCoordinator,
+    forkBatchCoordinator,
+    hostActions,
     recoveryCoordinator,
     providerConfigs
   }
@@ -529,8 +600,12 @@ function shutdown(): Promise<void> {
   pendingDatabaseRecovery = undefined
   return lifecycleCoordinator.shutdown(runtimeReady, {
     closeIncoming: () => {
+      if (runtimeState?.mode === 'normal') {
+        runtimeState.providerReady.cancelAll(new Error('Runtime 正在关闭'))
+      }
       forkCoordinator?.stop()
       forkCoordinator = undefined
+      hostNavigation.close()
       for (const server of servers) server.close()
       servers.clear()
     },
@@ -650,7 +725,8 @@ parentPort.on('message', async (event) => {
         ...(e2eJournalOptionsForSession ? {
           journalOptionsForSession: e2eJournalOptionsForSession
         } : {}),
-        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {})
+        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {}),
+        navigationBroker: hostNavigation
       }
     )
     servers.add(server)
