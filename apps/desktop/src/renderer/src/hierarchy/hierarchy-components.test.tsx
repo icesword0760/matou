@@ -96,6 +96,44 @@ describe('Workspace and Task navigation', () => {
     expect(target.setWorkspacePinned).toHaveBeenCalledWith('workspace-1', false)
   })
 
+  it('renders the Workspace action menu at the viewport root so the Board cannot cover it', async () => {
+    const user = userEvent.setup()
+    render(<TaskSidebar projection={fixture()} commands={commands()} boardActive />)
+
+    await user.click(screen.getByRole('button', { name: '工作空间菜单：Frontend' }))
+
+    expect(screen.getByRole('menu').parentElement).toBe(document.body)
+  })
+
+  it('renders the Task action menu at the viewport root so the Board cannot cover it', async () => {
+    const user = userEvent.setup()
+    render(<TaskSidebar projection={fixture()} commands={commands()} boardActive />)
+
+    await user.click(screen.getByRole('button', { name: '事项菜单：事项 A' }))
+
+    expect(screen.getByRole('menu').parentElement).toBe(document.body)
+  })
+
+  it('renders the Task rename dialog at the viewport root above the Board', async () => {
+    const user = userEvent.setup()
+    render(<TaskSidebar projection={fixture()} commands={commands()} boardActive />)
+
+    await user.click(screen.getByRole('button', { name: '事项菜单：事项 A' }))
+    await user.click(screen.getByRole('menuitem', { name: '重命名' }))
+
+    expect(screen.getByRole('dialog').parentElement?.parentElement).toBe(document.body)
+  })
+
+  it('renders the Workspace removal dialog at the viewport root above the Board', async () => {
+    const user = userEvent.setup()
+    render(<TaskSidebar projection={fixture()} commands={commands()} boardActive />)
+
+    await user.click(screen.getByRole('button', { name: '工作空间菜单：Frontend' }))
+    await user.click(screen.getByRole('menuitem', { name: '移出码头' }))
+
+    expect(screen.getByRole('alertdialog', { name: '移出工作空间' }).parentElement?.parentElement).toBe(document.body)
+  })
+
   it('pins a custom Workspace and keeps directory identity actions only', async () => {
     const user = userEvent.setup()
     const data = fixture()

@@ -47,7 +47,7 @@ export function ConfirmDialog(props: {
         onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
     </footer>
   </div></div>
-  if (props.scope !== 'session') return overlay
+  if (props.scope !== 'session') return createPortal(overlay, document.body)
   const sessionCanvas = document.querySelector<HTMLElement>('.scene-stage:not([hidden]) .session-canvas') ??
     document.querySelector<HTMLElement>('.session-canvas')
   return sessionCanvas ? createPortal(overlay, sessionCanvas) : overlay

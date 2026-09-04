@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { Glass } from '@samasante/liquid-glass'
 
 import { ConfirmDialog, ConfirmationSequence } from './ConfirmDialog'
@@ -308,7 +309,7 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
         <SettingsIcon /><span>设置</span>
       </button>
     </footer>
-    {menuWorkspace && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
+    {menuWorkspace && createPortal(<div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
       {projection.pathStates.find(({ workspaceId }) => workspaceId === menuWorkspace.id)?.status === 'invalid' &&
         !menuWorkspace.isDefault && <button role="menuitem" disabled={readOnly}
           title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
@@ -330,15 +331,15 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
       {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" disabled={readOnly}
         title={readOnly ? READ_ONLY_REASON : undefined}
         onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
-    </div>}
-    {menuTask && <div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
+    </div>, document.body)}
+    {menuTask && createPortal(<div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
         <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
           onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
         <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
           onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
         <button role="menuitem" className="is-delete" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
           onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
-    </div>}
+    </div>, document.body)}
     {removeWorkspace && <ConfirmDialog title="移出工作空间"
       body={`移出 "${removeWorkspace.name}" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？`}
       confirmLabel="移出" onCancel={() => setRemoveWorkspace(null)} onConfirm={() => {

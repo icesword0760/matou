@@ -36,7 +36,7 @@ export function RenameDialog(props: {
       <button className="dialog-primary" onClick={confirm}
         disabled={Boolean(error) && Boolean(trimmed)}>确定</button></footer>
   </div></div>
-  if (props.scope !== 'session') return overlay
+  if (props.scope !== 'session') return createPortal(overlay, document.body)
   const sessionCanvas = document.querySelector<HTMLElement>('.scene-stage:not([hidden]) .session-canvas') ??
     document.querySelector<HTMLElement>('.session-canvas')
   return sessionCanvas ? createPortal(overlay, sessionCanvas) : overlay
