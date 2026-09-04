@@ -38,6 +38,7 @@ test.describe('real foreground terminal continuity outside the carousel viewport
       const carousel = fixture.page.getByRole('region', { name: '同级会话列表' })
       await expect(carousel).toHaveAttribute('data-total-sessions', String(SESSION_COUNT))
       await expect(carousel).toHaveAttribute('data-foreground-terminals', String(SESSION_COUNT))
+      expect(await fixture.page.locator('.terminal-surface').count()).toBeLessThanOrEqual(12)
 
       const target = terminalSurface(fixture, TARGET_SESSION_ID)
       await expect(target).toBeVisible()

@@ -8,7 +8,7 @@ import { launchMatou, restartMatou } from './matou-fixture'
 test.describe('load an existing Claude Code session', () => {
   test.setTimeout(60_000)
 
-  test('discovers current-workspace history and searches exact conversation content', async () => {
+  test('separates left-side session filtering from right-side conversation search', async () => {
     let fixture = await launchMatou()
     try {
       const projectsRoot = join(fixture.rootDirectory, 'claude-projects')
@@ -64,9 +64,16 @@ test.describe('load an existing Claude Code session', () => {
         .toBeVisible()
       await expect(dialog).toContainText('开放所有权限')
 
-      await dialog.getByRole('searchbox', { name: '搜索会话内容' }).fill('hover width')
-      await expect(dialog.getByRole('button', { name: '跳转到第 2 条会话内容' })).toBeVisible()
-      await dialog.getByRole('button', { name: '跳转到第 2 条会话内容' }).click()
+      const sessionFilter = dialog.getByRole('searchbox', { name: '筛选左侧会话' })
+      const contentSearch = dialog.getByRole('searchbox', { name: '查找右侧会话内容' })
+      await sessionFilter.fill('hover width')
+      await expect(dialog.getByText('左侧没有匹配的会话')).toBeVisible()
+      await sessionFilter.fill('检查通知中心')
+      await expect(dialog.getByRole('button', { name: /预览会话：检查通知中心的聚合逻辑/ }))
+        .toBeVisible()
+
+      await contentSearch.fill('hover width')
+      await expect(dialog.getByLabel('右侧内容匹配位置')).toContainText('1/1')
       await expect(dialog.getByLabel('会话预览')).toContainText('hover width')
 
       await dialog.getByRole('button', { name: '载入到当前卡片' }).click()

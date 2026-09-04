@@ -28,6 +28,9 @@ test.describe('real PTY continuity across background Scenes', () => {
       await waitForShell(surfaceA)
       const sessionA = await requiredAttribute(surfaceA, 'data-session-id')
       const pidA = Number(await requiredAttribute(surfaceA, 'data-pid'))
+      await surfaceA.locator('.xterm').evaluate((element) => {
+        element.setAttribute('data-e2e-cache-probe', 'scene-a-warm-model')
+      })
 
       await terminalCommand(surfaceA, backgroundCommand(backgroundRelease, backgroundDone))
       await expect(surfaceA.locator('.xterm-rows')).toContainText('A_BACKGROUND_01')
@@ -58,6 +61,11 @@ test.describe('real PTY continuity across background Scenes', () => {
       const restoredA = activeSurface(fixture.page)
       await expect(restoredA).toHaveAttribute('data-session-id', sessionA)
       await expect(restoredA).toHaveAttribute('data-pid', String(pidA))
+      await expect(restoredA.locator('.xterm'))
+        .toHaveAttribute('data-e2e-cache-probe', 'scene-a-warm-model')
+      const restoredPane = restoredA.locator('xpath=ancestor::*[@data-testid="terminal-pane"][1]')
+      await expect(restoredPane).not.toHaveAttribute('aria-busy', 'true')
+      await expect(restoredPane.locator('.session-recovery-overlay')).toHaveCount(0)
       await expect.poll(async () => restoredA.locator('.xterm-rows').textContent())
         .toContain('A_BACKGROUND_12')
       const restoredText = await restoredA.locator('.xterm-rows').textContent()

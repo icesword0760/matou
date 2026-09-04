@@ -56,7 +56,9 @@ test('opens a newly added Workspace as a fresh interactive terminal without reco
     await fixture.page.getByRole('button', { name: '新增工作空间' }).click()
     await expect(fixture.page.getByRole('group', { name: 'fresh-workspace 工作空间' }))
       .toHaveClass(/is-active/)
-    const pane = fixture.page.locator('[data-testid="terminal-pane"]:visible').first()
+    const card = fixture.page.getByRole('article', { name: '会话：Shell' })
+    await expect(card).toBeVisible()
+    const pane = card.getByTestId('terminal-pane')
 
     const surface = pane.locator('.terminal-surface')
     await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)

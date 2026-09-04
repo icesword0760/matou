@@ -1,4 +1,4 @@
-import { readFile, readdir, realpath } from 'node:fs/promises'
+import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 import type {
@@ -16,6 +16,8 @@ interface CatalogQuery {
   query: string
 }
 
+type CatalogSearchScope = 'metadata' | 'all'
+
 interface ParsedTranscript {
   providerSessionId: string
   title: string
@@ -29,35 +31,65 @@ interface ParsedTranscript {
 
 export class ClaudeSessionCatalog {
   readonly #projectsRoot: string
+  readonly #fileCache = new Map<string, {
+    mtimeMs: number
+    size: number
+    transcript: ParsedTranscript | undefined
+  }>()
 
   constructor(projectsRoot: string) {
     this.#projectsRoot = resolve(projectsRoot)
   }
 
-  async list(input: CatalogQuery & { limit?: number }): Promise<ClaudeSessionListResult> {
+  async list(input: CatalogQuery & { limit?: number; searchScope?: CatalogSearchScope }): Promise<ClaudeSessionListResult> {
     const transcripts = await this.#readWorkspace(input.cwd)
     const query = normalizeQuery(input.query)
+    const searchScope = input.searchScope ?? 'all'
     const sessions = transcripts
-      .map((transcript) => summarize(transcript, query))
+      .map((transcript) => summarize(transcript, query, searchScope))
       .filter((session) => !query || session.matchCount > 0)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.title.localeCompare(right.title))
     const limit = Math.max(1, Math.min(input.limit ?? 100, 500))
     return { sessions: sessions.slice(0, limit), total: sessions.length }
   }
 
-  async detail(input: CatalogQuery & { providerSessionId: string }): Promise<ClaudeSessionDetail> {
+  async detail(input: CatalogQuery & { providerSessionId: string; previewLimit?: number }): Promise<ClaudeSessionDetail> {
     requireProviderSessionId(input.providerSessionId)
     const transcript = (await this.#readWorkspace(input.cwd))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
     if (!transcript) throw new Error('Claude Code 会话不存在或不属于当前工作空间')
     const query = normalizeQuery(input.query)
-    const summary = summarize(transcript, query)
+    const summary = summarize(transcript, '', 'metadata')
+    const previewLimit = input.previewLimit === undefined
+      ? undefined
+      : Math.max(1, Math.min(input.previewLimit, 1_000))
+    const hits: ClaudeSessionSearchHit[] = []
+    let matchCount = 0
+    const events: ClaudeSessionDetail['events'] = []
+    if (query) {
+      for (const event of transcript.events) {
+        const matched = searchableEventText(event).includes(query)
+        if (matched) {
+          matchCount += 1
+          if (hits.length < 4) {
+            hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
+          }
+        }
+        if (previewLimit === undefined || matched && matchCount <= previewLimit) {
+          events.push({ ...event, matched })
+        }
+      }
+    } else {
+      const previewSource = previewLimit === undefined
+        ? transcript.events
+        : transcript.events.slice(-previewLimit)
+      events.push(...previewSource.map((event) => ({ ...event, matched: false })))
+    }
     return {
       ...summary,
-      events: transcript.events.map((event) => ({
-        ...event,
-        matched: Boolean(query && searchableEventText(event).includes(query))
-      }))
+      matchCount,
+      hits,
+      events
     }
   }
 
@@ -88,9 +120,17 @@ export class ClaudeSessionCatalog {
     const transcripts = await Promise.all(candidates.map(async ({ directory, name }) => {
       const providerSessionId = name.slice(0, -'.jsonl'.length)
       if (!isProviderSessionId(providerSessionId)) return undefined
+      const path = resolve(directory, name)
       try {
-        const text = await readFile(resolve(directory, name), 'utf8')
-        const transcript = parseTranscript(providerSessionId, text)
+        const metadata = await stat(path)
+        const cached = this.#fileCache.get(path)
+        let transcript = cached?.mtimeMs === metadata.mtimeMs && cached.size === metadata.size
+          ? cached.transcript
+          : undefined
+        if (!cached || cached.mtimeMs !== metadata.mtimeMs || cached.size !== metadata.size) {
+          transcript = parseTranscript(providerSessionId, await readFile(path, 'utf8'))
+          this.#fileCache.set(path, { mtimeMs: metadata.mtimeMs, size: metadata.size, transcript })
+        }
         if (!transcript) return undefined
         const transcriptCwd = await canonicalPath(transcript.cwd)
         return transcriptCwd === normalizedCwd
@@ -207,21 +247,31 @@ function contentParts(content: unknown): Array<{ kind: 'text' | 'tool'; text: st
   return parts
 }
 
-function summarize(transcript: ParsedTranscript, query: string): ClaudeSessionSummary {
+function summarize(
+  transcript: ParsedTranscript,
+  query: string,
+  searchScope: CatalogSearchScope
+): ClaudeSessionSummary {
   const hits: ClaudeSessionSearchHit[] = []
-  if (query) {
+  let contentMatchCount = 0
+  if (query && searchScope === 'all') {
     for (const event of transcript.events) {
       const text = searchableEventText(event)
       if (!text.includes(query)) continue
-      hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
+      contentMatchCount += 1
+      if (hits.length < 4) {
+        hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
+      }
     }
   }
   const metadataMatch = Boolean(query && normalizeQuery([
     transcript.title,
     transcript.providerSessionId,
+    transcript.cwd,
     transcript.model ?? '',
     transcript.permissionMode
   ].join(' ')).includes(query))
+  const matchCount = contentMatchCount + (metadataMatch ? 1 : 0)
   return {
     providerSessionId: transcript.providerSessionId,
     title: transcript.title,
@@ -230,8 +280,8 @@ function summarize(transcript: ParsedTranscript, query: string): ClaudeSessionSu
     ...(transcript.model ? { model: transcript.model } : {}),
     permissionMode: transcript.permissionMode,
     eventCount: transcript.events.length,
-    matchCount: hits.length + (metadataMatch ? 1 : 0),
-    hits: hits.slice(0, 4),
+    matchCount,
+    hits,
     availability: 'available'
   }
 }

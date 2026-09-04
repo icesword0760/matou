@@ -124,9 +124,12 @@
 .session-loader-preview > header > div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .session-loader-preview > header strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .session-loader-preview > header span { color: #818b98; font-size: 9px; }
+.session-loader-content-search-group { display: flex!important; min-width: 0; flex: 0 1 390px!important; flex-direction: row!important; align-items: center; justify-content: flex-end; gap: 7px!important; }
+.session-loader-content-search-group .session-loader-search { width: min(245px,100%); flex: 1 1 180px; }
 .session-loader-match-nav { display: flex!important; flex: none!important; flex-direction: row!important; align-items: center; gap: 3px!important; }
 .session-loader-match-nav button { width: 25px; height: 25px; padding: 0; border: 0; border-radius: 6px; color: #a6afbb; background: rgba(255,255,255,.05); cursor: pointer; }
 .session-loader-events { min-height: 0; overflow: auto; padding: 16px clamp(14px,3vw,28px) 28px; scroll-behavior: smooth; scrollbar-width: thin; }
+.session-loader-preview-limit { max-width: 760px; margin: 0 auto 12px; padding: 7px 10px; border-radius: 8px; color: #8490a0; background: rgba(91,157,233,.07); font-size: 9px; text-align: center; }
 .session-loader-event { max-width: 760px; margin: 0 auto 12px; padding: 11px 13px; border: 1px solid #343b46; border-radius: 11px; background: #20242a; scroll-margin: 70px; }
 .session-loader-event.is-user { margin-left: auto; background: #252b32; }
 .session-loader-event.is-tool { border-color: #4c3d5a; background: #241f2a; }

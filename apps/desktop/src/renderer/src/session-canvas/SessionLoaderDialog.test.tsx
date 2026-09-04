@@ -9,7 +9,7 @@ import { SessionLoaderDialog } from './SessionLoaderDialog'
 afterEach(() => { vi.useRealTimers(); cleanup() })
 
 describe('SessionLoaderDialog', () => {
-  it('uses one compact search, previews a selected session, and loads only from the explicit action', async () => {
+  it('separates left session filtering from right content search and loads only from the explicit action', async () => {
     const onLoad = vi.fn(async () => undefined)
     const listSessions = vi.fn(async (): Promise<ClaudeSessionListResult> => ({
       total: 1,
@@ -27,7 +27,10 @@ describe('SessionLoaderDialog', () => {
       onLoad={onLoad} onCancel={() => undefined} />)
 
     expect(await screen.findByRole('dialog', { name: '载入 Claude Code 会话' })).toBeTruthy()
-    expect(screen.getAllByRole('searchbox')).toHaveLength(1)
+    expect(screen.getAllByRole('searchbox')).toHaveLength(2)
+    expect(screen.getByRole('searchbox', { name: '筛选左侧会话' })).toBeTruthy()
+    expect(screen.getByRole('searchbox', { name: '查找右侧会话内容' })).toBeTruthy()
+    await waitFor(() => expect(listSessions).toHaveBeenLastCalledWith('', 'metadata'))
     const row = await screen.findByRole('button', { name: /预览会话：通知中心聚合/ })
     await userEvent.setup().click(row)
     expect(onLoad).not.toHaveBeenCalled()
@@ -37,7 +40,7 @@ describe('SessionLoaderDialog', () => {
     await waitFor(() => expect(onLoad).toHaveBeenCalledWith('provider-1'))
   })
 
-  it('searches after a short debounce and jumps from a result snippet to its exact preview event', async () => {
+  it('filters only left metadata and searches only inside the selected right preview', async () => {
     Element.prototype.scrollIntoView = vi.fn()
     const listSessions = vi.fn(async (): Promise<ClaudeSessionListResult> => ({
       total: 2,
@@ -53,17 +56,32 @@ describe('SessionLoaderDialog', () => {
           ? '第二个会话' : '通知中心聚合' }
       }}
       onLoad={async () => undefined} onCancel={() => undefined} />)
-    const search = await screen.findByRole('searchbox', { name: '搜索会话内容' })
-    fireEvent.change(search, { target: { value: 'hover width' } })
-    await waitFor(() => expect(listSessions).toHaveBeenLastCalledWith('hover width', undefined))
+    const sessionSearch = await screen.findByRole('searchbox', { name: '筛选左侧会话' })
+    fireEvent.change(sessionSearch, { target: { value: '第二个会话' } })
+    await waitFor(() => expect(listSessions).toHaveBeenLastCalledWith('第二个会话', 'metadata'))
 
-    fireEvent.click(await screen.findByRole('button', { name: '跳转到第 2 条会话内容' }))
-    await waitFor(() => expect(Element.prototype.scrollIntoView).toHaveBeenCalled())
-    expect(screen.getByLabelText('会话预览').textContent).toContain('第二个会话')
+    const contentSearch = screen.getByRole('searchbox', { name: '查找右侧会话内容' })
+    fireEvent.change(contentSearch, { target: { value: 'hover width' } })
+    await waitFor(() => expect(screen.getByLabelText('右侧内容匹配位置')).toBeTruthy())
+    expect(listSessions).not.toHaveBeenCalledWith('hover width', expect.anything())
 
     fireEvent.keyDown(window, { key: 'f', metaKey: true })
-    await waitFor(() => expect(listSessions).toHaveBeenLastCalledWith('hover width', 'provider-2'))
-    expect(screen.getByRole('button', { name: '当前会话' })).toBeTruthy()
+    expect(document.activeElement).toBe(contentSearch)
+  })
+
+  it('bounds a very large preview to keep selection and search responsive', async () => {
+    const events = Array.from({ length: 2_000 }, (_, index) => ({
+      index: index + 1, kind: 'assistant' as const, role: 'assistant' as const,
+      text: `输出 ${index + 1}`, matched: false
+    }))
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={async () => ({ total: 1, sessions: [{ ...summary(), eventCount: events.length }] })}
+      loadDetail={async () => ({ ...detail(), eventCount: events.length, events })}
+      onLoad={async () => undefined} onCancel={() => undefined} />)
+
+    await screen.findByRole('note')
+    expect(document.querySelectorAll('.session-loader-event')).toHaveLength(240)
+    expect(screen.getByRole('note').textContent).toContain('完整历史')
   })
 
   it('keeps the dialog and current card intact when loading reports an error', async () => {

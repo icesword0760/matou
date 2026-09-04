@@ -84,6 +84,7 @@ export class PtySession {
   #exitFinalized = false
   #ending: Promise<void> | undefined
   #pendingReplayFrom: number | undefined
+  #replayCapture: RuntimeMessage[] | undefined
   #durabilityFault: SessionDurabilityFaultEvent | undefined
   #maximumUnackedBytes = 0
   #lastCols: number
@@ -316,6 +317,7 @@ export class PtySession {
   }
 
   attach(send: (message: RuntimeMessage) => void): void {
+    this.#replayCapture = undefined
     this.#send = send
     this.#pendingReplayFrom = undefined
     this.#creditWindow = this.#newCreditWindow()
@@ -323,10 +325,42 @@ export class PtySession {
   }
 
   detach(send: (message: RuntimeMessage) => void): void {
+    this.#replayCapture = undefined
     if (this.#send === send) {
       this.#send = undefined
       this.#pendingReplayFrom = undefined
       this.#creditWindow = this.#newCreditWindow()
+    }
+  }
+
+  beginReplayCapture(): void {
+    this.#replayCapture = []
+  }
+
+  cancelReplayCapture(): void {
+    this.#replayCapture = undefined
+  }
+
+  finishReplayCapture(send: (message: RuntimeMessage) => void, throughSequence: number): void {
+    const captured = this.#replayCapture ?? []
+    this.#replayCapture = undefined
+    this.attach(send)
+
+    for (const message of captured) {
+      if (!('sequence' in message) || message.sequence <= throughSequence) continue
+      if (message.type === 'terminal.data') {
+        if (this.#creditWindow.isPaused) {
+          this.#pendingReplayFrom ??= message.sequence
+          return
+        }
+        this.#sendOutput(message.sequence, message.data)
+      } else if (message.type === 'terminal.exited') {
+        if (this.#creditWindow.isPaused) {
+          this.#pendingReplayFrom ??= message.sequence
+          return
+        }
+        this.#send?.(message)
+      }
     }
   }
 
@@ -362,6 +396,16 @@ export class PtySession {
         persist: () => this.#journal.appendOutput(sequence, bytes),
         afterPersist: () => {
           this.#onOutput?.(data)
+          if (this.#replayCapture) {
+            this.#replayCapture.push({
+              type: 'terminal.data',
+              protocolVersion: PROTOCOL_VERSION,
+              sessionId: this.sessionId,
+              sequence,
+              data: bytes
+            })
+            return
+          }
           if (!this.#send) return
           if (this.#creditWindow.isPaused) {
             this.#pendingReplayFrom ??= sequence
@@ -415,6 +459,18 @@ export class PtySession {
         this, exitCode, signal, this.#exitReason
       ) !== false
       if (!this.#notifyExit || !allowNotification) return
+      const message: RuntimeMessage = {
+        type: 'terminal.exited',
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: this.sessionId,
+        sequence,
+        exitCode,
+        ...(signal === undefined ? {} : { signal })
+      }
+      if (this.#replayCapture) {
+        this.#replayCapture.push(message)
+        return
+      }
       if (!this.#send) {
         return
       }
@@ -422,15 +478,7 @@ export class PtySession {
         this.#pendingReplayFrom ??= sequence
         return
       }
-      const send = this.#send
-      send({
-        type: 'terminal.exited',
-        protocolVersion: PROTOCOL_VERSION,
-        sessionId: this.sessionId,
-        sequence,
-        exitCode,
-        ...(signal === undefined ? {} : { signal })
-      })
+      this.#send(message)
     } finally {
       this.#resolveClosedOnce()
     }

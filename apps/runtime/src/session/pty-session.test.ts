@@ -56,6 +56,49 @@ setInterval(() => {}, 1_000)
 })
 
 describe('PtySession live catch-up', () => {
+  it('buffers output beyond one stable replay boundary instead of making replay chase a moving tail', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-replay-barrier-'))
+    roots.push(root)
+    const executable = join(root, 'quiet-shell.js')
+    await writeFile(executable, '#!/usr/bin/env node\nsetInterval(() => {}, 1_000)\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    const initial: RuntimeMessage[] = []
+    const resumed: RuntimeMessage[] = []
+    let session: PtySession | undefined
+    const initialSend = (message: RuntimeMessage) => { initial.push(message) }
+    try {
+      session = await PtySession.create({
+        sessionId: 'stable-replay-boundary', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile: 'shell',
+        send: initialSend
+      })
+      session.display('before-replay')
+      await waitUntil(() => initial.some(({ type }) => type === 'terminal.data'))
+      session.detach(initialSend)
+
+      session.beginReplayCapture()
+      session.display('included-in-replay')
+      const boundary = (await session.replayMetadata()).lastSequence
+      session.display('arrived-during-catch-up')
+      await session.replayMetadata()
+
+      session.finishReplayCapture((message) => { resumed.push(message) }, boundary)
+      session.display('live-after-replay')
+      await waitUntil(() => resumed.filter(({ type }) => type === 'terminal.data').length === 2)
+
+      const output = resumed.filter((message) => message.type === 'terminal.data')
+      expect(output.map(({ sequence }) => sequence)).toEqual([boundary + 1, boundary + 2])
+      expect(output.map(({ data }) => new TextDecoder().decode(data))).toEqual([
+        'arrived-during-catch-up', 'live-after-replay'
+      ])
+    } finally {
+      await session?.endDurability()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('streams a credit-resumed suffix without decoding a cold segment', async () => {
     const root = await mkdtemp(join(tmpdir(), 'matou-pty-range-replay-'))
     roots.push(root)

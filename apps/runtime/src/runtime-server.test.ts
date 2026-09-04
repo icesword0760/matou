@@ -2195,6 +2195,92 @@ sleep 30
     await settle()
   })
 
+  it('completes replay at one stable boundary while a live terminal keeps producing output', async () => {
+    registerSession(database, 'busy-live-replay')
+    const executable = join(root, 'busy-live-replay.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousShell = process.env.SHELL
+    process.env.SHELL = executable
+    const sessions = createTestSessionRegistry()
+    server.close()
+    port = new MockPort()
+    server = new RuntimeServer(port, root, database, undefined, undefined, sessions)
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'busy-replay' })
+    try {
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'busy-live-replay', executionContextId: 'replay-context',
+        profile: 'shell', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('terminal.spawned') !== undefined)
+      const session = sessions.get('busy-live-replay')!
+      const largeOutput = 'x'.repeat(600 * 1024)
+      session.display(largeOutput)
+      session.display(largeOutput)
+      session.display(largeOutput)
+      await session.replayMetadata()
+
+      const replayStartIndex = port.sent.length
+      port.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'busy-live-replay', fromSequence: 0
+      })
+      await waitUntil(() => port.sent.slice(replayStartIndex).filter(
+        ({ type }) => type === 'terminal.data'
+      ).length === 2)
+
+      session.display(largeOutput)
+      session.display(largeOutput)
+      session.display(largeOutput)
+      await session.replayMetadata()
+      port.receive({
+        type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'busy-live-replay', throughSequence: port.last('terminal.data')!.sequence
+      })
+      await waitUntil(() => port.sent.slice(replayStartIndex).filter(
+        ({ type }) => type === 'terminal.data'
+      ).length >= 3)
+      port.receive({
+        type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'busy-live-replay', throughSequence: port.last('terminal.data')!.sequence
+      })
+      await waitUntil(() => port.sent.slice(replayStartIndex).filter(
+        ({ type }) => type === 'terminal.data'
+      ).length >= 5)
+
+      session.display('LIVE_AFTER_STABLE_BOUNDARY')
+      await session.replayMetadata()
+      for (let attempt = 0; attempt < 4 && !port.last('terminal.replay-complete'); attempt += 1) {
+        port.receive({
+          type: 'terminal.ack', protocolVersion: PROTOCOL_VERSION,
+          sessionId: 'busy-live-replay', throughSequence: port.last('terminal.data')!.sequence
+        })
+        await settle()
+      }
+      await waitUntil(() => port.last('terminal.replay-complete') !== undefined)
+      await waitUntil(() => terminalText(port).includes('LIVE_AFTER_STABLE_BOUNDARY'))
+
+      const replayMessages = port.sent.slice(replayStartIndex)
+      const completeIndex = replayMessages.findIndex(({ type }) => type === 'terminal.replay-complete')
+      const liveIndex = replayMessages.findIndex((message) =>
+        message.type === 'terminal.data' &&
+        message.data.byteLength < 100 &&
+        new TextDecoder().decode(message.data) === 'LIVE_AFTER_STABLE_BOUNDARY'
+      )
+      expect(completeIndex).toBeGreaterThanOrEqual(0)
+      expect(liveIndex).toBeGreaterThan(completeIndex)
+      expect(replayMessages[completeIndex]).toMatchObject({ throughSequence: 6 })
+    } finally {
+      port.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'busy-live-replay'
+      })
+      await settle()
+      restoreEnv('SHELL', previousShell)
+    }
+  })
+
   it('starts queued recovery without a view, then attaches and detaches the active card independently', async () => {
     const sessions = createTestSessionRegistry()
     registerSession(database, 'layered-session')

@@ -77,6 +77,43 @@ describe('ClaudeSessionCatalog', () => {
     expect(detail.events[1]).toMatchObject({ kind: 'tool', toolName: 'Read' })
   })
 
+  it('keeps left-list metadata filtering separate from transcript content search', async () => {
+    await writeSession(workspace, 'scope-session', [
+      row('user', 'scope-session', workspace, '2026-08-30T10:00:00.000Z', {
+        role: 'user', content: '固定会话标题'
+      }),
+      row('assistant', 'scope-session', workspace, '2026-08-30T10:01:00.000Z', {
+        role: 'assistant', content: '只存在于正文里的独特词语'
+      })
+    ])
+
+    const metadata = await catalog.list({
+      cwd: workspace, query: '独特词语', searchScope: 'metadata'
+    })
+    const content = await catalog.detail({
+      cwd: workspace, providerSessionId: 'scope-session', query: '独特词语', previewLimit: 240
+    })
+
+    expect(metadata.sessions).toHaveLength(0)
+    expect(content.events).toHaveLength(1)
+    expect(content.events[0]?.matched).toBe(true)
+  })
+
+  it('bounds a large detail preview while preserving the full event count', async () => {
+    await writeSession(workspace, 'large-session', Array.from({ length: 400 }, (_, index) =>
+      row('assistant', 'large-session', workspace, `2026-08-30T10:${String(index % 60).padStart(2, '0')}:00.000Z`, {
+        role: 'assistant', content: `输出 ${index}`
+      })))
+
+    const detail = await catalog.detail({
+      cwd: workspace, providerSessionId: 'large-session', query: '', previewLimit: 240
+    })
+
+    expect(detail.eventCount).toBe(400)
+    expect(detail.events).toHaveLength(240)
+    expect(detail.events[0]?.index).toBe(161)
+  })
+
   it('uses the latest explicit permission mode and skips malformed transcript lines', async () => {
     const directory = join(root, 'projects', encodeClaudeProjectPath(workspace))
     await mkdir(directory, { recursive: true })

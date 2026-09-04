@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION } from '@matou/contracts'
 
-import { HierarchyShell, preferredActiveChild } from './HierarchyShell'
+import { HierarchyShell, preferredActiveChild, requiresFreshSceneSnapshot } from './HierarchyShell'
 import type { HierarchyProjection } from './hierarchy-types'
 import type { SessionRecoveryStatus } from '../runtime/RuntimeClient'
 
@@ -58,6 +58,9 @@ afterEach(() => {
 })
 
 describe('PRD 05 hierarchy shell', () => {
+  it('hydrates the first Session graph before presenting a newly created Workspace', () => {
+    expect(requiresFreshSceneSnapshot('hierarchy.create-workspace')).toBe(true)
+  })
   it('opens global model switching from the new bottom-left settings entry', async () => {
     render(<HierarchyShell fixture={fixture()} />)
 

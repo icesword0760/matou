@@ -119,8 +119,8 @@ export function createHierarchyCommands(
     }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
     startFreshProvider: (sessionId) => command('hierarchy.start-fresh-provider', { sessionId }),
-    listClaudeSessions: (sessionId, query, providerSessionId) => client.request<ClaudeSessionListResult>(
-      'claude-sessions.list', { sessionId, query, ...(providerSessionId ? { providerSessionId } : {}) }
+    listClaudeSessions: (sessionId, query, searchScope) => client.request<ClaudeSessionListResult>(
+      'claude-sessions.list', { sessionId, query, ...(searchScope ? { searchScope } : {}) }
     ),
     getClaudeSessionDetail: (sessionId, providerSessionId, query) => client.request<ClaudeSessionDetail>(
       'claude-sessions.detail', { sessionId, providerSessionId, query }

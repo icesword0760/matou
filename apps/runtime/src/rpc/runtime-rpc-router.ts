@@ -268,17 +268,15 @@ export class RuntimeRpcRouter {
       const result = await this.#claudeSessions.list({
         cwd: this.#sessionCwd(sessionId),
         query: optionalString(input.query),
+        searchScope: input.searchScope === 'metadata' ? 'metadata' : 'all',
         limit: optionalInteger(input.limit, 100)
       })
-      const scopeProviderSessionId = optionalText(input.providerSessionId, 'providerSessionId')
       const sessions = result.sessions
-        .filter(({ providerSessionId }) =>
-          scopeProviderSessionId === undefined || providerSessionId === scopeProviderSessionId)
         .map((session) => ({
           ...session,
           ...this.#providerConversationUsage(session.providerSessionId, sessionId)
         }))
-      return { sessions, total: scopeProviderSessionId === undefined ? result.total : sessions.length }
+      return { sessions, total: result.total }
     }
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
@@ -286,7 +284,7 @@ export class RuntimeRpcRouter {
       const providerSessionId = text(input.providerSessionId, 'providerSessionId')
       const detail = await this.#claudeSessions.detail({
         cwd: this.#sessionCwd(sessionId), providerSessionId,
-        query: optionalString(input.query)
+        query: optionalString(input.query), previewLimit: 240
       })
       return {
         ...detail,
@@ -302,7 +300,7 @@ export class RuntimeRpcRouter {
         const sessionId = text(input.sessionId, 'sessionId')
         const providerSessionId = text(input.providerSessionId, 'providerSessionId')
         const detail = await this.#claudeSessions.detail({
-          cwd: this.#sessionCwd(sessionId), providerSessionId, query: ''
+          cwd: this.#sessionCwd(sessionId), providerSessionId, query: '', previewLimit: 1
         })
         const result = this.#providerModes.loadClaudeSession(command, {
           sessionId,

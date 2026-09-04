@@ -147,6 +147,7 @@ interface CachedTerminalModel {
   lastAppliedSequence: number
   lastCheckpointSequence: number
   screenEpoch: number
+  suspend(): void
   dispose(): void
 }
 
@@ -174,6 +175,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
   const activeRef = useRef(active)
+  const viewportMovingRef = useRef(viewportMoving)
   const profileRef = useRef(profile)
   const inputDisabledRef = useRef(inputDisabled)
   const onOscNotificationRef = useRef(onOscNotification)
@@ -199,12 +201,39 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const historyDismissedSearchSequenceRef = useRef<number | undefined>(undefined)
   const historyOpenedSearchSequenceRef = useRef<number | undefined>(undefined)
   const historyAnchorRef = useRef<HTMLDivElement>(null)
+  const interactiveRef = useRef(active && visible)
+  const activationReadyPendingRef = useRef(false)
+  const activationResizeObservedRef = useRef(false)
+  const activationReadyFrameRef = useRef<number | undefined>(undefined)
+  const reportActivatedVisualReady = () => {
+    if (
+      !activationReadyPendingRef.current || !activeRef.current ||
+      !visibleRef.current || viewportMovingRef.current
+    ) return
+    const terminal = terminalRef.current
+    if (!terminal) return
+    terminal.refresh(0, Math.max(0, terminal.rows - 1))
+    if (activationReadyFrameRef.current !== undefined) {
+      cancelAnimationFrame(activationReadyFrameRef.current)
+    }
+    activationReadyFrameRef.current = requestAnimationFrame(() => {
+      activationReadyFrameRef.current = undefined
+      if (
+        !activationReadyPendingRef.current || !activeRef.current ||
+        !visibleRef.current || viewportMovingRef.current
+      ) return
+      activationReadyPendingRef.current = false
+      activationResizeObservedRef.current = false
+      onVisualReadyRef.current()
+    })
+  }
 
   // Runtime bytes can arrive during React's commit phase, before passive
   // effects run. Keep focus authority synchronized with the latest render so
   // late output from the previously active Session cannot reclaim focus.
   visibleRef.current = visible
   activeRef.current = active
+  viewportMovingRef.current = viewportMoving
   profileRef.current = profile
   onUserInputRef.current = onUserInput
   onVisualReadyRef.current = onVisualReady
@@ -227,6 +256,18 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   }, [client, profile, sessionId])
 
   useEffect(() => {
+    const becameInteractive = active && visible && !interactiveRef.current
+    interactiveRef.current = active && visible
+    if (becameInteractive) activationReadyPendingRef.current = true
+    if (!active || !visible) {
+      activationReadyPendingRef.current = false
+      activationResizeObservedRef.current = false
+      if (activationReadyFrameRef.current !== undefined) {
+        cancelAnimationFrame(activationReadyFrameRef.current)
+        activationReadyFrameRef.current = undefined
+      }
+    }
+    let activationTimer: ReturnType<typeof setTimeout> | undefined
     if (visible || active) {
       if (active) {
         cancelWebglRef.current()
@@ -236,9 +277,19 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         ? undefined
         : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
       if (active && !viewportMoving) resumeVisualRef.current()
+      if (activationReadyPendingRef.current && !viewportMoving) {
+        // A wide, content-heavy xterm can take a full layout turn to reflow
+        // after its card becomes focused. Keep the card's loading cover until
+        // the settled grid has been fitted and a fresh frame is requested.
+        activationResizeObservedRef.current = false
+        activationTimer = setTimeout(() => {
+          if (!activationResizeObservedRef.current) reportActivatedVisualReady()
+        }, TERMINAL_RESIZE_SETTLE_MS + 20)
+      }
       flushOutputRef.current()
       return () => {
         if (catchupTimer !== undefined) clearTimeout(catchupTimer)
+        if (activationTimer !== undefined) clearTimeout(activationTimer)
       }
     }
     return undefined
@@ -330,11 +381,18 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminal.loadAddon(fit)
       terminal.loadAddon(search)
       terminal.loadAddon(serialize)
-      return {
+      const model: CachedTerminalModel = {
         terminal, fit, search, serialize, webgl: undefined, webglAttempted: false, opened: false,
         lastAppliedSequence: 0, lastCheckpointSequence: -1, screenEpoch: 0,
+        suspend: () => {
+          model.webgl?.dispose()
+          model.webgl = undefined
+          model.webglAttempted = false
+          terminal.element?.remove()
+        },
         dispose: () => terminal.dispose()
-      } satisfies CachedTerminalModel
+      }
+      return model
     }) as CachedTerminalModel
     const { terminal, fit, search, serialize } = model
     const e2eRows = new URLSearchParams(window.location.search).get('e2e') === '1'
@@ -851,9 +909,15 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       if (validTerminalDimensions(terminal.cols, terminal.rows)) {
         resizeCoalescer.offer(terminal.cols, terminal.rows)
       }
+      if (activationReadyPendingRef.current && !viewportMovingRef.current) {
+        reportActivatedVisualReady()
+      }
     }
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
+      if (activationReadyPendingRef.current && activeRef.current) {
+        activationResizeObservedRef.current = true
+      }
       if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
       resizeSettleTimer = setTimeout(settleTerminalResize, TERMINAL_RESIZE_SETTLE_MS)
     })
@@ -871,6 +935,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       historyModeRef.current = false
       historyOpenedSearchSequenceRef.current = undefined
       surfaceDisposed = true
+      if (activationReadyFrameRef.current !== undefined) {
+        cancelAnimationFrame(activationReadyFrameRef.current)
+        activationReadyFrameRef.current = undefined
+      }
       clearCheckpointTimer()
       if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
       output.dispose()

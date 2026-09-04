@@ -130,6 +130,17 @@ describe('SessionCarousel', () => {
     expect(screen.getByRole('region', { name: '同级会话列表' }).getAttribute('data-visible-columns')).toBe('4')
   })
 
+  it('bounds mounted card DOM to three viewport widths once a level exceeds twelve Sessions', () => {
+    render(<SessionCarousel nodes={fixtures(13)} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    expect(viewport.getAttribute('data-total-sessions')).toBe('13')
+    expect(Number(viewport.getAttribute('data-rendered-sessions'))).toBeLessThanOrEqual(12)
+    expect(document.querySelectorAll('[data-session-card]').length).toBeLessThanOrEqual(12)
+    expect(document.querySelectorAll('.session-card-virtual-spacer')).toHaveLength(1)
+  })
+
   it('virtualizes a 1000-Session strip while preserving its logical size', () => {
     render(<SessionCarousel nodes={fixtures(1000)} focusedSessionId="session-1"
       onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
@@ -137,8 +148,8 @@ describe('SessionCarousel', () => {
     const viewport = screen.getByRole('region', { name: '同级会话列表' })
     expect(viewport.getAttribute('data-total-sessions')).toBe('1000')
     expect(viewport.getAttribute('data-foreground-terminals')).toBe('1000')
-    expect(Number(viewport.getAttribute('data-rendered-sessions'))).toBeLessThanOrEqual(20)
-    expect(document.querySelectorAll('[data-session-card]').length).toBeLessThanOrEqual(20)
+    expect(Number(viewport.getAttribute('data-rendered-sessions'))).toBeLessThanOrEqual(12)
+    expect(document.querySelectorAll('[data-session-card]').length).toBeLessThanOrEqual(12)
     expect(document.querySelectorAll('.session-card-virtual-spacer')).toHaveLength(1)
   })
 

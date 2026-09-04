@@ -365,9 +365,9 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
-  const listLoaderSessions = useCallback((query: string, providerSessionId?: string) => {
+  const listLoaderSessions = useCallback((query: string, searchScope?: 'metadata' | 'all') => {
     if (!loaderSessionId) return Promise.resolve({ sessions: [], total: 0 })
-    return commands.listClaudeSessions(loaderSessionId, query, providerSessionId)
+    return commands.listClaudeSessions(loaderSessionId, query, searchScope)
   }, [commands, loaderSessionId])
   const loadLoaderDetail = useCallback((providerSessionId: string, query: string) => {
     if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
@@ -1556,10 +1556,11 @@ function mutationSceneId(
     : undefined
 }
 
-function requiresFreshSceneSnapshot(type: string): boolean {
+export function requiresFreshSceneSnapshot(type: string): boolean {
   return [
     'hierarchy.activate-workspace', 'hierarchy.activate-task', 'hierarchy.activate-scene',
-    'hierarchy.create-task', 'hierarchy.create-scene', 'hierarchy.create-canvas', 'hierarchy.reopen-scene',
+    'hierarchy.create-workspace', 'hierarchy.create-task', 'hierarchy.create-scene',
+    'hierarchy.create-canvas', 'hierarchy.reopen-scene',
     'hierarchy.split-session', 'hierarchy.fork-session', 'hierarchy.create-shell-sibling',
     'hierarchy.create-fork-child', 'hierarchy.create-fork-sibling',
     'hierarchy.retry-fork', 'hierarchy.remove-failed-fork',

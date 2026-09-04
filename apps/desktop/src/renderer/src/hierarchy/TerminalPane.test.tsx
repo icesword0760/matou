@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionEnvironment } from '@matou/domain'
 
 import { TerminalPane } from './TerminalPane'
+import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
 
 vi.mock('../terminal/TerminalSurface', () => ({
   TerminalSurface: (props: {
@@ -35,7 +36,10 @@ vi.mock('../terminal/TerminalSurface', () => ({
     </div>
 }))
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  foregroundTerminalModels.clear()
+})
 
 describe('Terminal pane', () => {
   it('keeps every Session in the foreground list bound even when a card scrolls offscreen', () => {
@@ -99,6 +103,30 @@ describe('Terminal pane', () => {
     expect(screen.getByText('加载中')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+  })
+
+  it('covers an activated content-heavy Session until its resized terminal frame paints', () => {
+    const props = fixture()
+    const view = render(<TerminalPane {...props} active={false} visible />)
+    fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+
+    view.rerender(<TerminalPane {...props} active visible />)
+
+    expect(screen.getByRole('status', { name: '正在加载终端：Claude 主会话' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+  })
+
+  it('shows a cached Session immediately when returning to it', () => {
+    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn() }))
+    foregroundTerminalModels.release('session-1')
+    const props = fixture()
+    const view = render(<TerminalPane {...props} active={false} visible />)
+
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+    view.rerender(<TerminalPane {...props} active visible />)
     expect(screen.queryByTestId('session-recovery-water')).toBeNull()
   })
 

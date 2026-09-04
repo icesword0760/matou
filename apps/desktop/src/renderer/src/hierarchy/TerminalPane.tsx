@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
 import {
@@ -30,6 +30,7 @@ import { sessionDeleteFlow } from './terminal-close-flow'
 import { AppIcon } from '../ui/AppIcon'
 import { SessionRecoveryWater } from './SessionRecoveryWater'
 import { terminalLoadingPresentation } from './terminal-loading-state'
+import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -123,7 +124,11 @@ export function TerminalPane(props: {
   const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
-  const [terminalVisualReady, setTerminalVisualReady] = useState(false)
+  const [terminalVisualReady, setTerminalVisualReady] = useState(
+    () => recoveryState === 'ready' && foregroundTerminalModels.has(session.id)
+  )
+  const [activationLoading, setActivationLoading] = useState(false)
+  const previousActive = useRef(active)
   const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
   const [forkReadinessHint, setForkReadinessHint] = useState(false)
   const [environmentAction, setEnvironmentAction] = useState('')
@@ -169,6 +174,18 @@ export function TerminalPane(props: {
   const environmentUnavailable = environment !== undefined && environment.state !== 'ready'
   const recoveryBlocking = recoveryState !== 'ready'
   const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
+  useLayoutEffect(() => {
+    const becameActive = active && !previousActive.current
+    previousActive.current = active
+    if (!becameActive) return
+    if (!recoveryBusy && foregroundTerminalModels.has(session.id)) {
+      setTerminalVisualReady(true)
+      setActivationLoading(false)
+      return
+    }
+    setTerminalVisualReady(false)
+    setActivationLoading(true)
+  }, [active, recoveryBusy, session.id])
   useEffect(() => {
     if (recoveryBusy) setTerminalVisualReady(false)
   }, [recoveryBusy])
@@ -256,7 +273,7 @@ export function TerminalPane(props: {
   const forkFailure = forkFailurePresentation(forkError)
   const currentForkProgress = activeForkProgress(forkProgress)
   const loadingPresentation = terminalLoadingPresentation({
-    visible, foreground, isTeamMember, pathValid, terminalVisualReady,
+    visible, foreground, isTeamMember, pathValid, terminalVisualReady, activationLoading,
     ...(suppliedRecoveryState === undefined ? {} : { recoveryState: suppliedRecoveryState }),
     providerRestoreState, ...(forkState === undefined ? {} : { forkState }),
     hasForkProgress: currentForkProgress !== undefined,
@@ -444,7 +461,10 @@ export function TerminalPane(props: {
       {...(props.diagnosticsProbe ? { diagnosticsProbe: true } : {})}
       spawnRevision={spawnRevision + startupRetry}
       onStatusChange={handleRuntimeAndDiagnosticsStatus}
-      onVisualReady={() => setTerminalVisualReady(true)}
+      onVisualReady={() => {
+        setTerminalVisualReady(true)
+        setActivationLoading(false)
+      }}
       {...(props.onDiagnosticsSmokeMarker
         ? { onSmokeMarker: props.onDiagnosticsSmokeMarker }
         : {})}

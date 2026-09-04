@@ -30,6 +30,12 @@ describe('terminal loading presentation', () => {
     expect(terminalLoadingPresentation({ ...base(), ...patch })).toMatchObject({ phase })
   })
 
+  it('uses loading water while an exited Session is repainting after activation', () => {
+    expect(terminalLoadingPresentation({
+      ...base(), activationLoading: true, runtimeStatus: 'exited'
+    })).toEqual({ phase: 'loading', label: '加载中' })
+  })
+
   it.each([
     ['first frame rendered', { terminalVisualReady: true }],
     ['background level', { foreground: false }],

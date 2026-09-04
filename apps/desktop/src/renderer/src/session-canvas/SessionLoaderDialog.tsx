@@ -14,15 +14,17 @@ import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 export function SessionLoaderDialog(props: {
   targetTitle: string
   targetRunning: boolean
-  listSessions(query: string, providerSessionId?: string): Promise<ClaudeSessionListResult>
+  listSessions(query: string, searchScope?: 'metadata' | 'all'): Promise<ClaudeSessionListResult>
   loadDetail(providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
   onLoad(providerSessionId: string): Promise<unknown>
   onCancel(): void
   portalTarget?: Element
 }) {
   const { targetTitle, targetRunning, listSessions, loadDetail, onLoad, onCancel, portalTarget } = props
-  const [query, setQuery] = useState('')
-  const [effectiveQuery, setEffectiveQuery] = useState('')
+  const [sessionQuery, setSessionQuery] = useState('')
+  const [effectiveSessionQuery, setEffectiveSessionQuery] = useState('')
+  const [contentQuery, setContentQuery] = useState('')
+  const [effectiveContentQuery, setEffectiveContentQuery] = useState('')
   const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<ClaudeSessionDetail | null>(null)
@@ -33,28 +35,19 @@ export function SessionLoaderDialog(props: {
   const [confirmDuplicate, setConfirmDuplicate] = useState(false)
   const [error, setError] = useState('')
   const [activeMatch, setActiveMatch] = useState(0)
-  const [scope, setScope] = useState<'all' | 'current'>('all')
-  const [currentScopeId, setCurrentScopeId] = useState('')
-  const [pendingJump, setPendingJump] = useState<{
-    providerSessionId: string
-    eventIndex: number
-  } | null>(null)
   const requestSequence = useRef(0)
   const eventRefs = useRef(new Map<number, HTMLElement>())
-  const searchRef = useRef<HTMLInputElement>(null)
+  const sessionSearchRef = useRef<HTMLInputElement>(null)
+  const contentSearchRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    searchRef.current?.focus()
+    sessionSearchRef.current?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !confirmDuplicate) onCancel()
       if (confirmDuplicate) return
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault()
-        if (selectedId) {
-          setCurrentScopeId(selectedId)
-          setScope('current')
-        }
-        searchRef.current?.focus()
+        contentSearchRef.current?.focus()
       }
     }
     window.addEventListener('keydown', onKeyDown)
@@ -62,28 +55,31 @@ export function SessionLoaderDialog(props: {
   }, [confirmDuplicate, onCancel, selectedId])
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setEffectiveQuery(query), 180)
+    const timer = window.setTimeout(() => setEffectiveSessionQuery(sessionQuery), 180)
     return () => window.clearTimeout(timer)
-  }, [query])
+  }, [sessionQuery])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setEffectiveContentQuery(contentQuery), 180)
+    return () => window.clearTimeout(timer)
+  }, [contentQuery])
 
   useEffect(() => {
     const sequence = ++requestSequence.current
     setLoadingList(true)
     setError('')
-    void listSessions(effectiveQuery, scope === 'current' ? currentScopeId : undefined).then((result) => {
+    void listSessions(effectiveSessionQuery, 'metadata').then((result) => {
       if (sequence !== requestSequence.current) return
       setSessions(result.sessions)
-      setSelectedId((current) => scope === 'current'
-        ? currentScopeId || current
-        : result.sessions.some(({ providerSessionId }) => providerSessionId === current)
-          ? current
-          : result.sessions[0]?.providerSessionId ?? '')
+      setSelectedId((current) => result.sessions.some(({ providerSessionId }) => providerSessionId === current)
+        ? current
+        : result.sessions[0]?.providerSessionId ?? '')
     }).catch((reason: unknown) => {
       if (sequence === requestSequence.current) setError(errorMessage(reason))
     }).finally(() => {
       if (sequence === requestSequence.current) setLoadingList(false)
     })
-  }, [currentScopeId, effectiveQuery, listSessions, scope])
+  }, [effectiveSessionQuery, listSessions])
 
   useEffect(() => {
     if (!selectedId) {
@@ -93,7 +89,7 @@ export function SessionLoaderDialog(props: {
     let alive = true
     setLoadingDetail(true)
     setActiveMatch(0)
-    void loadDetail(selectedId, effectiveQuery).then((result) => {
+    void loadDetail(selectedId, effectiveContentQuery).then((result) => {
       if (alive) setDetail(result)
     }).catch((reason: unknown) => {
       if (alive) setError(errorMessage(reason))
@@ -101,11 +97,12 @@ export function SessionLoaderDialog(props: {
       if (alive) setLoadingDetail(false)
     })
     return () => { alive = false }
-  }, [effectiveQuery, loadDetail, selectedId])
+  }, [effectiveContentQuery, loadDetail, selectedId])
 
+  const previewEvents = useMemo(() => detail?.events.slice(-240) ?? [], [detail])
   const matchedEvents = useMemo(
-    () => detail?.events.filter(({ matched }) => matched) ?? [],
-    [detail]
+    () => previewEvents.filter(({ matched }) => matched),
+    [previewEvents]
   )
   const selectedSession = sessions.find(({ providerSessionId }) => providerSessionId === selectedId)
   const selectedAvailability = selectedSession?.availability ?? detail?.availability ?? 'available'
@@ -114,11 +111,6 @@ export function SessionLoaderDialog(props: {
     if (matchIndex >= 0) setActiveMatch(matchIndex)
     eventRefs.current.get(eventIndex)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
-  useEffect(() => {
-    if (!pendingJump || detail?.providerSessionId !== pendingJump.providerSessionId) return
-    jumpTo(pendingJump.eventIndex)
-    setPendingJump(null)
-  }, [detail, pendingJump])
   const stepMatch = (offset: number) => {
     if (matchedEvents.length === 0) return
     const next = (activeMatch + offset + matchedEvents.length) % matchedEvents.length
@@ -165,23 +157,17 @@ export function SessionLoaderDialog(props: {
       </header>
       <div className="session-loader-body">
         <aside className="session-loader-list" aria-label="可恢复会话">
-          <label className="session-loader-search">
+          <label className="session-loader-search" data-search-scope="sessions">
             <SearchIcon />
-            <input ref={searchRef} type="search" aria-label="搜索会话内容"
-              value={query} placeholder="搜索标题、内容、工具或会话 ID"
-              onChange={(event) => setQuery(event.target.value)} />
-            {query && <button type="button" aria-label="清除搜索" onClick={() => setQuery('')}>×</button>}
+            <input ref={sessionSearchRef} type="search" aria-label="筛选左侧会话"
+              value={sessionQuery} placeholder="筛选左侧：标题、路径、模型或会话 ID"
+              onChange={(event) => setSessionQuery(event.target.value)} />
+            {sessionQuery && <button type="button" aria-label="清除会话筛选"
+              onClick={() => setSessionQuery('')}>×</button>}
           </label>
           <div className="session-loader-list-meta">
             <span>{loadingList ? '正在查找…' : `${sessions.length} 个会话`}</span>
-            <button type="button" className="session-loader-scope" onClick={() => {
-              if (scope === 'all' && selectedId) {
-                setCurrentScopeId(selectedId)
-                setScope('current')
-              } else {
-                setScope('all')
-              }
-            }}>{scope === 'all' ? '全部会话' : '当前会话'}</button>
+            <span>左侧会话列表</span>
           </div>
           <div className="session-loader-results" onKeyDown={onListKeyDown}>
             {sessions.map((session) => <article key={session.providerSessionId}
@@ -196,19 +182,9 @@ export function SessionLoaderDialog(props: {
                 {session.availability === 'loaded-elsewhere' &&
                   <small>已载入“{session.loadedSessionTitle ?? '其他卡片'}”</small>}
               </button>
-              {session.hits.map((hit) => <button type="button" className="session-loader-hit"
-                key={`${session.providerSessionId}:${hit.eventIndex}`}
-                aria-label={`跳转到第 ${hit.eventIndex} 条会话内容`}
-                onClick={() => {
-                  setSelectedId(session.providerSessionId)
-                  setPendingJump({
-                    providerSessionId: session.providerSessionId,
-                    eventIndex: hit.eventIndex
-                  })
-                }}>{hit.excerpt}</button>)}
             </article>)}
             {!loadingList && sessions.length === 0 && <div className="session-loader-empty">
-              {effectiveQuery ? '当前工作空间内没有匹配内容' : '当前工作空间内没有 Claude Code 会话'}
+              {effectiveSessionQuery ? '左侧没有匹配的会话' : '当前工作空间内没有 Claude Code 会话'}
             </div>}
           </div>
         </aside>
@@ -217,14 +193,28 @@ export function SessionLoaderDialog(props: {
             <div><strong>{detail?.title ?? '选择会话查看内容'}</strong>
               {detail && <span>{detail.model ?? 'Claude Code'} · {permissionLabel(detail.permissionMode)}</span>}
             </div>
-            {effectiveQuery && <div className="session-loader-match-nav" aria-label="搜索匹配位置">
-              <span>{matchedEvents.length ? activeMatch + 1 : 0}/{matchedEvents.length}</span>
-              <button type="button" aria-label="上一个匹配" onClick={() => stepMatch(-1)}>↑</button>
-              <button type="button" aria-label="下一个匹配" onClick={() => stepMatch(1)}>↓</button>
-            </div>}
+            <div className="session-loader-content-search-group">
+              <label className="session-loader-search" data-search-scope="content">
+                <SearchIcon />
+                <input ref={contentSearchRef} type="search" aria-label="查找右侧会话内容"
+                  value={contentQuery} placeholder="查找右侧内容" disabled={!selectedId}
+                  onChange={(event) => setContentQuery(event.target.value)} />
+                {contentQuery && <button type="button" aria-label="清除内容查找"
+                  onClick={() => setContentQuery('')}>×</button>}
+              </label>
+              {effectiveContentQuery && <div className="session-loader-match-nav" aria-label="右侧内容匹配位置">
+                <span>{matchedEvents.length ? activeMatch + 1 : 0}/{matchedEvents.length}</span>
+                <button type="button" aria-label="上一个匹配" onClick={() => stepMatch(-1)}>↑</button>
+                <button type="button" aria-label="下一个匹配" onClick={() => stepMatch(1)}>↓</button>
+              </div>}
+            </div>
           </header>
           <div className="session-loader-events" aria-busy={loadingDetail}>
-            {detail?.events.map((event) => <article key={event.index}
+            {detail && detail.eventCount > previewEvents.length && !effectiveContentQuery &&
+              <div className="session-loader-preview-limit" role="note">
+                为保持预览流畅，显示最近 {previewEvents.length} 条；载入后仍保留完整历史
+              </div>}
+            {previewEvents.map((event) => <article key={event.index}
               ref={(element) => {
                 if (element) eventRefs.current.set(event.index, element)
                 else eventRefs.current.delete(event.index)

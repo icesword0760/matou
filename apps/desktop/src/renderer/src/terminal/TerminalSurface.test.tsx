@@ -127,7 +127,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({
 describe('TerminalSurface focus continuity', () => {
   beforeEach(() => {
     window.history.replaceState({}, '', '/')
-    foregroundTerminalModels.setForegroundSessions([])
+    foregroundTerminalModels.clear()
     state.focus.mockClear()
     state.searchNext.mockClear()
     state.searchPrevious.mockClear()
@@ -278,7 +278,10 @@ describe('TerminalSurface focus continuity', () => {
   it('fits and resizes the PTY once after a burst of card width changes settles', () => {
     vi.useFakeTimers()
     render(<TerminalSurface sessionId="session-resize-settle" active visible />)
-    act(() => { vi.runOnlyPendingTimers() })
+    act(() => {
+      vi.runOnlyPendingTimers()
+      vi.runOnlyPendingTimers()
+    })
     state.fit.mockClear()
     state.resizeTerminal.mockClear()
 
@@ -372,6 +375,71 @@ describe('TerminalSurface focus continuity', () => {
 
     expect(state.fit).toHaveBeenCalled()
     expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
+  })
+
+  it('reports a fresh painted frame after an existing terminal becomes active', () => {
+    vi.useFakeTimers()
+    const onVisualReady = vi.fn()
+    const view = render(<TerminalSurface sessionId="session-preview" active={false} visible
+      onVisualReady={onVisualReady} />)
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active visible
+      onVisualReady={onVisualReady} />)
+
+    act(() => {
+      vi.runOnlyPendingTimers()
+      vi.runOnlyPendingTimers()
+    })
+
+    expect(state.terminalRefresh).toHaveBeenCalled()
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for carousel movement to settle before reporting an activated terminal ready', () => {
+    vi.useFakeTimers()
+    const onVisualReady = vi.fn()
+    const view = render(<TerminalSurface sessionId="session-preview" active={false} visible
+      viewportMoving onVisualReady={onVisualReady} />)
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active visible
+      viewportMoving onVisualReady={onVisualReady} />)
+    act(() => { vi.runOnlyPendingTimers() })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active visible
+      viewportMoving={false} onVisualReady={onVisualReady} />)
+    act(() => {
+      vi.runOnlyPendingTimers()
+      vi.runOnlyPendingTimers()
+    })
+
+    expect(state.terminalRefresh).toHaveBeenCalled()
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an activated terminal covered until its resize burst settles', () => {
+    vi.useFakeTimers()
+    const onVisualReady = vi.fn()
+    const view = render(<TerminalSurface sessionId="session-preview" active={false} visible
+      onVisualReady={onVisualReady} />)
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active visible
+      onVisualReady={onVisualReady} />)
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(60)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(59)
+    })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    act(() => {
+      vi.advanceTimersByTime(21)
+      vi.runOnlyPendingTimers()
+    })
+    expect(state.fit).toHaveBeenCalled()
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the old active PTY grid stable after it loses focus', () => {

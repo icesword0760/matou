@@ -91,15 +91,19 @@ export function SessionCarousel(props: {
   const inViewport = useMemo(() => new Set(
     nodes.slice(firstVisible, firstVisible + visibleCount).map(({ sessionId }) => sessionId)
   ), [firstVisible, nodes, visibleCount])
-  const virtualized = nodes.length > VIRTUALIZE_THRESHOLD
+  const maximumRenderedCards = Math.max(1, visibleCount * RENDERED_VIEWPORT_COUNT)
+  const virtualized = nodes.length > maximumRenderedCards
   const focusChangedForRender = previousFocusedSessionId.current !== focusedSessionId
   const focusedIndex = nodes.findIndex(({ sessionId }) => sessionId === focusedSessionId)
-  const defaultRenderStart = virtualized ? Math.max(0, firstVisible - visibleCount * 2) : 0
+  const maximumRenderStart = Math.max(0, nodes.length - maximumRenderedCards)
+  const defaultRenderStart = virtualized
+    ? Math.min(maximumRenderStart, Math.max(0, firstVisible - visibleCount))
+    : 0
   const renderStart = virtualized && focusChangedForRender && focusedIndex >= 0
-    ? Math.max(0, focusedIndex - visibleCount * 2)
+    ? Math.min(maximumRenderStart, Math.max(0, focusedIndex - visibleCount))
     : defaultRenderStart
   const renderEnd = virtualized
-    ? Math.min(nodes.length, renderStart + visibleCount * 5)
+    ? Math.min(nodes.length, renderStart + maximumRenderedCards)
     : nodes.length
   const renderedNodes = nodes.slice(renderStart, renderEnd)
   const foregroundTerminalCount = nodes.filter((node) =>
@@ -1007,7 +1011,7 @@ export function fullyVisibleCardScrollLeft(
 }
 
 const CARD_EDGE_INSET = 10
-const VIRTUALIZE_THRESHOLD = 80
+const RENDERED_VIEWPORT_COUNT = 3
 const VIEWPORT_SETTLE_MS = 300
 const EDGE_INTENT_WIDTH = 84
 const EDGE_INTENT_DWELL_MS = 180

@@ -4,6 +4,7 @@ export interface TerminalLoadingState {
   isTeamMember: boolean
   pathValid: boolean
   terminalVisualReady: boolean
+  activationLoading?: boolean
   recoveryState?: 'queued' | 'restoring' | 'ready' | 'failed'
   providerRestoreState: 'none' | 'restoring' | 'failed'
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
@@ -27,14 +28,18 @@ export interface TerminalLoadingPresentation {
 export function terminalLoadingPresentation(
   state: TerminalLoadingState
 ): TerminalLoadingPresentation | null {
+  const activationLoading = state.activationLoading === true
   if (
     !state.visible || !state.foreground || state.isTeamMember || !state.pathValid ||
-    state.terminalVisualReady || state.recoveryState === 'failed' ||
+    state.recoveryState === 'failed' ||
     state.providerRestoreState === 'failed' || state.forkState === 'failed' ||
     state.hasForkProgress || state.runtimeStatus === 'error' ||
-    state.runtimeStatus === 'exited' || state.hasStorageFault ||
+    state.hasStorageFault ||
     state.environmentUnavailable
   ) return null
+
+  if (activationLoading) return { phase: 'loading', label: '加载中' }
+  if (state.terminalVisualReady || state.runtimeStatus === 'exited') return null
 
   return state.recoveryState === undefined
     ? { phase: 'loading', label: '加载中' }

@@ -112,6 +112,7 @@ interface ReplayState {
   liveSequence: number
   requestedFromSequence: number
   activeSession?: PtySession
+  captureBoundary?: number
   pumping?: boolean
   finishing?: boolean
 }
@@ -1326,13 +1327,19 @@ export class RuntimeServer {
 
   async #finishReplay(replay: ReplayState): Promise<void> {
     if (this.#replays.get(replay.sessionId) !== replay) return
-    if (replay.activeSession) {
+    if (replay.activeSession && replay.captureBoundary === undefined) {
+      // Freeze one durable hand-off boundary after the initial replay. Output
+      // persisted while the suffix is replayed is buffered by PtySession and
+      // delivered after replay-complete, so a busy TUI cannot make recovery
+      // chase a continuously moving journal tail.
+      replay.activeSession.beginReplayCapture()
       const metadata = await replay.activeSession.replayMetadata(10_000)
       // A second Renderer attachment can replace this replay while journal
       // metadata is being read. Only the newest replay may reattach the live
       // PTY or clear replay state; otherwise the replacement is left detached
       // and its terminal stops receiving live output.
       if (this.#replays.get(replay.sessionId) !== replay) return
+      replay.captureBoundary = metadata.lastSequence
       if (metadata.lastSequence > replay.liveSequence) {
         const fromSequence = replay.liveSequence + 1
         replay.liveSequence = metadata.lastSequence
@@ -1343,7 +1350,6 @@ export class RuntimeServer {
         replay.finishing = false
         return
       }
-      replay.activeSession.attach(this.#sendToPort)
     }
     this.#port.postMessage({
       type: 'terminal.replay-complete', protocolVersion: PROTOCOL_VERSION,
@@ -1351,6 +1357,7 @@ export class RuntimeServer {
     })
     this.#completedReplayThrough.set(replay.sessionId, replay.liveSequence)
     this.#replays.delete(replay.sessionId)
+    replay.activeSession?.finishReplayCapture(this.#sendToPort, replay.liveSequence)
   }
 
   #failReplay(replay: ReplayState, error: unknown): void {
