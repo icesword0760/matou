@@ -439,12 +439,33 @@ describe('Terminal pane', () => {
 
     const button = screen.getByRole('button', { name: '从“Claude 主会话”创建子分支' })
     expect(button.getAttribute('aria-disabled')).toBe('true')
-    expect(button.getAttribute('title')).toContain('完成首轮对话')
+    expect(button.getAttribute('title')).toContain('在当前会话输入一次')
     await userEvent.setup().click(button)
 
     expect(screen.getByRole('status', { name: '创建子分支条件说明' }).textContent)
       .toContain('在当前会话输入一次，并等待 Claude Code 完成回复')
     expect(onFork).not.toHaveBeenCalled()
+  })
+
+  it('keeps Fork discoverable in the card menu while the current Claude reply is still running', async () => {
+    const props = fixture()
+    const onFork = vi.fn()
+    const onForkPeer = vi.fn()
+    const user = userEvent.setup()
+    render(<TerminalPane {...props} workStatus="running" forkReady={false}
+      onFork={onFork} onForkPeer={onForkPeer} onDetach={vi.fn()} />)
+
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('banner') })
+
+    const menuItem = screen.getByRole('menuitem', { name: '⑂ Fork 会话' })
+    expect(menuItem.getAttribute('aria-disabled')).toBe('true')
+    expect(menuItem.getAttribute('title')).toContain('当前回复完成后')
+    await user.click(menuItem)
+
+    expect(screen.getByRole('status', { name: '创建子分支条件说明' }).textContent)
+      .toContain('当前回复完成后即可 Fork')
+    expect(onFork).not.toHaveBeenCalled()
+    expect(onForkPeer).not.toHaveBeenCalled()
   })
 
 

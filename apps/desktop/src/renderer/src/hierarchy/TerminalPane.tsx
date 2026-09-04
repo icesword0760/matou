@@ -163,6 +163,9 @@ export function TerminalPane(props: {
     ? session.kind : 'shell'
   const showFork = session.kind === 'claude-code' && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
+  const forkReadinessReason = workStatus === 'running' || workStatus === 'starting' || workStatus === 'needs-input'
+    ? '当前回复完成后即可 Fork'
+    : '在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建分支'
   const environmentUnavailable = environment !== undefined && environment.state !== 'ready'
   const recoveryBlocking = recoveryState !== 'ready'
   const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
@@ -326,7 +329,7 @@ export function TerminalPane(props: {
         {showFork && <button className="pane-fork" type="button" draggable={false}
           aria-label={`从“${session.title}”创建子分支`} aria-disabled={actionBlocked || !canFork}
           disabled={actionBlocked}
-          title={actionBlockedReason ?? (canFork ? '创建子分支' : '完成首轮对话后可创建分支')}
+          title={actionBlockedReason ?? (canFork ? '创建子分支' : forkReadinessReason)}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
@@ -549,7 +552,7 @@ export function TerminalPane(props: {
       }} />}
     {forkReadinessHint && !actionBlocked && createPortal(<div className="fork-readiness-toast" role="status"
       aria-label="创建子分支条件说明">
-      在当前会话输入一次，并等待 Claude Code 完成回复后，即可创建子分支
+      {forkReadinessReason}
     </div>, document.body)}
     {contextMenu && !actionBlocked && createPortal(<>
       <div className="detach-context-overlay" onClick={() => setContextMenu(null)}
@@ -570,9 +573,14 @@ export function TerminalPane(props: {
           }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>
             恢复 Claude 自动标题
           </button>}
-        {canFork && onForkPeer && <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
-          title={actionBlockedReason} onClick={() => {
+        {showFork && onForkPeer && <button className="detach-menu-item" role="menuitem"
+          aria-disabled={actionBlocked || !canFork} disabled={actionBlocked}
+          title={actionBlockedReason ?? (canFork ? '创建 Fork 会话' : forkReadinessReason)} onClick={() => {
             setContextMenu(null)
+            if (!canFork) {
+              setForkReadinessHint(true)
+              return
+            }
             void onForkPeer(session.id)
           }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>⑂ Fork 会话</button>}
         {canDetach && <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
