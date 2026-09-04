@@ -971,9 +971,6 @@ function HierarchyProduct({ projection, commands, readOnly, eventSequence, termi
                   } : {})}
                   onRetryRestore={commands.retryProviderRestore}
                   onStartFreshProvider={commands.startFreshProvider}
-                  {...(client ? { onRetryWork: (sessionId: string) => {
-                    client.retryLastTerminalInput(sessionId)
-                  } } : {})}
                   onRetryFork={() => commands.retryFork(scene.id, session.id)}
                   {...(commands.renameSession ? {
                     onRename: (sessionId: string, title: string) => commands.renameSession?.(sessionId, title)

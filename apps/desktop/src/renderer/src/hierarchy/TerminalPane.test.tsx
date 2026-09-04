@@ -525,26 +525,20 @@ describe('Terminal pane', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '重试恢复' })).toBeTruthy())
   })
 
-  it('shows a real Claude round failure with its reason and retries in the same pane', async () => {
-    const user = userEvent.setup()
-    const onRetryWork = vi.fn()
+  it('leaves Claude task errors in the terminal without adding a failure banner', () => {
     render(<TerminalPane {...fixture()} workStatus="error"
       latestLines={[
         'Reply exactly STA007_RECOVERED',
         'Connection refused — a firewall or proxy may be blocking it (ConnectionRefused) · attempt 10/10'
-      ]}
-      onRetryWork={onRetryWork} />)
+      ]} />)
 
-    const status = screen.getByRole('status', { name: 'Claude Code 任务失败' })
-    expect(status.textContent).toContain('连接被拒绝')
+    expect(screen.queryByRole('status', { name: 'Claude Code 任务失败' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '重试本轮任务' })).toBeNull()
     expect(screen.getByTestId('surface-session-1')).toBeTruthy()
-    await user.click(screen.getByRole('button', { name: '重试本轮任务' }))
-    expect(onRetryWork).toHaveBeenCalledWith('session-1')
   })
 
   it('disables every card-changing action when storage pauses after a button was focused', async () => {
     const user = userEvent.setup()
-    const onRetryWork = vi.fn()
     const onFork = vi.fn()
     const onRemoveBranch = vi.fn()
     const onLoadSession = vi.fn()
@@ -552,16 +546,15 @@ describe('Terminal pane', () => {
     const props = fixture()
     const view = render(<TerminalPane {...props} resumable workStatus="error"
       latestLines={['Connection refused — attempt 10/10']}
-      onRetryWork={onRetryWork} onFork={onFork} onRemoveBranch={onRemoveBranch}
+      onFork={onFork} onRemoveBranch={onRemoveBranch}
       onLoadSession={onLoadSession} onStartFreshProvider={onStartFreshProvider} />)
 
-    const retry = screen.getByRole('button', { name: '重试本轮任务' })
-    retry.focus()
-    expect(document.activeElement).toBe(retry)
+    const loadSession = screen.getByRole('button', { name: '载入 Claude Code 会话到“Claude 主会话”' })
+    loadSession.focus()
+    expect(document.activeElement).toBe(loadSession)
     await user.click(screen.getByRole('button', { name: '触发存储异常' }))
 
     for (const name of [
-      '重试本轮任务',
       '载入 Claude Code 会话到“Claude 主会话”',
       '从“Claude 主会话”创建子分支',
       '移出节点：Claude 主会话'
@@ -571,7 +564,6 @@ describe('Terminal pane', () => {
       expect(button.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
       fireEvent.click(button)
     }
-    expect(onRetryWork).not.toHaveBeenCalled()
     expect(onFork).not.toHaveBeenCalled()
     expect(onRemoveBranch).not.toHaveBeenCalled()
     expect(onLoadSession).not.toHaveBeenCalled()

@@ -56,35 +56,29 @@ describe('TerminalWorkStatusTracker', () => {
     )).toEqual(['idle', 'running', 'needs-input'])
   })
 
-  it('marks only a terminal Claude provider failure as an error', () => {
+  it('leaves Claude failure text to the user instead of classifying the task', () => {
     const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
 
     expect(tracker.ingest('Retrying in 2s · attempt 9/10')).toEqual([])
     expect(tracker.ingest('\r\n✻ Connection refused — a firewall or proxy may be blocking it ')).toEqual([])
-    expect(tracker.ingest('(ConnectionRefused) · Retrying in 34s · attempt 10/10')).toEqual(['error'])
+    expect(tracker.ingest('(ConnectionRefused) · Retrying in 34s · attempt 10/10')).toEqual([])
+    expect(tracker.ingest('\r\nAPI Error: 529 Overloaded')).toEqual([])
+    expect(tracker.ingest('\r\nauthentication failed')).toEqual([])
+    expect(tracker.ingest('\r\nrate limit reached · final attempt')).toEqual([])
     expect(tracker.ingest('\r\n────────────────────\r\n❯ ')).toEqual([])
 
     const shell = new TerminalWorkStatusTracker()
     expect(shell.ingest('echo "Connection refused · attempt 10/10"')).toEqual([])
   })
 
-  it('keeps the provider failure visible through a full-screen repaint tail', () => {
-    const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
-
-    expect(tracker.ingest(
-      '✻ Connection refused (ConnectionRefused) · Retrying in 34s · attempt 10/10\r\n' +
-      '─'.repeat(1_500)
-    )).toEqual(['error'])
-  })
-
-  it('recognizes Claude final API Error repaint even when the retry counter was drawn as deltas', () => {
+  it('does not derive task failure from Claude full-screen repaint deltas', () => {
     const tracker = new TerminalWorkStatusTracker({ provider: 'claude-code' })
 
     expect(tracker.ingest(
       '\u001b[2D\u001b[3B\r\u001b[6A⏺\u001b[3GAPI Error:\u001b[14GConnection refused —' +
       '\u001b[35Ga firewall or proxy may be blocking it (ConnectionRefused)\u001b[K\r' +
       '\u001b[2B✻ Baked for 2m 50s · done 6:02 PM\u001b[K\r\u001b[2B❯ '
-    )).toEqual(['error'])
+    )).toEqual([])
     expect(tracker.ingest('\u001b]133;D;0\u0007')).toEqual([])
   })
 })

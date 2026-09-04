@@ -7,7 +7,7 @@ describe('nextProviderWorkStatus', () => {
     expect(nextProviderWorkStatus('error', 'completed')).toBe('error')
     expect(nextProviderWorkStatus('error', 'waiting')).toBe('error')
     expect(nextProviderWorkStatus('running', 'completed')).toBe('idle')
-    expect(nextProviderWorkStatus('running', 'error')).toBe('error')
+    expect(nextProviderWorkStatus('running', 'error')).toBe('needs-input')
     expect(nextProviderWorkStatus('running', 'permission')).toBe('needs-input')
   })
 })

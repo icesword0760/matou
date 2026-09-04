@@ -10,7 +10,6 @@ export function nextProviderWorkStatus(
   // including after a failed final network attempt. Keep a detected failure
   // sticky; explicit user input or the retry command changes it to running.
   if (current === 'error') return 'error'
-  if (eventType === 'error') return 'error'
   if (eventType === 'completed') return 'idle'
   return 'needs-input'
 }

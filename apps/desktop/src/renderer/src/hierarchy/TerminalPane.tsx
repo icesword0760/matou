@@ -74,7 +74,6 @@ export function TerminalPane(props: {
   onRetryRestore?(sessionId: string): unknown
   onStartFreshProvider?(sessionId: string): unknown
   onRetryRecovery?(sessionId: string): unknown
-  onRetryWork?(sessionId: string): unknown
   onRetryFork?(sessionId: string): unknown
   childNodes?: SessionGraphNodeView[]
   descendantNodes?: SessionGraphNodeView[]
@@ -101,7 +100,7 @@ export function TerminalPane(props: {
     providerRestoreState = 'none', restoreError, forkState, forkError, forkProgress, cwd, git,
     recoveryState: suppliedRecoveryState, recoveryError,
     sharedWorkingDirectory = false, environment, hasOwnedWorktree,
-    spawnRevision = 0, onRetryRestore, onStartFreshProvider, onRetryRecovery, onRetryWork, onRetryFork,
+    spawnRevision = 0, onRetryRestore, onStartFreshProvider, onRetryRecovery, onRetryFork,
     childNodes = [], descendantNodes = [], parentSessionId, workStatus = 'idle', latestLines = [], onOpenChildren, onLoadSession,
     themeKey = 'light', fontSize = 11, onFontSizeChange, closeRequest = 0,
     searchRequest, onSearchResults, focusRequest = 0,
@@ -265,9 +264,6 @@ export function TerminalPane(props: {
     : null
   const restoreNoticeVisible = restoreNoticeKey === null || dismissedRestoreNotice !== restoreNoticeKey
   const effectiveRestoreState = providerRestoreState
-  const providerWorkFailure = session.kind === 'claude-code' && workStatus === 'error'
-    ? claudeWorkFailureReason(latestLines)
-    : undefined
   const openPaneMenu = (event: MouseEvent<HTMLElement>) => {
     if (actionBlocked) return
     event.preventDefault()
@@ -402,17 +398,6 @@ export function TerminalPane(props: {
     {effectiveRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
       <strong>正在恢复 Claude Code 会话…</strong>
     </div>}
-    {providerWorkFailure && effectiveRestoreState !== 'failed' && forkState !== 'failed' && visible &&
-      <div className="provider-work-failure-banner" role="status" aria-label="Claude Code 任务失败">
-        <div><strong>Claude Code 任务失败</strong>
-          <span className="provider-work-failure-reason">{providerWorkFailure}</span>
-        </div>
-        {onRetryWork && <button type="button" aria-label="重试本轮任务" disabled={actionBlocked}
-          title={actionBlockedReason} onClick={(event) => {
-          event.stopPropagation()
-          void onRetryWork(session.id)
-        }}>重试</button>}
-      </div>}
     {runtimeStatus === 'error' && forkState !== 'failed' && effectiveRestoreState !== 'failed' && visible &&
       <div className="session-start-failure-card" role="status">
         <div><strong>会话启动失败</strong>
@@ -652,22 +637,6 @@ function BranchSiblingIcon() {
 
 export function RemoveNodeIcon() {
   return <AppIcon name="circle-minus" />
-}
-
-function claudeWorkFailureReason(latestLines: string[]): string {
-  const source = [...latestLines].reverse().find((line) =>
-    /Connection refused|ConnectionRefused|ECONNREFUSED|API Error|authentication|invalid api key|OAuth|rate limit|overloaded|service unavailable/i.test(line)
-  ) ?? ''
-  if (/Connection refused|ConnectionRefused|ECONNREFUSED/i.test(source)) {
-    return '连接被拒绝，请检查网络或代理后重试'
-  }
-  if (/authentication|invalid api key|OAuth/i.test(source)) {
-    return 'Claude Code 账户认证失败，请重新登录后重试'
-  }
-  if (/rate limit/i.test(source)) return 'Claude 服务达到使用限额，请稍后重试'
-  if (/overloaded|service unavailable/i.test(source)) return 'Claude 服务暂时不可用，请稍后重试'
-  const concise = source.replace(/\s+/g, ' ').trim().slice(0, 160)
-  return concise || '本轮 Claude Code 工作异常结束，请检查终端详情后重试'
 }
 
 function forkFailurePresentation(error: string | undefined): {

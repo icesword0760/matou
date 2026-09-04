@@ -2061,19 +2061,14 @@ sleep 30
     }
   })
 
-  it('keeps a failed Claude round on the same Session and retries its last submitted prompt', async () => {
+  it('keeps Claude failure output visible without classifying or retrying the task', async () => {
     const executable = join(root, 'provider-retry-round.sh')
     const inputFile = join(root, 'provider-retry-inputs.txt')
     await writeFile(executable, [
       '#!/bin/sh',
       'while IFS= read -r line; do',
       '  printf "%s\\n" "$line" >> "$MATOU_PROVIDER_INPUT_FILE"',
-      '  count=$(wc -l < "$MATOU_PROVIDER_INPUT_FILE" | tr -d " ")',
-      '  if [ "$count" = "1" ]; then',
-      '    printf "✻ Connection refused — a firewall or proxy may be blocking it (ConnectionRefused) · Retrying in 34s · attempt 10/10\\r\\n"',
-      '  else',
-      '    printf "STA007_RECOVERED\\r\\n"',
-      '  fi',
+      '  printf "✻ Connection refused — a firewall or proxy may be blocking it (ConnectionRefused) · Retrying in 34s · attempt 10/10\\r\\n"',
       'done'
     ].join('\n'))
     await chmod(executable, 0o755)
@@ -2094,20 +2089,12 @@ sleep 30
         type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
         sessionId: 'provider-round-retry', data: 'Reply exactly STA007_RECOVERED\r'
       })
-      await waitUntil(() => workStatus('provider-round-retry') === 'error', 5_000)
-
-      port.receive({
-        type: 'terminal.retry-last-input', protocolVersion: PROTOCOL_VERSION,
-        sessionId: 'provider-round-retry'
-      })
       await waitUntilAsync(async () => (
         await readFile(inputFile, 'utf8').catch(() => '')
-      ).trim().split('\n').length === 2, 5_000)
-      expect((await readFile(inputFile, 'utf8')).trim().split('\n')).toEqual([
-        'Reply exactly STA007_RECOVERED', 'Reply exactly STA007_RECOVERED'
-      ])
+      ).trim() === 'Reply exactly STA007_RECOVERED', 5_000)
+      await waitUntil(() => terminalText(port).includes('attempt 10/10'), 5_000)
       expect(workStatus('provider-round-retry')).toBe('running')
-      expect(terminalText(port)).toContain('STA007_RECOVERED')
+      expect(terminalText(port)).toContain('attempt 10/10')
     } finally {
       port.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -2710,9 +2697,10 @@ sleep 30
         'SELECT work_status FROM sessions WHERE id = ?', 'confirmed-derivation-session'
       )?.work_status).not.toBe('error')
       await writeFile(postConfirmFile, 'ready')
-      await waitUntil(() => database.get<{ work_status: string }>(
+      await waitUntil(() => terminalText(confirmedPort).includes('attempt 10/10'))
+      expect(database.get<{ work_status: string }>(
         'SELECT work_status FROM sessions WHERE id = ?', 'confirmed-derivation-session'
-      )?.work_status === 'error')
+      )?.work_status).not.toBe('error')
     } finally {
       confirmedServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
@@ -3937,9 +3925,10 @@ sleep 30
       expect(secondaryPort.sent.slice(beforeTakeoverOutput).filter((message) =>
         message.type === 'terminal.hud' && message.hud?.permissionMode === 'bypassPermissions'
       )).toHaveLength(1)
-      await waitUntil(() => database.get<{ work_status: string }>(
+      await waitUntil(() => terminalText(secondaryPort).includes('API Error: provider unavailable'))
+      expect(database.get<{ work_status: string }>(
         'SELECT work_status FROM sessions WHERE id = ?', 'provider-cross-window'
-      )?.work_status === 'error')
+      )?.work_status).not.toBe('error')
 
       secondaryPort.receive(rpc('cross-window-plan-after-owner-close', 'session.set-permission-mode', {
         sessionId: 'provider-cross-window', provider: 'claude-code',
