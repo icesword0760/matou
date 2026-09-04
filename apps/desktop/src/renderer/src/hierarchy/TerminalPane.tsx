@@ -643,7 +643,7 @@ function gitTitle(git: SessionGitState): string {
 }
 
 function BranchChildIcon() {
-  return <AppIcon name="git-branch" />
+  return <AppIcon name="layers-plus" />
 }
 
 function BranchSiblingIcon() {
