@@ -7,12 +7,52 @@
       "text": "ClaudeMd"
     },
     {
-      "className": "status-info__primary",
-      "text": "AFable 5 (1M context)72%1 MCPs3 Tools2 hooksWeekly 8% · 4d22h⚠ browser_bridge▸实现 HUD(1/2)"
+      "className": "status-field status-perm-badge is-clickable perm-auto",
+      "text": "A"
     },
     {
-      "className": "status-info__secondary",
+      "className": "status-field status-model status-priority-8",
+      "text": "Fable 5 (1M context)"
+    },
+    {
+      "className": "status-field status-context-ring status-priority-7",
+      "text": "72%"
+    },
+    {
+      "className": "status-field status-detail status-config",
+      "text": "1 MCPs"
+    },
+    {
+      "className": "status-field status-detail status-config",
+      "text": "3 Tools"
+    },
+    {
+      "className": "status-field status-detail status-config",
+      "text": "2 hooks"
+    },
+    {
+      "className": "status-field status-usage status-priority-6",
+      "text": "Weekly 8% · 4d22h"
+    },
+    {
+      "className": "status-field status-mcp-error status-priority-5",
+      "text": "⚠ browser_bridge"
+    },
+    {
+      "className": "status-field status-todos status-priority-4",
+      "text": "▸实现 HUD(1/2)"
+    },
+    {
+      "className": "status-divider status-priority-3",
+      "text": ""
+    },
+    {
+      "className": "status-field status-cwd status-priority-3",
       "text": "~/matou_workspace"
+    },
+    {
+      "className": "status-field status-environment is-clickable state-ready is-local-icon",
+      "text": ""
     }
   ],
   "bar": {

@@ -3,12 +3,20 @@
   "text": "zsh~/matou_workspacehud-main*",
   "fields": [
     {
-      "className": "status-info__primary",
+      "className": "status-field",
       "text": "zsh"
     },
     {
-      "className": "status-info__secondary",
-      "text": "~/matou_workspacehud-main*"
+      "className": "status-field status-cwd status-priority-3",
+      "text": "~/matou_workspace"
+    },
+    {
+      "className": "status-field status-git is-clickable",
+      "text": "hud-main*"
+    },
+    {
+      "className": "status-field status-environment is-clickable state-ready is-local-icon",
+      "text": ""
     }
   ],
   "bar": {

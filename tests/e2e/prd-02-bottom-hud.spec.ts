@@ -286,7 +286,7 @@ async function hudGeometry(root: Locator) {
     return {
       mode: hud.dataset.hudMode,
       text: hud.textContent,
-      fields: [...hud.children].map((element) => ({
+      fields: [...hud.querySelectorAll(':scope .status-field, :scope .team-role-badge, :scope .status-divider')].map((element) => ({
         className: element.className,
         text: element.textContent
       })),
