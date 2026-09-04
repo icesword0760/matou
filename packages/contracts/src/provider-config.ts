@@ -21,6 +21,7 @@ export type ProviderSessionActivationDeferredReason =
   | 'recovery-not-ready'
   | 'provider-identity-pending'
   | 'session-not-running'
+  | 'binding-update-failed'
   | 'restart-unavailable'
 
 export type ProviderSessionActivationTransition =

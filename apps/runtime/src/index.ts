@@ -325,6 +325,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   lifecycleCoordinator.registerHostControl(hostControl)
   const agentNotifications = new AgentNotificationRepository(database, transactions)
   const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository, {
+    currentRunId: (sessionId) => sessions.get(sessionId)?.runId,
     onNotification: (notification) => {
       const now = Date.now()
       const eventId = `agent-notification-${randomUUID()}`

@@ -2722,12 +2722,14 @@ export class RuntimeServer {
   #retireProviderHook(
     sessionId: string,
     runId: string,
-    registration?: ProviderHookRegistration
+    registration?: ProviderHookRegistration,
+    suppressSideEffects = false
   ): void {
     if (!registration) return
     const tracked = this.#providerHookRegistrations.get(sessionId)?.get(runId)
-    if (!tracked || tracked.registration !== registration || tracked.retirementTimer) return
-    registration.retire(PROVIDER_HOOK_RETIREMENT_GRACE_MS)
+    if (!tracked || tracked.registration !== registration) return
+    registration.retire(PROVIDER_HOOK_RETIREMENT_GRACE_MS, { suppressSideEffects })
+    if (tracked.retirementTimer) return
     const timer = setTimeout(() => {
       void registration.dispose().catch((error) => {
         console.error(`[provider-hook.dispose] ${errorMessage(error)}`)
@@ -3231,61 +3233,67 @@ export class RuntimeServer {
   ): Promise<ProviderSessionActivationTransition> {
     return this.#sessions.runExclusive(sessionId, async () => {
       const session = this.#sessions.get(sessionId)
+      const binding = session?.profile === descriptor.profile && descriptor.profile !== 'shell'
+        ? this.#sessionRepository.getResumeBinding(
+            sessionId,
+            descriptor.profile
+          )
+        : undefined
+      const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
       const deferredReason = this.#providerActivationDeferredReason(
         sessionId,
         descriptor.profile,
         session,
-        peers
+        peers,
+        binding !== undefined &&
+          previousSettings.providerConfigId !== undefined
       )
       if (deferredReason) {
         return { sessionId, status: 'deferred', reason: deferredReason }
       }
       const active = session!
-      const binding = this.#sessionRepository.getProviderSettingsBinding(
-        sessionId,
-        descriptor.profile as ProviderCli
-      )
-      const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
+      const currentBinding = binding!
       const previousPermission = permissionModeFromMetadata(binding?.metadata) ?? 'default'
-
-      // Stop the old run from contributing provider identity before its durable
-      // launch settings change. The endpoint stays alive for graceful final hooks,
-      // but its identity writes are fenced during this transition.
-      if (active.runId) {
-        for (const peer of peers) {
-          const registration = peer.#providerHookRegistrations
-            .get(sessionId)?.get(active.runId)?.registration
-          peer.#retireProviderHook(sessionId, active.runId, registration)
-        }
-      }
-      if (binding) {
+      let bindingUpdated = false
+      const wasAttached = this.#attachedSessionIds.has(sessionId)
+      try {
+        // Persist while the old process and hook are still fully authoritative.
+        // A storage failure therefore leaves every live side effect untouched.
         this.#sessionRepository.updateProviderLaunchSettings({
           commandId: `provider-config-activate-${sessionId}-${randomUUID()}`,
           commandType: 'provider-binding.launch-settings',
           requestHash: `${sessionId}:${selection.providerConfigId}:${selection.model}`
         }, {
-          bindingId: binding.id,
+          bindingId: currentBinding.id,
           providerConfigId: selection.providerConfigId,
           model: selection.model,
           permissionMode: previousPermission,
           now: Date.now()
         })
-      }
+        bindingUpdated = true
 
-      const wasAttached = this.#attachedSessionIds.has(sessionId)
-      for (const peer of peers) {
-        peer.#clearProviderResumeTimer(sessionId)
-        peer.#control?.backend.unregister(sessionId, active)
-        peer.#control?.tokens.revokeRun(active.runId ?? sessionId)
-        peer.#providerInputBuffers.delete(sessionId)
-        peer.#workStatusTrackers.delete(sessionId)
-        peer.#permissionModeTrackers.delete(sessionId)
-      }
-      this.#sessions.delete(sessionId, active)
-      active.dispose({ notifyExit: false })
-      await active.whenClosed()
+        // The binding is durable now. Retire every old-run endpoint before the
+        // process can emit a final hook, and suppress all of its product effects.
+        if (active.runId) {
+          for (const peer of peers) {
+            const registration = peer.#providerHookRegistrations
+              .get(sessionId)?.get(active.runId)?.registration
+            peer.#retireProviderHook(sessionId, active.runId, registration, true)
+          }
+        }
 
-      try {
+        for (const peer of peers) {
+          peer.#clearProviderResumeTimer(sessionId)
+          peer.#control?.backend.unregister(sessionId, active)
+          peer.#control?.tokens.revokeRun(active.runId ?? sessionId)
+          peer.#providerInputBuffers.delete(sessionId)
+          peer.#workStatusTrackers.delete(sessionId)
+          peer.#permissionModeTrackers.delete(sessionId)
+        }
+        this.#sessions.delete(sessionId, active)
+        active.dispose({ notifyExit: false })
+        await active.whenClosed()
+
         await this.#spawn(descriptor, undefined, undefined, wasAttached)
         const replacement = this.#sessions.get(sessionId)
         if (!replacement || replacement === active || replacement.profile !== descriptor.profile) {
@@ -3303,24 +3311,27 @@ export class RuntimeServer {
         RuntimeServer.#publishAttachedSessionHud(sessionId)
         return { sessionId, status: 'updated' }
       } catch (error) {
-        if (
-          binding && previousSettings.providerConfigId !== undefined &&
-          previousSettings.model !== undefined
-        ) {
+        if (!bindingUpdated) {
+          console.error(`[provider-config.activate] ${errorMessage(error)}`)
+          return { sessionId, status: 'deferred', reason: 'binding-update-failed' }
+        }
+        try {
           this.#sessionRepository.updateProviderLaunchSettings({
             commandId: `provider-config-rollback-${sessionId}-${randomUUID()}`,
             commandType: 'provider-binding.launch-settings',
             requestHash: `${sessionId}:${previousSettings.providerConfigId}:${previousSettings.model}`
           }, {
-            bindingId: binding.id,
-            providerConfigId: previousSettings.providerConfigId,
-            model: previousSettings.model,
+            bindingId: currentBinding.id,
+            providerConfigId: previousSettings.providerConfigId!,
+            model: previousSettings.model ?? '',
             permissionMode: previousPermission,
             now: Date.now()
           })
           if (!this.#sessions.has(sessionId)) {
             await this.#spawn(descriptor, undefined, undefined, wasAttached)
           }
+        } catch (rollbackError) {
+          console.error(`[provider-config.rollback] ${errorMessage(rollbackError)}`)
         }
         console.error(`[provider-config.activate] ${errorMessage(error)}`)
         return { sessionId, status: 'deferred', reason: 'restart-unavailable' }
@@ -3332,14 +3343,20 @@ export class RuntimeServer {
     sessionId: string,
     profile: TerminalSpawnMessage['profile'],
     session: PtySession | undefined,
-    peers: RuntimeServer[]
+    peers: RuntimeServer[],
+    hasValidBinding: boolean
   ): ProviderSessionActivationDeferredReason | undefined {
     if (!session || session.profile !== profile) return 'session-not-running'
     if (session.durabilityState !== 'healthy') return 'durability-fault'
     const recovery = peers.flatMap((peer) => peer.#recoveryCoordinator?.snapshot() ?? [])
       .find((job) => job.sessionId === sessionId && job.state !== 'ready')
     if (recovery) return 'recovery-not-ready'
-    if (this.#sessions.providerIdentityPending(sessionId)) return 'provider-identity-pending'
+    if (
+      !session.runId ||
+      this.#sessions.providerIdentityPending(sessionId) ||
+      !this.#sessions.providerIdentityConfirmed(session.runId) ||
+      !hasValidBinding
+    ) return 'provider-identity-pending'
     return undefined
   }
 

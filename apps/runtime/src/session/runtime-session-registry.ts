@@ -48,7 +48,12 @@ export class RuntimeSessionRegistry {
   }
   confirmProviderIdentity(sessionId: string, runId: string): boolean {
     const pending = this.#pendingProviderRuns.get(sessionId)
-    if (!pending || pending.runId !== runId) return false
+    if (!pending) {
+      if (this.#sessions.get(sessionId)?.runId !== runId) return false
+      this.#confirmedProviderRuns.add(runId)
+      return true
+    }
+    if (pending.runId !== runId) return false
     this.#pendingProviderRuns.delete(sessionId)
     this.#confirmedProviderRuns.add(runId)
     pending.confirm()

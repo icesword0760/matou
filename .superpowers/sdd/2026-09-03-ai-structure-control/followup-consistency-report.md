@@ -25,14 +25,14 @@
 | Hook 当前模型 reconciliation | `apps/runtime/src/session/provider-hook-server.ts:349-371,615-621` | 已知会话身份不再回灌 launch-time model；仅 hook 报告的精确当前模型更新 binding。 |
 | HUD 精确模型同步 | `apps/runtime/src/session/session-hud-registry.ts:178-187` | provider 激活/恢复后可把精确模型写入 HUD，同时保持可识别的 model strategy。 |
 | 激活结果产品 contract | `packages/contracts/src/provider-config.ts:19-36` | 新增逐 Session 的 `updated` / `deferred` 结果与稳定原因枚举，无 schema 变化。 |
-| Provider 激活排他事务 | `apps/runtime/src/runtime-server.ts:3187-3344` | 按共享 RuntimeSessionRegistry 收集 live Session；每个 Session 在单次排他转换中完成资格判断、旧 hook fencing、binding 更新、进程轮换与启动存活校验。失败路径恢复旧 binding，并返回 `restart-unavailable`。 |
+| Provider 激活排他事务 | `apps/runtime/src/runtime-server.ts:3189-3360` | 按共享 RuntimeSessionRegistry 收集 live Session；每个 Session 在单次排他转换中完成资格判断、binding 持久化、旧 hook 全副作用 fencing、进程轮换与启动存活校验。首次持久化失败时旧 hook 与进程保持原样；后续失败路径恢复旧 binding，并返回明确的 deferred 结果。 |
 | 设置界面反馈 | `apps/desktop/src/renderer/src/hierarchy/ModelSwitchSettings.tsx:86-102,188-191` | Toast 分别显示已更新与暂缓数量；静态说明告知暂缓 Session 保持原配置。 |
 
 ### 2.1 保留的身份与权限边界
 
 - 模型动作更新既有 binding id，只改 `model`；`providerConfigId`、profile、provider conversation id 和 permission 继续来自该 Session 原 binding。
 - Provider 激活保留原 permission；重启描述符保留 Session id、执行上下文、cwd、尺寸、附着状态和原恢复身份。
-- 激活开始时先 retire 当前 run 的 hook registration，再变更 binding；延迟到达的旧 hook 得到正常 HTTP 响应，但其旧身份/model 写入受 run fencing 拦截。
+- 激活先验证当前有效 binding 与已确认的 current run identity，再尝试写 binding；写入成功后才 retire 当前 run 的 hook registration，并同时关闭其全部产品副作用。延迟到达的旧 hook 得到正常 HTTP 响应，但不会再写 identity/model、HUD、通知、工作状态、标题或 Team 状态。
 - 对外结构化证据仅记录 provider 配置 id、endpoint、model、PID 是否轮换及 credential digest 是否存在；没有记录原始 key。
 
 ## 3. TDD RED / GREEN
@@ -145,3 +145,158 @@
 - Provider 激活按 Session 逐个原子转换，而不是把所有 Session 包成一个全局事务。因此可出现部分 Session 已更新、部分 Session 暂缓；返回 contract 与设置界面会逐项/汇总呈现，暂缓 Session 保持旧配置与旧进程。
 - `package:dir` 产物缺少 Developer ID Application 签名；本轮功能回放使用该本地目录产物，正式分发仍走项目既有签名与公证流程。
 - 最终完整 AI Host E2E 已通过；中间一次原生窗口前台焦点等待抖动已在独立重试和完整重跑中复核。
+
+---
+
+# Independent review closure — round 1/5
+
+**复核日期：** 2026-09-04
+**前一实现提交：** `4e93cd7`
+**本节结论：** independent review 提出的 3 个阻断项均已闭合。新建 Session 在首个 provider identity hook 到达前保持原进程并返回 `deferred/provider-identity-pending`；激活写 binding 失败时旧 binding、PID 与 hook 全部保留；成功激活后，旧 run endpoint 继续返回 HTTP 200，但 identity、HUD、通知、工作状态、标题与 Team 均不再发生旧 run 写入。
+
+## 8. Round 1 用户结果与状态转换
+
+### 8.1 首次身份确认前不轮换新 Session
+
+1. Session 排他转换先读取 `getResumeBinding(sessionId, profile)`；该查询只接受 `available/resumed`、`validated_at IS NOT NULL`、`invalidated_at IS NULL` 的 binding。
+2. 转换同时要求 live Session 有 current `runId`、该 run 已由 provider hook 确认、binding 带既有 `providerConfigId`。
+3. 任一身份前置条件缺失时返回 `{ status: 'deferred', reason: 'provider-identity-pending' }`；此路径仅返回 deferred，binding、hook、PTY 与 launch count 全部保持入场状态。
+4. fresh run 的首个有效 identity hook 创建 authoritative binding，并仅在 `sessionId` 当前 live run 与 hook `runId` 相等时记录 confirmed run；旧 run hook不具备确认资格。随后再次激活即可正常从 A 轮换到 B。
+
+**生产锚点：**
+- `apps/runtime/src/runtime-server.ts:3234-3253,3342-3360`
+- `apps/runtime/src/domain/session-repository.ts:893-906`
+- `apps/runtime/src/session/runtime-session-registry.ts:49-60`
+- `apps/runtime/src/runtime-server.test.ts:987-1117`
+- `apps/runtime/src/session/runtime-session-registry.test.ts:84-93`
+
+### 8.2 持久化成功前，旧进程与旧 hook 保持完整
+
+单个 Session 的成功顺序现在固定为：
+
+`runExclusive → snapshot current session/binding/settings → eligibility gate → write B to existing binding → suppress+retire old hook → revoke/clear old runtime state → dispose old PTY → spawn replacement from durable B → verify replacement is alive → publish HUD B`
+
+- binding write 位于旧 hook retirement 之前，并与后续转换放在同一个 `try/catch` 中。
+- 首次 write 抛错时 `bindingUpdated` 仍为 false，直接返回 `deferred/binding-update-failed`；旧 hook registration、旧 Session 对象、PID、binding A 与 permission 全部原样保留。
+- write 成功后的启动异常继续执行已有 rollback：恢复旧 provider/model/permission，并在旧 Session 已退出时按旧 binding respawn，返回 `deferred/restart-unavailable`。
+
+**生产锚点：**
+- `apps/runtime/src/runtime-server.ts:3254-3338`
+- `packages/contracts/src/provider-config.ts:19-26`
+- `apps/runtime/src/runtime-server.test.ts:1119-1247`
+
+### 8.3 旧 run hook 的所有产品副作用都受 current run fencing
+
+- production wiring 将 `RuntimeSessionRegistry` 的当前 `runId` 提供给 `ProviderHookServer`：`apps/runtime/src/index.ts:327-329`。
+- hook 在解析身份前检查 ownership；identity 后、HUD 前再次检查；transcript/title 的异步读取后再次检查；Team callback 与 notification 前继续检查。
+- provider 激活在 binding B 落盘后，以 `suppressSideEffects: true` retire 旧 registration。即使 endpoint 仍处于 grace period，旧 hook 只收到 HTTP 200，不再触发产品状态写入。
+- registration 已进入普通 retirement 时，后续 activation retirement 仍会升级为 suppress-all；既有 timer 不影响该 fencing 标记。
+
+**生产锚点：**
+- `apps/runtime/src/session/provider-hook-server.ts:269-279,286-476,482-560`
+- `apps/runtime/src/runtime-server.ts:2722-2744,3275-3283`
+- `apps/runtime/src/runtime-server.test.ts:772-985`
+
+生产 wiring 回归在 provider B 激活完成后向旧 URL 投递携带 model A、91% context、旧 title、旧 teammate 和 completed notification 的 `Stop` hook。endpoint 返回 200；测试逐项确认 HUD 完整 snapshot、work status、Session title、`agent.notification` event count 和 `agent-team-member` count 均保持激活完成时的值，同时 durable binding 与新进程继续为 B。
+
+## 9. Round 1 TDD RED / GREEN
+
+所有命令均在 `/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control` 执行；原断言未削弱。
+
+### 9.1 三个 review boundary 的首轮 RED
+
+```sh
+pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/runtime-server.test.ts -t 'fresh Session before its first identity hook|old binding, process, and hook when provider activation persistence fails|atomically activates an eligible provider'
+```
+
+- **RED：** 1 file；3 failed / 113 skipped（116 total）。
+- stale old hook 改写了 HUD；fresh Session 被报告为 updated 并轮换；注入 binding write failure 后 RPC 没有得到转换结果。
+- 日志：`followup-consistency-artifacts/logs/round1-three-boundaries-red.log`
+
+相同命令完成第一轮实现后：
+
+- **GREEN：** 1 file；3 passed / 113 skipped（116 total）。
+- 日志：`followup-consistency-artifacts/logs/round1-three-boundaries-green-1.log`
+
+### 9.2 首个 hook 的 fresh-run confirmation 邻接缺陷
+
+第一轮 GREEN 继续检查“首 hook 后再次激活”时发现：fresh Session 没有 resume output gate，原 registry 因不存在 pending record 而忽略了当前 run 的有效确认；binding 已创建，但 eligibility 仍停在 identity pending。按本轮同一状态转换范围做了最小修正：只接受 registry 中当前 Session 的 exact `runId`，并把该 run 加入 confirmed set。
+
+```sh
+pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/runtime-server.test.ts src/session/runtime-session-registry.test.ts -t 'fresh Session before its first identity hook|current fresh run without a pending output gate'
+```
+
+- **RED：** 2 files；2 failed / 120 skipped（122 total）。
+- **GREEN：** 2 files；2 passed / 120 skipped（122 total）。
+- RED 日志：`followup-consistency-artifacts/logs/round1-fresh-identity-confirmation-red.log`
+- GREEN 日志：`followup-consistency-artifacts/logs/round1-fresh-identity-confirmation-green.log`
+
+### 9.3 最终聚焦回归
+
+```sh
+pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/runtime-server.test.ts src/session/provider-hook-server.test.ts src/session/runtime-session-registry.test.ts -t 'explicitly rebinds an attached|atomically activates an eligible|fresh Session before its first identity hook|old binding, process, and hook when provider activation persistence fails|globally refreshed background|global Claude provider only to healthy|restored Session identity is still pending|recovering Claude process, permission|current fresh run without a pending output gate|old launch registration|exact model id'
+```
+
+- **GREEN：** 3 files；11 passed / 134 skipped（145 total）。
+- 覆盖 attached/background eligible activation、durability/recovery/pending/fresh gates、write failure、stale hook、fresh confirmation 与 hook model reconciliation。
+- 日志：`followup-consistency-artifacts/logs/round1-focused-final.log`
+
+补充文件级结果：
+
+- `src/runtime-server.test.ts`：116 passed；`followup-consistency-artifacts/logs/round1-runtime-server-green-2.log`
+- `src/session/provider-hook-server.test.ts`：23 passed；`followup-consistency-artifacts/logs/round1-provider-hook-green.log`
+
+## 10. Round 1 acceptance matrix
+
+| 场景 | 可观察断言 | 结果 |
+|---|---|---|
+| fresh Session，首 identity hook 前激活 B | `deferred/provider-identity-pending`；同一 Session object/PID；launch count 仍为 1；binding 仍为空；原 hook 可继续接收 | 通过 |
+| fresh Session 首 hook 报告 A | 创建有效 A binding；current run 标记 confirmed；旧 run id 无确认资格 | 通过 |
+| fresh Session 身份确认后再激活 B | 返回 `updated`；PID 轮换；原 conversation identity 保留；binding/provider/model 为 B | 通过 |
+| eligible A → B，旧 hook 在转换中延迟到达 | old endpoint HTTP 200；binding 不回写 A；replacement 按 B endpoint/model 与原 conversation 启动 | 通过 |
+| eligible A → B，激活完成后旧 hook 含全套 side effects | HTTP 200；HUD/model/context/task、notification、work status、title、Team 均保持新 run 状态 | 通过 |
+| binding update 抛错 | `deferred/binding-update-failed`；旧 binding A、permission、Session object、PID、launch count 保持；原 hook 仍可更新 A 的 identity/HUD | 通过 |
+| 既有 durability/recovery/pending gates | skipped Session 继续保留旧 binding 与 live process；eligible peer 独立完成更新 | 通过 |
+
+## 11. Round 1 完整门禁
+
+| 验证 | 精确命令 | 结果 | 日志 / 证据 |
+|---|---|---|---|
+| 全量单元/集成 | `pnpm test` | exit 0；identifier 4 passed；Vitest 194 files / 1889 passed；合计 1893 passed | `followup-consistency-artifacts/logs/round1-pnpm-test-final.log` |
+| 全仓类型 | `pnpm typecheck` | exit 0；packages build 与 contracts/domain/ui/desktop/runtime typecheck 全通过 | `followup-consistency-artifacts/logs/round1-typecheck-final-serial.log` |
+| 三组 AI Host E2E | `pnpm exec playwright test tests/e2e/ai-host-control-cli.spec.ts tests/e2e/ai-host-structure-control.spec.ts tests/e2e/ai-host-navigation.spec.ts --workers=1 --reporter=line` | 最终完整重跑 11 passed (1.4m) | `followup-consistency-artifacts/logs/round1-three-ai-host-e2e-retry.log` |
+| 目录打包 | `pnpm package:dir` | exit 0；macOS arm64 App 由当前源码重新构建 | `followup-consistency-artifacts/logs/round1-package-dir-final.log` |
+| 受影响打包重启场景 | `MATOU_E2E_EXECUTABLE_PATH="$PWD/apps/desktop/release/mac-arm64/码头.app/Contents/MacOS/码头" pnpm exec playwright test tests/e2e/.followup-consistency-packaged.spec.ts --workers=1 --reporter=line` | 1 passed (5.2s) | `followup-consistency-artifacts/logs/round1-packaged-session-model-restart.log` |
+| 命名门禁 | `pnpm check:identifiers` | exit 0 | `followup-consistency-artifacts/logs/round1-check-identifiers-final.log` |
+| Diff 卫生 | `git diff --check` | exit 0 | `followup-consistency-artifacts/logs/round1-git-diff-check-final.log` |
+
+执行说明：第一次三组 E2E 完整回放为 9 passed / 2 failed；两处均是既有 macOS 原生焦点/真实 Shell ready 等待抖动，生产修改未触碰相关窗口或 Shell 代码。同一精确命令完整重跑得到 11/11 passed。初次全量 `pnpm test` 与 `pnpm typecheck` 并发执行时，两条命令同时清理 package `dist`，typecheck 命中一次缺失的 `packages/domain/dist/index.d.ts`；全量测试结束后按串行顺序重新执行 typecheck 得到 exit 0。
+
+## 12. Round 1 packaged-App deterministic-provider evidence
+
+**证据性质：deterministic local provider fixture。** 该证据经过当前目录打包产物的 Electron main、Renderer、Runtime、SQLite、PTY 与 HTTP hook；它不代表外部云 provider 在线服务回放。
+
+- App：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/apps/desktop/release/mac-arm64/码头.app`
+- 可执行文件：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/apps/desktop/release/mac-arm64/码头.app/Contents/MacOS/码头`
+- Runtime bundle：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/apps/desktop/release/mac-arm64/码头.app/Contents/Resources/runtime/index.cjs`
+- App archive：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/apps/desktop/release/mac-arm64/码头.app/Contents/Resources/app.asar`
+- harness（保留的忽略证据）：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/harness/followup-consistency-packaged.spec.ts`
+- 结构化结果：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/results/session-model-restart-packaged.json`
+- 截图：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/screenshots/session-model-restart-packaged.png`
+- SHA 清单：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/results/round1-package-sha256.txt`
+
+| 组件 | Round 1 SHA-256 |
+|---|---|
+| `Contents/MacOS/码头` | `221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5` |
+| `Contents/Resources/runtime/index.cjs` | `0464a7c15c27c6773c8d89d0dabceb6456db58418984aec99e891b39ab8dc92e` |
+| `Contents/Resources/app.asar` | `86a880b1db16517fc2856f0d7fe5b236716670c43e408149d1f958230fce70ad` |
+
+结构化结果确认：source Session 在全局 provider A 下由 hook 将模型从 A 精确更新为 B；App 停止后全局 active 改成 provider C；重新启动同一个打包 App 后，source 继续使用 provider A endpoint、model B、原 permission/conversation，PID 已轮换，全局 active 仍为 C。结果文件仅保存配置 id、endpoint、model、PID 是否轮换与 credential digest 是否存在，不保存原始 credential。
+
+## 13. Round 1 关注点与证据边界
+
+- 本轮没有 database migration，继续更新原 `provider_bindings.metadata_json`；Fork 与 restart 的 authoritative read path 未变。
+- 打包场景采用 deterministic fixture；真实外部 provider 的网络响应、服务端模型别名和账户策略需在对应集成环境继续观察。
+- provider activation 是逐 Session 排他转换；多 Session 仍可能出现 eligible 已更新、ineligible 暂缓的混合结果，现有 RPC contract 与设置 UI 会明确汇总。
+- 若 binding B 已成功持久化、旧进程已退出，而后续 respawn 与 rollback 持久化同时发生底层存储故障，系统会记录 `provider-config.rollback` 错误并返回 `restart-unavailable`；这是双重基础设施故障边界，本轮“首次 binding write 失败时保留 A 的完整 live 状态”仍已闭合。
+- `package:dir` 目录产物仍无 Developer ID Application 签名；本地 packaged-App 回放已通过，正式分发沿用项目既有签名与公证流程。

@@ -28,6 +28,7 @@ interface HookRegistrationRecord {
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
   acceptIdentity: boolean
+  acceptSideEffects: boolean
   settingsPath: string
   statusScriptPath: string
   retirementTimer?: ReturnType<typeof setTimeout>
@@ -69,6 +70,7 @@ export interface AgentTeamObservation {
 }
 
 export interface ProviderHookServerOptions {
+  currentRunId?: (sessionId: string) => string | undefined
   onNotification?: (notification: ProviderHookNotification) => void
   onHudPayload?: (event: {
     runId: string
@@ -99,7 +101,7 @@ export interface ProviderHookRegistration {
   settingsPath: string
   codexHooksConfig?: string
   hookUrl: string
-  retire(graceMs?: number): void
+  retire(graceMs?: number, options?: { suppressSideEffects?: boolean }): void
   dispose(): Promise<void>
 }
 
@@ -111,6 +113,7 @@ export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
   readonly #registrations = new Map<string, HookRegistrationRecord>()
+  readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
@@ -123,6 +126,7 @@ export class ProviderHookServer {
   constructor(dataRoot: string, sessions: SessionRepository, options: ProviderHookServerOptions = {}) {
     this.#dataRoot = dataRoot
     this.#sessions = sessions
+    this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
@@ -244,6 +248,7 @@ export class ProviderHookServer {
       inheritedConversation: input.inheritedConversation === true,
       ...(input.forkAuthority === undefined ? {} : { forkAuthority: input.forkAuthority }),
       acceptIdentity: true,
+      acceptSideEffects: true,
       settingsPath,
       statusScriptPath
     }
@@ -264,7 +269,8 @@ export class ProviderHookServer {
       settingsPath,
       ...(provider === 'codex' ? { codexHooksConfig: codexInlineHookConfig(statusScriptPath) } : {}),
       hookUrl,
-      retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS) => {
+      retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS, options = {}) => {
+        if (options.suppressSideEffects) record.acceptSideEffects = false
         if (disposePromise || record.retirementTimer) return
         // Keep the endpoint alive briefly for the final HUD/notification hooks, while
         // preventing a process that has already returned to Shell from resurrecting
@@ -294,6 +300,11 @@ export class ProviderHookServer {
       // Session. Acknowledge later hooks so the provider is not stalled, but do
       // not let them mutate the original card's HUD, notifications or DAG.
       if (registration.identityRejected) {
+        sendJson(response, 200, {})
+        return
+      }
+      if (!this.#acceptsSideEffects(registration)) {
+        this.#stopTitleWatch(registration)
         sendJson(response, 200, {})
         return
       }
@@ -416,6 +427,11 @@ export class ProviderHookServer {
         sendJson(response, 200, {})
         return
       }
+      if (!this.#acceptsSideEffects(registration)) {
+        this.#stopTitleWatch(registration)
+        sendJson(response, 200, {})
+        return
+      }
       this.#onHudPayload({
         runId: registration.runId,
         sessionId: registration.sessionId,
@@ -436,7 +452,17 @@ export class ProviderHookServer {
           runId: registration.runId,
           leadSessionId: registration.sessionId
         })
+        if (!this.#acceptsSideEffects(registration)) {
+          this.#stopTitleWatch(registration)
+          sendJson(response, 200, {})
+          return
+        }
         if (observations.length > 0) await this.#onTeamObservations(observations)
+      }
+      if (!this.#acceptsSideEffects(registration)) {
+        this.#stopTitleWatch(registration)
+        sendJson(response, 200, {})
+        return
       }
       const notificationEvent = toProviderNotificationEvent(payload)
       if (notificationEvent) {
@@ -458,7 +484,15 @@ export class ProviderHookServer {
     providerSessionId: string,
     transcriptPath: string
   ): Promise<boolean> {
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return false
+    }
     const transcript = await readTranscriptTail(transcriptPath).catch(() => '')
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return false
+    }
     const title = latestClaudeAutoTitle(transcript, providerSessionId)
     if (!title) return false
     if (registration.observedTitle === title) {
@@ -482,6 +516,10 @@ export class ProviderHookServer {
     providerSessionId: string,
     transcriptPath: string
   ): Promise<void> {
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return
+    }
     const current = registration.titleWatch
     if (current?.providerSessionId === providerSessionId && current.transcriptPath === transcriptPath) return
     this.#stopTitleWatch(registration)
@@ -509,6 +547,16 @@ export class ProviderHookServer {
 
     // Close the gap between the first read and installing the file watcher.
     await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)
+  }
+
+  #acceptsSideEffects(registration: HookRegistrationRecord): boolean {
+    if (!registration.acceptSideEffects) return false
+    try {
+      const currentRunId = this.#currentRunId(registration.sessionId)
+      return currentRunId === undefined || currentRunId === registration.runId
+    } catch {
+      return false
+    }
   }
 
   #stopTitleWatch(registration: HookRegistrationRecord): void {
