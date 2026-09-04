@@ -19,7 +19,7 @@ describe('PRD 02 bottom HUD', () => {
     }} />)
 
     expect(container.querySelector('.status-info')?.textContent).toMatch(
-      /^zsh~\/projectfeature\/hud\*⏱1m$/
+      /^zsh~\/projectfeature\/hud\*$/
     )
     expect(screen.queryByText(/unknown|N\/A|--/i)).toBeNull()
     expect(container.querySelector('.status-git')?.textContent).toBe('feature/hud*')
@@ -94,7 +94,12 @@ describe('PRD 02 bottom HUD', () => {
       sessionName: 'adaptive-painting-hoare',
       teamRole: 'Leader', teamStatus: 'running',
       usageWindows: [{ label: 'Weekly', percent: 8, resetsAt: Date.now() + 4 * 86_400_000 + 22 * 3_600_000 }],
-      configCounts: { instructionFiles: 1, mcpServers: 2, hooks: 11 },
+      configCounts: {
+        instructionFiles: 1, mcpServers: 2, hooks: 11,
+        mcpServerNames: ['browser-bridge', 'filesystem'],
+        hookNames: ['Stop', 'Notification']
+      },
+      subagents: ['reviewer', 'test-runner'],
       mcpErrors: ['browser-bridge'],
       toolCounts: [{ name: 'Read', count: 9 }, { name: 'Bash', count: 9 }],
       lastTool: { name: 'WebFetch', target: 'example.com', status: 'error' },
@@ -111,16 +116,98 @@ describe('PRD 02 bottom HUD', () => {
     const { container } = render(<TerminalHud hud={hud} />)
 
     const text = container.querySelector('.status-info')?.textContent ?? ''
-    expect(text).toContain('AEOpus 4.6 (1M context)86%Weekly 8%')
+    expect(text).toContain('AEOpus 4.6 (1M context)86%2 MCPs21 Tools2 Agents11 hooksWeekly 8%')
     expect(text).not.toContain('adaptive-painting-hoare')
-    expect(text).toContain('1 CLAUDE.md2 MCPs11 hooks')
+    expect(text).toContain('ClaudeMd')
+    expect(text).toContain('2 MCPs21 Tools2 Agents11 hooks')
     expect(text).toContain('⚠ browser-bridge')
     expect(container.querySelector('.status-tool-running, .status-last-tool, .status-tool-done')).toBeNull()
     expect(text).not.toContain('WebFetch')
-    expect(text).toContain('任务中Agent:2Leader')
+    expect(text).not.toContain('任务中')
+    expect(text).toContain('2 Agents')
+    expect(text).toContain('Leader')
     expect(text).toContain('▸完成 HUD 实现(1/2)')
-    expect(text).toMatch(/~\/projectmain⏱1h1m$/)
+    expect(text).toMatch(/~\/projectmain$/)
     expect(container.querySelector('.context-ring-fg')?.getAttribute('stroke')).toBe('#f85149')
+  })
+
+  it('keeps ClaudeMd first and removes Local and elapsed time from the compact HUD', () => {
+    const { container } = render(<TerminalHud hud={agent({
+      cwd: '/Users/demo/project', startedAt: Date.now() - 90_000, taskStatus: 'running'
+    })} environment={{
+      kind: 'local', state: 'ready', path: '/Users/demo/project', localExecutionContextId: 'local-context'
+    }} environmentActions={environmentActions()} runtimeClient={{ request: vi.fn() }} />)
+
+    expect(container.querySelector('.status-info')?.firstElementChild?.textContent).toBe('ClaudeMd')
+    expect(screen.queryByText('任务中')).toBeNull()
+    expect(screen.queryByText('Local')).toBeNull()
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' })).not.toBeNull()
+    expect(container.querySelector('.status-info')?.textContent).not.toContain('⏱')
+  })
+
+  it('shows MCP, Tool and Agent detail lists on hover or keyboard focus', async () => {
+    const user = userEvent.setup()
+    render(<TerminalHud hud={agent({
+      configCounts: {
+        instructionFiles: 1, mcpServers: 2, hooks: 1,
+        mcpServerNames: ['browser-bridge', 'filesystem'], hookNames: ['Stop']
+      },
+      runningTools: [{ name: 'Edit', target: '/repo/src/App.tsx' }],
+      toolCounts: [{ name: 'Read', count: 3 }, { name: 'Bash', count: 2 }],
+      subagentCount: 2,
+      subagents: ['reviewer', 'test-runner']
+    })} runtimeClient={{ request: vi.fn() }} />)
+
+    await user.hover(screen.getByText('2 MCPs'))
+    expect(screen.getByRole('tooltip').textContent).toContain('browser-bridge')
+    expect(screen.getByRole('tooltip').textContent).toContain('filesystem')
+    await user.unhover(screen.getByText('2 MCPs'))
+
+    fireEvent.focus(screen.getByText('6 Tools'))
+    expect(screen.getByRole('tooltip').textContent).toContain('Edit · 运行中')
+    expect(screen.getByRole('tooltip').textContent).toContain('Read · 3 次')
+    fireEvent.blur(screen.getByText('6 Tools'))
+
+    await user.hover(screen.getByText('2 Agents'))
+    expect(screen.getByRole('tooltip').textContent).toContain('reviewer')
+    expect(screen.getByRole('tooltip').textContent).toContain('test-runner')
+  })
+
+  it('opens the current project instruction file, edits it and saves it', async () => {
+    const user = userEvent.setup()
+    const request = vi.fn(async (method: RpcMethod, payload: unknown, _options?: { timeoutMs?: number }) => {
+      if (method === 'session.instructions-read') return {
+        path: '/Users/demo/project/CLAUDE.md', content: '# Existing\n', exists: true
+      }
+      if (method === 'session.instructions-write') return {
+        path: '/Users/demo/project/CLAUDE.md', content: '# Updated\n', exists: true
+      }
+      throw new Error(`unexpected ${method}: ${JSON.stringify(payload)}`)
+    })
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
+    }
+    render(<TerminalHud hud={agent({ cwd: '/Users/demo/project' })}
+      runtimeClient={runtimeClient} />)
+
+    await user.click(screen.getByRole('button', { name: '编辑 ClaudeMd' }))
+    const dialog = await screen.findByRole('dialog', { name: '编辑 ClaudeMd' })
+    expect(dialog.textContent).toContain('/Users/demo/project/CLAUDE.md')
+    const editor = screen.getByRole('textbox', { name: 'ClaudeMd 内容' })
+    expect((editor as HTMLTextAreaElement).value).toBe('# Existing\n')
+    await user.clear(editor)
+    await user.type(editor, '# Updated')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    expect(request).toHaveBeenNthCalledWith(1, 'session.instructions-read', {
+      sessionId: 'session-1'
+    }, { timeoutMs: 10_000 })
+    expect(request).toHaveBeenNthCalledWith(2, 'session.instructions-write', {
+      sessionId: 'session-1', content: '# Updated'
+    }, { timeoutMs: 10_000 })
+    expect(screen.queryByRole('dialog', { name: '编辑 ClaudeMd' })).toBeNull()
   })
 
   it.each([
@@ -133,8 +220,8 @@ describe('PRD 02 bottom HUD', () => {
   })
 
   it.each([
-    ['running', '任务中'], ['needs-input', '待输入'], ['error', '错误']
-  ] as const)('shows the reference product Agent task label for %s', (taskStatus, label) => {
+    ['needs-input', '待输入'], ['error', '错误']
+  ] as const)('shows attention-worthy Agent task label for %s', (taskStatus, label) => {
     render(<TerminalHud hud={agent({ taskStatus })} />)
     expect(screen.getByText(label)).toBeTruthy()
   })
@@ -249,7 +336,7 @@ describe('PRD 02 bottom HUD', () => {
     expect(request).not.toHaveBeenCalled()
   })
 
-  it('keeps Environment and detached Git as separate right-side controls without a live HUD', async () => {
+  it('keeps detached Git visible while omitting the ordinary Local environment label', () => {
     const actions = environmentActions()
     render(<TerminalHud hud={undefined} sessionId="session-1"
       environment={{
@@ -260,9 +347,7 @@ describe('PRD 02 bottom HUD', () => {
       onPermissionMode={vi.fn()} />)
 
     expect(screen.getByRole('button', { name: '打开 Git' }).textContent).toBe('HEAD 1234567*')
-    expect(screen.getByRole('button', { name: '打开运行环境：Local' }).textContent).toBe('Local')
-    await userEvent.setup().click(screen.getByRole('button', { name: '打开运行环境：Local' }))
-    expect(screen.getByRole('dialog', { name: '运行环境' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' }).textContent).toBe('')
   })
 
   it('shows unavailable Git independently instead of hiding it behind an environment error', () => {
@@ -313,7 +398,7 @@ describe('PRD 02 bottom HUD', () => {
 
     expect(screen.queryByRole('button', { name: '打开 Git' })).toBeNull()
     expect(screen.queryByText('Git 不可用')).toBeNull()
-    expect(screen.getByRole('button', { name: '打开运行环境：Local' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '打开运行环境：Local' }).textContent).toBe('')
   })
 
   it('opens Git from the authoritative Environment path instead of a stale HUD cwd', async () => {

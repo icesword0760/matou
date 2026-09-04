@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -161,17 +161,33 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
     await expect(fixture.page.getByRole('button', { name: '设置' })).toBeVisible()
     await expect(hud).toContainText('72%')
     await expect(hud).toContainText('Weekly 8%')
-    await expect(hud).toContainText('1 CLAUDE.md')
+    await expect(hud.getByRole('button', { name: '编辑 ClaudeMd' })).toBeVisible()
     await expect(hud).toContainText('1 MCPs')
     await expect(hud).toContainText('2 hooks')
-    await expect(hud).toContainText('✓Read')
+    await expect(hud).toContainText(/\d+ Tools/)
     await expect(hud).toContainText('⚠ browser_bridge')
-    await expect(hud).toContainText('⚠browser_bridge: open')
     await expect(hud.locator('.context-ring-fg')).toHaveAttribute('stroke', '#d29922')
-    await expect(hud).toContainText('任务中')
-    await expect(hud).toContainText('TodoWrite')
+    await expect(hud).not.toContainText('任务中')
     await expect(hud).toContainText('▸实现 HUD(1/2)')
+    await hud.getByText('1 MCPs').hover()
+    await expect(fixture.page.getByRole('tooltip')).toContainText('browser_bridge')
+    await fixture.page.mouse.move(900, 500)
+
+    await hud.getByRole('button', { name: '编辑 ClaudeMd' }).click()
+    const instructionDialog = fixture.page.getByRole('dialog', { name: '编辑 ClaudeMd' })
+    await expect(instructionDialog).toBeVisible()
+    await expect(instructionDialog.getByRole('textbox', { name: 'ClaudeMd 内容' }))
+      .toHaveValue('project instructions\n')
     await mkdir(evidenceDirectory, { recursive: true })
+    await fixture.page.screenshot({
+      path: join(evidenceDirectory, 'claude-md-editor.png')
+    })
+    await instructionDialog.getByRole('textbox', { name: 'ClaudeMd 内容' })
+      .fill('# updated project instructions\n')
+    await instructionDialog.getByRole('button', { name: '保存', exact: true }).click()
+    await expect(instructionDialog).toBeHidden()
+    await expect.poll(() => readFile(join(fixture.workspaceDirectory, 'CLAUDE.md'), 'utf8'))
+      .toBe('# updated project instructions\n')
     await fixture.page.locator('.hierarchy-shell').screenshot({
       path: join(evidenceDirectory, 'agent-hud.png')
     })

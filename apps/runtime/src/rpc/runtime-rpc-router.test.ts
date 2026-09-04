@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,6 +27,28 @@ beforeEach(async () => {
 afterEach(() => database.close())
 
 describe('RuntimeRpcRouter', () => {
+  it('reads, creates and saves the current Session CLAUDE.md file', async () => {
+    const workspaceRoot = join(testRoot, 'instructions-workspace')
+    await mkdir(workspaceRoot)
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('instructions-bootstrap', {
+      windowId: 'window-instructions', defaultRootDirectory: workspaceRoot,
+      defaultName: 'instructions-workspace', now: 1
+    })) as { session: { id: string } }
+
+    await expect(router.handle('session.instructions-read', {
+      sessionId: initial.session.id
+    })).resolves.toEqual({
+      path: join(workspaceRoot, 'CLAUDE.md'), content: '', exists: false
+    })
+
+    await expect(router.handle('session.instructions-write', {
+      sessionId: initial.session.id, content: '# Project instructions\n'
+    })).resolves.toEqual({
+      path: join(workspaceRoot, 'CLAUDE.md'), content: '# Project instructions\n', exists: true
+    })
+    expect(await readFile(join(workspaceRoot, 'CLAUDE.md'), 'utf8')).toBe('# Project instructions\n')
+  })
+
   it('persists and activates provider configurations through explicit RPC methods', async () => {
     const created = await router.handle('provider-config.upsert', {
       provider: {

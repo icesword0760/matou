@@ -305,7 +305,10 @@ button { -webkit-app-region: no-drag; }
 .session-level-breadcrumb button > span[aria-hidden="true"] { flex: none; margin-right: 6px; font-size: 13px; }
 .session-level-breadcrumb strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .session-level-breadcrumb strong + span { flex: none; color: rgba(255,255,255,.4); }
-.status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; min-width: 0; max-width: none; margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
+.status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-start; min-width: 0; max-width: none; margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
+.status-info__primary,.status-info__secondary { display: flex; align-items: center; min-width: 0; gap: 8px; }
+.status-info__primary { flex: 0 0 auto; }
+.status-info__secondary { flex: 1 1 auto; justify-content: flex-end; overflow: hidden; }
 .status-field, .team-role-badge, .status-divider { flex-shrink: 0; }
 .status-info button.status-field { width: auto; height: auto; border: 0; background: transparent; font-family: inherit; }
 .status-info button.status-field:disabled { cursor: default; opacity: .7; }
@@ -315,7 +318,13 @@ button { -webkit-app-region: no-drag; }
 .status-usage strong { color: #58a6ff; font-weight: 600; }
 .status-usage small { color: #6e7681; font-size: inherit; }
 .status-git { max-width: 150px; overflow: hidden; color: #ff6b35; text-overflow: ellipsis; }
+.status-cwd { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
 .status-config { color: #8b949e; }
+.status-instructions { color: #79c0ff; font-weight: 600; }
+.status-environment.is-local-icon { display: inline-grid; width: 22px !important; height: 22px !important; place-items: center; padding: 0; color: #8b949e; }
+.status-environment.is-local-icon svg { width: 13px; height: 13px; }
+.status-detail { padding: 1px 3px; border-radius: 4px; cursor: help; }
+.status-detail:hover,.status-detail:focus-visible { color: #c9d1d9; background: rgba(255,255,255,.08); outline: 0; }
 .status-mcp-error { color: #f47067; }
 .status-divider { width: 1px; height: 12px; margin: 0 2px; background: #21262d; }
 .status-tool-running, .status-tool-done, .status-last-tool, .status-todos { display: inline-flex; flex-shrink: 1; align-items: center; min-width: 0; overflow: hidden; gap: 3px; }
@@ -357,6 +366,59 @@ button { -webkit-app-region: no-drag; }
 .team-role-badge.team-input { color: #ff9500; background: rgba(255,149,0,.15); }
 .team-role-badge.team-error { color: #ff3b30; background: rgba(255,59,48,.15); }
 .team-role-badge.team-idle { color: #8e8e93; background: rgba(142,142,147,.15); }
+.hud-detail-tooltip { position: fixed; z-index: 11020; min-width: 156px; max-width: 320px; padding: 9px 11px; transform: translate(-50%,-100%); border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; background: #1c2128; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 11px; line-height: 1.45; pointer-events: none; }
+.hud-detail-tooltip strong { display: block; margin-bottom: 5px; color: #f0f3f6; font-size: 11px; }
+.hud-detail-tooltip ul { display: grid; max-height: 210px; margin: 0; padding: 0; overflow: hidden auto; list-style: none; gap: 3px; }
+.hud-detail-tooltip li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instruction-file-overlay { position: fixed; z-index: 11010; inset: 0; display: grid; place-items: center; padding: 32px; background: rgba(8,12,18,.52); backdrop-filter: blur(5px); }
+.instruction-file-dialog { display: flex; flex-direction: column; width: min(760px,calc(100vw - 64px)); height: min(640px,calc(100vh - 80px)); overflow: hidden; border: 1px solid #30363d; border-radius: 14px; color: #c9d1d9; background: #161b22; box-shadow: 0 24px 70px rgba(0,0,0,.55); }
+.instruction-file-dialog header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; min-height: 64px; padding: 0 18px; border-bottom: 1px solid #30363d; }
+.instruction-file-dialog h2 { margin: 0; color: #f0f3f6; font-size: 15px; }
+.instruction-file-dialog header p { max-width: 620px; margin: 4px 0 0; overflow: hidden; color: #7d8590; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.instruction-file-dialog header button { width: 30px; height: 30px; border: 0; border-radius: 6px; color: #8b949e; background: transparent; cursor: pointer; font-size: 22px; }
+.instruction-file-dialog header button:hover { color: #f0f3f6; background: rgba(255,255,255,.08); }
+.instruction-file-dialog textarea { flex: 1 1 auto; min-height: 0; padding: 18px 20px; border: 0; outline: 0; color: #d7dce2; background: #0d1117; resize: none; font: 13px/1.6 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; tab-size: 2; }
+.instruction-file-dialog textarea:focus { box-shadow: inset 0 0 0 2px rgba(88,166,255,.42); }
+.instruction-file-state { display: grid; flex: 1 1 auto; place-items: center; color: #8b949e; background: #0d1117; font-size: 12px; }
+.instruction-file-error { padding: 8px 18px; border-top: 1px solid rgba(248,81,73,.25); color: #ffa198; background: rgba(248,81,73,.08); font-size: 12px; }
+.instruction-file-dialog footer { display: flex; flex: 0 0 54px; align-items: center; justify-content: space-between; padding: 0 14px 0 18px; border-top: 1px solid #30363d; color: #7d8590; font-size: 11px; }
+.instruction-file-dialog footer > div { display: flex; gap: 8px; }
+.instruction-file-dialog footer button { min-width: 68px; height: 30px; padding: 0 12px; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; background: #21262d; cursor: pointer; }
+.instruction-file-dialog footer button:hover { background: #292f36; }
+.instruction-file-dialog footer button.is-primary { border-color: #2f81f7; color: #fff; background: #1f6feb; }
+.instruction-file-dialog footer button:disabled { cursor: default; opacity: .55; }
+html[data-theme="light"] .hud-detail-tooltip,
+body.light-theme .hud-detail-tooltip { border-color: #d0d7de; color: #57606a; background: rgba(255,255,255,.98); box-shadow: 0 8px 24px rgba(31,35,40,.18); }
+html[data-theme="light"] .hud-detail-tooltip strong,
+body.light-theme .hud-detail-tooltip strong { color: #24292f; }
+html[data-theme="light"] .instruction-file-overlay,
+body.light-theme .instruction-file-overlay { background: rgba(31,35,40,.24); }
+html[data-theme="light"] .instruction-file-dialog,
+body.light-theme .instruction-file-dialog { border-color: #d0d7de; color: #24292f; background: #fff; box-shadow: 0 24px 70px rgba(31,35,40,.26); }
+html[data-theme="light"] .instruction-file-dialog header,
+html[data-theme="light"] .instruction-file-dialog footer,
+body.light-theme .instruction-file-dialog header,
+body.light-theme .instruction-file-dialog footer { border-color: #d8dee4; }
+html[data-theme="light"] .instruction-file-dialog h2,
+body.light-theme .instruction-file-dialog h2 { color: #24292f; }
+html[data-theme="light"] .instruction-file-dialog header p,
+html[data-theme="light"] .instruction-file-dialog footer,
+body.light-theme .instruction-file-dialog header p,
+body.light-theme .instruction-file-dialog footer { color: #6e7781; }
+html[data-theme="light"] .instruction-file-dialog header button,
+body.light-theme .instruction-file-dialog header button { color: #6e7781; }
+html[data-theme="light"] .instruction-file-dialog header button:hover,
+body.light-theme .instruction-file-dialog header button:hover { color: #24292f; background: rgba(31,35,40,.07); }
+html[data-theme="light"] .instruction-file-dialog textarea,
+html[data-theme="light"] .instruction-file-state,
+body.light-theme .instruction-file-dialog textarea,
+body.light-theme .instruction-file-state { color: #24292f; background: #f6f8fa; }
+html[data-theme="light"] .instruction-file-dialog footer button,
+body.light-theme .instruction-file-dialog footer button { border-color: #d0d7de; color: #24292f; background: #f6f8fa; }
+html[data-theme="light"] .instruction-file-dialog footer button:hover,
+body.light-theme .instruction-file-dialog footer button:hover { background: #eef1f4; }
+html[data-theme="light"] .instruction-file-dialog footer button.is-primary,
+body.light-theme .instruction-file-dialog footer button.is-primary { border-color: #0969da; color: #fff; background: #0969da; }
 @container (max-width:560px) { .status-priority-1 { display: none !important; } }
 @container (max-width:500px) { .status-priority-2 { display: none !important; } }
 @container (max-width:440px) { .status-priority-3 { display: none !important; } }

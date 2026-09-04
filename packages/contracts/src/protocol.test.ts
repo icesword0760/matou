@@ -289,6 +289,12 @@ describe('parseRendererMessage', () => {
     ]))
   })
 
+  it('allowlists reading and saving the current Session instruction file', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'session.instructions-read', 'session.instructions-write'
+    ]))
+  })
+
   it('rejects RPC methods outside the explicit allowlist', () => {
     expect(() => parseRendererMessage({
       type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'request-1',

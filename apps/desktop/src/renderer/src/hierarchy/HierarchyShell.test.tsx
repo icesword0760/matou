@@ -616,8 +616,9 @@ describe('PRD 05 hierarchy shell', () => {
         nodes: [{
           ...graphNode('session-a1', 'Claude 主会话'), currentMode: 'claude-code',
           environment: {
-            kind: 'local', state: 'ready', path: '/tmp/a',
-            localExecutionContextId: 'context-a'
+            kind: 'worktree', state: 'ready', path: '/tmp/a-worktree',
+            localExecutionContextId: 'context-a', worktreeId: 'worktree-a',
+            worktreeExecutionContextId: 'context-a-worktree'
           },
           hasOwnedWorktree: true
         }]
@@ -631,8 +632,8 @@ describe('PRD 05 hierarchy shell', () => {
     const permission = screen.getByRole('button', { name: /当前权限模式：Default/ })
     expect(permission).toHaveProperty('disabled', true)
     expect(permission.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
-    await user.click(screen.getByRole('button', { name: '打开运行环境：Local' }))
-    const handoff = screen.getByRole('button', { name: '交接到自有 Worktree' })
+    await user.click(screen.getByRole('button', { name: '打开运行环境：Worktree' }))
+    const handoff = screen.getByRole('button', { name: '交接到 Local' })
     expect(handoff).toHaveProperty('disabled', true)
     expect(handoff.getAttribute('title')).toBe('终端存储异常，请先恢复或结束当前会话')
   })

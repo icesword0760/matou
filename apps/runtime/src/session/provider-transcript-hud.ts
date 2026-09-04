@@ -8,6 +8,7 @@ export interface ProviderTranscriptHudSnapshot {
   permissionMode?: string
   model?: string
   subagentCount: number
+  subagents: string[]
   runningTools: Array<{ name: string; target?: string }>
   toolCounts: Array<{ name: string; count: number }>
   lastTool?: { name: string; target?: string; status: 'completed' | 'error' }
@@ -30,7 +31,7 @@ interface TranscriptState {
   completedTools: Set<string>
   completedToolCounts: Map<string, number>
   failedMcpServers: Set<string>
-  observedSubagents: Set<string>
+  observedSubagents: Map<string, string>
   lastTool?: { name: string; target?: string; status: 'completed' | 'error' }
   todos: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>
 }
@@ -70,7 +71,7 @@ function emptyState(): TranscriptState {
     completedTools: new Set(),
     completedToolCounts: new Map(),
     failedMcpServers: new Set(),
-    observedSubagents: new Set(),
+    observedSubagents: new Map(),
     todos: []
   }
 }
@@ -153,7 +154,9 @@ function ingestToolUse(state: TranscriptState, item: Record<string, unknown>): v
   if (name === 'TodoWrite') state.todos = todosFromInput(input.todos)
   if (name === 'TaskCreate') state.todos = applyTaskCreate(state.todos, input)
   if (name === 'TaskUpdate') state.todos = applyTaskUpdate(state.todos, input)
-  if (name === 'Agent') state.observedSubagents.add(id)
+  if (name === 'Agent') {
+    state.observedSubagents.set(id, subagentLabel(input, state.observedSubagents.size + 1))
+  }
 }
 
 function ingestToolResult(state: TranscriptState, item: Record<string, unknown>): void {
@@ -181,6 +184,7 @@ function snapshot(state: TranscriptState): ProviderTranscriptHudSnapshot {
     ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
     ...(state.model ? { model: state.model } : {}),
     subagentCount: state.observedSubagents.size,
+    subagents: [...state.observedSubagents.values()],
     runningTools: [...state.activeTools.values()],
     toolCounts: [...state.completedToolCounts.entries()].map(([name, count]) => ({ name, count })),
     ...(state.lastTool ? { lastTool: { ...state.lastTool } } : {}),
@@ -200,6 +204,11 @@ function targetForTool(name: string, input: Record<string, unknown>): { target?:
     target = command && command.length > 30 ? `${command.slice(0, 27)}...` : command
   }
   return target ? { target } : {}
+}
+
+function subagentLabel(input: Record<string, unknown>, ordinal: number): string {
+  return text(input.name) ?? text(input.description) ?? text(input.subagent_type) ??
+    text(input.subagentType) ?? `Agent ${ordinal}`
 }
 
 function todosFromInput(value: unknown): ProviderTranscriptHudSnapshot['todos'] {

@@ -10,7 +10,13 @@ export type HudTodoStatus = 'pending' | 'in_progress' | 'completed'
 export interface HudUsageWindow { label: string; percent: number; resetsAt?: number }
 export interface HudToolCount { name: string; count: number }
 export interface HudToolActivity { name: string; target?: string; status: 'running' | 'completed' | 'error' }
-export interface HudConfigCounts { instructionFiles: number; mcpServers: number; hooks: number }
+export interface HudConfigCounts {
+  instructionFiles: number
+  mcpServers: number
+  hooks: number
+  mcpServerNames: string[]
+  hookNames: string[]
+}
 export interface HudConfigWatchTarget { directory: string; names: string[] }
 
 export interface SessionHudSnapshot {
@@ -31,6 +37,7 @@ export interface SessionHudSnapshot {
   teamRole?: string
   teamStatus?: 'idle' | 'running' | 'needs-input' | 'error'
   subagentCount?: number
+  subagents?: string[]
   runningTools?: Array<{ name: string; target?: string }>
   toolCounts?: HudToolCount[]
   lastTool?: HudToolActivity
@@ -45,7 +52,7 @@ interface MutableHud extends SessionHudSnapshot {
   activeTools: Map<string, { name: string; target?: string }>
   completedToolCounts: Map<string, number>
   failedMcpServers: Set<string>
-  observedSubagents: Set<string>
+  observedSubagents: Map<string, string>
   providerPermissionObserved: boolean
   pendingPermissionMode?: HudPermissionMode
   providerModelObserved: boolean
@@ -98,6 +105,7 @@ export class SessionHudRegistry {
         ...(input.model ? { model: input.model } : {}),
         taskStatus: 'idle' as const,
         subagentCount: 0,
+        subagents: [],
         runningTools: [],
         toolCounts: [],
         usageWindows: [],
@@ -109,7 +117,7 @@ export class SessionHudRegistry {
       activeTools: new Map(),
       completedToolCounts: new Map(),
       failedMcpServers: new Set(),
-      observedSubagents: new Set(),
+      observedSubagents: new Map(),
       providerPermissionObserved: false,
       providerModelObserved: false
     })
@@ -132,7 +140,7 @@ export class SessionHudRegistry {
       activeTools: new Map(),
       completedToolCounts: new Map(),
       failedMcpServers: new Set(),
-      observedSubagents: new Set(),
+      observedSubagents: new Map(),
       providerPermissionObserved: false,
       providerModelObserved: false
     })
@@ -257,8 +265,12 @@ export class SessionHudRegistry {
       if (toolName === 'TaskCreate') current.todos = applyTaskCreate(current.todos ?? [], toolInput)
       if (toolName === 'TaskUpdate') current.todos = applyTaskUpdate(current.todos ?? [], toolInput)
       if (toolName === 'Agent') {
-        current.observedSubagents.add(toolId)
+        current.observedSubagents.set(
+          toolId,
+          subagentLabel(toolInput, current.observedSubagents.size + 1)
+        )
         current.subagentCount = current.observedSubagents.size
+        current.subagents = [...current.observedSubagents.values()]
       }
       current.activeTools.set(toolId, {
         name: toolName,
@@ -294,6 +306,10 @@ export class SessionHudRegistry {
     if (permission && !current.providerPermissionObserved) current.permissionMode = permission
     if (history.model && !current.providerModelObserved) current.model = history.model
     current.subagentCount = history.subagentCount
+    current.subagents = history.subagents
+    current.observedSubagents = new Map(
+      history.subagents.map((name, index) => [`transcript:${index}`, name])
+    )
     current.runningTools = history.runningTools
     current.toolCounts = history.toolCounts
     if (history.lastTool) current.lastTool = history.lastTool
@@ -311,8 +327,10 @@ export class SessionHudRegistry {
     current.configCounts = next
     current.configCwd = current.cwd
     current.configCheckedAt = this.#now()
-    return previous?.instructionFiles !== next.instructionFiles ||
-      previous?.mcpServers !== next.mcpServers || previous?.hooks !== next.hooks
+    return !previous || previous.instructionFiles !== next.instructionFiles ||
+      previous.mcpServers !== next.mcpServers || previous.hooks !== next.hooks ||
+      previous.mcpServerNames.join('\0') !== next.mcpServerNames.join('\0') ||
+      previous.hookNames.join('\0') !== next.hookNames.join('\0')
   }
 
   configWatchTargets(sessionId: string): HudConfigWatchTarget[] {
@@ -346,7 +364,7 @@ export class SessionHudRegistry {
 
 export function inspectProviderConfig(cwd: string, configDir: string): HudConfigCounts {
   let instructionFiles = 0
-  let hooks = 0
+  const hookNames = new Set<string>()
   const userMcp = new Set<string>()
   const projectMcp = new Set<string>()
 
@@ -360,8 +378,9 @@ export function inspectProviderConfig(cwd: string, configDir: string): HudConfig
 
   const userSettings = [join(configDir, 'settings.json'), join(configDir, 'settings.local.json')]
   for (const path of userSettings) {
-    addMcpNames(userMcp, readJson(path))
-    hooks += hookCount(readJson(path))
+    const config = readJson(path)
+    addMcpNames(userMcp, config)
+    addHookNames(hookNames, config)
   }
   const userRootConfig = readJson(join(dirname(configDir), '.claude.json'))
   addMcpNames(userMcp, userRootConfig)
@@ -376,9 +395,16 @@ export function inspectProviderConfig(cwd: string, configDir: string): HudConfig
     const config = readJson(path)
     addMcpNames(projectMcp, config)
     removeNames(projectMcp, config?.disabledMcpjsonServers)
-    hooks += hookCount(config)
+    addHookNames(hookNames, config)
   }
-  return { instructionFiles, mcpServers: userMcp.size + projectMcp.size, hooks }
+  const mcpServerNames = [...userMcp, ...projectMcp]
+  return {
+    instructionFiles,
+    mcpServers: mcpServerNames.length,
+    hooks: hookNames.size,
+    mcpServerNames,
+    hookNames: [...hookNames]
+  }
 }
 
 export function providerConfigWatchTargets(cwd: string, configDir: string): HudConfigWatchTarget[] {
@@ -417,8 +443,13 @@ function removeNames(output: Set<string>, value: unknown): void {
   for (const name of value) if (typeof name === 'string') output.delete(name)
 }
 
-function hookCount(config: Record<string, unknown> | undefined): number {
-  return Object.keys(object(config?.hooks) ?? {}).length
+function addHookNames(output: Set<string>, config: Record<string, unknown> | undefined): void {
+  for (const name of Object.keys(object(config?.hooks) ?? {})) output.add(name)
+}
+
+function subagentLabel(input: Record<string, unknown>, ordinal: number): string {
+  return text(input.name) ?? text(input.description) ?? text(input.subagent_type) ??
+    text(input.subagentType) ?? `Agent ${ordinal}`
 }
 
 function normalizePermission(value: unknown): HudPermissionMode | undefined {

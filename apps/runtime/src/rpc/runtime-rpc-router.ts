@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
 import type { ProviderCli, ProviderConfigInput } from '@matou/contracts'
@@ -175,6 +176,39 @@ export class RuntimeRpcRouter {
       )
     }
     if (method === 'projection.snapshot') return this.#snapshot(payload)
+    if (method === 'session.instructions-read') {
+      const input = record(payload)
+      const path = join(this.#sessionCwd(text(input.sessionId, 'sessionId')), 'CLAUDE.md')
+      try {
+        const content = await readFile(path, 'utf8')
+        if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) {
+          throw new RpcFault('CONFLICT', 'instruction file exceeds the 2 MB editor limit')
+        }
+        return { path, content, exists: true }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return { path, content: '', exists: false }
+        }
+        throw error
+      }
+    }
+    if (method === 'session.instructions-write') {
+      const input = record(payload)
+      const content = textValue(input.content, 'content')
+      if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) {
+        throw new RpcFault('INVALID_REQUEST', 'instruction file exceeds the 2 MB editor limit')
+      }
+      const directory = this.#sessionCwd(text(input.sessionId, 'sessionId'))
+      const path = join(directory, 'CLAUDE.md')
+      const temporaryPath = join(directory, `.matou-instructions-${randomUUID()}.tmp`)
+      try {
+        await writeFile(temporaryPath, content, { encoding: 'utf8', mode: 0o644 })
+        await rename(temporaryPath, path)
+      } finally {
+        await rm(temporaryPath, { force: true }).catch(() => undefined)
+      }
+      return { path, content, exists: true }
+    }
     if (method === 'hierarchy.get-scene-snapshot') {
       const sceneId = text(record(payload).sceneId, 'sceneId')
       const snapshot = this.#scenes.snapshot(sceneId)
@@ -1058,6 +1092,10 @@ function record(value: unknown): Record<string, unknown> {
 function text(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new RpcFault('INVALID_REQUEST', `${label} must be a non-empty string`)
   return value.trim()
+}
+function textValue(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new RpcFault('INVALID_REQUEST', `${label} must be a string`)
+  return value
 }
 function optionalText(value: unknown, label: string): string | undefined {
   return value === undefined ? undefined : text(value, label)

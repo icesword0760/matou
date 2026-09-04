@@ -44,20 +44,16 @@ export function TerminalHud(props: {
   const [switchError, setSwitchError] = useState('')
   const [gitOpen, setGitOpen] = useState(false)
   const [environmentOpen, setEnvironmentOpen] = useState(false)
-  const [elapsed, setElapsed] = useState(() => formatElapsed(hud?.startedAt))
+  const [instructionsOpen, setInstructionsOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => setPermissionMode(hud?.permissionMode ?? 'default'), [hud?.sessionId, hud?.permissionMode])
-  useEffect(() => {
-    setElapsed(formatElapsed(hud?.startedAt))
-    const timer = window.setInterval(() => setElapsed(formatElapsed(hud?.startedAt)), 10_000)
-    return () => window.clearInterval(timer)
-  }, [hud?.startedAt])
   useEffect(() => {
     if (!disabled) return
     setMenu(null)
     setConfirmTarget(null)
     setGitOpen(false)
+    setInstructionsOpen(false)
   }, [disabled])
   useEffect(() => {
     const closeOutside = (event: Event) => {
@@ -98,6 +94,14 @@ export function TerminalHud(props: {
   }
 
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
+    {hud?.mode === 'agent' && <button type="button"
+      className="status-field status-instructions is-clickable"
+      aria-label="编辑 ClaudeMd" disabled={!gitClient}
+      title="编辑当前项目的 CLAUDE.md"
+      onClick={() => {
+        setMenu(null); setGitOpen(false); setEnvironmentOpen(false); setInstructionsOpen(true)
+      }}>ClaudeMd</button>}
+    <div className="status-info__primary">
     {hud?.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
         disabled={disabled || switching || !props.onPermissionMode}
@@ -107,26 +111,35 @@ export function TerminalHud(props: {
       {modelLabel(hud) && <span className="status-field status-model status-priority-8"
         title={`当前模型：${modelLabel(hud)}`}>{modelLabel(hud)}</span>}
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
+      {hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
+        label={`${hud.configCounts.mcpServers} MCPs`} title="MCP 服务"
+        items={(hud.configCounts.mcpServerNames ?? []).map((name) => name)} />}
+      {toolTotal(hud) > 0 && <HudDetail label={`${toolTotal(hud)} Tools`} title="工具调用"
+        items={toolDetails(hud)} />}
+      {(hud.subagentCount ?? 0) > 0 && <HudDetail label={`${hud.subagentCount} Agents`} title="子 Agent"
+        items={hud.subagents ?? []} />}
+      {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
+        label={`${hud.configCounts.hooks} hooks`} title="Hooks"
+        items={hud.configCounts.hookNames ?? []} />}
       {(hud.usageWindows ?? []).map((window, index) => <span
         className="status-field status-usage status-priority-6"
         title={usageTitle(window)} key={`${window.label}:${index}`}>
         {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {formatReset(window.resetsAt)}</small>}
       </span>)}
       {taskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus)}</span>}
-      {(hud.subagentCount ?? 0) > 0 && <span className="status-field status-priority-5">Agent:{hud.subagentCount}</span>}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
-      {configDisplays(hud).map((item) => <span className="status-field status-config status-priority-5" key={item}>{item}</span>)}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
         <span>{todoDisplay(hud)!.text}</span><span className="tool-count">{todoDisplay(hud)!.progress}</span>
       </span>}
-      {hasAgentInfo(hud) && (shortCwd || gitDisplay || elapsed) && <span className="status-divider status-priority-3" />}
-      {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
     </> : hud?.mode === 'shell' ? <>
       {hud.shell && <span className="status-field">{hud.shell}</span>}
-      {shortCwd && <span className="status-field status-priority-3">{shortCwd}</span>}
     </> : null}
+    </div>
+    <div className="status-info__secondary">
+    {hud?.mode === 'agent' && hasAgentInfo(hud) && (shortCwd || gitDisplay) && <span className="status-divider status-priority-3" />}
+    {shortCwd && <span className="status-field status-cwd status-priority-3" title={hud?.cwd}>{shortCwd}</span>}
     {git && <button type="button" className="status-field status-git is-clickable"
       disabled={disabled || !gitClient || git.state === 'unavailable'} aria-label="打开 Git"
       title={props.disabledReason ?? gitStateTitle(git)}
@@ -135,7 +148,7 @@ export function TerminalHud(props: {
       disabled={!props.environmentActions} onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
       }} />}
-    {elapsed && <span className="status-field status-priority-1">⏱{elapsed}</span>}
+    </div>
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label="权限模式">
@@ -186,6 +199,8 @@ export function TerminalHud(props: {
       cwd={gitCwd} sessionId={sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
       dialogLabel="Git 与 Worktree" branchRowsAsButtons
       onClose={() => setGitOpen(false)} />, document.body)}
+    {instructionsOpen && gitClient && createPortal(<InstructionFileDialog client={gitClient}
+      sessionId={sessionId} readOnly={disabled} onClose={() => setInstructionsOpen(false)} />, document.body)}
   </div>
 }
 
@@ -196,9 +211,110 @@ function EnvironmentButton(props: {
 }) {
   const label = environmentLabel(props.environment)
   return <button type="button"
-    className={`status-field status-environment is-clickable state-${props.environment.state}`}
+    className={`status-field status-environment is-clickable state-${props.environment.state}${label === 'Local' ? ' is-local-icon' : ''}`}
     disabled={props.disabled} aria-label={`打开运行环境：${label}`} title="运行环境"
-    onClick={props.onClick}>{label}</button>
+    onClick={props.onClick}>{label === 'Local' ? <svg viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="2" y="2.5" width="12" height="8.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M5 13.5h6M8 11v2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg> : label}</button>
+}
+
+function HudDetail(props: { label: string; title: string; items: string[] }) {
+  const [open, setOpen] = useState(false)
+  const [style, setStyle] = useState<CSSProperties>({})
+  const show = (target: HTMLElement) => {
+    const rect = target.getBoundingClientRect()
+    setStyle({ left: rect.left + rect.width / 2, top: rect.top - 8 })
+    setOpen(true)
+  }
+  return <>
+    <span className="status-field status-detail status-config" role="button" tabIndex={0}
+      aria-label={`查看${props.title}列表`}
+      onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={() => setOpen(false)}
+      onFocus={(event) => show(event.currentTarget)} onBlur={() => setOpen(false)}>{props.label}</span>
+    {open && createPortal(<div className="hud-detail-tooltip" role="tooltip" style={style}>
+      <strong>{props.title}</strong>
+      <ul>{(props.items.length > 0 ? props.items : ['详情将在状态刷新后显示']).map((item, index) =>
+        <li key={`${item}:${index}`}>{item}</li>)}</ul>
+    </div>, document.body)}
+  </>
+}
+
+function InstructionFileDialog(props: {
+  client: GitRequestClient
+  sessionId: string
+  readOnly: boolean
+  onClose(): void
+}) {
+  const [path, setPath] = useState('')
+  const [content, setContent] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let active = true
+    void props.client.request<InstructionFileResult>('session.instructions-read', {
+      sessionId: props.sessionId
+    }, { timeoutMs: 10_000 }).then((result) => {
+      if (!active) return
+      setPath(result.path)
+      setContent(result.content)
+    }).catch((reason: unknown) => {
+      if (active) setError(errorText(reason, '读取失败'))
+    }).finally(() => {
+      if (active) setLoading(false)
+    })
+    return () => { active = false }
+  }, [props.client, props.sessionId])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      props.onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [props.onClose])
+
+  const save = async () => {
+    if (saving || props.readOnly) return
+    setSaving(true)
+    setError('')
+    try {
+      await props.client.request<InstructionFileResult>('session.instructions-write', {
+        sessionId: props.sessionId, content
+      }, { timeoutMs: 10_000 })
+      props.onClose()
+    } catch (reason) {
+      setError(errorText(reason, '保存失败'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <div className="instruction-file-overlay" onPointerDown={(event) => {
+    if (event.currentTarget === event.target) props.onClose()
+  }}><section className="instruction-file-dialog" role="dialog" aria-modal="true" aria-label="编辑 ClaudeMd">
+    <header><div><h2>ClaudeMd</h2><p>{path || '当前项目 / CLAUDE.md'}</p></div>
+      <button type="button" aria-label="关闭 ClaudeMd 编辑器" onClick={props.onClose}>×</button></header>
+    {loading ? <div className="instruction-file-state">正在读取…</div> : <textarea
+      aria-label="ClaudeMd 内容" value={content} readOnly={props.readOnly}
+      spellCheck={false} autoFocus onChange={(event) => setContent(event.target.value)} />}
+    {error && <div className="instruction-file-error" role="alert">{error}</div>}
+    <footer><span>{props.readOnly ? '恢复期间为只读' : '保存后立即用于当前项目的新请求'}</span>
+      <div><button type="button" onClick={props.onClose}>取消</button>
+        <button type="button" className="is-primary" disabled={loading || saving || props.readOnly}
+          onClick={() => void save()}>{saving ? '保存中…' : '保存'}</button></div></footer>
+  </section></div>
+}
+
+interface InstructionFileResult { path: string; content: string; exists: boolean }
+
+function errorText(reason: unknown, fallback: string): string {
+  return reason instanceof Error && reason.message ? `${fallback}：${reason.message}` : fallback
 }
 
 function ContextRing({ percent }: { percent: number }) {
@@ -215,13 +331,6 @@ function ContextRing({ percent }: { percent: number }) {
   </span>
 }
 
-function formatElapsed(startedAt: number | undefined): string {
-  if (!startedAt) return ''
-  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
-  return `${Math.floor(seconds / 3600)}h${Math.floor(seconds % 3600 / 60)}m`
-}
 function cwdShortName(cwd: string | undefined): string {
   const tail = cwd?.split(/[\\/]/).filter(Boolean).at(-1)
   return tail ? `~/${tail}` : ''
@@ -274,17 +383,18 @@ function usageTitle(window: NonNullable<SessionHudView['usageWindows']>[number])
   const reset = formatReset(window.resetsAt)
   return `${window.label} usage: ${window.percent}%${reset ? ` · resets in ${reset}` : ''}`
 }
-function configDisplays(hud: SessionHudView): string[] {
-  const counts = hud.configCounts
-  if (!counts) return []
+function toolTotal(hud: SessionHudView): number {
+  return (hud.runningTools?.length ?? 0) +
+    (hud.toolCounts ?? []).reduce((total, tool) => total + tool.count, 0)
+}
+function toolDetails(hud: SessionHudView): string[] {
   return [
-    counts.instructionFiles > 0 ? `${counts.instructionFiles} CLAUDE.md` : '',
-    counts.mcpServers > 0 ? `${counts.mcpServers} MCPs` : '',
-    counts.hooks > 0 ? `${counts.hooks} hooks` : ''
-  ].filter(Boolean)
+    ...(hud.runningTools ?? []).map(({ name, target }) =>
+      `${name} · 运行中${target ? ` · ${target}` : ''}`),
+    ...(hud.toolCounts ?? []).map(({ name, count }) => `${name} · ${count} 次`)
+  ]
 }
 function taskStatusLabel(status: SessionHudView['taskStatus']): string {
-  if (status === 'running') return '任务中'
   if (status === 'needs-input') return '待输入'
   if (status === 'error') return '错误'
   return ''
@@ -310,7 +420,7 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
   return Boolean(hud.modelStrategy || hud.contextPercent !== undefined || taskStatusLabel(hud.taskStatus) ||
-    (hud.usageWindows?.length ?? 0) > 0 || configDisplays(hud).length || (hud.mcpErrors?.length ?? 0) > 0 ||
+    (hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || (hud.mcpErrors?.length ?? 0) > 0 ||
     (hud.subagentCount ?? 0) > 0 || hud.teamRole || todoDisplay(hud))
 }
 

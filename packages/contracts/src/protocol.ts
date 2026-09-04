@@ -199,6 +199,8 @@ export const RPC_METHODS = [
   'session.update',
   'session.set-permission-mode',
   'session.set-model',
+  'session.instructions-read',
+  'session.instructions-write',
   'session.environment-open',
   'session.environment-restore',
   'session.environment-locate',

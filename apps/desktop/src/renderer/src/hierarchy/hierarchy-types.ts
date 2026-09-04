@@ -79,7 +79,13 @@ export type HudModelStrategy = 'opusplan' | 'claude-opus-4-6' | 'claude-sonnet-4
 export interface HudUsageWindow { label: string; percent: number; resetsAt?: number }
 export interface HudToolCount { name: string; count: number }
 export interface HudToolActivity { name: string; target?: string; status: 'running' | 'completed' | 'error' }
-export interface HudConfigCounts { instructionFiles: number; mcpServers: number; hooks: number }
+export interface HudConfigCounts {
+  instructionFiles: number
+  mcpServers: number
+  hooks: number
+  mcpServerNames?: string[]
+  hookNames?: string[]
+}
 export interface SessionHudView {
   sessionId: string
   mode: 'shell' | 'agent'
@@ -98,6 +104,7 @@ export interface SessionHudView {
   teamRole?: string
   teamStatus?: 'idle' | 'running' | 'needs-input' | 'error'
   subagentCount?: number
+  subagents?: string[]
   runningTools?: Array<{ name: string; target?: string }>
   toolCounts?: HudToolCount[]
   lastTool?: HudToolActivity

@@ -12,6 +12,7 @@ const READ_ONLY_RPC_METHODS = [
   'claude-sessions.list',
   'claude-sessions.detail',
   'session.environment-open',
+  'session.instructions-read',
   'geometry.list',
   'terminal.history-page',
   'terminal.history-search',
