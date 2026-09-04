@@ -300,3 +300,112 @@ pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/runtime-ser
 - provider activation 是逐 Session 排他转换；多 Session 仍可能出现 eligible 已更新、ineligible 暂缓的混合结果，现有 RPC contract 与设置 UI 会明确汇总。
 - 若 binding B 已成功持久化、旧进程已退出，而后续 respawn 与 rollback 持久化同时发生底层存储故障，系统会记录 `provider-config.rollback` 错误并返回 `restart-unavailable`；这是双重基础设施故障边界，本轮“首次 binding write 失败时保留 A 的完整 live 状态”仍已闭合。
 - `package:dir` 目录产物仍无 Developer ID Application 签名；本地 packaged-App 回放已通过，正式分发沿用项目既有签名与公证流程。
+
+---
+
+# Independent review closure — round 2/5
+
+**复核日期：** 2026-09-04
+**前一实现提交：** `7cc9ad3`
+**本节结论：** 剩余的 in-flight HUD 竞态已闭合。旧 run hook 可以在 provider 激活前合法通过入口 fence 并启动 transcript read；若该 I/O 在 B respawn 后才完成，read 会正常结束，但 Session HUD 的 model、title、tools、todos 与发布序列保持 B/current run 状态。hook endpoint 的 HTTP 行为保持原样。
+
+## 14. Round 2 状态转换与生产实现
+
+### 14.1 ownership 从 hook 一直携带到异步提交点
+
+生产 HUD callback 不再丢弃 hook 的 `runId`。`createProviderHudPayloadHandler` 统一承载实际 wiring：
+
+1. callback 入场先比较 `currentRunId(sessionId) === attempt runId`，仅 current run 执行同步 `ingestProvider` 与首次 HUD publish。
+2. transcript path 连同 attempt `runId`、动态 `currentRunId()` 一起交给 `SessionHudRegistry.refreshTranscript`。
+3. registry 在发起 read 前检查 ownership；`await transcriptReader.read(...)` 返回后，在第一次 HUD write 紧邻位置再次检查 exact run ownership。
+4. 同一位置也检查 registry 中的 HUD object identity，覆盖 I/O 期间 Session HUD 被重新 spawn/replaced 的情形。
+5. refresh 返回 changed 后，production handler再次确认 current run，才发布更新后的 HUD。
+
+**生产锚点：**
+- `apps/runtime/src/session/provider-hud-payload-handler.ts:1-33`
+- `apps/runtime/src/index.ts:328-337,363`
+- `apps/runtime/src/session/session-hud-registry.ts:15-18,299-322,366-368`
+
+`SessionHudRunOwnership` 是 `refreshTranscript` 的必填参数，production 与测试调用都必须明确提供 attempt/current run；这使未来新增调用点也进入同一 fence。
+
+### 14.2 与 activation 的并发顺序
+
+已闭合的 adversarial 顺序为：
+
+`old hook passes current-run gate → old transcript read blocks → provider binding A→B → old hook suppressed/retired → old PTY exits → B PTY respawns with new runId → new hook builds B HUD → old read releases → post-await ownership mismatch → old history stays inert`
+
+旧 read 返回的数据特意包含 model A、old title、Read tool/count、old MCP error、4 个 subagent 与 old todo。current run 数据包含 model B、new title、Write tool/count 与 new todo。GREEN 断言对 release 前后的完整 HUD snapshot 做 deep equality，并确认旧 completion 没有产生额外 HUD publication。
+
+## 15. Round 2 TDD RED / GREEN
+
+所有命令均在 `/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control` 执行；原有断言保持强度。
+
+```sh
+pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/runtime-server.test.ts -t 'atomically activates an eligible provider and fences delayed old-run hook effects'
+```
+
+- **RED：** 1 file；1 failed / 115 skipped（116 total）。释放旧 read 后，HUD 从 new `Write`/model B/new title/new todo 被覆盖成 old `Read`/model A/old title/old todo；完整对象 diff 同时显示旧 MCP error、tool count 与 subagent count 回流。
+- RED 日志：`followup-consistency-artifacts/logs/round2-inflight-hud-red.log`
+- **GREEN：** 1 file；1 passed / 115 skipped（116 total）。
+- 最终 GREEN 使用与 `index.ts` 相同的 `createProviderHudPayloadHandler` production wiring，而非同步 custom callback。
+- GREEN 日志：`followup-consistency-artifacts/logs/round2-inflight-hud-green-production-wiring.log`
+- 测试锚点：`apps/runtime/src/runtime-server.test.ts:774-1078`，其中 blocked read/release 与 full snapshot assertion 位于 `:838-847,941-1026`。
+
+聚焦补充：
+
+```sh
+pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/session/session-hud-registry.test.ts src/session/provider-hook-server.test.ts
+```
+
+结果：2 files / 36 passed。日志：`followup-consistency-artifacts/logs/round2-hud-hook-focused-final.log`。
+
+`src/runtime-server.test.ts` 文件级回归：116 passed。日志：`followup-consistency-artifacts/logs/round2-runtime-server-full.log`；production-wiring 提取后的同范围最终聚焦结果见上述 GREEN 日志与最终全量日志。
+
+## 16. Round 2 acceptance matrix
+
+| 场景 | 可观察结果 | 结论 |
+|---|---|---|
+| old hook 在 activation 前通过 fence | endpoint HTTP 200；old transcript read 已真实进入 blocked promise | 通过 |
+| old read 阻塞期间 A→B activation | durable binding 为 B；replacement PID/runId 变化；启动 endpoint/model 为 B | 通过 |
+| new run hook 在 old read 尚未完成时到达 | HUD 显示 model B、new title、Write tools/count 与 new todo | 通过 |
+| B HUD 建立后释放 old read | read 正常 resolve；完整 HUD deep-equal release 前 snapshot；旧 publication count 保持 | 通过 |
+| activation 后再次发送旧 endpoint hook | HTTP 200；既有 identity/HUD/notification/work/title/Team fence 继续成立 | 通过 |
+| 正常 current-run transcript hydration | 原 Session HUD transcript hydration 测试继续通过 | 通过 |
+
+## 17. Round 2 最终门禁
+
+| 验证 | 精确命令 | 结果 | 日志 / 证据 |
+|---|---|---|---|
+| HUD + hook 聚焦 | `pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/session/session-hud-registry.test.ts src/session/provider-hook-server.test.ts` | 2 files / 36 passed | `followup-consistency-artifacts/logs/round2-hud-hook-focused-final.log` |
+| in-flight production wiring | `pnpm --filter @matou/runtime exec vitest run --testTimeout=15000 src/runtime-server.test.ts -t 'atomically activates an eligible provider and fences delayed old-run hook effects'` | 1 passed / 115 skipped | `followup-consistency-artifacts/logs/round2-inflight-hud-green-production-wiring.log` |
+| 全量单元/集成 | `pnpm test` | exit 0；identifier 4 passed；Vitest 194 files / 1889 passed；合计 1893 passed | `followup-consistency-artifacts/logs/round2-pnpm-test-final-production-wiring.log` |
+| 全仓类型 | `pnpm typecheck` | exit 0；packages build 与 contracts/domain/ui/desktop/runtime typecheck 全通过 | `followup-consistency-artifacts/logs/round2-typecheck-final-production-wiring.log` |
+| 三组 AI Host E2E | `pnpm exec playwright test tests/e2e/ai-host-control-cli.spec.ts tests/e2e/ai-host-structure-control.spec.ts tests/e2e/ai-host-navigation.spec.ts --workers=1 --reporter=line` | 最终源码完整回放 11 passed (1.4m) | `followup-consistency-artifacts/logs/round2-three-ai-host-e2e-final-production-wiring.log` |
+| 目录打包 | `pnpm package:dir` | exit 0；当前源码生成 macOS arm64 App | `followup-consistency-artifacts/logs/round2-package-dir-final-production-wiring.log` |
+| 打包 App 重启场景 | `MATOU_E2E_EXECUTABLE_PATH="$PWD/apps/desktop/release/mac-arm64/码头.app/Contents/MacOS/码头" pnpm exec playwright test tests/e2e/.followup-consistency-packaged.spec.ts --workers=1 --reporter=line` | 1 passed (4.6s) | `followup-consistency-artifacts/logs/round2-packaged-session-model-restart-final-production-wiring.log` |
+| 命名门禁 | `pnpm check:identifiers` | exit 0 | `followup-consistency-artifacts/logs/round2-check-identifiers-final.log` |
+| Diff 卫生 | `git diff --check` | exit 0 | `followup-consistency-artifacts/logs/round2-git-diff-check-final.log` |
+
+执行说明：一次全量回放在 256 MiB Journal RSS 门禁观察到约 27.2 MiB 峰值，阈值为 16 MiB；生产修改未触碰 Journal。该单项立即独立重跑为 9/9 passed，随后同一 `pnpm test` 全量命令完整重跑得到 exit 0、1893 passed。日志分别为 `round2-pnpm-test-final.log`、`round2-journal-rss-retry.log` 与最终 `round2-pnpm-test-final-production-wiring.log`。三组 E2E 的早期回放也出现一次既有 macOS native-focus wait 抖动（10 passed / 1 failed），精确命令重跑为 11/11；production-wiring 最终源码又完整执行一次并直接得到 11/11。
+
+## 18. Round 2 packaged-App evidence 与关注点
+
+**证据性质：deterministic local provider fixture。** 受影响 packaged restart 场景已使用最终 production-wiring 源码重新打包与回放。
+
+- App：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/apps/desktop/release/mac-arm64/码头.app`
+- 结构化结果：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/results/session-model-restart-packaged.json`
+- screenshot：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/screenshots/session-model-restart-packaged.png`
+- SHA 清单：`/Users/icesword/Documents/AIProjects/matou/.worktrees/ai-structure-control/.superpowers/sdd/2026-09-03-ai-structure-control/followup-consistency-artifacts/results/round2-package-sha256-final-production-wiring.txt`
+
+| 组件 | Round 2 final SHA-256 |
+|---|---|
+| `Contents/MacOS/码头` | `221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5` |
+| `Contents/Resources/runtime/index.cjs` | `7832a5e89e2d541ea1da2bce11dd4356fcf8822854219e3b3c239be4f535eb20` |
+| `Contents/Resources/app.asar` | `86a880b1db16517fc2856f0d7fe5b236716670c43e408149d1f958230fce70ad` |
+
+关注点：
+
+- 本轮没有 database migration；binding、Fork 与 restart authoritative paths 保持 round 1 结果。
+- deterministic fixture 覆盖最终打包 App 的 Electron、Renderer、Runtime、SQLite、PTY 与 HTTP hook；外部 provider 网络、服务端模型别名和账户策略未纳入该本地证据。
+- 目录 App 仍无 Developer ID Application 签名；正式分发继续沿用既有签名与公证流程。
+- transcript reader 自身会正常完成旧文件读取并维护 reader cache；fence 位于 HUD commit boundary，因此旧数据既不会写入 current HUD，也不会触发 stale HUD publish。

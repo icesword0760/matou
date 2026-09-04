@@ -28,6 +28,8 @@ import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { ProviderHookServer } from './session/provider-hook-server'
+import { createProviderHudPayloadHandler } from './session/provider-hud-payload-handler'
+import type { ProviderTranscriptHudSnapshot } from './session/provider-transcript-hud'
 import { SessionRepository } from './domain/session-repository'
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeDatabase } from './storage/database'
@@ -769,7 +771,7 @@ sleep 30
     }
   })
 
-  it('atomically activates an eligible provider and fences a delayed old-run hook', async () => {
+  it('atomically activates an eligible provider and fences delayed old-run hook effects', async () => {
     server.close()
     const executable = join(root, 'provider-config-atomic-hook.sh')
     const launchLog = join(root, 'provider-config-atomic-hook-launches.txt')
@@ -806,16 +808,67 @@ sleep 30
     const transactions = new DomainTransactionManager(database)
     const repository = new SessionRepository(database, transactions)
     const sessions = createTestSessionRegistry()
-    const hud = new SessionHudRegistry()
+    const oldTranscriptPath = join(root, 'provider-config-atomic-in-flight-old.jsonl')
+    const newTranscriptPath = join(root, 'provider-config-atomic-current-new.jsonl')
+    await writeFile(oldTranscriptPath, JSON.stringify({
+      type: 'ai-title', sessionId: 'identity-provider-config-atomic-hook',
+      aiTitle: 'Old in-flight title'
+    }))
+    await writeFile(newTranscriptPath, JSON.stringify({
+      type: 'ai-title', sessionId: 'identity-provider-config-atomic-hook',
+      aiTitle: 'New current-run title'
+    }))
+    const oldHistory: ProviderTranscriptHudSnapshot = {
+      sessionName: 'Old in-flight title', model: 'claude-atomic-a', subagentCount: 4,
+      runningTools: [{ name: 'Read', target: '/old/run.ts' }],
+      toolCounts: [{ name: 'Read', count: 9 }],
+      lastTool: { name: 'Read', target: '/old/run.ts', status: 'completed' },
+      mcpErrors: ['old_run'],
+      todos: [{ content: 'Old run todo', status: 'pending' }]
+    }
+    const newHistory: ProviderTranscriptHudSnapshot = {
+      sessionName: 'New current-run title', model: 'claude-atomic-b', subagentCount: 1,
+      runningTools: [{ name: 'Write', target: '/new/run.ts' }],
+      toolCounts: [{ name: 'Write', count: 2 }],
+      lastTool: { name: 'Write', target: '/new/run.ts', status: 'completed' },
+      mcpErrors: [],
+      todos: [{ content: 'New run todo', status: 'in_progress' }]
+    }
+    let markOldReadStarted: () => void = () => {}
+    const oldReadStarted = new Promise<void>((resolve) => { markOldReadStarted = resolve })
+    let releaseOldTranscript: (history?: ProviderTranscriptHudSnapshot) => void = () => {}
+    const blockedOldHistory = new Promise<ProviderTranscriptHudSnapshot | undefined>((resolve) => {
+      releaseOldTranscript = resolve
+    })
+    const transcriptReader = {
+      read: vi.fn((path: string) => {
+        if (path === oldTranscriptPath) {
+          markOldReadStarted()
+          return blockedOldHistory
+        }
+        return Promise.resolve(path === newTranscriptPath ? newHistory : undefined)
+      })
+    }
+    const hud = new SessionHudRegistry(Date.now, join(root, '.claude'), transcriptReader as never)
+    const hudPublications: string[] = []
     const notifications = new AgentNotificationRepository(database, transactions)
     const workStatuses = new SessionWorkStatusService(database, transactions)
     const sessionCanvas = new SessionCanvasService(database, transactions)
     let eventOrdinal = 0
     let atomicServer: RuntimeServer | undefined
+    const onHudPayload = createProviderHudPayloadHandler({
+      hud,
+      currentRunId: (sessionId) => sessions.get(sessionId)?.runId,
+      publish: (sessionId) => {
+        const runId = sessions.get(sessionId)?.runId
+        if (runId) hudPublications.push(`${runId}:publish`)
+      },
+      reportError: (error) => { throw error }
+    })
     const providerHooks = new ProviderHookServer(root, repository, {
       currentRunId: (sessionId: string) => sessions.get(sessionId)?.runId,
       onIdentityRecorded: ({ sessionId, runId }) => atomicServer?.providerIdentityRecorded(sessionId, runId),
-      onHudPayload: ({ sessionId, payload }) => hud.ingestProvider(sessionId, payload),
+      onHudPayload,
       onNotification: (notification) => {
         const now = Date.now()
         const eventId = `atomic-provider-notification-${eventOrdinal++}`
@@ -834,6 +887,7 @@ sleep 30
       },
       onTitleObserved: ({ sessionId, providerSessionId, title, runId }) => {
         const now = Date.now()
+        hud.updateSessionName(sessionId, title)
         repository.observeProviderTitle({
           commandId: `title-${runId}-${eventOrdinal++}`, commandType: 'provider-hook.title',
           requestHash: `${sessionId}:${providerSessionId}:${title}:${now}`
@@ -885,6 +939,16 @@ sleep 30
         })
       })).status).toBe(200)
       await waitUntil(() => !sessions.providerIdentityPending('provider-config-atomic-hook'))
+      const inFlightHook = fetch(oldHookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'UserPromptSubmit',
+          session_id: 'identity-provider-config-atomic-hook',
+          model: { id: 'claude-atomic-a' }, transcript_path: oldTranscriptPath
+        })
+      })
+      await oldReadStarted
+      expect((await inFlightHook).status).toBe(200)
       const oldSession = sessions.get('provider-config-atomic-hook')!
       const oldPid = oldSession.pid
       const dispose = oldSession.dispose.bind(oldSession)
@@ -928,6 +992,38 @@ sleep 30
       expect(secondLaunch).toContain('--model claude-atomic-b')
       expect(secondLaunch).toContain('--resume identity-provider-config-atomic-hook')
       expect(secondLaunch).toContain('|https://atomic-b.example|KEY_B')
+
+      const secondArguments = secondLaunch.split('|')[0]!.split(' ')
+      const secondSettingsIndex = secondArguments.indexOf('--settings')
+      expect(secondSettingsIndex).toBeGreaterThanOrEqual(0)
+      const secondSettings = JSON.parse(await readFile(
+        secondArguments[secondSettingsIndex + 1]!, 'utf8'
+      )) as { hooks: { PreToolUse: Array<{ hooks: Array<{ url: string }> }> } }
+      const newHookUrl = secondSettings.hooks.PreToolUse[0]!.hooks[0]!.url
+      expect((await fetch(newHookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'PreToolUse', session_id: 'identity-provider-config-atomic-hook',
+          transcript_path: newTranscriptPath, tool_name: 'TodoWrite', tool_use_id: 'new-todo',
+          tool_input: { todos: [{ content: 'New run todo', status: 'in_progress' }] }
+        })
+      })).status).toBe(200)
+      await waitUntil(() => hud.snapshot('provider-config-atomic-hook')?.sessionName ===
+        'New current-run title')
+      const newRunHud = hud.snapshot('provider-config-atomic-hook')
+      expect(newRunHud).toMatchObject({
+        model: 'claude-atomic-b', sessionName: 'New current-run title',
+        runningTools: [{ name: 'Write', target: '/new/run.ts' }],
+        toolCounts: [{ name: 'Write', count: 2 }],
+        todos: [{ content: 'New run todo', status: 'in_progress' }]
+      })
+
+      const publicationsBeforeOldRead = [...hudPublications]
+      releaseOldTranscript(oldHistory)
+      await blockedOldHistory
+      await settle()
+      expect(hud.snapshot('provider-config-atomic-hook')).toEqual(newRunHud)
+      expect(hudPublications).toEqual(publicationsBeforeOldRead)
 
       const staleTranscript = join(root, 'provider-config-atomic-stale.jsonl')
       await writeFile(staleTranscript, [
@@ -977,6 +1073,7 @@ sleep 30
         "SELECT COUNT(*) AS count FROM sessions WHERE kind = 'agent-team-member'"
       )!.count).toBe(teamBeforeStaleHook)
     } finally {
+      releaseOldTranscript(oldHistory)
       await sessions.shutdownAll()
       atomicServer.close()
       await providerHooks.stop()
