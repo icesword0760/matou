@@ -29,6 +29,7 @@ import { RenameDialog } from './RenameDialog'
 import { sessionDeleteFlow } from './terminal-close-flow'
 import { AppIcon } from '../ui/AppIcon'
 import { SessionRecoveryWater } from './SessionRecoveryWater'
+import { terminalLoadingPresentation } from './terminal-loading-state'
 
 export function TerminalPane(props: {
   session: SessionView
@@ -111,7 +112,6 @@ export function TerminalPane(props: {
     onRename, onRestoreAutoTitle
   } = props
   const recoveryState = suppliedRecoveryState ?? 'ready'
-  const recoveryTracked = suppliedRecoveryState !== undefined
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -255,15 +255,14 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const currentForkProgress = activeForkProgress(forkProgress)
-  // Runtime recovery status is present only for a Session that existed before
-  // this Runtime generation. A freshly created Workspace has no recovery job;
-  // showing the recovery cover there hides an already-started Shell and can
-  // leave the card covered forever when its first prompt has no visible glyph.
-  const waitingForTerminalPaint = recoveryTracked && !isTeamMember &&
-    recoveryState === 'ready' && !terminalVisualReady
-  const showRecoveryWater = (recoveryBusy || waitingForTerminalPaint) &&
-    forkState !== 'failed' && providerRestoreState !== 'failed' && runtimeStatus !== 'error' && !storageFault &&
-    !currentForkProgress && !environmentUnavailable
+  const loadingPresentation = terminalLoadingPresentation({
+    visible, foreground, isTeamMember, pathValid, terminalVisualReady,
+    ...(suppliedRecoveryState === undefined ? {} : { recoveryState: suppliedRecoveryState }),
+    providerRestoreState, ...(forkState === undefined ? {} : { forkState }),
+    hasForkProgress: currentForkProgress !== undefined,
+    runtimeStatus, hasStorageFault: storageFault !== null, environmentUnavailable
+  })
+  const showRecoveryWater = loadingPresentation !== null
   const restoreIdentityExpired = providerRestoreIdentityExpired(restoreError)
   const restoreNoticeKey = restoreIdentityExpired && providerRestoreState === 'failed'
     ? `${session.id}:${restoreError ?? ''}`
@@ -308,7 +307,9 @@ export function TerminalPane(props: {
       }}>
       <div className="pane-header-content"><strong className="pane-title" title={session.title}>{session.title}</strong>
         {hasNotification && <span className="pane-notification-badge" role="status">新通知</span>}
-        {showRecoveryWater && <span className="pane-recovery-badge" aria-hidden="true"><i />恢复中</span>}
+        {loadingPresentation && <span className="pane-recovery-badge" aria-hidden="true">
+          <i />{loadingPresentation.label}
+        </span>}
         {git && <span className="pane-environment-badge" title={gitTitle(git)}>
           {gitLabel(git)}
         </span>}
@@ -478,7 +479,8 @@ export function TerminalPane(props: {
       onRetry={() => runtimeClient?.retryTerminalStorage(session.id)}
       onEnd={() => runtimeClient?.endTerminalAfterStorageFault(session.id)} />}
     {currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
-    {showRecoveryWater && <SessionRecoveryWater sessionTitle={session.title} />}
+    {loadingPresentation && <SessionRecoveryWater sessionTitle={session.title}
+      phase={loadingPresentation.phase} />}
     {recoveryState === 'failed' && forkState !== 'failed' && !storageFault &&
       !currentForkProgress && !environmentUnavailable &&
       <div className="session-recovery-overlay state-failed" data-testid="session-recovery-dialog"

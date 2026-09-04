@@ -28,7 +28,13 @@ export function recoveryWaterTimeline(elapsed: number, reducedMotion: boolean) {
   }
 }
 
-export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string }) {
+export function SessionRecoveryWater({
+  sessionTitle,
+  phase = 'recovery'
+}: {
+  sessionTitle: string
+  phase?: 'loading' | 'recovery'
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
@@ -277,10 +283,14 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
     }
   }, [])
 
+  const statusLabel = phase === 'recovery' ? '正在恢复终端' : '正在加载终端'
+  const detail = phase === 'recovery'
+    ? '正在恢复最近的终端内容与运行状态'
+    : '正在加载终端内容与运行状态'
   return <div className="session-recovery-overlay session-recovery-water" data-testid="session-recovery-water"
-    role="status" aria-label={`正在恢复终端：${sessionTitle}`}
+    data-loading-phase={phase} role="status" aria-label={`${statusLabel}：${sessionTitle}`}
     onPointerDown={(event) => event.stopPropagation()}>
-    <span className="visually-hidden">正在恢复最近的终端内容与运行状态</span>
+    <span className="visually-hidden">{detail}</span>
     <canvas ref={canvasRef} className="session-recovery-water__canvas" aria-hidden="true" />
   </div>
 }

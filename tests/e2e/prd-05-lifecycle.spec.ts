@@ -57,7 +57,6 @@ test('opens a newly added Workspace as a fresh interactive terminal without reco
     await expect(fixture.page.getByRole('group', { name: 'fresh-workspace 工作空间' }))
       .toHaveClass(/is-active/)
     const pane = fixture.page.locator('[data-testid="terminal-pane"]:visible').first()
-    await expect(pane.getByTestId('session-recovery-water')).toHaveCount(0)
 
     const surface = pane.locator('.terminal-surface')
     await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
@@ -67,6 +66,8 @@ test('opens a newly added Workspace as a fresh interactive terminal without reco
     await input.pressSequentially("printf '__FRESH_WORKSPACE_READY__\\n'", { delay: 2 })
     await input.press('Enter')
     await expect(surface.locator('.xterm-rows')).toContainText('__FRESH_WORKSPACE_READY__')
+    await expect(pane.getByTestId('session-recovery-water')).toHaveCount(0)
+    await expect(pane.getByText('恢复中')).toHaveCount(0)
   } finally { await fixture.close() }
 })
 
