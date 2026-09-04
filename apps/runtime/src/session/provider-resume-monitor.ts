@@ -24,6 +24,10 @@ export class ProviderResumeMonitor {
     return this.#settled
   }
 
+  get hasVisibleOutput(): boolean {
+    return this.#recentOutput.length > 0
+  }
+
   ingest(data: string): string | undefined {
     if (this.#failed || this.#settled) return undefined
     this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
@@ -41,6 +45,15 @@ export class ProviderResumeMonitor {
 
   timeout(): string | undefined {
     if (!this.isMonitoring) return undefined
+    // Claude may pause on an interactive startup screen (for example, the
+    // workspace trust confirmation) before it can emit the identity hook.
+    // Visible provider text proves the PTY is live and must remain available
+    // for the user's answer; only a completely silent launch is unresponsive.
+    if (this.#recentOutput.length > 0) {
+      this.#settled = true
+      this.#recentOutput = ''
+      return undefined
+    }
     this.#failed = true
     return 'provider resume timed out'
   }

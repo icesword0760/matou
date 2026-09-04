@@ -44,6 +44,23 @@ describe('ProviderResumeMonitor', () => {
     expect(monitor.isMonitoring).toBe(false)
   })
 
+  it('keeps a visibly interactive provider session alive at the identity deadline', () => {
+    const monitor = new ProviderResumeMonitor('provider-42')
+
+    expect(monitor.ingest([
+      'Accessing workspace: /Users/example',
+      'Quick safety check: Is this a project you created or one you trust?',
+      'No, exit',
+      'Yes, I trust this folder',
+      'Enter to confirm · Esc to cancel'
+    ].join('\r\n'))).toBeUndefined()
+    expect(monitor.hasVisibleOutput).toBe(true)
+    expect(monitor.isMonitoring).toBe(true)
+    expect(monitor.timeout()).toBeUndefined()
+    expect(monitor.isMonitoring).toBe(false)
+    expect(monitor.isSettled).toBe(true)
+  })
+
   it('stops treating later conversation text as startup failure after substantial resume output', () => {
     const monitor = new ProviderResumeMonitor('provider-42')
 

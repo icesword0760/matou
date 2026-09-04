@@ -1766,11 +1766,11 @@ export class RuntimeServer {
               hookRegistration?.retire()
               this.#parkResumeFailure(message, activeSession, resumeBinding.id, resumeFailure)
             }
-          } else if (resumeMonitor?.isSettled) {
+          } else if (resumeMonitor?.isSettled || resumeMonitor?.hasVisibleOutput) {
             // A full provider screen is the fallback readiness signal when a
-            // Claude release delays or omits its statusline HTTP hook. Do not
-            // remove the card-wide recovery state merely because the child PID
-            // exists; the first keystroke can otherwise land during startup.
+            // Claude release delays or omits its statusline HTTP hook. Visible
+            // provider content can also be an interactive trust prompt, so the
+            // card must become operable before the user can answer it.
             this.#settleProviderRecovery(message.sessionId)
           }
         },
@@ -2218,7 +2218,11 @@ export class RuntimeServer {
     this.#providerResumeTimers.set(message.sessionId, setTimeout(() => {
       this.#providerResumeTimers.delete(message.sessionId)
       const reason = monitor.timeout()
-      if (!reason || this.#sessions.get(message.sessionId) !== session) return
+      if (this.#sessions.get(message.sessionId) !== session) return
+      if (!reason) {
+        if (monitor.isSettled) this.#settleProviderRecovery(message.sessionId)
+        return
+      }
       this.#parkResumeFailure(message, session, bindingId, reason)
     }, this.#providerResumeTimeoutMs))
   }

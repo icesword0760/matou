@@ -4565,6 +4565,78 @@ sleep 30
     }
   })
 
+  it('keeps an interactive Claude resume alive when identity waits for user confirmation', async () => {
+    const executable = join(root, 'interactive-provider-session.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "Accessing workspace: /Users/example\\r\\n"',
+      'printf "Quick safety check: Is this a project you created or one you trust?\\r\\n"',
+      'printf "No, exit\\r\\nYes, I trust this folder\\r\\n"',
+      'printf "Enter to confirm · Esc to cancel\\r\\n"',
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const sessions = createTestSessionRegistry()
+    const interactivePort = new MockPort()
+    const interactiveServer = new RuntimeServer(
+      interactivePort, root, database, undefined, undefined, sessions, undefined, undefined,
+      { providerResumeTimeoutMs: 2_000 }
+    )
+    try {
+      registerSession(database, 'provider-interactive-session', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+        'binding-interactive', 'provider-interactive-session', 'interactive-provider-42'
+      )
+      interactivePort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'provider-interactive-renderer'
+      })
+      let recoverySettled = false
+      const recovery = interactiveServer.ensureSessionRunning({
+        sessionId: 'provider-interactive-session', sceneId: 'scene-provider-interactive',
+        executionContextId: 'replay-context', profile: 'claude-code',
+        priority: 'active-session', enqueueSequence: 1
+      }).then(() => { recoverySettled = true })
+      await waitUntil(() => sessions.has('provider-interactive-session'))
+      await waitUntil(() => recoverySettled, 500)
+      await recovery
+
+      expect(sessions.get('provider-interactive-session')).toBeDefined()
+      expect(database.get<{ resume_state: string; restore_state: string }>(
+        'SELECT resume_state, restore_state FROM provider_bindings WHERE id = ?',
+        'binding-interactive'
+      )).toEqual({ resume_state: 'available', restore_state: 'none' })
+
+      interactivePort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-interactive-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => interactivePort.last('terminal.spawned')?.reattached === true)
+      interactivePort.receive({
+        type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-interactive-session', fromSequence: 0
+      })
+      await waitUntil(() => interactivePort.last('terminal.replay-complete') !== undefined)
+      expect(terminalText(interactivePort)).toContain('Yes, I trust this folder')
+    } finally {
+      interactivePort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-interactive-session'
+      })
+      await settle()
+      interactiveServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
   it('keeps the Claude node failed when its resume process cannot start', async () => {
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = join(root, 'provider-command-does-not-exist')
