@@ -3206,6 +3206,14 @@ export class RuntimeServer {
     if (!session || !descriptor || session.profile === 'shell') {
       throw new RpcFault('CONFLICT', 'active AI Session is required for permission respawn')
     }
+    if (session.runId) {
+      for (const peer of RuntimeServer.#instances) {
+        if (peer.#sessions !== this.#sessions) continue
+        const registration = peer.#providerHookRegistrations
+          .get(sessionId)?.get(session.runId)?.registration
+        peer.#retireProviderHook(sessionId, session.runId, registration, true)
+      }
+    }
     this.#clearProviderResumeTimer(sessionId)
     this.#sessions.delete(sessionId, session)
     this.#control?.backend.unregister(sessionId, session)

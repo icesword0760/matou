@@ -5335,6 +5335,99 @@ sleep 30
     }
   })
 
+  it('keeps the persisted Bypass choice when the replaced run reports stale Auto during respawn', async () => {
+    server.close()
+    const executable = join(root, 'provider-permission-respawn-fence.sh')
+    const argumentFile = join(root, 'provider-permission-respawn-fence-arguments.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "%s\\n" "$@" >> "$MATOU_TEST_ARGUMENT_FILE"',
+      "trap 'sleep 0.5; exit 0' TERM HUP INT",
+      'while :; do sleep 0.05; done'
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousArgumentFile = process.env.MATOU_TEST_ARGUMENT_FILE
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_ARGUMENT_FILE = argumentFile
+    const sessions = createTestSessionRegistry()
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    const providerHooks = new ProviderHookServer(root, repository, {
+      currentRunId: (sessionId) => sessions.get(sessionId)?.runId
+    })
+    await providerHooks.start()
+    const permissionPort = new MockPort()
+    const permissionServer = new RuntimeServer(
+      permissionPort, root, database, undefined, undefined, sessions, providerHooks
+    )
+    try {
+      registerSession(database, 'provider-permission-respawn-fence', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+        'binding-permission-respawn-fence', 'provider-permission-respawn-fence',
+        'provider-permission-respawn-fence-42', JSON.stringify({ permissionMode: 'auto' })
+      )
+      permissionPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'permission-respawn-fence-renderer'
+      })
+      permissionPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-permission-respawn-fence', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => sessions.has('provider-permission-respawn-fence'))
+      permissionServer.providerIdentityRecorded(
+        'provider-permission-respawn-fence',
+        sessions.get('provider-permission-respawn-fence')!.runId!
+      )
+      await waitUntilAsync(async () => (await readFile(argumentFile, 'utf8').catch(() => '')).length > 0)
+      const firstArguments = (await readFile(argumentFile, 'utf8')).trim().split('\n')
+      const settingsPath = firstArguments[firstArguments.indexOf('--settings') + 1]!
+      const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
+        hooks: { Stop: Array<{ hooks: Array<{ url: string }> }> }
+      }
+      const oldHookUrl = settings.hooks.Stop[0]!.hooks[0]!.url
+
+      permissionPort.receive(rpc('permission-respawn-fence', 'session.set-permission-mode', {
+        sessionId: 'provider-permission-respawn-fence', provider: 'claude-code',
+        permissionMode: 'bypassPermissions', respawn: true, now: 3
+      }))
+      await waitUntil(() => (repository.getResumeBinding(
+        'provider-permission-respawn-fence', 'claude-code'
+      )?.metadata as { permissionMode?: string } | undefined)?.permissionMode === 'bypassPermissions')
+      await waitUntil(() => !sessions.has('provider-permission-respawn-fence'))
+
+      expect((await fetch(oldHookUrl, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          hook_event_name: 'Stop', session_id: 'provider-permission-respawn-fence-42',
+          permission_mode: 'auto'
+        })
+      })).status).toBe(200)
+      await waitUntil(() => permissionPort.findRpcResponse('permission-respawn-fence') !== undefined)
+
+      expect(repository.getResumeBinding(
+        'provider-permission-respawn-fence', 'claude-code'
+      )).toMatchObject({ metadata: { permissionMode: 'bypassPermissions' } })
+      expect((await readFile(argumentFile, 'utf8')).trim().split('\n'))
+        .toContain('--dangerously-skip-permissions')
+    } finally {
+      permissionPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'provider-permission-respawn-fence'
+      })
+      await settle()
+      permissionServer.close()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_ARGUMENT_FILE', previousArgumentFile)
+    }
+  })
+
   it('persists a successful live model change for an immediate Fork binding and launch', async () => {
     server.close()
     const executable = join(root, 'session-model-fork.sh')
