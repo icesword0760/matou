@@ -588,9 +588,6 @@ sleep 30
         }
       }
       const providerSnapshot = await providerConfigs.snapshot()
-      const bindingMetadata = database.all<{ id: string; metadata_json: string }>(
-        'SELECT id, metadata_json FROM provider_bindings ORDER BY id'
-      )
       controlledServer = new RuntimeServer(
         controlledPort, root, database, undefined,
         { backend, tokens, endpoint: join(root, 'control.sock') },
@@ -640,19 +637,34 @@ sleep 30
       expect((await readFile(join(root, 'control-claude-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
           '--plugin-dir', join(controlAssetRoot, 'providers', 'claude-plugin'),
-          '--model', 'claude-control-model', '--resume', 'provider-claude-code',
+          '--model', 'claude-code-persisted', '--resume', 'provider-claude-code',
           '--dangerously-skip-permissions'
         ])
       expect((await readFile(join(root, 'control-codex-session.args'), 'utf8')).trim().split('\n'))
         .toEqual([
           '-c', 'developer_instructions="Task 8 fixture\\n"',
-          '--model', 'codex-control-model', '--dangerously-bypass-approvals-and-sandbox',
+          '--model', 'codex-persisted', '--dangerously-bypass-approvals-and-sandbox',
           'resume', 'provider-codex'
         ])
       expect(await providerConfigs.snapshot()).toEqual(providerSnapshot)
-      expect(database.all(
+      expect(database.all<{ id: string; metadata_json: string }>(
         'SELECT id, metadata_json FROM provider_bindings ORDER BY id'
-      )).toEqual(bindingMetadata)
+      ).map(({ id, metadata_json }) => ({ id, metadata: JSON.parse(metadata_json) }))).toEqual([
+        {
+          id: 'binding-claude-code',
+          metadata: {
+            permissionMode: 'bypassPermissions', model: 'claude-code-persisted',
+            providerConfigId: providerSnapshot.activeProviderIds['claude-code']
+          }
+        },
+        {
+          id: 'binding-codex',
+          metadata: {
+            permissionMode: 'bypassPermissions', model: 'codex-persisted',
+            providerConfigId: providerSnapshot.activeProviderIds.codex
+          }
+        }
+      ])
       for (const { sessionId } of profileFixtures) {
         controlledPort.receive({
           type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId
@@ -670,7 +682,7 @@ sleep 30
     }
   })
 
-  it('applies a global Claude provider to launches and refreshes the attached live session', async () => {
+  it('explicitly rebinds an attached Claude Session when the user activates a provider', async () => {
     const executable = join(root, 'provider-config-claude.sh')
     const log = join(root, 'provider-config-invocations.txt')
     await writeFile(executable, [
@@ -683,6 +695,16 @@ sleep 30
     const previousCommand = process.env.MATOU_CLAUDE_COMMAND
     process.env.MATOU_CLAUDE_COMMAND = executable
     registerSession(database, 'provider-config-live', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'unknown', ?, 1, 1, NULL)`,
+      'provider-config-live-settings', 'provider-config-live', 'provider-config-live-pending',
+      JSON.stringify({
+        providerConfigId: 'anthropic-official', model: '', permissionMode: 'default'
+      })
+    )
     try {
       port.receive({
         type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
@@ -720,6 +742,12 @@ sleep 30
       const lines = (await readFile(log, 'utf8')).trim().split('\n')
       expect(lines[1]).toBe('--model claude-team|https://gateway.example|TOKEN|TOKEN')
       expect((port.last('terminal.spawned') as { pid: number }).pid).not.toBe(firstPid)
+      expect(JSON.parse(database.get<{ metadata_json: string }>(
+        'SELECT metadata_json FROM provider_bindings WHERE id = ?',
+        'provider-config-live-settings'
+      )!.metadata_json)).toMatchObject({
+        providerConfigId: providerId, model: 'claude-team', permissionMode: 'default'
+      })
     } finally {
       port.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -727,6 +755,161 @@ sleep 30
       })
       await settle()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('restores a Session with its bound provider configuration and model after global defaults change', async () => {
+    const executable = join(root, 'provider-bound-restore.sh')
+    const log = join(root, 'provider-bound-restore-invocations.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\n' "$*" "$ANTHROPIC_BASE_URL" "$ANTHROPIC_API_KEY" > ${JSON.stringify(log)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const bound = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Bound restore fixture', endpoint: 'https://bound.example/',
+      model: 'bound-provider-default', apiKey: 'KEY_A'
+    })
+    const laterDefault = await providerConfigs.upsert({
+      cli: 'claude-code', name: 'Later default fixture', endpoint: 'https://later.example/',
+      model: 'later-provider-model', apiKey: 'KEY_B'
+    })
+    await providerConfigs.activate('claude-code', laterDefault.id)
+    registerSession(database, 'bound-restore-session', 'claude-code')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+      'binding-bound-restore', 'bound-restore-session', 'provider-context-bound',
+      JSON.stringify({
+        providerConfigId: bound.id,
+        model: 'session-frozen-model',
+        permissionMode: 'bypassPermissions'
+      })
+    )
+    const restorePort = new MockPort()
+    const restoreRegistry = createTestSessionRegistry()
+    const restoreServer = new RuntimeServer(
+      restorePort, root, database, undefined, undefined, restoreRegistry,
+      undefined, undefined, { providerConfigs, providerResumeTimeoutMs: 30_000 }
+    )
+    restorePort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'bound-restore-renderer'
+    })
+    try {
+      restorePort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'bound-restore-session', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
+
+      expect((await readFile(log, 'utf8')).trim()).toBe(
+        '--model session-frozen-model --resume provider-context-bound ' +
+        '--dangerously-skip-permissions|https://bound.example|KEY_A'
+      )
+    } finally {
+      restorePort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'bound-restore-session'
+      })
+      await settle()
+      restoreServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+    }
+  })
+
+  it('starts an accepted Codex Fork with its frozen provider settings after global defaults change', async () => {
+    const executable = join(root, 'provider-bound-codex-fork.sh')
+    const log = join(root, 'provider-bound-codex-fork-invocations.txt')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      `printf '%s|%s|%s\n' "$*" "$OPENAI_BASE_URL" "$OPENAI_API_KEY" > ${JSON.stringify(log)}`,
+      'sleep 30',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CODEX_COMMAND
+    process.env.MATOU_CODEX_COMMAND = executable
+    const providerConfigs = new ProviderConfigStore(root)
+    const bound = await providerConfigs.upsert({
+      cli: 'codex', name: 'Bound fork fixture', endpoint: 'https://bound-codex.example/v1/',
+      model: 'bound-codex-default', apiKey: 'KEY_A'
+    })
+    const laterDefault = await providerConfigs.upsert({
+      cli: 'codex', name: 'Later Codex fixture', endpoint: 'https://later-codex.example/v1/',
+      model: 'later-codex-model', apiKey: 'KEY_B'
+    })
+    await providerConfigs.activate('codex', laterDefault.id)
+    registerSession(database, 'codex-fork-source', 'codex')
+    registerSession(database, 'codex-fork-child', 'codex')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'codex', ?, 'unknown', ?, 1, 1, NULL)`,
+      'binding-codex-fork-child', 'codex-fork-child', 'codex-source-context',
+      JSON.stringify({
+        providerConfigId: bound.id,
+        model: 'codex-session-frozen-model',
+        permissionMode: 'bypassPermissions',
+        inheritedConversation: true
+      })
+    )
+    const intents = new SessionForkIntentRepository(database)
+    const now = Date.now()
+    intents.accept({
+      operationId: 'operation-codex-frozen', submissionKey: 'submission-codex-frozen',
+      sessionId: 'codex-fork-child', sourceSessionId: 'codex-fork-source',
+      sourceProviderSessionId: 'codex-source-context', displayName: 'Codex child',
+      worktreeMode: 'current', totalSteps: 2, now
+    })
+    const lease = intents.acquireLease({
+      operationId: 'operation-codex-frozen', owner: 'coordinator', now, ttlMs: 60_000
+    })
+    if (lease.kind !== 'acquired') throw new Error('Codex Fork lease missing')
+    intents.advanceStage({
+      operationId: 'operation-codex-frozen', lease: lease.lease,
+      stage: 'restoring-provider', now
+    })
+    const forkPort = new MockPort()
+    const forkRegistry = createTestSessionRegistry()
+    const forkServer = new RuntimeServer(
+      forkPort, root, database, undefined, undefined, forkRegistry,
+      undefined, undefined, { providerConfigs, forkProviderIdentityTimeoutMs: 30_000 }
+    )
+    forkPort.receive({
+      type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+      clientId: 'bound-codex-fork-renderer'
+    })
+    try {
+      await forkServer.startOrResumeSession({
+        sessionId: 'codex-fork-child', executionContextId: 'replay-context',
+        profile: 'codex', cols: 80, rows: 24
+      }, {
+        operationId: 'operation-codex-frozen', runId: 'run-codex-frozen', lease: lease.lease
+      })
+      await waitUntilAsync(async () => Boolean((await readFile(log, 'utf8').catch(() => '')).trim()))
+
+      expect((await readFile(log, 'utf8')).trim()).toBe(
+        '--model codex-session-frozen-model --dangerously-bypass-approvals-and-sandbox ' +
+        'fork codex-source-context|https://bound-codex.example/v1|KEY_A'
+      )
+    } finally {
+      forkPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'codex-fork-child'
+      })
+      await settle()
+      forkServer.close()
+      restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
     }
   })
 
@@ -3209,7 +3392,11 @@ sleep 30
       await waitUntil(() => confirmedPort.findRpcError('pending-permission-plan') !== undefined)
       expect(database.get<{ metadata_json: string }>(
         'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-confirmed-derivation'
-      )).toEqual({ metadata_json: '{}' })
+      )).toEqual({
+        metadata_json: JSON.stringify({
+          providerConfigId: 'anthropic-official', model: '', permissionMode: 'default'
+        })
+      })
 
       const runId = sessions.get('confirmed-derivation-session')?.runId
       expect(runId).toEqual(expect.any(String))
@@ -5300,7 +5487,11 @@ describe('RuntimeServer session-scoped journal recovery', () => {
 
       expect(database.get<{ metadata_json: string }>(
         'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-recovering-agent'
-      )).toEqual({ metadata_json: JSON.stringify({ permissionMode: 'default' }) })
+      )).toEqual({
+        metadata_json: JSON.stringify({
+          permissionMode: 'default', providerConfigId: 'anthropic-official', model: ''
+        })
+      })
       expect(sessions.get('recovering-agent-session')?.pid).toBe(originalPid)
     } finally {
       server.close()
@@ -5403,7 +5594,11 @@ describe('RuntimeServer session-scoped journal recovery', () => {
 
       expect(database.get<{ metadata_json: string }>(
         'SELECT metadata_json FROM provider_bindings WHERE id = ?', 'binding-faulted-agent'
-      )).toEqual({ metadata_json: JSON.stringify({ permissionMode: 'default' }) })
+      )).toEqual({
+        metadata_json: JSON.stringify({
+          permissionMode: 'default', providerConfigId: 'anthropic-official', model: ''
+        })
+      })
       expect(sessions.get('faulted-agent-session')?.pid).toBe(originalPid)
     } finally {
       writable = true

@@ -38,6 +38,7 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
   const profile = requestedProfile === 'claude-code' || requestedProfile === 'codex'
     ? requestedProfile : 'shell'
   const title = query.get('title') ?? '独立终端'
+  const windowId = query.get('windowId') ?? ''
   const [hud, setHud] = useState<SessionHudView>(() => ({
     sessionId,
     mode: profile === 'shell' ? 'shell' : 'agent',
@@ -153,6 +154,41 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
     })
   }), [mainWindowId, sceneId, sessionId, themeKey])
   useEffect(() => {
+    if (isTeamMember || !windowId || !sessionId) return
+    const desktop = window.matouDesktop
+    if (
+      !desktop?.onDetachedTerminalFocusRequested ||
+      !desktop.acknowledgeDetachedTerminalFocus ||
+      !desktop.isCurrentWindowFocused
+    ) return
+    let alive = true
+    let generation = 0
+    const unsubscribe = desktop.onDetachedTerminalFocusRequested((request) => {
+      if (
+        request.targetWindowId !== windowId || request.routeWindowId !== mainWindowId ||
+        request.sessionId !== sessionId
+      ) return
+      const currentGeneration = ++generation
+      setSearchOpen(false)
+      setShortcutPanelOpen(false)
+      setFocusRequest((value) => value + 1)
+      void proveDetachedTerminalFocus({
+        request,
+        sessionId,
+        active: () => alive && generation === currentGeneration,
+        isNativeWindowFocused: () => desktop.isCurrentWindowFocused()
+      }).then(async (focused) => {
+        if (!alive || generation !== currentGeneration) return
+        await desktop.acknowledgeDetachedTerminalFocus({ ...request, focused })
+      })
+    })
+    return () => {
+      alive = false
+      generation += 1
+      unsubscribe()
+    }
+  }, [isTeamMember, mainWindowId, sessionId, windowId])
+  useEffect(() => {
     document.body.classList.toggle('light-theme', themeKey === 'light')
     document.documentElement.dataset.theme = themeKey
     return () => {
@@ -201,4 +237,43 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
         setFocusRequest((value) => value + 1)
       }} />}
   </main>
+}
+
+async function proveDetachedTerminalFocus(input: {
+  request: { deadlineAt: number }
+  sessionId: string
+  active(): boolean
+  isNativeWindowFocused(): Promise<boolean>
+}): Promise<boolean> {
+  while (input.active() && Date.now() < input.request.deadlineAt) {
+    await nextDetachedFocusFrame()
+    if (!input.active()) return false
+    const nativeFocused = await input.isNativeWindowFocused().catch(() => false)
+    if (nativeFocused && detachedTerminalOwnsInputFocus(input.sessionId)) return true
+  }
+  return false
+}
+
+function detachedTerminalOwnsInputFocus(sessionId: string): boolean {
+  const active = document.activeElement
+  if (!(active instanceof HTMLElement) || active === document.body) return false
+  return [...document.querySelectorAll<HTMLElement>('.terminal-surface[data-session-id]')]
+    .some((surface) => surface.dataset.sessionId === sessionId &&
+      surface.closest('[hidden]') === null && (surface === active || surface.contains(active)))
+}
+
+function nextDetachedFocusFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    let frame: number | undefined
+    const timer = window.setTimeout(finish, 40)
+    function finish() {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      resolve()
+    }
+    frame = requestAnimationFrame(finish)
+  })
 }

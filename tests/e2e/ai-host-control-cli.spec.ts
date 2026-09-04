@@ -29,6 +29,8 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     const firstSessionId = await first.getAttribute('data-session-id')
     expect(firstSessionId).toBeTruthy()
 
+    await focusTerminal(first)
+    const beforeIdentify = await uiState(fixture.page.locator('body'))
     const identifyFile = join(fixture.rootDirectory, 'mt-identify.json')
     const identity = await runShellMtJson(first, 'mt identify --json', identifyFile) as {
       target: { session: { id: string }; canvas: { name: string }; dag: { depth: number } }
@@ -36,6 +38,7 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     expect(identity.target.session.id).toBe(firstSessionId)
     expect(identity.target.canvas.name).toBeTruthy()
     expect(identity.target.dag.depth).toBe(0)
+    expect(await uiState(fixture.page.locator('body'))).toEqual(beforeIdentify)
 
     await fixture.page.getByRole('button', { name: '横向新增 Shell' }).click()
     await expect(visibleSurfaces(fixture.page)).toHaveCount(2)
@@ -46,7 +49,7 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     await waitForShell(second)
 
     await focusTerminal(stableFirst)
-    const uiBefore = await uiState(fixture.page.locator('body'))
+    const beforeSend = await uiState(fixture.page.locator('body'))
     const resultFile = join(fixture.rootDirectory, 'mt-send.json')
     const result = await runShellMtJson(
       stableFirst,
@@ -55,8 +58,9 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     ) as { sent: boolean }
     await expect(second.locator('.xterm-rows')).toContainText('__MT_REMOTE_OK__')
     expect(result.sent).toBe(true)
-    expect(await uiState(fixture.page.locator('body'))).toEqual(uiBefore)
+    expect(await uiState(fixture.page.locator('body'))).toEqual(beforeSend)
 
+    const beforeRead = await uiState(fixture.page.locator('body'))
     const readFilePath = join(fixture.rootDirectory, 'mt-read.json')
     const current = await runShellMtJson(stableFirst, 'mt read right --json', readFilePath) as {
       source: string
@@ -64,6 +68,7 @@ test('identifies the caller and sends to a sibling without moving the Matou UI',
     }
     expect(current.source).toBe('screen')
     expect(current.text).toContain('__MT_REMOTE_OK__')
+    expect(await uiState(fixture.page.locator('body'))).toEqual(beforeRead)
   } finally {
     await fixture.close()
   }
@@ -80,8 +85,18 @@ async function uiState(root: Locator): Promise<Record<string, unknown>> {
   return root.evaluate((element) => {
     const focused = element.querySelector<HTMLElement>('.session-card.is-focused')
     const carousel = element.querySelector<HTMLElement>('[aria-label="同级会话列表"]')
+    const activeElement = element.ownerDocument.activeElement as HTMLElement | null
     return {
+      activeWorkspaceId: element.querySelector<HTMLElement>(
+        '[data-workspace-id] .workspace-group__header[aria-current="location"]'
+      )?.closest<HTMLElement>('[data-workspace-id]')?.dataset.workspaceId ?? null,
+      activeTaskId: element.querySelector<HTMLElement>('[data-testid^="task-"][aria-current="true"]')
+        ?.dataset.testid?.replace(/^task-/, '') ?? null,
+      activeSceneId: element.querySelector<HTMLElement>('[data-scene-id] [role="tab"][aria-selected="true"]')
+        ?.closest<HTMLElement>('[data-scene-id]')?.dataset.sceneId ?? null,
       focusedSessionId: focused?.dataset.sessionCard ?? null,
+      activeElementSessionId: activeElement?.closest<HTMLElement>('.terminal-surface[data-session-id]')
+        ?.dataset.sessionId ?? null,
       scrollLeft: carousel?.scrollLeft ?? 0,
       notifyingCards: element.querySelectorAll('.session-card.is-notifying').length,
       notificationBadges: element.querySelectorAll('[data-testid="notification-badge"]').length

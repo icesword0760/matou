@@ -32,6 +32,7 @@ export interface PtySessionOptions {
   forkSession?: boolean
   permissionMode?: string
   settingsPath?: string
+  codexHooksConfig?: string
   controlAssetRoot?: string
   model?: string
   env?: Record<string, string>
@@ -164,6 +165,9 @@ export class PtySession {
       }),
       ...(options.settingsPath === undefined ? {} : {
         settingsPath: options.settingsPath
+      }),
+      ...(options.codexHooksConfig === undefined ? {} : {
+        codexHooksConfig: options.codexHooksConfig
       }),
       ...(options.controlAssetRoot === undefined ? {} : {
         controlAssetRoot: options.controlAssetRoot

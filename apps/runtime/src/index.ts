@@ -398,19 +398,21 @@ async function initializeRuntime(): Promise<RuntimeState> {
       if (changed) for (const server of servers) server.flushSemanticEvents()
     },
     onIdentityRecorded: ({
-      sessionId, runId, providerSessionId, eventName, forkAuthority
+      sessionId, runId, provider, providerSessionId, eventName, forkAuthority
     }) => {
       providerReady.record(sessionId, runId, sessions.get(sessionId)?.runId ?? '')
       sessionHuds.markResumable(sessionId)
       const now = Date.now()
-      try {
-        providerModes.observeHook({
-          commandId: `provider-mode-${runId}-${eventName}-${randomUUID()}`,
-          commandType: 'provider-hook.mode',
-          requestHash: `${sessionId}:${providerSessionId}:${eventName}:${now}`
-        }, { sessionId, providerSessionId, eventName, now })
-      } catch (error) {
-        console.error(`[provider-mode] ${errorMessage(error)}`)
+      if (provider === 'claude-code') {
+        try {
+          providerModes.observeHook({
+            commandId: `provider-mode-${runId}-${eventName}-${randomUUID()}`,
+            commandType: 'provider-hook.mode',
+            requestHash: `${sessionId}:${providerSessionId}:${eventName}:${now}`
+          }, { sessionId, providerSessionId, eventName, now })
+        } catch (error) {
+          console.error(`[provider-mode] ${errorMessage(error)}`)
+        }
       }
       for (const server of servers) {
         server.providerIdentityRecorded(sessionId, runId)
@@ -481,6 +483,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
   servers.add(backgroundServer)
   const forkWorkflow = new ForkWorkflowService(runtimeDataRoot, database, transactions, {
     stopRuns,
+    providerConfigs,
     ...(e2eForkSetupPolicyForWorkspace ? {
       setupPolicyForWorkspace: e2eForkSetupPolicyForWorkspace
     } : {}),

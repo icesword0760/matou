@@ -83,6 +83,32 @@ describe('PRD 04 provider launch plan', () => {
     })
   })
 
+  it('forks Codex from the source identity through its provider-specific subcommand', () => {
+    expect(resolvePtyCommand({
+      profile: 'codex', executable: '/fixture/codex',
+      providerSessionId: 'codex-source-1', forkSession: true,
+      codexDeveloperInstructions: 'Use mt.'
+    })).toEqual({
+      file: '/fixture/codex',
+      args: [
+        '-c', 'developer_instructions="Use mt."',
+        'fork', 'codex-source-1'
+      ],
+      resuming: true
+    })
+  })
+
+  it('loads the Matou-owned Codex identity hook for a managed launch', () => {
+    const codexHooksConfig = '{ SessionStart = [{ hooks = [{ type = "command", command = "/fixture/provider-hooks/run.statusline.sh", timeout = 5 }] }] }'
+    expect(resolvePtyCommand({
+      profile: 'codex', executable: '/fixture/codex',
+      codexHooksConfig
+    }).args).toEqual([
+      '-c', `hooks=${codexHooksConfig}`,
+      '--dangerously-bypass-hook-trust'
+    ])
+  })
+
   it('keeps Codex permission flags global while loading session-only instructions', () => {
     expect(resolvePtyCommand({
       profile: 'codex', executable: '/fixture/codex',

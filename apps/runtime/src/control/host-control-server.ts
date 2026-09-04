@@ -24,6 +24,7 @@ import type {
   HostActionMethod,
   HostActionResult
 } from './host-action-types'
+import { hostTargetRevision } from './host-target-revision'
 
 export type {
   AllowedControlKey,
@@ -309,7 +310,7 @@ export class HostControlServer {
       ? enumerationWithDefault(params.scope, ['current-level', 'all'] as const, 'scope', 'current-level')
       : targetListScope(params.target)
     const targets = await this.#backend.listTargets(caller, listScope)
-    const projectionRevision = targetRevision(targets)
+    const projectionRevision = hostTargetRevision(targets)
     if (method === 'host.list') return { projectionRevision, scope: listScope, targets }
 
     if (method === 'task.status.write') {
@@ -493,14 +494,6 @@ function targetListScope(raw: unknown): HostListScope {
   return target.kind === 'session' || target.kind === 'ref' || typeof target.sessionId === 'string'
     ? 'all'
     : 'current-level'
-}
-
-function targetRevision(targets: HostTarget[]): string {
-  return createHash('sha256')
-    .update(JSON.stringify(targets.map(({ ref, workspaceId, taskId, sessionId, mountId }) => ({
-      ref, workspaceId, taskId, sessionId, mountId
-    }))))
-    .digest('hex')
 }
 
 function hashToken(token: string): string {

@@ -31,6 +31,73 @@ interface NavigatedResult {
   }
 }
 
+interface IdentifiedResult {
+  target: {
+    ref: string
+    workspace: { id: string }
+    task: { id: string }
+    canvas: { id: string }
+  }
+}
+
+test('focuses and switches to a detached active Session through its owning main Renderer', async () => {
+  test.setTimeout(180_000)
+  const fixture = await launchAiHostControl()
+  try {
+    const caller = await seedResumableProviderSession(fixture)
+    const identity = (await runMtInSession<IdentifiedResult>(
+      fixture, caller.sessionId, ['identify', '--json']
+    )).value
+    const pane = fixture.page.locator(
+      `[data-testid="terminal-pane"]:has(.terminal-surface[data-session-id="${caller.sessionId}"])`
+    )
+    await pane.locator('.terminal-pane-header').click({
+      button: 'right', position: { x: 72, y: 20 }, force: true
+    })
+    await fixture.page.getByRole('menuitem', { name: '↗ 独立窗口' }).click()
+    await expect(fixture.page.getByTestId('detached-placeholder')).toContainText('已脱出')
+    await expect.poll(async () => (await fixture.app.windows()).length).toBe(2)
+    const detached = (await fixture.app.windows()).find((candidate) => candidate !== fixture.page)!
+    const routeWindowId = windowId(fixture.page)
+    const targetWindowId = windowId(detached)
+
+    // The command is typed through the detached terminal itself. Give that
+    // native window ownership before Playwright sends keys; the packaged-App
+    // acceptance exercises the stronger background-to-detached raise by
+    // invoking Host Control out of process.
+    await detached.evaluate((id) => window.matouDesktop!.showWindow(id), targetWindowId)
+    await expectNativeFocusedWindow(fixture.app, targetWindowId)
+
+    const focused = (await runMtInSession<NavigatedResult>(
+      fixture, caller.sessionId, ['focus', identity.target.ref, '--json'], 0, detached
+    )).value
+    expect(focused.finalPath).toMatchObject({
+      routeWindowId, targetWindowId, sessionId: caller.sessionId
+    })
+    await expectNativeFocusedWindow(fixture.app, targetWindowId)
+    const textarea = detached.locator(
+      `.terminal-surface[data-session-id="${caller.sessionId}"] .xterm-helper-textarea`
+    )
+    await expect(textarea).toBeFocused()
+
+    for (const [kind, ref] of [
+      ['workspace', `workspace:${identity.target.workspace.id}`],
+      ['task', `task:${identity.target.task.id}`],
+      ['canvas', `canvas:${identity.target.canvas.id}`]
+    ] as const) {
+      const switched = (await runMtInSession<NavigatedResult>(
+        fixture, caller.sessionId, ['switch', kind, ref, '--json'], 0, detached
+      )).value
+      expect(switched.finalPath).toMatchObject({
+        routeWindowId, targetWindowId, sessionId: caller.sessionId
+      })
+      await expectNativeFocusedWindow(fixture.app, targetWindowId)
+    }
+  } finally {
+    await fixture.close()
+  }
+})
+
 test('focuses a session in the second main window and leaves its terminal ready for keyboard input', async () => {
   test.setTimeout(180_000)
   const fixture = await launchAiHostControl()
@@ -126,4 +193,19 @@ function idFromRef(ref: string, kind: string): string {
   const prefix = `${kind}:`
   if (!ref.startsWith(prefix)) throw new Error(`Expected ${kind} ref, received ${ref}`)
   return ref.slice(prefix.length)
+}
+
+async function expectNativeFocusedWindow(
+  app: import('@playwright/test').ElectronApplication,
+  expectedWindowId: string
+): Promise<void> {
+  await expect.poll(() => app.evaluate(({ BrowserWindow }, expectedId) => {
+    const focusedWindow = BrowserWindow.getFocusedWindow()
+    const focusedId = focusedWindow === null
+      ? undefined
+      : new URL(focusedWindow.webContents.getURL()).searchParams.get('windowId') ?? undefined
+    return { focusedId, focused: focusedWindow?.isFocused() ?? false }
+  }, expectedWindowId), {
+    message: '等待目标窗口成为原生前台窗口', timeout: 30_000
+  }).toEqual({ focusedId: expectedWindowId, focused: true })
 }

@@ -77,6 +77,7 @@ interface BindingRow {
 
 export type ProviderPermissionMode =
   | 'default'
+  | 'auto'
   | 'acceptEdits'
   | 'plan'
   | 'bypassPermissions'
@@ -370,7 +371,15 @@ export class SessionRepository {
           existing.id
         )
       } else {
+        const settingsSource = tx.get<BindingRow>(
+          `SELECT * FROM provider_bindings
+           WHERE session_id = ? AND provider = ?
+           ORDER BY updated_at DESC, id DESC LIMIT 1`,
+          input.sessionId,
+          input.provider
+        )
         const metadata: Record<string, unknown> = {
+          ...providerLaunchMetadata(parseMetadata(settingsSource?.metadata_json ?? '{}')),
           ...(isObject(input.metadata) ? input.metadata : {}),
           ...authorityMetadata,
           ...(input.provisional ? { provisional: true } : {})
@@ -897,6 +906,67 @@ export class SessionRepository {
     return row ? mapBinding(row) : undefined
   }
 
+  getProviderSettingsBinding(
+    sessionId: string,
+    provider: ProviderBinding['provider']
+  ): ProviderBinding | undefined {
+    const row = this.#database.get<BindingRow>(
+      `SELECT * FROM provider_bindings
+       WHERE session_id = ? AND provider = ?
+       ORDER BY updated_at DESC, id DESC LIMIT 1`,
+      sessionId,
+      provider
+    )
+    return row ? mapBinding(row) : undefined
+  }
+
+  updateProviderLaunchSettings(
+    command: DomainCommandMetadata,
+    input: {
+      bindingId: string
+      providerConfigId: string
+      model: string
+      permissionMode: ProviderPermissionMode
+      now: number
+    }
+  ): DomainCommit<ProviderBinding> {
+    return this.#transactions.execute(command, ({ tx, emit }) => {
+      const binding = requireRow(
+        tx.get<BindingRow>('SELECT * FROM provider_bindings WHERE id = ?', input.bindingId),
+        'ProviderBinding'
+      )
+      const session = requireRow(
+        tx.get<SessionRow>('SELECT * FROM sessions WHERE id = ?', binding.session_id),
+        'Session'
+      )
+      const metadata = parseMetadata(binding.metadata_json)
+      tx.run(
+        `UPDATE provider_bindings SET metadata_json = ?, updated_at = ? WHERE id = ?`,
+        JSON.stringify({
+          ...(isObject(metadata) ? metadata : {}),
+          providerConfigId: input.providerConfigId,
+          model: input.model,
+          permissionMode: input.permissionMode
+        }),
+        input.now,
+        binding.id
+      )
+      const updated = mapBinding(requireRow(
+        tx.get<BindingRow>('SELECT * FROM provider_bindings WHERE id = ?', binding.id),
+        'ProviderBinding'
+      ))
+      emitSessionEvent(
+        emit,
+        command.commandId,
+        'provider-binding.launch-settings-updated',
+        session,
+        input.now,
+        { binding: updated }
+      )
+      return updated
+    })
+  }
+
   #changeBinding(
     command: DomainCommandMetadata,
     bindingId: string,
@@ -1032,6 +1102,19 @@ function parseMetadata(value: string): unknown {
     return JSON.parse(value) as unknown
   } catch {
     return {}
+  }
+}
+
+function providerLaunchMetadata(metadata: unknown): Record<string, unknown> {
+  if (!isObject(metadata)) return {}
+  return {
+    ...(typeof metadata.providerConfigId === 'string'
+      ? { providerConfigId: metadata.providerConfigId }
+      : {}),
+    ...(typeof metadata.model === 'string' ? { model: metadata.model } : {}),
+    ...(typeof metadata.permissionMode === 'string'
+      ? { permissionMode: metadata.permissionMode }
+      : {})
   }
 }
 

@@ -28,6 +28,12 @@ export interface ProviderLaunchConfig {
   env: Record<string, string>
 }
 
+export interface ProviderLaunchSelection {
+  providerConfigId: string
+  model: string
+  env: Record<string, string>
+}
+
 const DEFAULT_STATE: StoredProviderState = {
   version: 1,
   revision: 1,
@@ -109,13 +115,26 @@ export class ProviderConfigStore {
   }
 
   async launchConfig(cli: ProviderCli): Promise<ProviderLaunchConfig> {
+    const selected = await this.launchSelection(cli)
+    return {
+      ...(selected.model ? { model: selected.model } : {}),
+      env: selected.env
+    }
+  }
+
+  async launchSelection(
+    cli: ProviderCli,
+    providerConfigId?: string
+  ): Promise<ProviderLaunchSelection> {
     const state = await this.#read()
-    const provider = state.providers[cli].find(({ id }) => id === state.activeProviderIds[cli])
-    if (!provider) return { env: {} }
+    const selectedId = providerConfigId ?? state.activeProviderIds[cli]
+    const provider = state.providers[cli].find(({ id }) => id === selectedId)
+    if (!provider) throw new Error('会话绑定的供应商配置不存在')
     const endpoint = provider.endpoint.replace(/\/$/, '')
     if (cli === 'claude-code') {
       return {
-        ...(provider.model ? { model: provider.model } : {}),
+        providerConfigId: provider.id,
+        model: provider.model,
         env: {
           ...(provider.apiKey ? {
             ANTHROPIC_API_KEY: provider.apiKey,
@@ -126,7 +145,8 @@ export class ProviderConfigStore {
       }
     }
     return {
-      ...(provider.model ? { model: provider.model } : {}),
+      providerConfigId: provider.id,
+      model: provider.model,
       env: {
         ...(provider.apiKey ? { OPENAI_API_KEY: provider.apiKey } : {}),
         ...(endpoint ? { OPENAI_BASE_URL: endpoint } : {})

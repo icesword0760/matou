@@ -25,6 +25,7 @@ import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainMutationContext, DomainTransactionManager } from '../storage/domain-transaction'
 import { SessionEnvironmentRepository } from '../session/session-environment-repository'
+import { ProviderConfigStore } from '../provider-config/provider-config-store'
 import {
   SessionForkIntentRepository,
   type ForkLease
@@ -155,6 +156,14 @@ interface BindingRow {
   restore_state: string
 }
 
+interface FrozenProviderContext {
+  profile: 'claude-code' | 'codex'
+  providerSessionId: string
+  providerConfigId: string
+  model: string
+  permissionMode: 'default' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+}
+
 interface SourceContext {
   scene: SceneRow
   task: TaskOwnerRow
@@ -200,6 +209,7 @@ export class ForkWorkflowService {
   readonly #environments: SessionEnvironmentRepository
   readonly #gitStates: SessionGitStateRepository
   readonly #forkIntents: SessionForkIntentRepository
+  readonly #providerConfigs: ProviderConfigStore
   readonly #setupPolicyForWorkspace: (workspaceId: string) => WorktreeSetupStep[]
   readonly #onProgressCommitted: () => void
   readonly #accepting = new Map<string, Promise<ForkWorkflowResult>>()
@@ -210,6 +220,7 @@ export class ForkWorkflowService {
     transactions: DomainTransactionManager,
     dependencies: {
       stopRuns: (runIds: string[]) => Promise<void>
+      providerConfigs?: ProviderConfigStore
       setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
       onProgressCommitted?: () => void
     }
@@ -225,6 +236,7 @@ export class ForkWorkflowService {
     this.#environments = new SessionEnvironmentRepository(database)
     this.#gitStates = new SessionGitStateRepository(database)
     this.#forkIntents = new SessionForkIntentRepository(database)
+    this.#providerConfigs = dependencies.providerConfigs ?? new ProviderConfigStore(this.#dataRoot)
     this.#setupPolicyForWorkspace = dependencies.setupPolicyForWorkspace ?? (() => [])
     this.#onProgressCommitted = dependencies.onProgressCommitted ?? (() => undefined)
   }
@@ -558,6 +570,7 @@ export class ForkWorkflowService {
     const relationId = randomUUID()
     const operationId = randomUUID()
     const source = this.#resolveSource(input, placement)
+    const providerContext = await this.#freezeProviderContext(source)
     const activeNames = this.#activeChildNames(source.forkSource.id)
     const name = validateDisplayName(input.name, activeNames)
     if (!name.ok) throw displayNameError(name.code, name.message, name.input)
@@ -568,6 +581,7 @@ export class ForkWorkflowService {
     const initial = this.#createPreparingNode(
       command, input, source, name.displayName, ids, relationId, operationId, submissionKey,
       environment,
+      providerContext,
       placement === 'sibling' ? source.selected.id : undefined
     )
     return initial
@@ -639,26 +653,50 @@ export class ForkWorkflowService {
   }
 
   #validForkBinding(source: SessionRow): BindingRow {
-    if (source.kind !== 'claude-code') {
+    if (source.kind !== 'claude-code' && source.kind !== 'codex') {
       throw new ForkWorkflowError(
-        'FORK_SOURCE_NOT_READY', '完成首轮 Claude Code 对话后可创建分支'
+        'FORK_SOURCE_NOT_READY', '完成首轮 AI 对话后可创建分支'
       )
     }
     const binding = this.#database.get<BindingRow>(
       `SELECT provider_session_id, metadata_json, restore_state
        FROM provider_bindings
-       WHERE session_id = ? AND provider = 'claude-code'
+       WHERE session_id = ? AND provider = ?
          AND resume_state IN ('available', 'resumed')
          AND validated_at IS NOT NULL AND invalidated_at IS NULL
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
-      source.id
+      source.id,
+      source.kind
     )
-    if (!binding || binding.restore_state !== 'none' || metadata(binding.metadata_json).canFork !== true) {
+    if (
+      !binding || binding.restore_state !== 'none' ||
+      (source.kind === 'claude-code' && metadata(binding.metadata_json).canFork !== true)
+    ) {
       throw new ForkWorkflowError(
-        'FORK_SOURCE_NOT_READY', '完成首轮 Claude Code 对话后可创建分支'
+        'FORK_SOURCE_NOT_READY', '完成首轮 AI 对话后可创建分支'
       )
     }
     return binding
+  }
+
+  async #freezeProviderContext(source: SourceContext): Promise<FrozenProviderContext> {
+    const profile = source.forkSource.kind
+    if (profile !== 'claude-code' && profile !== 'codex') {
+      throw new ForkWorkflowError('FORK_SOURCE_NOT_READY', '完成首轮 AI 对话后可创建分支')
+    }
+    const persisted = metadata(source.binding.metadata_json)
+    const providerConfigId = typeof persisted.providerConfigId === 'string' &&
+      persisted.providerConfigId.trim()
+      ? persisted.providerConfigId
+      : undefined
+    const selected = await this.#providerConfigs.launchSelection(profile, providerConfigId)
+    return {
+      profile,
+      providerSessionId: source.binding.provider_session_id,
+      providerConfigId: selected.providerConfigId,
+      model: typeof persisted.model === 'string' ? persisted.model : selected.model,
+      permissionMode: providerPermissionMode(persisted.permissionMode)
+    }
   }
 
   #activeChildNames(parentSessionId: string): string[] {
@@ -816,6 +854,7 @@ export class ForkWorkflowService {
     operationId: string,
     submissionKey: string,
     environment: ForkEnvironmentPlan,
+    providerContext: FrozenProviderContext,
     preserveFocusedSessionId?: string
   ): ForkWorkflowResult {
     const gitPlan = environment.gitPlan
@@ -878,9 +917,25 @@ export class ForkWorkflowService {
         `INSERT INTO sessions (
            id, task_id, execution_context_id, kind, status, title, cwd,
            created_at, updated_at, last_activity_at, version
-         ) VALUES (?, ?, ?, 'claude-code', 'starting', ?, ?, ?, ?, ?, 1)`,
-        ids.sessionId, source.task.id, environment.executionContextId,
+         ) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, 1)`,
+        ids.sessionId, source.task.id, environment.executionContextId, providerContext.profile,
         displayName, environment.cwd, input.now, input.now, input.now
+      )
+      tx.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, restore_state,
+           metadata_json, created_at, updated_at, validated_at
+         ) VALUES (?, ?, ?, ?, 'unknown', 'none', ?, ?, ?, NULL)`,
+        randomUUID(), ids.sessionId, providerContext.profile,
+        providerContext.providerSessionId,
+        JSON.stringify({
+          providerConfigId: providerContext.providerConfigId,
+          model: providerContext.model,
+          permissionMode: providerContext.permissionMode,
+          inheritedConversation: true
+        }),
+        input.now,
+        input.now
       )
       tx.run(
         `INSERT INTO session_mounts (
@@ -1194,6 +1249,15 @@ function metadata(value: string): Record<string, unknown> {
   } catch {
     return {}
   }
+}
+
+function providerPermissionMode(
+  value: unknown
+): FrozenProviderContext['permissionMode'] {
+  return value === 'auto' || value === 'acceptEdits' || value === 'plan' ||
+    value === 'bypassPermissions'
+    ? value
+    : 'default'
 }
 
 function activeChildNamesFrom(tx: DatabaseTransaction, parentSessionId: string): string[] {

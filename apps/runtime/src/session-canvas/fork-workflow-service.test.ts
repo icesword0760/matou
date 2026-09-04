@@ -261,6 +261,41 @@ describe('ForkWorkflowService', () => {
     expect(result.graph.focusedSessionId).toBe(result.session!.id)
   })
 
+  it.each([
+    ['claude-code', 'anthropic-official'] as const,
+    ['codex', 'openai-official'] as const
+  ])('freezes the %s profile, provider configuration, model, permission, and source context at acceptance', async (
+    profile,
+    providerConfigId
+  ) => {
+    const source = bootstrapProvider(profile, `provider-context-${profile}`, {
+      providerConfigId,
+      model: `${profile}-session-model`,
+      permissionMode: 'bypassPermissions'
+    })
+
+    const result = await service.createForkChild(command(`frozen-${profile}-child`), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: `${profile} child`, worktreeMode: 'current', now: 30
+    })
+
+    expect(result.session).toMatchObject({ kind: profile })
+    expect(database.get<{ provider: string; provider_session_id: string; metadata_json: string }>(
+      `SELECT provider, provider_session_id, metadata_json
+       FROM provider_bindings WHERE session_id = ? ORDER BY created_at DESC LIMIT 1`,
+      result.session!.id
+    )).toEqual({
+      provider: profile,
+      provider_session_id: `provider-context-${profile}`,
+      metadata_json: JSON.stringify({
+        providerConfigId,
+        model: `${profile}-session-model`,
+        permissionMode: 'bypassPermissions',
+        inheritedConversation: true
+      })
+    })
+  })
+
   it('durably accepts one complete Fork asset set for repeated submission keys', async () => {
     await initializeGitRepository(workspaceRoot)
     const source = bootstrapClaude('provider-parent')
@@ -878,23 +913,44 @@ function bootstrapShell() {
 }
 
 function bootstrapClaude(providerSessionId: string) {
+  return bootstrapProvider('claude-code', providerSessionId)
+}
+
+function bootstrapProvider(
+  profile: 'claude-code' | 'codex',
+  providerSessionId: string,
+  settings: Record<string, unknown> = {}
+) {
   const result = bootstrapShell()
   database.run(
-    "UPDATE sessions SET kind = 'claude-code', title = 'Claude' WHERE id = ?",
-    result.sessionId
+    'UPDATE sessions SET kind = ?, title = ? WHERE id = ?',
+    profile, profile === 'claude-code' ? 'Claude' : 'Codex', result.sessionId
   )
-  seedClaudeBinding(result.sessionId, providerSessionId, true, 20)
+  seedProviderBinding(result.sessionId, profile, providerSessionId, {
+    canFork: true,
+    ...settings
+  }, 20)
   return result
 }
 
 function seedClaudeBinding(sessionId: string, providerSessionId: string, canFork: boolean, now: number) {
+  seedProviderBinding(sessionId, 'claude-code', providerSessionId, { canFork }, now)
+}
+
+function seedProviderBinding(
+  sessionId: string,
+  provider: 'claude-code' | 'codex',
+  providerSessionId: string,
+  metadata: Record<string, unknown>,
+  now: number
+) {
   database.run(
     `INSERT INTO provider_bindings (
        id, session_id, provider, provider_session_id, resume_state, restore_state,
        metadata_json, created_at, updated_at, validated_at
-     ) VALUES (?, ?, 'claude-code', ?, 'available', 'none', ?, ?, ?, ?)`,
-    `binding-${providerSessionId}`, sessionId, providerSessionId,
-    JSON.stringify({ canFork }), now, now, now
+     ) VALUES (?, ?, ?, ?, 'available', 'none', ?, ?, ?, ?)`,
+    `binding-${providerSessionId}`, sessionId, provider, providerSessionId,
+    JSON.stringify(metadata), now, now, now
   )
 }
 

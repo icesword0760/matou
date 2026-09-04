@@ -539,10 +539,32 @@ function HierarchyProduct({
         stage = 'settle-view'
         await waitForHostNavigationView(request, () => alive)
         if (request.focusTerminal) {
+          stage = 'verify-focus'
           assertHostNavigationActive(alive, request)
-          setTerminalFocusRequest((value) => value + 1)
-          await nextHostNavigationFrame()
-          await nextHostNavigationFrame()
+          if (request.sessionId === undefined) {
+            throw new HostNavigationExecutionError('导航目标会话当前不可用')
+          }
+          if (request.targetWindowId !== request.routeWindowId) {
+            const requestDetachedFocus = window.matouDesktop?.requestDetachedTerminalFocus
+            if (!requestDetachedFocus) {
+              throw new HostNavigationExecutionError('导航目标终端尚未获得输入焦点')
+            }
+            const focused = await requestDetachedFocus({
+              requestId: request.requestId,
+              attemptId: request.attemptId,
+              routeWindowId: request.routeWindowId,
+              targetWindowId: request.targetWindowId,
+              sessionId: request.sessionId,
+              deadlineAt: request.deadlineAt
+            })
+            assertHostNavigationActive(alive, request)
+            if (!focused) {
+              throw new HostNavigationExecutionError('导航目标终端尚未获得输入焦点')
+            }
+          } else {
+            setTerminalFocusRequest((value) => value + 1)
+            await waitForHostNavigationTerminalFocus(request, () => alive)
+          }
         }
 
         stage = 'verify-path'
@@ -1704,6 +1726,7 @@ type HostNavigationStage =
   | 'activate-scene'
   | 'focus-session'
   | 'settle-view'
+  | 'verify-focus'
   | 'verify-path'
 
 class HostNavigationExecutionError extends Error {}
@@ -1800,6 +1823,29 @@ async function waitForHostNavigationView(
     }
   }
   throw new HostNavigationExecutionError('导航目标会话尚未显示')
+}
+
+async function waitForHostNavigationTerminalFocus(
+  request: HostNavigationRequestWire,
+  alive: () => boolean
+): Promise<void> {
+  if (request.sessionId === undefined) {
+    throw new HostNavigationExecutionError('导航目标会话当前不可用')
+  }
+  while (alive() && Date.now() < request.deadlineAt) {
+    await nextHostNavigationFrame()
+    if (terminalOwnsInputFocus(request.sessionId)) return
+  }
+  if (!alive()) throw new HostNavigationExecutionError('导航页面已关闭')
+  throw new HostNavigationExecutionError('导航目标终端尚未获得输入焦点')
+}
+
+function terminalOwnsInputFocus(sessionId: string): boolean {
+  const active = document.activeElement
+  if (!(active instanceof HTMLElement) || active === document.body) return false
+  return [...document.querySelectorAll<HTMLElement>('.terminal-surface[data-session-id]')]
+    .some((surface) => surface.dataset.sessionId === sessionId &&
+      surface.closest('[hidden]') === null && (surface === active || surface.contains(active)))
 }
 
 function visibleHostNavigationSession(sessionId: string): HTMLElement | undefined {
@@ -1899,6 +1945,7 @@ function controlledHostNavigationError(error: unknown, stage: HostNavigationStag
   if (stage === 'activate-scene') return '导航画布切换未完成'
   if (stage === 'focus-session') return '导航会话聚焦未完成'
   if (stage === 'settle-view') return '导航目标界面尚未稳定'
+  if (stage === 'verify-focus') return '导航目标终端尚未获得输入焦点'
   return '导航目标位置当前未就绪'
 }
 

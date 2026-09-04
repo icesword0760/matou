@@ -275,16 +275,20 @@ test.describe('AI Host structure control in the real app', () => {
           message: `等待 ${items[index]!.title} 的首个任务进入 provider`, timeout: 30_000
         }).toContain(prompt)
       }
-      const events = await providerEvents(fixture)
-      for (const providerId of providers) {
-        const readyIndex = events.findIndex((event) =>
-          event.event === 'ready' && event.providerId === providerId
-        )
-        const inputIndex = events.findIndex((event) =>
-          event.event === 'input' && event.providerId === providerId && event.value === prompt
-        )
-        expect(readyIndex).toBeGreaterThanOrEqual(0)
-        expect(inputIndex).toBeGreaterThan(readyIndex)
+      for (const [index, providerId] of providers.entries()) {
+        await expect.poll(async () => {
+          const events = await providerEvents(fixture)
+          const readyIndex = events.findIndex((event) =>
+            event.event === 'ready' && event.providerId === providerId
+          )
+          const inputIndex = events.findIndex((event) =>
+            event.event === 'input' && event.providerId === providerId && event.value === prompt
+          )
+          return readyIndex >= 0 && inputIndex > readyIndex
+        }, {
+          message: `等待 ${items[index]!.title} 的 ready 事件先于首个输入`,
+          timeout: 30_000
+        }).toBe(true)
       }
       await expectCallerFocus(fixture, parent.sessionId)
     } finally {

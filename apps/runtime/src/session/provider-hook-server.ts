@@ -18,7 +18,10 @@ const MAX_HOOK_BYTES = 1024 * 1024
 interface HookRegistrationRecord {
   runId: string
   sessionId: string
+  provider: 'claude-code' | 'codex'
   permissionMode?: string
+  providerConfigId?: string
+  model?: string
   acceptStatuslineIdentity: boolean
   expectedProviderSessionId?: string
   identityRejected?: boolean
@@ -49,7 +52,7 @@ export interface ProviderHookNotification {
 export interface ProviderIdentityMismatch {
   runId: string
   sessionId: string
-  provider: 'claude-code'
+  provider: 'claude-code' | 'codex'
   expectedProviderSessionId: string
   actualProviderSessionId: string
   eventName: string
@@ -76,7 +79,7 @@ export interface ProviderHookServerOptions {
   onIdentityRecorded?: (event: {
     runId: string
     sessionId: string
-    provider: 'claude-code'
+    provider: 'claude-code' | 'codex'
     providerSessionId: string
     eventName: string
     forkAuthority?: ProviderIdentityForkAuthority
@@ -94,6 +97,7 @@ export interface ProviderHookServerOptions {
 
 export interface ProviderHookRegistration {
   settingsPath: string
+  codexHooksConfig?: string
   hookUrl: string
   retire(graceMs?: number): void
   dispose(): Promise<void>
@@ -165,11 +169,43 @@ export class ProviderHookServer {
     runId: string
     sessionId: string
     permissionMode?: string
+    providerConfigId?: string
+    model?: string
     acceptStatuslineIdentity?: boolean
     expectedProviderSessionId?: string
     inheritedConversation?: boolean
     forkAuthority?: ProviderIdentityForkAuthority
   }): Promise<ProviderHookRegistration> {
+    return this.#registerProviderSession('claude-code', input)
+  }
+
+  async registerCodexSession(input: {
+    runId: string
+    sessionId: string
+    permissionMode?: string
+    providerConfigId?: string
+    model?: string
+    expectedProviderSessionId?: string
+    inheritedConversation?: boolean
+    forkAuthority?: ProviderIdentityForkAuthority
+  }): Promise<ProviderHookRegistration> {
+    return this.#registerProviderSession('codex', input)
+  }
+
+  async #registerProviderSession(
+    provider: 'claude-code' | 'codex',
+    input: {
+      runId: string
+      sessionId: string
+      permissionMode?: string
+      providerConfigId?: string
+      model?: string
+      acceptStatuslineIdentity?: boolean
+      expectedProviderSessionId?: string
+      inheritedConversation?: boolean
+      forkAuthority?: ProviderIdentityForkAuthority
+    }
+  ): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
     if (input.forkAuthority && input.forkAuthority.runId !== input.runId) {
       throw new Error('Fork provider hook run identity does not match its authority')
@@ -179,12 +215,15 @@ export class ProviderHookServer {
     const directory = join(this.#dataRoot, 'provider-hooks')
     await mkdir(directory, { recursive: true, mode: 0o700 })
     await chmod(directory, 0o700)
-    const settingsPath = join(directory, `${token}.settings.json`)
+    const settingsPath = join(directory, `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
     const statusScriptPath = join(directory, `${token}.statusline.sh`)
     const temporaryPath = `${settingsPath}.tmp`
     await writeFile(statusScriptPath, statusLineScript(hookUrl), { encoding: 'utf8', mode: 0o700 })
     await chmod(statusScriptPath, 0o700)
-    await writeFile(temporaryPath, JSON.stringify(claudeHookSettings(hookUrl, statusScriptPath), null, 2), {
+    const settings = provider === 'claude-code'
+      ? claudeHookSettings(hookUrl, statusScriptPath)
+      : codexHookSettings(statusScriptPath)
+    await writeFile(temporaryPath, JSON.stringify(settings, null, 2), {
       encoding: 'utf8', mode: 0o600
     })
     await rename(temporaryPath, settingsPath)
@@ -192,8 +231,13 @@ export class ProviderHookServer {
     const record: HookRegistrationRecord = {
       runId: input.runId,
       sessionId: input.sessionId,
+      provider,
       ...(input.permissionMode === undefined ? {} : { permissionMode: input.permissionMode }),
-      acceptStatuslineIdentity: input.acceptStatuslineIdentity === true,
+      ...(input.providerConfigId === undefined
+        ? {}
+        : { providerConfigId: input.providerConfigId }),
+      ...(input.model === undefined ? {} : { model: input.model }),
+      acceptStatuslineIdentity: provider === 'codex' || input.acceptStatuslineIdentity === true,
       ...(input.expectedProviderSessionId === undefined
         ? {}
         : { expectedProviderSessionId: input.expectedProviderSessionId }),
@@ -218,12 +262,13 @@ export class ProviderHookServer {
     }
     return {
       settingsPath,
+      ...(provider === 'codex' ? { codexHooksConfig: codexInlineHookConfig(statusScriptPath) } : {}),
       hookUrl,
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS) => {
         if (disposePromise || record.retirementTimer) return
         // Keep the endpoint alive briefly for the final HUD/notification hooks, while
         // preventing a process that has already returned to Shell from resurrecting
-        // its Claude conversation identity.
+        // its provider conversation identity.
         record.acceptIdentity = false
         record.retirementTimer = setTimeout(() => { void dispose() }, Math.max(0, graceMs))
         record.retirementTimer.unref?.()
@@ -281,7 +326,7 @@ export class ProviderHookServer {
           this.#onIdentityMismatch({
             runId: registration.runId,
             sessionId: registration.sessionId,
-            provider: 'claude-code',
+            provider: registration.provider,
             expectedProviderSessionId: registration.expectedProviderSessionId,
             actualProviderSessionId: providerSessionId,
             eventName
@@ -296,7 +341,7 @@ export class ProviderHookServer {
           nonEmptyText(payload.permissionMode)
         const currentBinding = this.#sessions.getResumeBinding(
           registration.sessionId,
-          'claude-code'
+          registration.provider
         )
         const isKnownIdentity = currentBinding?.providerSessionId === providerSessionId
         // The registration mode is only a launch-time fallback for a newly observed
@@ -314,9 +359,13 @@ export class ProviderHookServer {
           }, {
             id: `provider-binding-${randomUUID()}`,
             sessionId: registration.sessionId,
-            provider: 'claude-code',
+            provider: registration.provider,
             providerSessionId,
             metadata: {
+              ...(registration.providerConfigId === undefined
+                ? {}
+                : { providerConfigId: registration.providerConfigId }),
+              ...(registration.model === undefined ? {} : { model: registration.model }),
               ...(permissionMode === undefined ? {} : { permissionMode }),
               ...(cwd === undefined ? {} : { cwd }),
               lastHookEvent: eventName,
@@ -340,7 +389,7 @@ export class ProviderHookServer {
           this.#onIdentityRecorded({
             runId: registration.runId,
             sessionId: registration.sessionId,
-            provider: 'claude-code',
+            provider: registration.provider,
             providerSessionId,
             eventName,
             ...(forkAuthority === undefined
@@ -357,6 +406,10 @@ export class ProviderHookServer {
           sendJson(response, 200, {})
           return
         }
+      }
+      if (registration.provider === 'codex') {
+        sendJson(response, 200, {})
+        return
       }
       this.#onHudPayload({
         runId: registration.runId,
@@ -482,6 +535,36 @@ function claudeHookSettings(hookUrl: string, statusScriptPath: string): unknown 
     },
     statusLine: { type: 'command', command: statusScriptPath, padding: 0 }
   }
+}
+
+function codexHookSettings(statusScriptPath: string): unknown {
+  return {
+    hooks: {
+      SessionStart: [{ hooks: [codexCommandHook(statusScriptPath, 5)] }],
+      SessionEnd: [{ hooks: [codexCommandHook(statusScriptPath, 3)] }]
+    }
+  }
+}
+
+function codexInlineHookConfig(statusScriptPath: string): string {
+  const command = JSON.stringify(shellCommandPath(statusScriptPath))
+  const statusMessage = JSON.stringify('正在确认会话')
+  const event = (timeout: number) =>
+    `{ hooks = [{ type = "command", command = ${command}, timeout = ${timeout}, statusMessage = ${statusMessage} }] }`
+  return `{ SessionStart = [${event(5)}], SessionEnd = [${event(3)}] }`
+}
+
+function codexCommandHook(statusScriptPath: string, timeout: number): Record<string, unknown> {
+  return {
+    type: 'command',
+    command: shellCommandPath(statusScriptPath),
+    timeout,
+    statusMessage: '正在确认会话'
+  }
+}
+
+function shellCommandPath(path: string): string {
+  return `'${path.replaceAll("'", `'\\''`)}'`
 }
 
 function statusLineScript(hookUrl: string): string {

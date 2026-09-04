@@ -57,6 +57,16 @@ const desktopApi: MatouDesktopApi = {
     ipcRenderer.invoke(DESKTOP_CHANNELS.openDirectoryInTerminal, path),
   hideWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.hideWindow, windowId),
   showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId),
+  requestDetachedTerminalFocus: (input) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.requestDetachedTerminalFocus, input),
+  onDetachedTerminalFocusRequested: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.detachedTerminalFocusRequested, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.detachedTerminalFocusRequested, handler)
+  },
+  acknowledgeDetachedTerminalFocus: (result) =>
+    ipcRenderer.invoke(DESKTOP_CHANNELS.acknowledgeDetachedTerminalFocus, result),
+  isCurrentWindowFocused: () => ipcRenderer.invoke(DESKTOP_CHANNELS.isCurrentWindowFocused),
   createDetachedTerminalWindow: (input) => ipcRenderer.invoke(DESKTOP_CHANNELS.createDetachedTerminalWindow, input),
   closeDetachedTerminalWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.closeDetachedTerminalWindow, windowId),
   detachedTerminalWindowExists: (windowId) =>

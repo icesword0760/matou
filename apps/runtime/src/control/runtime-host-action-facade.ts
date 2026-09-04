@@ -702,7 +702,7 @@ export class RuntimeHostActionFacade {
     }>
   ): Promise<HostActionResult> {
     const resolved = this.#resolve(caller, request.target)
-    const target = this.#navigationTarget(request.method, resolved)
+    const target = this.#navigationTarget(caller, request.method, resolved)
     const now = this.#now()
     const acknowledgement = await this.#navigation.navigate({
       requestId: `host-navigation-${randomUUID()}`,
@@ -714,6 +714,7 @@ export class RuntimeHostActionFacade {
   }
 
   #navigationTarget(
+    caller: HostCallerIdentity,
     method: Extract<HostActionRequest, { method: `navigation.${string}` }>['method'],
     resolved: ResolvedHostEntity
   ): {
@@ -743,13 +744,18 @@ export class RuntimeHostActionFacade {
     const sceneId = method === 'navigation.switch.canvas'
       ? resolved.sceneId
       : this.#activeScene(routeWindowId, taskId)
+    const sessionId = this.#canvasAnchor(routeWindowId, sceneId)
+    const activeSession = requireEntity(
+      this.#resolver.resolveEntity(caller, { kind: 'session', sessionId }, ''),
+      'session'
+    )
     return {
       routeWindowId,
-      targetWindowId: routeWindowId,
+      targetWindowId: activeSession.windowId,
       workspaceId: resolved.workspaceId,
       taskId,
       sceneId,
-      sessionId: this.#canvasAnchor(routeWindowId, sceneId)
+      sessionId
     }
   }
 

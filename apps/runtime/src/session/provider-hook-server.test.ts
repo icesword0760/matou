@@ -65,6 +65,76 @@ afterEach(async () => {
 })
 
 describe('ProviderHookServer', () => {
+  it('records a fenced Codex Fork from its exact SessionStart identity', async () => {
+    sessions.createSession(command('codex-source'), {
+      id: 'codex-source', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'codex', title: 'Codex source', now: 2
+    })
+    sessions.createSession(command('codex-child'), {
+      id: 'codex-child', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'codex', title: 'Codex child', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    const now = Date.now()
+    intents.accept({
+      operationId: 'codex-operation', submissionKey: 'codex-submission',
+      sessionId: 'codex-child', sourceSessionId: 'codex-source',
+      sourceProviderSessionId: 'codex-source-context', displayName: 'Codex child',
+      worktreeMode: 'current', totalSteps: 2, now
+    })
+    const acquired = intents.acquireLease({
+      operationId: 'codex-operation', owner: 'runtime', now, ttlMs: 60_000
+    })
+    if (acquired.kind !== 'acquired') throw new Error('Codex Fork lease missing')
+    intents.advanceStage({
+      operationId: 'codex-operation', lease: acquired.lease,
+      stage: 'restoring-provider', now
+    })
+    const registration = await hooks.registerCodexSession({
+      runId: 'codex-run', sessionId: 'codex-child',
+      providerConfigId: 'codex-config', model: 'gpt-session',
+      permissionMode: 'bypassPermissions', inheritedConversation: true,
+      forkAuthority: {
+        operationId: 'codex-operation', runId: 'codex-run', lease: acquired.lease
+      }
+    })
+    const config = JSON.parse(await readFile(registration.settingsPath, 'utf8')) as {
+      hooks: Record<string, Array<{
+        hooks: Array<{ type: string; command: string; timeout: number; statusMessage: string }>
+      }>>
+    }
+    const startHook = config.hooks.SessionStart?.[0]?.hooks[0]
+    const endHook = config.hooks.SessionEnd?.[0]?.hooks[0]
+    expect(startHook).toMatchObject({
+      type: 'command', timeout: 5, statusMessage: '正在确认会话'
+    })
+    expect(endHook).toMatchObject({
+      type: 'command', timeout: 3, statusMessage: '正在确认会话'
+    })
+    expect(registration.codexHooksConfig).toBe(
+      `{ SessionStart = [{ hooks = [{ type = "command", command = ${JSON.stringify(startHook?.command)}, timeout = 5, statusMessage = "正在确认会话" }] }], ` +
+      `SessionEnd = [{ hooks = [{ type = "command", command = ${JSON.stringify(endHook?.command)}, timeout = 3, statusMessage = "正在确认会话" }] }] }`
+    )
+    expect(registration.codexHooksConfig).not.toContain(registration.hookUrl)
+
+    await postHook(registration.hookUrl, {
+      hook_event_name: 'SessionStart', session_id: 'codex-derived-context', cwd: root
+    })
+
+    expect(sessions.getResumeBinding('codex-child', 'codex')).toMatchObject({
+      providerSessionId: 'codex-derived-context', resumeState: 'available',
+      metadata: expect.objectContaining({
+        providerConfigId: 'codex-config', model: 'gpt-session',
+        permissionMode: 'bypassPermissions', inheritedConversation: true
+      })
+    })
+    expect(intents.state('codex-child')).toBe('succeeded')
+    expect(identityEvents).toContainEqual(expect.objectContaining({
+      runId: 'codex-run', sessionId: 'codex-child', provider: 'codex',
+      providerSessionId: 'codex-derived-context', eventName: 'SessionStart'
+    }))
+  })
+
   it('writes a private additive Claude settings file with reference product-equivalent hook coverage', async () => {
     const registration = await hooks.registerClaudeSession({
       runId: 'run-1', sessionId: 'session-1', permissionMode: 'bypassPermissions'
@@ -483,7 +553,8 @@ describe('ProviderHookServer', () => {
 
   it('persists identity from the first supported follow-up hook when HTTP SessionStart does not fire', async () => {
     const registration = await hooks.registerClaudeSession({
-      runId: 'run-1', sessionId: 'session-1', permissionMode: 'bypassPermissions'
+      runId: 'run-1', sessionId: 'session-1', permissionMode: 'bypassPermissions',
+      providerConfigId: 'bound-provider-config', model: 'session-model'
     })
 
     const response = await postHook(registration.hookUrl, {
@@ -494,6 +565,7 @@ describe('ProviderHookServer', () => {
     expect(sessions.getResumeBinding('session-1', 'claude-code')).toMatchObject({
       providerSessionId: 'claude-session-42', resumeState: 'available',
       metadata: {
+        providerConfigId: 'bound-provider-config', model: 'session-model',
         permissionMode: 'bypassPermissions', cwd: root, lastHookEvent: 'UserPromptSubmit'
       }
     })

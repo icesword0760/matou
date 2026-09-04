@@ -94,7 +94,10 @@ import type {
   RecoveryJobSnapshot
 } from './recovery/runtime-session-recovery-scheduler'
 import type { RuntimeRecoveryCoordinator } from './recovery/runtime-recovery-coordinator'
-import { ProviderConfigStore } from './provider-config/provider-config-store'
+import {
+  ProviderConfigStore,
+  type ProviderLaunchSelection
+} from './provider-config/provider-config-store'
 
 export interface PortMessageEvent {
   data: unknown
@@ -1013,7 +1016,14 @@ export class RuntimeServer {
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
         const cli = input?.cli === 'claude-code' || input?.cli === 'codex' ? input.cli : undefined
-        if (cli === 'claude-code') await RuntimeServer.#restartProviderSessions(cli)
+        const providerId = typeof input?.providerId === 'string' ? input.providerId : undefined
+        if (cli === 'claude-code' && providerId) {
+          await RuntimeServer.#restartProviderSessions(
+            this.#sessions,
+            cli,
+            await this.#providerConfigs.launchSelection(cli, providerId)
+          )
+        }
       }
       if (isGitMutation(message.method)) {
         await Promise.all([...this.#attachedSessionIds].map((sessionId) =>
@@ -1645,7 +1655,7 @@ export class RuntimeServer {
       }
     }
 
-    const forkDecision = message.profile === 'claude-code' && forkAuthority === undefined
+    const forkDecision = message.profile !== 'shell' && forkAuthority === undefined
       ? this.#forkIntents.claimForLaunch(message.sessionId, Date.now())
       : undefined
     if (forkDecision?.kind === 'failed') {
@@ -1664,6 +1674,12 @@ export class RuntimeServer {
     const resumeBinding = message.profile === 'shell' || skipResume || forkLaunch
       ? undefined
       : this.#sessionRepository.getResumeBinding(message.sessionId, message.profile)
+    const providerSettingsBinding = message.profile === 'shell'
+      ? undefined
+      : this.#sessionRepository.getProviderSettingsBinding(message.sessionId, message.profile)
+    const boundProviderSettings = providerLaunchSettingsFromMetadata(
+      providerSettingsBinding?.metadata
+    )
     const providerSessionId = forkLaunch?.sourceProviderSessionId ?? resumeBinding?.providerSessionId
     const supersedesRestoreFailure = message.profile === 'claude-code' &&
       providerSessionId === undefined && Boolean(this.#database.get(
@@ -1698,7 +1714,7 @@ export class RuntimeServer {
         ? new ClaudePermissionModeTracker() : undefined
       if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
       const permissionMode = this.#permissionOverrides.get(message.sessionId) ??
-        permissionModeFromMetadata(resumeBinding?.metadata)
+        permissionModeFromMetadata(providerSettingsBinding?.metadata)
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -1734,23 +1750,59 @@ export class RuntimeServer {
           })
         }
       }
-      const providerLaunch = message.profile === 'shell'
+      const providerSelection = message.profile === 'shell'
+        ? undefined
+        : await this.#providerConfigs.launchSelection(
+            message.profile,
+            boundProviderSettings.providerConfigId
+          )
+      const providerModel = boundProviderSettings.model ?? providerSelection?.model
+      const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
-        : await this.#providerConfigs.launchConfig(message.profile)
-      if (message.profile === 'claude-code' && runId && this.#providerHooks) {
-        hookRegistration = await this.#providerHooks.registerClaudeSession({
+        : {
+            ...(providerModel ? { model: providerModel } : {}),
+            env: providerSelection.env
+          }
+      if (providerSettingsBinding && providerSelection && (
+        boundProviderSettings.providerConfigId !== providerSelection.providerConfigId ||
+        boundProviderSettings.model === undefined ||
+        permissionModeFromMetadata(providerSettingsBinding.metadata) === undefined
+      )) {
+        this.#sessionRepository.updateProviderLaunchSettings({
+          commandId: `provider-launch-settings-${message.sessionId}-${randomUUID()}`,
+          commandType: 'provider-binding.launch-settings',
+          requestHash: `${message.sessionId}:${providerSelection.providerConfigId}:${providerModel ?? ''}:${permissionMode ?? 'default'}`
+        }, {
+          bindingId: providerSettingsBinding.id,
+          providerConfigId: providerSelection.providerConfigId,
+          model: providerModel ?? '',
+          permissionMode: permissionMode ?? 'default',
+          now: Date.now()
+        })
+      }
+      if (message.profile !== 'shell' && runId && this.#providerHooks) {
+        const providerHookInput = {
           runId,
           sessionId: message.sessionId,
-          // A fresh Claude process that replaces an invalid resume is already live
-          // when its statusline arrives. Accept that new identity immediately.
-          acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
           ...(resumeBinding === undefined || forkLaunch !== undefined
             ? {}
             : { expectedProviderSessionId: resumeBinding.providerSessionId }),
           inheritedConversation: forkLaunch !== undefined,
           ...(forkAuthority === undefined ? {} : { forkAuthority }),
-          ...(permissionMode === undefined ? {} : { permissionMode })
-        })
+          ...(permissionMode === undefined ? {} : { permissionMode }),
+          ...(providerSelection === undefined ? {} : {
+            providerConfigId: providerSelection.providerConfigId,
+            model: providerModel ?? ''
+          })
+        }
+        hookRegistration = message.profile === 'claude-code'
+          ? await this.#providerHooks.registerClaudeSession({
+              ...providerHookInput,
+              // A fresh Claude process that replaces an invalid resume is already live
+              // when its statusline arrives. Accept that new identity immediately.
+              acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure
+            })
+          : await this.#providerHooks.registerCodexSession(providerHookInput)
         this.#trackProviderHook(message.sessionId, runId, hookRegistration)
         if (providerSessionId !== undefined) {
           this.#providerLaunchRunIds.set(message.sessionId, runId)
@@ -1795,7 +1847,7 @@ export class RuntimeServer {
         }
       }
       let providerDerivationState: 'pending' | 'confirmed' | 'rejected' =
-        message.profile === 'claude-code' && providerSessionId !== undefined && runId !== undefined
+        message.profile !== 'shell' && providerSessionId !== undefined && runId !== undefined
           ? 'pending'
           : 'confirmed'
       let pendingProviderOutput = ''
@@ -1839,7 +1891,9 @@ export class RuntimeServer {
         ...(forkLaunch === undefined ? {} : { forkSession: true }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
         ...(hookRegistration === undefined ? {} : {
-          settingsPath: hookRegistration.settingsPath
+          ...(message.profile === 'claude-code'
+            ? { settingsPath: hookRegistration.settingsPath }
+            : { codexHooksConfig: hookRegistration.codexHooksConfig! })
         }),
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
@@ -2296,10 +2350,11 @@ export class RuntimeServer {
     if (!mismatch || !session || !message || session.runId !== mismatch.runId) return false
     const binding = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
-       WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?
+       WHERE session_id = ? AND provider = ? AND provider_session_id = ?
          AND resume_state NOT IN ('failed', 'expired')
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
       sessionId,
+      mismatch.provider,
       mismatch.expectedProviderSessionId
     )
     this.#providerIdentityMismatches.delete(sessionId)
@@ -2308,7 +2363,7 @@ export class RuntimeServer {
       message,
       session,
       binding.id,
-      'Claude Code 返回的会话与待恢复会话不一致，请重试恢复'
+      'AI 会话返回的上下文与待恢复会话不一致，请重试恢复'
     )
     this.flushSemanticEvents()
     return true
@@ -3079,15 +3134,41 @@ export class RuntimeServer {
     replacement.display('\u001b[2J\u001b[3J\u001b[H')
   }
 
-  static async #restartProviderSessions(cli: ProviderCli): Promise<void> {
+  static async #restartProviderSessions(
+    sessions: RuntimeSessionRegistry,
+    cli: ProviderCli,
+    selection: ProviderLaunchSelection
+  ): Promise<void> {
     const restarted = new Set<string>()
     for (const server of RuntimeServer.#instances) {
+      if (server.#sessions !== sessions) continue
       for (const [sessionId, descriptor] of server.#spawnDescriptors) {
         if (descriptor.profile !== cli || restarted.has(sessionId)) continue
         restarted.add(sessionId)
+        server.#rebindProviderLaunchSettings(sessionId, cli, selection)
         await server.#respawnForProviderConfig(sessionId, descriptor)
       }
     }
+  }
+
+  #rebindProviderLaunchSettings(
+    sessionId: string,
+    cli: ProviderCli,
+    selection: ProviderLaunchSelection
+  ): void {
+    const binding = this.#sessionRepository.getProviderSettingsBinding(sessionId, cli)
+    if (!binding) return
+    this.#sessionRepository.updateProviderLaunchSettings({
+      commandId: `provider-config-activate-${sessionId}-${randomUUID()}`,
+      commandType: 'provider-binding.launch-settings',
+      requestHash: `${sessionId}:${selection.providerConfigId}:${selection.model}`
+    }, {
+      bindingId: binding.id,
+      providerConfigId: selection.providerConfigId,
+      model: selection.model,
+      permissionMode: permissionModeFromMetadata(binding.metadata) ?? 'default',
+      now: Date.now()
+    })
   }
 
   async #respawnForProviderConfig(
@@ -3237,11 +3318,33 @@ function prependedPathEnvironment(
   return { [pathKey]: inherited ? `${entry}${delimiter}${inherited}` : entry }
 }
 
-function permissionModeFromMetadata(metadata: unknown): string | undefined {
+function permissionModeFromMetadata(metadata: unknown): HudPermissionMode | undefined {
   if (typeof metadata !== 'object' || metadata === null || !('permissionMode' in metadata)) {
     return undefined
   }
-  return typeof metadata.permissionMode === 'string' ? metadata.permissionMode : undefined
+  const value = metadata.permissionMode
+  return value === 'default' || value === 'auto' || value === 'acceptEdits' ||
+    value === 'plan' || value === 'bypassPermissions'
+    ? value
+    : undefined
+}
+
+function providerLaunchSettingsFromMetadata(metadata: unknown): {
+  providerConfigId?: string
+  model?: string
+} {
+  if (typeof metadata !== 'object' || metadata === null) return {}
+  const providerConfigId = 'providerConfigId' in metadata &&
+    typeof metadata.providerConfigId === 'string' && metadata.providerConfigId.trim()
+    ? metadata.providerConfigId
+    : undefined
+  const model = 'model' in metadata && typeof metadata.model === 'string'
+    ? metadata.model
+    : undefined
+  return {
+    ...(providerConfigId === undefined ? {} : { providerConfigId }),
+    ...(model === undefined ? {} : { model })
+  }
 }
 
 function isMissingFile(error: unknown): boolean {

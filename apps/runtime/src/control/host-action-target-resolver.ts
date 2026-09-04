@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 
 import type {
   ForkEnvironmentChoice,
@@ -11,6 +10,7 @@ import type {
 } from './host-action-types'
 import type { HostCallerIdentity, HostListScope, HostTarget } from './host-control-types'
 import { HostTopologyProjector } from './host-topology-projector'
+import { hostTargetRevision } from './host-target-revision'
 import type { RuntimeDatabase } from '../storage/database'
 
 export interface ResolvedHierarchyPath {
@@ -134,12 +134,7 @@ export class HostActionTargetResolver {
 
   /** Matches the Host Control projection hash for the selected list scope. */
   projectionRevision(caller: HostCallerIdentity, scope: HostListScope = 'all'): string {
-    const targets = this.#topology.list(caller, scope)
-    return createHash('sha256')
-      .update(JSON.stringify(targets.map(({ ref, workspaceId, taskId, sessionId, mountId }) => ({
-        ref, workspaceId, taskId, sessionId, mountId
-      }))))
-      .digest('hex')
+    return hostTargetRevision(this.#topology.list(caller, scope))
   }
 
   resolveEntity(

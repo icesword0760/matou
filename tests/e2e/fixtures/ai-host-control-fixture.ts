@@ -148,9 +148,10 @@ export async function runMtInSession<T>(
   fixture: AiHostControlFixture,
   sessionId: string,
   args: string[],
-  expectedStatus = 0
+  expectedStatus = 0,
+  sourcePage: Page = fixture.page
 ): Promise<MtInvocation<T>> {
-  const surface = fixture.page.locator(`.terminal-surface[data-session-id="${sessionId}"]`)
+  const surface = sourcePage.locator(`.terminal-surface[data-session-id="${sessionId}"]`)
   await expect(surface).toBeVisible()
   const resultPath = join(fixture.rootDirectory, `mt-result-${randomUUID()}.json`)
   const payload = Buffer.from(JSON.stringify({ args, resultPath }), 'utf8').toString('base64')

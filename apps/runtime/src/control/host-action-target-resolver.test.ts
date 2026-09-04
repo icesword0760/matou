@@ -112,15 +112,53 @@ describe('HostActionTargetResolver', () => {
       kind: 'sibling', ordinal: 1, projectionRevision: childRevision
     }, childRevision), 'STALE_PROJECTION')
 
-    const parentCaller = { runId: 'run-parent', sessionId: fixture.parent.session!.id }
-    const parentRevision = resolver.projectionRevision(parentCaller, 'current-level')
-    database.run(
-      'UPDATE session_canvas_memberships SET last_user_interaction_seq = 100 WHERE session_id = ?',
-      fixture.rootSibling.session!.id
+  })
+
+  it('invalidates a relation selector when ordered children are inserted, removed, or reordered', () => {
+    const fixture = graphFixture()
+    const caller = { runId: 'run-parent', sessionId: fixture.parent.session!.id }
+    const selector = (projectionRevision: string) => ({
+      kind: 'relation' as const,
+      relation: 'child' as const,
+      ordinal: 1,
+      projectionRevision
+    })
+
+    const beforeInsert = resolver.projectionRevision(caller, 'current-level')
+    const inserted = canvas.createShellSibling(command('inserted-child'), {
+      windowId: 'window-1', sceneId: fixture.parent.scene!.id,
+      sourceSessionId: fixture.parent.session!.id,
+      parentSessionId: fixture.parent.session!.id, now: 30
+    })
+    expectFault(
+      () => resolver.resolveEntity(caller, selector(beforeInsert), beforeInsert),
+      'STALE_PROJECTION'
     )
-    expectFault(() => resolver.resolveEntity(parentCaller, {
-      kind: 'relation', relation: 'child', ordinal: 1, projectionRevision: parentRevision
-    }, parentRevision), 'STALE_PROJECTION')
+
+    const beforeRemove = resolver.projectionRevision(caller, 'current-level')
+    database.run(
+      "UPDATE sessions SET status = 'archived', archived_at = 31 WHERE id = ?",
+      inserted.session!.id
+    )
+    expectFault(
+      () => resolver.resolveEntity(caller, selector(beforeRemove), beforeRemove),
+      'STALE_PROJECTION'
+    )
+
+    const beforeReorder = resolver.projectionRevision(caller, 'current-level')
+    const [firstChildRef, secondChildRef] = projector.identify(caller).target.dag.childRefs
+    database.run(
+      'UPDATE session_canvas_memberships SET last_user_interaction_seq = 0 WHERE session_id = ?',
+      firstChildRef!.slice('session:'.length)
+    )
+    database.run(
+      'UPDATE session_canvas_memberships SET last_user_interaction_seq = 100000 WHERE session_id = ?',
+      secondChildRef!.slice('session:'.length)
+    )
+    expectFault(
+      () => resolver.resolveEntity(caller, selector(beforeReorder), beforeReorder),
+      'STALE_PROJECTION'
+    )
   })
 
   it('counts descendants and live terminal runs before removal', () => {

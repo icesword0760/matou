@@ -1116,6 +1116,59 @@ describe('RuntimeHostActionFacade navigation actions', () => {
     }
   })
 
+  it.each([
+    ['navigation.switch.workspace', 'workspace'] as const,
+    ['navigation.switch.task', 'task'] as const,
+    ['navigation.switch.canvas', 'canvas'] as const
+  ])('routes %s through the detached native window for its saved active Session', async (method, kind) => {
+    const workspaceId = database.get<{ workspace_id: string }>(
+      'SELECT workspace_id FROM tasks WHERE id = ?', sourceTaskId()
+    )!.workspace_id
+    const activeTask = hierarchy.createTask(command(`detached-switch-${kind}-task`), {
+      windowId: 'window-1', workspaceId, title: `Detached ${kind} task`,
+      navigation: 'activate', now: ++clock
+    })
+    const activeCanvas = sessionCanvas.createCanvas(command(`detached-switch-${kind}-canvas`), {
+      windowId: 'window-1', taskId: activeTask.created.task.id,
+      title: `Detached ${kind} canvas`, navigation: 'activate', now: ++clock
+    })
+    const activeSession = sessionCanvas.createShellSibling(command(`detached-switch-${kind}-session`), {
+      windowId: 'window-1', sceneId: activeCanvas.created.scene.id,
+      sourceSessionId: activeCanvas.created.session.id,
+      title: `Detached ${kind} session`, now: ++clock
+    })
+    sessionCanvas.setFocusedSession({
+      windowId: 'window-1', sceneId: activeCanvas.created.scene.id,
+      sessionId: activeSession.session!.id, now: ++clock
+    })
+    const nativeWindowId = `native-detached-${kind}`
+    new DetachedSessionService(database, transactions).detach(
+      command(`detached-switch-${kind}-detach`),
+      {
+        mainWindowId: 'window-1', sceneWindowId: `detached-scene-${kind}`,
+        sceneId: activeCanvas.created.scene.id, mountId: activeSession.mount!.id,
+        sessionId: activeSession.session!.id, nativeWindowKey: nativeWindowId,
+        now: ++clock
+      }
+    )
+    navigate.mockClear()
+    const projectionRevision = resolver.projectionRevision(caller)
+    const target = kind === 'workspace'
+      ? { kind: 'ref' as const, ref: `workspace:${workspaceId}`, projectionRevision }
+      : kind === 'task'
+        ? { kind: 'ref' as const, ref: `task:${activeTask.created.task.id}`, projectionRevision }
+        : { kind: 'ref' as const, ref: `scene:${activeCanvas.created.scene.id}`, projectionRevision }
+
+    await facade.execute(method, caller, { target })
+
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      routeWindowId: 'window-1', targetWindowId: nativeWindowId,
+      workspaceId, taskId: activeTask.created.task.id,
+      sceneId: activeCanvas.created.scene.id, sessionId: activeSession.session!.id,
+      focusTerminal: false
+    }))
+  })
+
   it('uses stable descendants only when saved focus rows point outside the requested hierarchy', async () => {
     const foreign = seedSecondWindow()
     const workspaceId = database.get<{ workspace_id: string }>(

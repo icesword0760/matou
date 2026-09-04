@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useEffect, useRef } from 'react'
 import {
   PROTOCOL_VERSION, type HostNavigationRequestWire, type HostNavigationResultWire
 } from '@matou/contracts'
@@ -11,23 +12,35 @@ import type { HierarchyProjection } from './hierarchy-types'
 import type { SessionRecoveryStatus } from '../runtime/RuntimeClient'
 
 vi.mock('../terminal/TerminalSurface', () => ({
-  TerminalSurface: ({ sessionId, inputDisabled, readOnly, themeKey, fontSize, searchRequest, focusRequest, onStorageFault }: {
+  TerminalSurface: (props: {
     sessionId: string; inputDisabled: boolean; readOnly?: boolean; themeKey?: string; fontSize?: number
     searchRequest?: { query: string; direction: string; sequence: number }
-    focusRequest?: number
+    focusRequest?: number; active?: boolean; visible?: boolean
     onStorageFault?(fault: {
       type: 'terminal.storage-fault'; protocolVersion: 1; sessionId: string; sequence: number
       code: 'STORAGE_WRITE_FAILED'; message: string; retainedBytes: number
     }): void
-  }) => <div data-testid={`xterm-${sessionId}`} data-input-disabled={inputDisabled} data-read-only={readOnly}
-    data-theme={themeKey} data-font-size={fontSize} data-search-query={searchRequest?.query}
-    data-search-direction={searchRequest?.direction} data-focus-request={focusRequest}>
-    <button type="button" aria-label={`触发存储异常：${sessionId}`} onClick={() => onStorageFault?.({
-      type: 'terminal.storage-fault', protocolVersion: 1, sessionId, sequence: 1,
+  }) => {
+    const inputRef = useRef<HTMLSpanElement>(null)
+    useEffect(() => {
+      if (props.focusRequest && props.active !== false && props.visible !== false && !terminalFocus.blocked) {
+        inputRef.current?.focus()
+      }
+    }, [props.active, props.focusRequest, props.visible])
+    return <div className="terminal-surface" data-session-id={props.sessionId}
+      data-testid={`xterm-${props.sessionId}`} data-input-disabled={props.inputDisabled} data-read-only={props.readOnly}
+      data-theme={props.themeKey} data-font-size={props.fontSize} data-search-query={props.searchRequest?.query}
+      data-search-direction={props.searchRequest?.direction} data-focus-request={props.focusRequest}>
+      <span tabIndex={-1} data-terminal-input ref={inputRef} />
+      <button type="button" aria-label={`触发存储异常：${props.sessionId}`} onClick={() => props.onStorageFault?.({
+      type: 'terminal.storage-fault', protocolVersion: 1, sessionId: props.sessionId, sequence: 1,
       code: 'STORAGE_WRITE_FAILED', message: 'disk offline', retainedBytes: 128
-    })} />
-  </div>
+      })} />
+    </div>
+  }
 }))
+
+const terminalFocus = vi.hoisted(() => ({ blocked: false }))
 
 const runtime = vi.hoisted(() => ({
   current: null as null | {
@@ -47,6 +60,7 @@ vi.mock('../runtime/RuntimeProvider', () => ({ useRuntimeClient: () => runtime.c
 
 beforeEach(() => {
   runtime.current = null
+  terminalFocus.blocked = false
   Object.defineProperty(navigator, 'platform', { configurable: true, value: 'MacIntel' })
   Object.defineProperty(Element.prototype, 'scrollIntoView', {
     configurable: true,
@@ -743,12 +757,16 @@ describe('PRD 05 hierarchy shell', () => {
     expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
       .toBe('session-a1')
     await user.click(screen.getByRole('button', { name: '从“Depth-2”创建子分支' }))
-    await user.type(screen.getByRole('textbox', { name: '分支名称' }), 'Depth-3')
+    fireEvent.change(screen.getByRole('textbox', { name: '分支名称' }), {
+      target: { value: 'Depth-3' }
+    })
     await user.click(screen.getByRole('button', { name: '创建分支' }))
 
-    expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
-      .toBe('session-depth2')
-    expect(screen.getByTestId('xterm-fixture-fork-session-scene-a1-3')).toBeTruthy()
+    await waitFor(() => {
+      expect(screen.getByTestId('xterm-fixture-fork-session-scene-a1-3')).toBeTruthy()
+      expect(screen.getByRole('region', { name: '会话画布' }).getAttribute('data-parent-session-id'))
+        .toBe('session-depth2')
+    })
   })
 
   it('exposes a test-only Agent notification path through the real hierarchy UI', async () => {
@@ -1866,7 +1884,7 @@ describe('Runtime host navigation', () => {
     })
   })
 
-  it('uses the owning main Renderer to activate a detached native target', async () => {
+  it('waits for attempt-bound detached Renderer focus proof before acknowledging', async () => {
     const data = hostNavigationFixture('window-1')
     const target = data.sessionGraphs!['scene-b1']!.nodes[0]!
     target.detachedWindowId = 'native-detached-1'
@@ -1877,9 +1895,15 @@ describe('Runtime host navigation', () => {
     })
     const host = installHostNavigationRuntime()
     const showWindow = vi.fn(async () => undefined)
+    let proveFocus!: (focused: boolean) => void
+    const focusProof = new Promise<boolean>((resolve) => { proveFocus = resolve })
+    const requestDetachedTerminalFocus = vi.fn(() => focusProof)
     Object.defineProperty(window, 'matouDesktop', {
       configurable: true,
-      value: { showWindow, onDetachedWindowClosed: vi.fn(() => () => {}) }
+      value: {
+        showWindow, requestDetachedTerminalFocus,
+        onDetachedWindowClosed: vi.fn(() => () => {})
+      }
     })
     render(<HierarchyShell fixture={data} />)
     await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
@@ -1887,6 +1911,16 @@ describe('Runtime host navigation', () => {
 
     host.emit(request)
 
+    await waitFor(() => expect(requestDetachedTerminalFocus).toHaveBeenCalledWith({
+      requestId: request.requestId,
+      attemptId: request.attemptId,
+      routeWindowId: request.routeWindowId,
+      targetWindowId: request.targetWindowId,
+      sessionId: request.sessionId,
+      deadlineAt: request.deadlineAt
+    }))
+    expect(host.acknowledge).not.toHaveBeenCalled()
+    proveFocus(true)
     await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
     expect(showWindow).toHaveBeenCalledWith('native-detached-1')
     expect(screen.getByTestId('detached-placeholder')).toBeTruthy()
@@ -1897,6 +1931,29 @@ describe('Runtime host navigation', () => {
       targetWindowId: 'native-detached-1',
       ok: true,
       finalPath: expect.objectContaining({ targetWindowId: 'native-detached-1' })
+    }))
+  })
+
+  it('rejects main-window Session focus when the target terminal never owns input focus', async () => {
+    terminalFocus.blocked = true
+    const data = hostNavigationFixture('window-1')
+    const host = installHostNavigationRuntime()
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { showWindow: vi.fn(async () => undefined), onDetachedWindowClosed: vi.fn(() => () => {}) }
+    })
+    render(<HierarchyShell fixture={data} />)
+    await waitFor(() => expect(host.listener()).toBeTypeOf('function'))
+    const request = hostNavigationRequest({ deadlineAt: Date.now() + 150 })
+
+    host.emit(request)
+
+    await waitFor(() => expect(host.acknowledge).toHaveBeenCalledTimes(1))
+    expect(host.acknowledge).toHaveBeenLastCalledWith(expect.objectContaining({
+      requestId: request.requestId,
+      attemptId: request.attemptId,
+      ok: false,
+      error: '导航目标终端尚未获得输入焦点'
     }))
   })
 
