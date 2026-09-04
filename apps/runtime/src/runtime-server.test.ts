@@ -1289,7 +1289,7 @@ sleep 30
     await journal.close()
     await new CheckpointManager(root, database).create({
       sessionId: 'checkpoint-replay', terminalSequence: 2, domainEventSequence: 1,
-      screenEpoch: 4, snapshot: Uint8Array.from([9, 8, 7])
+      screenEpoch: 4, cols: 90, rows: 30, snapshot: Uint8Array.from([9, 8, 7])
     })
 
     port.receive({
@@ -1302,11 +1302,37 @@ sleep 30
       checkpointSequence: 2,
       checkpoint: {
         terminalSequence: 2, domainEventSequence: 1, screenEpoch: 4,
+        cols: 90, rows: 30,
         snapshot: Uint8Array.from([9, 8, 7])
       }
     })
     expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
       expect.objectContaining({ sequence: 3, data: Uint8Array.from([66]) })
+    ])
+  })
+
+  it('ignores a legacy checkpoint without its original grid and replays the Journal tail', async () => {
+    registerSession(database, 'legacy-gridless-checkpoint')
+    const journal = await SegmentJournal.open(root, 'legacy-gridless-checkpoint')
+    await journal.appendOutput(1, Uint8Array.from([65]))
+    await journal.appendOutput(2, Uint8Array.from([66]))
+    await journal.close()
+    await new CheckpointManager(root, database).create({
+      sessionId: 'legacy-gridless-checkpoint', terminalSequence: 1, domainEventSequence: 0,
+      screenEpoch: 2, snapshot: Uint8Array.from([9, 8, 7])
+    })
+
+    port.receive({
+      type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'legacy-gridless-checkpoint', fromSequence: 0
+    })
+    await settle()
+
+    expect(port.last('terminal.replay-start')).toMatchObject({ source: 'tail' })
+    expect(port.last('terminal.replay-start')).not.toHaveProperty('checkpoint')
+    expect(port.sent.filter((message) => message.type === 'terminal.data')).toEqual([
+      expect.objectContaining({ sequence: 1, data: Uint8Array.from([65]) }),
+      expect.objectContaining({ sequence: 2, data: Uint8Array.from([66]) })
     ])
   })
 
@@ -1322,7 +1348,7 @@ sleep 30
     await journal.close()
     await new CheckpointManager(root, database).create({
       sessionId: 'checkpoint-range-replay', terminalSequence: 2, domainEventSequence: 7,
-      screenEpoch: 9, snapshot: Uint8Array.from([1, 3, 5])
+      screenEpoch: 9, cols: 100, rows: 40, snapshot: Uint8Array.from([1, 3, 5])
     })
     const bounds = await readSessionJournalBounds(root, 'checkpoint-range-replay')
     const cold = bounds.segments.filter(({ lastSequence }) => lastSequence <= 2)
@@ -1360,7 +1386,8 @@ sleep 30
     await writer.close()
     await new CheckpointManager(root, database).create({
       sessionId: 'checkpoint-protected-restart', terminalSequence: 2,
-      domainEventSequence: 0, screenEpoch: 1, snapshot: Uint8Array.from([2])
+      domainEventSequence: 0, screenEpoch: 1, cols: 80, rows: 24,
+      snapshot: Uint8Array.from([2])
     })
 
     server.close()
@@ -1462,7 +1489,7 @@ sleep 30
     await journal.close()
     await new CheckpointManager(root, database).create({
       sessionId: 'reattach-checkpoint', terminalSequence: 5, domainEventSequence: 0,
-      screenEpoch: 0, snapshot: Uint8Array.from([9, 9])
+      screenEpoch: 0, cols: 80, rows: 24, snapshot: Uint8Array.from([9, 9])
     })
 
     port.receive({
@@ -1488,7 +1515,7 @@ sleep 30
     await journal.close()
     await new CheckpointManager(root, database).create({
       sessionId: 'reattach-retained-model', terminalSequence: 5, domainEventSequence: 0,
-      screenEpoch: 0, snapshot: Uint8Array.from([9, 9])
+      screenEpoch: 0, cols: 80, rows: 24, snapshot: Uint8Array.from([9, 9])
     })
 
     port.receive({
@@ -1516,7 +1543,7 @@ sleep 30
     await journal.close()
     await new CheckpointManager(root, database).create({
       sessionId: 'older-reattach-checkpoint', terminalSequence: 2, domainEventSequence: 0,
-      screenEpoch: 0, snapshot: Uint8Array.from([8, 8])
+      screenEpoch: 0, cols: 80, rows: 24, snapshot: Uint8Array.from([8, 8])
     })
 
     port.receive({
@@ -1545,6 +1572,7 @@ sleep 30
     port.receive({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'renderer-checkpoint', throughSequence: 3, screenEpoch: 4,
+      cols: 96, rows: 31,
       snapshot: '\u001b[2Jserialized screen'
     })
     await waitUntil(() => port.last('terminal.checkpoint-stored') !== undefined)
@@ -1556,6 +1584,7 @@ sleep 30
       terminalSequence: 3, domainEventSequence: 7
     })).resolves.toMatchObject({
       terminalSequence: 3, domainEventSequence: 7, screenEpoch: 4,
+      cols: 96, rows: 31,
       snapshot: new TextEncoder().encode('\u001b[2Jserialized screen')
     })
   })
@@ -1578,6 +1607,7 @@ sleep 30
     port.receive({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'range-indexed-checkpoint', throughSequence: 3, screenEpoch: 4,
+      cols: 80, rows: 24,
       snapshot: 'indexed screen'
     })
     await waitUntil(() =>
@@ -1603,6 +1633,7 @@ sleep 30
     port.receive({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'invalid-renderer-checkpoint', throughSequence: 3, screenEpoch: 0,
+      cols: 80, rows: 24,
       snapshot: 'future'
     })
     await waitUntil(() => port.last('terminal.checkpoint-rejected') !== undefined)
@@ -1613,6 +1644,7 @@ sleep 30
     port.receive({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'invalid-renderer-checkpoint', throughSequence: 2, screenEpoch: 0,
+      cols: 80, rows: 24,
       snapshot: 'current'
     })
     await waitUntil(() => port.last('terminal.checkpoint-stored') !== undefined)
@@ -1622,6 +1654,7 @@ sleep 30
     port.receive({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'invalid-renderer-checkpoint', throughSequence: 1, screenEpoch: 0,
+      cols: 80, rows: 24,
       snapshot: 'stale'
     })
     await waitUntil(() => port.sent.filter(
@@ -1690,11 +1723,11 @@ sleep 30
     const checkpoints = new CheckpointManager(root, database)
     const older = await checkpoints.create({
       sessionId: 'readonly-corrupt-checkpoint', terminalSequence: 2, domainEventSequence: 1,
-      screenEpoch: 3, snapshot: Uint8Array.from([1, 2, 3])
+      screenEpoch: 3, cols: 80, rows: 24, snapshot: Uint8Array.from([1, 2, 3])
     })
     const newest = await checkpoints.create({
       sessionId: 'readonly-corrupt-checkpoint', terminalSequence: 4, domainEventSequence: 2,
-      screenEpoch: 4, snapshot: Uint8Array.from([4, 5, 6])
+      screenEpoch: 4, cols: 80, rows: 24, snapshot: Uint8Array.from([4, 5, 6])
     })
     const corrupted = await readFile(newest.filePath)
     corrupted[corrupted.byteLength - 1] = corrupted[corrupted.byteLength - 1]! ^ 0xff
@@ -1725,6 +1758,7 @@ sleep 30
         checkpointSequence: 2,
         checkpoint: {
           terminalSequence: 2, domainEventSequence: 1, screenEpoch: 3,
+          cols: 80, rows: 24,
           snapshot: Uint8Array.from([1, 2, 3])
         }
       })
@@ -1748,7 +1782,7 @@ sleep 30
     await journal.close()
     const missing = await new CheckpointManager(root, database).create({
       sessionId: 'readonly-missing-checkpoint', terminalSequence: 2, domainEventSequence: 0,
-      screenEpoch: 5, snapshot: Uint8Array.from([9, 9, 9])
+      screenEpoch: 5, cols: 80, rows: 24, snapshot: Uint8Array.from([9, 9, 9])
     })
     await unlink(missing.filePath)
 

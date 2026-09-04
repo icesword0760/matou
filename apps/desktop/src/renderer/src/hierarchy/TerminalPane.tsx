@@ -111,6 +111,7 @@ export function TerminalPane(props: {
     onRename, onRestoreAutoTitle
   } = props
   const recoveryState = suppliedRecoveryState ?? 'ready'
+  const recoveryTracked = suppliedRecoveryState !== undefined
   const [confirmationOpen, setConfirmationOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
@@ -254,7 +255,12 @@ export function TerminalPane(props: {
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError)
   const currentForkProgress = activeForkProgress(forkProgress)
-  const waitingForTerminalPaint = !isTeamMember && recoveryState === 'ready' && !terminalVisualReady
+  // Runtime recovery status is present only for a Session that existed before
+  // this Runtime generation. A freshly created Workspace has no recovery job;
+  // showing the recovery cover there hides an already-started Shell and can
+  // leave the card covered forever when its first prompt has no visible glyph.
+  const waitingForTerminalPaint = recoveryTracked && !isTeamMember &&
+    recoveryState === 'ready' && !terminalVisualReady
   const showRecoveryWater = (recoveryBusy || waitingForTerminalPaint) &&
     forkState !== 'failed' && providerRestoreState !== 'failed' && runtimeStatus !== 'error' && !storageFault &&
     !currentForkProgress && !environmentUnavailable

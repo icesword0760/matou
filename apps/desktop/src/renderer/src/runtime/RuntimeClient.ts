@@ -45,6 +45,8 @@ interface TerminalConsumer {
 interface TerminalCheckpoint {
   throughSequence: number
   screenEpoch: number
+  cols: number
+  rows: number
   snapshot: string
 }
 
@@ -359,10 +361,12 @@ export class RuntimeClient {
     sessionId: string,
     throughSequence: number,
     screenEpoch: number,
+    cols: number,
+    rows: number,
     snapshot: string
   ): void {
     if (this.#readOnly) return
-    const checkpoint = { throughSequence, screenEpoch, snapshot }
+    const checkpoint = { throughSequence, screenEpoch, cols, rows, snapshot }
     const queue = this.#terminalCheckpoints.get(sessionId) ?? {}
     this.#terminalCheckpoints.set(sessionId, queue)
     if (queue.inFlight) {

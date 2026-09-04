@@ -27,7 +27,10 @@ import {
   readSessionReplayMetadata
 } from './journal/journal-range-reader'
 import { JournalHistoryReader } from './journal/journal-history-reader'
-import { CheckpointManager } from './checkpoints/checkpoint-manager'
+import {
+  CheckpointManager,
+  type LoadedCheckpoint
+} from './checkpoints/checkpoint-manager'
 import type { CapabilityTokenService } from './control/host-control-server'
 import type { RuntimeControlBackend } from './control/runtime-control-backend'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
@@ -1061,7 +1064,7 @@ export class RuntimeServer {
       // checkpoint cannot replace that prefix: resetting to it and then
       // starting at requestedFrom would leave a visible hole. A newer
       // checkpoint already contains that prefix and is the fastest exact base.
-      const checkpoint = !message.preserveExistingModel && candidateCheckpoint && (
+      const checkpoint = !message.preserveExistingModel && checkpointHasGrid(candidateCheckpoint) && (
         message.fromSequence === 0 ||
         candidateCheckpoint.terminalSequence >= message.fromSequence
       ) ? candidateCheckpoint : undefined
@@ -1089,6 +1092,8 @@ export class RuntimeServer {
             terminalSequence: checkpoint.terminalSequence,
             domainEventSequence: checkpoint.domainEventSequence,
             screenEpoch: checkpoint.screenEpoch,
+            cols: checkpoint.cols,
+            rows: checkpoint.rows,
             snapshot: checkpoint.snapshot
           }
         }),
@@ -1194,6 +1199,8 @@ export class RuntimeServer {
           ? activeSession.domainEventSequenceAtOrBefore(message.throughSequence)
           : metadata.domainEventSequence,
         screenEpoch: message.screenEpoch,
+        cols: message.cols,
+        rows: message.rows,
         snapshot: new TextEncoder().encode(message.snapshot)
       })
       await activeSession?.protectCheckpointSequences(
@@ -3261,6 +3268,16 @@ function optionalBoundedInteger(
     throw new RpcFault('INVALID_REQUEST', `${name} must be between ${minimum} and ${maximum}`)
   }
   return Number(value)
+}
+
+function checkpointHasGrid(
+  checkpoint: LoadedCheckpoint | undefined
+): checkpoint is LoadedCheckpoint & { cols: number; rows: number } {
+  if (checkpoint === undefined) return false
+  const { cols, rows } = checkpoint
+  return typeof cols === 'number' && typeof rows === 'number' &&
+    Number.isSafeInteger(cols) && cols >= 2 && cols <= 1000 &&
+    Number.isSafeInteger(rows) && rows >= 1 && rows <= 500
 }
 
 export function terminalSummaryLines(raw: string): string[] {

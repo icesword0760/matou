@@ -319,6 +319,38 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.resizeTerminal).not.toHaveBeenCalled()
   })
 
+  it('settles an inactive card once when its width changes just after recovery replay', () => {
+    vi.useFakeTimers()
+    render(<TerminalSurface sessionId="session-restored" profile="claude-code"
+      active={false} visible />)
+    act(() => { vi.runOnlyPendingTimers() })
+
+    state.onMessage?.({
+      type: 'terminal.replay-complete', sessionId: 'session-restored', throughSequence: 8
+    })
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+      vi.runOnlyPendingTimers()
+    })
+
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-restored', 80, 24)
+
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+      vi.runOnlyPendingTimers()
+    })
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+  })
+
   it('publishes only the settled focused dimensions when an inactive card becomes active', () => {
     vi.useFakeTimers()
     const view = render(<TerminalSurface sessionId="session-preview" active={false} visible />)
@@ -587,6 +619,7 @@ describe('TerminalSurface focus continuity', () => {
       availableFromSequence: 1, liveSequence: 8,
       checkpoint: {
         terminalSequence: 7, domainEventSequence: 2, screenEpoch: 3,
+        cols: 101, rows: 37,
         snapshot: new TextEncoder().encode('\u001b[2Jcheckpoint screen')
       }
     })
@@ -598,6 +631,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.terminalWrite.mock.calls.slice(-2).map(([data]) =>
       typeof data === 'string' ? data : new TextDecoder().decode(data as Uint8Array)
     )).toEqual(['\u001b[2Jcheckpoint screen', 'tail'])
+    expect(state.terminalResize).toHaveBeenCalledWith(101, 37)
   })
 
   it('checkpoints the latest applied screen after output becomes quiet', async () => {
@@ -613,7 +647,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
     await act(() => vi.advanceTimersByTimeAsync(1))
     expect(state.storeTerminalCheckpoint).toHaveBeenLastCalledWith(
-      'session-1', 1, 0, '\u001b[2Jserialized screen'
+      'session-1', 1, 0, 80, 24, '\u001b[2Jserialized screen'
     )
 
     state.onMessage?.({
@@ -622,7 +656,7 @@ describe('TerminalSurface focus continuity', () => {
     })
     await act(() => vi.advanceTimersByTimeAsync(500))
     expect(state.storeTerminalCheckpoint).toHaveBeenLastCalledWith(
-      'session-1', 2, 0, '\u001b[2Jserialized screen'
+      'session-1', 2, 0, 80, 24, '\u001b[2Jserialized screen'
     )
     expect(state.storeTerminalCheckpoint).toHaveBeenCalledTimes(2)
   })
@@ -675,7 +709,7 @@ describe('TerminalSurface focus continuity', () => {
     await act(() => vi.advanceTimersByTimeAsync(0))
 
     expect(state.storeTerminalCheckpoint).toHaveBeenCalledWith(
-      'session-1', 4, 0, '\u001b[2Jserialized screen'
+      'session-1', 4, 0, 80, 24, '\u001b[2Jserialized screen'
     )
   })
 

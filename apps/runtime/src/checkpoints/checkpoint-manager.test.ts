@@ -33,6 +33,8 @@ describe('CheckpointManager', () => {
       terminalSequence: 12,
       domainEventSequence: 7,
       screenEpoch: 2,
+      cols: 96,
+      rows: 31,
       snapshot: Uint8Array.from([1, 2, 3])
     })
 
@@ -48,6 +50,8 @@ describe('CheckpointManager', () => {
       terminalSequence: 12,
       domainEventSequence: 7,
       screenEpoch: 2,
+      cols: 96,
+      rows: 31,
       snapshot: Uint8Array.from([1, 2, 3])
     })
   })

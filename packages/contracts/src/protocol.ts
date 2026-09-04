@@ -119,6 +119,8 @@ const checkpointSchema = z.object({
   sessionId,
   throughSequence: z.number().int().nonnegative(),
   screenEpoch: z.number().int().nonnegative(),
+  cols: z.number().int().min(2).max(1000),
+  rows: z.number().int().min(1).max(500),
   snapshot: z.string().refine(
     (value) => new TextEncoder().encode(value).byteLength <= MAX_CHECKPOINT_SNAPSHOT_BYTES,
     'checkpoint snapshot exceeds the transport limit'
@@ -412,6 +414,8 @@ export type RuntimeMessage =
         terminalSequence: number
         domainEventSequence: number
         screenEpoch: number
+        cols: number
+        rows: number
         snapshot: Uint8Array
       }
       availableFromSequence: number

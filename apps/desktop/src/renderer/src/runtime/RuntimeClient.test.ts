@@ -431,11 +431,12 @@ describe('RuntimeClient', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })
 
-    client.storeTerminalCheckpoint('session-1', 42, 3, '\u001b[2Jscreen')
+    client.storeTerminalCheckpoint('session-1', 42, 3, 96, 31, '\u001b[2Jscreen')
 
     expect(port.sent.at(-1)).toMatchObject({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-1', throughSequence: 42, screenEpoch: 3,
+      cols: 96, rows: 31,
       snapshot: '\u001b[2Jscreen'
     })
     expect(() => parseRendererMessage(port.sent.at(-1))).not.toThrow()
@@ -445,10 +446,10 @@ describe('RuntimeClient', () => {
     const port = new FakePort()
     const client = new RuntimeClient(port, { clientId: 'renderer-1' })
 
-    client.storeTerminalCheckpoint('session-1', 1, 0, 'first')
-    client.storeTerminalCheckpoint('session-1', 2, 0, 'second')
-    client.storeTerminalCheckpoint('session-1', 3, 0, 'newest')
-    client.storeTerminalCheckpoint('session-2', 4, 1, 'independent')
+    client.storeTerminalCheckpoint('session-1', 1, 0, 80, 24, 'first')
+    client.storeTerminalCheckpoint('session-1', 2, 0, 80, 24, 'second')
+    client.storeTerminalCheckpoint('session-1', 3, 0, 80, 24, 'newest')
+    client.storeTerminalCheckpoint('session-2', 4, 1, 100, 30, 'independent')
 
     expect(port.sent.filter(({ type }) => type === 'terminal.checkpoint')).toEqual([
       expect.objectContaining({ sessionId: 'session-1', throughSequence: 1, snapshot: 'first' }),
@@ -466,8 +467,8 @@ describe('RuntimeClient', () => {
   it('continues checkpointing after rejection and after replacing a port with a lost acknowledgement', () => {
     const first = new FakePort()
     const client = new RuntimeClient(first, { clientId: 'renderer-1' })
-    client.storeTerminalCheckpoint('session-1', 1, 0, 'first')
-    client.storeTerminalCheckpoint('session-1', 2, 0, 'pending')
+    client.storeTerminalCheckpoint('session-1', 1, 0, 80, 24, 'first')
+    client.storeTerminalCheckpoint('session-1', 2, 0, 80, 24, 'pending')
 
     first.deliver({
       type: 'terminal.checkpoint-rejected', protocolVersion: PROTOCOL_VERSION,
@@ -479,7 +480,7 @@ describe('RuntimeClient', () => {
 
     const second = new FakePort()
     client.replacePort(second)
-    client.storeTerminalCheckpoint('session-1', 3, 0, 'after reconnect')
+    client.storeTerminalCheckpoint('session-1', 3, 0, 80, 24, 'after reconnect')
     expect(second.sent.at(-1)).toMatchObject({
       type: 'terminal.checkpoint', sessionId: 'session-1', throughSequence: 3,
       snapshot: 'after reconnect'
@@ -493,8 +494,8 @@ describe('RuntimeClient', () => {
       sessionId: 'session-1', executionContextId: 'context-1',
       profile: 'shell', cols: 80, rows: 24
     }, () => undefined)
-    client.storeTerminalCheckpoint('session-1', 1, 0, 'quiet')
-    client.storeTerminalCheckpoint('session-1', 2, 0, 'leaving foreground')
+    client.storeTerminalCheckpoint('session-1', 1, 0, 80, 24, 'quiet')
+    client.storeTerminalCheckpoint('session-1', 2, 0, 80, 24, 'leaving foreground')
 
     detach()
     port.deliver({
@@ -574,7 +575,7 @@ describe('RuntimeClient', () => {
     client.retryTerminalStorage('session-1')
     client.endTerminalAfterStorageFault('session-1')
     client.recordTerminalInteraction('session-1', 'submit')
-    client.storeTerminalCheckpoint('session-1', 1, 0, 'blocked')
+    client.storeTerminalCheckpoint('session-1', 1, 0, 80, 24, 'blocked')
     client.disposeDeletedTerminal('session-1')
 
     expect(port.sent).toHaveLength(before)

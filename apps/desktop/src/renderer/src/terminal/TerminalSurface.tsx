@@ -28,6 +28,7 @@ const CHECKPOINT_QUIET_MS = 500
 const CHECKPOINT_SCROLLBACK_LINES = 10_000
 const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const TERMINAL_RESIZE_SETTLE_MS = 80
+const RECOVERY_LAYOUT_SETTLE_WINDOW_MS = 800
 const NOOP = () => {}
 
 interface QueuedWebglActivation {
@@ -417,6 +418,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let visualReadyReported = false
     let terminalContentApplied = false
     let visualReplayPending = false
+    let recoveryLayoutResizeDeadline = 0
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
     const reportVisualReady = () => {
@@ -475,6 +477,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         sessionId,
         model.lastAppliedSequence,
         model.screenEpoch,
+        terminal.cols,
+        terminal.rows,
         snapshot
       )
     }
@@ -640,6 +644,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         }
         preserveExistingModelForReplay = false
         if (message.checkpoint) {
+          // SerializeAddon snapshots contain cursor movement and wrapped rows
+          // for the grid they were captured in. Restore that exact grid before
+          // applying the VT stream, then fit to today's card after replay.
+          terminal.resize(message.checkpoint.cols, message.checkpoint.rows)
+          publishTerminalDimensions()
           const snapshot = message.checkpoint.snapshot instanceof Uint8Array
             ? message.checkpoint.snapshot
             : new Uint8Array(message.checkpoint.snapshot)
@@ -672,6 +681,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           visualCatchupRequested = false
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.throughSequence)
           fit.fit()
+          // The carousel can still be completing its responsive flex transition
+          // when an inactive Session finishes replay. Permit exactly one later
+          // settled resize so the restored grid fills that card, without making
+          // ordinary inactive hover previews resize the live PTY repeatedly.
+          recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
           publishTerminalDimensions()
           if (validTerminalDimensions(terminal.cols, terminal.rows)) {
             resizeCoalescer.offer(terminal.cols, terminal.rows)
@@ -829,7 +843,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       // that animation visual avoids making shells redraw their prompt into
       // durable scrollback after the card has already lost input focus. The
       // final focused grid is published when that card becomes active again.
-      if (!visibleRef.current || !activeRef.current) return
+      const settlingRecoveredLayout = performance.now() <= recoveryLayoutResizeDeadline
+      if (!visibleRef.current || (!activeRef.current && !settlingRecoveredLayout)) return
+      recoveryLayoutResizeDeadline = 0
       fit.fit()
       publishTerminalDimensions()
       if (validTerminalDimensions(terminal.cols, terminal.rows)) {

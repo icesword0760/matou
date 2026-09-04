@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest'
 import { recoveryWaterTimeline } from './SessionRecoveryWater'
 
 describe('recovery water timeline', () => {
-  it('keeps the water visible and moving instead of ending before terminal content is ready', () => {
-    const firstPass = recoveryWaterTimeline(7_000, false)
-    const stillWaiting = recoveryWaterTimeline(12_000, false)
+  it('restarts the full fill motion while terminal content is still pending', () => {
+    const opening = recoveryWaterTimeline(0, false)
+    const filled = recoveryWaterTimeline(7_000, false)
+    const replayedOpening = recoveryWaterTimeline(7_200, false)
 
-    expect(firstPass.alpha).toBe(1)
-    expect(stillWaiting.alpha).toBe(1)
-    expect(stillWaiting.rise).toBeGreaterThan(firstPass.rise)
-    expect(stillWaiting.rise).toBeLessThan(1)
+    expect(filled.alpha).toBe(1)
+    expect(filled.rise).toBeGreaterThan(.85)
+    expect(replayedOpening).toEqual(opening)
   })
 })

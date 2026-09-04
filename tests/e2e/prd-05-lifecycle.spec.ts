@@ -1,5 +1,6 @@
-import { access, realpath } from 'node:fs/promises'
+import { access, mkdir, realpath } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { expect, test } from '@playwright/test'
@@ -38,6 +39,34 @@ test('opens the selected default directory as a complete Workspace hierarchy', a
       expect(await realpath(await processCwd(Number(await surface.getAttribute('data-pid')))))
         .toBe(await realpath(fixture.workspaceDirectory))
     }
+  } finally { await fixture.close() }
+})
+
+test('opens a newly added Workspace as a fresh interactive terminal without recovery UI', async () => {
+  const fixture = await launchMatou()
+  const freshWorkspace = join(fixture.rootDirectory, 'fresh-workspace')
+  await mkdir(freshWorkspace)
+  try {
+    await fixture.app.evaluate(({ ipcMain }, selectedPath) => {
+      const channel = 'matou:select-workspace-directory'
+      ipcMain.removeHandler(channel)
+      ipcMain.handle(channel, () => selectedPath)
+    }, freshWorkspace)
+
+    await fixture.page.getByRole('button', { name: '新增工作空间' }).click()
+    await expect(fixture.page.getByRole('group', { name: 'fresh-workspace 工作空间' }))
+      .toHaveClass(/is-active/)
+    const pane = fixture.page.locator('[data-testid="terminal-pane"]:visible').first()
+    await expect(pane.getByTestId('session-recovery-water')).toHaveCount(0)
+
+    const surface = pane.locator('.terminal-surface')
+    await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
+    const input = surface.locator('.xterm-helper-textarea')
+    await expect(input).toHaveCount(1)
+    await input.focus()
+    await input.pressSequentially("printf '__FRESH_WORKSPACE_READY__\\n'", { delay: 2 })
+    await input.press('Enter')
+    await expect(surface.locator('.xterm-rows')).toContainText('__FRESH_WORKSPACE_READY__')
   } finally { await fixture.close() }
 })
 

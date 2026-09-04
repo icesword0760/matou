@@ -16,13 +16,15 @@ const clamp = (value: number, minimum: number, maximum: number) =>
   Math.max(minimum, Math.min(maximum, value))
 
 const smooth = (value: number) => value * value * (3 - 2 * value)
+const RECOVERY_WATER_CYCLE_MS = 7_200
 
 export function recoveryWaterTimeline(elapsed: number, reducedMotion: boolean) {
   if (reducedMotion) return { rise: .5, alpha: 1 }
-  const rise = .94 * smooth(1 - Math.exp(-Math.max(0, elapsed) / 2_400))
+  const cycleElapsed = Math.max(0, elapsed) % RECOVERY_WATER_CYCLE_MS
+  const rise = .94 * smooth(1 - Math.exp(-cycleElapsed / 2_400))
   return {
     rise,
-    alpha: clamp(elapsed / 288, 0, 1)
+    alpha: clamp(cycleElapsed / 288, 0, 1)
   }
 }
 
@@ -46,6 +48,7 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
     let bulkSignal = 0
     let innerSignal = 0
     let counterSignal = 0
+    let cycleIndex = -1
     let frame = 0
     let context: CanvasRenderingContext2D | null = null
 
@@ -146,6 +149,12 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
 
       const now = performance.now()
       const elapsed = now - animationOrigin
+      const nextCycleIndex = reducedMotion ? 0 : Math.floor(elapsed / RECOVERY_WATER_CYCLE_MS)
+      if (nextCycleIndex !== cycleIndex) {
+        cycleIndex = nextCycleIndex
+        resetSurface()
+      }
+      const cycleElapsed = reducedMotion ? elapsed : elapsed % RECOVERY_WATER_CYCLE_MS
       const frameScale = clamp((now - previousFrame) / 16.667, .35, 1.5)
       previousFrame = now
       const timeline = recoveryWaterTimeline(elapsed, reducedMotion)
@@ -153,8 +162,8 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
       const surface = cssHeight * (.85 - rise * .74)
       const alpha = timeline.alpha
       const energy = reducedMotion ? .08 : Math.pow(1 - rise, 1.45)
-      const introIntensity = reducedMotion ? 1 : 1 + (1 - smooth(clamp(elapsed / 1700, 0, 1))) * .65
-      bulkPhase = elapsed * .00272 + 2.1 * (1 - Math.exp(-elapsed / 1050)) - 1.08
+      const introIntensity = reducedMotion ? 1 : 1 + (1 - smooth(clamp(cycleElapsed / 1700, 0, 1))) * .65
+      bulkPhase = cycleElapsed * .00272 + 2.1 * (1 - Math.exp(-cycleElapsed / 1050)) - 1.08
       bulkSignal = reducedMotion ? 0 : (
         Math.sin(bulkPhase) + Math.sin(bulkPhase * .53 + .75) * .2 + Math.sin(bulkPhase * 1.83 + 1.4) * .12
       ) / 1.24
@@ -204,7 +213,7 @@ export function SessionRecoveryWater({ sessionTitle }: { sessionTitle: string })
       }
 
       for (const bubble of BUBBLES) {
-        const progress = (bubble.offset + elapsed * .000065 * bubble.speed) % 1
+        const progress = (bubble.offset + cycleElapsed * .000065 * bubble.speed) % 1
         const y = cssHeight + 9 - progress * Math.max(cssHeight - surface + 24, 1)
         if (y < surface + 14 || y > cssHeight + 5) continue
         const x = cssWidth * bubble.x + bulkSignal * 22

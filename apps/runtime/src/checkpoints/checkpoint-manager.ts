@@ -26,6 +26,8 @@ export interface CreateCheckpointInput {
   terminalSequence: number
   domainEventSequence: number
   screenEpoch: number
+  cols?: number
+  rows?: number
   snapshot: Uint8Array<ArrayBufferLike>
 }
 
@@ -41,6 +43,8 @@ export interface LoadedCheckpoint {
   terminalSequence: number
   domainEventSequence: number
   screenEpoch: number
+  cols?: number
+  rows?: number
   snapshot: Uint8Array
 }
 
@@ -67,6 +71,8 @@ interface CheckpointHeader {
   terminalSequence: number
   domainEventSequence: number
   screenEpoch: number
+  cols?: number
+  rows?: number
   snapshotLength: number
 }
 
@@ -128,6 +134,7 @@ export class CheckpointManager {
         terminalSequence: input.terminalSequence,
         domainEventSequence: input.domainEventSequence,
         screenEpoch: input.screenEpoch,
+        ...(input.cols === undefined ? {} : { cols: input.cols, rows: input.rows! }),
         snapshotLength: input.snapshot.byteLength
       }, input.snapshot)
       await writeFile(temporaryPath, encoded, { mode: 0o600 })
@@ -211,6 +218,9 @@ export class CheckpointManager {
       terminalSequence: candidate.terminal_sequence,
       domainEventSequence: candidate.domain_event_sequence,
       screenEpoch: candidate.screen_epoch,
+      ...(decoded.header.cols === undefined
+        ? {}
+        : { cols: decoded.header.cols, rows: decoded.header.rows! }),
       snapshot: decoded.snapshot
     }
   }
@@ -331,6 +341,19 @@ function validateInput(input: CreateCheckpointInput): void {
     ['screenEpoch', input.screenEpoch]
   ] as const) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be non-negative`)
+  }
+  if ((input.cols === undefined) !== (input.rows === undefined)) {
+    throw new Error('checkpoint cols and rows must be stored together')
+  }
+  if (input.cols !== undefined && (
+    !Number.isSafeInteger(input.cols) || input.cols < 2 || input.cols > 1000
+  )) {
+    throw new Error('checkpoint cols must be between 2 and 1000')
+  }
+  if (input.rows !== undefined && (
+    !Number.isSafeInteger(input.rows) || input.rows < 1 || input.rows > 500
+  )) {
+    throw new Error('checkpoint rows must be between 1 and 500')
   }
   if (input.snapshot.byteLength > MAX_CHECKPOINT_SNAPSHOT_BYTES) {
     throw new Error('checkpoint snapshot exceeds the storage limit')

@@ -103,18 +103,28 @@ describe('parseRendererMessage', () => {
     expect(parseRendererMessage({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-1', throughSequence: 17, screenEpoch: 2,
+      cols: 120, rows: 40,
       snapshot: '\u001b[2Jrestored screen'
-    })).toMatchObject({ type: 'terminal.checkpoint', throughSequence: 17 })
+    })).toMatchObject({
+      type: 'terminal.checkpoint', throughSequence: 17, cols: 120, rows: 40
+    })
+    expect(() => parseRendererMessage({
+      type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'session-1', throughSequence: 17, screenEpoch: 2,
+      snapshot: '\u001b[2Jrestored screen'
+    })).toThrow(/cols/)
   })
 
   it('rejects unsafe checkpoint identities and oversized UTF-8 snapshots', () => {
     expect(() => parseRendererMessage({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
-      sessionId: '../outside', throughSequence: 17, screenEpoch: 2, snapshot: 'screen'
+      sessionId: '../outside', throughSequence: 17, screenEpoch: 2,
+      cols: 80, rows: 24, snapshot: 'screen'
     })).toThrow(/sessionId/)
     expect(() => parseRendererMessage({
       type: 'terminal.checkpoint', protocolVersion: PROTOCOL_VERSION,
       sessionId: 'session-1', throughSequence: 17, screenEpoch: 2,
+      cols: 80, rows: 24,
       snapshot: '😀'.repeat(Math.floor(MAX_CHECKPOINT_SNAPSHOT_BYTES / 4) + 1)
     })).toThrow(/transport limit/)
   })
