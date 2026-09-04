@@ -394,6 +394,17 @@ describe('parseRendererMessage', () => {
     ]))
   })
 
+  it('allowlists paged Claude session transcript search', () => {
+    expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'claude-sessions.list', 'claude-sessions.detail', 'claude-sessions.search'
+    ]))
+    expect(parseRendererMessage({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION, requestId: 'claude-search-1',
+      method: 'claude-sessions.search', capability: 'renderer',
+      deadlineAt: Date.now() + 1000, payload: { providerSessionId: 'session-1', query: 'needle' }
+    })).toMatchObject({ type: 'rpc.request', method: 'claude-sessions.search' })
+  })
+
   it('allowlists reading and saving the current Session instruction file', () => {
     expect(RPC_METHODS).toEqual(expect.arrayContaining([
       'session.instructions-read', 'session.instructions-write'

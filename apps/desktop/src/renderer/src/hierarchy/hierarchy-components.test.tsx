@@ -412,6 +412,7 @@ function commands(): HierarchyCommands {
     createForkPeer: vi.fn(),
     retryFork: vi.fn(), removeFailedFork: vi.fn(),
     retryProviderRestore: vi.fn(), startFreshProvider: vi.fn(), listClaudeSessions: vi.fn(),
+    searchClaudeSession: vi.fn(),
     getClaudeSessionDetail: vi.fn(), loadClaudeSession: vi.fn(), getSceneSessionGraph: vi.fn(),
     recordSessionInteraction: vi.fn(), setFocusedSession: vi.fn(),
     putGeometry: vi.fn(),

@@ -133,6 +133,55 @@ describe('RuntimeRpcRouter', () => {
     })
   })
 
+  it('pages complete Claude history and searches events beyond the first preview window', async () => {
+    const workspaceRoot = join(testRoot, 'paged-history-workspace')
+    const projectsRoot = join(testRoot, 'claude-projects')
+    await mkdir(workspaceRoot)
+    const projectDirectory = join(projectsRoot, encodeClaudeProjectPath(workspaceRoot))
+    await mkdir(projectDirectory, { recursive: true })
+    await writeFile(join(projectDirectory, 'provider-paged.jsonl'), Array.from({ length: 400 }, (_, index) =>
+      JSON.stringify({
+        type: index === 0 ? 'user' : 'assistant',
+        sessionId: 'provider-paged',
+        cwd: workspaceRoot,
+        timestamp: new Date(Date.UTC(2026, 7, 31, 10, 0, index)).toISOString(),
+        message: {
+          role: index === 0 ? 'user' : 'assistant',
+          content: index === 49 || index === 349 ? `远端命中 ${index + 1}` : `普通内容 ${index + 1}`
+        }
+      })).join('\n'))
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), { projectsRoot })
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('paged-bootstrap', {
+      windowId: 'window-paged', defaultRootDirectory: workspaceRoot,
+      defaultName: 'paged-history-workspace', now: 1
+    })) as { session: { id: string } }
+
+    const latest = await router.handle('claude-sessions.detail', {
+      sessionId: initial.session.id, providerSessionId: 'provider-paged', limit: 200
+    }) as { events: Array<{ index: number }>; page: { total: number; hasEarlier: boolean } }
+    expect(latest.events).toHaveLength(200)
+    expect(latest.events[0]?.index).toBe(201)
+    expect(latest.page).toEqual(expect.objectContaining({ total: 400, hasEarlier: true }))
+
+    const earlier = await router.handle('claude-sessions.detail', {
+      sessionId: initial.session.id, providerSessionId: 'provider-paged',
+      beforeEventIndex: 201, limit: 200
+    }) as { events: Array<{ index: number }> }
+    expect(earlier.events[0]?.index).toBe(1)
+
+    const search = await router.handle('claude-sessions.search', {
+      sessionId: initial.session.id, providerSessionId: 'provider-paged',
+      query: '远端命中', offset: 1, limit: 1
+    }) as { total: number; hits: Array<{ eventIndex: number }> }
+    expect(search).toMatchObject({ total: 2, hits: [{ eventIndex: 350 }] })
+
+    const around = await router.handle('claude-sessions.detail', {
+      sessionId: initial.session.id, providerSessionId: 'provider-paged',
+      aroundEventIndex: 350, limit: 40
+    }) as { events: Array<{ index: number }> }
+    expect(around.events.some(({ index }) => index === 350)).toBe(true)
+  })
+
   it('lists Claude history already loaded by another card instead of reporting an empty workspace', async () => {
     const workspaceRoot = join(testRoot, 'occupied-workspace')
     const projectsRoot = join(testRoot, 'claude-projects')

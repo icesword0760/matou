@@ -208,6 +208,7 @@ export const RPC_METHODS = [
   'hierarchy.move-task-to-window',
   'claude-sessions.list',
   'claude-sessions.detail',
+  'claude-sessions.search',
   'claude-sessions.load',
   'provider-config.snapshot',
   'provider-config.upsert',

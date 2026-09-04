@@ -1,4 +1,5 @@
-import { readFile, readdir, realpath, stat } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { open, readdir, realpath, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 import type {
@@ -8,6 +9,7 @@ import type {
   ClaudeSessionPermissionMode,
   ClaudeSessionPreviewEvent,
   ClaudeSessionSearchHit,
+  ClaudeSessionSearchResult,
   ClaudeSessionSummary
 } from '@matou/contracts'
 
@@ -18,7 +20,17 @@ interface CatalogQuery {
 
 type CatalogSearchScope = 'metadata' | 'all'
 
-interface ParsedTranscript {
+interface IndexedEvent {
+  index: number
+  kind: ClaudeSessionEventKind
+  role?: 'user' | 'assistant'
+  timestamp?: number
+  toolName?: string
+  offset: number
+  length: number
+}
+
+interface IndexedTranscript {
   providerSessionId: string
   title: string
   autoTitle?: string
@@ -26,70 +38,146 @@ interface ParsedTranscript {
   updatedAt: number
   model?: string
   permissionMode: ClaudeSessionPermissionMode
-  events: Omit<ClaudeSessionPreviewEvent, 'matched'>[]
+  path: string
+  mtimeMs: number
+  size: number
+  events: IndexedEvent[]
 }
+
+interface JsonLine {
+  offset: number
+  length: number
+  source: Buffer
+}
+
+const DEFAULT_EVENT_PAGE_LIMIT = 200
+const MAX_EVENT_PAGE_LIMIT = 500
+const MAX_SESSION_LIST_PAGE_LIMIT = 200
+const MAX_SEARCH_PAGE_LIMIT = 200
+const SEARCH_READ_BATCH_SIZE = 64
+const SEARCH_READ_BATCH_BYTES = 4 * 1024 * 1024
+const SEARCH_CACHE_LIMIT = 16
 
 export class ClaudeSessionCatalog {
   readonly #projectsRoot: string
   readonly #fileCache = new Map<string, {
     mtimeMs: number
     size: number
-    transcript: ParsedTranscript | undefined
+    transcript: IndexedTranscript | undefined
+  }>()
+  readonly #searchCache = new Map<string, {
+    mtimeMs: number
+    size: number
+    hits: ClaudeSessionSearchHit[]
   }>()
 
   constructor(projectsRoot: string) {
     this.#projectsRoot = resolve(projectsRoot)
   }
 
-  async list(input: CatalogQuery & { limit?: number; searchScope?: CatalogSearchScope }): Promise<ClaudeSessionListResult> {
+  async list(input: CatalogQuery & {
+    offset?: number
+    limit?: number
+    searchScope?: CatalogSearchScope
+  }): Promise<ClaudeSessionListResult> {
     const transcripts = await this.#readWorkspace(input.cwd)
     const query = normalizeQuery(input.query)
     const searchScope = input.searchScope ?? 'all'
-    const sessions = transcripts
-      .map((transcript) => summarize(transcript, query, searchScope))
+    const sessions = (await Promise.all(transcripts.map(async (transcript) => {
+      const contentHits = query && searchScope === 'all'
+        ? await this.#searchTranscript(transcript, query)
+        : []
+      return summarize(transcript, query, searchScope, contentHits)
+    })))
       .filter((session) => !query || session.matchCount > 0)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.title.localeCompare(right.title))
-    const limit = Math.max(1, Math.min(input.limit ?? 100, 500))
-    return { sessions: sessions.slice(0, limit), total: sessions.length }
+    const offset = clampInteger(input.offset ?? 0, 0, sessions.length)
+    const limit = clampInteger(input.limit ?? 50, 1, MAX_SESSION_LIST_PAGE_LIMIT)
+    const page = sessions.slice(offset, offset + limit)
+    const nextOffset = offset + page.length
+    return {
+      sessions: page,
+      total: sessions.length,
+      offset,
+      limit,
+      nextOffset,
+      hasMore: nextOffset < sessions.length
+    }
   }
 
-  async detail(input: CatalogQuery & { providerSessionId: string; previewLimit?: number }): Promise<ClaudeSessionDetail> {
+  async detail(input: CatalogQuery & {
+    providerSessionId: string
+    beforeEventIndex?: number
+    aroundEventIndex?: number
+    limit?: number
+  }): Promise<ClaudeSessionDetail> {
     requireProviderSessionId(input.providerSessionId)
     const transcript = (await this.#readWorkspace(input.cwd))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
     if (!transcript) throw new Error('Claude Code 会话不存在或不属于当前工作空间')
     const query = normalizeQuery(input.query)
-    const summary = summarize(transcript, '', 'metadata')
-    const previewLimit = input.previewLimit === undefined
-      ? undefined
-      : Math.max(1, Math.min(input.previewLimit, 1_000))
-    const hits: ClaudeSessionSearchHit[] = []
-    let matchCount = 0
-    const events: ClaudeSessionDetail['events'] = []
+    const limit = clampInteger(
+      input.limit ?? DEFAULT_EVENT_PAGE_LIMIT,
+      1,
+      MAX_EVENT_PAGE_LIMIT
+    )
+    let selected: IndexedEvent[]
+    let hits: ClaudeSessionSearchHit[] = []
     if (query) {
-      for (const event of transcript.events) {
-        const matched = searchableEventText(event).includes(query)
-        if (matched) {
-          matchCount += 1
-          if (hits.length < 4) {
-            hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
-          }
-        }
-        if (previewLimit === undefined || matched && matchCount <= previewLimit) {
-          events.push({ ...event, matched })
-        }
-      }
+      hits = await this.#searchTranscript(transcript, query)
+      selected = selectEventWindow(transcript.events, {
+        limit,
+        ...(input.beforeEventIndex === undefined ? {} : { beforeEventIndex: input.beforeEventIndex }),
+        ...(input.aroundEventIndex === undefined ? {} : { aroundEventIndex: input.aroundEventIndex })
+      })
     } else {
-      const previewSource = previewLimit === undefined
-        ? transcript.events
-        : transcript.events.slice(-previewLimit)
-      events.push(...previewSource.map((event) => ({ ...event, matched: false })))
+      selected = selectEventWindow(transcript.events, {
+        limit,
+        ...(input.beforeEventIndex === undefined ? {} : { beforeEventIndex: input.beforeEventIndex }),
+        ...(input.aroundEventIndex === undefined ? {} : { aroundEventIndex: input.aroundEventIndex })
+      })
     }
+    const events = await readIndexedEvents(transcript, selected, query)
+    const firstIndex = selected[0]?.index ?? 0
+    const lastIndex = selected.at(-1)?.index ?? 0
     return {
-      ...summary,
-      matchCount,
+      ...summarize(transcript, '', 'metadata', []),
+      matchCount: hits.length,
+      hits: hits.slice(0, 4),
+      events,
+      page: {
+        startEventIndex: firstIndex,
+        endEventIndex: lastIndex,
+        total: transcript.events.length,
+        hasEarlier: firstIndex > 1,
+        hasLater: lastIndex > 0 && lastIndex < transcript.events.length
+      }
+    }
+  }
+
+  async search(input: CatalogQuery & {
+    providerSessionId: string
+    offset?: number
+    limit?: number
+  }): Promise<ClaudeSessionSearchResult> {
+    requireProviderSessionId(input.providerSessionId)
+    const transcript = (await this.#readWorkspace(input.cwd))
+      .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
+    if (!transcript) throw new Error('Claude Code 会话不存在或不属于当前工作空间')
+    const query = normalizeQuery(input.query)
+    const allHits = query ? await this.#searchTranscript(transcript, query) : []
+    const offset = clampInteger(input.offset ?? 0, 0, allHits.length)
+    const limit = clampInteger(input.limit ?? 100, 1, MAX_SEARCH_PAGE_LIMIT)
+    const hits = allHits.slice(offset, offset + limit)
+    const nextOffset = offset + hits.length
+    return {
+      query,
       hits,
-      events
+      total: allHits.length,
+      offset,
+      limit,
+      nextOffset,
+      hasMore: nextOffset < allHits.length
     }
   }
 
@@ -100,7 +188,39 @@ export class ClaudeSessionCatalog {
       ?.autoTitle
   }
 
-  async #readWorkspace(cwd: string): Promise<ParsedTranscript[]> {
+  async #searchTranscript(
+    transcript: IndexedTranscript,
+    query: string
+  ): Promise<ClaudeSessionSearchHit[]> {
+    const cacheKey = `${transcript.path}\0${query}`
+    const cached = this.#searchCache.get(cacheKey)
+    if (cached?.mtimeMs === transcript.mtimeMs && cached.size === transcript.size) {
+      this.#searchCache.delete(cacheKey)
+      this.#searchCache.set(cacheKey, cached)
+      return cached.hits
+    }
+    const hits: ClaudeSessionSearchHit[] = []
+    for (const refs of indexedEventBatches(transcript.events)) {
+      const events = await readIndexedEvents(transcript, refs, query)
+      for (const event of events) {
+        if (!event.matched) continue
+        hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
+      }
+    }
+    this.#searchCache.set(cacheKey, {
+      mtimeMs: transcript.mtimeMs,
+      size: transcript.size,
+      hits
+    })
+    while (this.#searchCache.size > SEARCH_CACHE_LIMIT) {
+      const oldest = this.#searchCache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.#searchCache.delete(oldest)
+    }
+    return hits
+  }
+
+  async #readWorkspace(cwd: string): Promise<IndexedTranscript[]> {
     const normalizedCwd = await canonicalPath(cwd)
     const directoryNames = [...new Set([
       encodeClaudeProjectPath(cwd), encodeClaudeProjectPath(normalizedCwd)
@@ -117,7 +237,7 @@ export class ClaudeSessionCatalog {
         if (!isMissing(error)) throw error
       }
     }
-    const transcripts = await Promise.all(candidates.map(async ({ directory, name }) => {
+    const transcripts = await mapWithConcurrency(candidates, 8, async ({ directory, name }) => {
       const providerSessionId = name.slice(0, -'.jsonl'.length)
       if (!isProviderSessionId(providerSessionId)) return undefined
       const path = resolve(directory, name)
@@ -128,7 +248,7 @@ export class ClaudeSessionCatalog {
           ? cached.transcript
           : undefined
         if (!cached || cached.mtimeMs !== metadata.mtimeMs || cached.size !== metadata.size) {
-          transcript = parseTranscript(providerSessionId, await readFile(path, 'utf8'))
+          transcript = await indexTranscript(providerSessionId, path, metadata.mtimeMs, metadata.size)
           this.#fileCache.set(path, { mtimeMs: metadata.mtimeMs, size: metadata.size, transcript })
         }
         if (!transcript) return undefined
@@ -140,9 +260,9 @@ export class ClaudeSessionCatalog {
         if (isMissing(error)) return undefined
         throw error
       }
-    }))
+    })
     return [...new Map(transcripts
-      .filter((value): value is ParsedTranscript => value !== undefined)
+      .filter((value): value is IndexedTranscript => value !== undefined)
       .map((value) => [value.providerSessionId, value])).values()]
   }
 }
@@ -151,19 +271,24 @@ export function encodeClaudeProjectPath(cwd: string): string {
   return resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
 }
 
-function parseTranscript(providerSessionId: string, source: string): ParsedTranscript | undefined {
+async function indexTranscript(
+  providerSessionId: string,
+  path: string,
+  mtimeMs: number,
+  size: number
+): Promise<IndexedTranscript | undefined> {
   let cwd = ''
   let title = ''
   let autoTitle = ''
   let updatedAt = 0
   let model: string | undefined
   let permissionMode: ClaudeSessionPermissionMode = 'default'
-  const events: Omit<ClaudeSessionPreviewEvent, 'matched'>[] = []
-  for (const line of source.split(/\r?\n/)) {
-    if (!line.trim()) continue
+  const events: IndexedEvent[] = []
+  for await (const line of scanJsonLines(path)) {
+    if (line.length === 0) continue
     let row: Record<string, unknown>
     try {
-      const parsed = JSON.parse(line) as unknown
+      const parsed = JSON.parse(line.source.toString('utf8')) as unknown
       if (!isRecord(parsed)) continue
       row = parsed
     } catch {
@@ -181,7 +306,15 @@ function parseTranscript(providerSessionId: string, source: string): ParsedTrans
     if (message && typeof message.model === 'string' && message.model.trim()) model = message.model
     const event = message ? eventFromMessage(events.length + 1, message, timestamp) : undefined
     if (!event) continue
-    events.push(event)
+    events.push({
+      index: event.index,
+      kind: event.kind,
+      ...(event.role ? { role: event.role } : {}),
+      ...(event.timestamp === undefined ? {} : { timestamp: event.timestamp }),
+      ...(event.toolName ? { toolName: event.toolName } : {}),
+      offset: line.offset,
+      length: line.length
+    })
     if (!title && event.role === 'user' && event.kind === 'user') title = compactTitle(event.text)
   }
   if (!cwd || events.length === 0) return undefined
@@ -193,8 +326,108 @@ function parseTranscript(providerSessionId: string, source: string): ParsedTrans
     updatedAt,
     ...(model ? { model } : {}),
     permissionMode,
+    path,
+    mtimeMs,
+    size,
     events
   }
+}
+
+async function* scanJsonLines(path: string): AsyncGenerator<JsonLine> {
+  let pending = Buffer.alloc(0)
+  let pendingOffset = 0
+  for await (const value of createReadStream(path)) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+    const buffer = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk
+    let start = 0
+    for (let index = 0; index < buffer.length; index += 1) {
+      if (buffer[index] !== 0x0a) continue
+      const rawEnd = index > start && buffer[index - 1] === 0x0d ? index - 1 : index
+      yield {
+        offset: pendingOffset + start,
+        length: rawEnd - start,
+        source: buffer.subarray(start, rawEnd)
+      }
+      start = index + 1
+    }
+    pendingOffset += start
+    pending = start < buffer.length ? Buffer.from(buffer.subarray(start)) : Buffer.alloc(0)
+  }
+  if (pending.length > 0) {
+    const rawEnd = pending.at(-1) === 0x0d ? pending.length - 1 : pending.length
+    yield { offset: pendingOffset, length: rawEnd, source: pending.subarray(0, rawEnd) }
+  }
+}
+
+function selectEventWindow(
+  events: IndexedEvent[],
+  input: { limit: number; beforeEventIndex?: number; aroundEventIndex?: number }
+): IndexedEvent[] {
+  if (events.length === 0) return []
+  if (input.aroundEventIndex !== undefined) {
+    const anchor = clampInteger(input.aroundEventIndex, 1, events.length)
+    let start = Math.max(0, anchor - 1 - Math.floor(input.limit / 2))
+    let end = Math.min(events.length, start + input.limit)
+    start = Math.max(0, end - input.limit)
+    return events.slice(start, end)
+  }
+  const end = input.beforeEventIndex === undefined
+    ? events.length
+    : clampInteger(input.beforeEventIndex - 1, 0, events.length)
+  return events.slice(Math.max(0, end - input.limit), end)
+}
+
+async function readIndexedEvents(
+  transcript: IndexedTranscript,
+  refs: IndexedEvent[],
+  query: string
+): Promise<ClaudeSessionPreviewEvent[]> {
+  if (refs.length === 0) return []
+  const rangeStart = refs[0]!.offset
+  const rangeEnd = refs.at(-1)!.offset + refs.at(-1)!.length
+  const buffer = Buffer.allocUnsafe(rangeEnd - rangeStart)
+  const handle = await open(transcript.path, 'r')
+  try {
+    let readOffset = 0
+    while (readOffset < buffer.length) {
+      const result = await handle.read(buffer, readOffset, buffer.length - readOffset, rangeStart + readOffset)
+      if (result.bytesRead === 0) break
+      readOffset += result.bytesRead
+    }
+    const events: ClaudeSessionPreviewEvent[] = []
+    for (const ref of refs) {
+      const start = ref.offset - rangeStart
+      if (start + ref.length > readOffset) continue
+      const source = buffer.subarray(start, start + ref.length).toString('utf8')
+      try {
+        const row = JSON.parse(source) as unknown
+        if (!isRecord(row)) continue
+        const message = isRecord(row.message) ? row.message : undefined
+        const event = message ? eventFromMessage(ref.index, message, parseTimestamp(row.timestamp)) : undefined
+        if (!event) continue
+        events.push({ ...event, matched: Boolean(query && searchableEventText(event).includes(query)) })
+      } catch {
+        continue
+      }
+    }
+    return events
+  } finally {
+    await handle.close()
+  }
+}
+
+function* indexedEventBatches(events: IndexedEvent[]): Generator<IndexedEvent[]> {
+  let batch: IndexedEvent[] = []
+  for (const event of events) {
+    const first = batch[0]
+    const span = first ? event.offset + event.length - first.offset : event.length
+    if (batch.length > 0 && (batch.length >= SEARCH_READ_BATCH_SIZE || span > SEARCH_READ_BATCH_BYTES)) {
+      yield batch
+      batch = []
+    }
+    batch.push(event)
+  }
+  if (batch.length > 0) yield batch
 }
 
 function eventFromMessage(
@@ -248,22 +481,13 @@ function contentParts(content: unknown): Array<{ kind: 'text' | 'tool'; text: st
 }
 
 function summarize(
-  transcript: ParsedTranscript,
+  transcript: IndexedTranscript,
   query: string,
-  searchScope: CatalogSearchScope
+  searchScope: CatalogSearchScope,
+  contentHits: ClaudeSessionSearchHit[]
 ): ClaudeSessionSummary {
-  const hits: ClaudeSessionSearchHit[] = []
-  let contentMatchCount = 0
-  if (query && searchScope === 'all') {
-    for (const event of transcript.events) {
-      const text = searchableEventText(event)
-      if (!text.includes(query)) continue
-      contentMatchCount += 1
-      if (hits.length < 4) {
-        hits.push({ eventIndex: event.index, kind: event.kind, excerpt: excerpt(event.text, query) })
-      }
-    }
-  }
+  const hits = searchScope === 'all' ? contentHits.slice(0, 4) : []
+  const contentMatchCount = searchScope === 'all' ? contentHits.length : 0
   const metadataMatch = Boolean(query && normalizeQuery([
     transcript.title,
     transcript.providerSessionId,
@@ -306,6 +530,30 @@ function compactTitle(value: string): string {
 
 function normalizeQuery(value: string): string {
   return value.trim().toLocaleLowerCase()
+}
+
+function clampInteger(value: number, minimum: number, maximum: number): number {
+  const normalized = Number.isFinite(value) ? Math.trunc(value) : minimum
+  return Math.max(minimum, Math.min(normalized, maximum))
+}
+
+async function mapWithConcurrency<T, Result>(
+  values: T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<Result>
+): Promise<Result[]> {
+  if (values.length === 0) return []
+  const results = new Array<Result>(values.length)
+  let cursor = 0
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      if (index >= values.length) return
+      results[index] = await mapper(values[index]!, index)
+    }
+  }))
+  return results
 }
 
 export function latestClaudeAutoTitle(source: string, providerSessionId?: string): string | undefined {

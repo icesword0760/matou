@@ -112,6 +112,12 @@
 .session-loader-scope { height: 22px; padding: 0 7px; border: 1px solid transparent; border-radius: 7px; color: #8290a1; background: transparent; font-size: 9px; cursor: pointer; }
 .session-loader-scope:hover { border-color: #3c4653; color: #b5c0cd; background: rgba(255,255,255,.04); }
 .session-loader-results { min-height: 0; overflow: auto; padding: 0 0 12px; scrollbar-width: thin; }
+.session-loader-virtual-list,.session-loader-virtual-events { position: relative; width: 100%; }
+.session-loader-virtual-row { position: absolute; top: 0; left: 0; width: 100%; box-sizing: border-box; }
+.session-loader-virtual-list > .session-loader-virtual-row { padding-bottom: 6px; }
+.session-loader-virtual-events > .session-loader-virtual-row { padding-bottom: 12px; }
+.session-loader-virtual-row > .session-loader-result,.session-loader-virtual-row > .session-loader-event { margin-bottom: 0; }
+.session-loader-page-status { padding: 7px 10px; color: #8490a0; font-size: 9px; text-align: center; }
 .session-loader-result { margin: 0 0 6px; overflow: hidden; border: 1px solid transparent; border-radius: 10px; background: rgba(255,255,255,.025); }
 .session-loader-result.selected { border-color: rgba(91,157,233,.6); background: rgba(91,157,233,.1); }
 .session-loader-result-main { display: grid; width: 100%; box-sizing: border-box; gap: 4px; padding: 10px 11px; border: 0; text-align: left; color: inherit; background: transparent; cursor: pointer; }
@@ -129,8 +135,9 @@
 .session-loader-match-nav { display: flex!important; flex: none!important; flex-direction: row!important; align-items: center; gap: 3px!important; }
 .session-loader-match-nav button { width: 25px; height: 25px; padding: 0; border: 0; border-radius: 6px; color: #a6afbb; background: rgba(255,255,255,.05); cursor: pointer; }
 .session-loader-events { min-height: 0; overflow: auto; padding: 16px clamp(14px,3vw,28px) 28px; scroll-behavior: smooth; scrollbar-width: thin; }
-.session-loader-preview-limit { max-width: 760px; margin: 0 auto 12px; padding: 7px 10px; border-radius: 8px; color: #8490a0; background: rgba(91,157,233,.07); font-size: 9px; text-align: center; }
+.session-loader-history-status { position: sticky; z-index: 2; top: -8px; width: max-content; max-width: 100%; margin: 0 auto 10px; padding: 5px 9px; border: 1px solid rgba(91,157,233,.15); border-radius: 999px; color: #8490a0; background: rgba(24,27,32,.92); font-size: 9px; text-align: center; backdrop-filter: blur(8px); }
 .session-loader-event { max-width: 760px; margin: 0 auto 12px; padding: 11px 13px; border: 1px solid #343b46; border-radius: 11px; background: #20242a; scroll-margin: 70px; }
+.session-loader-virtual-events .session-loader-event { width: 100%; box-sizing: border-box; }
 .session-loader-event.is-user { margin-left: auto; background: #252b32; }
 .session-loader-event.is-tool { border-color: #4c3d5a; background: #241f2a; }
 .session-loader-event.matched { border-color: #5b9de9; box-shadow: 0 0 0 2px rgba(91,157,233,.14); }
@@ -155,6 +162,7 @@
 .light-theme .session-loader-result { background: rgba(48,65,87,.025); }
 .light-theme .session-loader-result.selected { border-color: #80b4ef; background: #eaf3fe; }
 .light-theme .session-loader-preview { background: #fff; }
+.light-theme .session-loader-history-status { border-color: rgba(52,123,200,.17); color: #748091; background: rgba(255,255,255,.92); }
 .light-theme .session-loader-preview > header { border-color: #dce1e8; }
 .light-theme .session-loader-event { border-color: #d8dee6; background: #f7f9fb; }
 .light-theme .session-loader-event.is-user { background: #eef2f6; }

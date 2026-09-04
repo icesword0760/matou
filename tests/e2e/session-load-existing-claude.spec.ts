@@ -16,7 +16,7 @@ test.describe('load an existing Claude Code session', () => {
       const invocationLog = join(fixture.rootDirectory, 'load-session-provider-invocations.txt')
       const projectDirectory = join(projectsRoot, encodeClaudeProjectPath(fixture.workspaceDirectory))
       await mkdir(projectDirectory, { recursive: true })
-      await writeFile(join(projectDirectory, 'load-session-e2e.jsonl'), [
+      const transcriptRows = [
         JSON.stringify({
           type: 'user', sessionId: 'load-session-e2e', cwd: fixture.workspaceDirectory,
           timestamp: '2026-08-31T10:00:00.000Z', permissionMode: 'default',
@@ -32,11 +32,23 @@ test.describe('load an existing Claude Code session', () => {
             ]
           }
         }),
+        ...Array.from({ length: 398 }, (_, index) => {
+          const eventIndex = index + 3
+          const content = eventIndex === 50 || eventIndex === 350
+            ? `跨页搜索标记 ${eventIndex}`
+            : `历史内容 ${eventIndex}`
+          return JSON.stringify({
+            type: 'assistant', sessionId: 'load-session-e2e', cwd: fixture.workspaceDirectory,
+            timestamp: new Date(Date.UTC(2026, 7, 31, 10, 2, index)).toISOString(),
+            message: { role: 'assistant', model: 'claude-opus-4-6', content }
+          })
+        }),
         JSON.stringify({
           type: 'permission-mode', sessionId: 'load-session-e2e', cwd: fixture.workspaceDirectory,
           timestamp: '2026-08-31T10:02:00.000Z', permissionMode: 'bypassPermissions'
         })
-      ].join('\n'))
+      ]
+      await writeFile(join(projectDirectory, 'load-session-e2e.jsonl'), transcriptRows.join('\n'))
       await writeFile(providerExecutable, [
         '#!/bin/sh',
         'printf "%s\\n" "$*" >> "$MATOU_LOAD_SESSION_INVOCATIONS"',
@@ -63,6 +75,7 @@ test.describe('load an existing Claude Code session', () => {
       await expect(dialog.getByRole('button', { name: /预览会话：检查通知中心的聚合逻辑/ }))
         .toBeVisible()
       await expect(dialog).toContainText('开放所有权限')
+      await expect(dialog.getByRole('status')).toContainText('已加载 200 / 400 条')
 
       const sessionFilter = dialog.getByRole('searchbox', { name: '筛选左侧会话' })
       const contentSearch = dialog.getByRole('searchbox', { name: '查找右侧会话内容' })
@@ -75,6 +88,13 @@ test.describe('load an existing Claude Code session', () => {
       await contentSearch.fill('hover width')
       await expect(dialog.getByLabel('右侧内容匹配位置')).toContainText('1/1')
       await expect(dialog.getByLabel('会话预览')).toContainText('hover width')
+
+      await contentSearch.fill('跨页搜索标记')
+      await expect(dialog.getByLabel('右侧内容匹配位置')).toContainText('1/2')
+      await expect(dialog.getByLabel('会话预览')).toContainText('跨页搜索标记 50')
+      await dialog.getByRole('button', { name: '下一个匹配' }).click()
+      await expect(dialog.getByLabel('右侧内容匹配位置')).toContainText('2/2')
+      await expect(dialog.getByLabel('会话预览')).toContainText('跨页搜索标记 350')
 
       await dialog.getByRole('button', { name: '载入到当前卡片' }).click()
       const confirmation = dialog.getByRole('button', { name: '结束当前运行并载入' })

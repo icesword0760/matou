@@ -45,11 +45,34 @@ export interface ClaudeSessionPreviewEvent {
 
 export interface ClaudeSessionDetail extends ClaudeSessionSummary {
   events: ClaudeSessionPreviewEvent[]
+  page: ClaudeSessionEventPageInfo
+}
+
+export interface ClaudeSessionEventPageInfo {
+  startEventIndex: number
+  endEventIndex: number
+  total: number
+  hasEarlier: boolean
+  hasLater: boolean
 }
 
 export interface ClaudeSessionListResult {
   sessions: ClaudeSessionSummary[]
   total: number
+  offset: number
+  limit: number
+  nextOffset: number
+  hasMore: boolean
+}
+
+export interface ClaudeSessionSearchResult {
+  query: string
+  hits: ClaudeSessionSearchHit[]
+  total: number
+  offset: number
+  limit: number
+  nextOffset: number
+  hasMore: boolean
 }
 
 export interface ClaudeSessionLoadResult {

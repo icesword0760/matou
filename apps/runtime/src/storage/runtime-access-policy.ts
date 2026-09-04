@@ -40,6 +40,7 @@ const READ_ONLY_RPC_METHODS = new Set<RpcMethod>([
   'hierarchy.get-scene-session-graph',
   'claude-sessions.list',
   'claude-sessions.detail',
+  'claude-sessions.search',
   'session.environment-open',
   'session.instructions-read',
   'geometry.list',
