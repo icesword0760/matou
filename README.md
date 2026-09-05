@@ -83,7 +83,7 @@ Matou 会向它托管的每个 Agent 提供会话定位与控制能力，使它�
 <details>
 <summary>当前版本支持的控制命令</summary>
 
-Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send` 和 `mt key`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
+Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send`、`mt key`、`mt create`、`mt fork` 和 `mt remove`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
 
 </details>
 
@@ -144,11 +144,9 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 
 ## 路线图
 
-**自然语言创建层级结构（未实现）。** 当前版本已支持用自然语言读取和控制其他卡片；下一步是让你直接描述任务拆分，由 Agent 创建工作空间、事项、画布和会话卡片，而不必连续点击菜单：
+**自然语言创建层级结构。** 除了读取和控制其他卡片，托管的 Agent 还可以直接创建结构：`mt create workspace|task|canvas|session`、`mt fork child|sibling|children`，以及 `mt remove preview|commit` 带预览确认的移除。你可以对当前会话说：
 
 > “根据这三个方案创建三个子卡片，分别验证性能、兼容性和回滚路径。”
-
-规划范围包括创建子卡片、兄弟卡片和批量子卡片；聚焦、切换、移除，以及关闭前的预览确认。
 
 **代码签名与公证（未完成）。** 当前安装包未经 Apple 签名，首次打开需要手动放行；Intel Mac 安装包也尚未提供。
 

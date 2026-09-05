@@ -83,7 +83,7 @@ Matou gives every agent it hosts the ability to identify itself, list related ca
 <details>
 <summary>Control commands in the current version</summary>
 
-Inside a hosted session: `mt identify`, `mt list`, `mt read`, `mt history`, `mt commands`, `mt send` and `mt key`. Targets can be `self`, `left`, `right`, `parent`, `child:N`, `sibling:N` or a session reference.
+Inside a hosted session: `mt identify`, `mt list`, `mt read`, `mt history`, `mt commands`, `mt send`, `mt key`, `mt create`, `mt fork` and `mt remove`. Targets can be `self`, `left`, `right`, `parent`, `child:N`, `sibling:N` or a session reference.
 
 </details>
 
@@ -143,11 +143,9 @@ Matou persists tasks, tabs, splits, directories, focus, terminal output and host
 
 ## Roadmap
 
-**Natural-language structure creation (not implemented).** The current version already lets you read and control other cards in plain language; the next step is describing a task breakdown and letting the agent create workspaces, tasks, canvases and session cards instead of clicking through menus:
+**Natural-language structure creation.** Beyond reading and controlling other cards, a hosted agent can create structure directly: `mt create workspace|task|canvas|session`, `mt fork child|sibling|children`, and `mt remove preview|commit` for removal with a preview confirmation. You can tell the current session:
 
 > "Create three child cards from these three plans and validate performance, compatibility and rollback separately."
-
-Planned scope: child, sibling and batch card creation; focus, switch, remove, and a preview confirmation before closing.
 
 **Code signing and notarization (not done).** The installer is not signed by Apple yet, so the first launch needs a manual override; an Intel build is not provided yet.
 
