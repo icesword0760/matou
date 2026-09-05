@@ -110,6 +110,37 @@ function addSection(id: string, ...clips: Clip[]): void { recorded.set(id, clips
 
 // ---------- shared helpers ----------
 
+// Recording-only stand-in for the macOS vibrancy material.
+//
+// The main window is created with `transparent: true`, `backgroundColor: '#00000000'` and
+// `vibrancy: 'sidebar'` (apps/desktop/src/main/index.ts), so in light theme the shell root
+// (`html[data-theme="light"], body.light-theme` and `.hierarchy-shell[data-theme="light"]`), the
+// sidebar (`.workbench-sidebar.flat-sidebar`, `.flat-sidebar__topbar`) and its frosted layer
+// (`.flat-sidebar__glass-material`, which only paints ~10% alpha whites plus a backdrop blur) are
+// all deliberately transparent: on a real Mac the OS blends the milky sidebar material behind
+// them. `beginFrameSubscription` hands us the web layer alone as premultiplied BGRA, and ffmpeg
+// drops the alpha, so those pixels arrive as near-black - a dark grey panel whose light-theme
+// labels read as pale grey on black. Paint the material ourselves for the recording; the app's own
+// CSS and main process stay untouched.
+const VIBRANCY_STAND_IN = `
+html[data-theme="light"], body.light-theme,
+.hierarchy-shell[data-theme="light"] { background: #f7f8fa !important; }
+.hierarchy-shell[data-theme="light"] .workbench-sidebar.flat-sidebar,
+.hierarchy-shell[data-theme="light"] .flat-sidebar__topbar,
+.hierarchy-shell[data-theme="light"] .flat-sidebar__toolbar { background: #eff1f5 !important; }
+.hierarchy-shell[data-theme="light"] .workbench-sidebar.flat-sidebar {
+  border-right: 1px solid rgba(88,113,139,.12) !important;
+}
+.hierarchy-shell[data-theme="light"] .flat-sidebar__glass-material { display: none !important; }
+`
+
+// Injected right after every launch. The DAG window needs nothing: it is created opaque
+// (`backgroundColor: '#F7F8FA'`, no `transparent`/`vibrancy`) and `.light-theme .dag-window`
+// paints `#f7f8fa` itself, which is exactly what the current recordings already show.
+async function paintVibrancy(page: Page): Promise<void> {
+  await page.addStyleTag({ content: VIBRANCY_STAND_IN })
+}
+
 // The stub `claude` pops one role per launch, so every section that starts a session declares the
 // roles it consumes right before it runs. Trailing spares keep an unexpected launch (a provider
 // switch restarting a session, say) from emptying the queue mid-recording.
@@ -433,6 +464,7 @@ async function buildScene(root: string): Promise<Scene> {
 
   const app = await scene.launch({ root, home, workspace, demo })
   const page = await app.firstWindow()
+  await paintVibrancy(page)
   await scene.placeWindow(app, ZOOM, VIDEO_WINDOW)
   console.log('viewport', await page.evaluate(() => `${window.innerWidth}x${window.innerHeight} @${window.devicePixelRatio}`))
 
@@ -590,6 +622,7 @@ async function restartApp(host: Scene): Promise<void> {
   await host.app.close().catch(() => {})
   host.app = await scene.launch({ root: host.root, home: host.home, workspace: host.workspace, demo: host.demo })
   host.page = await host.app.firstWindow()
+  await paintVibrancy(host.page)
   await scene.placeWindow(host.app, ZOOM, VIDEO_WINDOW)
   await expect(scene.visibleSurfaces(host.page).first()).toBeVisible({ timeout: 180_000 })
   // Only 实现与验证 is filmed after the restart. 方案探索 is deliberately left untouched: a canvas
