@@ -17,9 +17,16 @@ import urllib.request
 ROOT = os.environ['MATOU_DEMO_ROOT']
 args = sys.argv[1:]
 settings = None
+resume = None
 for index, value in enumerate(args):
     if value == '--settings' and index + 1 < len(args):
         settings = args[index + 1]
+    if value == '--resume' and index + 1 < len(args):
+        resume = args[index + 1]
+# A Fork passes the source conversation with --fork-session and the real CLI answers with a new
+# identity, so only a plain resume may report the id it was handed.
+if '--fork-session' in args:
+    resume = None
 
 with open(os.path.join(ROOT, 'roles.queue'), 'r+') as queue:
     fcntl.flock(queue, fcntl.LOCK_EX)
@@ -36,7 +43,9 @@ with open(os.path.join(ROOT, 'launches.log'), 'a') as log:
     log.write(json.dumps({'role': role, 'args': args, 'cwd': os.getcwd()}) + '\n')
 
 spec = json.load(open(os.path.join(ROOT, 'roles.json')))[role]
-provider_id = f'demo-{role}'
+# Report the conversation the host asked us to resume. Without this a catalog load (which resumes
+# a real session id) fails the restore identity handshake and the card shows "Claude Code 恢复失败".
+provider_id = resume or f'demo-{role}'
 url = json.load(open(settings))['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
 base = {'session_id': provider_id, 'cwd': os.getcwd()}
 

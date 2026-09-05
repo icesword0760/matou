@@ -24,9 +24,13 @@ const ZOOM = 1
 const ORDER = ['intro', 'why', 'structure', 'focus', 'persist', 'fork-dag', 'ai-control',
   'board-notify', 'model-switch', 'outro'] as const
 const IMPL_CARDS = ['实现 · Redis 幂等键', '回归 · 支付模块测试', '审查 · 方案对比', '文档 · 回调约定', '协调 · 跨卡片']
+// The card the AI batch-forks from, on its own canvas so that canvas's DAG is just it and its three
+// children. The 方案探索 baseline tree keeps its own discussion card under a different name.
 const DISCUSS = '幂等方案 · 讨论'
+const PLAN_CARD = '幂等方案 · 三条路线'
 const IMPL_TAB = '实现与验证'
 const PLAN_TAB = '方案探索'
+const FORK_TAB = 'AI 分叉'
 
 test.setTimeout(0)
 
@@ -49,13 +53,26 @@ interface Scene {
   forkerIds: Ids
 }
 
+// The ffmpeg child lives in the Electron main process, so the recorder must be stopped even when
+// the section throws - otherwise it keeps writing frames into the next section's app evaluate calls
+// and the mp4 is never finalised. A clip whose body failed is still flushed to disk, but it is not
+// returned, so `writeManifest` never lists it.
 async function recordClip(host: Scene, sectionId: string, part: string | undefined, startAtMs: number,
   body: (rec: ClipRecorder) => Promise<void>): Promise<Clip> {
   const name = part ? `${sectionId}-${part}` : sectionId
   const rec = new ClipRecorder(host.app, 30)
   await rec.start(join(OUT, `${name}.mp4`))
-  await body(rec)
+  let failure: unknown
+  try {
+    await body(rec)
+  } catch (error) {
+    failure = error
+  }
   const stats = await rec.stop(join(OUT, `${name}.events.json`))
+  if (failure !== undefined) {
+    console.log(`clip ${name}: FAILED after ${stats.stoppedAt - stats.startedAt} ms, not written to the manifest`)
+    throw failure
+  }
   const clip: Clip = {
     file: `recordings/${name}.mp4`, events: `recordings/${name}.events.json`,
     startAtMs, durationMs: stats.stoppedAt - stats.startedAt
@@ -365,16 +382,21 @@ async function buildScene(root: string): Promise<Scene> {
   await scene.waitForShell(discuss)
   await scene.promoteToClaude(discuss, demo)
   await scene.waitForRole(demo, 'baseline-three')
-  await scene.renameSession(page, discuss, DISCUSS)
+  await scene.renameSession(page, discuss, PLAN_CARD)
   const discussIds = await scene.hierarchyIds(page, discuss)
 
+  // ----- canvas 3: AI 分叉 (one card, so its DAG is exactly the batch fork) -----
+  await page.getByRole('button', { name: '新建页签' }).click()
+  await expect(page.getByRole('tab')).toHaveCount(3)
+  await scene.renameActiveTab(page, FORK_TAB)
+  const forker = await scene.stableSurface(scene.visibleSurfaces(page).first())
+  await scene.waitForShell(forker)
+  await scene.renameSession(page, forker, DISCUSS)
   // `mt fork children self` is refused until the calling conversation has completed one
   // prompt→Stop cycle, and the ai-fork stub runs the command in the middle of its first cycle.
   // Priming the card here (the batch fails, the Stop still lands and makes the binding
   // fork-capable) lets the recorded run succeed. `exit` hands the card back to its Shell and the
   // next `claude` clears the screen, so the recording starts from an ordinary empty terminal.
-  const forker = await scene.newSurfaceAfter(page, () => page.getByRole('button', { name: '横向新增 Shell' }).click())
-  await scene.waitForShell(forker)
   await scene.promoteToClaude(forker, demo)
   await scene.waitForRole(demo, 'ai-fork')
   await page.waitForTimeout(2500)
@@ -551,7 +573,7 @@ async function recordPersist(host: Scene): Promise<Clip[]> {
     await rec.moveTo(host.page, 700, 420, 1200)
     await rec.waitUntil(Math.max(0, restartAt - 300))
   })
-  await queueRoles(host.demo, ...RESTART_ROLES)
+  console.log('restoring', await queueRestoreRoles(host, 'baseline'), 'Claude cards')
   await restartApp(host)
   console.log('restore launches', await launchedRoles(host.demo))
   const startAtMs = clipA.durationMs
@@ -587,21 +609,23 @@ async function recordForkDag(host: Scene): Promise<Clip> {
     await rec.click(tabOf(page, PLAN_TAB), 'tab')
     // The card is addressed through its pane rather than its terminal: right after a restart the
     // terminal may not be mounted yet, while the pane (and its Fork button) always is.
-    await climbToCard(page, DISCUSS)
-    const discussPane = paneByTitle(page, DISCUSS)
+    await climbToCard(page, PLAN_CARD)
+    const discussPane = paneByTitle(page, PLAN_CARD)
     await rec.click(discussPane, 'card', { x: 12, y: 12 })
 
     // hoverThenClick spends ~1.5 s travelling and letting the strip settle, so start the approach
     // early enough that the click itself lands on the words "点一下 Fork".
     await rec.waitUntil(cueTime(cues, '点一下 Fork', -1600))
     await scene.newSurfaceAfter(page, async () => {
-      const forkButton = discussPane.getByRole('button', { name: `从“${DISCUSS}”创建子分支` })
+      const forkButton = discussPane.getByRole('button', { name: `从“${PLAN_CARD}”创建子分支` })
       await expect(forkButton).not.toHaveAttribute('aria-disabled', 'true', { timeout: 90_000 })
       await hoverThenClick(rec, page, forkButton, 'fork')
       const branch = page.getByLabel('分支名称')
       if (await branch.count() === 0) {
+        // Log the retry too: two clicks really happened, and the events file is what the cursor
+        // overlay is drawn from, so it must show both rather than only the one that missed.
         console.log('fork retry: the recorded click missed the button')
-        await forkButton.click()
+        await rec.click(forkButton, 'fork')
       }
       await scene.fillForkDialog(page, 'idem/plan-a')
     })
@@ -628,7 +652,8 @@ async function recordForkDag(host: Scene): Promise<Clip> {
     await rec.waitUntil(phraseTime(cues, '会闪一个蓝框'))
     // The pull lands on the canvas root, where 方案 B is no longer on screen; the discussion card
     // next to us is what can actually flash.
-    await notify(page, host.discussIds, { eventType: 'waiting', title: DISCUSS, subtitle: '等待输入',
+    rec.mark('flash')
+    await notify(page, host.discussIds, { eventType: 'waiting', title: PLAN_CARD, subtitle: '等待输入',
       body: '方案 1 已经跑通，要不要把方案 3 也开一条线？' })
     await runToTail(rec, durationMs + TAIL_MS)
   })
@@ -654,7 +679,7 @@ async function recordAiControl(host: Scene): Promise<Clip> {
     rec.mark('mt-read')
 
     await rec.waitUntil(cueTime(cues, '再进一步'))
-    await rec.click(tabOf(page, PLAN_TAB), 'tab')
+    await rec.click(tabOf(page, FORK_TAB), 'tab')
     const forker = surfaceOf(page, host.forkerIds.sessionId)
     await rec.click(forker, 'card', { x: 12, y: 12 })
     await scene.waitForShell(forker)
@@ -671,8 +696,16 @@ async function recordAiControl(host: Scene): Promise<Clip> {
     await expect(page.getByLabel('会话：方案 3 · 去重表')).toBeVisible({ timeout: 30_000 })
 
     await rec.waitUntil(phraseTime(cues, 'DAG 上同时长出三条线'))
-    await openDag(host, rec, 'dag')
+    const dag = await openDag(host, rec, 'dag')
+    await expect(dag.locator('.dag-node-card')).toHaveCount(4, { timeout: 30_000 })
     await runToTail(rec, durationMs + TAIL_MS)
+    // Hand the next section a clean slate: close the DAG inside this clip (by landing on the node,
+    // which is the gesture the fork-dag section already taught) and go back to the main window, so
+    // the section is self-contained rather than leaving a second window open behind it.
+    await rec.click(dag.getByRole('button', { name: `打开会话：${DISCUSS}` }), 'dag-node')
+    await expect.poll(async () => (await host.app.windows()).length, { timeout: 30_000 }).toBe(1)
+    await rec.setSource('main')
+    await rec.hold(800)
   })
 }
 
@@ -683,17 +716,24 @@ async function recordBoardNotify(host: Scene): Promise<Clip> {
   // persist adds a sixth card to this canvas, so anchor on a card that is always there.
   await expect(surfaceOf(host.page, host.implIds[0]!.sessionId)).toBeVisible({ timeout: 30_000 })
   await resetNotifications(host)
+  // Spread the columns before recording: the moves are persisted by the runtime, so the board opens
+  // already arranged and the only drag on camera is the narrated one.
+  await host.page.getByRole('button', { name: '看板' }).click()
+  await expect(host.page.getByRole('region', { name: 'shop-api 看板' })).toBeVisible()
+  for (const [title, column] of [['订单列表分页超时', '运行中'], ['结算页 500 热修', '阻塞'],
+    ['登录页 A/B 实验', '完成'], ['CI 缓存修复', '完成']] as const) {
+    await scene.moveTask(host.page, title, column)
+  }
+  await expect(host.page.locator('.board-feedback')).toHaveCount(0, { timeout: 5_000 })
+  await host.page.getByRole('button', { name: '看板' }).click()
   await host.page.mouse.move(5, 500)
   return recordClip(host, 'board-notify', undefined, 0, async (rec) => {
     const page = host.page
     await rec.waitUntil(cueTime(cues, '每个工作空间都有一个看板'))
     await rec.click(page.getByRole('button', { name: '看板' }), 'board')
     await expect(page.getByRole('region', { name: 'shop-api 看板' })).toBeVisible()
-    for (const [title, column] of [['订单列表分页超时', '运行中'], ['结算页 500 热修', '阻塞'],
-      ['登录页 A/B 实验', '完成'], ['CI 缓存修复', '完成']] as const) {
-      await scene.moveTask(page, title, column)
-    }
-    await expect(page.locator('.board-feedback')).toHaveCount(0, { timeout: 5_000 })
+    await expect(page.locator('section[aria-label="运行中列"] article.board-task-card[aria-label="订单列表分页超时"]'))
+      .toBeVisible({ timeout: 15_000 })
 
     await rec.waitUntil(phraseTime(cues, '拖一下就行'))
     const card = await centerOf(page.locator('article.board-task-card[aria-label="支付回调幂等性"]'))
@@ -720,7 +760,7 @@ async function recordModelSwitch(host: Scene): Promise<Clip> {
   const { cues, durationMs } = await loadCues('model-switch')
   // Activating a provider restarts the Claude sessions it updates, so queue the roles the visible
   // cards should come back with instead of letting them draw whatever is left in the queue.
-  await queueRoles(host.demo, ...RESTART_ROLES)
+  await queueRestoreRoles(host, 'baseline')
   return recordClip(host, 'model-switch', undefined, 0, async (rec) => {
     const page = host.page
     await rec.waitUntil(cueTime(cues, '码头内置了供应商切换'))
@@ -768,9 +808,19 @@ async function launchedRoles(demo: string): Promise<string> {
 }
 
 // Restoring a canvas relaunches the stub once per restored Claude card, in card order, and only for
-// the canvas that is on screen. So: the five cards of 实现与验证, then the Claude session persist-b
-// loads into a fresh Shell.
-const RESTART_ROLES = ['implementation', 'regression', 'review', 'docs', 'coordinate', 'baseline']
+// the canvas that is on screen. These are 实现与验证's cards in order; ai-control appends a sixth
+// (its `mt read` card) when it has already run, which is why the queue is sized from the live count
+// rather than hard-coded - a role that lands on the wrong card makes a restored card come back
+// showing someone else's transcript.
+const RESTORE_ROLES = ['implementation', 'regression', 'review', 'docs', 'coordinate', 'ai-read']
+
+async function queueRestoreRoles(host: Scene, ...after: string[]): Promise<number> {
+  const claudeCards = await host.page
+    .locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"]:visible .terminal-surface[data-profile="claude-code"]')
+    .count()
+  await queueRoles(host.demo, ...RESTORE_ROLES.slice(0, claudeCards), ...after)
+  return claudeCards
+}
 
 // ---------- test ----------
 
@@ -792,9 +842,11 @@ test('records every narration section of the launch video', async () => {
     if (wanted('board-notify')) addSection('board-notify', await recordBoardNotify(host))
     if (wanted('persist')) addSection('persist', ...await recordPersist(host))
     if (wanted('model-switch')) addSection('model-switch', await recordModelSwitch(host))
-    await writeManifest()
     console.log('all launches', await launchedRoles(host.demo))
   } finally {
+    // Written even when a section throws, so the sections already in the can stay usable and the
+    // run can be resumed with MATOU_SECTIONS for the rest.
+    await writeManifest()
     await host.app.evaluate(({ app: electronApp }) => { electronApp.quit() }).catch(() => {})
     await host.app.close().catch(() => {})
     if (!process.env.MATOU_KEEP_DEMO_ROOT) await rm(root, { recursive: true, force: true })
