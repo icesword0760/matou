@@ -8,8 +8,10 @@ hook endpoint so the HUD, work status and DAG reflect a believable session.
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 ROOT = os.environ['MATOU_DEMO_ROOT']
@@ -43,7 +45,10 @@ def post(payload):
     body = json.dumps(payload).encode()
     request = urllib.request.Request(
         url, data=body, headers={'content-type': 'application/json'}, method='POST')
-    urllib.request.urlopen(request, timeout=3).read()
+    try:
+        urllib.request.urlopen(request, timeout=3).read()
+    except urllib.error.URLError as error:
+        print(f'readme-capture: hook post failed: {error}', file=sys.stderr, flush=True)
 
 
 def hook(name, **extra):
@@ -66,6 +71,18 @@ post({
 })
 for event in spec['events']:
     kind = event[0]
+    if kind == 'exec':
+        _, command, label = event
+        sys.stdout.write(f"\x1b[32m⏺\x1b[0m \x1b[1mBash({label})\x1b[0m\n")
+        sys.stdout.flush()
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, env=os.environ)
+        lines = (result.stdout or result.stderr).splitlines()[:12]
+        for index, line in enumerate(lines):
+            prefix = '  \x1b[90m⎿\x1b[0m  ' if index == 0 else '     '
+            sys.stdout.write(prefix + line + '\n')
+        sys.stdout.flush()
+        time.sleep(0.4)
+        continue
     if kind == 'tool':
         _, name, tool_id, tool_input, outcome = event
         hook('PreToolUse', tool_name=name, tool_use_id=tool_id, tool_input=tool_input)
@@ -75,6 +92,9 @@ for event in spec['events']:
             hook('PostToolUseFailure', tool_name=name, tool_use_id=tool_id, tool_input=tool_input)
     else:
         hook(event[1], **event[2])
+        if event[1] == 'Stop' and 'last_assistant_message' in event[2]:
+            sys.stdout.write(f"\x1b[38;5;214m⏺\x1b[0m {event[2]['last_assistant_message']}\n")
+            sys.stdout.flush()
     time.sleep(0.05)
 
 for line in sys.stdin:

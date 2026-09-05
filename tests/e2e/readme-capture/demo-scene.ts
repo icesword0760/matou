@@ -2,6 +2,7 @@
 // Every session is a stub `claude` (claude-stub.py); nothing touches the real CLI or account.
 import { _electron as electron, expect, type ElectronApplication, type Locator, type Page } from '@playwright/test'
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { chmod, cp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -182,8 +183,100 @@ export async function prepareDemo(demo: string): Promise<void> {
     planA1: planA,
     planB1: planB,
     planA,
-    planB
+    planB,
+    'baseline-three': {
+      ...base, transcript: 'baseline-three', permission: 'default', context: 21, duration_ms: 7 * minute,
+      events: [['hook', 'UserPromptSubmit', {}], ['hook', 'Stop', { last_assistant_message: '三个幂等方案已列出，等待选择。' }]]
+    },
+    'ai-read': {
+      ...base, transcript: 'ai-read', permission: 'acceptEdits', context: 12, duration_ms: 2 * minute,
+      events: [
+        ['hook', 'UserPromptSubmit', {}],
+        ['exec', 'mt read left --lines 12', 'mt read left --lines 12'],
+        ['hook', 'Stop', { last_assistant_message: '结论：左边回归 27 个用例通过，1 个与新行为冲突，需要你确认是否更新断言。' }]
+      ]
+    },
+    'ai-fork': {
+      ...base, transcript: 'ai-fork', permission: 'acceptEdits', context: 15, duration_ms: 3 * minute,
+      events: [
+        ['hook', 'UserPromptSubmit', {}],
+        ['exec', `mt fork children self --items-json '${JSON.stringify([
+          { itemKey: 'redis', title: '方案 1 · Redis SETNX', environment: { mode: 'current' } },
+          { itemKey: 'unique', title: '方案 2 · DB 唯一索引', environment: { mode: 'current' } },
+          { itemKey: 'dedupe', title: '方案 3 · 去重表', environment: { mode: 'current' } }
+        ])}' --json`, 'mt fork children self --items-json …'],
+        ['hook', 'Stop', { last_assistant_message: '三张子卡片已创建，DAG 里可以看到三条分支。' }]
+      ]
+    }
   }, null, 2))
+}
+
+// Seeds three fake Claude Code session transcripts into the isolated HOME's history storage so the
+// "载入 Claude Code 会话" dialog has believable sessions to list. The row shape mirrors what the real
+// Claude Code CLI writes and what ClaudeSessionCatalog (apps/runtime/src/session/claude-session-catalog.ts)
+// reads back: one JSON object per line, keyed by `type`/`sessionId`/`cwd`/`timestamp`/`message`.
+export async function seedClaudeHistory(home: string, workspace: string): Promise<void> {
+  const projectDirectory = join(home, '.claude', 'projects', encodeClaudeProjectPath(workspace))
+  await mkdir(projectDirectory, { recursive: true })
+  const sessions: Array<{ startedAt: string; turns: Array<['user' | 'assistant', string]> }> = [
+    {
+      startedAt: '2026-08-25T09:00:00.000Z',
+      turns: [
+        ['user', '支付回调幂等键设计'],
+        ['assistant', '先看当前回调处理的幂等策略，是否已有唯一约束。'],
+        ['user', '目前用的是 Redis SETNX，但过期时间设置不统一'],
+        ['assistant', '建议统一为 24 小时过期，并给键加上 provider 前缀避免冲突'],
+        ['user', 'DB 层要不要也加唯一索引兜底？'],
+        ['assistant', '建议加 (provider, event_id) 唯一索引作为最后一道防线'],
+        ['assistant', '已整理成 ADR，稍后同步给你']
+      ]
+    },
+    {
+      startedAt: '2026-08-28T09:00:00.000Z',
+      turns: [
+        ['user', '订单分页超时排查'],
+        ['assistant', '先看慢查询日志，定位是不是 offset 分页导致的'],
+        ['user', '是的，offset 越大越慢，P99 到了 8s'],
+        ['assistant', '建议改成游标分页，按 (created_at, id) 做 keyset'],
+        ['user', '历史数据要不要重新生成索引？'],
+        ['assistant', '需要，迁移窗口建议放在低峰期'],
+        ['assistant', '迁移脚本已经写好，跑一遍看看效果']
+      ]
+    },
+    {
+      startedAt: '2026-08-31T09:00:00.000Z',
+      turns: [
+        ['user', 'Prisma 6 升级评估'],
+        ['assistant', '先扫一遍 breaking changes，重点看关系查询语法'],
+        ['user', '有没有影响到我们现有的迁移文件？'],
+        ['assistant', '迁移文件兼容，但 relationJoins 预览特性要单独开启'],
+        ['user', '升级之后测试全过了吗？'],
+        ['assistant', '27 个用例通过，1 个跟排序相关的失败，正在看'],
+        ['assistant', '已修复排序失败用例，可以合并升级分支']
+      ]
+    }
+  ]
+  for (const session of sessions) {
+    const sessionId = randomUUID()
+    const startedAt = Date.parse(session.startedAt)
+    const rows = session.turns.map(([role, text], index) => JSON.stringify({
+      type: role,
+      sessionId,
+      cwd: workspace,
+      timestamp: new Date(startedAt + index * 60_000).toISOString(),
+      ...(role === 'user' ? { permissionMode: 'default' } : {}),
+      message: role === 'assistant'
+        ? { role, model: 'claude-opus-4-6', content: [{ type: 'text', text }] }
+        : { role, content: text }
+    }))
+    await writeFile(join(projectDirectory, `${sessionId}.jsonl`), rows.join('\n') + '\n')
+  }
+}
+
+// Mirrors apps/runtime/src/session/claude-session-catalog.ts's encodeClaudeProjectPath so seeded
+// sessions land in the same directory the runtime scans for the active workspace's history.
+function encodeClaudeProjectPath(cwd: string): string {
+  return resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
 }
 
 export async function launch(input: { root: string; home: string; workspace: string; demo: string }): Promise<ElectronApplication> {
