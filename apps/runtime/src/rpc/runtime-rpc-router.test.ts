@@ -155,14 +155,17 @@ describe('RuntimeRpcRouter', () => {
     await router.handle('claude-sessions.load', payload('occupy-provider', {
       sessionId: initial.session.id, providerSessionId: 'provider-occupied', now: 2
     }))
+    await router.handle('hierarchy.rename-session', payload('rename-occupied-card', {
+      sessionId: initial.session.id, title: '手动修改后的卡片名', now: 3
+    }))
     await router.handle('session.create', payload('loader-target', {
       id: 'loader-target', taskId: initial.session.taskId,
       executionContextId: initial.session.executionContextId,
-      kind: 'shell', title: '目标 Shell', now: 3
+      kind: 'shell', title: '目标 Shell', now: 4
     }))
     await router.handle('scene.mount-session', payload('loader-target-mount', {
       id: 'loader-target-mount', sceneId: initial.scene.id,
-      sceneNodeId: initial.scene.rootNodeId, sessionId: 'loader-target', now: 3
+      sceneNodeId: initial.scene.rootNodeId, sessionId: 'loader-target', now: 4
     }))
 
     const list = await router.handle('claude-sessions.list', {
@@ -170,6 +173,7 @@ describe('RuntimeRpcRouter', () => {
     }) as {
       sessions: Array<{
         providerSessionId: string
+        title: string
         availability: string
         loadedSessionTitle?: string
       }>
@@ -177,12 +181,15 @@ describe('RuntimeRpcRouter', () => {
 
     expect(list.sessions).toEqual([expect.objectContaining({
       providerSessionId: 'provider-occupied',
+      title: '手动修改后的卡片名',
       availability: 'loaded-elsewhere',
-      loadedSessionTitle: '继续已载入的会话'
+      loadedSessionTitle: '手动修改后的卡片名'
     })])
     await expect(router.handle('claude-sessions.detail', {
       sessionId: 'loader-target', providerSessionId: 'provider-occupied', query: ''
-    })).resolves.toMatchObject({ providerSessionId: 'provider-occupied' })
+    })).resolves.toMatchObject({
+      providerSessionId: 'provider-occupied', title: '手动修改后的卡片名'
+    })
     await expect(router.handle('claude-sessions.load', payload('duplicate-load', {
       sessionId: 'loader-target', providerSessionId: 'provider-occupied', now: 4
     }))).resolves.toMatchObject({

@@ -105,7 +105,9 @@ export class ProviderModeService {
         ...(input.model ? { model: input.model } : {}),
         loadedFromCatalog: true,
         spawnRevision: input.now,
-        canFork: false,
+        // Catalog conversations already have durable history to branch from.
+        // restore_state keeps Fork unavailable until the resumed identity is live.
+        canFork: true,
         observedUserPrompt: false,
         observedNormalStop: false
       }

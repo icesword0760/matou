@@ -272,10 +272,14 @@ export class RuntimeRpcRouter {
         limit: optionalInteger(input.limit, 100)
       })
       const sessions = result.sessions
-        .map((session) => ({
-          ...session,
-          ...this.#providerConversationUsage(session.providerSessionId, sessionId)
-        }))
+        .map((session) => {
+          const usage = this.#providerConversationUsage(session.providerSessionId, sessionId)
+          return {
+            ...session,
+            ...usage,
+            ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
+          }
+        })
       return { sessions, total: result.total }
     }
     if (method === 'claude-sessions.detail') {
@@ -286,9 +290,11 @@ export class RuntimeRpcRouter {
         cwd: this.#sessionCwd(sessionId), providerSessionId,
         query: optionalString(input.query), previewLimit: 240
       })
+      const usage = this.#providerConversationUsage(providerSessionId, sessionId)
       return {
         ...detail,
-        ...this.#providerConversationUsage(providerSessionId, sessionId)
+        ...usage,
+        ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
       }
     }
 
