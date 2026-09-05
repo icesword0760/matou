@@ -562,8 +562,31 @@ async function restartApp(host: Scene): Promise<void> {
 
 // ---------- sections ----------
 
-// Nothing happens on screen: the hero canvas simply reads, while the pointer drifts across the five
-// cards so the eye is led over the whole board.
+/**
+ * Cards that are wholly on screen right now, left to right.
+ *
+ * The carousel expands and scrolls to whichever card the pointer crosses, so the strip is wider
+ * than the window and its layout changes under the sweep. A card that is only half on screen is
+ * not a place the pointer can meaningfully rest - its centre is off the frame - so it is left out
+ * rather than clamped to the edge.
+ */
+async function fullyVisibleCards(page: Page): Promise<Array<{ x: number; y: number }>> {
+  const surfaces = await scene.visibleSurfaces(page).all()
+  const boxes = await Promise.all(surfaces.map((surface) => surface.boundingBox()))
+  return boxes
+    .filter((box): box is NonNullable<typeof box> =>
+      box !== null && box.x >= 0 && box.x + box.width <= VIDEO_WINDOW.width)
+    .sort((a, b) => a.x - b.x)
+    .map((box) => ({
+      x: box.x + box.width / 2,
+      y: clampToWindow(box.y + box.height / 2, VIDEO_WINDOW.height)
+    }))
+}
+
+// Nothing happens on screen: the hero canvas simply reads, while the pointer drifts across the
+// cards so the eye is led over the whole board. One beat per card, but the target is re-chosen at
+// each beat from what is actually on screen then, and the sweep only ever moves right - parking at
+// the edge and jumping back reads as a mistake rather than as looking around.
 async function recordWhy(host: Scene): Promise<Clip> {
   const { cues, durationMs } = await loadCues('why')
   const page = host.page
@@ -571,16 +594,19 @@ async function recordWhy(host: Scene): Promise<Clip> {
     rec.mark('overview')
     const start = cueTime(cues, '市面上不缺好用的终端工具')
     const step = (durationMs - start) / IMPL_CARDS.length
-    for (let index = 0; index < IMPL_CARDS.length; index += 1) {
-      await rec.waitUntil(start + index * step)
-      // Measured here, not up front: the carousel expands and scrolls to whichever card the
-      // pointer crosses, so boxes taken before the sweep starts describe a layout that no longer
-      // exists - the last two cards had already slid past the right edge of the window by the time
-      // the pointer was sent to them. A card that is still only half on screen when its turn comes
-      // has its centre clamped into the window, so the pointer sweeps across the strip instead of
-      // walking off the edge of the frame.
-      const point = await centerOf(scene.visibleSurfaces(page).nth(index))
-      await rec.moveTo(page, clampToWindow(point.x, VIDEO_WINDOW.width), clampToWindow(point.y, VIDEO_WINDOW.height), 1400)
+    let lastX = -Infinity
+    for (let beat = 0; beat < IMPL_CARDS.length; beat += 1) {
+      await rec.waitUntil(start + beat * step)
+      const cards = await fullyVisibleCards(page)
+      const point = cards[Math.min(beat, cards.length - 1)]
+      if (!point || point.x <= lastX) {
+        console.log(`why beat ${beat}: holding (${cards.length} cards fully visible,` +
+          ` centres ${cards.map((c) => Math.round(c.x)).join('/')}, last ${Math.round(lastX)})`)
+        continue
+      }
+      console.log(`why beat ${beat}: -> ${Math.round(point.x)} of ${cards.map((c) => Math.round(c.x)).join('/')}`)
+      await rec.moveTo(page, point.x, point.y, 1400)
+      lastX = point.x
     }
     await runToTail(rec, durationMs + TAIL_MS)
   })
