@@ -28,21 +28,33 @@ for index, value in enumerate(args):
 if '--fork-session' in args:
     resume = None
 
-with open(os.path.join(ROOT, 'roles.queue'), 'r+') as queue:
-    fcntl.flock(queue, fcntl.LOCK_EX)
-    pending = [line for line in queue.read().splitlines() if line.strip()]
-    if not pending:
-        print('readme-capture: roles.queue is empty', flush=True)
-        sys.exit(1)
-    role = pending[0]
-    queue.seek(0)
-    queue.truncate()
-    queue.write('\n'.join(pending[1:]) + '\n')
+roles = json.load(open(os.path.join(ROOT, 'roles.json')))
+
+# Restoring a conversation asks for it by name. Answer with that conversation's own role instead of
+# taking the next queue entry: the app relaunches restored terminals in whatever order it likes, so
+# popping here would hand a restored card someone else's transcript. A Fork is excluded above, so it
+# still draws a fresh role from the queue.
+restored = resume[len('demo-'):] if resume and resume.startswith('demo-') else None
+role = restored if restored in roles else None
+
+if role is None:
+    with open(os.path.join(ROOT, 'roles.queue'), 'r+') as queue:
+        fcntl.flock(queue, fcntl.LOCK_EX)
+        pending = [line for line in queue.read().splitlines() if line.strip()]
+        if not pending:
+            print('readme-capture: roles.queue is empty', flush=True)
+            sys.exit(1)
+        role = pending[0]
+        queue.seek(0)
+        queue.truncate()
+        queue.write('\n'.join(pending[1:]) + '\n')
 
 with open(os.path.join(ROOT, 'launches.log'), 'a') as log:
-    log.write(json.dumps({'role': role, 'args': args, 'cwd': os.getcwd()}) + '\n')
+    log.write(json.dumps(
+        {'role': role, 'restored': restored is not None and role == restored,
+         'args': args, 'cwd': os.getcwd()}) + '\n')
 
-spec = json.load(open(os.path.join(ROOT, 'roles.json')))[role]
+spec = roles[role]
 # Report the conversation the host asked us to resume. Without this a catalog load (which resumes
 # a real session id) fails the restore identity handshake and the card shows "Claude Code 恢复失败".
 provider_id = resume or f'demo-{role}'

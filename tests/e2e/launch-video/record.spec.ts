@@ -573,7 +573,9 @@ async function recordPersist(host: Scene): Promise<Clip[]> {
     await rec.moveTo(host.page, 700, 420, 1200)
     await rec.waitUntil(Math.max(0, restartAt - 300))
   })
-  console.log('restoring', await queueRestoreRoles(host, 'baseline'), 'Claude cards')
+  // A restored card asks the stub for its own conversation by name, so restores no longer draw from
+  // the queue. The only launch here that still does is the catalog load below.
+  await queueRoles(host.demo, 'baseline')
   await restartApp(host)
   console.log('restore launches', await launchedRoles(host.demo))
   const startAtMs = clipA.durationMs
@@ -758,9 +760,9 @@ async function recordBoardNotify(host: Scene): Promise<Clip> {
 
 async function recordModelSwitch(host: Scene): Promise<Clip> {
   const { cues, durationMs } = await loadCues('model-switch')
-  // Activating a provider restarts the Claude sessions it updates, so queue the roles the visible
-  // cards should come back with instead of letting them draw whatever is left in the queue.
-  await queueRestoreRoles(host, 'baseline')
+  // Activating a provider restarts the Claude sessions it updates; each one asks for its own
+  // conversation by name, except the card holding the loaded catalog session.
+  await queueRoles(host.demo, 'baseline')
   return recordClip(host, 'model-switch', undefined, 0, async (rec) => {
     const page = host.page
     await rec.waitUntil(cueTime(cues, '码头内置了供应商切换'))
@@ -805,21 +807,6 @@ async function writeManifest(): Promise<void> {
 async function launchedRoles(demo: string): Promise<string> {
   const log = await readFile(join(demo, 'launches.log'), 'utf8').catch(() => '')
   return log.split('\n').filter(Boolean).map((line) => JSON.parse(line).role).join(',')
-}
-
-// Restoring a canvas relaunches the stub once per restored Claude card, in card order, and only for
-// the canvas that is on screen. These are 实现与验证's cards in order; ai-control appends a sixth
-// (its `mt read` card) when it has already run, which is why the queue is sized from the live count
-// rather than hard-coded - a role that lands on the wrong card makes a restored card come back
-// showing someone else's transcript.
-const RESTORE_ROLES = ['implementation', 'regression', 'review', 'docs', 'coordinate', 'ai-read']
-
-async function queueRestoreRoles(host: Scene, ...after: string[]): Promise<number> {
-  const claudeCards = await host.page
-    .locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"]:visible .terminal-surface[data-profile="claude-code"]')
-    .count()
-  await queueRoles(host.demo, ...RESTORE_ROLES.slice(0, claudeCards), ...after)
-  return claudeCards
 }
 
 // ---------- test ----------
