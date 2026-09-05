@@ -12,6 +12,8 @@
 ## 常用命令
 
 - `npm run tts`：读取 `script/narration.json`，用 edge-tts 逐段合成配音，产出 `public/audio/<id>.mp3`、`<id>.cues.json` 和 `manifest.json`
+- `npm run tts -- --only why`（或 `node tts/synthesize.mjs --only why`）：只重合成列出的段（逗号分隔），把它们的条目合并回现有 `manifest.json`，其余条目和顺序原样保留。改了一段说辞后配合 `MATOU_SECTIONS=why npm run record` 只重录该段
+- `npm run tts -- --script script/narration-short.json --out public/audio-short`：合成 60 秒短版的配音，`npm run render:short` 之前必须先跑一次（短版读的是 `public/audio-short/manifest.json`，与正片的配音互不覆盖）
 - `npm run record`：录制页面素材（Playwright，见 `tests/e2e/launch-video/record`）
 - `npm run studio`：本地预览 Remotion 工程
 - `npm run render` / `npm run render:short`：渲染正片 / 60 秒短版

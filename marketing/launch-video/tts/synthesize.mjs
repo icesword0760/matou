@@ -15,6 +15,9 @@ const RATE = '-8%'
 
 // `--script script/narration-short.json --out public/audio-short` builds the 60s cut's narration;
 // with no arguments this stays the main film's `script/narration.json` -> `public/audio`.
+// `--only why[,structure]` re-synthesises just those sections and merges their entries back into
+// the existing `manifest.json`, leaving every other entry (and the order) exactly as it was - that
+// is what lets a single reworded paragraph be re-voiced and re-recorded without touching the rest.
 const argv = process.argv.slice(2)
 const arg = (name, fallback) => {
   const at = argv.indexOf(`--${name}`)
@@ -28,7 +31,12 @@ const outRel = arg('out', 'public/audio').replace(/\/+$/, '')
 // Manifest paths are resolved through Remotion's `staticFile()`, so they are relative to `public/`.
 const publicPrefix = outRel.replace(/^public\//, '')
 
-const sections = JSON.parse(await readFile(join(root, scriptRel), 'utf8'))
+const only = (arg('only', '') || '').split(',').map((id) => id.trim()).filter(Boolean)
+
+const allSections = JSON.parse(await readFile(join(root, scriptRel), 'utf8'))
+const missing = only.filter((id) => !allSections.some((section) => section.id === id))
+if (missing.length > 0) throw new Error(`--only names sections that are not in ${scriptRel}: ${missing.join(', ')}`)
+const sections = only.length > 0 ? allSections.filter((section) => only.includes(section.id)) : allSections
 const audioDir = join(root, outRel)
 await mkdir(audioDir, { recursive: true })
 
@@ -46,7 +54,17 @@ const parseVtt = (vtt) => {
   return cues
 }
 
-const manifest = { voice: VOICE, rate: RATE, sections: [] }
+// With `--only` the previous manifest is the base: entries for sections we are not re-synthesising
+// keep their durations and paths, and stay in the order the last full run wrote them.
+const previous = only.length > 0
+  ? await readFile(join(audioDir, 'manifest.json'), 'utf8').then((text) => JSON.parse(text)).catch(() => undefined)
+  : undefined
+const manifest = { voice: VOICE, rate: RATE, sections: previous?.sections ?? [] }
+const record = (entry) => {
+  const at = manifest.sections.findIndex((section) => section.id === entry.id)
+  if (at === -1) manifest.sections.push(entry)
+  else manifest.sections[at] = entry
+}
 for (const section of sections) {
   const txt = join(audioDir, `${section.id}.txt`)
   const mp3 = join(audioDir, `${section.id}.mp3`)
@@ -58,7 +76,7 @@ for (const section of sections) {
     await writeFile(join(audioDir, `${section.id}.cues.json`), JSON.stringify(cues, null, 2))
     const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp3])
     const durationMs = Math.round(parseFloat(stdout) * 1000)
-    manifest.sections.push({ id: section.id, title: section.title, durationMs, audio: `${publicPrefix}/${section.id}.mp3`, cues: `${publicPrefix}/${section.id}.cues.json` })
+    record({ id: section.id, title: section.title, durationMs, audio: `${publicPrefix}/${section.id}.mp3`, cues: `${publicPrefix}/${section.id}.cues.json` })
     console.log(`${section.id}: ${(durationMs / 1000).toFixed(1)}s, ${cues.length} cues`)
   } catch (err) {
     const stderr = err?.stderr ? `\n${err.stderr}` : ''

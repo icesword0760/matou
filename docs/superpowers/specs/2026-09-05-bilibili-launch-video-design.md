@@ -15,7 +15,7 @@
 | 时长 | 主片 6 到 7 分钟（说辞 1569 字，默认语速 4:34，放慢 8% 后约 5 分钟，加演示动作） |
 | 配音 | edge-tts `zh-CN-YunxiNeural`，`--rate=-8%`；不满意再升级 MiniMax |
 | 演示数据 | 全部构造数据，复用 `tests/e2e/readme-capture` 的隔离环境和 Claude 替身；片尾声明 |
-| 不提 | Codex（当前不支持）；对 cmux / Ghostty 先肯定再转折，不点名批评 |
+| 不提 | Codex（当前不支持）；不点名批评其他终端工具，先肯定再转折 |
 | 录制显示器 | 副屏（内建 Retina 屏，3024×1964 物理像素，缩放 2 倍）整屏可用 |
 | 画幅 | 窗口 1512×850 CSS 像素（16:9），采集 3024×1700 物理像素；成片 1920×1080 等比缩小，推近 1.5 倍内无损 |
 | 剪辑引擎 | Remotion 4（代码即时间轴），独立工程 `marketing/launch-video/`，不进 pnpm 工作区 |
@@ -33,7 +33,7 @@
 | 段 | 画面 |
 |---|---|
 | intro | Remotion 合成：十几个终端窗口层叠乱切，最后停在红色报错；不进 App |
-| why | 码头主界面全景缓慢推近；cmux、Ghostty 名字以字幕形式出现，不放 logo |
+| why | 码头主界面全景缓慢推近；不点名批评其他终端工具，先肯定再转折，画面只有字幕不放任何第三方 logo |
 | structure | 依次点击工作空间、事项、画布页签、卡片，镜头随点击推近；最后推到底部 HUD 逐项停留 |
 | focus | 五张卡片并排，依次点击，焦点展开其余收窄 |
 | persist | 退出 App 再启动（两段录制拼接），一切原位；新建卡片，打开「载入 Claude Code 会话」对话框，左列表右预览，载入 |
@@ -52,8 +52,10 @@
 
 ## 验收
 
-1. `pnpm --dir marketing/launch-video render` 产出 `out/matou-launch-1080p.mp4`，时长 6:00 到 7:30。
+1. `pnpm --dir marketing/launch-video render` 产出 `out/matou-launch-1080p.mp4`，时长 5:00 到 5:30。
+   （录制脚本按字幕 cue 等待，所有演示动作都发生在配音之内，成片 ≈ 配音总长 + 每段尾巴，不会再被动作拉长。）
 2. 字幕与配音对齐误差小于 200ms（抽查三处）。
-3. 每段的关键操作出现在说辞提到它的 1 秒内（抽查 fork、DAG、mt read left）。
+3. 每段的关键操作出现在说辞提到它的 1.2 秒内（抽查 fork、DAG、mt read left）。
+   （`mt-read` 标记落在 Claude 替身真实执行完 `mt read` 之后，比纯 UI 点击多出命令自身的耗时。）
 4. 逐帧检查无黑帧、无窗口尺寸跳变、光标位置与点击位置一致。
 5. 60 秒短版 `out/matou-launch-60s.mp4` 产出。

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 配音音色 `zh-CN-YunxiNeural`，语速 `--rate=-8%`。
-- 说辞正文以 `marketing/launch-video/script/narration.json` 为唯一来源，内容等于 `~/Downloads/matou-tts-samples/说辞v2.txt`（不提 Codex；cmux / Ghostty 段落用软化版）。
+- 说辞正文以 `marketing/launch-video/script/narration.json` 为唯一来源，内容等于 `~/Downloads/matou-tts-samples/说辞v2.txt`（不提 Codex；why 段不点名批评其他终端工具，先肯定再转折，用软化版）。
 - 录制窗口 1504×846 CSS 像素（精确 16:9），放在内建 Retina 屏（缩放 2），采集帧 3008×1692。
 - 成片 1920×1080、30fps、H.264 yuv420p；Remotion 合成尺寸 1920×1080。
 - `marketing/launch-video/` 不加入 `pnpm-workspace.yaml`，用自己的 `package.json` 与 `node_modules`。
@@ -1212,4 +1212,17 @@ Expected: 通过（品牌与命名门禁）。
 
 ## 验收记录
 
-（执行时填写）
+对照 spec「验收」五条，2026-09-05 最后一轮修正后实测。
+
+| # | 验收项 | 实测结果 | 结论 |
+|---|---|---|---|
+| 1 | 正片 `out/matou-launch-1080p.mp4`，时长 5:00 到 5:30 | `ffprobe` 309.99 s = **5:09.99**，1920×1080、30fps、9298 帧 | 通过 |
+| 2 | 字幕与配音对齐误差小于 200ms（抽查三处） | 字幕由各段 `<id>.cues.json` 的 cue 时间戳直接生成，与配音同源，理论误差 ≤ 1 帧（33ms）。抽查 0:20「市面上不缺好用的终端工具，我自己也常年在用几款，」、0:25「它们把终端这件事做得很好：分屏、标签、拖宽度。」、2:17.4「点一下 Fork，从当前会话分出一个子会话，」，三处画面字幕都落在对应 cue 区间内 | 通过 |
+| 3 | 关键操作出现在说辞提到它的 1.2 秒内 | `npm run qc:sync` 退出码 0，四项 delta 全部在 0 到 1.2 s：fork 0.29s、dag 0.54s、mt-read 1.06s、board 0.56s | 通过 |
+| 4 | 无黑帧、无窗口尺寸跳变、光标与点击位置一致 | `qc/contact-sheet.sh` 产出 `out/qc-sheet.png`（每 15 秒一格，共 21 格）。除片头 0:00 与片尾 4:30/4:45/5:00 三张有意为之的深色文字卡外无黑帧；21 格全部 1920×1080，无尺寸跳变；抽查 0:20、2:17、3:45 全帧，光标落在被点击的控件上 | 通过 |
+| 5 | 60 秒短版产出 | `out/matou-launch-60s.mp4` 36.52 s（60 s 上限内），1920×1080、30fps、1094 帧；封面 `out/cover.png` 1146×717 已随 `workspace-demo.png` 降采样到 1400px 后重渲，右半截图仍清晰可读 | 通过 |
+
+补充：本轮把 why 段说辞改为不点名其他终端工具，用 `node tts/synthesize.mjs --only why` 只重合成该段
+（29.688 s，4 条 cue，`public/audio/manifest.json` 其余条目与顺序未动），再用
+`MATOU_SECTIONS=why npm run record` 只重录该段（clip 31344 ms，dropped 0，resized 0，
+`public/recordings/manifest.json` 其余段未动），最后重渲正片、短版与封面。
