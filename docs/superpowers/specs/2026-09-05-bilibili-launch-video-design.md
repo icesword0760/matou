@@ -25,7 +25,7 @@
 
 ## 说辞（v2，已确认）
 
-见 `marketing/launch-video/script/narration.ts`，与 `~/Downloads/matou-tts-samples/说辞v2.txt` 一致。
+见 `marketing/launch-video/script/narration.json`，与 `~/Downloads/matou-tts-samples/说辞v2.txt` 一致。
 十段：intro、why、structure、focus、persist、fork-dag、ai-control、board-notify、model-switch、outro。
 
 ## 分镜（每段画面）
