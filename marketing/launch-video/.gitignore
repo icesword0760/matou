@@ -1,4 +1,5 @@
 node_modules/
 out/
 public/audio/
+public/audio-short/
 public/recordings/

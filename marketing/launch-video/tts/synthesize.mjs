@@ -13,8 +13,23 @@ const EDGE_TTS = process.env.EDGE_TTS ?? join(homedir(), '.local/bin/edge-tts')
 const VOICE = 'zh-CN-YunxiNeural'
 const RATE = '-8%'
 
-const sections = JSON.parse(await readFile(join(root, 'script/narration.json'), 'utf8'))
-const audioDir = join(root, 'public/audio')
+// `--script script/narration-short.json --out public/audio-short` builds the 60s cut's narration;
+// with no arguments this stays the main film's `script/narration.json` -> `public/audio`.
+const argv = process.argv.slice(2)
+const arg = (name, fallback) => {
+  const at = argv.indexOf(`--${name}`)
+  if (at === -1) return fallback
+  const value = argv[at + 1]
+  if (!value || value.startsWith('--')) throw new Error(`--${name} needs a value`)
+  return value
+}
+const scriptRel = arg('script', 'script/narration.json')
+const outRel = arg('out', 'public/audio').replace(/\/+$/, '')
+// Manifest paths are resolved through Remotion's `staticFile()`, so they are relative to `public/`.
+const publicPrefix = outRel.replace(/^public\//, '')
+
+const sections = JSON.parse(await readFile(join(root, scriptRel), 'utf8'))
+const audioDir = join(root, outRel)
 await mkdir(audioDir, { recursive: true })
 
 const parseVtt = (vtt) => {
@@ -43,7 +58,7 @@ for (const section of sections) {
     await writeFile(join(audioDir, `${section.id}.cues.json`), JSON.stringify(cues, null, 2))
     const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp3])
     const durationMs = Math.round(parseFloat(stdout) * 1000)
-    manifest.sections.push({ id: section.id, title: section.title, durationMs, audio: `audio/${section.id}.mp3`, cues: `audio/${section.id}.cues.json` })
+    manifest.sections.push({ id: section.id, title: section.title, durationMs, audio: `${publicPrefix}/${section.id}.mp3`, cues: `${publicPrefix}/${section.id}.cues.json` })
     console.log(`${section.id}: ${(durationMs / 1000).toFixed(1)}s, ${cues.length} cues`)
   } catch (err) {
     const stderr = err?.stderr ? `\n${err.stderr}` : ''

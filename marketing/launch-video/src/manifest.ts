@@ -60,7 +60,8 @@ export const EMPTY_TIMELINE: TimelineData = {
   totalFrames: 1
 }
 
-interface AudioManifest {
+/** `tts/synthesize.mjs` output - written to `public/audio` and, for the 60s cut, `public/audio-short`. */
+export interface AudioManifest {
   voice: string
   rate: string
   sections: { id: string; title: string; durationMs: number; audio: string; cues: string }[]
@@ -73,7 +74,7 @@ interface RecordingsManifest {
   sections: { id: string; clips: { file: string; events: string; startAtMs: number; durationMs: number }[] }[]
 }
 
-const fetchJson = async <T>(path: string): Promise<T> => {
+export const fetchJson = async <T>(path: string): Promise<T> => {
   const response = await fetch(staticFile(path))
   if (!response.ok) {
     throw new Error(`failed to load ${path}: ${response.status} ${response.statusText}`)

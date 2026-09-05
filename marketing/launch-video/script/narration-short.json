@@ -1,0 +1,27 @@
+[
+  {
+    "id": "s-hook",
+    "title": "钩子",
+    "text": "你开过几个 Claude Code？我开过十二个，然后忘了哪个在报错。"
+  },
+  {
+    "id": "s-what",
+    "title": "是什么",
+    "text": "所以我开源了码头：Claude Code 的多智能体桌面工作台。"
+  },
+  {
+    "id": "s-ai",
+    "title": "AI 读屏",
+    "text": "最爽的是这个：直接让一个 Claude Code 去读隔壁卡片的屏幕，不用复制粘贴。"
+  },
+  {
+    "id": "s-dag",
+    "title": "DAG",
+    "text": "DAG 一眼看到哪条路线在跑、哪条挂了。重启回来，现场原样。"
+  },
+  {
+    "id": "s-cta",
+    "title": "收尾",
+    "text": "开源、免费、Mac。GitHub 搜 matou，完整演示在主页。"
+  }
+]
