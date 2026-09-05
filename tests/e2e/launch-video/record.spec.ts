@@ -200,6 +200,35 @@ async function frameDagGraph(dag: Page): Promise<void> {
   if (lift > 0) await panDagUp(dag, lift)
 }
 
+const NO_SELECT_STYLE = 'matou-recorder-no-select'
+
+/**
+ * Runs the DAG's framing gestures with text selection suppressed, then clears any that survived.
+ *
+ * Panning means pressing on the canvas background and dragging, and the browser reads that as a
+ * drag-select: the search box, the zoom toolbar and the relation legend come up highlighted in
+ * blue for as long as the selection stands. The recorder is filming throughout, so clearing the
+ * selection afterwards is not enough on its own - the drag itself is already on camera. The style
+ * is injected only for the duration and removed in `finally`, so a failed gesture cannot leave the
+ * DAG unselectable for the rest of the run.
+ */
+async function withoutTextSelection(dag: Page, gestures: () => Promise<void>): Promise<void> {
+  await dag.evaluate((id) => {
+    const style = document.createElement('style')
+    style.id = id
+    style.textContent = '*{-webkit-user-select:none!important;user-select:none!important}'
+    document.head.append(style)
+  }, NO_SELECT_STYLE)
+  try {
+    await gestures()
+  } finally {
+    await dag.evaluate((id) => {
+      document.getElementById(id)?.remove()
+      window.getSelection()?.removeAllRanges()
+    }, NO_SELECT_STYLE).catch(() => { /* window already gone */ })
+  }
+}
+
 async function openDag(host: Scene, rec: ClipRecorder, label: string): Promise<Page> {
   await rec.click(host.page.getByRole('button', { name: '打开会话 DAG' }), label)
   await expect.poll(async () => (await host.app.windows()).length, { timeout: 30_000 }).toBe(2)
@@ -208,8 +237,10 @@ async function openDag(host: Scene, rec: ClipRecorder, label: string): Promise<P
   await scene.alignDagWindow(host.app, ZOOM)
   await rec.setSource('dag')
   await dag.waitForTimeout(300)
-  await scene.centerDagGraph(dag)
-  await frameDagGraph(dag)
+  await withoutTextSelection(dag, async () => {
+    await scene.centerDagGraph(dag)
+    await frameDagGraph(dag)
+  })
   return dag
 }
 
