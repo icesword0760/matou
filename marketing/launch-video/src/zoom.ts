@@ -1,7 +1,10 @@
 import type { RecorderEvent } from '../../../tests/e2e/launch-video/recorder'
 
 export interface ZoomConfig { scale: number; inMs: number; holdMs: number; outMs: number; mergeGapMs: number }
-export const DEFAULT_ZOOM: ZoomConfig = { scale: 1.6, inMs: 450, holdMs: 1800, outMs: 650, mergeGapMs: 2500 }
+// 1.35 rather than a more dramatic 1.6: at 1.6 a 1504x846 recording upscaled into a 1920x1080
+// frame reads soft, and the push-in crops enough of the card strip that the surrounding context
+// (which is the point of every one of these shots) leaves the frame.
+export const DEFAULT_ZOOM: ZoomConfig = { scale: 1.35, inMs: 450, holdMs: 1800, outMs: 650, mergeGapMs: 2500 }
 /** cx / cy are output-frame pixels (1920x1080), not the recording's CSS pixels. */
 export interface Focus { scale: number; cx: number; cy: number }
 

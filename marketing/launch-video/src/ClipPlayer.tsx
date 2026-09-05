@@ -6,6 +6,15 @@ import { cursorAt, focusAt } from './zoom'
 
 const isClick = (e: RecorderEvent): e is Extract<RecorderEvent, { type: 'click' }> => e.type === 'click'
 
+/**
+ * Clicking a DAG node closes the DAG window about 360ms later, so a push-in started by that click
+ * would land its hold on the main window that replaces it - zoomed into whatever happens to sit
+ * where the node was. Dropping those clicks before `focusAt` also stops them extending the
+ * preceding shot through `mergeGapMs`, and leaves `focusAt` itself a pure function of the clicks
+ * it is handed.
+ */
+const startsZoom = (e: Extract<RecorderEvent, { type: 'click' }>): boolean => e.label !== 'dag-node'
+
 export interface ClipPlayerProps {
   clip: ClipData
   /** Time inside the source recording, in ms - recorder timestamps are clip-relative. */
@@ -27,9 +36,17 @@ export const ClipPlayer = ({ clip, clipMs, trimBefore = 0 }: ClipPlayerProps) =>
     x: (x * WIDTH) / viewport.width,
     y: (y * HEIGHT) / viewport.height
   })
-  const focus = focusAt(clip.events.events.filter(isClick), clipMs, toOutput)
+  const focus = focusAt(clip.events.events.filter(isClick).filter(startsZoom), clipMs, toOutput)
   const cursor = cursorAt(clip.events.events, clipMs)
-  const pointer = cursor ? toOutput(cursor.x, cursor.y) : null
+  // Some recorded `move` targets sit outside the window: the recorder computes them from a
+  // bounding box taken before the strip re-lays out, and a card that has since scrolled away
+  // reports an x beyond the viewport (why sweeps to 1945, persist-b to 2293 on a 1504px window).
+  // The pointer is drawn on top of footage that stops at the window edge, so it is clamped to it
+  // rather than floating in the backdrop.
+  const clamp = (value: number, max: number) => Math.min(max, Math.max(0, value))
+  const pointer = cursor
+    ? toOutput(clamp(cursor.x, viewport.width), clamp(cursor.y, viewport.height))
+    : null
   return (
     <AbsoluteFill
       style={{

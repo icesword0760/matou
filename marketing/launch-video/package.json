@@ -9,6 +9,8 @@
     "render": "remotion render src/index.ts LaunchVideo out/matou-launch-1080p.mp4 --codec h264 --crf 18",
     "render:short": "remotion render src/index.ts Short60 out/matou-launch-60s.mp4 --codec h264 --crf 18",
     "cover": "remotion still src/index.ts Cover out/cover.png",
+    "qc:sheet": "qc/contact-sheet.sh",
+    "qc:sync": "node --experimental-strip-types qc/check-sync.mjs",
     "test": "vitest run"
   },
   "dependencies": {

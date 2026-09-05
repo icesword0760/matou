@@ -28,6 +28,9 @@ const IMPL_CARDS = ['实现 · Redis 幂等键', '回归 · 支付模块测试',
 // children. The 方案探索 baseline tree keeps its own discussion card under a different name.
 const DISCUSS = '幂等方案 · 讨论'
 const PLAN_CARD = '幂等方案 · 三条路线'
+// What the fork-dag section renames its new child to, so the DAG shows plan names rather than the
+// branch name the fork dialog gives a fresh card.
+const FORK_CHILD = '方案 C · 去重表'
 const IMPL_TAB = '实现与验证'
 const PLAN_TAB = '方案探索'
 const FORK_TAB = 'AI 分叉'
@@ -128,6 +131,75 @@ async function closeDag(host: Scene): Promise<void> {
   await expect.poll(async () => (await host.app.windows()).length).toBe(1)
 }
 
+// The burned-in captions sit 64px above the bottom of the 1080p frame and a single line is about
+// 74px tall, so the bottom 138 output pixels are subtitle. In this window's CSS pixels that is the
+// bottom ~108, and everything the DAG shot wants to show has to live above it.
+const CAPTION_BAND_CSS = Math.round(((64 + 74) * VIDEO_WINDOW.height) / 1080)
+const SAFE_BOTTOM_CSS = VIDEO_WINDOW.height - CAPTION_BAND_CSS
+/** Keeps the framing off both edges rather than flush against them. */
+const DAG_MARGIN_CSS = 8
+
+/** Bounding box of every node card, in the DAG window's CSS pixels. */
+async function dagBox(dag: Page): Promise<{ top: number; bottom: number; height: number }> {
+  return dag.evaluate(() => {
+    const rects = [...document.querySelectorAll('.dag-node-card')].map((node) => node.getBoundingClientRect())
+    const top = Math.min(...rects.map((r) => r.top))
+    const bottom = Math.max(...rects.map((r) => r.bottom))
+    return { top, bottom, height: bottom - top }
+  })
+}
+
+// Drags the canvas background up by `by` CSS px. The press has to land on empty canvas: pressing on
+// a node card drags (or opens) the node instead of panning the graph.
+async function panDagUp(dag: Page, by: number): Promise<void> {
+  const from = await dag.evaluate((by) => {
+    const rects = [...document.querySelectorAll('.dag-node-card')].map((node) => node.getBoundingClientRect())
+    const free = (x: number, y: number) =>
+      rects.every((r) => x < r.left - 12 || x > r.right + 12 || y < r.top - 12 || y > r.bottom + 12)
+    for (const x of [24, window.innerWidth - 24, 64, window.innerWidth - 64]) {
+      for (let y = window.innerHeight - 40; y > by + 40; y -= 20) {
+        if (free(x, y)) return { x, y }
+      }
+    }
+    return null
+  }, by)
+  if (!from) {
+    console.log('dag pan skipped: no empty canvas to drag from')
+    return
+  }
+  await dag.mouse.move(from.x, from.y)
+  await dag.mouse.down()
+  await dag.mouse.move(from.x, from.y - by, { steps: 12 })
+  await dag.mouse.up()
+}
+
+/**
+ * Fits the whole graph into the part of the frame the captions do not cover.
+ *
+ * `centerDagGraph` puts the node bounding box in the middle of the window, which leaves the lowest
+ * card sitting under the subtitles. Panning up is enough only while the graph is shorter than the
+ * safe area - the six-node 方案探索 canvas is taller than it, and lifting it far enough to clear
+ * the captions pushed the 方案 A card (the first one the narration talks about) off the top of the
+ * window. So: zoom out a step at a time until the graph fits, re-centring after each step, then
+ * lift it by exactly what is left, never past the top edge.
+ */
+async function frameDagGraph(dag: Page): Promise<void> {
+  for (let step = 0; step < 3; step += 1) {
+    if ((await dagBox(dag)).height <= SAFE_BOTTOM_CSS - 2 * DAG_MARGIN_CSS) break
+    await dag.getByRole('button', { name: '缩小' }).click()
+    await dag.waitForTimeout(250)
+    await scene.centerDagGraph(dag)
+  }
+  const box = await dagBox(dag)
+  const lift = Math.min(
+    Math.max(0, Math.round(box.bottom - SAFE_BOTTOM_CSS + DAG_MARGIN_CSS)),
+    Math.max(0, Math.round(box.top - DAG_MARGIN_CSS))
+  )
+  console.log(`dag framing: graph ${Math.round(box.height)}px, top ${Math.round(box.top)}, ` +
+    `bottom ${Math.round(box.bottom)}, safe bottom ${SAFE_BOTTOM_CSS}, lifting ${lift}`)
+  if (lift > 0) await panDagUp(dag, lift)
+}
+
 async function openDag(host: Scene, rec: ClipRecorder, label: string): Promise<Page> {
   await rec.click(host.page.getByRole('button', { name: '打开会话 DAG' }), label)
   await expect.poll(async () => (await host.app.windows()).length, { timeout: 30_000 }).toBe(2)
@@ -137,6 +209,7 @@ async function openDag(host: Scene, rec: ClipRecorder, label: string): Promise<P
   await rec.setSource('dag')
   await dag.waitForTimeout(300)
   await scene.centerDagGraph(dag)
+  await frameDagGraph(dag)
   return dag
 }
 
@@ -196,6 +269,11 @@ async function visibleTitles(page: Page): Promise<string> {
 async function runToTail(rec: ClipRecorder, untilMs: number): Promise<void> {
   await rec.waitUntil(untilMs)
   await rec.hold(150)
+}
+
+/** Keeps a pointer target inside the recorded window, with room for the cursor sprite. */
+function clampToWindow(value: number, extent: number, margin = 28): number {
+  return Math.min(extent - margin, Math.max(margin, value))
 }
 
 async function centerOf(locator: Locator): Promise<{ x: number; y: number }> {
@@ -489,17 +567,20 @@ async function restartApp(host: Scene): Promise<void> {
 async function recordWhy(host: Scene): Promise<Clip> {
   const { cues, durationMs } = await loadCues('why')
   const page = host.page
-  const centers: Array<{ x: number; y: number }> = []
-  for (let index = 0; index < IMPL_CARDS.length; index += 1) {
-    centers.push(await centerOf(scene.visibleSurfaces(page).nth(index)))
-  }
   return recordClip(host, 'why', undefined, 0, async (rec) => {
     rec.mark('overview')
     const start = cueTime(cues, '市面上不缺好用的终端工具')
-    const step = (durationMs - start) / centers.length
-    for (const [index, point] of centers.entries()) {
+    const step = (durationMs - start) / IMPL_CARDS.length
+    for (let index = 0; index < IMPL_CARDS.length; index += 1) {
       await rec.waitUntil(start + index * step)
-      await rec.moveTo(page, point.x, point.y, 1400)
+      // Measured here, not up front: the carousel expands and scrolls to whichever card the
+      // pointer crosses, so boxes taken before the sweep starts describe a layout that no longer
+      // exists - the last two cards had already slid past the right edge of the window by the time
+      // the pointer was sent to them. A card that is still only half on screen when its turn comes
+      // has its centre clamped into the window, so the pointer sweeps across the strip instead of
+      // walking off the edge of the frame.
+      const point = await centerOf(scene.visibleSurfaces(page).nth(index))
+      await rec.moveTo(page, clampToWindow(point.x, VIDEO_WINDOW.width), clampToWindow(point.y, VIDEO_WINDOW.height), 1400)
     }
     await runToTail(rec, durationMs + TAIL_MS)
   })
@@ -618,7 +699,7 @@ async function recordForkDag(host: Scene): Promise<Clip> {
     // hoverThenClick spends ~1.5 s travelling and letting the strip settle, so start the approach
     // early enough that the click itself lands on the words "点一下 Fork".
     await rec.waitUntil(cueTime(cues, '点一下 Fork', -1600))
-    await scene.newSurfaceAfter(page, async () => {
+    const child = await scene.newSurfaceAfter(page, async () => {
       const forkButton = discussPane.getByRole('button', { name: `从“${PLAN_CARD}”创建子分支` })
       await expect(forkButton).not.toHaveAttribute('aria-disabled', 'true', { timeout: 90_000 })
       await hoverThenClick(rec, page, forkButton, 'fork')
@@ -631,6 +712,10 @@ async function recordForkDag(host: Scene): Promise<Clip> {
       }
       await scene.fillForkDialog(page, 'idem/plan-a')
     })
+    // A forked card is named after its branch, so the DAG opened a few seconds later would show
+    // "idem/plan-a" among cards named for what they actually do. Name it like its siblings - this
+    // canvas is the three-plan discussion, and this is the third plan.
+    await scene.renameSession(page, child, FORK_CHILD)
 
     await rec.waitUntil(phraseTime(cues, '按 Option 加 Tab'))
     const dag = await openDag(host, rec, 'dag')

@@ -1,3 +1,5 @@
+import { useMemo } from 'react'
+import { splitCues } from './captions-split'
 import type { CueData } from './manifest'
 
 /** A cue is shown slightly before it is spoken and lingers a beat after, so it never flickers. */
@@ -5,7 +7,10 @@ const LEAD_IN_MS = 120
 const LEAD_OUT_MS = 80
 
 export const Captions = ({ cues, nowMs }: { cues: CueData[]; nowMs: number }) => {
-  const cue = cues.find((c) => nowMs >= c.startMs - LEAD_IN_MS && nowMs < c.endMs + LEAD_OUT_MS)
+  // The narration cues are whole sentence groups; `splitCues` breaks the long ones into lines that
+  // never grow past two rows. See `captions-split.ts`.
+  const lines = useMemo(() => splitCues(cues), [cues])
+  const cue = lines.find((c) => nowMs >= c.startMs - LEAD_IN_MS && nowMs < c.endMs + LEAD_OUT_MS)
   if (!cue) return null
   return (
     <div
