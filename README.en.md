@@ -83,7 +83,7 @@ Matou gives every agent it hosts the ability to identify itself, list related ca
 <details>
 <summary>Control commands in the current version</summary>
 
-Inside a hosted session: `mt identify`, `mt list`, `mt read`, `mt history`, `mt commands`, `mt send`, `mt key`, `mt create`, `mt fork` and `mt remove`. Targets can be `self`, `left`, `right`, `parent`, `child:N`, `sibling:N` or a session reference.
+Inside a hosted session: `mt identify`, `mt list`, `mt read`, `mt history`, `mt commands`, `mt send`, `mt key`, `mt create`, `mt fork`, `mt remove`, `mt close`, `mt focus` and `mt switch`. Targets can be `self`, `left`, `right`, `parent`, `child:N`, `sibling:N` or a session reference.
 
 </details>
 

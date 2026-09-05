@@ -83,7 +83,7 @@ Matou 会向它托管的每个 Agent 提供会话定位与控制能力，使它�
 <details>
 <summary>当前版本支持的控制命令</summary>
 
-Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send`、`mt key`、`mt create`、`mt fork` 和 `mt remove`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
+Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send`、`mt key`、`mt create`、`mt fork`、`mt remove`、`mt close`、`mt focus` 和 `mt switch`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
 
 </details>
 
