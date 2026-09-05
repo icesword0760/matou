@@ -247,7 +247,6 @@ export class RuntimeServer {
   readonly #hudFileWatchers = new Map<string, Map<string, FSWatcher>>()
   readonly #hudFileRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
-  readonly #automaticRecoverySessionIds = new Set<string>()
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerHookRegistrations: Map<
     string,
@@ -418,7 +417,6 @@ export class RuntimeServer {
       this.#sessionRepository.getResumeBinding(job.sessionId, 'claude-code')
       ? this.#waitForProviderRecovery(job.sessionId)
       : undefined
-    this.#automaticRecoverySessionIds.add(job.sessionId)
     try {
       await this.#spawnSerialized({
         type: 'terminal.spawn',
@@ -434,7 +432,6 @@ export class RuntimeServer {
       }
       await providerRecovery?.promise
     } finally {
-      this.#automaticRecoverySessionIds.delete(job.sessionId)
       providerRecovery?.cancel()
     }
   }
@@ -1787,15 +1784,11 @@ export class RuntimeServer {
       const resumeMonitor = providerSessionId === undefined
         ? undefined
         : new ProviderResumeMonitor(providerSessionId)
-      const startupRecovery = this.#recoveryCoordinator?.snapshot().find(
-        ({ sessionId }) => sessionId === message.sessionId
-      )
-      const fullResumePromptMonitor = message.profile === 'claude-code' && resumeBinding &&
-        (
-          this.#automaticRecoverySessionIds.has(message.sessionId) ||
-          startupRecovery?.state === 'queued' ||
-          startupRecovery?.state === 'restoring'
-        )
+      // A mounted idle Session can be restored lazily by the Renderer after the
+      // startup recovery queue has already settled. Scope this to any real
+      // provider resume so the long-session choice behaves the same regardless
+      // of whether the PTY was started eagerly or when its Canvas became visible.
+      const fullResumePromptMonitor = message.profile === 'claude-code' && resumeBinding
         ? new ClaudeFullResumePromptMonitor()
         : undefined
       let activeSession: PtySession | undefined
