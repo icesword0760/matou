@@ -269,7 +269,8 @@ export class RuntimeRpcRouter {
         cwd: this.#sessionCwd(sessionId),
         query: optionalString(input.query),
         searchScope: input.searchScope === 'metadata' ? 'metadata' : 'all',
-        limit: optionalInteger(input.limit, 100)
+        offset: optionalInteger(input.offset, 0, 'offset', 0),
+        limit: optionalInteger(input.limit, 50)
       })
       const sessions = result.sessions
         .map((session) => {
@@ -280,7 +281,7 @@ export class RuntimeRpcRouter {
             ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
           }
         })
-      return { sessions, total: result.total }
+      return { ...result, sessions }
     }
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
@@ -288,7 +289,14 @@ export class RuntimeRpcRouter {
       const providerSessionId = text(input.providerSessionId, 'providerSessionId')
       const detail = await this.#claudeSessions.detail({
         cwd: this.#sessionCwd(sessionId), providerSessionId,
-        query: optionalString(input.query), previewLimit: 240
+        query: optionalString(input.query),
+        ...(input.beforeEventIndex === undefined ? {} : {
+          beforeEventIndex: integer(input.beforeEventIndex, 'beforeEventIndex', 1)
+        }),
+        ...(input.aroundEventIndex === undefined ? {} : {
+          aroundEventIndex: integer(input.aroundEventIndex, 'aroundEventIndex', 1)
+        }),
+        limit: optionalInteger(input.limit, 200)
       })
       const usage = this.#providerConversationUsage(providerSessionId, sessionId)
       return {
@@ -296,6 +304,17 @@ export class RuntimeRpcRouter {
         ...usage,
         ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
       }
+    }
+    if (method === 'claude-sessions.search') {
+      const input = record(payload)
+      const sessionId = text(input.sessionId, 'sessionId')
+      return this.#claudeSessions.search({
+        cwd: this.#sessionCwd(sessionId),
+        providerSessionId: text(input.providerSessionId, 'providerSessionId'),
+        query: optionalString(input.query),
+        offset: optionalInteger(input.offset, 0, 'offset', 0),
+        limit: optionalInteger(input.limit, 100)
+      })
     }
 
     const envelope = record(payload)
@@ -306,7 +325,7 @@ export class RuntimeRpcRouter {
         const sessionId = text(input.sessionId, 'sessionId')
         const providerSessionId = text(input.providerSessionId, 'providerSessionId')
         const detail = await this.#claudeSessions.detail({
-          cwd: this.#sessionCwd(sessionId), providerSessionId, query: '', previewLimit: 1
+          cwd: this.#sessionCwd(sessionId), providerSessionId, query: '', limit: 1
         })
         const result = this.#providerModes.loadClaudeSession(command, {
           sessionId,
@@ -1153,8 +1172,8 @@ function optionalString(value: unknown): string {
   if (typeof value !== 'string') throw new RpcFault('INVALID_REQUEST', 'query must be a string')
   return value
 }
-function optionalInteger(value: unknown, fallback: number): number {
-  return value === undefined ? fallback : integer(value, 'limit', 1)
+function optionalInteger(value: unknown, fallback: number, label = 'limit', minimum = 1): number {
+  return value === undefined ? fallback : integer(value, label, minimum)
 }
 function optionalNullableText(input: Record<string, unknown>, key: string): { present: boolean; value: string | null } {
   if (!Object.prototype.hasOwnProperty.call(input, key)) return { present: false, value: null }

@@ -384,13 +384,23 @@ function HierarchyProduct({
   const loaderTitleRevision = useMemo(() => projection.sessions
     .map(({ id, title }) => `${id}\u0000${title}`)
     .join('\u0001'), [projection.sessions])
-  const listLoaderSessions = useCallback((query: string, searchScope?: 'metadata' | 'all') => {
-    if (!loaderSessionId) return Promise.resolve({ sessions: [], total: 0 })
-    return commands.listClaudeSessions(loaderSessionId, query, searchScope)
+  const listLoaderSessions = useCallback((
+    query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number
+  ) => {
+    if (!loaderSessionId) return Promise.resolve({
+      sessions: [], total: 0, offset: 0, limit: limit ?? 50, nextOffset: 0, hasMore: false
+    })
+    return commands.listClaudeSessions(loaderSessionId, query, searchScope, offset, limit)
   }, [commands, loaderSessionId, loaderTitleRevision])
-  const loadLoaderDetail = useCallback((providerSessionId: string, query: string) => {
+  const loadLoaderDetail = useCallback((providerSessionId: string, options = {}) => {
     if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
-    return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, query)
+    return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
+  }, [commands, loaderSessionId, loaderTitleRevision])
+  const searchLoaderSession = useCallback((
+    providerSessionId: string, query: string, offset?: number, limit?: number
+  ) => {
+    if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
+    return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit)
   }, [commands, loaderSessionId, loaderTitleRevision])
   const cancelSessionLoader = useCallback(() => {
     setSessionLoader(null)
@@ -1377,6 +1387,7 @@ function HierarchyProduct({
                 {...(workspaceStageRef.current ? { portalTarget: workspaceStageRef.current } : {})}
                 listSessions={listLoaderSessions}
                 loadDetail={loadLoaderDetail}
+                searchSession={searchLoaderSession}
                 onCancel={cancelSessionLoader}
                 onLoad={loadIntoCurrentCard} />}
               {branchDialog && !readOnly && <BranchDialog relationMode={branchDialog.relationMode}
@@ -1680,8 +1691,13 @@ function createFixtureCommands(
     retryFork: NOOP, removeFailedFork: NOOP,
     retryProviderRestore: NOOP, startFreshProvider: NOOP, restartStoppedSession: NOOP,
     removeSessionBranch: (_sceneId, sessionId) => removeFixtureSession(sessionId),
-    listClaudeSessions: async () => ({ sessions: [], total: 0 }),
+    listClaudeSessions: async () => ({
+      sessions: [], total: 0, offset: 0, limit: 50, nextOffset: 0, hasMore: false
+    }),
     getClaudeSessionDetail: async () => { throw new Error('fixture session is unavailable') },
+    searchClaudeSession: async () => ({
+      query: '', hits: [], total: 0, offset: 0, limit: 100, nextOffset: 0, hasMore: false
+    }),
     loadClaudeSession: async (sessionId, providerSessionId) => ({
       sessionId, providerSessionId, permissionMode: 'default' as const
     }),

@@ -1,44 +1,92 @@
 import {
-  useEffect, useMemo, useRef, useState,
+  useCallback, useEffect, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent
 } from 'react'
 import { createPortal } from 'react-dom'
+import { useVirtualizer } from '@tanstack/react-virtual'
 
 import type {
   ClaudeSessionDetail,
   ClaudeSessionListResult,
+  ClaudeSessionSearchHit,
+  ClaudeSessionSearchResult,
   ClaudeSessionSummary
 } from '@matou/contracts'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 
+const SESSION_PAGE_SIZE = 50
+const EVENT_PAGE_SIZE = 200
+const SEARCH_PAGE_SIZE = 100
+
+interface DetailOptions {
+  beforeEventIndex?: number
+  aroundEventIndex?: number
+  limit?: number
+}
+
 export function SessionLoaderDialog(props: {
   targetTitle: string
   targetRunning: boolean
-  listSessions(query: string, searchScope?: 'metadata' | 'all'): Promise<ClaudeSessionListResult>
-  loadDetail(providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
+  listSessions(
+    query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number
+  ): Promise<ClaudeSessionListResult>
+  loadDetail(providerSessionId: string, options?: DetailOptions): Promise<ClaudeSessionDetail>
+  searchSession(
+    providerSessionId: string, query: string, offset?: number, limit?: number
+  ): Promise<ClaudeSessionSearchResult>
   onLoad(providerSessionId: string): Promise<unknown>
   onCancel(): void
   portalTarget?: Element
 }) {
-  const { targetTitle, targetRunning, listSessions, loadDetail, onLoad, onCancel, portalTarget } = props
+  const {
+    targetTitle, targetRunning, listSessions, loadDetail, searchSession,
+    onLoad, onCancel, portalTarget
+  } = props
   const [sessionQuery, setSessionQuery] = useState('')
   const [effectiveSessionQuery, setEffectiveSessionQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
   const [effectiveContentQuery, setEffectiveContentQuery] = useState('')
   const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([])
+  const [sessionTotal, setSessionTotal] = useState(0)
+  const [nextSessionOffset, setNextSessionOffset] = useState(0)
+  const [hasMoreSessions, setHasMoreSessions] = useState(false)
   const [selectedId, setSelectedId] = useState('')
   const [detail, setDetail] = useState<ClaudeSessionDetail | null>(null)
+  const [searchPage, setSearchPage] = useState<ClaudeSessionSearchResult | null>(null)
+  const [activeMatchAbsolute, setActiveMatchAbsolute] = useState(0)
+  const [activeEventIndex, setActiveEventIndex] = useState<number | null>(null)
   const [loadingList, setLoadingList] = useState(true)
+  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [loadingSession, setLoadingSession] = useState(false)
   const [confirmRunning, setConfirmRunning] = useState(false)
   const [confirmDuplicate, setConfirmDuplicate] = useState(false)
   const [error, setError] = useState('')
-  const [activeMatch, setActiveMatch] = useState(0)
-  const requestSequence = useRef(0)
-  const eventRefs = useRef(new Map<number, HTMLElement>())
+  const listRequestSequence = useRef(0)
+  const detailRequestSequence = useRef(0)
   const sessionSearchRef = useRef<HTMLInputElement>(null)
   const contentSearchRef = useRef<HTMLInputElement>(null)
+  const sessionScrollRef = useRef<HTMLDivElement>(null)
+  const eventScrollRef = useRef<HTMLDivElement>(null)
+
+  const sessionVirtualizer = useVirtualizer({
+    count: sessions.length,
+    getScrollElement: () => sessionScrollRef.current,
+    estimateSize: () => 83,
+    overscan: 6,
+    initialRect: { width: 340, height: 620 }
+  })
+  const previewEvents = detail?.events ?? []
+  const eventVirtualizer = useVirtualizer({
+    count: previewEvents.length,
+    getScrollElement: () => eventScrollRef.current,
+    estimateSize: () => 126,
+    overscan: 8,
+    initialRect: { width: 760, height: 620 }
+  })
+  const visibleSessionRows = sessionVirtualizer.getVirtualItems()
+  const visibleEventRows = eventVirtualizer.getVirtualItems()
 
   useEffect(() => {
     sessionSearchRef.current?.focus()
@@ -52,7 +100,7 @@ export function SessionLoaderDialog(props: {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmDuplicate, onCancel, selectedId])
+  }, [confirmDuplicate, onCancel])
 
   useEffect(() => {
     const timer = window.setTimeout(() => setEffectiveSessionQuery(sessionQuery), 180)
@@ -65,58 +113,156 @@ export function SessionLoaderDialog(props: {
   }, [contentQuery])
 
   useEffect(() => {
-    const sequence = ++requestSequence.current
+    const sequence = ++listRequestSequence.current
     setLoadingList(true)
     setError('')
-    void listSessions(effectiveSessionQuery, 'metadata').then((result) => {
-      if (sequence !== requestSequence.current) return
+    void listSessions(effectiveSessionQuery, 'metadata', 0, SESSION_PAGE_SIZE).then((result) => {
+      if (sequence !== listRequestSequence.current) return
       setSessions(result.sessions)
-      setSelectedId((current) => result.sessions.some(({ providerSessionId }) => providerSessionId === current)
-        ? current
-        : result.sessions[0]?.providerSessionId ?? '')
+      setSessionTotal(result.total)
+      setNextSessionOffset(result.nextOffset)
+      setHasMoreSessions(result.hasMore)
+      setSelectedId((current) => result.sessions.some(({ providerSessionId }) =>
+        providerSessionId === current) ? current : result.sessions[0]?.providerSessionId ?? '')
+      sessionVirtualizer.scrollToOffset(0)
     }).catch((reason: unknown) => {
-      if (sequence === requestSequence.current) setError(errorMessage(reason))
+      if (sequence === listRequestSequence.current) setError(errorMessage(reason))
     }).finally(() => {
-      if (sequence === requestSequence.current) setLoadingList(false)
+      if (sequence === listRequestSequence.current) setLoadingList(false)
     })
   }, [effectiveSessionQuery, listSessions])
+
+  const loadMoreSessions = useCallback(async () => {
+    if (loadingList || loadingMoreSessions || !hasMoreSessions) return
+    const sequence = listRequestSequence.current
+    setLoadingMoreSessions(true)
+    try {
+      const result = await listSessions(
+        effectiveSessionQuery, 'metadata', nextSessionOffset, SESSION_PAGE_SIZE
+      )
+      if (sequence !== listRequestSequence.current) return
+      setSessions((current) => {
+        const known = new Set(current.map(({ providerSessionId }) => providerSessionId))
+        return [...current, ...result.sessions.filter(({ providerSessionId }) => !known.has(providerSessionId))]
+      })
+      setSessionTotal(result.total)
+      setNextSessionOffset(result.nextOffset)
+      setHasMoreSessions(result.hasMore)
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setLoadingMoreSessions(false)
+    }
+  }, [effectiveSessionQuery, hasMoreSessions, listSessions, loadingList, loadingMoreSessions, nextSessionOffset])
 
   useEffect(() => {
     if (!selectedId) {
       setDetail(null)
+      setSearchPage(null)
       return
     }
-    let alive = true
+    const sequence = ++detailRequestSequence.current
     setLoadingDetail(true)
-    setActiveMatch(0)
-    void loadDetail(selectedId, effectiveContentQuery).then((result) => {
-      if (alive) setDetail(result)
+    setActiveMatchAbsolute(0)
+    setActiveEventIndex(null)
+    setError('')
+    if (!effectiveContentQuery) {
+      setSearchPage(null)
+      void loadDetail(selectedId, { limit: EVENT_PAGE_SIZE }).then((result) => {
+        if (sequence !== detailRequestSequence.current) return
+        setDetail(result)
+        requestAnimationFrame(() => eventVirtualizer.scrollToIndex(
+          Math.max(0, result.events.length - 1), { align: 'end' }
+        ))
+      }).catch((reason: unknown) => {
+        if (sequence === detailRequestSequence.current) setError(errorMessage(reason))
+      }).finally(() => {
+        if (sequence === detailRequestSequence.current) setLoadingDetail(false)
+      })
+      return
+    }
+    void searchSession(selectedId, effectiveContentQuery, 0, SEARCH_PAGE_SIZE).then(async (result) => {
+      if (sequence !== detailRequestSequence.current) return
+      setSearchPage(result)
+      const hit = result.hits[0]
+      if (!hit) {
+        const nextDetail = await loadDetail(selectedId, { limit: EVENT_PAGE_SIZE })
+        if (sequence === detailRequestSequence.current) setDetail(nextDetail)
+        return
+      }
+      setActiveEventIndex(hit.eventIndex)
+      const nextDetail = await loadDetail(selectedId, {
+        aroundEventIndex: hit.eventIndex, limit: EVENT_PAGE_SIZE
+      })
+      if (sequence !== detailRequestSequence.current) return
+      setDetail(nextDetail)
+      scrollToEvent(nextDetail, hit.eventIndex, eventVirtualizer)
     }).catch((reason: unknown) => {
-      if (alive) setError(errorMessage(reason))
+      if (sequence === detailRequestSequence.current) setError(errorMessage(reason))
     }).finally(() => {
-      if (alive) setLoadingDetail(false)
+      if (sequence === detailRequestSequence.current) setLoadingDetail(false)
     })
-    return () => { alive = false }
-  }, [effectiveContentQuery, loadDetail, selectedId])
+  }, [effectiveContentQuery, loadDetail, searchSession, selectedId])
 
-  const previewEvents = useMemo(() => detail?.events.slice(-240) ?? [], [detail])
-  const matchedEvents = useMemo(
-    () => previewEvents.filter(({ matched }) => matched),
-    [previewEvents]
-  )
+  const loadEarlier = useCallback(async () => {
+    if (!detail?.page.hasEarlier || loadingEarlier || effectiveContentQuery) return
+    const anchorIndex = detail.events[0]?.index
+    if (!anchorIndex) return
+    setLoadingEarlier(true)
+    try {
+      const earlier = await loadDetail(selectedId, {
+        beforeEventIndex: detail.page.startEventIndex, limit: EVENT_PAGE_SIZE
+      })
+      setDetail((current) => current?.providerSessionId === selectedId
+        ? mergeEarlierDetail(earlier, current)
+        : current)
+      requestAnimationFrame(() => {
+        const added = earlier.events.filter(({ index }) => index < anchorIndex).length
+        eventVirtualizer.scrollToIndex(added, { align: 'start' })
+      })
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }, [detail, effectiveContentQuery, eventVirtualizer, loadDetail, loadingEarlier, selectedId])
+
+  const navigateToHit = useCallback(async (
+    absoluteIndex: number, page: ClaudeSessionSearchResult, hit: ClaudeSessionSearchHit
+  ) => {
+    const sequence = detailRequestSequence.current
+    setActiveMatchAbsolute(absoluteIndex)
+    setActiveEventIndex(hit.eventIndex)
+    setLoadingDetail(true)
+    try {
+      const nextDetail = await loadDetail(selectedId, {
+        aroundEventIndex: hit.eventIndex, limit: EVENT_PAGE_SIZE
+      })
+      if (sequence !== detailRequestSequence.current) return
+      setSearchPage(page)
+      setDetail(nextDetail)
+      scrollToEvent(nextDetail, hit.eventIndex, eventVirtualizer)
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setLoadingDetail(false)
+    }
+  }, [eventVirtualizer, loadDetail, selectedId])
+
+  const stepMatch = useCallback(async (delta: number) => {
+    if (!searchPage?.total || !effectiveContentQuery) return
+    const target = (activeMatchAbsolute + delta + searchPage.total) % searchPage.total
+    let page = searchPage
+    if (target < page.offset || target >= page.offset + page.hits.length) {
+      const pageOffset = Math.floor(target / SEARCH_PAGE_SIZE) * SEARCH_PAGE_SIZE
+      page = await searchSession(selectedId, effectiveContentQuery, pageOffset, SEARCH_PAGE_SIZE)
+    }
+    const hit = page.hits[target - page.offset]
+    if (hit) await navigateToHit(target, page, hit)
+  }, [activeMatchAbsolute, effectiveContentQuery, navigateToHit, searchPage, searchSession, selectedId])
+
   const selectedSession = sessions.find(({ providerSessionId }) => providerSessionId === selectedId)
   const selectedAvailability = selectedSession?.availability ?? detail?.availability ?? 'available'
-  const jumpTo = (eventIndex: number) => {
-    const matchIndex = matchedEvents.findIndex(({ index }) => index === eventIndex)
-    if (matchIndex >= 0) setActiveMatch(matchIndex)
-    eventRefs.current.get(eventIndex)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
-  const stepMatch = (offset: number) => {
-    if (matchedEvents.length === 0) return
-    const next = (activeMatch + offset + matchedEvents.length) % matchedEvents.length
-    setActiveMatch(next)
-    jumpTo(matchedEvents[next]!.index)
-  }
   const submitLoad = async (duplicateConfirmed = false) => {
     if (!selectedId || loadingSession) return
     if (selectedAvailability === 'loaded-elsewhere' && !duplicateConfirmed) {
@@ -141,10 +287,11 @@ export function SessionLoaderDialog(props: {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
     event.preventDefault()
     if (sessions.length === 0) return
-    const current = Math.max(0, sessions.findIndex(({ providerSessionId }) =>
-      providerSessionId === selectedId))
+    const current = Math.max(0, sessions.findIndex(({ providerSessionId }) => providerSessionId === selectedId))
     const offset = event.key === 'ArrowDown' ? 1 : -1
-    setSelectedId(sessions[(current + offset + sessions.length) % sessions.length]!.providerSessionId)
+    const next = (current + offset + sessions.length) % sessions.length
+    setSelectedId(sessions[next]!.providerSessionId)
+    sessionVirtualizer.scrollToIndex(next, { align: 'auto' })
   }
 
   return createPortal(<div className="session-loader-backdrop" role="presentation"
@@ -166,23 +313,38 @@ export function SessionLoaderDialog(props: {
               onClick={() => setSessionQuery('')}>×</button>}
           </label>
           <div className="session-loader-list-meta">
-            <span>{loadingList ? '正在查找…' : `${sessions.length} 个会话`}</span>
-            <span>左侧会话列表</span>
+            <span>{loadingList ? '正在查找…' : `${sessions.length} / ${sessionTotal} 个会话`}</span>
+            <span>{hasMoreSessions ? '滚动加载更多' : '已加载全部'}</span>
           </div>
-          <div className="session-loader-results" onKeyDown={onListKeyDown}>
-            {sessions.map((session) => <article key={session.providerSessionId}
-              className={`session-loader-result${selectedId === session.providerSessionId ? ' selected' : ''}`}>
-              <button type="button" className="session-loader-result-main"
-                aria-label={`预览会话：${session.title}`}
-                onClick={() => setSelectedId(session.providerSessionId)}>
-                <strong>{session.title}</strong>
-                <span>{relativeTime(session.updatedAt)} · {session.model ?? 'Claude Code'}</span>
-                <small>{permissionLabel(session.permissionMode)} · {session.eventCount} 条内容</small>
-                {session.availability === 'loaded-here' && <small>已载入当前卡片</small>}
-                {session.availability === 'loaded-elsewhere' &&
-                  <small>已载入“{session.loadedSessionTitle ?? '其他卡片'}”</small>}
-              </button>
-            </article>)}
+          <div ref={sessionScrollRef} className="session-loader-results" onKeyDown={onListKeyDown}
+            onScroll={(event) => {
+              const element = event.currentTarget
+              if (element.scrollHeight - element.scrollTop - element.clientHeight < 140) void loadMoreSessions()
+            }}>
+            <div className="session-loader-virtual-list" style={{ height: sessionVirtualizer.getTotalSize() }}>
+              {(visibleSessionRows.length > 0 ? visibleSessionRows : sessions.slice(0, 10).map((_, index) => ({
+                index, start: index * 83
+              }))).map((row) => {
+                const session = sessions[row.index]!
+                return <div key={session.providerSessionId} ref={sessionVirtualizer.measureElement}
+                  data-index={row.index} style={{ transform: `translateY(${row.start}px)` }}
+                  className="session-loader-virtual-row">
+                  <article className={`session-loader-result${selectedId === session.providerSessionId ? ' selected' : ''}`}>
+                    <button type="button" className="session-loader-result-main"
+                      aria-label={`预览会话：${session.title}`}
+                      onClick={() => setSelectedId(session.providerSessionId)}>
+                      <strong>{session.title}</strong>
+                      <span>{relativeTime(session.updatedAt)} · {session.model ?? 'Claude Code'}</span>
+                      <small>{permissionLabel(session.permissionMode)} · {session.eventCount} 条内容</small>
+                      {session.availability === 'loaded-here' && <small>已载入当前卡片</small>}
+                      {session.availability === 'loaded-elsewhere' &&
+                        <small>已载入“{session.loadedSessionTitle ?? '其他卡片'}”</small>}
+                    </button>
+                  </article>
+                </div>
+              })}
+            </div>
+            {loadingMoreSessions && <div className="session-loader-page-status">正在载入更多会话…</div>}
             {!loadingList && sessions.length === 0 && <div className="session-loader-empty">
               {effectiveSessionQuery ? '左侧没有匹配的会话' : '当前工作空间内没有 Claude Code 会话'}
             </div>}
@@ -203,31 +365,40 @@ export function SessionLoaderDialog(props: {
                   onClick={() => setContentQuery('')}>×</button>}
               </label>
               {effectiveContentQuery && <div className="session-loader-match-nav" aria-label="右侧内容匹配位置">
-                <span>{matchedEvents.length ? activeMatch + 1 : 0}/{matchedEvents.length}</span>
-                <button type="button" aria-label="上一个匹配" onClick={() => stepMatch(-1)}>↑</button>
-                <button type="button" aria-label="下一个匹配" onClick={() => stepMatch(1)}>↓</button>
+                <span>{searchPage?.total ? activeMatchAbsolute + 1 : 0}/{searchPage?.total ?? 0}</span>
+                <button type="button" aria-label="上一个匹配" onClick={() => void stepMatch(-1)}>↑</button>
+                <button type="button" aria-label="下一个匹配" onClick={() => void stepMatch(1)}>↓</button>
               </div>}
             </div>
           </header>
-          <div className="session-loader-events" aria-busy={loadingDetail}>
-            {detail && detail.eventCount > previewEvents.length && !effectiveContentQuery &&
-              <div className="session-loader-preview-limit" role="note">
-                为保持预览流畅，显示最近 {previewEvents.length} 条；载入后仍保留完整历史
-              </div>}
-            {previewEvents.map((event) => <article key={event.index}
-              ref={(element) => {
-                if (element) eventRefs.current.set(event.index, element)
-                else eventRefs.current.delete(event.index)
-              }}
-              className={`session-loader-event is-${event.kind}${event.matched ? ' matched' : ''}${
-                matchedEvents[activeMatch]?.index === event.index ? ' active-match' : ''}`}>
-              <div><strong>{highlightMatches(
-                event.kind === 'tool' ? event.toolName ?? '工具' : event.role === 'user' ? '你' : 'Claude',
-                effectiveContentQuery
-              )}</strong>
-                <span>#{event.index}</span></div>
-              <p>{highlightMatches(event.text, effectiveContentQuery)}</p>
-            </article>)}
+          <div ref={eventScrollRef} className="session-loader-events" aria-busy={loadingDetail}
+            onScroll={(event) => { if (event.currentTarget.scrollTop < 64) void loadEarlier() }}>
+            {detail && <div className="session-loader-history-status" role="status">
+              {effectiveContentQuery
+                ? `全文共 ${searchPage?.total ?? 0} 处匹配`
+                : `已加载 ${previewEvents.length} / ${detail.page.total} 条`}
+            </div>}
+            {loadingEarlier && <div className="session-loader-page-status">正在载入更早内容…</div>}
+            <div className="session-loader-virtual-events" style={{ height: eventVirtualizer.getTotalSize() }}>
+              {(visibleEventRows.length > 0 ? visibleEventRows : previewEvents.slice(0, 12).map((_, index) => ({
+                index, start: index * 126
+              }))).map((row) => {
+                const event = previewEvents[row.index]!
+                const matched = effectiveContentQuery && event.index === activeEventIndex
+                return <div key={event.index} ref={eventVirtualizer.measureElement} data-index={row.index}
+                  style={{ transform: `translateY(${row.start}px)` }} className="session-loader-virtual-row">
+                  <article className={`session-loader-event is-${event.kind}${
+                    matched ? ' matched active-match' : ''}`}>
+                    <div><strong>{highlightMatches(
+                      event.kind === 'tool' ? event.toolName ?? '工具' : event.role === 'user' ? '你' : 'Claude',
+                      effectiveContentQuery
+                    )}</strong>
+                      <span>#{event.index}</span></div>
+                    <p>{highlightMatches(event.text, effectiveContentQuery)}</p>
+                  </article>
+                </div>
+              })}
+            </div>
             {loadingDetail && <div className="session-loader-empty">正在载入预览…</div>}
           </div>
         </section>
@@ -238,25 +409,42 @@ export function SessionLoaderDialog(props: {
           {confirmRunning && <span className="session-loader-confirm">当前卡片正在运行，继续会结束当前进程。</span>}
         </div>
         <button type="button" onClick={onCancel}>取消</button>
-        <button type="button" className="primary"
-          disabled={!selectedId || loadingSession}
+        <button type="button" className="primary" disabled={!selectedId || loadingSession}
           onClick={() => void submitLoad()}>
-          {loadingSession
-            ? '正在载入…'
-            : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
+          {loadingSession ? '正在载入…' : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
         </button>
       </footer>
       {confirmDuplicate && <ConfirmDialog
         title="会话已在当前工作空间载入"
         body={`“${selectedSession?.title ?? '该会话'}”已载入到“${selectedSession?.loadedSessionTitle ?? '其他卡片'}”。仍然可以载入到当前卡片，两张卡片将关联同一个 Claude Code 会话。`}
-        confirmLabel="仍然载入"
-        onCancel={() => setConfirmDuplicate(false)}
-        onConfirm={() => {
-          setConfirmDuplicate(false)
-          void submitLoad(true)
-        }} />}
+        confirmLabel="仍然载入" onCancel={() => setConfirmDuplicate(false)}
+        onConfirm={() => { setConfirmDuplicate(false); void submitLoad(true) }} />}
     </section>
   </div>, portalTarget ?? document.body)
+}
+
+function mergeEarlierDetail(earlier: ClaudeSessionDetail, current: ClaudeSessionDetail): ClaudeSessionDetail {
+  const existing = new Set(earlier.events.map(({ index }) => index))
+  return {
+    ...current,
+    events: [...earlier.events, ...current.events.filter(({ index }) => !existing.has(index))],
+    page: {
+      startEventIndex: earlier.page.startEventIndex,
+      endEventIndex: current.page.endEventIndex,
+      total: current.page.total,
+      hasEarlier: earlier.page.hasEarlier,
+      hasLater: current.page.hasLater
+    }
+  }
+}
+
+type EventVirtualizer = ReturnType<typeof useVirtualizer<HTMLDivElement, Element>>
+
+function scrollToEvent(
+  detail: ClaudeSessionDetail, eventIndex: number, virtualizer: EventVirtualizer
+): void {
+  const index = detail.events.findIndex((event) => event.index === eventIndex)
+  if (index >= 0) requestAnimationFrame(() => virtualizer.scrollToIndex(index, { align: 'center' }))
 }
 
 function SearchIcon() {
@@ -301,8 +489,7 @@ function relativeTime(timestamp: number): string {
   const elapsed = Math.max(0, Date.now() - timestamp)
   const hours = Math.floor(elapsed / 3_600_000)
   if (hours < 24) return hours <= 0 ? '刚刚' : `${hours} 小时前`
-  const days = Math.floor(hours / 24)
-  return `${days} 天前`
+  return `${Math.floor(hours / 24)} 天前`
 }
 
 function errorMessage(error: unknown): string {

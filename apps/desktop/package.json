@@ -17,6 +17,7 @@
     "@matou/domain": "workspace:*",
     "@matou/ui": "workspace:*",
     "@samasante/liquid-glass": "0.1.1",
+    "@tanstack/react-virtual": "^3.14.10",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-search": "0.16.0",
     "@xterm/addon-serialize": "0.14.0",

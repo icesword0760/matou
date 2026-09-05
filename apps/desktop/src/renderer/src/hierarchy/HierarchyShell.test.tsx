@@ -256,6 +256,10 @@ describe('PRD 05 hierarchy shell', () => {
       if (method === 'projection.snapshot') return projectionSnapshot(data)
       if (method === 'claude-sessions.list') return {
         total: 1,
+        offset: 0,
+        limit: 50,
+        nextOffset: 1,
+        hasMore: false,
         sessions: [{
           providerSessionId: 'provider-loaded', title: loadedTitle, cwd: '/tmp/a',
           updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
@@ -268,7 +272,14 @@ describe('PRD 05 hierarchy shell', () => {
         updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
         availability: 'loaded-elsewhere', loadedSessionId: 'session-a2',
         loadedSessionTitle: loadedTitle,
-        events: [{ index: 1, kind: 'user', role: 'user', text: '已有内容', matched: false }]
+        events: [{ index: 1, kind: 'user', role: 'user', text: '已有内容', matched: false }],
+        page: {
+          startEventIndex: 1,
+          endEventIndex: 1,
+          total: 1,
+          hasEarlier: false,
+          hasLater: false
+        }
       }
       throw new Error(`unexpected Runtime request: ${method}`)
     })

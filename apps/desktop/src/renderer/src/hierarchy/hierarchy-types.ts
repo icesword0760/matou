@@ -215,8 +215,16 @@ export interface HierarchyCommands {
   removeFailedFork(sceneId: string, sessionId: string): unknown
   retryProviderRestore(sessionId: string): unknown
   startFreshProvider(sessionId: string): unknown
-  listClaudeSessions(sessionId: string, query: string, searchScope?: 'metadata' | 'all'): Promise<ClaudeSessionListResult>
-  getClaudeSessionDetail(sessionId: string, providerSessionId: string, query: string): Promise<ClaudeSessionDetail>
+  listClaudeSessions(
+    sessionId: string, query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number
+  ): Promise<ClaudeSessionListResult>
+  getClaudeSessionDetail(
+    sessionId: string, providerSessionId: string,
+    options?: { beforeEventIndex?: number; aroundEventIndex?: number; limit?: number }
+  ): Promise<ClaudeSessionDetail>
+  searchClaudeSession(
+    sessionId: string, providerSessionId: string, query: string, offset?: number, limit?: number
+  ): Promise<ClaudeSessionSearchResult>
   loadClaudeSession(sessionId: string, providerSessionId: string): Promise<ClaudeSessionLoadResult>
   restartStoppedSession?(sessionId: string): unknown
   removeSessionBranch?(sceneId: string, sessionId: string, scope: RemoveNodeScope): unknown
@@ -240,7 +248,7 @@ export interface HierarchyCommands {
 }
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 import type {
-  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult,
+  ClaudeSessionDetail, ClaudeSessionListResult, ClaudeSessionLoadResult, ClaudeSessionSearchResult,
   RemoveNodeScope,
   SessionEnvironmentActionResult, SessionEnvironmentOpenResult,
   SessionEnvironmentTarget
