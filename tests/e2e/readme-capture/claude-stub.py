@@ -69,9 +69,11 @@ post({
     'rate_limits': {'seven_day': {
         'used_percentage': spec['weekly'], 'resets_at': time.time() + spec['resets_in']}}
 })
+ran_exec = False
 for event in spec['events']:
     kind = event[0]
     if kind == 'exec':
+        ran_exec = True
         _, command, label = event
         sys.stdout.write(f"\x1b[32m⏺\x1b[0m \x1b[1mBash({label})\x1b[0m\n")
         sys.stdout.flush()
@@ -92,7 +94,7 @@ for event in spec['events']:
             hook('PostToolUseFailure', tool_name=name, tool_use_id=tool_id, tool_input=tool_input)
     else:
         hook(event[1], **event[2])
-        if event[1] == 'Stop' and 'last_assistant_message' in event[2]:
+        if ran_exec and event[1] == 'Stop' and 'last_assistant_message' in event[2]:
             sys.stdout.write(f"\x1b[38;5;214m⏺\x1b[0m {event[2]['last_assistant_message']}\n")
             sys.stdout.flush()
     time.sleep(0.05)
