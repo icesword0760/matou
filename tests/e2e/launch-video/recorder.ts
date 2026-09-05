@@ -120,7 +120,9 @@ export class ClipRecorder {
       state.timer = setInterval(pump, frameMs / 2)
       const win = BrowserWindow.getAllWindows().find((w) => !isDag(w))!
       const scale = screen.getDisplayMatching(win.getBounds()).scaleFactor
-      const [width, height] = win.getContentSize()
+      // Electron types getContentSize() as number[], so under noUncheckedIndexedAccess the
+      // destructure widens to `number | undefined`; it is always exactly [width, height].
+      const [width, height] = win.getContentSize() as [number, number]
       ;(globalThis as Record<string, unknown>).__matouRecorder = { state, subscribe }
       return { startedAt: state.startedAt, scale, viewport: { width, height } }
     }, { outputPath, fps: this.fps })
@@ -143,12 +145,17 @@ export class ClipRecorder {
       const stoppedAt = Date.now()
       for (const win of state.subscribed) { try { win.webContents.endFrameSubscription() } catch { /* window gone */ } }
       // If ffmpeg already exited (crash/spawn failure), 'close' has already fired and never will
-      // again - awaiting it here would hang forever. Only wait when it's still running.
-      if (state.ff.exitCode === null) {
+      // again - awaiting it here would hang forever. Only wait when it's still running. A process
+      // killed by a signal reports exitCode === null with signalCode set, so both have to be
+      // checked: treating that as "still running" is exactly the hang this guard exists to avoid.
+      if (state.ff.exitCode === null && state.ff.signalCode === null) {
         await new Promise<void>((resolve) => { state.ff.once('close', () => resolve()); state.ff.stdin.end() })
       }
       delete (globalThis as Record<string, unknown>).__matouRecorder
       if (state.spawnError) throw state.spawnError
+      // A killed ffmpeg leaves an unfinalised mp4 (no moov atom), so it must fail loudly rather
+      // than pass through as a clip with a plausible-looking frame count.
+      if (state.ff.signalCode) throw new Error(`ffmpeg killed by ${state.ff.signalCode}`)
       if (state.ff.exitCode !== null && state.ff.exitCode !== 0) {
         throw new Error(`ffmpeg exited with code ${state.ff.exitCode}`)
       }

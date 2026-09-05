@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path'
 import { expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
 import * as scene from '../readme-capture/demo-scene'
 import type { Ids } from '../readme-capture/demo-scene'
-import { ClipRecorder } from './recorder'
+import { ClipRecorder, type RecorderStats } from './recorder'
 import { cueTime, loadCues, phraseTime } from './cues'
 
 const OUT = resolve(import.meta.dirname, '../../../marketing/launch-video/public/recordings')
@@ -40,6 +40,10 @@ test.setTimeout(0)
 type Clip = { file: string; events: string; startAtMs: number; durationMs: number }
 type Manifest = { fps: number; scale: number; viewport: typeof VIDEO_WINDOW; sections: Array<{ id: string; clips: Clip[] }> }
 const recorded = new Map<string, Clip[]>()
+// Every section that got as far as starting a recorder. `rec.start()` truncates the section's mp4,
+// so a section in here but missing from `recorded` has no usable clips on disk any more - its old
+// manifest entry has to be dropped rather than carried over.
+const attempted = new Set<string>()
 
 const selected = (process.env.MATOU_SECTIONS ?? '').split(',').map((id) => id.trim()).filter(Boolean)
 function wanted(id: string): boolean { return selected.length === 0 || selected.includes(id) }
@@ -58,24 +62,41 @@ interface Scene {
 
 // The ffmpeg child lives in the Electron main process, so the recorder must be stopped even when
 // the section throws - otherwise it keeps writing frames into the next section's app evaluate calls
-// and the mp4 is never finalised. A clip whose body failed is still flushed to disk, but it is not
-// returned, so `writeManifest` never lists it.
+// and the mp4 is never finalised. A clip whose body failed is then deleted: `rec.start()` has
+// already truncated whatever previous take lived at that path, so leaving the half-written file
+// there would let a stale manifest entry point at a broken mp4 that no longer matches the audio.
 async function recordClip(host: Scene, sectionId: string, part: string | undefined, startAtMs: number,
   body: (rec: ClipRecorder) => Promise<void>): Promise<Clip> {
   const name = part ? `${sectionId}-${part}` : sectionId
+  const mp4Path = join(OUT, `${name}.mp4`)
+  const eventsPath = join(OUT, `${name}.events.json`)
+  attempted.add(sectionId)
   const rec = new ClipRecorder(host.app, 30)
-  await rec.start(join(OUT, `${name}.mp4`))
+  await rec.start(mp4Path)
   let failure: unknown
   try {
     await body(rec)
   } catch (error) {
     failure = error
   }
-  const stats = await rec.stop(join(OUT, `${name}.events.json`))
+  // stop() itself can fail (ffmpeg crashed or was killed); that is still a failed clip, and the
+  // body's error - the more useful one - wins when both happened.
+  let stats: RecorderStats | undefined
+  try {
+    stats = await rec.stop(eventsPath)
+  } catch (error) {
+    if (failure === undefined) failure = error
+    else console.log(`clip ${name}: stop() also failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
   if (failure !== undefined) {
-    console.log(`clip ${name}: FAILED after ${stats.stoppedAt - stats.startedAt} ms, not written to the manifest`)
+    await rm(mp4Path, { force: true })
+    await rm(eventsPath, { force: true })
+    const took = stats ? `${stats.stoppedAt - stats.startedAt} ms` : 'an unknown duration'
+    console.log(`clip ${name}: FAILED after ${took}, clip deleted and not written to the manifest`)
     throw failure
   }
+  // Unreachable: stop() either returned stats or threw, and a throw set `failure` above.
+  if (!stats) throw new Error(`clip ${name}: recorder stopped without stats`)
   const clip: Clip = {
     file: `recordings/${name}.mp4`, events: `recordings/${name}.events.json`,
     startAtMs, durationMs: stats.stoppedAt - stats.startedAt
@@ -553,7 +574,8 @@ async function buildScene(root: string): Promise<Scene> {
 // Notifications live in the renderer, so a restart clears them; every section that shows them
 // re-pushes the same curated set first.
 async function resetNotifications(host: Scene): Promise<void> {
-  await host.page.getByRole('button', { name: '通知中心' }).click()
+  // `exact` matters: without it the accessible-name substring match also hits 「关闭通知中心」.
+  await host.page.getByRole('button', { name: '通知中心', exact: true }).click()
   const clear = host.page.getByRole('button', { name: '清空通知' })
   if (await clear.isVisible().catch(() => false)) await clear.click()
   await host.page.getByRole('button', { name: '关闭通知中心' }).click()
@@ -890,7 +912,7 @@ async function recordBoardNotify(host: Scene): Promise<Clip> {
 
     await rec.waitUntil(cueTime(cues, '通知按来源'))
     await rec.click(page.getByRole('button', { name: '看板' }), 'board-close')
-    await rec.click(page.getByRole('button', { name: '通知中心' }), 'notify')
+    await rec.click(page.getByRole('button', { name: '通知中心', exact: true }), 'notify')
     await expect(page.getByRole('region', { name: '通知中心' })).toBeVisible()
 
     await rec.waitUntil(phraseTime(cues, '点一下回到事发现场'))
@@ -939,7 +961,11 @@ async function writeManifest(): Promise<void> {
     .then((text) => JSON.parse(text) as Manifest).catch(() => undefined)
   const manifest: Manifest = { fps: 30, scale: 2, viewport: VIDEO_WINDOW, sections: [] }
   for (const id of ORDER) {
-    const kept = previous?.sections.find((section) => section.id === id)?.clips ?? []
+    // A section not touched by this run keeps whatever the last run left. A section that WAS
+    // attempted and produced nothing gets an empty list, not the old entry: its clip files were
+    // truncated by `rec.start()` and deleted by `recordClip`, so the old entry would point at
+    // nothing (or at a clip whose timings no longer match the current narration).
+    const kept = attempted.has(id) ? [] : previous?.sections.find((section) => section.id === id)?.clips ?? []
     manifest.sections.push({ id, clips: recorded.get(id) ?? (id === 'intro' || id === 'outro' ? [] : kept) })
   }
   await writeFile(join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 2))

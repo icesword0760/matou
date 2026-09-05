@@ -66,9 +66,12 @@ def post(payload):
     body = json.dumps(payload).encode()
     request = urllib.request.Request(
         url, data=body, headers={'content-type': 'application/json'}, method='POST')
+    # A hook post is best-effort telemetry for the demo scene: a dead or slow host must never
+    # abort the transcript. urlopen raises URLError for most failures, but a socket timeout on
+    # the read surfaces as TimeoutError and a closed socket as a bare OSError.
     try:
         urllib.request.urlopen(request, timeout=3).read()
-    except urllib.error.URLError as error:
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
         print(f'readme-capture: hook post failed: {error}', file=sys.stderr, flush=True)
 
 
@@ -98,8 +101,15 @@ for event in spec['events']:
         _, command, label = event
         sys.stdout.write(f"\x1b[32m⏺\x1b[0m \x1b[1mBash({label})\x1b[0m\n")
         sys.stdout.flush()
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, env=os.environ)
-        lines = (result.stdout or result.stderr).splitlines()[:12]
+        # The real `mt` command runs here, so it can hang (a runtime that never answers) or emit
+        # bytes that are not valid UTF-8. Neither may wedge the recording: cap the wait and
+        # replace undecodable bytes rather than raising.
+        try:
+            result = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                    errors='replace', env=os.environ, timeout=20)
+            lines = (result.stdout or result.stderr).splitlines()[:12]
+        except subprocess.TimeoutExpired:
+            lines = ['(timed out)']
         for index, line in enumerate(lines):
             prefix = '  \x1b[90m⎿\x1b[0m  ' if index == 0 else '     '
             sys.stdout.write(prefix + line + '\n')
