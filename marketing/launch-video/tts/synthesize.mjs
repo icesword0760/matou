@@ -36,14 +36,19 @@ for (const section of sections) {
   const txt = join(audioDir, `${section.id}.txt`)
   const mp3 = join(audioDir, `${section.id}.mp3`)
   const vtt = join(audioDir, `${section.id}.vtt`)
-  await writeFile(txt, section.text)
-  await run(EDGE_TTS, ['--voice', VOICE, `--rate=${RATE}`, '-f', txt, '--write-media', mp3, '--write-subtitles', vtt])
-  const cues = parseVtt(await readFile(vtt, 'utf8'))
-  await writeFile(join(audioDir, `${section.id}.cues.json`), JSON.stringify(cues, null, 2))
-  const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp3])
-  const durationMs = Math.round(parseFloat(stdout) * 1000)
-  manifest.sections.push({ id: section.id, title: section.title, durationMs, audio: `audio/${section.id}.mp3`, cues: `audio/${section.id}.cues.json` })
-  console.log(`${section.id}: ${(durationMs / 1000).toFixed(1)}s, ${cues.length} cues`)
+  try {
+    await writeFile(txt, section.text)
+    await run(EDGE_TTS, ['--voice', VOICE, `--rate=${RATE}`, '-f', txt, '--write-media', mp3, '--write-subtitles', vtt])
+    const cues = parseVtt(await readFile(vtt, 'utf8'))
+    await writeFile(join(audioDir, `${section.id}.cues.json`), JSON.stringify(cues, null, 2))
+    const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', mp3])
+    const durationMs = Math.round(parseFloat(stdout) * 1000)
+    manifest.sections.push({ id: section.id, title: section.title, durationMs, audio: `audio/${section.id}.mp3`, cues: `audio/${section.id}.cues.json` })
+    console.log(`${section.id}: ${(durationMs / 1000).toFixed(1)}s, ${cues.length} cues`)
+  } catch (err) {
+    const stderr = err?.stderr ? `\n${err.stderr}` : ''
+    throw new Error(`tts failed for section "${section.id}": ${err.message}${stderr}`)
+  }
 }
 await writeFile(join(audioDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
 console.log('total', (manifest.sections.reduce((n, s) => n + s.durationMs, 0) / 1000).toFixed(1), 's')
