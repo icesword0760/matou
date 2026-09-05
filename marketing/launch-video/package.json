@@ -1,0 +1,27 @@
+{
+  "name": "matou-launch-video",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tts": "node tts/synthesize.mjs",
+    "record": "cd ../.. && MATOU_LAUNCH_VIDEO=1 npx playwright test tests/e2e/launch-video/record --workers=1 --reporter=line",
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts LaunchVideo out/matou-launch-1080p.mp4 --codec h264 --crf 18",
+    "render:short": "remotion render src/index.ts Short60 out/matou-launch-60s.mp4 --codec h264 --crf 18",
+    "cover": "remotion still src/index.ts Cover out/cover.png",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.520",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remotion": "^4.0.520"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}
