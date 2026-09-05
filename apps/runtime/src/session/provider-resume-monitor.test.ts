@@ -18,6 +18,23 @@ describe('ClaudeFullResumePromptMonitor', () => {
     expect(monitor.ingest('2. Resume full session as-is')).toBe(false)
   })
 
+  it('recognizes the cursor-positioned prompt emitted by the current Claude TUI', () => {
+    const monitor = new ClaudeFullResumePromptMonitor()
+
+    expect(monitor.ingest(
+      '\u001b[39mResuming\u001b[12Gthe\u001b[16Gfull\u001b[21Gsession\u001b[29Gwill' +
+      '\u001b[34Gconsume\u001b[42Ga\r\u001b[2C\u001b[1Bsubstantial\u001b[15Gportion' +
+      '\u001b[23Gof\u001b[26Gyour\u001b[31Gusage\u001b[37Glimits.\u001b[45GWe' +
+      '\r\u001b[2C\u001b[1Brecommend\u001b[13Gresuming\u001b[22Gfrom\u001b[27Ga' +
+      '\u001b[29Gsummary.\r\u001b[2C\u001b[2B\u001b[34m\u276f\u001b[5G\u001b[90m1. ' +
+      '\u001b[34mResume from summary (recommended)\r\u001b[4C\u001b[1B\u001b[90m2. ' +
+      '\u001b[39mResume\u001b[15Gfull\u001b[20Gsession\u001b[28Gas-is' +
+      '\r\u001b[4C\u001b[1B\u001b[90m3. \u001b[39mDon\'t\u001b[14Gask\u001b[18Gme' +
+      '\u001b[21Gagain\r\u001b[2C\u001b[2B\u001b[90m\u001b[3mEnter to confirm' +
+      ' \u00b7 Esc to cancel\u001b[23m\u001b[39m'
+    )).toBe(true)
+  })
+
   it('ignores ordinary restored content that only mentions full-session resume', () => {
     const monitor = new ClaudeFullResumePromptMonitor()
 

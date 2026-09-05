@@ -1787,8 +1787,15 @@ export class RuntimeServer {
       const resumeMonitor = providerSessionId === undefined
         ? undefined
         : new ProviderResumeMonitor(providerSessionId)
+      const startupRecovery = this.#recoveryCoordinator?.snapshot().find(
+        ({ sessionId }) => sessionId === message.sessionId
+      )
       const fullResumePromptMonitor = message.profile === 'claude-code' && resumeBinding &&
-        this.#automaticRecoverySessionIds.has(message.sessionId)
+        (
+          this.#automaticRecoverySessionIds.has(message.sessionId) ||
+          startupRecovery?.state === 'queued' ||
+          startupRecovery?.state === 'restoring'
+        )
         ? new ClaudeFullResumePromptMonitor()
         : undefined
       let activeSession: PtySession | undefined

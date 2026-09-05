@@ -6518,7 +6518,7 @@ sleep 30
     }
   })
 
-  it('selects full-session resume when startup recovery reaches the long-session prompt', async () => {
+  it('selects full-session resume when the renderer wins the startup recovery spawn race', async () => {
     const executable = join(root, 'full-session-resume-fixture.py')
     const inputMarker = join(root, 'full-session-resume-input.txt')
     await writeFile(inputMarker, '')
@@ -6548,9 +6548,20 @@ sleep 30
     process.env.MATOU_TEST_FULL_RESUME_INPUT = inputMarker
     const sessions = createTestSessionRegistry()
     const recoveryPort = new MockPort()
+    let finishRecovery!: () => void
+    const recoveryGate = new Promise<void>((resolve) => { finishRecovery = resolve })
+    const recovery = new RuntimeRecoveryCoordinator({
+      concurrency: 1,
+      jobs: [{
+        sessionId: 'full-session-resume', sceneId: 'scene-full-session-resume',
+        executionContextId: 'replay-context', profile: 'claude-code',
+        priority: 'active-session', enqueueSequence: 1
+      }],
+      start: () => recoveryGate
+    })
     const recoveryServer = new RuntimeServer(
       recoveryPort, root, database, undefined, undefined, sessions, undefined, undefined,
-      { providerResumeTimeoutMs: 2_000 }
+      { providerResumeTimeoutMs: 2_000, recoveryCoordinator: recovery }
     )
     try {
       registerSession(database, 'full-session-resume', 'claude-code')
@@ -6565,16 +6576,18 @@ sleep 30
         type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
         clientId: 'full-session-resume-background'
       })
-
-      await recoveryServer.ensureSessionRunning({
-        sessionId: 'full-session-resume', sceneId: 'scene-full-session-resume',
-        executionContextId: 'replay-context', profile: 'claude-code',
-        priority: 'active-session', enqueueSequence: 1
+      recovery.start()
+      await waitUntil(() => recovery.snapshot()[0]?.state === 'restoring')
+      recoveryPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'full-session-resume', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
       })
       await waitUntilAsync(async () => (await readFile(inputMarker, 'utf8')) === '1b5b420d')
 
       expect(await readFile(inputMarker, 'utf8')).toBe('1b5b420d')
     } finally {
+      finishRecovery()
       recoveryServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
       restoreEnv('MATOU_TEST_FULL_RESUME_INPUT', previousInputMarker)
