@@ -6,6 +6,32 @@ const RESUME_FAILURE_PATTERNS = [
   /failed to resume/i
 ]
 
+const CLAUDE_FULL_RESUME_PROMPT_MARKERS = [
+  'resuming the full session will consume',
+  'resume from summary',
+  'resume full session as-is',
+  "don't ask me again",
+  'enter to confirm'
+]
+
+export class ClaudeFullResumePromptMonitor {
+  #recentOutput = ''
+  #handled = false
+
+  ingest(data: string): boolean {
+    if (this.#handled) return false
+    this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
+      .toLowerCase()
+      .slice(-8_192)
+    if (!CLAUDE_FULL_RESUME_PROMPT_MARKERS.every((marker) => this.#recentOutput.includes(marker))) {
+      return false
+    }
+    this.#handled = true
+    this.#recentOutput = ''
+    return true
+  }
+}
+
 export class ProviderResumeMonitor {
   readonly #expectedProviderSessionId: string
   #recentOutput = ''

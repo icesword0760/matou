@@ -1,6 +1,31 @@
 import { describe, expect, it } from 'vitest'
 
-import { ProviderResumeMonitor } from './provider-resume-monitor'
+import { ClaudeFullResumePromptMonitor, ProviderResumeMonitor } from './provider-resume-monitor'
+
+describe('ClaudeFullResumePromptMonitor', () => {
+  it('requests the full-session choice once when the long-session resume prompt spans chunks', () => {
+    const monitor = new ClaudeFullResumePromptMonitor()
+
+    expect(monitor.ingest('\u001b[2JThis session is 21h 34m old and 806.9k tokens.\r\n'))
+      .toBe(false)
+    expect(monitor.ingest(
+      'Resuming the full session will consume a substantial portion of your usage limits.\r\n' +
+      '1. Resume from summary (recommended)\r\n'
+    )).toBe(false)
+    expect(monitor.ingest(
+      '2. Resume full session as-is\r\n3. Don\'t ask me again\r\nEnter to confirm · Esc to cancel'
+    )).toBe(true)
+    expect(monitor.ingest('2. Resume full session as-is')).toBe(false)
+  })
+
+  it('ignores ordinary restored content that only mentions full-session resume', () => {
+    const monitor = new ClaudeFullResumePromptMonitor()
+
+    expect(monitor.ingest(
+      'The notes say Resume full session as-is, but this is ordinary conversation history.'
+    )).toBe(false)
+  })
+})
 
 describe('ProviderResumeMonitor', () => {
   it('detects a missing provider session even when the failure spans output chunks', () => {

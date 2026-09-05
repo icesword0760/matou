@@ -48,7 +48,10 @@ import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
 import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracker'
 import { ClaudePermissionModeTracker } from './session/claude-permission-mode-tracker'
-import { ProviderResumeMonitor } from './session/provider-resume-monitor'
+import {
+  ClaudeFullResumePromptMonitor,
+  ProviderResumeMonitor
+} from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
 import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
 import {
@@ -149,6 +152,7 @@ const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
 const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
+const CLAUDE_FULL_RESUME_SELECTION = '\u001b[B\r'
 const execFileAsync = promisify(execFile)
 
 export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Object.freeze([
@@ -243,6 +247,7 @@ export class RuntimeServer {
   readonly #hudFileWatchers = new Map<string, Map<string, FSWatcher>>()
   readonly #hudFileRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly #skipResumeSessionIds = new Set<string>()
+  readonly #automaticRecoverySessionIds = new Set<string>()
   readonly #providerHooks: ProviderHookServer | undefined
   readonly #providerHookRegistrations: Map<
     string,
@@ -413,6 +418,7 @@ export class RuntimeServer {
       this.#sessionRepository.getResumeBinding(job.sessionId, 'claude-code')
       ? this.#waitForProviderRecovery(job.sessionId)
       : undefined
+    this.#automaticRecoverySessionIds.add(job.sessionId)
     try {
       await this.#spawnSerialized({
         type: 'terminal.spawn',
@@ -428,6 +434,7 @@ export class RuntimeServer {
       }
       await providerRecovery?.promise
     } finally {
+      this.#automaticRecoverySessionIds.delete(job.sessionId)
       providerRecovery?.cancel()
     }
   }
@@ -1780,8 +1787,13 @@ export class RuntimeServer {
       const resumeMonitor = providerSessionId === undefined
         ? undefined
         : new ProviderResumeMonitor(providerSessionId)
+      const fullResumePromptMonitor = message.profile === 'claude-code' && resumeBinding &&
+        this.#automaticRecoverySessionIds.has(message.sessionId)
+        ? new ClaudeFullResumePromptMonitor()
+        : undefined
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
+      let pendingFullResumeSelection = false
       let emittedTerminalOutput = false
       let controlEnvironment: Record<string, string> | undefined
       if (this.#control) {
@@ -1956,6 +1968,10 @@ export class RuntimeServer {
         ...(attachView ? { send: this.#sendToPort } : {}),
         onOutput: (data) => {
           emittedTerminalOutput = true
+          if (fullResumePromptMonitor?.ingest(data)) {
+            if (activeSession) activeSession.write(CLAUDE_FULL_RESUME_SELECTION)
+            else pendingFullResumeSelection = true
+          }
           if (providerDerivationState === 'pending') {
             pendingProviderOutput = (pendingProviderOutput + data)
               .slice(-MAX_PENDING_PROVIDER_DERIVATION_BYTES)
@@ -2154,6 +2170,10 @@ export class RuntimeServer {
       this.#permissionOverrides.delete(message.sessionId)
       this.#spawnDescriptors.set(message.sessionId, message)
       activeSession = session
+      if (pendingFullResumeSelection) {
+        session.write(CLAUDE_FULL_RESUME_SELECTION)
+        pendingFullResumeSelection = false
+      }
       if (this.#applyProviderIdentityMismatch(message.sessionId)) return
       this.#endedSessionIds.delete(message.sessionId)
       this.#completedReplayThrough.delete(message.sessionId)

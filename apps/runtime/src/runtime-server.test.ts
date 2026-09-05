@@ -6518,6 +6518,69 @@ sleep 30
     }
   })
 
+  it('selects full-session resume when startup recovery reaches the long-session prompt', async () => {
+    const executable = join(root, 'full-session-resume-fixture.py')
+    const inputMarker = join(root, 'full-session-resume-input.txt')
+    await writeFile(inputMarker, '')
+    await writeFile(executable, [
+      '#!/usr/bin/python3',
+      'import os, sys, time, tty',
+      'sys.stdout.write("This session is 21h 34m old and 806.9k tokens.\\r\\n")',
+      'sys.stdout.write("Resuming the full session will consume a substantial portion of your usage limits.\\r\\n")',
+      'sys.stdout.write("1. Resume from summary (recommended)\\r\\n")',
+      'sys.stdout.write("2. Resume full session as-is\\r\\n")',
+      'sys.stdout.write("3. Don\\\'t ask me again\\r\\n")',
+      'sys.stdout.write("Enter to confirm · Esc to cancel\\r\\n")',
+      'sys.stdout.flush()',
+      'tty.setraw(0)',
+      'data = os.read(0, 4)',
+      'with open(os.environ["MATOU_TEST_FULL_RESUME_INPUT"], "w") as marker:',
+      '    marker.write(data.hex())',
+      'sys.stdout.write("FULL_SESSION_READY\\r\\n")',
+      'sys.stdout.flush()',
+      'time.sleep(30)',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousInputMarker = process.env.MATOU_TEST_FULL_RESUME_INPUT
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_FULL_RESUME_INPUT = inputMarker
+    const sessions = createTestSessionRegistry()
+    const recoveryPort = new MockPort()
+    const recoveryServer = new RuntimeServer(
+      recoveryPort, root, database, undefined, undefined, sessions, undefined, undefined,
+      { providerResumeTimeoutMs: 2_000 }
+    )
+    try {
+      registerSession(database, 'full-session-resume', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
+        'binding-full-session-resume', 'full-session-resume', 'provider-full-session-resume'
+      )
+      recoveryPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'full-session-resume-background'
+      })
+
+      await recoveryServer.ensureSessionRunning({
+        sessionId: 'full-session-resume', sceneId: 'scene-full-session-resume',
+        executionContextId: 'replay-context', profile: 'claude-code',
+        priority: 'active-session', enqueueSequence: 1
+      })
+      await waitUntilAsync(async () => (await readFile(inputMarker, 'utf8')) === '1b5b420d')
+
+      expect(await readFile(inputMarker, 'utf8')).toBe('1b5b420d')
+    } finally {
+      recoveryServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_FULL_RESUME_INPUT', previousInputMarker)
+    }
+  })
+
   it('keeps an interactive Claude resume alive when identity waits for user confirmation', async () => {
     const executable = join(root, 'interactive-provider-session.sh')
     await writeFile(executable, [
