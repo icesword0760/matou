@@ -12,11 +12,14 @@ export interface RecorderStats {
   width: number; height: number; fps: number; startedAt: number; stoppedAt: number
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
 export class ClipRecorder {
   private events: RecorderEvent[] = []
   private startedAt = 0
   private scale = 2
   private viewport = { width: 0, height: 0 }
+  private pointer = { x: 0, y: 0 }
 
   constructor(private readonly app: ElectronApplication, private readonly fps = 30) {}
 
@@ -33,13 +36,19 @@ export class ClipRecorder {
         lastWritten: undefined as Electron.NativeImage | undefined,
         timer: undefined as NodeJS.Timeout | undefined,
         ff: undefined as ReturnType<typeof cp.spawn> | undefined,
+        spawnError: undefined as Error | undefined,
         size: { width: 0, height: 0 },
         startedAt: 0,
-        writable: true
+        writable: true,
+        stopped: false
       }
+      // Throws when the requested window doesn't exist yet - no silent fallback to main.
+      // The pump's `?? state.latest.main` covers the brief gap after a successful subscribe,
+      // before that window's frame subscription has delivered its first frame.
       const subscribe = (which: 'main' | 'dag') => {
         const win = BrowserWindow.getAllWindows().find((w) => (which === 'dag') === isDag(w))
-        if (!win || state.subscribed.has(win)) return
+        if (!win) throw new Error(`no ${which} window to subscribe to`)
+        if (state.subscribed.has(win)) return
         state.subscribed.add(win)
         win.webContents.beginFrameSubscription(false, (image) => { state.latest[which] = image })
         win.webContents.invalidate()
@@ -55,33 +64,60 @@ export class ClipRecorder {
         '-f', 'rawvideo', '-pix_fmt', 'bgra', '-s', `${state.size.width}x${state.size.height}`, '-r', String(fps), '-i', 'pipe:0',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '16', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outputPath
       ], { stdio: ['pipe', 'ignore', 'inherit'] })
-      state.ff.stdin!.on('drain', () => { state.writable = true })
+      state.ff.on('error', (e) => { state.spawnError = e })
+      state.ff.stdin!.on('error', (e) => { state.spawnError = e })
+      state.ff.stdin!.on('drain', () => { if (!state.stopped) state.writable = true })
       const expected = state.size.width * state.size.height * 4
-      const tick = () => {
+      // Writes exactly one frame slot. Returns false only when it must wait (backpressure, no
+      // frame captured yet, or recording has stopped) - the caller should stop and let the next
+      // pump tick retry. A bitmap-size mismatch is the only thing that counts as `dropped`; even
+      // then we still bump `written` so the wall-clock catch-up loop below can never spin forever
+      // on a bad frame. The write itself is guarded because stop() ends stdin from a separate
+      // evaluate() call, and a pump already mid-flight when that happens must not throw past
+      // Electron's main process - any write failure is captured as spawnError and surfaced
+      // through stop() instead.
+      const writeOneFrame = (): boolean => {
+        if (state.stopped) return false
         const image = state.latest[state.active] ?? state.latest.main
-        if (!image) return
-        if (!state.writable) { state.dropped += 1; return }
+        if (!image) return false
+        if (!state.writable) return false
         let frame = image
         if (frame.getSize().width !== state.size.width || frame.getSize().height !== state.size.height) {
-          frame = frame.resize({ width: state.size.width, height: state.size.height }); state.resized += 1
+          frame = frame.resize({ width: state.size.width, height: state.size.height, quality: 'good' })
+          state.resized += 1
         }
         const bitmap = frame.toBitmap()
-        if (bitmap.length !== expected) { state.dropped += 1; return }
+        if (bitmap.length !== expected) { state.dropped += 1; state.written += 1; return true }
         if (image === state.lastWritten) state.duplicated += 1
         state.lastWritten = image
-        state.writable = state.ff!.stdin!.write(bitmap)
+        if (state.stopped || state.ff!.stdin!.writableEnded) return false
+        try {
+          state.writable = state.ff!.stdin!.write(bitmap)
+        } catch (e) {
+          state.spawnError = e instanceof Error ? e : new Error(String(e))
+          state.stopped = true
+          return false
+        }
         state.written += 1
+        return true
+      }
+      // Wall-clock catch-up pump (not a bare setInterval, which drifts under load - an empty
+      // setInterval(fn, 1000/30) alone measures under 29fps here). Every half frame period we
+      // compute how many frames SHOULD exist by now from real elapsed time and write until we
+      // catch up, duplicating the latest frame when nothing repainted. A frame that couldn't be
+      // written because of backpressure is never permanently lost - it's caught up on a later
+      // pump once 'drain' fires.
+      const frameMs = 1000 / fps
+      const pump = () => {
+        if (state.stopped) return
+        const due = Math.floor((Date.now() - state.startedAt) / frameMs) + 1
+        while (state.written < due) {
+          if (!writeOneFrame()) break
+        }
       }
       state.startedAt = Date.now()
-      tick()
-      // The very first write() almost always reports backpressure immediately: ffmpeg's process
-      // startup (spawn + libx264 init) is slower than one frame interval, so it hasn't started
-      // reading stdin yet. Wait for that initial backpressure to clear before starting the
-      // periodic clock, otherwise the first scheduled tick races the first 'drain' and is
-      // guaranteed to be dropped. t=0 (startedAt) still marks the first frame's write, unchanged.
-      const startTicking = () => { state.timer = setInterval(tick, 1000 / fps) }
-      if (state.writable) startTicking()
-      else state.ff.stdin!.once('drain', startTicking)
+      pump()
+      state.timer = setInterval(pump, frameMs / 2)
       const win = BrowserWindow.getAllWindows().find((w) => !isDag(w))!
       const scale = screen.getDisplayMatching(win.getBounds()).scaleFactor
       const [width, height] = win.getContentSize()
@@ -92,16 +128,30 @@ export class ClipRecorder {
     this.scale = started.scale
     this.viewport = started.viewport
     this.events = []
+    this.pointer = { x: 0, y: 0 }
   }
 
   async stop(eventsPath: string): Promise<RecorderStats> {
     const stats = await this.app.evaluate(async () => {
       const { state } = (globalThis as Record<string, any>).__matouRecorder
+      state.stopped = true
       clearInterval(state.timer)
-      for (const win of state.subscribed) { try { win.webContents.endFrameSubscription() } catch { /* window gone */ } }
-      await new Promise<void>((resolve) => { state.ff.once('close', () => resolve()); state.ff.stdin.end() })
+      // Snapshot stoppedAt right when we stop pumping frames, not after ffmpeg's shutdown flush
+      // below - that flush's wall-clock duration has nothing to do with the captured frame
+      // cadence and would otherwise dilute written/((stoppedAt-startedAt)/1000) below the true
+      // effective fps.
       const stoppedAt = Date.now()
+      for (const win of state.subscribed) { try { win.webContents.endFrameSubscription() } catch { /* window gone */ } }
+      // If ffmpeg already exited (crash/spawn failure), 'close' has already fired and never will
+      // again - awaiting it here would hang forever. Only wait when it's still running.
+      if (state.ff.exitCode === null) {
+        await new Promise<void>((resolve) => { state.ff.once('close', () => resolve()); state.ff.stdin.end() })
+      }
       delete (globalThis as Record<string, unknown>).__matouRecorder
+      if (state.spawnError) throw state.spawnError
+      if (state.ff.exitCode !== null && state.ff.exitCode !== 0) {
+        throw new Error(`ffmpeg exited with code ${state.ff.exitCode}`)
+      }
       return {
         written: state.written, duplicated: state.duplicated, dropped: state.dropped, resized: state.resized,
         width: state.size.width, height: state.size.height, startedAt: state.startedAt, stoppedAt
@@ -125,8 +175,18 @@ export class ClipRecorder {
   }
 
   async moveTo(page: Page, x: number, y: number, ms = 350): Promise<void> {
-    this.events.push({ t: this.now(), type: 'move', x, y, ms })
-    await page.mouse.move(x, y, { steps: Math.max(2, Math.round(ms / 16)) })
+    const t = this.now()
+    const steps = Math.max(2, Math.round(ms / 16))
+    const from = this.pointer
+    const perStep = ms / steps
+    for (let i = 1; i <= steps; i++) {
+      const xi = from.x + ((x - from.x) * i) / steps
+      const yi = from.y + ((y - from.y) * i) / steps
+      await page.mouse.move(xi, yi)
+      await sleep(perStep)
+    }
+    this.pointer = { x, y }
+    this.events.push({ t, type: 'move', x, y, ms: this.now() - t })
   }
 
   async click(locator: Locator, label?: string, position?: { x: number; y: number }): Promise<void> {
@@ -142,8 +202,8 @@ export class ClipRecorder {
 
   async waitUntil(ms: number): Promise<void> {
     const remaining = ms - this.now()
-    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining))
+    if (remaining > 0) await sleep(remaining)
   }
 
-  async hold(ms: number): Promise<void> { await new Promise((resolve) => setTimeout(resolve, ms)) }
+  async hold(ms: number): Promise<void> { await sleep(ms) }
 }

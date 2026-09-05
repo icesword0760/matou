@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, test } from '@playwright/test'
-import { launch, placeWindow, prepareDemo, prepareHome, prepareRepo, prepareShopPlatform, renameTask, waitForShell, activeSurface } from '../readme-capture/demo-scene'
+import { launch, placeWindow, prepareDemo, prepareHome, prepareShopPlatform, renameTask, waitForShell, activeSurface } from '../readme-capture/demo-scene'
 import { ClipRecorder } from './recorder'
 
 const run = promisify(execFile)
@@ -40,7 +40,7 @@ test('records 10 seconds at 30fps without dropping frames', async () => {
     expect(stats.height).toBe(VIDEO_WINDOW.height * 2)
     expect(stats.dropped).toBe(0)
     const seconds = (stats.stoppedAt - stats.startedAt) / 1000
-    expect(stats.written).toBeGreaterThanOrEqual(Math.floor(seconds * 30 * 0.95))
+    expect(Math.abs(stats.written - Math.round(seconds * 30))).toBeLessThanOrEqual(2)
     const { stdout } = await run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height,pix_fmt,r_frame_rate,nb_frames', '-of', 'json', clip])
     const stream = JSON.parse(stdout).streams[0]
     expect(stream.pix_fmt).toBe('yuv420p')
