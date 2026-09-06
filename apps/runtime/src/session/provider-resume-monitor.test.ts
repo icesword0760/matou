@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { ClaudeFullResumePromptMonitor, ProviderResumeMonitor } from './provider-resume-monitor'
+import {
+  ClaudeFullResumePromptMonitor,
+  ClaudeWorkspaceTrustPromptMonitor,
+  ProviderResumeMonitor
+} from './provider-resume-monitor'
 
 describe('ClaudeFullResumePromptMonitor', () => {
   it('requests the full-session choice once when the long-session resume prompt spans chunks', () => {
@@ -41,6 +45,28 @@ describe('ClaudeFullResumePromptMonitor', () => {
     expect(monitor.ingest(
       'The notes say Resume full session as-is, but this is ordinary conversation history.'
     )).toBe(false)
+  })
+})
+
+describe('ClaudeWorkspaceTrustPromptMonitor', () => {
+  it('requests the trust choice once when the workspace prompt spans chunks', () => {
+    const monitor = new ClaudeWorkspaceTrustPromptMonitor()
+
+    expect(monitor.ingest(
+      'Accessing workspace:\r\n/Users/example\r\n' +
+      'Quick safety check: Is this a project you created or one you trust?\r\n'
+    )).toBe(false)
+    expect(monitor.ingest(
+      'Claude Code\'ll be able to read, edit, and execute files here.\r\n' +
+      'No, exit\r\nYes, I trust this folder\r\nEnter to confirm · Esc to cancel'
+    )).toBe(true)
+    expect(monitor.ingest('Yes, I trust this folder')).toBe(false)
+  })
+
+  it('ignores ordinary conversation text about trusting a folder', () => {
+    const monitor = new ClaudeWorkspaceTrustPromptMonitor()
+
+    expect(monitor.ingest('The setup notes say Yes, I trust this folder.')).toBe(false)
   })
 })
 

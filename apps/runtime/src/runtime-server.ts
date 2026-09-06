@@ -50,6 +50,7 @@ import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracke
 import { ClaudePermissionModeTracker } from './session/claude-permission-mode-tracker'
 import {
   ClaudeFullResumePromptMonitor,
+  ClaudeWorkspaceTrustPromptMonitor,
   ProviderResumeMonitor
 } from './session/provider-resume-monitor'
 import { SessionHudRegistry, type HudPermissionMode } from './session/session-hud-registry'
@@ -153,6 +154,9 @@ const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const CLAUDE_FULL_RESUME_SELECTION = '\u001b[B\r'
+const CLAUDE_NEXT_OPTION = '\u001b[B'
+const CLAUDE_CONFIRM_OPTION = '\r'
+const CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS = 200
 const execFileAsync = promisify(execFile)
 
 export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Object.freeze([
@@ -1791,9 +1795,22 @@ export class RuntimeServer {
       const fullResumePromptMonitor = message.profile === 'claude-code' && resumeBinding
         ? new ClaudeFullResumePromptMonitor()
         : undefined
+      const workspaceTrustPromptMonitor = message.profile === 'claude-code' && resumeBinding &&
+        permissionMode === 'bypassPermissions'
+        ? new ClaudeWorkspaceTrustPromptMonitor()
+        : undefined
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
       let pendingFullResumeSelection = false
+      let pendingWorkspaceTrustSelection = false
+      const selectTrustedWorkspace = (session: PtySession): void => {
+        session.write(CLAUDE_NEXT_OPTION)
+        setTimeout(() => {
+          if (this.#sessions.get(message.sessionId) === session) {
+            session.write(CLAUDE_CONFIRM_OPTION)
+          }
+        }, CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS)
+      }
       let emittedTerminalOutput = false
       let controlEnvironment: Record<string, string> | undefined
       if (this.#control) {
@@ -1971,6 +1988,10 @@ export class RuntimeServer {
           if (fullResumePromptMonitor?.ingest(data)) {
             if (activeSession) activeSession.write(CLAUDE_FULL_RESUME_SELECTION)
             else pendingFullResumeSelection = true
+          }
+          if (workspaceTrustPromptMonitor?.ingest(data)) {
+            if (activeSession) selectTrustedWorkspace(activeSession)
+            else pendingWorkspaceTrustSelection = true
           }
           if (providerDerivationState === 'pending') {
             pendingProviderOutput = (pendingProviderOutput + data)
@@ -2173,6 +2194,10 @@ export class RuntimeServer {
       if (pendingFullResumeSelection) {
         session.write(CLAUDE_FULL_RESUME_SELECTION)
         pendingFullResumeSelection = false
+      }
+      if (pendingWorkspaceTrustSelection) {
+        selectTrustedWorkspace(session)
+        pendingWorkspaceTrustSelection = false
       }
       if (this.#applyProviderIdentityMismatch(message.sessionId)) return
       this.#endedSessionIds.delete(message.sessionId)

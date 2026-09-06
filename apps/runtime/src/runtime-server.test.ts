@@ -6580,6 +6580,75 @@ sleep 30
     }
   })
 
+  it('trusts the workspace when restoring a bypass-permission provider session', async () => {
+    const executable = join(root, 'workspace-trust-resume-fixture.py')
+    const inputMarker = join(root, 'workspace-trust-resume-input.txt')
+    await writeFile(inputMarker, '')
+    await writeFile(executable, [
+      '#!/usr/bin/python3',
+      'import os, sys, time, tty',
+      'sys.stdout.write("Accessing workspace:\\r\\n/Users/example\\r\\n")',
+      'sys.stdout.write("Quick safety check: Is this a project you created or one you trust?\\r\\n")',
+      'sys.stdout.write("Claude Code\\\'ll be able to read, edit, and execute files here.\\r\\n")',
+      'sys.stdout.write("No, exit\\r\\nYes, I trust this folder\\r\\n")',
+      'sys.stdout.write("Enter to confirm · Esc to cancel\\r\\n")',
+      'sys.stdout.flush()',
+      'tty.setraw(0)',
+      'down = os.read(0, 3)',
+      'started = time.monotonic()',
+      'confirm = os.read(0, 1)',
+      'elapsed_ms = round((time.monotonic() - started) * 1000)',
+      'with open(os.environ["MATOU_TEST_WORKSPACE_TRUST_INPUT"], "w") as marker:',
+      '    marker.write(f"{down.hex()}:{confirm.hex()}:{elapsed_ms}")',
+      'sys.stdout.write("WORKSPACE_TRUST_READY\\r\\n")',
+      'sys.stdout.flush()',
+      'time.sleep(30)',
+      ''
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousCommand = process.env.MATOU_CLAUDE_COMMAND
+    const previousInputMarker = process.env.MATOU_TEST_WORKSPACE_TRUST_INPUT
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_TEST_WORKSPACE_TRUST_INPUT = inputMarker
+    const sessions = createTestSessionRegistry()
+    const trustPort = new MockPort()
+    const trustServer = new RuntimeServer(
+      trustPort, root, database, undefined, undefined, sessions, undefined, undefined,
+      { providerResumeTimeoutMs: 2_000 }
+    )
+    try {
+      registerSession(database, 'workspace-trust-resume', 'claude-code')
+      database.run(
+        `INSERT INTO provider_bindings (
+           id, session_id, provider, provider_session_id, resume_state, metadata_json,
+           created_at, updated_at, validated_at
+         ) VALUES (?, ?, 'claude-code', ?, 'available', ?, 1, 1, 1)`,
+        'binding-workspace-trust-resume', 'workspace-trust-resume',
+        'provider-workspace-trust-resume', JSON.stringify({ permissionMode: 'bypassPermissions' })
+      )
+      trustPort.receive({
+        type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
+        clientId: 'workspace-trust-resume-renderer'
+      })
+      trustPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'workspace-trust-resume', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntilAsync(async () => (
+        await readFile(inputMarker, 'utf8')
+      ).startsWith('1b5b42:0d:'))
+
+      const [down, confirm, elapsedMs] = (await readFile(inputMarker, 'utf8')).split(':')
+      expect({ down, confirm }).toEqual({ down: '1b5b42', confirm: '0d' })
+      expect(Number(elapsedMs)).toBeGreaterThanOrEqual(100)
+    } finally {
+      trustServer.close()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
+      restoreEnv('MATOU_TEST_WORKSPACE_TRUST_INPUT', previousInputMarker)
+    }
+  })
+
   it('keeps an interactive Claude resume alive when identity waits for user confirmation', async () => {
     const executable = join(root, 'interactive-provider-session.sh')
     await writeFile(executable, [

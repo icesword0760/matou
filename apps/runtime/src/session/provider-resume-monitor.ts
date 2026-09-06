@@ -14,6 +14,15 @@ const CLAUDE_FULL_RESUME_PROMPT_MARKERS = [
   'enter to confirm'
 ]
 
+const CLAUDE_WORKSPACE_TRUST_PROMPT_MARKERS = [
+  'accessing workspace:',
+  'quick safety check:',
+  "claude code'll be able to read, edit, and execute files here.",
+  'no, exit',
+  'yes, i trust this folder',
+  'enter to confirm'
+]
+
 export class ClaudeFullResumePromptMonitor {
   #recentOutput = ''
   #handled = false
@@ -24,6 +33,26 @@ export class ClaudeFullResumePromptMonitor {
       .toLowerCase()
       .slice(-8_192)
     if (!CLAUDE_FULL_RESUME_PROMPT_MARKERS.every((marker) => this.#recentOutput.includes(marker))) {
+      return false
+    }
+    this.#handled = true
+    this.#recentOutput = ''
+    return true
+  }
+}
+
+export class ClaudeWorkspaceTrustPromptMonitor {
+  #recentOutput = ''
+  #handled = false
+
+  ingest(data: string): boolean {
+    if (this.#handled) return false
+    this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
+      .toLowerCase()
+      .slice(-8_192)
+    if (!CLAUDE_WORKSPACE_TRUST_PROMPT_MARKERS.every(
+      (marker) => this.#recentOutput.includes(marker)
+    )) {
       return false
     }
     this.#handled = true
