@@ -6466,7 +6466,7 @@ sleep 30
     }
   })
 
-  it('parks an unresponsive provider resume at the product deadline', async () => {
+  it('releases recovery scheduling without killing a silent provider resume', async () => {
     const executable = join(root, 'unresponsive-provider-session.sh')
     await writeFile(executable, '#!/bin/sh\nsleep 30\n')
     await chmod(executable, 0o755)
@@ -6483,7 +6483,7 @@ sleep 30
          ) VALUES (?, ?, 'claude-code', ?, 'available', '{}', 1, 1, 1)`,
         'binding-timeout', 'provider-timeout-session', 'unresponsive-provider-42'
       )
-      new RuntimeServer(
+      const timeoutServer = new RuntimeServer(
         timeoutPort, root, database, undefined, undefined, sessions, undefined, undefined,
         { providerResumeTimeoutMs: 25 }
       )
@@ -6491,22 +6491,23 @@ sleep 30
         type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION,
         clientId: 'provider-timeout-renderer'
       })
-      timeoutPort.receive({
-        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
-        sessionId: 'provider-timeout-session', executionContextId: 'replay-context',
-        profile: 'claude-code', cols: 80, rows: 24
+      const recovery = timeoutServer.ensureSessionRunning({
+        sessionId: 'provider-timeout-session', sceneId: 'scene-1',
+        priority: 'active-session', enqueueSequence: 1,
+        executionContextId: 'replay-context', profile: 'claude-code'
       })
-
-      await waitUntil(() => database.get<{ restore_state: string }>(
-        'SELECT restore_state FROM provider_bindings WHERE id = ?', 'binding-timeout'
-      )?.restore_state === 'failed')
+      await expect(Promise.race([
+        recovery.then(() => 'released'),
+        new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 250))
+      ])).resolves.toBe('released')
       expect(database.get<{ kind: string }>(
         'SELECT kind FROM sessions WHERE id = ?', 'provider-timeout-session'
       )).toEqual({ kind: 'claude-code' })
-      expect(sessions.get('provider-timeout-session')).toBeUndefined()
-      expect(database.get<{ resume_state: string }>(
-        'SELECT resume_state FROM provider_bindings WHERE id = ?', 'binding-timeout'
-      )).toEqual({ resume_state: 'failed' })
+      expect(sessions.get('provider-timeout-session')).toBeDefined()
+      expect(database.get<{ resume_state: string; restore_state: string }>(
+        'SELECT resume_state, restore_state FROM provider_bindings WHERE id = ?', 'binding-timeout'
+      )).toEqual({ resume_state: 'available', restore_state: 'none' })
+      timeoutServer.close()
     } finally {
       timeoutPort.receive({
         type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
@@ -6641,7 +6642,7 @@ sleep 30
 
       const [down, confirm, elapsedMs] = (await readFile(inputMarker, 'utf8')).split(':')
       expect({ down, confirm }).toEqual({ down: '1b5b42', confirm: '0d' })
-      expect(Number(elapsedMs)).toBeGreaterThanOrEqual(100)
+      expect(Number(elapsedMs)).toBeGreaterThanOrEqual(500)
     } finally {
       trustServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)

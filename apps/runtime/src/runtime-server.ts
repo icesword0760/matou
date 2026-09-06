@@ -156,7 +156,7 @@ const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const CLAUDE_FULL_RESUME_SELECTION = '\u001b[B\r'
 const CLAUDE_NEXT_OPTION = '\u001b[B'
 const CLAUDE_CONFIRM_OPTION = '\r'
-const CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS = 200
+const CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS = 750
 const execFileAsync = promisify(execFile)
 
 export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Object.freeze([
@@ -2478,7 +2478,9 @@ export class RuntimeServer {
       const reason = monitor.timeout()
       if (this.#sessions.get(message.sessionId) !== session) return
       if (!reason) {
-        if (monitor.isSettled) this.#settleProviderRecovery(message.sessionId)
+        // The deadline only bounds the startup queue. Keep a silent PTY alive
+        // and keep monitoring it for a definitive identity mismatch or exit.
+        this.#settleProviderRecovery(message.sessionId)
         return
       }
       this.#parkResumeFailure(message, session, bindingId, reason)

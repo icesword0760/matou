@@ -104,12 +104,13 @@ describe('ProviderResumeMonitor', () => {
     expect(monitor.ingest('Reading session context...\r\nReady.')).toBeUndefined()
   })
 
-  it('reports a resume failure when the provider remains unresponsive until the deadline', () => {
+  it('keeps a silent provider resume alive after the readiness deadline', () => {
     const monitor = new ProviderResumeMonitor('provider-42')
     const timeout = (monitor as unknown as { timeout?: () => string }).timeout
 
-    expect(timeout?.call(monitor)).toBe('provider resume timed out')
-    expect(monitor.isMonitoring).toBe(false)
+    expect(timeout?.call(monitor)).toBeUndefined()
+    expect(monitor.isMonitoring).toBe(true)
+    expect(monitor.isSettled).toBe(false)
   })
 
   it('keeps a visibly interactive provider session alive at the identity deadline', () => {

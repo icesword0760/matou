@@ -103,14 +103,15 @@ export class ProviderResumeMonitor {
     // Claude may pause on an interactive startup screen (for example, the
     // workspace trust confirmation) before it can emit the identity hook.
     // Visible provider text proves the PTY is live and must remain available
-    // for the user's answer; only a completely silent launch is unresponsive.
+    // for the user's answer. A silent process can still be loading hooks,
+    // credentials, or remote state, so the readiness deadline must not turn
+    // an inconclusive wait into a permanent restore failure.
     if (this.#recentOutput.length > 0) {
       this.#settled = true
       this.#recentOutput = ''
       return undefined
     }
-    this.#failed = true
-    return 'provider resume timed out'
+    return undefined
   }
 }
 
