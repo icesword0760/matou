@@ -156,7 +156,8 @@ const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
 const CLAUDE_FULL_RESUME_SELECTION = '\u001b[B\r'
 const CLAUDE_NEXT_OPTION = '\u001b[B'
 const CLAUDE_CONFIRM_OPTION = '\r'
-const CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS = 750
+const CLAUDE_WORKSPACE_TRUST_SELECTION_DELAY_MS = 500
+const CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS = 150
 const execFileAsync = promisify(execFile)
 
 export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Object.freeze([
@@ -1804,12 +1805,18 @@ export class RuntimeServer {
       let pendingFullResumeSelection = false
       let pendingWorkspaceTrustSelection = false
       const selectTrustedWorkspace = (session: PtySession): void => {
-        session.write(CLAUDE_NEXT_OPTION)
         setTimeout(() => {
-          if (this.#sessions.get(message.sessionId) === session) {
-            session.write(CLAUDE_CONFIRM_OPTION)
-          }
-        }, CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS)
+          if (this.#sessions.get(message.sessionId) !== session) return
+          // The provider redraws this startup screen once after first paint and
+          // resets the highlighted row. Select only after that redraw, then
+          // give the TUI one frame to apply the choice before confirming it.
+          session.write(CLAUDE_NEXT_OPTION)
+          setTimeout(() => {
+            if (this.#sessions.get(message.sessionId) === session) {
+              session.write(CLAUDE_CONFIRM_OPTION)
+            }
+          }, CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS)
+        }, CLAUDE_WORKSPACE_TRUST_SELECTION_DELAY_MS)
       }
       let emittedTerminalOutput = false
       let controlEnvironment: Record<string, string> | undefined

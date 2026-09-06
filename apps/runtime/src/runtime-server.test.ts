@@ -6595,12 +6595,14 @@ sleep 30
       'sys.stdout.write("Enter to confirm · Esc to cancel\\r\\n")',
       'sys.stdout.flush()',
       'tty.setraw(0)',
+      'started = time.monotonic()',
       'down = os.read(0, 3)',
+      'down_delay_ms = round((time.monotonic() - started) * 1000)',
       'started = time.monotonic()',
       'confirm = os.read(0, 1)',
-      'elapsed_ms = round((time.monotonic() - started) * 1000)',
+      'confirm_delay_ms = round((time.monotonic() - started) * 1000)',
       'with open(os.environ["MATOU_TEST_WORKSPACE_TRUST_INPUT"], "w") as marker:',
-      '    marker.write(f"{down.hex()}:{confirm.hex()}:{elapsed_ms}")',
+      '    marker.write(f"{down.hex()}:{confirm.hex()}:{down_delay_ms}:{confirm_delay_ms}")',
       'sys.stdout.write("WORKSPACE_TRUST_READY\\r\\n")',
       'sys.stdout.flush()',
       'time.sleep(30)',
@@ -6640,9 +6642,12 @@ sleep 30
         await readFile(inputMarker, 'utf8')
       ).startsWith('1b5b42:0d:'))
 
-      const [down, confirm, elapsedMs] = (await readFile(inputMarker, 'utf8')).split(':')
+      const [down, confirm, downDelayMs, confirmDelayMs] = (
+        await readFile(inputMarker, 'utf8')
+      ).split(':')
       expect({ down, confirm }).toEqual({ down: '1b5b42', confirm: '0d' })
-      expect(Number(elapsedMs)).toBeGreaterThanOrEqual(500)
+      expect(Number(downDelayMs)).toBeGreaterThanOrEqual(300)
+      expect(Number(confirmDelayMs)).toBeGreaterThanOrEqual(100)
     } finally {
       trustServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
