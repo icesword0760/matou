@@ -49,6 +49,31 @@ describe('ClaudeSessionCatalog', () => {
     })
   })
 
+  it('keeps a session in its original workspace after later messages change cwd', async () => {
+    const laterCwd = join(workspace, 'generated-output')
+    await writeSession(workspace, 'changed-cwd-session', [
+      row('user', 'changed-cwd-session', workspace, '2026-09-07T01:00:00.000Z', {
+        role: 'user', content: '整理企业介绍材料'
+      }),
+      row('assistant', 'changed-cwd-session', laterCwd, '2026-09-08T04:27:47.000Z', {
+        role: 'assistant', model: 'claude-opus-5', content: '材料已输出到新目录。'
+      }),
+      { type: 'ai-title', sessionId: 'changed-cwd-session', aiTitle: '企业介绍材料整理' }
+    ])
+
+    const result = await catalog.list({ cwd: workspace, query: '' })
+
+    expect(result.sessions).toEqual([
+      expect.objectContaining({
+        providerSessionId: 'changed-cwd-session',
+        title: '企业介绍材料整理',
+        cwd: await realpath(workspace),
+        updatedAt: Date.parse('2026-09-08T04:27:47.000Z'),
+        eventCount: 2
+      })
+    ])
+  })
+
   it('searches message text and tool calls while returning exact preview event indexes', async () => {
     await writeSession(workspace, 'search-session', [
       row('user', 'search-session', workspace, '2026-08-30T10:00:00.000Z', {

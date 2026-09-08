@@ -294,7 +294,11 @@ async function indexTranscript(
     } catch {
       continue
     }
-    if (typeof row.cwd === 'string' && row.cwd.trim()) cwd = row.cwd
+    // Claude keeps a transcript in the project bucket where the Session was
+    // created even when later turns run after `cd`. Match that stable origin
+    // instead of the latest row so the catalog mirrors the provider's resume
+    // list and recent Sessions do not disappear from their original workspace.
+    if (!cwd && typeof row.cwd === 'string' && row.cwd.trim()) cwd = row.cwd
     if (row.type === 'ai-title' && typeof row.aiTitle === 'string' && row.aiTitle.trim()) {
       autoTitle = row.aiTitle.trim()
     }

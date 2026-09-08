@@ -49,6 +49,22 @@ test.describe('load an existing Claude Code session', () => {
         })
       ]
       await writeFile(join(projectDirectory, 'load-session-e2e.jsonl'), transcriptRows.join('\n'))
+      await writeFile(join(projectDirectory, 'changed-cwd-session-e2e.jsonl'), [
+        JSON.stringify({
+          type: 'user', sessionId: 'changed-cwd-session-e2e', cwd: fixture.workspaceDirectory,
+          timestamp: '2026-09-01T10:00:00.000Z',
+          message: { role: 'user', content: '整理最新项目材料' }
+        }),
+        JSON.stringify({
+          type: 'assistant', sessionId: 'changed-cwd-session-e2e',
+          cwd: join(fixture.workspaceDirectory, 'generated-output'),
+          timestamp: '2026-09-01T10:01:00.000Z',
+          message: { role: 'assistant', model: 'claude-opus-5', content: '材料已经整理完成。' }
+        }),
+        JSON.stringify({
+          type: 'ai-title', sessionId: 'changed-cwd-session-e2e', aiTitle: '最新项目材料'
+        })
+      ].join('\n'))
       await writeFile(providerExecutable, [
         '#!/bin/sh',
         'printf "%s\\n" "$*" >> "$MATOU_LOAD_SESSION_INVOCATIONS"',
@@ -72,8 +88,11 @@ test.describe('load an existing Claude Code session', () => {
       await fixture.page.getByRole('button', { name: /载入 Claude Code 会话到/ }).click()
       const dialog = fixture.page.getByRole('dialog', { name: '载入 Claude Code 会话' })
       await expect(dialog).toBeVisible()
+      await expect(dialog.getByRole('button', { name: /预览会话：最新项目材料/ }))
+        .toBeVisible()
       await expect(dialog.getByRole('button', { name: /预览会话：检查通知中心的聚合逻辑/ }))
         .toBeVisible()
+      await dialog.getByRole('button', { name: /预览会话：检查通知中心的聚合逻辑/ }).click()
       await expect(dialog).toContainText('开放所有权限')
       await expect(dialog.getByRole('status')).toContainText('已加载 200 / 400 条')
 
