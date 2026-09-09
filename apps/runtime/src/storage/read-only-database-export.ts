@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { cp, mkdir, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
+import { runtimeMessages } from '../i18n/messages'
+
 export async function exportReadOnlyDatabaseBundle(
   databasePath: string,
   destinationRoot: string,
@@ -17,7 +19,9 @@ export async function exportReadOnlyDatabaseBundle(
     await cp(source, join(exportPath, name), { errorOnExist: true })
     exportedFiles.push(name)
   }
-  if (exportedFiles.length === 0) throw new Error('没有可导出的数据库文件')
+  if (exportedFiles.length === 0) {
+    throw new Error(runtimeMessages().storage.noDatabaseFilesToExport)
+  }
   await writeFile(join(exportPath, 'manifest.json'), JSON.stringify({
     mode: 'read-only', sourceDatabasePath: databasePath, exportedAt: now, exportedFiles
   }, null, 2), { encoding: 'utf8', mode: 0o600 })

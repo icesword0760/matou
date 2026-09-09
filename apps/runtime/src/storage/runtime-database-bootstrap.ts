@@ -11,6 +11,7 @@ import {
 import { link, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
+import { runtimeMessages } from '../i18n/messages'
 import {
   RuntimeDatabase,
   type RuntimeDatabaseOwnership
@@ -661,7 +662,7 @@ export async function resolveRuntimeDatabaseRecoveryMarker(
     required.recoveryId !== recoveryId ||
     hasMatchingResolvedTombstone(required)
   ) {
-    throw new Error('数据库恢复状态已更新，请使用最新恢复页面重试')
+    throw new Error(runtimeMessages().storage.recoveryStateChanged)
   }
   const tombstonePath = resolvedTombstonePath(required)
   const tombstone = {

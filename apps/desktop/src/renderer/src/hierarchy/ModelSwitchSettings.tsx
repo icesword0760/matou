@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
-import type {
-  ProviderCli, ProviderConfigActivationResult, ProviderConfigInput,
-  ProviderConfigSnapshot, ProviderConfigView, RpcMethod
+import {
+  CLI_DEFAULT_MODEL,
+  type ProviderCli, type ProviderConfigActivationResult, type ProviderConfigInput,
+  type ProviderConfigSnapshot, type ProviderConfigView, type RpcMethod
 } from '@matou/contracts'
 
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
@@ -163,7 +164,7 @@ export function ModelSwitchSettings({ client, onClose }: {
         {loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
           {active && <section className="model-settings__current" aria-label={m.activeProvider}>
             <ProviderLogo provider={active} />
-            <div><strong>{active.name}</strong><span>{active.model} · {shortEndpoint(active.endpoint)}</span></div>
+            <div><strong>{active.name}</strong><span>{modelLabel(active.model, m.cliDefaultModel)} · {shortEndpoint(active.endpoint)}</span></div>
             <b>{m.inGlobalUse}</b>
           </section>}
           <div className="model-settings__toolbar">
@@ -177,11 +178,11 @@ export function ModelSwitchSettings({ client, onClose }: {
               return <article key={provider.id} className={`model-provider${current ? ' is-current' : ''}`}>
                 <ProviderLogo provider={provider} />
                 <div className="model-provider__name"><strong>{provider.name}{current && <i>{m.inUse}</i>}</strong><span>{shortEndpoint(provider.endpoint)}</span></div>
-                <div className="model-provider__model"><strong>{provider.model}</strong><span>{m.defaultModel}{provider.hasApiKey ? m.keyConfigured : ''}</span></div>
+                <div className="model-provider__model"><strong>{modelLabel(provider.model, m.cliDefaultModel)}</strong><span>{m.defaultModel}{provider.hasApiKey ? m.keyConfigured : ''}</span></div>
                 <div className="model-provider__actions">
                   <button type="button" onClick={() => setDraft({
                     id: provider.id, name: provider.name, endpoint: provider.endpoint,
-                    model: provider.builtIn && provider.model === 'CLI 默认' ? '' : provider.model,
+                    model: provider.builtIn && provider.model === CLI_DEFAULT_MODEL ? '' : provider.model,
                     apiKey: '', ...(provider.builtIn ? { builtIn: true } : {})
                   })}>{m.edit}</button>
                   <button className="primary" type="button" disabled={current}
@@ -237,6 +238,8 @@ function ProviderLogo({ provider }: { provider: ProviderConfigView }) {
 }
 function SlidersIcon() { return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg> }
 function shortEndpoint(value: string) { return value.replace(/^https?:\/\//, '').replace(/\/$/, '') }
+/** The runtime stores a sentinel when a provider keeps the model the CLI picks. */
+function modelLabel(model: string, cliDefault: string) { return model === CLI_DEFAULT_MODEL ? cliDefault : model }
 function tone(name: string) { return name.toLowerCase().includes('openai') ? 'openai' : name.toLowerCase().includes('anthropic') ? 'anthropic' : 'custom' }
 function validateDraft(draft: ProviderDraft): string {
   const m = messages().hierarchyShell.modelSettings

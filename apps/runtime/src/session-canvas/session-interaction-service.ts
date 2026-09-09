@@ -3,6 +3,7 @@ import type {
   SceneSessionGraph
 } from '@matou/domain'
 
+import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 import { projectSceneGraphFrom } from './session-graph-repository'
@@ -44,7 +45,7 @@ export class SessionInteractionService {
     input: RecordSessionInteractionInput
   ): RecordedSessionInteraction {
     if (!ORDERING_INTERACTIONS.has(input.interactionKind)) {
-      throw new Error('用户交互类型不参与会话排序')
+      throw new Error(runtimeMessages().sessionCanvas.interactionKindNotOrdering)
     }
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const owner = tx.get<{

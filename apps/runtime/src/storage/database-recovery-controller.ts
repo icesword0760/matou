@@ -4,6 +4,7 @@ import { basename, join } from 'node:path'
 
 import type { RuntimeRecoveryCommand } from '@matou/contracts'
 
+import { runtimeMessages } from '../i18n/messages'
 import { DatabaseBackupService } from './database-backup-service'
 import { RuntimeDatabase, type RuntimeDatabaseOwnership } from './database'
 import {
@@ -70,7 +71,7 @@ export class DatabaseRecoveryController {
       command.action !== 'export-recovery-bundle' &&
       command.expectedRecoveryId !== recovery.recoveryId
     ) {
-      throw new Error('数据库恢复周期已更新，本次操作已停止')
+      throw new Error(runtimeMessages().storage.recoveryCycleChanged)
     }
     switch (command.action) {
       case 'export-recovery-bundle':
@@ -85,7 +86,7 @@ export class DatabaseRecoveryController {
       case 'retry-open':
         return this.#executeOpeningAction(recovery, command.requestId, async () => {
           if (!await isFile(recovery.durableDatabasePath)) {
-            throw new Error('原数据库尚未回到可检查的位置，请先恢复备份或导出恢复资料')
+            throw new Error(runtimeMessages().storage.originalDatabaseMissing)
           }
         })
       case 'start-empty-database':
@@ -141,7 +142,7 @@ export class DatabaseRecoveryController {
         } catch (cleanupError) {
           throw new AggregateError(
             [error, cleanupError],
-            '数据库恢复失败，资源清理将在下一次操作前重试'
+            runtimeMessages().storage.recoveryCleanupPending
           )
         }
       }
@@ -228,19 +229,19 @@ export class DatabaseRecoveryController {
 
 async function assertRecoveryStillActive(recovery: RecoveryRequired): Promise<void> {
   if (await isRuntimeDatabaseRecoveryResolved(recovery.markerPath, recovery.recoveryId)) {
-    throw new Error('数据库恢复已由其他 Runtime 完成，本次操作已停止')
+    throw new Error(runtimeMessages().storage.recoveryTakenOver)
   }
   let marker: Partial<RecoveryRequired> & { state?: unknown }
   try {
     marker = JSON.parse(await readFile(recovery.markerPath, 'utf8')) as Partial<RecoveryRequired>
   } catch (error) {
     if (errorCode(error) === 'ENOENT') {
-      throw new Error('数据库恢复已由其他 Runtime 完成，本次操作已停止')
+      throw new Error(runtimeMessages().storage.recoveryTakenOver)
     }
     throw error
   }
   if (marker.state === 'resolved' && marker.recoveryId === recovery.recoveryId) {
-    throw new Error('数据库恢复已由其他 Runtime 完成，本次操作已停止')
+    throw new Error(runtimeMessages().storage.recoveryTakenOver)
   }
   if (
     marker.state !== 'required' ||
@@ -250,7 +251,7 @@ async function assertRecoveryStillActive(recovery: RecoveryRequired): Promise<vo
     marker.quarantinedPath !== recovery.quarantinedPath ||
     marker.markerPath !== recovery.markerPath
   ) {
-    throw new Error('数据库恢复状态已更新，请使用最新恢复页面重试')
+    throw new Error(runtimeMessages().storage.recoveryStateChanged)
   }
 }
 

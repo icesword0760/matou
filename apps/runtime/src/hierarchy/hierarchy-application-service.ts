@@ -12,8 +12,10 @@ import type {
   Workspace
 } from '@matou/domain'
 
+import { HierarchyConflictError, HierarchyEntityMissingError } from './hierarchy-errors'
 import { createHierarchyIds, type HierarchyIds } from './hierarchy-ids'
 import { WorkspacePathInvalidError } from './workspace-path-service'
+import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type {
   DomainMutationContext,
@@ -326,7 +328,7 @@ export class HierarchyApplicationService {
           windowId: input.windowId,
           name: input.defaultName,
           rootDirectory: input.defaultRootDirectory,
-          taskTitle: '默认',
+          taskTitle: runtimeMessages().hierarchy.defaultTask,
           commandId: command.commandId,
           now: input.now,
           isDefault: true,
@@ -380,7 +382,7 @@ export class HierarchyApplicationService {
           windowId: input.windowId,
           name: input.name,
           rootDirectory,
-          taskTitle: '默认',
+          taskTitle: runtimeMessages().hierarchy.defaultTask,
           commandId: command.commandId,
           now: input.now
         })
@@ -401,7 +403,7 @@ export class HierarchyApplicationService {
       'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL', input.workspaceId
     )
     if (!row) throw new Error(`Workspace ${input.workspaceId} does not exist`)
-    throw new Error('工作空间名称跟随目录名称')
+    throw new Error(runtimeMessages().hierarchy.workspaceNameFollowsDirectory)
   }
 
   relinkWorkspace(command: DomainCommandMetadata, input: RelinkWorkspaceInput): Workspace {
@@ -410,12 +412,18 @@ export class HierarchyApplicationService {
       const row = requireRow<WorkspaceRow>(tx.get(
         'SELECT * FROM workspaces WHERE id = ? AND archived_at IS NULL', input.workspaceId
       ), 'Workspace')
-      if (row.is_default === 1) throw new Error('默认工作空间始终指向 macOS 用户目录')
+      if (row.is_default === 1) {
+        throw new Error(runtimeMessages().hierarchy.defaultWorkspaceIsHomeDirectory)
+      }
       const duplicate = tx.get<{ id: string }>(
         'SELECT id FROM workspaces WHERE root_directory = ? AND archived_at IS NULL AND id <> ?',
         rootDirectory, input.workspaceId
       )
-      if (duplicate) throw new Error('该目录已经属于另一个工作空间')
+      if (duplicate) {
+        throw new HierarchyConflictError(
+          'WORKSPACE_DIRECTORY_TAKEN', runtimeMessages().hierarchy.workspaceDirectoryTaken
+        )
+      }
       tx.run(`UPDATE workspaces SET root_directory = ?, path_identity = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
         rootDirectory, `path:${rootDirectory}`, input.now, input.workspaceId)
       tx.run('UPDATE execution_contexts SET cwd = ? WHERE workspace_id = ? AND archived_at IS NULL', rootDirectory, input.workspaceId)
@@ -449,7 +457,7 @@ export class HierarchyApplicationService {
         input.workspaceId
       )
       if (!workspace) throw new Error(`Workspace ${input.workspaceId} does not exist`)
-      if (workspace.is_default === 1) throw new Error('默认工作空间会保留在侧栏中')
+      if (workspace.is_default === 1) throw new Error(runtimeMessages().hierarchy.defaultWorkspaceKept)
       const disposedSessionIds = tx.all<{ id: string }>(
         `SELECT sessions.id FROM sessions
          JOIN tasks ON tasks.id = sessions.task_id
@@ -913,7 +921,7 @@ export class HierarchyApplicationService {
           ids: replacementIds,
           windowId: input.windowId,
           workspace: refreshedWorkspace,
-          title: '默认',
+          title: runtimeMessages().hierarchy.defaultTask,
           commandId: command.commandId,
           now: input.now
         })
@@ -1139,7 +1147,9 @@ export class HierarchyApplicationService {
         name,
         input.sceneId
       )) {
-        throw new Error('当前事项下已存在同名页签')
+        throw new HierarchyConflictError(
+          'DUPLICATE_SCENE_NAME', runtimeMessages().hierarchy.duplicateSceneName
+        )
       }
       tx.run(
         `UPDATE scenes SET name = ?, title_pinned = 1, updated_at = ? WHERE id = ?`,
@@ -1692,7 +1702,8 @@ export class HierarchyApplicationService {
             ), 'Workspace')
             this.#createTaskHierarchy(context, {
               ids: replacementIds, windowId: input.windowId, workspace: refreshed,
-              title: '默认', commandId: command.commandId, now: input.now
+              title: runtimeMessages().hierarchy.defaultTask,
+              commandId: command.commandId, now: input.now
             })
             outcome = 'default-task-created'
           }
@@ -2719,9 +2730,10 @@ function nextTaskTitle(tx: DatabaseTransaction, workspaceId: string): string {
     'SELECT title FROM tasks WHERE workspace_id = ? AND archived_at IS NULL',
     workspaceId
   ).map(({ title }) => title))
-  if (!titles.has('新事项')) return '新事项'
+  const messages = runtimeMessages().hierarchy
+  if (!titles.has(messages.newTask)) return messages.newTask
   for (let suffix = 2; ; suffix += 1) {
-    const candidate = `新事项 ${suffix}`
+    const candidate = messages.newTaskNumbered(suffix)
     if (!titles.has(candidate)) return candidate
   }
 }
@@ -2755,6 +2767,6 @@ function parseStringArray(value: string): string[] {
 }
 
 function requireRow<T>(row: T | undefined, label: string): T {
-  if (!row) throw new Error(`${label} does not exist`)
+  if (!row) throw new HierarchyEntityMissingError(`${label} does not exist`)
   return row
 }

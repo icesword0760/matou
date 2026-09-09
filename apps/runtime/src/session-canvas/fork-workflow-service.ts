@@ -23,6 +23,7 @@ import {
 } from '../hierarchy/hierarchy-application-service'
 import type { ResolvedForkEnvironment } from '../control/host-action-target-resolver'
 import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
+import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainMutationContext, DomainTransactionManager } from '../storage/domain-transaction'
 import { SessionEnvironmentRepository } from '../session/session-environment-repository'
@@ -413,7 +414,7 @@ export class ForkWorkflowService {
       'SELECT * FROM session_fork_intents WHERE session_id = ?', input.sessionId
     ), 'Fork intent')
     if (intent.state !== 'failed') {
-      throw new ForkWorkflowError('FORK_NOT_FAILED', '当前分支无需重试')
+      throw new ForkWorkflowError('FORK_NOT_FAILED', runtimeMessages().sessionCanvas.fork.notFailedRetry)
     }
     const owner = requireRow(this.#database.get<{ workspace_id: string }>(
       `SELECT tasks.workspace_id FROM sessions
@@ -482,7 +483,7 @@ export class ForkWorkflowService {
       'SELECT * FROM session_fork_intents WHERE session_id = ?', input.sessionId
     ), 'Fork intent')
     if (intent.state !== 'failed') {
-      throw new ForkWorkflowError('FORK_NOT_FAILED', '当前分支无需移除')
+      throw new ForkWorkflowError('FORK_NOT_FAILED', runtimeMessages().sessionCanvas.fork.notFailedRemove)
     }
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const session = requireRow(tx.get<{ task_id: string }>(
@@ -647,7 +648,7 @@ export class ForkWorkflowService {
       input.sceneId, input.sourceSessionId
     ), 'SessionMount')
     if (selectedMount.scene_window_id !== null || selectedMount.scene_node_id === null) {
-      throw new ForkWorkflowError('DETACHED_SOURCE', '请先把会话返回当前画布')
+      throw new ForkWorkflowError('DETACHED_SOURCE', runtimeMessages().sessionCanvas.fork.detachedSource)
     }
 
     let forkSource = selected
@@ -662,7 +663,9 @@ export class ForkWorkflowService {
         selected.id
       )
       if (!parent) {
-        throw new ForkWorkflowError('ROOT_HAS_NO_FORK_PARENT', '根层会话可创建子分支')
+        throw new ForkWorkflowError(
+          'ROOT_HAS_NO_FORK_PARENT', runtimeMessages().sessionCanvas.fork.rootHasNoForkParent
+        )
       }
       forkSource = requireRow(this.#database.get<SessionRow>(
         `SELECT id, task_id, execution_context_id, kind, title, cwd
@@ -693,7 +696,7 @@ export class ForkWorkflowService {
   #validForkBinding(source: SessionRow): BindingRow {
     if (source.kind !== 'claude-code' && source.kind !== 'codex') {
       throw new ForkWorkflowError(
-        'FORK_SOURCE_NOT_READY', '完成首轮 AI 对话后可创建分支'
+        'FORK_SOURCE_NOT_READY', runtimeMessages().sessionCanvas.fork.sourceNotReady
       )
     }
     const binding = this.#database.get<BindingRow>(
@@ -711,7 +714,7 @@ export class ForkWorkflowService {
       (source.kind === 'claude-code' && metadata(binding.metadata_json).canFork !== true)
     ) {
       throw new ForkWorkflowError(
-        'FORK_SOURCE_NOT_READY', '完成首轮 AI 对话后可创建分支'
+        'FORK_SOURCE_NOT_READY', runtimeMessages().sessionCanvas.fork.sourceNotReady
       )
     }
     return binding
@@ -720,7 +723,9 @@ export class ForkWorkflowService {
   async #freezeProviderContext(source: SourceContext): Promise<FrozenProviderContext> {
     const profile = source.forkSource.kind
     if (profile !== 'claude-code' && profile !== 'codex') {
-      throw new ForkWorkflowError('FORK_SOURCE_NOT_READY', '完成首轮 AI 对话后可创建分支')
+      throw new ForkWorkflowError(
+        'FORK_SOURCE_NOT_READY', runtimeMessages().sessionCanvas.fork.sourceNotReady
+      )
     }
     const persisted = metadata(source.binding.metadata_json)
     const providerConfigId = typeof persisted.providerConfigId === 'string' &&
@@ -787,7 +792,9 @@ export class ForkWorkflowService {
       environment.executionContextId
     )
     if (!target || target.workspace_id !== source.task.workspace_id) {
-      throw new ForkWorkflowError('WORKTREE_CONFLICT', '当前执行环境已不可用')
+      throw new ForkWorkflowError(
+        'WORKTREE_CONFLICT', runtimeMessages().sessionCanvas.fork.currentEnvironmentUnavailable
+      )
     }
     return {
       worktreeMode: 'current',
@@ -835,12 +842,14 @@ export class ForkWorkflowService {
       environment.worktreeRef !== `worktree:${environment.worktreeId}`
     ) {
       throw new ForkWorkflowError(
-        'WORKTREE_CONFLICT', '指定的 Worktree 已不可用', environment.worktreeRef
+        'WORKTREE_CONFLICT', runtimeMessages().sessionCanvas.fork.worktreeUnavailable,
+        environment.worktreeRef
       )
     }
     if (target.branch_name !== environment.branch || target.git_branch !== environment.branch) {
       throw new ForkWorkflowError(
-        'BRANCH_CONFLICT', `Worktree 当前分支与提交的 ${environment.branch} 不一致`,
+        'BRANCH_CONFLICT',
+        runtimeMessages().sessionCanvas.fork.worktreeBranchMismatch(environment.branch),
         environment.branch
       )
     }
@@ -857,7 +866,11 @@ export class ForkWorkflowService {
        WHERE execution_context_id = ? AND state = 'ready' AND repository_root IS NOT NULL`,
       source.forkSource.execution_context_id
     )
-    if (!git) throw new ForkWorkflowError('GIT_REPOSITORY_REQUIRED', '新工作树需要 Git 仓库')
+    if (!git) {
+      throw new ForkWorkflowError(
+        'GIT_REPOSITORY_REQUIRED', runtimeMessages().sessionCanvas.fork.gitRepositoryRequired
+      )
+    }
     await assertBranchAvailable(git.repository_root, branch)
     const baseRevision = (await exec(
       'git', ['-C', git.repository_root, 'rev-parse', 'HEAD']
@@ -1363,7 +1376,9 @@ async function assertBranchAvailable(repositoryRoot: string, branch: string): Pr
     const checked = await exec('git', ['check-ref-format', '--branch', branch])
     if (checked.stdout.trim() !== branch) throw new Error('branch shorthand is not stable')
   } catch {
-    throw new ForkWorkflowError('INVALID_BRANCH', '分支名称无效', branch)
+    throw new ForkWorkflowError(
+      'INVALID_BRANCH', runtimeMessages().sessionCanvas.fork.invalidBranch, branch
+    )
   }
   try {
     await exec('git', [
@@ -1373,7 +1388,9 @@ async function assertBranchAvailable(repositoryRoot: string, branch: string): Pr
     if (processExitCode(error) === 1) return
     throw error
   }
-  throw new ForkWorkflowError('BRANCH_CONFLICT', `分支 ${branch} 已存在`, branch)
+  throw new ForkWorkflowError(
+    'BRANCH_CONFLICT', runtimeMessages().sessionCanvas.fork.branchExists(branch), branch
+  )
 }
 
 function assertBranchAvailableSync(repositoryRoot: string, branch: string): void {
@@ -1381,7 +1398,9 @@ function assertBranchAvailableSync(repositoryRoot: string, branch: string): void
     encoding: 'utf8'
   })
   if (checked.error || checked.status !== 0 || checked.stdout.trim() !== branch) {
-    throw new ForkWorkflowError('INVALID_BRANCH', '分支名称无效', branch)
+    throw new ForkWorkflowError(
+      'INVALID_BRANCH', runtimeMessages().sessionCanvas.fork.invalidBranch, branch
+    )
   }
   const collision = spawnSync(
     'git', ['-C', repositoryRoot, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
@@ -1390,7 +1409,9 @@ function assertBranchAvailableSync(repositoryRoot: string, branch: string): void
   if (collision.error) throw collision.error
   if (collision.status === 1) return
   if (collision.status === 0) {
-    throw new ForkWorkflowError('BRANCH_CONFLICT', `分支 ${branch} 已存在`, branch)
+    throw new ForkWorkflowError(
+      'BRANCH_CONFLICT', runtimeMessages().sessionCanvas.fork.branchExists(branch), branch
+    )
   }
   throw new Error(collision.stderr.trim() || `Git branch check failed with ${collision.status}`)
 }
@@ -1417,7 +1438,8 @@ function assertDurableBranchAvailable(
   )
   if (conflict) {
     throw new ForkWorkflowError(
-      'BRANCH_CONFLICT', `分支 ${gitPlan.branch} 已被其他 Fork 预留`, gitPlan.branch
+      'BRANCH_CONFLICT', runtimeMessages().sessionCanvas.fork.branchReserved(gitPlan.branch),
+      gitPlan.branch
     )
   }
 }

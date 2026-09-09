@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { DomainCommandMetadata, ForkStage } from '@matou/domain'
 
+import { runtimeMessages } from '../i18n/messages'
 import {
   SessionForkIntentRepository,
   type ForkLease,
@@ -292,7 +293,7 @@ export class ForkOperationCoordinator {
       if (this.#now() >= deadline) {
         const active = this.#leases.get(operationId)
         if (active && !active.stale) {
-          const reason = 'Fork 会话身份确认超时，请重试'
+          const reason = runtimeMessages().sessionCanvas.fork.identityTimeout
           const failed = this.#intents.failOperation({
             operationId,
             lease: active.lease,

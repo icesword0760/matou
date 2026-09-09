@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 
+import { runtimeMessages } from '../i18n/messages'
 import {
   StaleForkProviderIdentityError,
   type ProviderIdentityForkAuthority,
@@ -601,7 +602,7 @@ function codexHookSettings(statusScriptPath: string): unknown {
 
 function codexInlineHookConfig(statusScriptPath: string): string {
   const command = JSON.stringify(shellCommandPath(statusScriptPath))
-  const statusMessage = JSON.stringify('正在确认会话')
+  const statusMessage = JSON.stringify(runtimeMessages().session.hookStatusMessage)
   const event = (timeout: number) =>
     `{ hooks = [{ type = "command", command = ${command}, timeout = ${timeout}, statusMessage = ${statusMessage} }] }`
   return `{ SessionStart = [${event(5)}], SessionEnd = [${event(3)}] }`
@@ -612,7 +613,7 @@ function codexCommandHook(statusScriptPath: string, timeout: number): Record<str
     type: 'command',
     command: shellCommandPath(statusScriptPath),
     timeout,
-    statusMessage: '正在确认会话'
+    statusMessage: runtimeMessages().session.hookStatusMessage
   }
 }
 
@@ -793,7 +794,7 @@ function parseIdleNotification(value: string): string | undefined {
     const parsed = JSON.parse(value) as unknown
     const event = record(parsed)
     if (event?.type !== 'idle_notification') return undefined
-    return nonEmptyText(event.result) ?? '队友已完成当前任务'
+    return nonEmptyText(event.result) ?? runtimeMessages().session.teammateFinished
   } catch {
     return undefined
   }

@@ -1,6 +1,10 @@
 import type { CatalogShape } from '../catalog'
 
-/** Filled in by the remaining runtime localisation work. */
-export const shellHistoryZhCN = {}
+export const shellHistoryZhCN = {
+  /** Written into the terminal between the replayed history and the live shell. */
+  restoredDivider: '──────── 会话已恢复 ────────'
+}
 
-export const shellHistoryEn: CatalogShape<typeof shellHistoryZhCN> = {}
+export const shellHistoryEn: CatalogShape<typeof shellHistoryZhCN> = {
+  restoredDivider: '──────── Session restored ────────'
+}

@@ -19,7 +19,9 @@ import {
   type CreateNavigationOptions,
   type WorkspaceHierarchyResult
 } from '../hierarchy/hierarchy-application-service'
+import { HierarchyConflictError } from '../hierarchy/hierarchy-errors'
 import { createHierarchyIds } from '../hierarchy/hierarchy-ids'
+import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 import { projectSceneGraphFrom } from './session-graph-repository'
@@ -194,7 +196,9 @@ export class SessionCanvasService {
         task.id,
         sceneName
       )) {
-        throw new Error('当前事项下已存在同名页签')
+        throw new HierarchyConflictError(
+          'DUPLICATE_SCENE_NAME', runtimeMessages().hierarchy.duplicateSceneName
+        )
       }
       const sceneOrdinal = tx.get<{ count: number }>(
         `SELECT COUNT(*) AS count FROM scenes
@@ -321,7 +325,7 @@ export class SessionCanvasService {
         input.sceneId, input.sourceSessionId, input.parentSessionId ?? null
       ), 'SessionMount')
       if (sourceMount.scene_window_id !== null || sourceMount.scene_node_id === null) {
-        throw new Error('独立窗口中的会话需要先回到原会话列表')
+        throw new Error(runtimeMessages().sessionCanvas.detachedSessionMustReturn)
       }
       const sourceNode = requireRow(tx.get<SceneNodeRow>(
         `SELECT id, parent_node_id, ordinal FROM scene_nodes WHERE id = ?`,
@@ -926,7 +930,7 @@ export class SessionCanvasService {
          WHERE session_id = ? AND scene_id = ?`,
         input.sessionId, input.sceneId
       )
-      if (!owner) throw new Error('会话不在当前画布中')
+      if (!owner) throw new Error(runtimeMessages().sessionCanvas.sessionNotInCanvas)
       activateSessionInTransaction(tx, input.windowId, input.sessionId, input.now)
       return projectSceneGraphFrom(tx, input.sceneId, input.windowId)
     })
@@ -1014,9 +1018,10 @@ function nextCanvasName(tx: DatabaseTransaction, taskId: string): string {
     `SELECT name FROM scenes WHERE task_id = ? AND archived_at IS NULL`,
     taskId
   ).map(({ name }) => name))
-  if (!names.has('新画布')) return '新画布'
+  const messages = runtimeMessages().sessionCanvas
+  if (!names.has(messages.newCanvas)) return messages.newCanvas
   for (let suffix = 2; ; suffix += 1) {
-    const candidate = `新画布 ${suffix}`
+    const candidate = messages.newCanvasNumbered(suffix)
     if (!names.has(candidate)) return candidate
   }
 }

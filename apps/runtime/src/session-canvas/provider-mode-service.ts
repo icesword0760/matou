@@ -11,6 +11,7 @@ import type {
   SessionWorkStatus
 } from '@matou/domain'
 
+import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
 import { projectSceneGraphFrom } from './session-graph-repository'
@@ -242,7 +243,7 @@ export class ProviderModeService {
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
       if (binding.restore_state !== 'failed') {
-        throw new Error('只有恢复失败的 Claude Code 会话需要重试')
+        throw new Error(runtimeMessages().sessionCanvas.retryRestoreOnlyFailed)
       }
       const metadata = asMetadata(binding.metadata_json)
       metadata.spawnRevision = input.now
@@ -270,7 +271,7 @@ export class ProviderModeService {
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
       if (binding.restore_state !== 'failed') {
-        throw new Error('只有恢复失败的 Claude Code 会话可新开对话')
+        throw new Error(runtimeMessages().sessionCanvas.startFreshOnlyFailed)
       }
       const metadata = asMetadata(binding.metadata_json)
       metadata.spawnRevision = input.now
@@ -451,8 +452,8 @@ function emitRecoveryNotificationFailure(
         operation: 'upsert',
         replacementKey,
         eventType: 'error',
-        title: 'Claude Code 恢复失败',
-        body: result.binding.restoreError ?? 'Claude Code 会话恢复未完成',
+        title: runtimeMessages().sessionCanvas.recoveryFailedTitle,
+        body: result.binding.restoreError ?? runtimeMessages().sessionCanvas.recoveryIncomplete,
         sound: true
       }
     },

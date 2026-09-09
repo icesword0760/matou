@@ -54,6 +54,7 @@ import {
   type CreatedHierarchyPath,
   type WorkspaceHierarchyResult
 } from '../hierarchy/hierarchy-application-service'
+import { HierarchyConflictError, HierarchyEntityMissingError } from '../hierarchy/hierarchy-errors'
 import {
   SessionCanvasService,
   type RemoveSessionBranchResult
@@ -1367,23 +1368,24 @@ function normalizeFacadeError(error: unknown): unknown {
     }
     return new RuntimeHostActionError('TARGET_NOT_READY', error.message, { cause: error })
   }
+  if (error instanceof HierarchyConflictError) {
+    return new RuntimeHostActionError('PATH_CONFLICT', error.message, { cause: error })
+  }
+  if (error instanceof HierarchyEntityMissingError) {
+    return new RuntimeHostActionError('TARGET_NOT_FOUND', error.message, { cause: error })
+  }
   if (error instanceof Error) {
-    // Fragment matching classifies plain Errors thrown by the hierarchy, canvas and
-    // storage layers. Those layers still emit fixed text, so their Chinese fragments
-    // stay listed next to the English ones until each thrower moves to the catalog.
+    // Fragment matching classifies the plain Errors the hierarchy, canvas and storage
+    // layers still throw. Only untranslated developer text is matched: every localised
+    // thrower now carries a code that is checked above.
     if (
       error.message.includes(runtimeMessages().control.forkBatch.inputMismatchFragment) ||
       error.message.includes('was already used for a different request') ||
-      error.message.includes('当前事项下已存在同名页签') ||
-      error.message.includes('already exists in this Workspace') ||
-      error.message.includes('该目录已经属于另一个工作空间')
+      error.message.includes('already exists in this Workspace')
     ) {
       return new RuntimeHostActionError('PATH_CONFLICT', error.message, { cause: error })
     }
-    if (
-      error.message.includes('does not exist') ||
-      error.message.includes('不存在')
-    ) {
+    if (error.message.includes('does not exist')) {
       return new RuntimeHostActionError('TARGET_NOT_FOUND', error.message, { cause: error })
     }
     if (

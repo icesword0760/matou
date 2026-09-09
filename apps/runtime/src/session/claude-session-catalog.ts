@@ -13,6 +13,8 @@ import type {
   ClaudeSessionSummary
 } from '@matou/contracts'
 
+import { runtimeMessages } from '../i18n/messages'
+
 interface CatalogQuery {
   cwd: string
   query: string
@@ -114,7 +116,7 @@ export class ClaudeSessionCatalog {
     requireProviderSessionId(input.providerSessionId)
     const transcript = (await this.#readWorkspace(input.cwd))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
-    if (!transcript) throw new Error('Claude Code 会话不存在或不属于当前工作空间')
+    if (!transcript) throw new Error(runtimeMessages().session.claudeSessionNotInWorkspace)
     const query = normalizeQuery(input.query)
     const limit = clampInteger(
       input.limit ?? DEFAULT_EVENT_PAGE_LIMIT,
@@ -163,7 +165,7 @@ export class ClaudeSessionCatalog {
     requireProviderSessionId(input.providerSessionId)
     const transcript = (await this.#readWorkspace(input.cwd))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
-    if (!transcript) throw new Error('Claude Code 会话不存在或不属于当前工作空间')
+    if (!transcript) throw new Error(runtimeMessages().session.claudeSessionNotInWorkspace)
     const query = normalizeQuery(input.query)
     const allHits = query ? await this.#searchTranscript(transcript, query) : []
     const offset = clampInteger(input.offset ?? 0, 0, allHits.length)
@@ -324,7 +326,7 @@ async function indexTranscript(
   if (!cwd || events.length === 0) return undefined
   return {
     providerSessionId,
-    title: autoTitle || title || '未命名 Claude 会话',
+    title: autoTitle || title || runtimeMessages().session.untitledClaudeSession,
     ...(autoTitle ? { autoTitle } : {}),
     cwd,
     updatedAt,
@@ -603,7 +605,7 @@ function isProviderSessionId(value: string): boolean {
 }
 
 function requireProviderSessionId(value: string): void {
-  if (!isProviderSessionId(value)) throw new Error('Claude Code 会话标识格式错误')
+  if (!isProviderSessionId(value)) throw new Error(runtimeMessages().session.claudeSessionIdInvalid)
 }
 
 async function canonicalPath(value: string): Promise<string> {

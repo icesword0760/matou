@@ -3,18 +3,16 @@ import { access, constants, stat } from 'node:fs/promises'
 
 import type { WorkspacePathReason, WorkspacePathState } from '@matou/domain'
 
+import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
-
-export const WORKSPACE_PATH_INVALID_MESSAGE =
-  '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
 
 export class WorkspacePathInvalidError extends Error {
   readonly code = 'WORKSPACE_PATH_INVALID' as const
   readonly workspaceId: string
 
   constructor(workspaceId: string) {
-    super(WORKSPACE_PATH_INVALID_MESSAGE)
+    super(runtimeMessages().hierarchy.workspacePathInvalid)
     this.name = 'WorkspacePathInvalidError'
     this.workspaceId = workspaceId
   }

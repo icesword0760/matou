@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 
+import { runtimeMessages } from '../i18n/messages'
+
 export type DisplayNameValidation =
   | { ok: true; displayName: string }
   | {
@@ -13,18 +15,19 @@ export function validateDisplayName(
   input: string,
   activeSiblingNames: readonly string[]
 ): DisplayNameValidation {
+  const messages = runtimeMessages().sessionCanvas.branchName
   const displayName = input.trim()
   if (displayName.length === 0) {
-    return { ok: false, code: 'EMPTY', message: '请输入分支名称', input }
+    return { ok: false, code: 'EMPTY', message: messages.required, input }
   }
   if ([...displayName].length > 64) {
-    return { ok: false, code: 'TOO_LONG', message: '分支名称最多 64 个字符', input }
+    return { ok: false, code: 'TOO_LONG', message: messages.tooLong, input }
   }
   if (activeSiblingNames.includes(displayName)) {
     return {
       ok: false,
       code: 'DUPLICATE',
-      message: `同一层已存在“${displayName}”`,
+      message: messages.duplicate(displayName),
       input
     }
   }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
+import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 
 export const SHELL_HISTORY_BLOCK_LIMIT = 100
@@ -238,7 +239,8 @@ export function formatShellHistoryForTerminal(blocks: readonly ShellHistoryBlock
     const terminatedOutput = output && !output.endsWith('\r\n') ? `${output}\r\n` : output
     return `❯ ${block.command}\r\n${terminatedOutput}`
   }).join('\r\n')
-  return `${rendered}\r\n\u001b[2m──────── 会话已恢复 ────────\u001b[0m\r\n`
+  const divider = runtimeMessages().shellHistory.restoredDivider
+  return `${rendered}\r\n\u001b[2m${divider}\u001b[0m\r\n`
 }
 
 function decodeCommandMarker(marker: string): string | undefined {

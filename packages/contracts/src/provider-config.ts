@@ -1,5 +1,12 @@
 export type ProviderCli = 'claude-code' | 'codex'
 
+/**
+ * Sentinel stored in `ProviderConfigView.model` when a provider keeps the model
+ * the CLI picks itself. It is an identifier, not display text: the renderer
+ * matches it and shows a localised label instead.
+ */
+export const CLI_DEFAULT_MODEL = 'CLI 默认'
+
 export interface ProviderConfigView {
   id: string
   cli: ProviderCli

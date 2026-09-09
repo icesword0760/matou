@@ -2,9 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import type {
-  ProviderCli, ProviderConfigInput, ProviderConfigSnapshot, ProviderConfigView
+import {
+  CLI_DEFAULT_MODEL,
+  type ProviderCli, type ProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView
 } from '@matou/contracts'
+
+import { runtimeMessages } from '../i18n/messages'
 
 interface StoredProvider {
   id: string
@@ -34,21 +37,25 @@ export interface ProviderLaunchSelection {
   env: Record<string, string>
 }
 
-const DEFAULT_STATE: StoredProviderState = {
-  version: 1,
-  revision: 1,
-  providers: {
-    'claude-code': [{
-      id: 'anthropic-official', cli: 'claude-code', name: 'Anthropic 官方',
-      endpoint: 'https://api.anthropic.com', model: '', builtIn: true
-    }],
-    codex: [{
-      id: 'openai-official', cli: 'codex', name: 'OpenAI 官方',
-      endpoint: 'https://api.openai.com/v1', model: '', builtIn: true
-    }]
-  },
-  activeProviderIds: {
-    'claude-code': 'anthropic-official', codex: 'openai-official'
+/** Built fresh on every call so the seed names follow the current locale. */
+function defaultState(): StoredProviderState {
+  const messages = runtimeMessages().providerConfig
+  return {
+    version: 1,
+    revision: 1,
+    providers: {
+      'claude-code': [{
+        id: 'anthropic-official', cli: 'claude-code', name: messages.builtIn.anthropic,
+        endpoint: 'https://api.anthropic.com', model: '', builtIn: true
+      }],
+      codex: [{
+        id: 'openai-official', cli: 'codex', name: messages.builtIn.openai,
+        endpoint: 'https://api.openai.com/v1', model: '', builtIn: true
+      }]
+    },
+    activeProviderIds: {
+      'claude-code': 'anthropic-official', codex: 'openai-official'
+    }
   }
 }
 
@@ -81,7 +88,7 @@ export class ProviderConfigStore {
         ...(existing?.builtIn ? { builtIn: true } : {}),
         ...(apiKey ? { apiKey } : {})
       }
-      if (input.id && !existing) throw new Error('供应商配置不存在')
+      if (input.id && !existing) throw new Error(runtimeMessages().providerConfig.notFound)
       const index = list.findIndex(({ id }) => id === provider.id)
       if (index >= 0) list[index] = provider
       else list.push(provider)
@@ -94,9 +101,11 @@ export class ProviderConfigStore {
     return this.#mutate(async (state) => {
       const list = state.providers[cli]
       const provider = list.find(({ id }) => id === providerId)
-      if (!provider) throw new Error('供应商配置不存在')
-      if (state.activeProviderIds[cli] === providerId) throw new Error('使用中的供应商需要先切换后再删除')
-      if (provider.builtIn) throw new Error('官方供应商配置保留为默认入口')
+      if (!provider) throw new Error(runtimeMessages().providerConfig.notFound)
+      if (state.activeProviderIds[cli] === providerId) {
+        throw new Error(runtimeMessages().providerConfig.activeCannotBeDeleted)
+      }
+      if (provider.builtIn) throw new Error(runtimeMessages().providerConfig.builtInKept)
       state.providers[cli] = list.filter(({ id }) => id !== providerId)
       state.revision += 1
       return publicSnapshot(state)
@@ -105,7 +114,9 @@ export class ProviderConfigStore {
 
   async activate(cli: ProviderCli, providerId: string): Promise<ProviderConfigSnapshot> {
     return this.#mutate(async (state) => {
-      if (!state.providers[cli].some(({ id }) => id === providerId)) throw new Error('供应商配置不存在')
+      if (!state.providers[cli].some(({ id }) => id === providerId)) {
+        throw new Error(runtimeMessages().providerConfig.notFound)
+      }
       if (state.activeProviderIds[cli] !== providerId) {
         state.activeProviderIds[cli] = providerId
         state.revision += 1
@@ -129,7 +140,7 @@ export class ProviderConfigStore {
     const state = await this.#read()
     const selectedId = providerConfigId ?? state.activeProviderIds[cli]
     const provider = state.providers[cli].find(({ id }) => id === selectedId)
-    if (!provider) throw new Error('会话绑定的供应商配置不存在')
+    if (!provider) throw new Error(runtimeMessages().providerConfig.sessionProviderNotFound)
     const endpoint = provider.endpoint.replace(/\/$/, '')
     if (cli === 'claude-code') {
       return {
@@ -170,7 +181,7 @@ export class ProviderConfigStore {
       const parsed = JSON.parse(await readFile(this.#path, 'utf8')) as Partial<StoredProviderState>
       return normalizeState(parsed)
     } catch (error) {
-      if (isMissing(error)) return structuredClone(DEFAULT_STATE)
+      if (isMissing(error)) return defaultState()
       throw error
     }
   }
@@ -185,30 +196,34 @@ export class ProviderConfigStore {
 }
 
 function normalizeInput(input: ProviderConfigInput): ProviderConfigInput & { apiKey: string } {
-  if (input.cli !== 'claude-code' && input.cli !== 'codex') throw new Error('CLI 类型不正确')
+  if (input.cli !== 'claude-code' && input.cli !== 'codex') {
+    throw new Error(runtimeMessages().providerConfig.invalidCli)
+  }
   const name = input.name.trim()
   const model = input.model.trim() === '__cli_default__' ? '' : input.model.trim()
-  if (!name) throw new Error('供应商名称不能为空')
-  if (!model && input.model.trim() !== '__cli_default__') throw new Error('默认模型不能为空')
+  if (!name) throw new Error(runtimeMessages().providerConfig.nameRequired)
+  if (!model && input.model.trim() !== '__cli_default__') {
+    throw new Error(runtimeMessages().providerConfig.modelRequired)
+  }
   let endpoint: string
   try {
     const url = new URL(input.endpoint.trim())
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error()
     endpoint = url.toString().replace(/\/$/, '')
   } catch {
-    throw new Error('API 地址需要使用有效的 HTTP 或 HTTPS 地址')
+    throw new Error(runtimeMessages().providerConfig.endpointInvalid)
   }
   return { ...input, name, model, endpoint, apiKey: input.apiKey?.trim() ?? '' }
 }
 
 function normalizeState(value: Partial<StoredProviderState>): StoredProviderState {
   if (value.version !== 1 || !value.providers || !value.activeProviderIds) {
-    return structuredClone(DEFAULT_STATE)
+    return defaultState()
   }
   const state = value as StoredProviderState
   for (const cli of ['claude-code', 'codex'] as const) {
     if (!Array.isArray(state.providers[cli]) || state.providers[cli].length === 0) {
-      state.providers[cli] = structuredClone(DEFAULT_STATE.providers[cli])
+      state.providers[cli] = defaultState().providers[cli]
     }
     if (!state.providers[cli].some(({ id }) => id === state.activeProviderIds[cli])) {
       state.activeProviderIds[cli] = state.providers[cli][0]!.id
@@ -231,7 +246,7 @@ function publicSnapshot(state: StoredProviderState): ProviderConfigSnapshot {
 function view(provider: StoredProvider): ProviderConfigView {
   return {
     id: provider.id, cli: provider.cli, name: provider.name,
-    endpoint: provider.endpoint, model: provider.model || 'CLI 默认',
+    endpoint: provider.endpoint, model: provider.model || CLI_DEFAULT_MODEL,
     hasApiKey: Boolean(provider.apiKey), ...(provider.builtIn ? { builtIn: true } : {})
   }
 }

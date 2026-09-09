@@ -12,6 +12,7 @@ import type {
 } from '@matou/contracts'
 import type { DomainCommandMetadata } from '@matou/domain'
 
+import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { WorktreeService } from '../worktrees/worktree-service'
@@ -105,7 +106,7 @@ export class GitWorkspaceService {
     input: { message: string; includeUnstaged: boolean }
   ): Promise<GitRepositoryStatus> {
     const message = input.message.trim()
-    if (!message) throw new Error('请输入提交信息')
+    if (!message) throw new Error(runtimeMessages().git.commitMessageRequired)
     if (input.includeUnstaged) await git(cwd, ['add', '-A'])
     await git(cwd, ['commit', '-m', message])
     return this.status(cwd)
@@ -113,13 +114,13 @@ export class GitWorkspaceService {
 
   async push(cwd: string): Promise<GitRepositoryStatus> {
     const status = await this.status(cwd)
-    if (!status.currentBranch) throw new Error('当前处于 detached HEAD，请先创建分支')
+    if (!status.currentBranch) throw new Error(runtimeMessages().git.detachedHead)
     if (status.upstream) {
       await git(cwd, ['push'])
     } else {
       const remotes = (await git(cwd, ['remote'])).split('\n').map((item) => item.trim()).filter(Boolean)
       const remote = remotes.includes('origin') ? 'origin' : remotes[0]
-      if (!remote) throw new Error('仓库尚未配置远端')
+      if (!remote) throw new Error(runtimeMessages().git.noRemote)
       await git(cwd, [
         'push', '--set-upstream', remote, `HEAD:refs/heads/${status.currentBranch}`
       ])
@@ -193,7 +194,7 @@ export class GitWorkspaceService {
        WHERE execution_context_id = ? AND archived_at IS NULL`,
       worktree.executionContextId
     )?.count ?? 0
-    if (sessionCount > 0) throw new Error(`该 Worktree 仍有关联会话（${sessionCount}）`)
+    if (sessionCount > 0) throw new Error(runtimeMessages().git.worktreeStillLinked(sessionCount))
     await worktrees.remove(command, worktree.id, input.now)
     return this.status(worktree.repositoryRoot)
   }
@@ -284,8 +285,8 @@ export class GitWorkspaceService {
 
 function requiredBranch(value: string): string {
   const branch = value.trim()
-  if (!branch) throw new Error('请输入分支名称')
-  if (branch.startsWith('-')) throw new Error('分支名称格式不正确')
+  if (!branch) throw new Error(runtimeMessages().git.branchNameRequired)
+  if (branch.startsWith('-')) throw new Error(runtimeMessages().git.branchNameInvalid)
   return branch
 }
 
@@ -315,7 +316,7 @@ function gitError(error: unknown): Error {
 
 class GitExecutionError extends Error {
   constructor(message: string) {
-    super(message.trim().slice(-16_384) || 'Git 操作失败')
+    super(message.trim().slice(-16_384) || runtimeMessages().git.operationFailed)
     this.name = 'GitExecutionError'
   }
 }
@@ -326,7 +327,7 @@ function gitErrorOutput(error: unknown): string {
   const candidate = error as { stderr?: unknown; stdout?: unknown; message?: unknown }
   const parts = [candidate.stderr, candidate.stdout, candidate.message]
     .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-  return parts.join('\n').trim() || 'Git 操作失败'
+  return parts.join('\n').trim() || runtimeMessages().git.operationFailed
 }
 
 function parsePorcelain(output: string): {

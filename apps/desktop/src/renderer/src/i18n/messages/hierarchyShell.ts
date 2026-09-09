@@ -171,6 +171,8 @@ export const hierarchyShellZhCN = {
     newProviderAction: '＋ 新增供应商',
     inUse: '使用中',
     defaultModel: '默认模型',
+    /** Shown instead of the CLI_DEFAULT_MODEL sentinel the runtime stores. */
+    cliDefaultModel: 'CLI 默认',
     keyConfigured: ' · Key 已配置',
     edit: '编辑',
     currentConfigurationOf: (name: string) => `${name} 当前配置`,
@@ -381,6 +383,7 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     newProviderAction: '+ New provider',
     inUse: 'In use',
     defaultModel: 'Default model',
+    cliDefaultModel: 'CLI default',
     keyConfigured: ' · Key configured',
     edit: 'Edit',
     currentConfigurationOf: (name: string) => `${name} is the current configuration`,

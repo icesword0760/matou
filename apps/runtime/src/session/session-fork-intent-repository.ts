@@ -1,6 +1,7 @@
 import type { HudPermissionMode } from '@matou/contracts'
 import type { ForkProgress, ForkStage } from '@matou/domain'
 
+import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 
 export type ForkWorktreeMode = 'current' | 'new'
@@ -399,7 +400,9 @@ export class SessionForkIntentRepository {
       if (!row || row.state === 'succeeded' || !legacyOperation(row.operation_id)) return undefined
       if (activeLease(row, now)) return undefined
       if (row.state === 'failed') {
-        return { kind: 'failed', error: row.error_message ?? 'Fork 会话启动失败' }
+        return {
+          kind: 'failed', error: row.error_message ?? runtimeMessages().session.forkStartFailed
+        }
       }
       tx.run(
         `UPDATE session_fork_intents
