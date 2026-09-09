@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent, type WheelEvent } from 'react'
 
 import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
 import { DagSearch } from './DagSearch'
 import { layoutGraph, visibleLayers } from './dag-layout'
 import { buildDagRenderModel, type DagAggregateItem } from './dag-render-model'
@@ -15,6 +17,7 @@ export function DagCanvas(props: {
   initialTransform?: DagTransform
   onTransformChange?(transform: DagTransform): void
 }) {
+  const m = useMessages().dag
   const { graph, focusedSessionId, onSelect, notifiedSessionIds = [], initialTransform, onTransformChange } = props
   const notified = new Set(notifiedSessionIds)
   const layout = useMemo(() => layoutGraph(graph), [graph])
@@ -167,7 +170,7 @@ export function DagCanvas(props: {
     event.currentTarget.releasePointerCapture?.(event.pointerId)
   }
 
-  return <div className="dag-canvas" ref={viewportRef} role="application" aria-label="会话 DAG 画布"
+  return <div className="dag-canvas" ref={viewportRef} role="application" aria-label={m.canvas.label}
     data-scale={round(transform.scale)} data-pan={`${round(transform.x)},${round(transform.y)}`}
     data-rendered-node-count={renderedNodes.length}
     data-rendered-aggregate-count={renderModel.aggregates.length}
@@ -175,15 +178,15 @@ export function DagCanvas(props: {
     onPointerUp={pointerEnd} onPointerCancel={pointerEnd}>
     <header className="dag-toolbar">
       <DagSearch nodes={graph.nodes} onPreview={(sessionId) => focusNode(sessionId)} onChoose={onSelect} />
-      <div className="dag-toolbar__zoom" aria-label="画布缩放">
-        <button aria-label="缩小" onClick={() => update(zoomAt(transform, transform.scale - .1, center(viewportRef.current)))}>−</button>
-        <button aria-label="恢复 100%" onClick={restoreViewport}>{Math.round(transform.scale * 100)}%</button>
-        <button aria-label="放大" onClick={() => update(zoomAt(transform, transform.scale + .1, center(viewportRef.current)))}>＋</button>
-        <button aria-label="聚焦当前节点" onClick={() => focusNode(previewSessionId)}>⌖</button>
+      <div className="dag-toolbar__zoom" aria-label={m.canvas.zoom}>
+        <button aria-label={m.canvas.zoomOut} onClick={() => update(zoomAt(transform, transform.scale - .1, center(viewportRef.current)))}>−</button>
+        <button aria-label={m.canvas.resetZoom} onClick={restoreViewport}>{Math.round(transform.scale * 100)}%</button>
+        <button aria-label={m.canvas.zoomIn} onClick={() => update(zoomAt(transform, transform.scale + .1, center(viewportRef.current)))}>＋</button>
+        <button aria-label={m.canvas.focusCurrent} onClick={() => focusNode(previewSessionId)}>⌖</button>
       </div>
-      <div className="dag-relation-legend" aria-label="关系说明">
-        <span className="fork">Fork：继承对话</span>
-        <span className="derived">普通关联：不继承对话</span>
+      <div className="dag-relation-legend" aria-label={m.canvas.legend}>
+        <span className="fork">{m.canvas.legendFork}</span>
+        <span className="derived">{m.canvas.legendDerived}</span>
       </div>
     </header>
     <div className="dag-world" style={{
@@ -203,9 +206,7 @@ export function DagCanvas(props: {
           const mid = (edge.from.x + edge.to.x) / 2
           return <path key={`${edge.fromSessionId}:${edge.toSessionId}`}
             className={`dag-edge relation-${edge.relationKind}`}
-            data-relation-label={edge.relationKind === 'forked-from'
-              ? 'Fork 分支：继承父会话对话上下文'
-              : '普通父子关联：共享层级，不继承对话上下文'}
+            data-relation-label={m.canvas.relationLabel[edge.relationKind]}
             d={`M ${edge.from.x} ${edge.from.y} C ${mid} ${edge.from.y}, ${mid} ${edge.to.y}, ${edge.to.x} ${edge.to.y}`} />
         })}
       </svg>
@@ -233,23 +234,24 @@ function DagNodeCard(props: {
   style: CSSProperties
   onClick(): void
 }) {
+  const m = useMessages().dag.nodeCard
   const { node, focused, notified, style, onClick } = props
   const branch = node.worktree?.branch ?? node.git?.branch
   const shared = node.sharedWorkingDirectory === true || node.worktree?.shared === true
   const legacyStopped = node.archivedAt !== undefined
   const visualStatus = legacyStopped ? 'exited' : node.workStatus
   return <button type="button" className={`dag-node-card status-${visualStatus}${legacyStopped ? ' is-stopped' : ''}${focused ? ' is-focused' : ''}${notified ? ' has-notification' : ''}`}
-    style={style} data-session-id={node.sessionId} aria-label={`打开会话：${node.title}`} onClick={onClick}>
-    {notified && <span className="dag-node-card__notification" aria-label={`新通知：${node.title}`} />}
-    <span className="dag-node-card__top"><i />{statusLabel(visualStatus)}<em>{modeLabel(node.currentMode)}</em></span>
+    style={style} data-session-id={node.sessionId} aria-label={m.open(node.title)} onClick={onClick}>
+    {notified && <span className="dag-node-card__notification" aria-label={m.newNotification(node.title)} />}
+    <span className="dag-node-card__top"><i />{m.status[visualStatus]}<em>{m.mode[node.currentMode]}</em></span>
     <strong className="dag-node-card__title" title={node.title}>{node.title}</strong>
     <span className="dag-node-card__path" title={node.cwd}>
       {branch ? `${branch}${node.git?.dirty ? '*' : ''}` : node.cwd}
     </span>
     {branch && <span className="dag-node-card__cwd" title={node.cwd}>{compactPath(node.cwd)}</span>}
-    <pre>{node.latestLines.slice(-4).join('\n') || '等待会话输出…'}</pre>
-    <span className="dag-node-card__meta">子会话 {node.activeChildCount + node.stoppedChildCount}{legacyStopped ? ' · 已停止' : ''} · {activityLabel(node)}</span>
-    {shared && <span className="dag-node-card__shared">{branch ? '共享工作树' : '共享目录'}</span>}
+    <pre>{node.latestLines.slice(-4).join('\n') || m.awaitingOutput}</pre>
+    <span className="dag-node-card__meta">{m.childCount(node.activeChildCount + node.stoppedChildCount)}{legacyStopped ? m.stoppedSuffix : ''} · {activityLabel(m, node)}</span>
+    {shared && <span className="dag-node-card__shared">{branch ? m.sharedWorktree : m.sharedDirectory}</span>}
   </button>
 }
 
@@ -258,9 +260,10 @@ function DagAggregateCard(props: {
   style: CSSProperties
   onClick(): void
 }) {
+  const m = useMessages().dag.aggregateCard
   const { aggregate, style, onClick } = props
   const { counts } = aggregate
-  const label = `共 ${aggregate.sessionCount} 个会话，运行中 ${counts.running}，等待输入 ${counts.needsInput}，异常 ${counts.error}`
+  const label = m.summary(aggregate.sessionCount, counts.running, counts.needsInput, counts.error)
   return <button type="button"
     className={`dag-aggregate-card${counts.running > 0 ? ' has-running' : ''}${counts.needsInput > 0 ? ' has-needs-input' : ''}${counts.error > 0 ? ' has-error' : ''}`}
     style={style}
@@ -268,24 +271,17 @@ function DagAggregateCard(props: {
     data-aggregate-kind={aggregate.kind}
     data-aggregate-count={aggregate.sessionCount}
     data-direction={aggregate.direction}
-    aria-label={`展开远层会话：${label}`}
+    aria-label={m.expand(label)}
     onClick={onClick}>
-    <span className="dag-aggregate-card__eyebrow">{aggregate.kind === 'branch' ? '远层分支' : '远层层级'}</span>
-    <strong>共 {aggregate.sessionCount} 个会话</strong>
-    <span className="dag-aggregate-card__range">第 {aggregate.minimumDepth + 1}–{aggregate.maximumDepth + 1} 层 · 点击展开</span>
+    <span className="dag-aggregate-card__eyebrow">{m.eyebrow[aggregate.kind]}</span>
+    <strong>{m.sessionTotal(aggregate.sessionCount)}</strong>
+    <span className="dag-aggregate-card__range">{m.depthRange(aggregate.minimumDepth + 1, aggregate.maximumDepth + 1)}</span>
     <span className="dag-aggregate-card__counts">
-      <i className="running" />运行中 {counts.running}
-      <i className="needs-input" />等待输入 {counts.needsInput}
-      <i className="error" />异常 {counts.error}
+      <i className="running" />{m.countRunning(counts.running)}
+      <i className="needs-input" />{m.countNeedsInput(counts.needsInput)}
+      <i className="error" />{m.countError(counts.error)}
     </span>
   </button>
-}
-
-function modeLabel(mode: SessionGraphNodeView['currentMode']): string {
-  if (mode === 'claude-code') return 'Claude'
-  if (mode === 'agent-team-member') return '队友'
-  if (mode === 'codex') return 'Codex'
-  return 'Shell'
 }
 
 export function clampDagScale(scale: number): number {
@@ -307,19 +303,10 @@ function center(element: HTMLElement | null) {
   return { x: (element?.clientWidth ?? 0) / 2, y: (element?.clientHeight ?? 0) / 2 }
 }
 
-function statusLabel(status: SessionGraphNodeView['workStatus']) {
-  if (status === 'needs-input') return '等待输入'
-  if (status === 'running' || status === 'starting') return '运行中'
-  if (status === 'error') return '异常'
-  if (status === 'interrupted') return '中断'
-  if (status === 'exited') return '已停止'
-  return '空闲'
-}
-
-function activityLabel(node: SessionGraphNodeView) {
-  if (!node.lastActivityAt) return `活动记录 #${node.lastUserInteractionSeq}`
+function activityLabel(m: Messages['dag']['nodeCard'], node: SessionGraphNodeView) {
+  if (!node.lastActivityAt) return m.activitySequence(node.lastUserInteractionSeq)
   const date = new Date(node.lastActivityAt)
-  return `最近活动 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return m.lastActivity(`${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`)
 }
 
 function reducedMotion() {

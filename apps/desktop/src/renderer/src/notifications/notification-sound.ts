@@ -36,7 +36,7 @@ export function playNotificationSound(
     oscillator.start(context.currentTime)
     oscillator.stop(context.currentTime + 0.3)
   } catch (error) {
-    console.warn('[NotificationSound] 播放失败:', error)
+    console.warn('[NotificationSound] Playback failed:', error)
   }
 }
 

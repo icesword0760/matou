@@ -4,15 +4,17 @@ import type { DagWindowContext, RuntimeConnectionState } from '../../../shared/d
 import type { DomainEventWireEnvelope, RuntimeMessage, RuntimeMode } from '@matou/contracts'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { SessionGraphView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 import { DagCanvas, type DagTransform } from './DagCanvas'
 import { DagGraphFrameQueue } from './DagGraphFrameQueue'
 import './dag.css'
-import { READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
 
 export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   fixtureGraph?: SessionGraphView
   runtimeMode?: RuntimeMode
 }) {
+  const all = useMessages()
+  const m = all.dag.window
   const client = useRuntimeClient()
   const readOnly = runtimeMode === 'read-only'
   const [context, setContext] = useState(readContext)
@@ -226,13 +228,11 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
     return () => window.removeEventListener('keydown', keyDown)
   }, [closeAfterGeometryFlush])
 
-  if (!graph || !geometryReady) return <main className="dag-window dag-window-state" aria-label="会话 DAG">
-    <strong>{runtimeConnection === 'reconnecting' || error
-      ? '会话信息暂时未更新'
-      : '正在载入会话关系…'}</strong>
+  if (!graph || !geometryReady) return <main className="dag-window dag-window-state" aria-label={m.title}>
+    <strong>{runtimeConnection === 'reconnecting' || error ? m.stale : m.loading}</strong>
     {(runtimeConnection === 'reconnecting' || error) && <>
-      <p>{runtimeConnection === 'reconnecting' ? '正在重新连接，已有会话与关系不会丢失。' : '正在重试载入会话关系。'}</p>
-      {runtimeConnection === 'ready' && <button onClick={() => void refresh()}>立即重试</button>}
+      <p>{runtimeConnection === 'reconnecting' ? m.reconnectingHint : m.retryingHint}</p>
+      {runtimeConnection === 'ready' && <button onClick={() => void refresh()}>{m.retryNow}</button>}
     </>}
   </main>
   const focusedSessionId = graph.nodes.some(({ sessionId }) => sessionId === context.sessionId)
@@ -241,18 +241,16 @@ export function DagWindowApp({ fixtureGraph, runtimeMode = 'normal' }: {
   if (firstOperableMs.current === undefined && context.requestedAt !== undefined) {
     firstOperableMs.current = Math.max(0, Date.now() - context.requestedAt)
   }
-  return <main className="dag-window" aria-label="会话 DAG"
+  return <main className="dag-window" aria-label={m.title}
     data-first-operable-ms={firstOperableMs.current}>
     {readOnly && <div className="dag-runtime-notice" role="status">
-      <strong>{READ_ONLY_REASON}</strong>
-      <span>会话关系仍可浏览和选择；画布位置变化仅在本次窗口内保留。</span>
+      <strong>{all.hierarchyShell.readOnlyRecoveryReason}</strong>
+      <span>{m.readOnlyBody}</span>
     </div>}
     {(runtimeConnection === 'reconnecting' || error) && <div className="dag-runtime-notice" role="status">
-      <strong>会话信息暂时未更新</strong>
-      <span>{runtimeConnection === 'reconnecting'
-        ? '正在重新连接；当前关系图保留，连接恢复后会自动刷新。'
-        : '正在重试更新；当前显示上一次成功载入的关系。'}</span>
-      {runtimeConnection === 'ready' && error && <button onClick={() => void refresh()}>立即重试</button>}
+      <strong>{m.stale}</strong>
+      <span>{runtimeConnection === 'reconnecting' ? m.reconnectingNotice : m.retryingNotice}</span>
+      {runtimeConnection === 'ready' && error && <button onClick={() => void refresh()}>{m.retryNow}</button>}
     </div>}
     <DagCanvas key={context.sceneId} graph={graph} focusedSessionId={focusedSessionId}
       notifiedSessionIds={notifiedSessionIds}

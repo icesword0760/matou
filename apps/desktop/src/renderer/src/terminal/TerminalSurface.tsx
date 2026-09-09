@@ -12,6 +12,8 @@ import { SerializeAddon } from '@xterm/addon-serialize'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 
+import { messages } from '../i18n/current'
+import { useMessages } from '../i18n/LocaleProvider'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { ResizeCoalescer } from './resize-coalescer'
 import { quoteDroppedPath } from './shell-path-quote'
@@ -163,6 +165,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     onOscNotification = NOOP, onUserInput = NOOP,
     onStorageFault = NOOP, onStorageRecovered = NOOP
   } = props
+  const m = useMessages().terminal
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
   const [isDragOverTerminal, setIsDragOverTerminal] = useState(false)
@@ -674,10 +677,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         visualCatchupPending = false
         visualCatchupRequested = false
         preserveExistingModelForReplay = false
+        // Resolved here rather than at module load, so the banner follows the
+        // locale that is active when the gap actually happens.
+        const gapText = messages().terminal
         terminal.write(
-          message.reason === 'corruption'
-            ? '\r\n[部分终端历史损坏，已继续显示实时输出]\r\n'
-            : '\r\n[较早的终端历史已清理，已继续显示实时输出]\r\n',
+          `\r\n[${message.reason === 'corruption' ? gapText.historyCorrupted : gapText.historyTrimmed}]\r\n`,
           () => {
             awaitRenderedTerminalFrame()
             scheduleE2eRows()
@@ -1054,13 +1058,13 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     {historyContext && <TerminalHistoryContextView view={historyContext}
       anchorRef={historyAnchorRef} onClose={exitHistoryView} />}
     {archivedSearch && !historyContext && <div className="terminal-history-result" role="status"
-      aria-label="归档历史搜索结果">
-      <span className="terminal-history-result__source">归档历史</span>
+      aria-label={m.archivedSearch.label}>
+      <span className="terminal-history-result__source">{m.archivedSearch.source}</span>
       <span className="terminal-history-result__text">{archivedSearch.text}</span>
       <span className="terminal-history-result__meta">
         {archivedSearch.resultIndex + 1}/{archivedSearch.resultCount}
         {archivedSearch.hasMore ? '+' : ''}
-        {archivedSearch.gapCount > 0 ? ` · ${archivedSearch.gapCount} 处历史缺口` : ''}
+        {archivedSearch.gapCount > 0 ? ` · ${m.historyGaps(archivedSearch.gapCount)}` : ''}
       </span>
     </div>}
     {isDragOverTerminal && <div className="terminal-drop-overlay" data-testid="terminal-drop-overlay" />}
@@ -1072,22 +1076,24 @@ function TerminalHistoryContextView(props: {
   anchorRef: React.RefObject<HTMLDivElement | null>
   onClose: () => void
 }) {
+  const terminalMessages = useMessages().terminal
+  const m = terminalMessages.historyContext
   const { view, anchorRef, onClose } = props
-  return <section className="terminal-history-context" role="region" aria-label="终端历史记录">
+  return <section className="terminal-history-context" role="region" aria-label={m.region}>
     <header className="terminal-history-context__header">
       <div className="terminal-history-context__title">
-        <strong>历史记录</strong>
-        <span>只读</span>
+        <strong>{m.title}</strong>
+        <span>{m.readOnly}</span>
         <span>{view.resultIndex + 1}/{view.resultCount}</span>
       </div>
       <button type="button" className="terminal-history-context__return" onClick={onClose}>
-        返回实时终端
+        {m.returnToLive}
       </button>
     </header>
     {view.state === 'loading'
-      ? <div className="terminal-history-context__loading" role="status">正在读取历史上下文…</div>
+      ? <div className="terminal-history-context__loading" role="status">{m.loading}</div>
       : <div className="terminal-history-context__body">
-        {view.hasMoreBefore && <div className="terminal-history-context__boundary">上方还有更早记录</div>}
+        {view.hasMoreBefore && <div className="terminal-history-context__boundary">{m.moreBefore}</div>}
         {view.lines.map((line, index) => {
           const current = index === view.anchorIndex
           return <div key={`${line.cursor.sequence}:${line.cursor.lineIndex}`}
@@ -1098,12 +1104,12 @@ function TerminalHistoryContextView(props: {
             <span className="terminal-history-context__line-text">{line.text || ' '}</span>
           </div>
         })}
-        {view.hasMoreAfter && <div className="terminal-history-context__boundary">下方还有更新记录</div>}
+        {view.hasMoreAfter && <div className="terminal-history-context__boundary">{m.moreAfter}</div>}
       </div>}
     <footer className="terminal-history-context__footer">
-      <span>命中行前后各最多 250 行</span>
-      {view.gapCount > 0 && <span>{view.gapCount} 处历史缺口</span>}
-      <span>Esc 返回</span>
+      <span>{m.contextRange}</span>
+      {view.gapCount > 0 && <span>{terminalMessages.historyGaps(view.gapCount)}</span>}
+      <span>{m.escapeHint}</span>
     </footer>
   </section>
 }
@@ -1125,7 +1131,7 @@ function publishArchivedSearch(
   const match = result.matches[result.index]
   if (!match) {
     publish(result.gapCount > 0 ? {
-      text: '该范围存在不可读的历史片段',
+      text: messages().terminal.archivedSearch.unreadableRange,
       resultIndex: 0,
       resultCount: 0,
       gapCount: result.gapCount,

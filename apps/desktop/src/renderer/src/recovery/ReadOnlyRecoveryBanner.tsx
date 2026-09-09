@@ -10,12 +10,6 @@ export function readOnlyReason(): string {
   return messages().hierarchyShell.readOnlyRecoveryReason
 }
 
-/**
- * Resolved once at module load, so it stays on the startup locale.
- * @deprecated Call `readOnlyReason()`; the DAG window is the last caller.
- */
-export const READ_ONLY_REASON = readOnlyReason()
-
 export function ReadOnlyRecoveryBanner(props: {
   exportBundle(): Promise<RuntimeRecoveryCommandResult>
   onSearch?(): void

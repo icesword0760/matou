@@ -1,3 +1,4 @@
+import { messages } from '../i18n/current'
 import type { AgentNotificationInput } from './AgentNotificationStore'
 
 export function toOscNotification(oscId: number, content: string): Omit<AgentNotificationInput, 'eventId'> | null {
@@ -6,7 +7,7 @@ export function toOscNotification(oscId: number, content: string): Omit<AgentNot
     eventType: 'osc-notification',
     title: 'Claude Code',
     subtitle: 'Terminal',
-    body: compact(content, 180) || '终端通知',
+    body: compact(content, 180) || messages().notifications.fallbackBody,
     sound: true,
     cooldownKey: 'OSCNotification'
   }

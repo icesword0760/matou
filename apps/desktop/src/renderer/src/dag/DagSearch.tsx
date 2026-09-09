@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 
 import type { SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 import { searchGraph } from './dag-layout'
 
 export function DagSearch(props: {
@@ -8,6 +9,7 @@ export function DagSearch(props: {
   onPreview(sessionId: string): void
   onChoose(sessionId: string): void
 }) {
+  const m = useMessages().dag.search
   const { nodes, onPreview, onChoose } = props
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
@@ -17,7 +19,7 @@ export function DagSearch(props: {
     requestAnimationFrame(() => onChoose(sessionId))
   }
   return <div className="dag-search">
-    <input type="search" role="searchbox" aria-label="搜索会话" placeholder="搜索名称、路径、分支或输出…"
+    <input type="search" role="searchbox" aria-label={m.label} placeholder={m.placeholder}
       value={query} onChange={(event) => { setQuery(event.currentTarget.value); setSelected(0) }}
       onKeyDown={(event) => {
         if (event.key === 'ArrowDown' && results.length > 0) {
@@ -28,8 +30,8 @@ export function DagSearch(props: {
           event.preventDefault(); choose(results[selected]!.sessionId)
         }
       }} />
-    {query && <div className="dag-search__results" role="listbox" aria-label="搜索结果">
-      {results.length === 0 && <p>没有匹配的会话</p>}
+    {query && <div className="dag-search__results" role="listbox" aria-label={m.results}>
+      {results.length === 0 && <p>{m.empty}</p>}
       {results.slice(0, 12).map((node, index) => <button key={node.sessionId} role="option"
         aria-selected={index === selected} onPointerEnter={() => setSelected(index)}
         onClick={() => choose(node.sessionId)}>

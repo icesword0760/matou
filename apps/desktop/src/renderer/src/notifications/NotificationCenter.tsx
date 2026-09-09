@@ -1,4 +1,6 @@
 import type { HierarchyProjection } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
 import type { AgentNotification } from './AgentNotificationStore'
 import { useNotificationSnapshot, useNotificationStore } from './NotificationProvider'
 
@@ -7,32 +9,33 @@ export function NotificationCenter({ projection, onClose, onNavigate }: {
   onClose(): void
   onNavigate(notification: AgentNotification): void
 }) {
+  const m = useMessages().notifications.center
   const store = useNotificationStore()
   const snapshot = useNotificationSnapshot()
   const notifications = [...snapshot.notifications].sort((left, right) => right.timestamp - left.timestamp)
-  return <section className="notification-center" aria-label="通知中心">
+  return <section className="notification-center" aria-label={m.label}>
     <header className="notification-center__header">
-      <h2 className="notification-center__title">通知 <span className="notification-center__title-count">({notifications.length})</span></h2>
+      <h2 className="notification-center__title">{m.title} <span className="notification-center__title-count">({notifications.length})</span></h2>
       <div className="notification-center__header-actions">
         {notifications.length > 0 && <button className="notification-center__action-btn"
-          aria-label="清空通知" title="清空通知" onClick={() => store.clear()}><ClearIcon /></button>}
-        <button className="notification-center__close-btn" aria-label="关闭通知中心" onClick={onClose}><CloseIcon /></button>
+          aria-label={m.clear} title={m.clear} onClick={() => store.clear()}><ClearIcon /></button>}
+        <button className="notification-center__close-btn" aria-label={m.close} onClick={onClose}><CloseIcon /></button>
       </div>
     </header>
     <div className="notification-center__list">
       {notifications.length === 0
         ? <div className="notification-center__empty">
-            <p className="notification-center__empty-text">暂无通知</p>
+            <p className="notification-center__empty-text">{m.empty}</p>
           </div>
         : <div className="notification-center__group"><div className="notification-center__items">
           {notifications.map((notification) => <article key={notification.id}
             className={`notification-item${notification.read ? '' : ' is-unread'}`}>
-            <button className="notification-item__body" aria-label={`打开通知：${notification.body || notification.title}`}
+            <button className="notification-item__body" aria-label={m.open(notification.body || notification.title)}
               onClick={() => onNavigate(notification)}>
               <span className="notification-item__breadcrumb">
-                <span className="notification-item__breadcrumb-part">{workspaceName(projection, notification.workspaceId)}</span>
+                <span className="notification-item__breadcrumb-part">{workspaceName(m, projection, notification.workspaceId)}</span>
                 <span className="notification-item__breadcrumb-sep">/</span>
-                <span className="notification-item__breadcrumb-part">{taskName(projection, notification.taskId)}</span>
+                <span className="notification-item__breadcrumb-part">{taskName(m, projection, notification.taskId)}</span>
               </span>
               <span className="notification-item__title-row">
                 <strong className="notification-item__title">{notification.title || 'Claude Code'}</strong>
@@ -46,7 +49,7 @@ export function NotificationCenter({ projection, onClose, onNavigate }: {
                 {formatTime(notification.timestamp)}
               </time>
             </button>
-            <button className="notification-item__dismiss" aria-label="清除此通知" title="清除此通知"
+            <button className="notification-item__dismiss" aria-label={m.dismiss} title={m.dismiss}
               onClick={() => store.remove(notification.id)}><CloseIcon /></button>
           </article>)}
         </div></div>}
@@ -55,23 +58,31 @@ export function NotificationCenter({ projection, onClose, onNavigate }: {
       <label className="notification-center__sound-toggle">
         <span className="notification-center__sound-label">
           <span className={`notification-center__switch${snapshot.soundEnabled ? ' is-on' : ''}`}>
-            <input type="checkbox" aria-label="通知声音" checked={snapshot.soundEnabled}
+            <input type="checkbox" aria-label={m.sound} checked={snapshot.soundEnabled}
               onChange={(event) => store.setSoundEnabled(event.currentTarget.checked)} />
             <span className="notification-center__switch-track"><span className="notification-center__switch-thumb" /></span>
           </span>
-          <span>通知声音</span>
+          <span>{m.sound}</span>
         </span>
       </label>
     </footer>
   </section>
 }
 
-function workspaceName(projection: HierarchyProjection, id: string | null): string {
-  return projection.workspaces.find((workspace) => workspace.id === id)?.name ?? '未知工作区'
+function workspaceName(
+  m: Messages['notifications']['center'],
+  projection: HierarchyProjection,
+  id: string | null
+): string {
+  return projection.workspaces.find((workspace) => workspace.id === id)?.name ?? m.unknownWorkspace
 }
 
-function taskName(projection: HierarchyProjection, id: string | null): string {
-  return projection.tasks.find((task) => task.id === id)?.title ?? '未知工作台'
+function taskName(
+  m: Messages['notifications']['center'],
+  projection: HierarchyProjection,
+  id: string | null
+): string {
+  return projection.tasks.find((task) => task.id === id)?.title ?? m.unknownTask
 }
 
 function formatTime(timestamp: number): string {
