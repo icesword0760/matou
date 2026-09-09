@@ -256,13 +256,47 @@ const vitest = [
   ''
 ]
 
+// Roles that hand the stub an `exec` event (mt read/fork actually run) so viewers see real output.
+const baselineThree = [
+  ...welcome('~/work/shop-api'),
+  '',
+  prompt('支付回调重复入账，给我几个幂等方案，先别动代码'),
+  '',
+  say('三个方向，各有取舍：'),
+  cont('1. Redis SETNX 幂等键，24h 过期，最快落地'),
+  cont('2. DB 唯一索引 (provider, event_id)，最稳'),
+  cont('3. 消费侧去重表 + 定时清理，兼容历史数据'),
+  '',
+  say('建议各开一条路验证，我在这里等你决定。'),
+  '',
+  ...inputBox()
+]
+const aiRead = [
+  ...welcome('~/work/shop-api'),
+  '',
+  prompt('看看左边那张卡片的测试跑到哪了，给我结论'),
+  '',
+  say('我先读一下左边卡片的实时输出。')
+]
+const aiFork = [
+  '',
+  prompt('为这三个方案各开一张子卡片'),
+  '',
+  say('好，按方案 1、2、3 各建一张子卡片，继承当前上下文。')
+]
+
 // Scene-1 cards are printed while narrow and widen when focused; xterm reflows every line except the
 // cursor line, so those transcripts end with a newline. DAG previews show the last four lines, so the
 // scene-2 transcripts keep the cursor on their final line instead.
 const trailingNewline = new Set(['implementation', 'regression', 'review', 'docs', 'coordinate'])
 
+const transcriptSource: Record<string, string[]> = {
+  implementation, regression, review, docs, coordinate, baseline, planA, planB, vitest,
+  'baseline-three': baselineThree, 'ai-read': aiRead, 'ai-fork': aiFork
+}
+
 export const transcripts: Record<string, string> = Object.fromEntries(
-  Object.entries({ implementation, regression, review, docs, coordinate, baseline, planA, planB, vitest })
+  Object.entries(transcriptSource)
     .map(([name, lines]) => [name, lines.join('\r\n') + (trailingNewline.has(name) ? '\r\n' : '')])
 )
 
