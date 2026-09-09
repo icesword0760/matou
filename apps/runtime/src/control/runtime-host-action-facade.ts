@@ -1377,12 +1377,15 @@ function normalizeFacadeError(error: unknown): unknown {
   }
   if (error instanceof Error) {
     // Every localised thrower below the facade carries a code, checked above. What is
-    // left here is fragment matching over untranslated developer text that no locale
-    // ever rewrites: `an active Task named "X" already exists in this Workspace` from
-    // the task repositories, and the `${label} does not exist` invariant that the
-    // canvas, layout, migration, worktree and repository helpers still raise as plain
-    // Errors. `inputMismatchFragment` is the one catalog value matched as text; it is
-    // a documented substring of `forkBatch.inputMismatch` in every locale.
+    // left here is plain-text fragment matching over developer-authored error strings
+    // that are never localised: `an active Task named "X" already exists in this
+    // Workspace` from the task repositories, and the `${label} does not exist`
+    // invariant that the canvas, layout, migration, worktree and repository helpers
+    // still raise as plain Errors. Localised (zh-CN or en) user-facing messages never
+    // contain these fragments, and `forkBatch.inputMismatchFragment` — the one catalog
+    // value matched as text — is guarded by `i18n/messages.test.ts`, which asserts it
+    // stays a substring of `forkBatch.inputMismatch` in every locale. So this block
+    // behaves identically regardless of the runtime's locale.
     if (
       error.message.includes(runtimeMessages().control.forkBatch.inputMismatchFragment) ||
       error.message.includes('already exists in this Workspace')

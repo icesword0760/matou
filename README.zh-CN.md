@@ -243,7 +243,7 @@ tests/e2e/                真实 Electron 用户旅程
 
 **数据会离开我的电脑吗？** 码头自己只发一种网络请求：检查更新。会话元数据和终端输出都保存在本机应用数据目录。Claude Code 与 Anthropic 的通信和你在普通终端里完全一样。如果你在设置里配置了自定义模型端点，请求只会发往那个端点。
 
-**有英文界面吗？** 还没有，目前界面是中文。跟随系统语言的英文界面正在做（[#4](https://github.com/icesword0760/matou/issues/4)）。
+**有英文界面吗？** 有。界面会跟随系统语言自动切换中文或英文，也可以在托盘菜单里手动指定：Language → Follow system / 中文 / English。运行时消息（如会话与终端文案）在重启后生效。详见 [#4](https://github.com/icesword0760/matou/issues/4)。
 
 ## 反馈与交流
 

@@ -31,7 +31,7 @@
 
 Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. It puts your Claude Code sessions, tasks, branches and context into one recoverable workspace, so you can push several coding agents forward at once and still know what each one is doing, what it needs, and where it branched off from.
 
-> **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page. The product UI is currently in Chinese.
+> **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page.
 
 ![Matou workspace demo with five parallel Claude Code sessions](assets/shots/workspace-demo.gif)
 
@@ -242,7 +242,7 @@ Further reading (Chinese): [process model](docs/architecture/process-model.md) �
 
 **Does anything leave my machine?** Matou itself makes one network request: the update check. Session metadata and terminal output stay on disk in the app's data directory. Claude Code talks to Anthropic exactly as it does in a plain terminal. If you configure a custom model endpoint in settings, your requests go to that endpoint and nowhere else.
 
-**Is the UI in English?** Not yet — the product UI is Chinese today. An English UI that follows the system language is in progress ([#4](https://github.com/icesword0760/matou/issues/4)).
+**Is the UI in English?** Yes — the UI follows your system language (Chinese or English), with a manual override in the tray menu: Language → Follow system / 中文 / English. Runtime messages (e.g. session and terminal text) switch after a restart. See [#4](https://github.com/icesword0760/matou/issues/4).
 
 ## Feedback
 

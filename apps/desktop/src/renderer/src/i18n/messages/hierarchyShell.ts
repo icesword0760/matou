@@ -328,8 +328,8 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
   },
   shell: {
     storageFaultMutationReason: 'Terminal storage failed. Recover or end the current session first.',
-    recoveryMutationReason: 'This terminal has to finish recovering first.',
-    environmentMutationReason: 'The current environment has to be recovered or handed off first.',
+    recoveryMutationReason: 'This terminal must finish recovering first.',
+    environmentMutationReason: 'The current environment must be recovered or handed off first.',
     sessionLoaderClosed: 'The session loader is closed',
     workspaceStage: (name: string) => `${name} workspace stage`,
     workspaceStageFallback: 'Workspace stage',
@@ -418,7 +418,7 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     saveConfiguration: 'Save configuration',
     nameRequired: 'Enter the provider name',
     modelRequired: 'Enter the default model',
-    endpointScheme: 'The API endpoint has to use HTTP or HTTPS',
+    endpointScheme: 'The API endpoint must use HTTP or HTTPS',
     endpointInvalid: 'Enter a valid API endpoint',
     errorDetail: (fallback: string, detail: string) => `${fallback}: ${detail}`
   }

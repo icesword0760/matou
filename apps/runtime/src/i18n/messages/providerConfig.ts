@@ -27,7 +27,7 @@ export const providerConfigEn: CatalogShape<typeof providerConfigZhCN> = {
   sessionProviderNotFound: 'The provider configuration bound to this session does not exist',
   activeCannotBeDeleted: 'Switch away from the provider in use before deleting it',
   builtInKept: 'The official provider configuration stays as the default entry',
-  invalidCli: 'The CLI type is not valid',
+  invalidCli: 'The CLI type is invalid',
   nameRequired: 'The provider name must not be empty',
   modelRequired: 'The default model must not be empty',
   endpointInvalid: 'The API endpoint must be a valid HTTP or HTTPS address'
