@@ -11,3 +11,4 @@ export * from './session-node-removal'
 
 export * from './provider-config'
 export * from './host-navigation'
+export * from './locale'
