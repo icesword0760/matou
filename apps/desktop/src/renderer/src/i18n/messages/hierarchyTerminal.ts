@@ -181,8 +181,8 @@ export const hierarchyTerminalEn: CatalogShape<typeof hierarchyTerminalZhCN> = {
     forkNeedsReply:
       'Send one message in this session and wait for Claude Code to finish replying, then you can fork',
     forkReadinessHint: 'When a child session can be forked',
-    recoveryBlockedReason: 'This terminal is still recovering',
-    retryFork: 'Retry the fork',
+    recoveryBlockedReason: 'This terminal is still recovering.',
+    retryFork: 'Retry fork',
     removeNodeAction: 'Remove node…',
     parentConversationExpired: 'The original Claude Code conversation expired',
     claudeRestoreFailed: 'Claude Code recovery failed',
@@ -243,7 +243,7 @@ export const hierarchyTerminalEn: CatalogShape<typeof hierarchyTerminalZhCN> = {
   },
   git: {
     unavailable: 'Git unavailable',
-    notARepository: 'This directory is not a usable Git workspace',
+    notARepository: 'This directory is not a Git repository',
     branch: (branch: string, dirty: boolean) =>
       `Git branch ${branch}${dirty ? ', uncommitted changes' : ''}`,
     detachedHead: (head: string, dirty: boolean) =>
