@@ -4,11 +4,27 @@ import { execFile, spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, net, screen, shell, Tray } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  type MenuItemConstructorOptions,
+  nativeImage,
+  net,
+  screen,
+  shell,
+  Tray
+} from 'electron'
 import electronUpdater from 'electron-updater'
+
+import { isLocalePreference, type LocalePreference } from '@matou/contracts'
 
 import { AppUpdateManager } from './app-update-manager'
 import { resolveAppUpdateInstallMode } from './app-update-install-mode'
+import { LocaleStore } from './locale-store'
+import { mainMessages } from './messages'
 import { RuntimeHost } from './runtime-host'
 import { resolvePackagedApplication } from './app-environment'
 import { applyApplicationBrand } from './application-brand'
@@ -91,6 +107,13 @@ if (process.env.ELECTRON_USER_DATA_DIR) {
 } else {
   app.setPath('userData', join(app.getPath('appData'), APP_STORAGE_DIRECTORY_NAME))
 }
+
+const localeStore = new LocaleStore({
+  file: join(app.getPath('userData'), 'locale.json'),
+  system: () => app.getLocale(),
+  env: process.env.MATOU_LOCALE
+})
+const messages = () => mainMessages(localeStore.current())
 
 const dagWindows = new DagWindowManager({
   createWindow: ({ context, bounds }) => createDagBrowserWindow(context, bounds),
@@ -310,7 +333,7 @@ function createDagBrowserWindow(context: DagWindowContext, bounds: Rectangle): D
     minHeight: 480,
     show: false,
     frame: true,
-    title: `${APP_DISPLAY_NAME} · 会话 DAG`,
+    title: messages().dagWindowTitle,
     backgroundColor: context.theme === 'light' ? '#F7F8FA' : '#171717',
     ...(process.platform === 'darwin' ? {
       titleBarStyle: 'hidden' as const,
@@ -374,6 +397,25 @@ function installNativeScrollGesture(window: BrowserWindow): void {
   })
 }
 
+function buildTrayMenu(): Menu {
+  const m = messages()
+  const preference = localeStore.preference()
+  const item = (label: string, value: LocalePreference): MenuItemConstructorOptions => ({
+    label, type: 'radio', checked: preference === value,
+    click: () => { localeStore.set(value) }
+  })
+  return Menu.buildFromTemplate([
+    { label: m.showApp, click: () => { const id = windows.firstLiveWindowId(); if (id) windows.showWindow(id); else void createWindow() } },
+    { type: 'separator' },
+    { label: m.language, submenu: [
+      item(m.followSystem, 'system'), item(m.chinese, 'zh-CN'), item(m.english, 'en'),
+      { type: 'separator' }, { label: m.restartHint, enabled: false }
+    ] },
+    { type: 'separator' },
+    { label: m.quit, click: () => { quitting = true; app.quit() } }
+  ])
+}
+
 function resolveRuntimeEntry(): string {
   if (process.env.MATOU_RUNTIME_ENTRY) {
     return resolve(process.env.MATOU_RUNTIME_ENTRY)
@@ -391,7 +433,10 @@ if (primaryInstance) app.whenReady().then(async () => {
     appPath: app.getAppPath(),
     dock: app.dock
   })
-  runtimeHost = new RuntimeHost(resolveRuntimeEntry())
+  runtimeHost = new RuntimeHost(resolveRuntimeEntry(), undefined, {
+    messages,
+    locale: () => localeStore.current()
+  })
   await runtimeHost.start()
   await createWindow()
   if (isPackagedApplication) {
@@ -428,7 +473,8 @@ if (primaryInstance) app.whenReady().then(async () => {
       destinationDirectory: join(app.getPath('userData'), 'pending-updates'),
       ...(expectedSha512 ? { expectedSha512 } : {}),
       fetcher: (input) => net.fetch(input),
-      onProgress
+      onProgress,
+      messages
     }),
     openManualInstaller: async (path) => {
       const error = await shell.openPath(path)
@@ -442,22 +488,19 @@ if (primaryInstance) app.whenReady().then(async () => {
     prepareInstall: async () => {
       quitting = true
       await shutdownRuntime()
-    }
+    },
+    messages
   })
   updateManager.start()
   tray = new Tray(nativeImage.createEmpty())
   tray.setToolTip(APP_DISPLAY_NAME)
-  tray.setContextMenu(Menu.buildFromTemplate([
-    {
-      label: `显示${APP_DISPLAY_NAME}`, click: () => {
-        const windowId = windows.firstLiveWindowId()
-        if (windowId) windows.showWindow(windowId)
-        else void createWindow()
-      }
-    },
-    { type: 'separator' },
-    { label: '退出', click: () => { quitting = true; app.quit() } }
-  ]))
+  tray.setContextMenu(buildTrayMenu())
+  localeStore.onChange((locale) => {
+    tray?.setContextMenu(buildTrayMenu())
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.localeChanged, locale)
+    }
+  })
 
   app.on('activate', async () => {
     const windowId = windows.firstLiveWindowId()
@@ -565,6 +608,12 @@ ipcMain.handle(DESKTOP_CHANNELS.getAppUpdateState, () => updateManager?.state() 
 ipcMain.handle(DESKTOP_CHANNELS.checkForAppUpdates, () => updateManager?.check())
 ipcMain.handle(DESKTOP_CHANNELS.downloadAppUpdate, () => updateManager?.download())
 ipcMain.handle(DESKTOP_CHANNELS.installAppUpdate, () => updateManager?.install())
+ipcMain.handle(DESKTOP_CHANNELS.getLocale, () => localeStore.current())
+ipcMain.handle(DESKTOP_CHANNELS.getLocalePreference, () => localeStore.preference())
+ipcMain.handle(DESKTOP_CHANNELS.setLocalePreference, (_event, preference: LocalePreference) => {
+  if (!isLocalePreference(preference)) throw new Error('Invalid locale preference')
+  return localeStore.set(preference)
+})
 
 app.on('before-quit', () => {
   quitting = true

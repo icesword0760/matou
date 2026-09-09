@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
+import type { Locale } from '@matou/contracts'
+
 import type { MatouDesktopApi, RuntimeConnectionState } from '../shared/desktop-api'
 import { DESKTOP_CHANNELS } from '../shared/desktop-api'
 
@@ -138,6 +140,14 @@ const desktopApi: MatouDesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, state: Parameters<typeof listener>[0]) => listener(state)
     ipcRenderer.on(DESKTOP_CHANNELS.appUpdateState, handler)
     return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.appUpdateState, handler)
+  },
+  getLocale: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getLocale),
+  getLocalePreference: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getLocalePreference),
+  setLocalePreference: (preference) => ipcRenderer.invoke(DESKTOP_CHANNELS.setLocalePreference, preference),
+  onLocaleChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, locale: Locale) => listener(locale)
+    ipcRenderer.on(DESKTOP_CHANNELS.localeChanged, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.localeChanged, handler)
   }
 }
 contextBridge.exposeInMainWorld('matouDesktop', desktopApi)

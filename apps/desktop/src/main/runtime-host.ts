@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
   parseRuntimeLifecycleEvent,
   parseRuntimeStartupFailure,
+  type Locale,
   type RuntimeConnectRequest,
   type RuntimeLifecycleEvent,
   type RuntimeRecoveryCommand,
@@ -19,6 +20,7 @@ import {
   type RuntimeRecoveryCommandResult,
   type RuntimeRecoveryDetails
 } from '../shared/desktop-api'
+import { mainMessages, type MainMessages } from './messages'
 
 const RESTART_DELAYS = [100, 500, 1_000, 2_000, 5_000] as const
 
@@ -89,9 +91,18 @@ interface PendingScaleMetrics {
   reject(error: Error): void
 }
 
+export interface RuntimeHostOptions {
+  /** Getter so a locale change applies without reconstructing the host. */
+  messages?: () => MainMessages
+  /** Getter for the current locale, forwarded to the forked Runtime as `MATOU_LOCALE`. */
+  locale?: () => Locale
+}
+
 export class RuntimeHost {
   readonly #runtimeEntry: string
   readonly #controlAssetRoot: string
+  readonly #messages: () => MainMessages
+  readonly #locale: () => Locale
   readonly #renderers = new Set<WebContents>()
   readonly #connectedRenderers = new Set<WebContents>()
   readonly #pendingRecoveryCommands = new Map<string, PendingRecoveryCommand>()
@@ -115,9 +126,15 @@ export class RuntimeHost {
     }
   }
 
-  constructor(runtimeEntry: string, controlAssetRoot = join(dirname(runtimeEntry), 'control-assets')) {
+  constructor(
+    runtimeEntry: string,
+    controlAssetRoot = join(dirname(runtimeEntry), 'control-assets'),
+    options: RuntimeHostOptions = {}
+  ) {
     this.#runtimeEntry = runtimeEntry
     this.#controlAssetRoot = controlAssetRoot
+    this.#messages = options.messages ?? (() => mainMessages('zh-CN'))
+    this.#locale = options.locale ?? (() => 'zh-CN')
   }
 
   async start(): Promise<void> {
@@ -158,7 +175,7 @@ export class RuntimeHost {
       command.action !== 'export-recovery-bundle' &&
       command.expectedRecoveryId !== this.#lifecycle.recovery?.recoveryId
     ) {
-      return Promise.reject(new Error('数据库恢复周期已更新，本次操作已停止'))
+      return Promise.reject(new Error(this.#messages().recoveryCycleChanged))
     }
     if (this.#pendingRecoveryCommands.size > 0) {
       return Promise.reject(new Error('Recovery command is already running'))
@@ -197,7 +214,8 @@ export class RuntimeHost {
       env: {
         ...process.env,
         MATOU_CONTROL_ASSET_ROOT: this.#controlAssetRoot,
-        MATOU_CONTROL_NODE_EXECUTABLE: process.execPath
+        MATOU_CONTROL_NODE_EXECUTABLE: process.execPath,
+        MATOU_LOCALE: this.#locale()
       }
     })
     child.stdout?.pipe(process.stdout)
@@ -218,7 +236,7 @@ export class RuntimeHost {
         this.#connectedRenderers.clear()
         if (code !== 0) console.error(`Matou Runtime exited with code ${code}`)
         this.#rejectPending(
-          new Error('数据库恢复操作未完成：Runtime 在恢复操作期间退出'),
+          new Error(this.#messages().recoveryExitedDuringOperation),
           true
         )
         this.#rejectScaleMetrics(new Error('Runtime exited during scale measurement'))
@@ -354,7 +372,7 @@ export class RuntimeHost {
       this.#publishLifecycle()
       pending.resolve(value)
     } else {
-      const error = candidate.error || '数据库恢复操作失败'
+      const error = candidate.error || this.#messages().recoveryOperationFailed
       this.#lifecycle = {
         ...this.#lifecycle,
         operation: { ...this.#lifecycle.operation!, pending: false, error }

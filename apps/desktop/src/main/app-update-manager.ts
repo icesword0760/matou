@@ -2,6 +2,7 @@ import type {
   AppUpdateErrorStage, AppUpdateInstallMode, AppUpdateProgress, AppUpdateReleaseState,
   AppUpdateState
 } from '../shared/desktop-api'
+import { mainMessages, type MainMessages } from './messages'
 
 export interface AppUpdaterAdapter {
   autoDownload: boolean
@@ -32,6 +33,8 @@ export interface AppUpdateManagerOptions {
   openManualInstaller?: (path: string) => Promise<void>
   publish?: (state: AppUpdateState) => void
   prepareInstall?: () => Promise<void>
+  /** Getter so a locale change applies without reconstructing the manager. */
+  messages?: () => MainMessages
 }
 
 export class AppUpdateManager {
@@ -46,9 +49,11 @@ export class AppUpdateManager {
   private manualInstallerPath: string | undefined
   private lastRelease: AppUpdateReleaseState | undefined
   private started = false
+  private readonly messages: () => MainMessages
 
   constructor(private readonly options: AppUpdateManagerOptions) {
     this.current = { status: 'idle', currentVersion: options.currentVersion }
+    this.messages = options.messages ?? (() => mainMessages('zh-CN'))
   }
 
   start(): void {
@@ -95,7 +100,7 @@ export class AppUpdateManager {
       : this.current.status === 'error' ? this.current.manualDownloadUrl : undefined
     try {
       if (manualDownloadUrl) {
-        if (!this.options.downloadManualInstaller) throw new Error('应用内下载器尚未初始化')
+        if (!this.options.downloadManualInstaller) throw new Error(this.messages().updateDownloaderMissing)
         const previous = this.current.status === 'available'
           ? releaseFromState(this.current)
           : this.lastRelease
@@ -141,7 +146,7 @@ export class AppUpdateManager {
     if (this.current.installMode === 'manual') {
       try {
         if (!this.manualInstallerPath || !this.options.openManualInstaller) {
-          throw new Error('已下载的 DMG 路径不存在')
+          throw new Error(this.messages().updateDmgMissing)
         }
         await this.options.openManualInstaller(this.manualInstallerPath)
       } catch (error) {
@@ -242,7 +247,7 @@ export class AppUpdateManager {
       this.checkCycleActive = false
       this.pendingCheckError = undefined
     }
-    this.onError(lastError ?? new Error('更新检查失败'), 'check')
+    this.onError(lastError ?? new Error(this.messages().updateCheckFailed), 'check')
   }
 
   private releaseState(

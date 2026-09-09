@@ -3,6 +3,7 @@ import { mkdir, open, rename, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { AppUpdateProgress } from '../shared/desktop-api'
+import { mainMessages, type MainMessages } from './messages'
 
 interface DownloadManualUpdateOptions {
   url: string
@@ -11,14 +12,17 @@ interface DownloadManualUpdateOptions {
   fetcher?: (url: string) => Promise<Response>
   now?: () => number
   onProgress: (progress: AppUpdateProgress) => void
+  /** Getter so a locale change applies without reconstructing the caller. */
+  messages?: () => MainMessages
 }
 
 const PROGRESS_EMIT_INTERVAL_MS = 100
 
 export async function downloadManualUpdate(options: DownloadManualUpdateOptions): Promise<string> {
+  const messages = options.messages?.() ?? mainMessages('zh-CN')
   const response = await (options.fetcher ?? fetch)(options.url)
-  if (!response.ok) throw new Error(`更新文件下载失败（HTTP ${response.status}）`)
-  if (!response.body) throw new Error('更新服务器没有返回文件内容')
+  if (!response.ok) throw new Error(messages.updateDownloadHttp(response.status))
+  if (!response.body) throw new Error(messages.updateEmptyBody)
 
   await mkdir(options.destinationDirectory, { recursive: true })
   const finalPath = join(options.destinationDirectory, installerFileName(options.url))
@@ -51,7 +55,7 @@ export async function downloadManualUpdate(options: DownloadManualUpdateOptions)
     file = undefined
 
     if (options.expectedSha512 && hash.digest('base64') !== options.expectedSha512) {
-      throw new Error('更新文件完整性校验失败')
+      throw new Error(messages.updateChecksumMismatch)
     }
     await rename(partialPath, finalPath)
     options.onProgress(progressState(

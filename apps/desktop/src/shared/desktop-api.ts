@@ -1,4 +1,6 @@
 import type {
+  Locale,
+  LocalePreference,
   RuntimeRecoveryCommandAction,
   RuntimeRecoverySnapshot,
   RuntimeStartupFailure
@@ -47,6 +49,10 @@ export interface MatouDesktopApi {
   downloadAppUpdate(): Promise<void>
   installAppUpdate(): Promise<void>
   onAppUpdateState(listener: (state: AppUpdateState) => void): () => void
+  getLocale(): Promise<Locale>
+  getLocalePreference(): Promise<LocalePreference>
+  setLocalePreference(preference: LocalePreference): Promise<Locale>
+  onLocaleChanged(listener: (locale: Locale) => void): () => void
 }
 
 export type RuntimeConnectionState = 'reconnecting' | 'ready'
@@ -212,5 +218,9 @@ export const DESKTOP_CHANNELS = {
   checkForAppUpdates: 'matou:app-update:check',
   downloadAppUpdate: 'matou:app-update:download',
   installAppUpdate: 'matou:app-update:install',
-  appUpdateState: 'matou:app-update:state'
+  appUpdateState: 'matou:app-update:state',
+  getLocale: 'matou:get-locale',
+  getLocalePreference: 'matou:get-locale-preference',
+  setLocalePreference: 'matou:set-locale-preference',
+  localeChanged: 'matou:locale-changed'
 } as const
