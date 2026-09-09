@@ -1,3 +1,5 @@
+import type { CatalogShape } from '../catalog'
+
 export const commonZhCN = {
   cancel: '取消',
   confirm: '确认',
@@ -7,7 +9,7 @@ export const commonZhCN = {
   loading: '加载中',
   unknown: '未知'
 }
-export const commonEn: import('../catalog').CatalogShape<typeof commonZhCN> = {
+export const commonEn: CatalogShape<typeof commonZhCN> = {
   cancel: 'Cancel',
   confirm: 'Confirm',
   close: 'Close',

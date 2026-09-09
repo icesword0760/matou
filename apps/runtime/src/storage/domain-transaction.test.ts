@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { CommandReplayConflictError } from '../errors'
 import { RuntimeDatabase } from './database'
 import { DomainTransactionManager } from './domain-transaction'
 import { MigrationRunner } from './migration-runner'
@@ -130,12 +131,13 @@ describe('DomainTransactionManager', () => {
       () => 'first'
     )
 
-    expect(() =>
+    const replay = () =>
       transactions.execute(
         { commandId: 'cmd-4', commandType: 'noop', requestHash: 'hash-b' },
         () => 'second'
       )
-    ).toThrow('command id cmd-4 was already used for a different request')
+    expect(replay).toThrow('command id cmd-4 was already used for a different request')
+    expect(replay).toThrow(CommandReplayConflictError)
   })
 
   it('propagates terminal and causal alignment metadata', () => {

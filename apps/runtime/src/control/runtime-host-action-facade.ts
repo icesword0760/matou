@@ -46,7 +46,7 @@ import {
   withHostControlPostResponseEffect
 } from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
-import { EntityMissingError } from '../errors'
+import { CommandReplayConflictError, EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
 import {
   HierarchyApplicationService,
@@ -1372,20 +1372,27 @@ function normalizeFacadeError(error: unknown): unknown {
   if (error instanceof HierarchyConflictError) {
     return new RuntimeHostActionError('PATH_CONFLICT', error.message, { cause: error })
   }
+  if (error instanceof CommandReplayConflictError) {
+    return new RuntimeHostActionError('PATH_CONFLICT', error.message, { cause: error })
+  }
   if (error instanceof EntityMissingError) {
     return new RuntimeHostActionError('TARGET_NOT_FOUND', error.message, { cause: error })
   }
   if (error instanceof Error) {
-    // Every localised thrower below the facade carries a code, checked above. What is
-    // left here is plain-text fragment matching over developer-authored error strings
-    // that are never localised: `an active Task named "X" already exists in this
-    // Workspace` from the task repositories, and the `${label} does not exist`
-    // invariant that the canvas, layout, migration, worktree and repository helpers
-    // still raise as plain Errors. Localised (zh-CN or en) user-facing messages never
-    // contain these fragments, and `forkBatch.inputMismatchFragment` — the one catalog
-    // value matched as text — is guarded by `i18n/messages.test.ts`, which asserts it
-    // stays a substring of `forkBatch.inputMismatch` in every locale. So this block
-    // behaves identically regardless of the runtime's locale.
+    // Everything below the facade that carries a code is classified above, so only
+    // plain `Error`s raised by never-localised invariants reach this block, and the
+    // fragments name exactly those: `an active Task named "X" already exists in this
+    // Workspace` from the hierarchy service and the task repository, the
+    // `${label} does not exist` invariant that the scene, layout, relation, worktree,
+    // migration and canvas helpers still raise, `Scene must keep one Session` from the
+    // canvas service, and the `… intent is stale` guards in the hierarchy service.
+    // English catalogs do carry the words "does not exist" (`providerConfig.notFound`
+    // and the `control.target.*` misses), but every one of those is thrown as an
+    // EntityMissingError or a HostActionTargetResolverError and is matched by code
+    // above, so no localised message ever falls through to the fragments.
+    // `forkBatch.inputMismatchFragment` is the one catalog value matched as text, and
+    // `i18n/messages.test.ts` asserts it stays a substring of `forkBatch.inputMismatch`
+    // in every locale. So this block behaves identically regardless of the locale.
     if (
       error.message.includes(runtimeMessages().control.forkBatch.inputMismatchFragment) ||
       error.message.includes('already exists in this Workspace')

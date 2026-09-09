@@ -7,7 +7,7 @@ import type { DomainCommandMetadata } from '@matou/domain'
 import type { HostNavigationPath } from '@matou/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { EntityMissingError } from '../errors'
+import { CommandReplayConflictError, EntityMissingError } from '../errors'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { DetachedSessionService } from '../hierarchy/detached-session-service'
 import { resetRuntimeLocaleForTests } from '../i18n/locale'
@@ -839,6 +839,30 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
       }
     }
   )
+
+  it('classifies a domain-transaction command replay conflict as PATH_CONFLICT', async () => {
+    transactions.execute(
+      { commandId: 'replay-conflict', commandType: 'noop', requestHash: 'hash-a' },
+      () => 'first'
+    )
+    let thrown: unknown
+    try {
+      transactions.execute(
+        { commandId: 'replay-conflict', commandType: 'noop', requestHash: 'hash-b' },
+        () => 'second'
+      )
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(CommandReplayConflictError)
+    expect(thrown).toMatchObject({ code: 'COMMAND_REPLAY_CONFLICT' })
+
+    createForkChild.mockRejectedValueOnce(thrown)
+    await expectFault(facade.execute('structure.fork.child', caller, {
+      source: { kind: 'self' }, title: '重放冲突', environment: { mode: 'current' },
+      submissionKey: 'replay-conflict-fork'
+    }), 'PATH_CONFLICT')
+  })
 
   it('replays an accepted single Fork before revalidating its now-reserved branch', async () => {
     seedGitState()

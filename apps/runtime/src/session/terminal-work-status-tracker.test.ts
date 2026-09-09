@@ -51,8 +51,10 @@ describe('TerminalWorkStatusTracker', () => {
     expect(new TerminalWorkStatusTracker().ingest('Which item should I select?')).toEqual([])
     expect(new TerminalWorkStatusTracker()
       .ingest('Reading the file so I can select the right section: ')).toEqual([])
+    // No trailing newline: `  input: build` is the live line, so the keyword regex
+    // really runs on it instead of on an empty final line.
     expect(new TerminalWorkStatusTracker()
-      .ingest('steps:\r\n  input: build\r\n  output: dist\r\n')).toEqual([])
+      .ingest('steps:\r\n  input: build')).toEqual([])
   })
 
   it('recognizes a real zsh read prompt without depending on Bash read syntax', () => {

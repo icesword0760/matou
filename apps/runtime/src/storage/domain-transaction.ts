@@ -4,6 +4,7 @@ import type {
   DomainEventInput
 } from '@matou/domain'
 
+import { CommandReplayConflictError } from '../errors'
 import type { DatabaseTransaction, RuntimeDatabase } from './database'
 
 export interface DomainMutationContext {
@@ -36,7 +37,7 @@ export class DomainTransactionManager {
     )
     if (stored) {
       if (stored.request_hash !== command.requestHash) {
-        throw new Error(
+        throw new CommandReplayConflictError(
           `command id ${command.commandId} was already used for a different request`
         )
       }

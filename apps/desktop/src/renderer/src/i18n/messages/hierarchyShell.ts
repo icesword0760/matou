@@ -215,7 +215,7 @@ export const hierarchyShellZhCN = {
 
 export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
   emptyWorkspace: { title: 'No workspace yet', hint: 'Pick a local directory to start working.', create: 'New workspace' },
-  readOnlyRecoveryReason: 'The database is in read-only recovery mode.',
+  readOnlyRecoveryReason: 'The database is in read-only recovery mode',
   workspacePathUnavailable: 'The workspace directory is unavailable. Restore the original path locally, or remove the workspace.',
   defaultWorkspaceName: 'Workspace',
   confirmOk: 'OK',

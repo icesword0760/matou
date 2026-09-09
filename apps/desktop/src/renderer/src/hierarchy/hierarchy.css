@@ -304,7 +304,8 @@ button { -webkit-app-region: no-drag; }
 .session-level-breadcrumb button:hover { color: rgba(255,255,255,.94); background: rgba(255,255,255,.08); }
 .session-level-breadcrumb button > span[aria-hidden="true"] { flex: none; margin-right: 6px; font-size: 13px; }
 .session-level-breadcrumb strong { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.session-level-breadcrumb strong + span { flex: none; color: rgba(255,255,255,.4); }
+/* The flex container trims the leading space of the ` · count` span, so space it here. */
+.session-level-breadcrumb strong + span { flex: none; margin-left: 4px; color: rgba(255,255,255,.4); }
 .status-info { container-type: inline-size; display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-start; min-width: 0; max-width: none; margin-left: auto; padding-left: 12px; overflow: hidden; border-left: 1px solid #21262d; color: #6e7681; font-size: 10px; gap: 8px; white-space: nowrap; }
 .status-info__primary,.status-info__secondary { display: flex; align-items: center; min-width: 0; gap: 8px; }
 .status-info__primary { flex: 0 0 auto; }
@@ -574,7 +575,9 @@ body.light-theme .instruction-file-dialog footer button.is-primary { border-colo
   pointer-events: none;
 }
 .flat-sidebar__topbar { position: relative; z-index: 2; display: flex; flex: 0 0 48px; align-items: center; justify-content: space-between; padding: 0 12px 0 78px; border: 0; background: transparent; -webkit-app-region: drag; }
-.flat-sidebar__new-workspace { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border: 0; border-radius: 7px; color: #e8e8e8; background: transparent; font-size: 14px; font-weight: 550; cursor: pointer; }
+.flat-sidebar__new-workspace { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border: 0; border-radius: 7px; color: #e8e8e8; background: transparent; font-size: 14px; font-weight: 550; cursor: pointer; white-space: nowrap; }
+/* Longer labels ("Adding…", "New workspace") ellipsize instead of wrapping the row. */
+.flat-sidebar__new-workspace > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .flat-sidebar__new-workspace:hover, .flat-sidebar__notify:hover { background: rgba(255,255,255,.07); }
 .flat-sidebar__notify { position: relative; display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
 .flat-sidebar__notify svg { width: 16px; height: 16px; color: #8d96a3; opacity: .9; }

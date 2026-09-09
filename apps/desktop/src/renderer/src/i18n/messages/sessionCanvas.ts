@@ -412,7 +412,10 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
       `${session} is already loaded in ${card}. You can still load it into this card, and both cards will then share the same Claude Code session.`,
     thisSession: 'This session',
     loadAnyway: 'Load anyway',
-    /** Claude Code's own mode names, shared with the HUD so the two cannot drift. */
+    /**
+     * Claude Code's own mode names. Only the English side reuses `hudEn.permission`;
+     * the Chinese catalog above keeps its own translated labels.
+     */
     permission: hudEn.permission,
     timeUnknown: 'Time unknown',
     justNow: 'Just now',

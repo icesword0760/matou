@@ -8,6 +8,7 @@ export interface MainMessages {
   chinese: string
   english: string
   restartHint: string
+  envForced: string
   dagWindowTitle: string
   updateDownloaderMissing: string
   updateDmgMissing: string
@@ -28,6 +29,7 @@ const ZH_CN: MainMessages = {
   chinese: '中文',
   english: 'English',
   restartHint: '运行时消息在重启后切换',
+  envForced: '语言由 MATOU_LOCALE 环境变量指定',
   dagWindowTitle: '码头 · 会话 DAG',
   updateDownloaderMissing: '应用内下载器尚未初始化',
   updateDmgMissing: '已下载的 DMG 路径不存在',
@@ -48,6 +50,7 @@ const EN: MainMessages = {
   chinese: '中文',
   english: 'English',
   restartHint: 'Runtime messages switch after a restart',
+  envForced: 'Language is set by the MATOU_LOCALE environment variable',
   dagWindowTitle: 'Matou · Session DAG',
   updateDownloaderMissing: 'The in-app downloader has not been initialised',
   updateDmgMissing: 'The downloaded DMG path does not exist',

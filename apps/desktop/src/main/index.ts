@@ -19,7 +19,7 @@ import {
 } from 'electron'
 import electronUpdater from 'electron-updater'
 
-import { isLocalePreference, type LocalePreference } from '@matou/contracts'
+import { isLocale, isLocalePreference, type LocalePreference } from '@matou/contracts'
 
 import { AppUpdateManager } from './app-update-manager'
 import { resolveAppUpdateInstallMode } from './app-update-install-mode'
@@ -400,8 +400,11 @@ function installNativeScrollGesture(window: BrowserWindow): void {
 function buildTrayMenu(): Menu {
   const m = messages()
   const preference = localeStore.preference()
+  // MATOU_LOCALE outranks the stored preference, so picking a radio item would do
+  // nothing while it is set. Show the choice, disabled, and say who is deciding.
+  const envForced = isLocale(process.env.MATOU_LOCALE)
   const item = (label: string, value: LocalePreference): MenuItemConstructorOptions => ({
-    label, type: 'radio', checked: preference === value,
+    label, type: 'radio', checked: preference === value, enabled: !envForced,
     click: () => { localeStore.set(value) }
   })
   return Menu.buildFromTemplate([
@@ -409,7 +412,9 @@ function buildTrayMenu(): Menu {
     { type: 'separator' },
     { label: m.language, submenu: [
       item(m.followSystem, 'system'), item(m.chinese, 'zh-CN'), item(m.english, 'en'),
-      { type: 'separator' }, { label: m.restartHint, enabled: false }
+      { type: 'separator' },
+      ...(envForced ? [{ label: m.envForced, enabled: false } as MenuItemConstructorOptions] : []),
+      { label: m.restartHint, enabled: false }
     ] },
     { type: 'separator' },
     { label: m.quit, click: () => { quitting = true; app.quit() } }
@@ -497,6 +502,10 @@ if (primaryInstance) app.whenReady().then(async () => {
   tray.setContextMenu(buildTrayMenu())
   localeStore.onChange((locale) => {
     tray?.setContextMenu(buildTrayMenu())
+    // The DAG window's title is native chrome the renderer cannot repaint.
+    for (const window of dagBrowserWindows.values()) {
+      if (!window.isDestroyed()) window.setTitle(messages().dagWindowTitle)
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.localeChanged, locale)
     }
