@@ -41,6 +41,20 @@ describe('TerminalWorkStatusTracker', () => {
     expect(tracker.ingest('Password: accepted\r\n')).toEqual([])
   })
 
+  it('takes an English keyword as a prompt only when it opens the line and ends in a colon', () => {
+    expect(new TerminalWorkStatusTracker().ingest('Select an option: ')).toEqual(['needs-input'])
+    expect(new TerminalWorkStatusTracker().ingest('Password: ')).toEqual(['needs-input'])
+    expect(new TerminalWorkStatusTracker().ingest('password for user bob: ')).toEqual(['needs-input'])
+
+    expect(new TerminalWorkStatusTracker().ingest('inputs: ')).toEqual([])
+    expect(new TerminalWorkStatusTracker().ingest('Selector: ')).toEqual([])
+    expect(new TerminalWorkStatusTracker().ingest('Which item should I select?')).toEqual([])
+    expect(new TerminalWorkStatusTracker()
+      .ingest('Reading the file so I can select the right section: ')).toEqual([])
+    expect(new TerminalWorkStatusTracker()
+      .ingest('steps:\r\n  input: build\r\n  output: dist\r\n')).toEqual([])
+  })
+
   it('recognizes a real zsh read prompt without depending on Bash read syntax', () => {
     const tracker = new TerminalWorkStatusTracker()
 

@@ -12,9 +12,10 @@ import type {
   Workspace
 } from '@matou/domain'
 
-import { HierarchyConflictError, HierarchyEntityMissingError } from './hierarchy-errors'
+import { HierarchyConflictError } from './hierarchy-errors'
 import { createHierarchyIds, type HierarchyIds } from './hierarchy-ids'
 import { WorkspacePathInvalidError } from './workspace-path-service'
+import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 import type {
@@ -2767,6 +2768,6 @@ function parseStringArray(value: string): string[] {
 }
 
 function requireRow<T>(row: T | undefined, label: string): T {
-  if (!row) throw new HierarchyEntityMissingError(`${label} does not exist`)
+  if (!row) throw new EntityMissingError(`${label} does not exist`)
   return row
 }

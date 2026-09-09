@@ -13,6 +13,7 @@ import type {
   ClaudeSessionSummary
 } from '@matou/contracts'
 
+import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
 
 interface CatalogQuery {
@@ -116,7 +117,9 @@ export class ClaudeSessionCatalog {
     requireProviderSessionId(input.providerSessionId)
     const transcript = (await this.#readWorkspace(input.cwd))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
-    if (!transcript) throw new Error(runtimeMessages().session.claudeSessionNotInWorkspace)
+    if (!transcript) {
+      throw new EntityMissingError(runtimeMessages().session.claudeSessionNotInWorkspace)
+    }
     const query = normalizeQuery(input.query)
     const limit = clampInteger(
       input.limit ?? DEFAULT_EVENT_PAGE_LIMIT,
@@ -165,7 +168,9 @@ export class ClaudeSessionCatalog {
     requireProviderSessionId(input.providerSessionId)
     const transcript = (await this.#readWorkspace(input.cwd))
       .find(({ providerSessionId }) => providerSessionId === input.providerSessionId)
-    if (!transcript) throw new Error(runtimeMessages().session.claudeSessionNotInWorkspace)
+    if (!transcript) {
+      throw new EntityMissingError(runtimeMessages().session.claudeSessionNotInWorkspace)
+    }
     const query = normalizeQuery(input.query)
     const allHits = query ? await this.#searchTranscript(transcript, query) : []
     const offset = clampInteger(input.offset ?? 0, 0, allHits.length)

@@ -7,8 +7,12 @@ import type { DomainCommandMetadata } from '@matou/domain'
 import type { HostNavigationPath } from '@matou/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { EntityMissingError } from '../errors'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { DetachedSessionService } from '../hierarchy/detached-session-service'
+import { resetRuntimeLocaleForTests } from '../i18n/locale'
+import { runtimeMessages } from '../i18n/messages'
+import { ProviderConfigStore } from '../provider-config/provider-config-store'
 import { SessionCanvasService } from '../session-canvas/session-canvas-service'
 import type {
   CreateForkInput,
@@ -802,6 +806,39 @@ describe('RuntimeHostActionFacade create and Fork actions', () => {
       submissionKey: 'branch-conflict-fork'
     }), 'BRANCH_CONFLICT')
   })
+
+  it.each([
+    ['zh-CN', 'zh-CN'],
+    ['en', 'en']
+  ] as const)(
+    'classifies a missing provider configuration from the Fork path as TARGET_NOT_FOUND in %s',
+    async (label, locale) => {
+      const previous = process.env.MATOU_LOCALE
+      process.env.MATOU_LOCALE = locale
+      resetRuntimeLocaleForTests()
+      try {
+        const store = new ProviderConfigStore(join(root, `provider-config-${label}`))
+        const thrown = await store.launchSelection('claude-code', 'missing-provider')
+          .then(() => undefined, (error: unknown) => error)
+        expect(thrown).toBeInstanceOf(EntityMissingError)
+        createForkChild.mockRejectedValueOnce(thrown)
+
+        const fault = await facade.execute('structure.fork.child', caller, {
+          source: { kind: 'self' }, title: 'Provider gone',
+          environment: { mode: 'current' }, submissionKey: `provider-gone-${label}`
+        }).then(() => undefined, (error: unknown) => error)
+
+        expect(fault).toMatchObject({
+          code: 'TARGET_NOT_FOUND',
+          message: runtimeMessages().providerConfig.sessionProviderNotFound
+        })
+      } finally {
+        if (previous === undefined) delete process.env.MATOU_LOCALE
+        else process.env.MATOU_LOCALE = previous
+        resetRuntimeLocaleForTests()
+      }
+    }
+  )
 
   it('replays an accepted single Fork before revalidating its now-reserved branch', async () => {
     seedGitState()

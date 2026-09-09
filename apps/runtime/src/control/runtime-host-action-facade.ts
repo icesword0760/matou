@@ -46,6 +46,7 @@ import {
   withHostControlPostResponseEffect
 } from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
+import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
 import {
   HierarchyApplicationService,
@@ -54,7 +55,7 @@ import {
   type CreatedHierarchyPath,
   type WorkspaceHierarchyResult
 } from '../hierarchy/hierarchy-application-service'
-import { HierarchyConflictError, HierarchyEntityMissingError } from '../hierarchy/hierarchy-errors'
+import { HierarchyConflictError } from '../hierarchy/hierarchy-errors'
 import {
   SessionCanvasService,
   type RemoveSessionBranchResult
@@ -1371,16 +1372,19 @@ function normalizeFacadeError(error: unknown): unknown {
   if (error instanceof HierarchyConflictError) {
     return new RuntimeHostActionError('PATH_CONFLICT', error.message, { cause: error })
   }
-  if (error instanceof HierarchyEntityMissingError) {
+  if (error instanceof EntityMissingError) {
     return new RuntimeHostActionError('TARGET_NOT_FOUND', error.message, { cause: error })
   }
   if (error instanceof Error) {
-    // Fragment matching classifies the plain Errors the hierarchy, canvas and storage
-    // layers still throw. Only untranslated developer text is matched: every localised
-    // thrower now carries a code that is checked above.
+    // Every localised thrower below the facade carries a code, checked above. What is
+    // left here is fragment matching over untranslated developer text that no locale
+    // ever rewrites: `an active Task named "X" already exists in this Workspace` from
+    // the task repositories, and the `${label} does not exist` invariant that the
+    // canvas, layout, migration, worktree and repository helpers still raise as plain
+    // Errors. `inputMismatchFragment` is the one catalog value matched as text; it is
+    // a documented substring of `forkBatch.inputMismatch` in every locale.
     if (
       error.message.includes(runtimeMessages().control.forkBatch.inputMismatchFragment) ||
-      error.message.includes('was already used for a different request') ||
       error.message.includes('already exists in this Workspace')
     ) {
       return new RuntimeHostActionError('PATH_CONFLICT', error.message, { cause: error })

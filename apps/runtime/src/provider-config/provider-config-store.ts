@@ -7,6 +7,7 @@ import {
   type ProviderCli, type ProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView
 } from '@matou/contracts'
 
+import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
 
 interface StoredProvider {
@@ -88,7 +89,9 @@ export class ProviderConfigStore {
         ...(existing?.builtIn ? { builtIn: true } : {}),
         ...(apiKey ? { apiKey } : {})
       }
-      if (input.id && !existing) throw new Error(runtimeMessages().providerConfig.notFound)
+      if (input.id && !existing) {
+        throw new EntityMissingError(runtimeMessages().providerConfig.notFound)
+      }
       const index = list.findIndex(({ id }) => id === provider.id)
       if (index >= 0) list[index] = provider
       else list.push(provider)
@@ -101,7 +104,7 @@ export class ProviderConfigStore {
     return this.#mutate(async (state) => {
       const list = state.providers[cli]
       const provider = list.find(({ id }) => id === providerId)
-      if (!provider) throw new Error(runtimeMessages().providerConfig.notFound)
+      if (!provider) throw new EntityMissingError(runtimeMessages().providerConfig.notFound)
       if (state.activeProviderIds[cli] === providerId) {
         throw new Error(runtimeMessages().providerConfig.activeCannotBeDeleted)
       }
@@ -115,7 +118,7 @@ export class ProviderConfigStore {
   async activate(cli: ProviderCli, providerId: string): Promise<ProviderConfigSnapshot> {
     return this.#mutate(async (state) => {
       if (!state.providers[cli].some(({ id }) => id === providerId)) {
-        throw new Error(runtimeMessages().providerConfig.notFound)
+        throw new EntityMissingError(runtimeMessages().providerConfig.notFound)
       }
       if (state.activeProviderIds[cli] !== providerId) {
         state.activeProviderIds[cli] = providerId
@@ -140,7 +143,9 @@ export class ProviderConfigStore {
     const state = await this.#read()
     const selectedId = providerConfigId ?? state.activeProviderIds[cli]
     const provider = state.providers[cli].find(({ id }) => id === selectedId)
-    if (!provider) throw new Error(runtimeMessages().providerConfig.sessionProviderNotFound)
+    if (!provider) {
+      throw new EntityMissingError(runtimeMessages().providerConfig.sessionProviderNotFound)
+    }
     const endpoint = provider.endpoint.replace(/\/$/, '')
     if (cli === 'claude-code') {
       return {
@@ -221,9 +226,10 @@ function normalizeState(value: Partial<StoredProviderState>): StoredProviderStat
     return defaultState()
   }
   const state = value as StoredProviderState
+  const seed = defaultState()
   for (const cli of ['claude-code', 'codex'] as const) {
     if (!Array.isArray(state.providers[cli]) || state.providers[cli].length === 0) {
-      state.providers[cli] = defaultState().providers[cli]
+      state.providers[cli] = seed.providers[cli]
     }
     if (!state.providers[cli].some(({ id }) => id === state.activeProviderIds[cli])) {
       state.activeProviderIds[cli] = state.providers[cli][0]!.id

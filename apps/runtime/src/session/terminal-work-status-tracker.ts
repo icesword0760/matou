@@ -58,10 +58,15 @@ function isExplicitBlockingPrompt(raw: string): boolean {
   if (!line) return false
   return /(?:^|\s)(?:enter|input|type|provide)\s+[^:：?？\r\n]{1,64}[:：?？]$/i.test(line) ||
     /(?:^|\s)(?:password|passphrase|pin|token)\s*[:：?？]$/i.test(line) ||
-    // Labelled prompts in either language. The English branch keeps a word
-    // boundary so "entered" or "inputs" is not mistaken for a prompt keyword.
-    /(?:^|\s)(?:请输入|输入|密码|口令|请选择|(?:password|passphrase|enter|input|select|choose)\b)[^:：?？\r\n]{0,64}[:：?？]$/i
-      .test(line) ||
+    /(?:^|\s)(?:请输入|输入|密码|口令|请选择)[^:：?？\r\n]{0,64}[:：?？]$/.test(line) ||
+    // English verb-form keys such as "Select an option:". The keyword has to open
+    // the line and the line has to end in a colon, so prose like "…so I can select
+    // the right section:" or "…should I select?" stays ordinary output. The word
+    // boundary keeps "inputs:" and "Selector:" out.
+    /^\s*(?:enter|input|select|choose)\b[^:：?？\r\n]{0,64}[:：]$/i.test(line) ||
+    // A secret prompt may carry a subject ("password for user bob:"), so this one
+    // stays free-form.
+    /(?:^|\s)(?:password|passphrase)\b[^:：?？\r\n]{0,64}[:：?？]$/i.test(line) ||
     // zsh's native `read "name?prompt"` form and many interactive CLIs use
     // a labelled chevron prompt. A label is required so ordinary redirected
     // output or the Agent UI's single `❯` glyph does not become waiting work.

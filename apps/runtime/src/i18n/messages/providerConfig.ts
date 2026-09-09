@@ -19,8 +19,8 @@ export const providerConfigZhCN = {
 
 export const providerConfigEn: CatalogShape<typeof providerConfigZhCN> = {
   builtIn: {
-    anthropic: 'Anthropic official',
-    openai: 'OpenAI official'
+    anthropic: 'Anthropic (official)',
+    openai: 'OpenAI (official)'
   },
 
   notFound: 'That provider configuration does not exist',
@@ -30,5 +30,5 @@ export const providerConfigEn: CatalogShape<typeof providerConfigZhCN> = {
   invalidCli: 'The CLI type is not valid',
   nameRequired: 'The provider name must not be empty',
   modelRequired: 'The default model must not be empty',
-  endpointInvalid: 'The API endpoint has to be a valid HTTP or HTTPS address'
+  endpointInvalid: 'The API endpoint must be a valid HTTP or HTTPS address'
 }

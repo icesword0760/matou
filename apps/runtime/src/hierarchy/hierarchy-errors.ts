@@ -13,16 +13,3 @@ export class HierarchyConflictError extends Error {
     this.code = code
   }
 }
-
-/**
- * A hierarchy or canvas row that a command needs is gone. The message stays the
- * untranslated developer text the layer has always produced.
- */
-export class HierarchyEntityMissingError extends Error {
-  readonly code = 'ENTITY_NOT_FOUND' as const
-
-  constructor(message: string) {
-    super(message)
-    this.name = 'HierarchyEntityMissingError'
-  }
-}

@@ -44,7 +44,7 @@ export const sessionCanvasZhCN = {
 }
 
 export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
-  detachedSessionMustReturn: 'A session in a detached window has to return to its session list first',
+  detachedSessionMustReturn: 'A session in a detached window must return to its session list first',
   sessionNotInCanvas: 'That session is not in this canvas',
   newCanvas: 'New canvas',
   newCanvasNumbered: (suffix) => `New canvas ${suffix}`,

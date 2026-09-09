@@ -19,6 +19,6 @@ export const gitEn: CatalogShape<typeof gitZhCN> = {
     ? 'This worktree still has 1 session attached'
     : `This worktree still has ${sessionCount} sessions attached`,
   branchNameRequired: 'Enter a branch name',
-  branchNameInvalid: 'The branch name format is not valid',
+  branchNameInvalid: 'The branch name format is invalid',
   operationFailed: 'The Git operation failed'
 }
