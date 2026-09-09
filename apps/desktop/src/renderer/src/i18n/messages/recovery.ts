@@ -54,35 +54,35 @@ export const recoveryEn: CatalogShape<typeof recoveryZhCN> = {
     integrityDescription:
       'The database failed its integrity check. Matou kept the original files and will not start a blank workspace on its own.',
     working: 'Recovering the database. Keep Matou open…',
-    exportedTo: (path: string) => `Recovery data exported to ${path}`,
+    exportedTo: (path: string) => `Recovery bundle exported to ${path}`,
     backups: 'Available backups',
-    backupCount: (count: number) => (count === 1 ? '1 backup' : `${count} backups`),
+    backupCount: (count: number) => `${count}`,
     noBackups: 'No backup has passed the integrity check yet.',
     schemaVersion: (version: number) => `Schema version ${version}`,
     restoring: 'Restoring…',
-    restoreSelected: 'Restore the selected backup',
+    restoreSelected: 'Restore backup',
     checking: 'Checking…',
-    recheckDatabase: 'Check the database again',
+    recheckDatabase: 'Check database again',
     exporting: 'Exporting…',
-    exportBundle: 'Export recovery data',
-    startEmpty: 'Create a new empty database',
+    exportBundle: 'Export recovery bundle',
+    startEmpty: 'Create new empty database',
     startEmptyHint:
       'This runs only after you confirm it explicitly. The quarantined files and the backups are kept.',
-    confirmEmptyLabel: 'Confirm creating a new empty database',
+    confirmEmptyLabel: 'Confirm new empty database',
     confirmEmptyTitle: 'Create a new empty database?',
     confirmEmptyBody:
       'Matou will show a brand-new empty workspace. The damaged files and the backups are kept so you can export and investigate them later.',
     back: 'Back',
-    confirmEmpty: 'Create the empty database'
+    confirmEmpty: 'Create empty database'
   },
   readOnlyBanner: {
     explanation:
       'Existing workspaces, tasks and sessions can still be browsed, searched and copied. Anything that would change data is paused.',
     searchTerminal: 'Search this terminal',
     exporting: 'Exporting…',
-    exportDatabase: 'Export the database',
-    exportedTo: (path: string) => `Database exported to ${path}`,
-    exported: 'Database exported',
+    exportDatabase: 'Export recovery bundle',
+    exportedTo: (path: string) => `Recovery bundle exported to ${path}`,
+    exported: 'Recovery bundle exported',
     exportFailed: (reason: string) => `Export failed: ${reason}`
   }
 }

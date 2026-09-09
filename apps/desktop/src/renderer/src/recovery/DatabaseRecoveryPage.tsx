@@ -195,7 +195,8 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
 
 function formatTime(createdAt: number, locale: Locale): string {
   return new Intl.DateTimeFormat(locale, {
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
   }).format(new Date(createdAt))
 }
 

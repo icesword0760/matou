@@ -13,7 +13,7 @@ export const appEn: CatalogShape<typeof appZhCN> = {
   startupCheck: 'Matou startup check',
   updateRequired: 'Matou needs an update',
   upgradeIncomplete: 'The workspace upgrade did not finish',
-  startupHalted: 'Matou stopped retrying the start. Your data is untouched.',
+  startupHalted: 'Matou stopped restarting itself. Your data is unchanged.',
   checking: 'Checking…',
   recheck: 'Check again'
 }
