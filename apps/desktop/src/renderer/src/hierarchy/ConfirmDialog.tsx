@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import type { ConfirmStep } from './terminal-close-flow'
+import { useMessages } from '../i18n/LocaleProvider'
 
 export function ConfirmDialog(props: {
   title: string
@@ -14,6 +15,7 @@ export function ConfirmDialog(props: {
   onConfirm(): void
   onCancel(): void
 }) {
+  const m = useMessages().common
   const dialogRef = useRef<HTMLDivElement>(null)
   const [composing, setComposing] = useState(false)
 
@@ -39,10 +41,10 @@ export function ConfirmDialog(props: {
       event.preventDefault()
       next?.focus()
     }}>
-    <header><h2>{props.title}</h2><button className="dialog-close" aria-label="关闭" onClick={props.onCancel}>×</button></header>
+    <header><h2>{props.title}</h2><button className="dialog-close" aria-label={m.close} onClick={props.onCancel}>×</button></header>
     {typeof props.body === 'string' ? <p>{props.body}</p> : <div className="dialog-content">{props.body}</div>}
     <footer>
-      {props.showCancel !== false && <button onClick={props.onCancel}>{props.cancelLabel ?? '取消'}</button>}
+      {props.showCancel !== false && <button onClick={props.onCancel}>{props.cancelLabel ?? m.cancel}</button>}
       <button className={`dialog-primary${props.confirmTone === 'danger' ? ' is-danger' : ''}`}
         onClick={() => !composing && props.onConfirm()}>{props.confirmLabel}</button>
     </footer>

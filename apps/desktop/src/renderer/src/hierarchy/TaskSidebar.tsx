@@ -8,6 +8,7 @@ import type { HierarchyCommands, HierarchyProjection, TaskView, WorkspaceView } 
 import { taskDeleteFlow } from './terminal-close-flow'
 import { NotificationCenter } from '../notifications/NotificationCenter'
 import type { AgentNotification } from '../notifications/AgentNotificationStore'
+import { useMessages } from '../i18n/LocaleProvider'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import workbenchIcon from '../assets/terminal-reference/terminal/dark_lujing.svg'
 import { AppIcon } from '../ui/AppIcon'
@@ -57,6 +58,8 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
   settingsActive?: boolean
   onSettingsActiveChange?(active: boolean): void
 }) {
+  const shell = useMessages().hierarchyShell
+  const m = shell.taskSidebar
   const workspaces = useMemo(() => orderNavigation(projection.workspaces), [projection.workspaces])
   const placedIds = new Set(projection.taskPlacements
     .filter(({ windowId }) => windowId === projection.windowId).map(({ taskId }) => taskId))
@@ -114,7 +117,7 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
     try {
       await Promise.resolve(commands.createWorkspace(path))
     } catch {
-      setToast('工作空间添加失败，请重试')
+      setToast(m.createWorkspaceFailed)
     } finally {
       setCreatingWorkspace(false)
     }
@@ -125,9 +128,9 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
     if (!path) return
     try {
       await Promise.resolve(commands.relinkWorkspace(workspace.id, path))
-      setToast(`已恢复 ${workspace.name} 的工作目录`)
+      setToast(m.directoryRestored(workspace.name))
     } catch {
-      setToast('工作目录恢复失败，请重新选择')
+      setToast(m.directoryRestoreFailed)
     }
   }
   const openTaskMenu = (task: TaskView, event: MouseEvent<HTMLElement>) => {
@@ -176,22 +179,22 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
         await Promise.resolve(commands.activateSession(notification.sessionId))
         onRevealSession?.(scene.id, notification.sessionId)
         success = true
-      } else { success = false; setToast('原面板已不存在或不在当前窗口') }
+      } else { success = false; setToast(m.panelGone) }
     }
     if (success) notificationStore.remove(notification.id)
     setNotificationCenterOpen(false)
   }
 
-  return <aside ref={sidebarRef} className="workbench-sidebar flat-sidebar" aria-label="事项列表"
+  return <aside ref={sidebarRef} className="workbench-sidebar flat-sidebar" aria-label={m.list}
     onPointerMove={moveGlassLight} onPointerLeave={resetGlassLight}>
     <SidebarGlassMaterial />
     <header className="flat-sidebar__topbar">
-      <button className="flat-sidebar__new-workspace" aria-label="新增工作空间"
-        disabled={readOnly || creatingWorkspace} title={readOnly ? READ_ONLY_REASON : undefined}
+      <button className="flat-sidebar__new-workspace" aria-label={m.newWorkspace}
+        disabled={readOnly || creatingWorkspace} title={readOnly ? shell.readOnlyRecoveryReason : undefined}
         onClick={() => void chooseDirectory()}>
-        <ComposeIcon /><span>{creatingWorkspace ? '正在添加…' : '新增工作空间'}</span>
+        <ComposeIcon /><span>{creatingWorkspace ? m.addingWorkspace : m.newWorkspace}</span>
       </button>
-      <button className="flat-sidebar__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
+      <button className="flat-sidebar__notify" aria-label={shell.notificationCenter} aria-expanded={notificationCenterOpen}
         onClick={() => setNotificationCenterOpen((value) => !value)}>
         <AppIcon name="bell" />
         {notificationSnapshot.unreadCount > 0 && <span className="flat-sidebar__notify-dot" aria-hidden="true" />}
@@ -199,12 +202,12 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
     </header>
     {notificationCenterOpen && <NotificationCenter projection={projection}
       onClose={() => setNotificationCenterOpen(false)} onNavigate={(notification) => { void navigateNotification(notification) }} />}
-    <nav className="flat-sidebar__groups custom-scrollbar" aria-label="工作空间与事项">
+    <nav className="flat-sidebar__groups custom-scrollbar" aria-label={m.groups}>
       {workspaces.map((workspace) => {
         const tasks = visibleTasks(workspace.id)
         const invalid = projection.pathStates.find(({ workspaceId }) => workspaceId === workspace.id)?.status === 'invalid'
         const isCollapsed = collapsed.has(workspace.id)
-        return <section key={workspace.id} role="group" aria-label={`${workspace.name} 工作空间`}
+        return <section key={workspace.id} role="group" aria-label={m.workspaceGroup(workspace.name)}
           data-testid="workspace-group" data-workspace-id={workspace.id}
           className={`workspace-group${workspace.id === activeWorkspaceId ? ' is-active' : ''}${dragWorkspaceId === workspace.id ? ' is-dragging' : ''}${dragOverId === `workspace:${workspace.id}` ? ' drag-over' : ''}`}
           draggable={!readOnly && Boolean(workspace.isPinned)}
@@ -232,20 +235,20 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
               <ChevronIcon collapsed={isCollapsed} /><FolderIcon home={Boolean(workspace.isDefault)} />
               <span className="workspace-group__name" title={workspace.rootDirectory}>{workspace.name}</span>
               <span className="workspace-group__status">
-                {workspace.isDefault && <span className="workspace-group__badge">默认</span>}
+                {workspace.isDefault && <span className="workspace-group__badge">{m.defaultBadge}</span>}
                 {workspace.isPinned && <PinIcon />}
-                {invalid && <span className="workspace-invalid">路径失效</span>}
+                {invalid && <span className="workspace-invalid">{shell.pathInvalid}</span>}
               </span>
             </button>
-            <button className="workspace-group__add" aria-label={`在 ${workspace.name} 中新增事项`}
-              title={readOnly ? READ_ONLY_REASON : invalid ? WORKSPACE_PATH_MESSAGE : '新增事项'}
+            <button className="workspace-group__add" aria-label={m.newTaskIn(workspace.name)}
+              title={readOnly ? shell.readOnlyRecoveryReason : invalid ? shell.workspacePathUnavailable : m.newTask}
               disabled={readOnly || invalid} onClick={() => void commands.createTask(workspace.id)}><PlusIcon /></button>
             {invalid && !workspace.isDefault && <button className="workspace-group__relink"
-              aria-label={`重新关联工作空间目录：${workspace.name}`}
-              disabled={readOnly} title={readOnly ? READ_ONLY_REASON : '选择工作空间的新位置'}
-              onClick={(event) => { event.stopPropagation(); void relinkDirectory(workspace) }}>恢复目录</button>}
+              aria-label={m.relinkWorkspace(workspace.name)}
+              disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : m.relinkHint}
+              onClick={(event) => { event.stopPropagation(); void relinkDirectory(workspace) }}>{m.restoreDirectory}</button>}
             <button className="workspace-group__more" data-icon="ellipsis"
-              aria-label={`工作空间菜单：${workspace.name}`}
+              aria-label={m.workspaceMenu(workspace.name)}
               onClick={(event) => openWorkspaceMenu(workspace, event)} />
           </div>
           {!isCollapsed && <div className="workspace-group__tasks" role="list">
@@ -287,7 +290,7 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
                 </span>
                 {unreadCount(task.id) === 0 && <span className="workbench-item__actions">
                   <button className={`workbench-item__more-btn${menuTask?.id === task.id ? ' is-open' : ''}`}
-                    data-icon="ellipsis" aria-label={`事项菜单：${task.title}`} title="更多操作"
+                    data-icon="ellipsis" aria-label={m.taskMenu(task.title)} title={m.moreActions}
                     onClick={(event) => openTaskMenu(task, event)} />
                 </span>}
               </div>
@@ -296,62 +299,62 @@ export function TaskSidebar({ projection, commands, readOnly = false, onRevealSe
         </section>
       })}
     </nav>
-    <footer className="flat-sidebar__toolbar" aria-label="工作空间视图">
+    <footer className="flat-sidebar__toolbar" aria-label={m.views}>
       <button type="button" className={`flat-sidebar__board-toggle${boardActive ? ' is-active' : ''}`}
-        aria-label="看板" aria-pressed={boardActive}
-        disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+        aria-label={m.board} aria-pressed={boardActive}
+        disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined}
         onClick={() => { onSettingsActiveChange?.(false); onBoardActiveChange?.(!boardActive) }}>
-        <KanbanIcon /><span>看板</span><i aria-hidden="true" />
+        <KanbanIcon /><span>{m.board}</span><i aria-hidden="true" />
       </button>
       <button type="button" className={`flat-sidebar__settings-toggle${settingsActive ? ' is-active' : ''}`}
-        aria-label="设置" aria-pressed={settingsActive}
+        aria-label={m.settings} aria-pressed={settingsActive}
         onClick={() => { onBoardActiveChange?.(false); onSettingsActiveChange?.(!settingsActive) }}>
-        <SettingsIcon /><span>设置</span>
+        <SettingsIcon /><span>{m.settings}</span>
       </button>
     </footer>
     {menuWorkspace && createPortal(<div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
       {projection.pathStates.find(({ workspaceId }) => workspaceId === menuWorkspace.id)?.status === 'invalid' &&
         !menuWorkspace.isDefault && <button role="menuitem" disabled={readOnly}
-          title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
+          title={readOnly ? shell.readOnlyRecoveryReason : undefined} onClick={() => {
           const target = menuWorkspace
           setMenuWorkspace(null)
           void relinkDirectory(target)
-        }}>重新关联工作空间目录</button>}
-      <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
+        }}>{m.relinkWorkspaceAction}</button>}
+      <button role="menuitem" disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined} onClick={() => {
         const pinned = !menuWorkspace.isPinned
         const workspaceId = menuWorkspace.id
         setMenuWorkspace(null)
         void Promise.resolve(commands.setWorkspacePinned(workspaceId, pinned))
-          .then(() => setToast(pinned ? '工作空间已置顶' : '已取消工作空间置顶'))
-          .catch(() => setToast('工作空间置顶状态更新失败'))
+          .then(() => setToast(pinned ? m.workspacePinned : m.workspaceUnpinned))
+          .catch(() => setToast(m.workspacePinFailed))
       }}>
-        <PinIcon />{menuWorkspace.isPinned ? '取消置顶' : '置顶'}</button>
-      <button role="menuitem" onClick={() => { void window.matouDesktop?.revealDirectory(menuWorkspace.rootDirectory); setMenuWorkspace(null) }}>在 Finder 中显示</button>
-      <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(menuWorkspace.rootDirectory); setToast('路径已复制'); setMenuWorkspace(null) }}>复制路径</button>
+        <PinIcon />{menuWorkspace.isPinned ? m.unpin : m.pin}</button>
+      <button role="menuitem" onClick={() => { void window.matouDesktop?.revealDirectory(menuWorkspace.rootDirectory); setMenuWorkspace(null) }}>{m.revealInFinder}</button>
+      <button role="menuitem" onClick={() => { void navigator.clipboard?.writeText(menuWorkspace.rootDirectory); setToast(m.pathCopied); setMenuWorkspace(null) }}>{m.copyPath}</button>
       {!menuWorkspace.isDefault && <button role="menuitem" className="is-delete" disabled={readOnly}
-        title={readOnly ? READ_ONLY_REASON : undefined}
-        onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />移出码头</button>}
+        title={readOnly ? shell.readOnlyRecoveryReason : undefined}
+        onClick={() => { setRemoveWorkspace(menuWorkspace); setMenuWorkspace(null) }}><TrashIcon />{m.removeFromApp}</button>}
     </div>, document.body)}
     {menuTask && createPortal(<div role="menu" className="workbench-action-popover" style={{ top: menuPosition.top, left: menuPosition.left }} onPointerDown={(event) => event.stopPropagation()}>
-        <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
-          onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? '取消置顶' : '置顶'}</button>
-        <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
-          onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />重命名</button>
-        <button role="menuitem" className="is-delete" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
-          onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />删除</button>
+        <button role="menuitem" disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined}
+          onClick={() => { void commands.setTaskPinned(menuTask.id, !menuTask.isPinned); setMenuTask(null) }}><PinIcon />{menuTask.isPinned ? m.unpin : m.pin}</button>
+        <button role="menuitem" disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined}
+          onClick={() => { setRenameFailure(null); setRenameTask(menuTask); setMenuTask(null) }}><EditIcon />{m.rename}</button>
+        <button role="menuitem" className="is-delete" disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined}
+          onClick={() => { setDeleteTask(menuTask); setMenuTask(null) }}><TrashIcon />{m.delete}</button>
     </div>, document.body)}
-    {removeWorkspace && <ConfirmDialog title="移出工作空间"
-      body={`移出 "${removeWorkspace.name}" 会关闭该空间下的事项和终端会话，本地文件保持原样。 是否继续？`}
-      confirmLabel="移出" onCancel={() => setRemoveWorkspace(null)} onConfirm={() => {
+    {removeWorkspace && <ConfirmDialog title={m.removeWorkspaceTitle}
+      body={m.removeWorkspaceBody(removeWorkspace.name)}
+      confirmLabel={m.removeWorkspaceConfirm} onCancel={() => setRemoveWorkspace(null)} onConfirm={() => {
         const id = removeWorkspace.id; setRemoveWorkspace(null); void Promise.resolve(commands.removeWorkspace(id)).catch(NOOP)
       }} />}
-    {renameTask && <RenameDialog label="事项名称" placeholder="请输入事项名称" emptyError="工作台名称不能为空" initialValue={renameTask.title}
+    {renameTask && <RenameDialog label={m.taskName} placeholder={m.taskNamePlaceholder} emptyError={m.taskNameEmpty} initialValue={renameTask.title}
       error={(value) => visibleTasks(renameTask.workspaceId).some((task) => task.id !== renameTask.id && task.title === value)
-        ? `当前工作区下已存在名为"${value}"的工作台`
+        ? m.taskNameTaken(value)
         : renameFailure?.title === value ? renameFailure.message : undefined}
       onCancel={() => setRenameTask(null)} onConfirm={(title) => {
-        void Promise.resolve(commands.renameTask(renameTask.id, title)).then(() => { setRenameTask(null); setToast('工作台已重命名') })
-          .catch(() => setRenameFailure({ title, message: '重命名失败：名称为空或已存在' }))
+        void Promise.resolve(commands.renameTask(renameTask.id, title)).then(() => { setRenameTask(null); setToast(m.taskRenamed) })
+          .catch(() => setRenameFailure({ title, message: m.renameFailed }))
       }} />}
     {deleteTask && <ConfirmationSequence steps={taskDeleteFlow({
       taskName: deleteTask.title, sessionCount: projection.sessions.filter(({ taskId }) => taskId === deleteTask.id).length
@@ -383,8 +386,6 @@ function EditIcon() { return <AppIcon name="pencil" size={14} /> }
 function TrashIcon() { return <AppIcon name="trash-2" size={14} /> }
 function KanbanIcon() { return <AppIcon name="columns-3" /> }
 function SettingsIcon() { return <AppIcon name="settings-2" /> }
-const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
-const READ_ONLY_REASON = '数据库处于只读恢复模式'
 function NOOP(): void {}
 function parseTransfer(value: string): { workspaceId: string; taskId: string } | undefined {
   try {

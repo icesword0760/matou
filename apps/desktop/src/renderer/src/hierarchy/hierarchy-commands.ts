@@ -1,3 +1,4 @@
+import { messages } from '../i18n/current'
 import type { RuntimeClient } from '../runtime/RuntimeClient'
 import type { HierarchyCommands } from './hierarchy-types'
 import type { HierarchyProjection } from './hierarchy-types'
@@ -45,7 +46,8 @@ export function createHierarchyCommands(
   return {
     activateWorkspace: (workspaceId) => command('hierarchy.activate-workspace', { workspaceId }),
     createWorkspace: (rootDirectory) => command('hierarchy.create-workspace', {
-      rootDirectory, name: rootDirectory.split('/').filter(Boolean).at(-1) ?? '工作区'
+      rootDirectory,
+      name: rootDirectory.split('/').filter(Boolean).at(-1) ?? messages().hierarchyShell.defaultWorkspaceName
     }),
     renameWorkspace: (workspaceId, name) => command('hierarchy.rename-workspace', { workspaceId, name }),
     relinkWorkspace: (workspaceId, rootDirectory) => command('hierarchy.relink-workspace', { workspaceId, rootDirectory }),
@@ -188,14 +190,12 @@ export function createHierarchyCommands(
   }
 }
 
-export const READ_ONLY_RECOVERY_REASON = '数据库处于只读恢复模式'
-
 export function createReadOnlyHierarchyCommands(
   base: HierarchyCommands,
   updateProjection: (update: (value: HierarchyProjection) => void) => void
 ): HierarchyCommands {
   const blocked = () => Promise.reject(Object.assign(
-    new Error(READ_ONLY_RECOVERY_REASON), { code: 'STORAGE_READ_ONLY' }
+    new Error(messages().hierarchyShell.readOnlyRecoveryReason), { code: 'STORAGE_READ_ONLY' }
   ))
   const navigate = (update: (value: HierarchyProjection) => void) => {
     updateProjection(update)

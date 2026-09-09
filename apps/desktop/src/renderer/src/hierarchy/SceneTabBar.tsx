@@ -5,6 +5,7 @@ import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
+import { useMessages } from '../i18n/LocaleProvider'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import { AppIcon } from '../ui/AppIcon'
 
@@ -28,6 +29,8 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
   onOpenDag?(): void
   trailingControl?: ReactNode
 }) {
+  const shell = useMessages().hierarchyShell
+  const m = shell.sceneTabBar
   const workspaceId = projection.navigation.activeWorkspaceId
   const taskId = workspaceId ? projection.navigation.taskByWorkspace[workspaceId] : undefined
   const activeSceneId = taskId ? projection.navigation.sceneByTask[taskId] : undefined
@@ -130,8 +133,8 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
     return sceneCloseFlow({
       isLastScene: scenes.length === 1,
       isLastTask: workspaceTasks.length === 1,
-      taskName: task?.title ?? '当前事项',
-      sceneName: scene?.name ?? '当前画布',
+      taskName: task?.title ?? m.currentTask,
+      sceneName: scene?.name ?? m.currentCanvas,
       sessionCount: nodes.length,
       runningCount: nodes.filter(({ workStatus }) => workStatus === 'running' || workStatus === 'starting').length,
       needsInputCount: nodes.filter(({ workStatus }) => workStatus === 'needs-input').length
@@ -170,37 +173,37 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
           if (!readOnly) setSceneMenu(canvasMenuPosition(scene.id, event.clientX, event.clientY))
         }}>
         <button role="tab" className="tab-title" aria-selected={scene.id === activeSceneId}
-          title={readOnly ? scene.name : `${scene.name}\n双击重命名画布`}
+          title={readOnly ? scene.name : m.tabHint(scene.name)}
           onDoubleClick={() => { if (!readOnly) setRenamingSceneId(scene.id) }}
           onClick={() => select(scene.id)}>{scene.name}</button>
         {sceneHasUnread(scene.id) && <span className="tab-status-dot" data-testid={`scene-unread-${scene.id}`} />}
-        <button className="tab-close" aria-label={`关闭页签：${scene.name}`}
-          disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined}
+        <button className="tab-close" aria-label={m.closeTab(scene.name)}
+          disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined}
           onClick={() => close(scene.id)}><AppIcon name="x" /></button>
       </div>)}
-      {!isTabOverflowing && <button className="tab-add-btn" aria-label="新建页签"
+      {!isTabOverflowing && <button className="tab-add-btn" aria-label={m.newTab}
         disabled={readOnly || !pathValid}
-        title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        title={readOnly ? shell.readOnlyRecoveryReason : !pathValid ? shell.workspacePathUnavailable : undefined}
         onClick={addCanvas}><AppIcon name="plus" /></button>}
     </div>
     {isTabOverflowing && <div className="tab-bar-overflow-actions">
-      <button className="tab-overflow-btn" aria-label="更多页签" title="查看隐藏页签"
+      <button className="tab-overflow-btn" aria-label={m.moreTabs} title={m.showHiddenTabs}
         onClick={(event) => {
           event.stopPropagation()
           refreshHiddenTabs()
           setTabOverflowVisible((visible) => !visible)
         }}><AppIcon name="ellipsis" /></button>
-      <button className="tab-add-btn" aria-label="新建页签"
+      <button className="tab-add-btn" aria-label={m.newTab}
         disabled={readOnly || !pathValid}
-        title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : undefined}
+        title={readOnly ? shell.readOnlyRecoveryReason : !pathValid ? shell.workspacePathUnavailable : undefined}
         onClick={addCanvas}><AppIcon name="plus" /></button>
     </div>}
     <div className="tab-bar-right">
-    {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label="打开会话 DAG"
-      title="会话 DAG（长按 Option + Tab）" onClick={onOpenDag}><AppIcon name="graph-ring" /></button>}
-    <button className="toolbar-btn split-horizontal-icon" aria-label="横向新增 Shell"
+    {onOpenDag && <button className="toolbar-btn dag-canvas-icon" aria-label={m.openDag}
+      title={m.openDagHint} onClick={onOpenDag}><AppIcon name="graph-ring" /></button>}
+    <button className="toolbar-btn split-horizontal-icon" aria-label={m.addShell}
       disabled={readOnly || !pathValid || !activeSceneId || !activeSessionId}
-      title={readOnly ? READ_ONLY_REASON : !pathValid ? WORKSPACE_PATH_MESSAGE : '横向新增 Shell'}
+      title={readOnly ? shell.readOnlyRecoveryReason : !pathValid ? shell.workspacePathUnavailable : m.addShell}
       onClick={() => {
         if (!activeSceneId || !activeSessionId) return
         if (commands.createShellSibling) {
@@ -215,14 +218,14 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
     </div>
     {sceneMenu && createPortal(<div ref={sceneMenuRef} role="menu" className="scene-tab-menu"
       style={{ left: sceneMenu.x, top: sceneMenu.y }}>
-      <button role="menuitem" disabled={readOnly} title={readOnly ? READ_ONLY_REASON : undefined} onClick={() => {
+      <button role="menuitem" disabled={readOnly} title={readOnly ? shell.readOnlyRecoveryReason : undefined} onClick={() => {
         setRenamingSceneId(sceneMenu.sceneId)
         setSceneMenu(null)
-      }}>重命名页签</button>
+      }}>{m.renameTabAction}</button>
     </div>, document.body)}
     {tabOverflowVisible && createPortal(<>
       <div className="tab-overflow-mask" onMouseDown={() => setTabOverflowVisible(false)} />
-      <div role="menu" aria-label="隐藏页签" className="tab-overflow-panel" style={tabOverflowPanelStyle(tabBarLeftRef.current)}>
+      <div role="menu" aria-label={m.hiddenTabs} className="tab-overflow-panel" style={tabOverflowPanelStyle(tabBarLeftRef.current)}>
         {hiddenSceneIds.map((sceneId) => {
           const scene = scenes.find(({ id }) => id === sceneId)
           if (!scene) return null
@@ -241,18 +244,18 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
     {renamingSceneId && (() => {
       const scene = scenes.find(({ id }) => id === renamingSceneId)
       if (!scene) return null
-      return <RenameDialog title="重命名标签页" label="页签名称" placeholder="输入标签页名称" initialValue={scene.name}
+      return <RenameDialog title={m.renameTabTitle} label={m.tabName} placeholder={m.tabNamePlaceholder} initialValue={scene.name}
         error={(value) => scenes.some((candidate) =>
           candidate.id !== scene.id && candidate.titlePinned && candidate.name === value
-        ) ? `当前事项下已存在名为"${value}"的标签页` : undefined}
+        ) ? m.tabNameTaken(value) : undefined}
         onCancel={() => setRenamingSceneId(null)} onConfirm={(name) => {
           setRenamingSceneId(null)
           void Promise.resolve(commands.renameScene(scene.id, name)).catch(NOOP)
         }} />
     })()}
-    {closingSceneId && closeFlowFor(closingSceneId).action === 'hide-window' && <ConfirmDialog title="提示"
-      body={'当前已是最后一个事项下的最后一个标签，这里点击关闭不会删除该事项。\n\n如需删除该工作区，请在左侧事项面板的下拉菜单中执行删除。'}
-      confirmLabel="我知道了" showCancel={false} onCancel={() => setClosingSceneId(null)}
+    {closingSceneId && closeFlowFor(closingSceneId).action === 'hide-window' && <ConfirmDialog title={shell.notice}
+      body={m.lastTabBody}
+      confirmLabel={m.lastTabConfirm} showCancel={false} onCancel={() => setClosingSceneId(null)}
       onConfirm={() => setClosingSceneId(null)} />}
     {closingSceneId && closeFlowFor(closingSceneId).action !== 'hide-window' && <ConfirmationSequence steps={closeFlowFor(closingSceneId).steps}
       onCancel={() => setClosingSceneId(null)} onComplete={() => {
@@ -263,8 +266,6 @@ export function SceneTabBar({ projection, commands, pathValid = true, readOnly =
   </div>
 }
 
-const WORKSPACE_PATH_MESSAGE = '工作区目录不可用，请先在本地恢复原路径，或移出该工作区'
-const READ_ONLY_REASON = '数据库处于只读恢复模式'
 const CANVAS_MENU_WIDTH = 128
 const CANVAS_MENU_HEIGHT = 36
 const CANVAS_MENU_MARGIN = 8

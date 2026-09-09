@@ -12,6 +12,8 @@ import {
   RuntimeProjectionStore, type RuntimeProjectionSnapshot, type SceneSnapshotProjection,
   type SessionGraphProjection
 } from '../projection/RuntimeProjectionStore'
+import { messages } from '../i18n/current'
+import { useMessages } from '../i18n/LocaleProvider'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import type { HostNavigationResultInput } from '../runtime/RuntimeClient'
 import { createBrowserNotificationStore } from '../notifications/browser-notification-store'
@@ -63,8 +65,6 @@ import {
 } from '../terminal/usePersistentTerminalFontSize'
 
 const DETACHED_RETURN_RETRY_DELAYS_MS = [100, 300, 900, 1_800] as const
-const STORAGE_FAULT_MUTATION_REASON = '终端存储异常，请先恢复或结束当前会话'
-const RECOVERY_MUTATION_REASON = '当前终端需要先完成恢复'
 const HOST_NAVIGATION_ATTEMPT_LIMIT = 256
 const HOST_NAVIGATION_FOCUS_SUPPRESSION_MS = 800
 
@@ -299,6 +299,7 @@ function HierarchyProduct({
   refreshProjection?: () => Promise<HierarchyProjection | undefined>
   terminalDiagnostics?: HierarchyTerminalDiagnostics
 }) {
+  const m = useMessages().hierarchyShell.shell
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
@@ -393,13 +394,13 @@ function HierarchyProduct({
     return commands.listClaudeSessions(loaderSessionId, query, searchScope, offset, limit)
   }, [commands, loaderSessionId, loaderTitleRevision])
   const loadLoaderDetail = useCallback((providerSessionId: string, options = {}) => {
-    if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
+    if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
   }, [commands, loaderSessionId, loaderTitleRevision])
   const searchLoaderSession = useCallback((
     providerSessionId: string, query: string, offset?: number, limit?: number
   ) => {
-    if (!loaderSessionId) return Promise.reject(new Error('会话管理器已关闭'))
+    if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit)
   }, [commands, loaderSessionId, loaderTitleRevision])
   const cancelSessionLoader = useCallback(() => {
@@ -500,7 +501,7 @@ function HierarchyProduct({
         stage = 'show-window'
         assertHostNavigationActive(alive, request)
         const showWindow = window.matouDesktop?.showWindow
-        if (!showWindow) throw new HostNavigationExecutionError('导航目标窗口当前未就绪')
+        if (!showWindow) throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.windowNotReady)
         await showWindow(request.targetWindowId)
 
         stage = 'activate-workspace'
@@ -555,12 +556,12 @@ function HierarchyProduct({
           stage = 'verify-focus'
           assertHostNavigationActive(alive, request)
           if (request.sessionId === undefined) {
-            throw new HostNavigationExecutionError('导航目标会话当前不可用')
+            throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.sessionUnavailable)
           }
           if (request.targetWindowId !== request.routeWindowId) {
             const requestDetachedFocus = window.matouDesktop?.requestDetachedTerminalFocus
             if (!requestDetachedFocus) {
-              throw new HostNavigationExecutionError('导航目标终端尚未获得输入焦点')
+              throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.terminalNotFocused)
             }
             const focused = await requestDetachedFocus({
               requestId: request.requestId,
@@ -572,7 +573,7 @@ function HierarchyProduct({
             })
             assertHostNavigationActive(alive, request)
             if (!focused) {
-              throw new HostNavigationExecutionError('导航目标终端尚未获得输入焦点')
+              throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.terminalNotFocused)
             }
           } else {
             setTerminalFocusRequest((value) => value + 1)
@@ -584,7 +585,7 @@ function HierarchyProduct({
         assertHostNavigationActive(alive, request)
         const finalPath = readVisibleHostNavigationPath(projectionRef.current, request)
         if (!finalPath || !sameHostNavigationPath(finalPath, request)) {
-          throw new HostNavigationExecutionError('导航目标位置在完成前已变化')
+          throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.pathChanged)
         }
         return hostNavigationResult(request, { ok: true, finalPath })
       } catch (error) {
@@ -1053,11 +1054,11 @@ function HierarchyProduct({
                       }
                     }))
                   }} />
-                <section ref={workspaceStageRef} className="workspace-stage claude-code-main" aria-label={workspace ? `${workspace.name} 工作现场` : '工作现场'}>
+                <section ref={workspaceStageRef} className="workspace-stage claude-code-main" aria-label={workspace ? m.workspaceStage(workspace.name) : m.workspaceStageFallback}>
         {dagOpenError && <div className="dag-open-error" role="alert">
-          <span>会话关系视图打开失败，当前会话列表和返回入口仍可继续使用。</span>
-          <button type="button" onClick={openDag}>重试打开 DAG</button>
-          <button type="button" aria-label="关闭 DAG 异常提示" onClick={() => setDagOpenError(false)}>×</button>
+          <span>{m.dagOpenFailed}</span>
+          <button type="button" onClick={openDag}>{m.retryDag}</button>
+          <button type="button" aria-label={m.dismissDagError} onClick={() => setDagOpenError(false)}>×</button>
         </div>}
         {task && <>
           {!settingsActive && <SceneTabBar projection={projection} commands={commands} pathValid={pathValid}
@@ -1095,7 +1096,7 @@ function HierarchyProduct({
                       }} />
                   }
                   if (liveDetachedWindowIds === null) {
-                    return <div className="scene-recovery" role="status">正在确认历史窗口…</div>
+                    return <div className="scene-recovery" role="status">{m.checkingDetachedWindows}</div>
                   }
                 }
                 const graphNode = graphIndex?.byId.get(session.id)
@@ -1239,7 +1240,7 @@ function HierarchyProduct({
                     : {})} />
               }
               return <section className="scene-stage" key={scene.id} hidden={scene.id !== activeSceneId}
-                aria-label={`${scene.name} 终端布局`}>
+                aria-label={m.sceneLayout(scene.name)}>
                 {graph && snapshot
                   ? <SessionCanvas graph={graph} disabled={!pathValid || readOnly}
                       {...(readOnly ? { disabledReason: READ_ONLY_REASON } : {})}
@@ -1311,7 +1312,7 @@ function HierarchyProduct({
             })}
           </div>
         </>}
-        {!task && <div className="scene-recovery" role="status">选择或新建一个事项开始工作</div>}
+        {!task && <div className="scene-recovery" role="status">{m.noTask}</div>}
                   <TerminalSearchBar open={searchOpen} themeKey={themeKey}
                     resultIndex={searchResults.resultIndex} resultCount={searchResults.resultCount}
                     onSearch={(query, options) => updateSearch(query, options)}
@@ -1322,7 +1323,7 @@ function HierarchyProduct({
                       setSearchOpen(false)
                       setTerminalFocusRequest((value) => value + 1)
                     }} />
-                  <div className="shortcut-bar" aria-label="快捷指令栏">
+                  <div className="shortcut-bar" aria-label={m.shortcutBar}>
                     {activeGraph && <SessionBreadcrumb
                       {...(activeLevelParent ? { parentTitle: activeLevelParent.title } : {})}
                       sessionCount={activeLevelSessionCount}
@@ -1344,15 +1345,15 @@ function HierarchyProduct({
                         disabledReason: readOnly
                           ? READ_ONLY_REASON
                           : activeStorageFault
-                            ? STORAGE_FAULT_MUTATION_REASON
+                            ? m.storageFaultMutationReason
                             : activeRecoveryBlocked
-                              ? RECOVERY_MUTATION_REASON
-                              : '当前运行环境需要先恢复或交接'
+                              ? m.recoveryMutationReason
+                              : m.environmentMutationReason
                       } : {})}
                       {...(readOnly || activeStorageFault ? {
                         environmentDisabledReason: readOnly
                           ? READ_ONLY_REASON
-                          : STORAGE_FAULT_MUTATION_REASON
+                          : m.storageFaultMutationReason
                       } : {})}
                       {...(activeSceneId ? {
                         gitContext: { windowId: projection.windowId, sceneId: activeSceneId }
@@ -1770,25 +1771,25 @@ function validateHostNavigationTarget(
     projection.windowId !== routeWindowId ||
     projection.navigation.windowId !== routeWindowId
   ) {
-    throw new HostNavigationExecutionError('导航目标与当前窗口不匹配')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.windowMismatch)
   }
   const workspace = projection.workspaces.find(({ id }) => id === request.workspaceId)
   const task = projection.tasks.find(({ id }) => id === request.taskId)
   const scene = projection.scenes.find(({ id }) => id === request.sceneId)
   if (!workspace || !task || task.workspaceId !== workspace.id || !scene || scene.taskId !== task.id) {
-    throw new HostNavigationExecutionError('导航目标层级当前不可用')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.levelUnavailable)
   }
   if (projection.taskPlacements.length > 0 && !projection.taskPlacements.some((placement) =>
     placement.windowId === routeWindowId && placement.taskId === task.id
   )) {
-    throw new HostNavigationExecutionError('导航目标事项不在当前窗口')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.taskNotInWindow)
   }
   if (request.focusTerminal && request.sessionId === undefined) {
-    throw new HostNavigationExecutionError('导航目标会话当前不可用')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.sessionUnavailable)
   }
   if (request.sessionId === undefined) {
     if (request.targetWindowId !== routeWindowId) {
-      throw new HostNavigationExecutionError('导航目标窗口与当前路径不匹配')
+      throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.windowPathMismatch)
     }
     return { stopped: false }
   }
@@ -1801,7 +1802,7 @@ function validateHostNavigationTarget(
     sessionId === request.sessionId
   )
   if (!session || session.taskId !== request.taskId || (!mount && !node)) {
-    throw new HostNavigationExecutionError('导航目标会话当前不可用')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.sessionUnavailable)
   }
   const sceneWindow = mount?.sceneWindowId
     ? snapshot?.windows.find(({ id }) => id === mount.sceneWindowId)
@@ -1814,7 +1815,7 @@ function validateHostNavigationTarget(
   )
   const expectedTargetWindowId = projectedNativeWindowId ?? routeWindowId
   if (request.targetWindowId !== expectedTargetWindowId) {
-    throw new HostNavigationExecutionError('导航目标窗口与当前路径不匹配')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.windowPathMismatch)
   }
   return {
     ...(node?.parentSessionId === undefined ? {} : { parentSessionId: node.parentSessionId }),
@@ -1826,9 +1827,9 @@ function assertHostNavigationActive(
   alive: boolean,
   request: HostNavigationRequestWire
 ): void {
-  if (!alive) throw new HostNavigationExecutionError('导航页面已关闭')
+  if (!alive) throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.pageClosed)
   if (request.deadlineAt <= Date.now()) {
-    throw new HostNavigationExecutionError('导航请求已过期')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.requestExpired)
   }
 }
 
@@ -1851,7 +1852,7 @@ async function waitForHostNavigationView(
       return
     }
   }
-  throw new HostNavigationExecutionError('导航目标会话尚未显示')
+  throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.sessionNotVisible)
 }
 
 async function waitForHostNavigationTerminalFocus(
@@ -1859,14 +1860,14 @@ async function waitForHostNavigationTerminalFocus(
   alive: () => boolean
 ): Promise<void> {
   if (request.sessionId === undefined) {
-    throw new HostNavigationExecutionError('导航目标会话当前不可用')
+    throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.sessionUnavailable)
   }
   while (alive() && Date.now() < request.deadlineAt) {
     await nextHostNavigationFrame()
     if (terminalOwnsInputFocus(request.sessionId)) return
   }
-  if (!alive()) throw new HostNavigationExecutionError('导航页面已关闭')
-  throw new HostNavigationExecutionError('导航目标终端尚未获得输入焦点')
+  if (!alive()) throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.pageClosed)
+  throw new HostNavigationExecutionError(messages().hierarchyShell.hostNavigation.terminalNotFocused)
 }
 
 function terminalOwnsInputFocus(sessionId: string): boolean {
@@ -1968,14 +1969,7 @@ function hostNavigationResult(
 
 function controlledHostNavigationError(error: unknown, stage: HostNavigationStage): string {
   if (error instanceof HostNavigationExecutionError) return error.message
-  if (stage === 'show-window') return '导航目标窗口当前未就绪'
-  if (stage === 'activate-workspace') return '导航工作空间切换未完成'
-  if (stage === 'activate-task') return '导航事项切换未完成'
-  if (stage === 'activate-scene') return '导航画布切换未完成'
-  if (stage === 'focus-session') return '导航会话聚焦未完成'
-  if (stage === 'settle-view') return '导航目标界面尚未稳定'
-  if (stage === 'verify-focus') return '导航目标终端尚未获得输入焦点'
-  return '导航目标位置当前未就绪'
+  return messages().hierarchyShell.hostNavigation.stage[stage]
 }
 
 function hostNavigationAttemptKey(request: HostNavigationRequestWire): string {

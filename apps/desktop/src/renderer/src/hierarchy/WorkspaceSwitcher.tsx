@@ -4,6 +4,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { EmptyWorkspaceState } from './EmptyWorkspaceState'
 import { RenameDialog } from './RenameDialog'
 import type { HierarchyCommands, HierarchyProjection } from './hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 import { useNotificationSnapshot, useNotificationStore } from '../notifications/NotificationProvider'
 import { AppIcon } from '../ui/AppIcon'
 
@@ -15,6 +16,10 @@ export function WorkspaceSwitcher({
   onNotificationToggle?(): void
   onWorkspaceMenuOpen?(): void
 }) {
+  const shell = useMessages().hierarchyShell
+  const m = shell.workspaceSwitcher
+  const reasonCopy = (reason: string) =>
+    (m.pathReason as Record<string, string>)[reason] ?? shell.pathInvalid
   const [open, setOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [removing, setRemoving] = useState(false)
@@ -28,24 +33,24 @@ export function WorkspaceSwitcher({
   if (!active) return <EmptyWorkspaceState onCreate={() => void chooseDirectory()} />
   const pathState = projection.pathStates.find(({ workspaceId }) => workspaceId === active.id)
   return <div className="workspace-switcher project-dropdown" data-workspace-id={active.id}>
-    <button className="project-dropdown__trigger" aria-label="切换工作区" onClick={() => {
+    <button className="project-dropdown__trigger" aria-label={m.trigger} onClick={() => {
       const next = !open
       setOpen(next)
       if (next) onWorkspaceMenuOpen?.()
     }}>
       <span className="project-dropdown__trigger-content"><strong className="project-dropdown__name">{active.name}</strong>
       <svg className={`project-dropdown__chevron${open ? ' open' : ''}`} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m6 9 6 6 6-6"/></svg></span>
-      {pathState?.status === 'invalid' && <span className="workspace-invalid" title={reasonCopy(pathState.reason)}>路径失效</span>}
+      {pathState?.status === 'invalid' && <span className="workspace-invalid" title={reasonCopy(pathState.reason)}>{shell.pathInvalid}</span>}
     </button>
     <span className="project-dropdown__notify-group"><i className="project-dropdown__divider" />
-      <button className="project-dropdown__notify" aria-label="通知中心" aria-expanded={notificationCenterOpen}
+      <button className="project-dropdown__notify" aria-label={shell.notificationCenter} aria-expanded={notificationCenterOpen}
         onClick={(event) => { event.stopPropagation(); setOpen(false); onNotificationToggle?.() }}>
         <AppIcon name="bell" />
         {notificationSnapshot.unreadCount > 0 && <span className="project-dropdown__notify-dot" aria-hidden="true" />}
       </button></span>
     {open && <div role="menu" className="project-dropdown__panel">
       <div className="project-dropdown__header"><span>workspace</span>
-        <button role="menuitem" onClick={() => void chooseDirectory()}>＋ 新增工作区</button></div>
+        <button role="menuitem" onClick={() => void chooseDirectory()}>{m.addWorkspace}</button></div>
       <div className="project-dropdown__list">
       {projection.workspaces.map((workspace) => {
         const state = projection.pathStates.find(({ workspaceId }) => workspaceId === workspace.id)
@@ -58,23 +63,23 @@ export function WorkspaceSwitcher({
             void commands.activateWorkspace(workspace.id)
           }}>
           <span><strong>{workspace.name}</strong><small title={workspace.rootDirectory}>{pathTail(workspace.rootDirectory)}</small></span>
-          {state?.status === 'invalid' && <span title={reasonCopy(state.reason)}>路径失效</span>}
+          {state?.status === 'invalid' && <span title={reasonCopy(state.reason)}>{shell.pathInvalid}</span>}
           </button>
         </div>
       })}
       </div>
       <div className="project-dropdown__footer-actions">
-        <button role="menuitem" onClick={() => setRenaming(true)}>重命名</button>
-        <button role="menuitem" onClick={() => { setOpen(false); setRemoving(true) }}>删除</button>
+        <button role="menuitem" onClick={() => setRenaming(true)}>{m.rename}</button>
+        <button role="menuitem" onClick={() => { setOpen(false); setRemoving(true) }}>{m.delete}</button>
       </div>
     </div>}
-    {renaming && <RenameDialog label="工作区名称" placeholder="请输入工作区名称" initialValue={active.name}
+    {renaming && <RenameDialog label={m.workspaceName} placeholder={m.workspaceNamePlaceholder} initialValue={active.name}
       onCancel={() => setRenaming(false)} onConfirm={(name) => {
         void commands.renameWorkspace(active.id, name); setRenaming(false)
       }} />}
-    {removing && <ConfirmDialog title="提示"
-      body={`删除 "${active.name}" 不会删除磁盘上的工作区目录，但该工作区下所有终端会话都会被丢弃，无法恢复。 是否继续?`}
-      confirmLabel="确定" onCancel={() => setRemoving(false)} onConfirm={() => {
+    {removing && <ConfirmDialog title={shell.notice}
+      body={m.removeBody(active.name)}
+      confirmLabel={shell.confirmOk} onCancel={() => setRemoving(false)} onConfirm={() => {
         setRemoving(false)
         void Promise.resolve(commands.removeWorkspace(active.id)).catch(NOOP)
       }} />}
@@ -86,7 +91,4 @@ function NOOP(): void {}
 function pathTail(path: string): string {
   const parts = path.split('/').filter(Boolean)
   return parts.length <= 2 ? path : `…/${parts.slice(-2).join('/')}`
-}
-function reasonCopy(reason: string): string {
-  return ({ missing: '目录不存在', 'not-directory': '路径不是目录', 'no-access': '目录访问受限', unknown: '目录状态异常' } as Record<string, string>)[reason] ?? '路径失效'
 }

@@ -6,6 +6,8 @@ import type {
 } from '@matou/contracts'
 
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
+import { messages } from '../i18n/current'
+import { useMessages } from '../i18n/LocaleProvider'
 
 export interface ProviderConfigClient {
   request(method: RpcMethod, payload: unknown): Promise<unknown>
@@ -28,6 +30,7 @@ export function ModelSwitchSettings({ client, onClose }: {
   client: ProviderConfigClient | null
   onClose(): void
 }) {
+  const m = useMessages().hierarchyShell.modelSettings
   const [cli, setCli] = useState<ProviderCli>('claude-code')
   const [snapshot, setSnapshot] = useState<ProviderConfigSnapshot>()
   const [loading, setLoading] = useState(true)
@@ -39,14 +42,14 @@ export function ModelSwitchSettings({ client, onClose }: {
   const refresh = useCallback(async () => {
     if (!client) {
       setLoading(false)
-      setFailure('供应商配置服务正在连接，请稍后重试')
+      setFailure(m.serviceConnecting)
       return
     }
     try {
       const next = await client.request('provider-config.snapshot', {}) as ProviderConfigSnapshot
       setSnapshot(next); setFailure('')
     } catch (error) {
-      setFailure(message(error, '供应商配置载入失败'))
+      setFailure(message(error, m.loadFailed))
     } finally {
       setLoading(false)
     }
@@ -93,15 +96,15 @@ export function ModelSwitchSettings({ client, onClose }: {
         const updated = transitions.filter(({ status }) => status === 'updated').length
         const deferred = transitions.length - updated
         setToast(deferred > 0
-          ? `已切换为 ${provider.name}；${updated} 个 Claude Code 会话已更新，${deferred} 个会话暂缓并保持原配置`
+          ? m.switchedDeferred(provider.name, updated, deferred)
           : updated > 0
-            ? `已切换为 ${provider.name}；${updated} 个 Claude Code 会话已更新`
-            : `已切换为 ${provider.name}；Claude Code 新会话直接生效`)
+            ? m.switchedUpdated(provider.name, updated)
+            : m.switchedClaude(provider.name))
       } else {
-        setToast(`已切换为 ${provider.name}；Codex 新会话直接生效`)
+        setToast(m.switchedCodex(provider.name))
       }
     } catch (error) {
-      setToast(message(error, '切换失败'))
+      setToast(message(error, m.switchFailed))
     }
   }
   const save = async () => {
@@ -118,9 +121,9 @@ export function ModelSwitchSettings({ client, onClose }: {
     try {
       await client.request('provider-config.upsert', { provider })
       setDraft(undefined); await refresh(); announceChange()
-      setToast(draft.id ? '供应商配置已保存' : '供应商已添加')
+      setToast(draft.id ? m.configurationSaved : m.providerAdded)
     } catch (error) {
-      setFailure(message(error, '供应商配置保存失败'))
+      setFailure(message(error, m.saveFailed))
     } finally {
       setSaving(false)
     }
@@ -132,40 +135,40 @@ export function ModelSwitchSettings({ client, onClose }: {
       const next = await client.request('provider-config.delete', {
         cli, providerId: draft.id
       }) as ProviderConfigSnapshot
-      setSnapshot(next); setDraft(undefined); announceChange(); setToast('供应商已删除')
+      setSnapshot(next); setDraft(undefined); announceChange(); setToast(m.providerDeleted)
     } catch (error) {
-      setFailure(message(error, '删除失败'))
+      setFailure(message(error, m.deleteFailed))
     } finally { setSaving(false) }
   }
 
-  return <section className="model-settings" aria-label="模型切换设置">
+  return <section className="model-settings" aria-label={m.region}>
     <div className="model-settings__frame">
-      <nav className="model-settings__nav" aria-label="设置分类">
-        <span className="model-settings__section-label">AI 服务</span>
+      <nav className="model-settings__nav" aria-label={m.categories}>
+        <span className="model-settings__section-label">{m.aiServices}</span>
         <button className="model-settings__nav-item is-active" type="button">
-          <SlidersIcon /><span>模型切换</span>
+          <SlidersIcon /><span>{m.modelSwitch}</span>
         </button>
-        <p>供应商切换是全局设置，将同步影响所有 {APP_DISPLAY_NAME} 窗口。</p>
+        <p>{m.globalHint(APP_DISPLAY_NAME)}</p>
       </nav>
       <main className="model-settings__main">
         <header className="model-settings__heading">
-          <div><h1>模型切换</h1><p>配置 Claude Code 与 Codex 使用的供应商，并设置全局默认。</p></div>
-          <button type="button" aria-label="关闭设置" onClick={onClose}>×</button>
+          <div><h1>{m.modelSwitch}</h1><p>{m.heading}</p></div>
+          <button type="button" aria-label={m.close} onClick={onClose}>×</button>
         </header>
-        <div className="model-settings__tabs" role="tablist" aria-label="CLI 类型">
+        <div className="model-settings__tabs" role="tablist" aria-label={m.cliType}>
           {([['claude-code', 'Claude Code'], ['codex', 'Codex']] as const).map(([id, label]) =>
             <button key={id} role="tab" aria-selected={cli === id} className={cli === id ? 'is-active' : ''}
               type="button" onClick={() => { setCli(id); setFailure('') }}>{label}</button>)}
         </div>
-        {loading ? <div className="model-settings__state" aria-busy="true">正在载入供应商配置…</div> : <>
-          {active && <section className="model-settings__current" aria-label="全局使用中的供应商">
+        {loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
+          {active && <section className="model-settings__current" aria-label={m.activeProvider}>
             <ProviderLogo provider={active} />
             <div><strong>{active.name}</strong><span>{active.model} · {shortEndpoint(active.endpoint)}</span></div>
-            <b>全局使用中</b>
+            <b>{m.inGlobalUse}</b>
           </section>}
           <div className="model-settings__toolbar">
-            <h2>供应商 <span>{providers.length} 个配置</span></h2>
-            <button type="button" aria-label="新增供应商" onClick={() => setDraft({ ...EMPTY_DRAFT })}>＋ 新增供应商</button>
+            <h2>{m.providers} <span>{m.providerCount(providers.length)}</span></h2>
+            <button type="button" aria-label={m.newProvider} onClick={() => setDraft({ ...EMPTY_DRAFT })}>{m.newProviderAction}</button>
           </div>
           {failure && !draft && <div className="model-settings__error" role="alert">{failure}</div>}
           <div className="model-settings__providers">
@@ -173,22 +176,22 @@ export function ModelSwitchSettings({ client, onClose }: {
               const current = provider.id === activeId
               return <article key={provider.id} className={`model-provider${current ? ' is-current' : ''}`}>
                 <ProviderLogo provider={provider} />
-                <div className="model-provider__name"><strong>{provider.name}{current && <i>使用中</i>}</strong><span>{shortEndpoint(provider.endpoint)}</span></div>
-                <div className="model-provider__model"><strong>{provider.model}</strong><span>默认模型{provider.hasApiKey ? ' · Key 已配置' : ''}</span></div>
+                <div className="model-provider__name"><strong>{provider.name}{current && <i>{m.inUse}</i>}</strong><span>{shortEndpoint(provider.endpoint)}</span></div>
+                <div className="model-provider__model"><strong>{provider.model}</strong><span>{m.defaultModel}{provider.hasApiKey ? m.keyConfigured : ''}</span></div>
                 <div className="model-provider__actions">
                   <button type="button" onClick={() => setDraft({
                     id: provider.id, name: provider.name, endpoint: provider.endpoint,
                     model: provider.builtIn && provider.model === 'CLI 默认' ? '' : provider.model,
                     apiKey: '', ...(provider.builtIn ? { builtIn: true } : {})
-                  })}>编辑</button>
+                  })}>{m.edit}</button>
                   <button className="primary" type="button" disabled={current}
-                    aria-label={current ? `${provider.name} 当前配置` : `切换到 ${provider.name}`}
-                    onClick={() => void activate(provider)}>{current ? '当前配置' : '切换'}</button>
+                    aria-label={current ? m.currentConfigurationOf(provider.name) : m.switchTo(provider.name)}
+                    onClick={() => void activate(provider)}>{current ? m.currentConfiguration : m.switchAction}</button>
                 </div>
               </article>
             })}
           </div>
-          <p className="model-settings__impact"><span>ⓘ</span><b>切换会影响所有 {APP_DISPLAY_NAME} 窗口。</b> 符合条件的 Claude Code 会话自动更新，暂缓会话保持原配置；Codex 新会话直接生效，运行中的会话需要重启。</p>
+          <p className="model-settings__impact"><span>ⓘ</span><b>{m.impactTitle(APP_DISPLAY_NAME)}</b> {m.impactBody}</p>
         </>}
       </main>
     </div>
@@ -203,24 +206,26 @@ function ProviderDialog({ cli, draft, failure, saving, onChange, onCancel, onSav
   cli: ProviderCli; draft: ProviderDraft; failure: string; saving: boolean
   onChange(value: ProviderDraft): void; onCancel(): void; onSave(): void; onDelete(): void
 }) {
+  const catalog = useMessages()
+  const m = catalog.hierarchyShell.modelSettings
   const update = (key: keyof ProviderDraft, value: string) => onChange({ ...draft, [key]: value })
   return <div className="provider-dialog-layer" onPointerDown={(event) => {
     if (event.currentTarget === event.target) onCancel()
   }}>
-    <section className="provider-dialog" role="dialog" aria-modal="true" aria-label={draft.id ? `编辑 ${draft.name}` : '新增供应商'}>
-      <header><strong>{draft.id ? `编辑 ${draft.name}` : '新增供应商'}</strong><button type="button" aria-label="关闭" onClick={onCancel}>×</button></header>
+    <section className="provider-dialog" role="dialog" aria-modal="true" aria-label={draft.id ? m.editProvider(draft.name) : m.newProvider}>
+      <header><strong>{draft.id ? m.editProvider(draft.name) : m.newProvider}</strong><button type="button" aria-label={catalog.common.close} onClick={onCancel}>×</button></header>
       <div className="provider-dialog__body">
-        <label>供应商名称<input aria-label="供应商名称" autoFocus value={draft.name} onChange={(event) => update('name', event.target.value)} /></label>
-        <label>默认模型<input aria-label="默认模型" value={draft.model} placeholder={cli === 'claude-code' ? 'claude-opus-5' : 'gpt-5.6-sol'} onChange={(event) => update('model', event.target.value)} /></label>
-        <label className="wide">API 地址<input aria-label="API 地址" value={draft.endpoint} onChange={(event) => update('endpoint', event.target.value)} /></label>
-        <label className="wide">API Key<input aria-label="API Key" type="password" value={draft.apiKey} placeholder={draft.id ? '留空表示保持原 Key' : '输入 API Key'} onChange={(event) => update('apiKey', event.target.value)} /></label>
-        <div className="provider-dialog__advanced wide">▸ 高级配置　模型映射与未知配置字段将在这里保留</div>
+        <label>{m.providerName}<input aria-label={m.providerName} autoFocus value={draft.name} onChange={(event) => update('name', event.target.value)} /></label>
+        <label>{m.defaultModel}<input aria-label={m.defaultModel} value={draft.model} placeholder={cli === 'claude-code' ? 'claude-opus-5' : 'gpt-5.6-sol'} onChange={(event) => update('model', event.target.value)} /></label>
+        <label className="wide">{m.apiEndpoint}<input aria-label={m.apiEndpoint} value={draft.endpoint} onChange={(event) => update('endpoint', event.target.value)} /></label>
+        <label className="wide">API Key<input aria-label="API Key" type="password" value={draft.apiKey} placeholder={draft.id ? m.apiKeyKeepHint : m.apiKeyPlaceholder} onChange={(event) => update('apiKey', event.target.value)} /></label>
+        <div className="provider-dialog__advanced wide">{m.advanced}</div>
         {failure && <div className="provider-dialog__error wide" role="alert">{failure}</div>}
       </div>
       <footer>
-        <span>{draft.id && !draft.builtIn && <button className="delete" type="button" onClick={onDelete}>删除供应商</button>}</span>
-        <button type="button" onClick={onCancel}>取消</button>
-        <button className="primary" type="button" disabled={saving} onClick={onSave}>{saving ? '保存中…' : '保存配置'}</button>
+        <span>{draft.id && !draft.builtIn && <button className="delete" type="button" onClick={onDelete}>{m.deleteProvider}</button>}</span>
+        <button type="button" onClick={onCancel}>{catalog.common.cancel}</button>
+        <button className="primary" type="button" disabled={saving} onClick={onSave}>{saving ? m.saving : m.saveConfiguration}</button>
       </footer>
     </section>
   </div>
@@ -234,12 +239,17 @@ function SlidersIcon() { return <svg width="15" height="15" viewBox="0 0 24 24" 
 function shortEndpoint(value: string) { return value.replace(/^https?:\/\//, '').replace(/\/$/, '') }
 function tone(name: string) { return name.toLowerCase().includes('openai') ? 'openai' : name.toLowerCase().includes('anthropic') ? 'anthropic' : 'custom' }
 function validateDraft(draft: ProviderDraft): string {
-  if (!draft.name.trim()) return '请输入供应商名称'
-  if (!draft.model.trim() && !draft.builtIn) return '请输入默认模型'
+  const m = messages().hierarchyShell.modelSettings
+  if (!draft.name.trim()) return m.nameRequired
+  if (!draft.model.trim() && !draft.builtIn) return m.modelRequired
   try {
     const url = new URL(draft.endpoint.trim())
-    if (!['http:', 'https:'].includes(url.protocol)) return 'API 地址需要使用 HTTP 或 HTTPS'
-  } catch { return '请输入有效的 API 地址' }
+    if (!['http:', 'https:'].includes(url.protocol)) return m.endpointScheme
+  } catch { return m.endpointInvalid }
   return ''
 }
-function message(error: unknown, fallback: string) { return error instanceof Error ? `${fallback}：${error.message}` : fallback }
+function message(error: unknown, fallback: string) {
+  return error instanceof Error
+    ? messages().hierarchyShell.modelSettings.errorDetail(fallback, error.message)
+    : fallback
+}
