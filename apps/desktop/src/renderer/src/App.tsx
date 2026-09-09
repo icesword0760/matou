@@ -5,6 +5,7 @@ import { DetachedTerminalApp } from './hierarchy/DetachedTerminalApp'
 import type { RuntimeStatus } from './terminal/TerminalSurface'
 import { DagWindowApp } from './dag/DagWindowApp'
 import { DatabaseRecoveryPage } from './recovery/DatabaseRecoveryPage'
+import { useMessages } from './i18n/LocaleProvider'
 import type { RuntimeLifecyclePresentation } from '../../shared/desktop-api'
 
 export function App() {
@@ -79,18 +80,19 @@ function RuntimeStartupFailurePage({ state, retry }: {
   state: RuntimeLifecyclePresentation
   retry(): Promise<void>
 }) {
+  const m = useMessages().app
   const [pending, setPending] = useState(false)
   const [retryError, setRetryError] = useState('')
   const failure = state.startupFailure!
   const title = failure.code === 'DATABASE_SCHEMA_UNSUPPORTED'
-    ? '需要更新 Matou'
-    : '工作区升级未完成'
+    ? m.updateRequired
+    : m.upgradeIncomplete
   return <main className="database-recovery-page" aria-labelledby="runtime-startup-failure-title">
     <section className="database-recovery-card">
       <header>
-        <p className="database-recovery-eyebrow">Matou 启动检查</p>
+        <p className="database-recovery-eyebrow">{m.startupCheck}</p>
         <h1 id="runtime-startup-failure-title">{title}</h1>
-        <p>Matou 已停止重复启动，原数据保持原样。</p>
+        <p>{m.startupHalted}</p>
       </header>
       <p role="alert" className="database-recovery-error">{failure.message}</p>
       {retryError && <p role="alert" className="database-recovery-error">{retryError}</p>}
@@ -102,7 +104,7 @@ function RuntimeStartupFailurePage({ state, retry }: {
           void retry().catch((error: unknown) => {
             setRetryError(error instanceof Error ? error.message : String(error))
           }).finally(() => setPending(false))
-        }}>{pending ? '正在检查…' : '重新检查'}</button>
+        }}>{pending ? m.checking : m.recheck}</button>
       </div>
     </section>
   </main>

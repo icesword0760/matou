@@ -1,14 +1,27 @@
 import { useState } from 'react'
 
 import type { RuntimeRecoveryCommandResult } from '../../../shared/desktop-api'
+import { messages } from '../i18n/current'
+import { useMessages } from '../i18n/LocaleProvider'
 import './read-only-recovery.css'
 
-const READ_ONLY_REASON = '数据库处于只读恢复模式'
+/** Headline of the banner, reused as the disabled reason of blocked commands. */
+export function readOnlyReason(): string {
+  return messages().hierarchyShell.readOnlyRecoveryReason
+}
+
+/**
+ * Resolved once at module load, so it stays on the startup locale.
+ * @deprecated Call `readOnlyReason()`; the DAG window is the last caller.
+ */
+export const READ_ONLY_REASON = readOnlyReason()
 
 export function ReadOnlyRecoveryBanner(props: {
   exportBundle(): Promise<RuntimeRecoveryCommandResult>
   onSearch?(): void
 }) {
+  const all = useMessages()
+  const m = all.recovery.readOnlyBanner
   const [exporting, setExporting] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
@@ -19,11 +32,9 @@ export function ReadOnlyRecoveryBanner(props: {
     setError('')
     try {
       const result = await props.exportBundle()
-      setMessage(result.exportedPath
-        ? `数据库资料已导出到 ${result.exportedPath}`
-        : '数据库资料已导出')
+      setMessage(result.exportedPath ? m.exportedTo(result.exportedPath) : m.exported)
     } catch (reason) {
-      setError(`导出失败：${reason instanceof Error ? reason.message : String(reason)}`)
+      setError(m.exportFailed(reason instanceof Error ? reason.message : String(reason)))
     } finally {
       setExporting(false)
     }
@@ -31,18 +42,16 @@ export function ReadOnlyRecoveryBanner(props: {
 
   return <section className="read-only-recovery-banner" role="status" aria-live="polite">
     <div>
-      <strong>{READ_ONLY_REASON}</strong>
-      <span>现有工作空间、事项和会话仍可浏览、搜索与复制；可能改动数据的操作已暂停。</span>
+      <strong>{all.hierarchyShell.readOnlyRecoveryReason}</strong>
+      <span>{m.explanation}</span>
     </div>
     <div className="read-only-recovery-banner__actions">
-      {props.onSearch && <button type="button" onClick={props.onSearch}>搜索当前终端</button>}
+      {props.onSearch && <button type="button" onClick={props.onSearch}>{m.searchTerminal}</button>}
       <button type="button" disabled={exporting} onClick={() => void exportBundle()}>
-        {exporting ? '正在导出…' : '导出数据库资料'}
+        {exporting ? m.exporting : m.exportDatabase}
       </button>
     </div>
     {message && <output>{message}</output>}
     {error && <span role="alert">{error}</span>}
   </section>
 }
-
-export { READ_ONLY_REASON }

@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import type { Locale } from '@matou/contracts'
+
 import type {
   RuntimeLifecyclePresentation,
   RuntimeRecoveryCommandResult
 } from '../../../shared/desktop-api'
+import { useLocale, useMessages } from '../i18n/LocaleProvider'
 import './recovery.css'
 
 export interface DatabaseRecoveryActions {
@@ -19,6 +22,8 @@ interface Props {
 }
 
 export function DatabaseRecoveryPage({ state, actions }: Props) {
+  const m = useMessages().recovery.page
+  const locale = useLocale()
   const backups = useMemo(
     () => [...(state.recovery?.backups ?? [])]
       .sort((left, right) => right.createdAt - left.createdAt)
@@ -72,7 +77,7 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
     try {
       const result = await operation() as RuntimeRecoveryCommandResult | undefined
       if (recoveryIdRef.current === operationRecoveryId && result?.exportedPath) {
-        setMessage(`恢复资料已导出到 ${result.exportedPath}`)
+        setMessage(m.exportedTo(result.exportedPath))
       }
     } catch (reason) {
       if (recoveryIdRef.current === operationRecoveryId) {
@@ -84,17 +89,17 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
   }
 
   const ownershipRecovery = recovery?.reason === 'ownership-recovery-required'
-  const title = ownershipRecovery ? '数据库占用状态需要处理' : '数据库需要恢复'
+  const title = ownershipRecovery ? m.ownershipTitle : m.title
   const description = ownershipRecovery
-    ? '数据库占用记录或接管状态异常，原数据库仍保留在原位置。处理前不会将其当作损坏文件移动。'
+    ? m.ownershipDescription
     : recovery?.reason === 'wal-recovery-required'
-      ? '数据库日志状态不完整。Matou 已保留原数据库和日志文件，请选择备份恢复或导出资料。'
-      : '数据库完整性检查未通过。Matou 已保留原文件，不会直接进入全新空工作区。'
+      ? m.walDescription
+      : m.integrityDescription
 
   return <main className="database-recovery-page" aria-labelledby="database-recovery-title">
     <section className="database-recovery-card">
       <header>
-        <p className="database-recovery-eyebrow">Matou 数据恢复</p>
+        <p className="database-recovery-eyebrow">{m.eyebrow}</p>
         <h1 id="database-recovery-title">{title}</h1>
         <p>{description}</p>
       </header>
@@ -104,16 +109,16 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
         <p role="alert" className="database-recovery-error">{error ?? state.operation?.error}</p>}
       {message && <p role="status" className="database-recovery-success">{message}</p>}
       {(state.operation?.pending || reopening) && <p role="status" className="database-recovery-progress">
-        正在处理数据库恢复，请保持 Matou 开启…
+        {m.working}
       </p>}
 
       <section aria-labelledby="database-backups-title" className="database-recovery-backups">
         <div className="database-recovery-section-title">
-          <h2 id="database-backups-title">可用备份</h2>
-          <span>{backups.length} 份</span>
+          <h2 id="database-backups-title">{m.backups}</h2>
+          <span>{m.backupCount(backups.length)}</span>
         </div>
         {backups.length === 0
-          ? <p className="database-recovery-empty">暂未找到通过完整性校验的备份。</p>
+          ? <p className="database-recovery-empty">{m.noBackups}</p>
           : <div className="database-recovery-list">
             {backups.map((backup) => <label key={backup.id}>
               <input
@@ -126,7 +131,7 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
               />
               <span>
                 <strong>{backup.id}</strong>
-                <small>{formatTime(backup.createdAt)} · 数据版本 {backup.schemaVersion} · {formatSize(backup.size)}</small>
+                <small>{formatTime(backup.createdAt, locale)} · {m.schemaVersion(backup.schemaVersion)} · {formatSize(backup.size)}</small>
               </span>
             </label>)}
           </div>}
@@ -137,27 +142,27 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
           className="primary"
           disabled={busy || !selectedBackupId || !recoveryId}
           onClick={() => void perform('restore', () => actions.restore(selectedBackupId, recoveryId))}
-        >{pending === 'restore' ? '正在恢复…' : '恢复所选备份'}</button>
+        >{pending === 'restore' ? m.restoring : m.restoreSelected}</button>
         <button disabled={busy || !recoveryId}
           onClick={() => void perform('retry', () => actions.retry(recoveryId))}>
-          {pending === 'retry' ? '正在检查…' : '重新检查数据库'}
+          {pending === 'retry' ? m.checking : m.recheckDatabase}
         </button>
         <button disabled={busy} onClick={() => void perform('export', actions.exportBundle)}>
-          {pending === 'export' ? '正在导出…' : '导出恢复资料'}
+          {pending === 'export' ? m.exporting : m.exportBundle}
         </button>
       </div>
 
       <footer>
         <button ref={emptyTriggerRef} className="danger-link" disabled={busy}
           onClick={() => setConfirmationRecoveryId(recoveryId)}>
-          创建全新空数据库
+          {m.startEmpty}
         </button>
-        <p>此入口只在你明确确认后执行；现有隔离文件和备份继续保留。</p>
+        <p>{m.startEmptyHint}</p>
       </footer>
     </section>
 
     {confirmationRecoveryId && <div className="database-recovery-dialog-backdrop">
-      <section role="dialog" aria-modal="true" aria-label="确认创建全新空数据库"
+      <section role="dialog" aria-modal="true" aria-label={m.confirmEmptyLabel}
         className="database-recovery-dialog" onKeyDown={(event) => {
           if (event.key === 'Escape') {
             event.preventDefault()
@@ -173,23 +178,23 @@ export function DatabaseRecoveryPage({ state, actions }: Props) {
             dialogBackRef.current?.focus()
           }
         }}>
-        <h2>确认创建全新空数据库？</h2>
-        <p>Matou 将显示一个全新的空工作区。当前损坏或异常文件和备份仍会保留，便于后续导出与排查。</p>
+        <h2>{m.confirmEmptyTitle}</h2>
+        <p>{m.confirmEmptyBody}</p>
         <div>
-          <button ref={dialogBackRef} onClick={closeEmptyConfirmation}>返回</button>
+          <button ref={dialogBackRef} onClick={closeEmptyConfirmation}>{m.back}</button>
           <button ref={dialogConfirmRef} className="danger" onClick={() => {
             const frozenRecoveryId = confirmationRecoveryId
             setConfirmationRecoveryId(undefined)
             void perform('empty', () => actions.startEmpty(frozenRecoveryId))
-          }}>确认创建空数据库</button>
+          }}>{m.confirmEmpty}</button>
         </div>
       </section>
     </div>}
   </main>
 }
 
-function formatTime(createdAt: number): string {
-  return new Intl.DateTimeFormat('zh-CN', {
+function formatTime(createdAt: number, locale: Locale): string {
+  return new Intl.DateTimeFormat(locale, {
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
   }).format(new Date(createdAt))
 }

@@ -1,12 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 
-import type { AppUpdateState } from '../../../shared/desktop-api'
+import type { Locale } from '@matou/contracts'
+
+import type { AppUpdateErrorStage, AppUpdateState } from '../../../shared/desktop-api'
+import { useLocale, useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
 import desktopPackage from '../../../../package.json'
+
+type UpdateMessages = Messages['updates']
 
 const INITIAL_STATE: AppUpdateState = { status: 'idle', currentVersion: desktopPackage.version }
 const LAST_VERSION_KEY = 'matou:last-seen-app-version'
 
 export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: number }) {
+  const m = useMessages().updates
   const [state, setState] = useState<AppUpdateState>(INITIAL_STATE)
   const [open, setOpen] = useState(false)
   const [waitingForIdle, setWaitingForIdle] = useState(false)
@@ -64,7 +71,7 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
     void window.matouDesktop?.installAppUpdate?.()
   }, [activeSessionCount, state.status, waitingForIdle])
 
-  const label = useMemo(() => updateButtonLabel(state), [state])
+  const label = useMemo(() => updateButtonLabel(state, m), [state, m])
   const progress = state.status === 'downloading' ? Math.round(state.progress.percent) : undefined
 
   const installNow = () => {
@@ -92,101 +99,104 @@ export function AppUpdateControl({ activeSessionCount }: { activeSessionCount: n
       {(state.status === 'available' || state.status === 'downloaded') && <i className="app-update-trigger__dot" />}
     </button>
 
-    {open && <section role="dialog" aria-label="Matou 应用更新" className="app-update-popover">
+    {open && <section role="dialog" aria-label={m.popover} className="app-update-popover">
       <UpdateHeader state={state} onClose={() => setOpen(false)} />
       <div className="app-update-popover__body">
-        {state.status === 'idle' && <p>当前版本 {state.currentVersion || '—'}</p>}
+        {state.status === 'idle' && <p>{m.currentVersion(state.currentVersion || '—')}</p>}
         {state.status === 'checking' && <p>{state.retryAttempt
-          ? `连接波动，正在自动重试（${state.retryAttempt}/${state.maxRetryAttempts ?? state.retryAttempt}）…`
-          : '正在检查云端是否有新版本…'}</p>}
-        {state.status === 'not-available' && <p>当前已是最新版本（{state.currentVersion}）</p>}
+          ? m.retrying(state.retryAttempt, state.maxRetryAttempts ?? state.retryAttempt)
+          : m.checking}</p>}
+        {state.status === 'not-available' && <p>{m.upToDate(state.currentVersion)}</p>}
         {state.status === 'error' && <div className="app-update-error">
-          <span>{friendlyError(state)}</span>
+          <span>{friendlyError(state, m)}</span>
         </div>}
         {state.status === 'available' && state.installMode === 'manual' &&
-          <div className="app-update-waiting">当前体验包将通过应用内下载 DMG 更新。</div>}
+          <div className="app-update-waiting">{m.manualDmgNotice}</div>}
         {isReleaseState(state) && state.status !== 'downloading' && state.releaseNotes.length > 0 &&
           <ul className="app-update-notes">{state.releaseNotes.slice(0, 3).map((note) => <li key={note}>{note}</li>)}</ul>}
         {state.status === 'downloading' && <DownloadProgress state={state} />}
         {state.status === 'downloaded' && state.installMode === 'automatic' && activeSessionCount > 0 && <div className="app-update-session-warning">
-          <i /><span><strong>当前有 {activeSessionCount} 个活动会话</strong>
-            <small>空闲后更新会保留工作区、画布位置及会话恢复信息。</small></span>
+          <i /><span><strong>{m.activeSessions(activeSessionCount)}</strong>
+            <small>{m.idleUpdateKeepsState}</small></span>
         </div>}
         {waitingForIdle && state.status === 'downloaded' && state.installMode === 'automatic' &&
-          <div className="app-update-waiting">已安排：空闲后自动更新</div>}
+          <div className="app-update-waiting">{m.idleUpdateScheduled}</div>}
       </div>
       <div className="app-update-popover__actions">
         {(state.status === 'idle' || state.status === 'not-available') &&
           <button className="is-primary" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>
-            检查更新
+            {m.actions.check}
           </button>}
         {state.status === 'error' && state.manualDownloadUrl && <>
-          <button className="is-primary" onClick={() => void window.matouDesktop?.downloadAppUpdate?.()}>下载 DMG 更新</button>
-          <button className="is-quiet" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>重新检查</button>
+          <button className="is-primary" onClick={() => void window.matouDesktop?.downloadAppUpdate?.()}>{m.actions.downloadDmg}</button>
+          <button className="is-quiet" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>{m.actions.recheck}</button>
         </>}
         {state.status === 'error' && !state.manualDownloadUrl &&
-          <button className="is-primary" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>重新检查</button>}
+          <button className="is-primary" onClick={() => void window.matouDesktop?.checkForAppUpdates?.()}>{m.actions.recheck}</button>}
         {state.status === 'available' && <>
           <button className="is-primary" onClick={() => void window.matouDesktop?.downloadAppUpdate?.()}>
-            {state.installMode === 'manual' ? '下载更新' : '后台下载'}
+            {state.installMode === 'manual' ? m.actions.download : m.actions.downloadInBackground}
           </button>
-          <button className="is-quiet" onClick={() => setOpen(false)}>稍后提醒</button>
+          <button className="is-quiet" onClick={() => setOpen(false)}>{m.actions.remindLater}</button>
         </>}
-        {state.status === 'downloading' && <button className="is-quiet" onClick={() => setOpen(false)}>继续在后台下载</button>}
+        {state.status === 'downloading' && <button className="is-quiet" onClick={() => setOpen(false)}>{m.actions.keepInBackground}</button>}
         {state.status === 'downloaded' && state.installMode === 'manual' && <>
           <button className="is-primary" disabled={installing} onClick={installNow}>
-            {installing ? '正在打开…' : '打开 DMG 安装'}
+            {installing ? m.actions.opening : m.actions.openDmg}
           </button>
-          <button className="is-quiet" onClick={() => setOpen(false)}>稍后安装</button>
+          <button className="is-quiet" onClick={() => setOpen(false)}>{m.actions.installLater}</button>
         </>}
         {state.status === 'downloaded' && state.installMode === 'automatic' && activeSessionCount > 0 && <>
           <button className={waitingForIdle ? '' : 'is-primary'} disabled={installing}
             onClick={() => setWaitingForIdle((waiting) => !waiting)}>
-            {waitingForIdle ? '取消空闲更新' : '空闲后自动更新'}
+            {waitingForIdle ? m.actions.cancelIdleUpdate : m.actions.updateWhenIdle}
           </button>
           <div className="app-update-action-row">
-            <button disabled={installing} onClick={installNow}>立即重启并更新</button>
-            <button onClick={() => setOpen(false)}>退出时安装</button>
+            <button disabled={installing} onClick={installNow}>{m.actions.restartNow}</button>
+            <button onClick={() => setOpen(false)}>{m.actions.installOnQuit}</button>
           </div>
         </>}
         {state.status === 'downloaded' && state.installMode === 'automatic' && activeSessionCount === 0 && <>
-          <button className="is-primary" disabled={installing} onClick={installNow}>{installing ? '正在准备更新…' : '重启并更新'}</button>
-          <button className="is-quiet" onClick={() => setOpen(false)}>退出时安装</button>
+          <button className="is-primary" disabled={installing} onClick={installNow}>{installing ? m.actions.preparing : m.actions.restart}</button>
+          <button className="is-quiet" onClick={() => setOpen(false)}>{m.actions.installOnQuit}</button>
         </>}
       </div>
     </section>}
 
     {showUpdatedToast && <div className="app-update-toast" role="status">
-      <span>✓</span><div><strong>Matou 已更新至 {state.currentVersion}</strong><small>工作空间与会话已恢复</small></div>
+      <span>✓</span><div><strong>{m.updatedTo(state.currentVersion)}</strong><small>{m.updatedHint}</small></div>
     </div>}
   </div>
 }
 
 function UpdateHeader({ state, onClose }: { state: AppUpdateState; onClose: () => void }) {
-  const title = state.status === 'available' ? `Matou ${state.version} 可用`
-    : state.status === 'downloading' ? '正在后台下载'
-    : state.status === 'downloaded' ? state.installMode === 'manual' ? 'DMG 已下载完成' : '更新已准备好'
-    : state.status === 'checking' ? '正在检查更新'
-    : state.status === 'error' ? errorTitle(state.errorStage)
-    : state.status === 'not-available' ? 'Matou 已是最新版本'
-    : 'Matou 应用更新'
+  const m = useMessages().updates
+  const locale = useLocale()
+  const title = state.status === 'available' ? m.header.available(state.version)
+    : state.status === 'downloading' ? m.header.downloading
+    : state.status === 'downloaded' ? state.installMode === 'manual' ? m.header.dmgReady : m.header.ready
+    : state.status === 'checking' ? m.header.checking
+    : state.status === 'error' ? errorTitle(state.errorStage, m)
+    : state.status === 'not-available' ? m.header.upToDate
+    : m.popover
   const subtitle = isReleaseState(state)
-    ? [state.status === 'available' ? '稳定版' : `Matou ${state.version}`, state.sizeBytes ? formatBytes(state.sizeBytes) : '', formatDate(state.releaseDate)].filter(Boolean).join(' · ')
-    : `当前版本 ${state.currentVersion || '—'}`
+    ? [state.status === 'available' ? m.header.stableChannel : `Matou ${state.version}`, state.sizeBytes ? formatBytes(state.sizeBytes) : '', formatDate(state.releaseDate, locale)].filter(Boolean).join(' · ')
+    : m.currentVersion(state.currentVersion || '—')
   return <header className="app-update-popover__header">
     <span className="app-update-release-icon"><DownloadIcon /></span>
     <span><strong>{title}</strong><small>{subtitle}</small></span>
-    <button type="button" aria-label="关闭更新浮层" onClick={onClose}>×</button>
+    <button type="button" aria-label={m.header.close} onClick={onClose}>×</button>
   </header>
 }
 
 function DownloadProgress({ state }: { state: Extract<AppUpdateState, { status: 'downloading' }> }) {
+  const m = useMessages().updates
   const progress = state.progress
   return <div className="app-update-download">
     <div><span>{formatBytes(progress.transferredBytes)} / {formatBytes(progress.totalBytes)}</span>
-      <span>{Math.round(progress.percent)}%{progress.remainingSeconds === undefined ? '' : ` · 约 ${progress.remainingSeconds} 秒`}</span></div>
+      <span>{Math.round(progress.percent)}%{progress.remainingSeconds === undefined ? '' : ` · ${m.remainingSeconds(progress.remainingSeconds)}`}</span></div>
     <span className="app-update-download__track"><i style={{ width: `${Math.max(0, Math.min(100, progress.percent))}%` }} /></span>
-    <small>{formatBytes(progress.bytesPerSecond)}/秒 · 可继续使用当前会话</small>
+    <small>{m.downloadRate(formatBytes(progress.bytesPerSecond))}</small>
   </div>
 }
 
@@ -200,15 +210,15 @@ function isReleaseState(state: AppUpdateState): state is Extract<AppUpdateState,
   return state.status === 'available' || state.status === 'downloading' || state.status === 'downloaded'
 }
 
-function updateButtonLabel(state: AppUpdateState): string {
-  if (state.status === 'checking') return '应用更新：正在检查'
-  if (state.status === 'available') return `应用更新：发现 ${state.version}`
-  if (state.status === 'downloading') return `应用更新：下载中 ${Math.round(state.progress.percent)}%`
+function updateButtonLabel(state: AppUpdateState, m: UpdateMessages): string {
+  if (state.status === 'checking') return m.buttonLabel.checking
+  if (state.status === 'available') return m.buttonLabel.available(state.version)
+  if (state.status === 'downloading') return m.buttonLabel.downloading(Math.round(state.progress.percent))
   if (state.status === 'downloaded') return state.installMode === 'manual'
-    ? '应用更新：等待打开安装包'
-    : '应用更新：等待安装'
-  if (state.status === 'error') return `应用更新：${errorTitle(state.errorStage)}`
-  return '应用更新'
+    ? m.buttonLabel.awaitingInstaller
+    : m.buttonLabel.awaitingInstall
+  if (state.status === 'error') return m.buttonLabel.error(errorTitle(state.errorStage, m))
+  return m.buttonLabel.idle
 }
 
 function formatBytes(bytes: number): string {
@@ -216,48 +226,48 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1_000_000).toFixed(1)} MB`
 }
 
-function formatDate(value?: string): string {
+function formatDate(value: string | undefined, locale: Locale): string {
   if (!value) return ''
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(date)
+  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric' }).format(date)
 }
 
-function errorTitle(stage: Extract<AppUpdateState, { status: 'error' }>['errorStage']): string {
-  if (stage === 'download') return '更新下载失败'
-  if (stage === 'verify') return '安装包校验未通过'
-  if (stage === 'install') return '更新安装失败'
-  return '更新检查失败'
+function errorTitle(stage: AppUpdateErrorStage, m: UpdateMessages): string {
+  if (stage === 'download') return m.errorTitle.download
+  if (stage === 'verify') return m.errorTitle.verify
+  if (stage === 'install') return m.errorTitle.install
+  return m.errorTitle.check
 }
 
-function friendlyError(state: Extract<AppUpdateState, { status: 'error' }>): string {
+function friendlyError(state: Extract<AppUpdateState, { status: 'error' }>, m: UpdateMessages): string {
   if (state.errorStage === 'verify') {
-    return '当前安装包缺少 Apple 发布签名，改用应用内 DMG 下载继续更新。'
+    return m.error.signatureMissing
   }
-  if (state.errorStage === 'install') return '更新安装前的会话保存或应用退出过程出现异常，请重新尝试。'
+  if (state.errorStage === 'install') return m.error.installFailed
   if (/ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED|\bDNS\b|getaddrinfo/i.test(state.errorMessage)) {
-    return '更新服务器域名解析失败，请检查网络或 DNS 设置。'
+    return m.error.dnsFailed
   }
   if (/ETIMEDOUT|ERR_TIMED_OUT|timed?\s*out/i.test(state.errorMessage)) {
-    return '连接更新服务器超时，请检查网络后重试。'
+    return m.error.timedOut
   }
   if (/ENETUNREACH|ERR_INTERNET_DISCONNECTED|network is unreachable/i.test(state.errorMessage)) {
-    return '当前设备尚未接入网络，请恢复网络后重试。'
+    return m.error.offline
   }
   if (/ECONNREFUSED|ERR_CONNECTION_REFUSED/i.test(state.errorMessage)) {
-    return '更新服务器暂时拒绝连接，请稍后重试。'
+    return m.error.connectionRefused
   }
   if (/ECONNRESET|ERR_CONNECTION_RESET|socket hang up/i.test(state.errorMessage)) {
-    return '下载连接被中途断开，应用已保留当前版本，请重新尝试。'
+    return m.error.connectionReset
   }
   if (/CERT_|SSL|TLS|certificate/i.test(state.errorMessage)) {
-    return '更新服务器的安全连接校验异常，请检查系统时间后重试。'
+    return m.error.tlsFailed
   }
   const httpStatus = state.errorMessage.match(/(?:HTTP|status(?: code)?)\D*(\d{3})/i)?.[1]
-  if (httpStatus) return `更新服务器返回 HTTP ${httpStatus}，请稍后重试。`
+  if (httpStatus) return m.error.httpStatus(httpStatus)
   if (/stable-mac\.yml|latest[^\s]*\.yml|YAML|parse/i.test(state.errorMessage)) {
-    return '更新信息格式异常，当前版本保持不变，请稍后重试。'
+    return m.error.manifestInvalid
   }
-  if (/network|server|fetch|ECONN|timeout/i.test(state.errorMessage)) return '暂时没有连接到更新服务器，请检查网络后重试。'
-  if (state.errorStage === 'download') return '更新文件下载中断，请检查网络后重试。'
-  return '更新服务出现异常，请稍后重新检查。'
+  if (/network|server|fetch|ECONN|timeout/i.test(state.errorMessage)) return m.error.networkUnavailable
+  if (state.errorStage === 'download') return m.error.downloadInterrupted
+  return m.error.unknown
 }

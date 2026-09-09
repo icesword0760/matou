@@ -53,7 +53,7 @@ import {
   DEFAULT_TERMINAL_THEME, type TerminalThemeKey
 } from '../terminal/terminal-themes'
 import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
-import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
+import { ReadOnlyRecoveryBanner } from '../recovery/ReadOnlyRecoveryBanner'
 import { AppFocusRestorer } from './focus-restoration'
 import { useSessionRecovery } from '../runtime/useSessionRecovery'
 import { indexSceneLayout, layoutFromSnapshot } from './scene-layout-index'
@@ -299,7 +299,8 @@ function HierarchyProduct({
   refreshProjection?: () => Promise<HierarchyProjection | undefined>
   terminalDiagnostics?: HierarchyTerminalDiagnostics
 }) {
-  const m = useMessages().hierarchyShell.shell
+  const hierarchyMessages = useMessages().hierarchyShell
+  const m = hierarchyMessages.shell
   const client = useRuntimeClient()
   const notificationStore = useNotificationStore()
   useNotificationSnapshot()
@@ -1243,7 +1244,7 @@ function HierarchyProduct({
                 aria-label={m.sceneLayout(scene.name)}>
                 {graph && snapshot
                   ? <SessionCanvas graph={graph} disabled={!pathValid || readOnly}
-                      {...(readOnly ? { disabledReason: READ_ONLY_REASON } : {})}
+                      {...(readOnly ? { disabledReason: hierarchyMessages.readOnlyRecoveryReason } : {})}
                       {...(levelParentByScene[scene.id] !== undefined
                         ? { levelParentSessionId: levelParentByScene[scene.id]! }
                         : {})}
@@ -1343,7 +1344,7 @@ function HierarchyProduct({
                       onPermissionMode={commands.setPermissionMode}
                       {...(activeSessionMutationBlocked ? {
                         disabledReason: readOnly
-                          ? READ_ONLY_REASON
+                          ? hierarchyMessages.readOnlyRecoveryReason
                           : activeStorageFault
                             ? m.storageFaultMutationReason
                             : activeRecoveryBlocked
@@ -1352,7 +1353,7 @@ function HierarchyProduct({
                       } : {})}
                       {...(readOnly || activeStorageFault ? {
                         environmentDisabledReason: readOnly
-                          ? READ_ONLY_REASON
+                          ? hierarchyMessages.readOnlyRecoveryReason
                           : m.storageFaultMutationReason
                       } : {})}
                       {...(activeSceneId ? {
