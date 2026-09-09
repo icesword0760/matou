@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="assets/logo.png" width="128" alt="码头 Matou logo">
+  <img src="assets/logo.png" width="128" alt="Matou logo">
 </p>
 
-<h1 align="center">码头 Matou</h1>
+<h1 align="center">Matou (码头)</h1>
 
 <p align="center">
-  <strong>Claude Code 多智能体桌面工作台</strong><br>
-  A macOS desktop workbench for running many Claude Code agents side by side —<br>
+  <strong>A multi-agent desktop workbench for Claude Code</strong><br>
+  Run many Claude Code agents side by side on macOS —<br>
   session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.
 </p>
 
@@ -20,166 +20,165 @@
 </p>
 
 <p align="center">
-  <a href="#下载安装">下载安装</a> ·
-  <a href="#从混乱的终端到可管理的-ai-工作流">核心场景</a> ·
-  <a href="#用-dag-看懂会话从哪里来下一步去哪里">DAG 使用方法</a> ·
-  <a href="#架构与质量">架构文档</a> ·
-  <a href="README.en.md">English</a>
+  <a href="#install">Install</a> ·
+  <a href="#from-a-pile-of-terminals-to-a-manageable-ai-workflow">Core scenarios</a> ·
+  <a href="#3-read-the-session-dag-where-did-this-come-from-where-is-it-going">DAG</a> ·
+  <a href="#architecture-and-quality">Architecture</a> ·
+  <a href="README.zh-CN.md">中文</a>
 </p>
 
 <br>
 
-码头（Matou）是一款面向 AI 编程的桌面工作台：把 Claude Code 会话、任务、分支和上下文放进同一个可恢复的工作现场。你可以同时推进多个编码智能体，又随时知道每个会话在做什么、需要什么、从哪里分出来。
+Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. It puts your Claude Code sessions, tasks, branches and context into one recoverable workspace, so you can push several coding agents forward at once and still know what each one is doing, what it needs, and where it branched off from.
 
-> **项目状态**：早期预览版，仅支持 macOS（Apple Silicon）。安装包见 [Releases](https://github.com/icesword0760/matou/releases/latest)。
+> **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page. The product UI is currently in Chinese.
 
-![码头 Matou 的 Claude Code 多会话桌面工作台演示](assets/shots/workspace-demo.gif)
+![Matou workspace demo with five parallel Claude Code sessions](assets/shots/workspace-demo.gif)
 
-> 上图的一段工作流：你在「实现」卡片里写代码，后台的回归跑完了、需要你拍板，卡片角标当场亮起；打开通知中心点进去，画布滑到回归卡片；切到「方案探索」呼出 DAG，一眼看到方案 A 在跑、方案 B 卡住、回归失败；点方案 B 节点直接落到那张卡片；最后呼出看板把事项拖到「阻塞」。本文截图均来自隔离演示环境，项目、终端输出和通知都是为演示构造的。
+> One stretch of work: you are coding in the implementation card when the background regression finishes and needs a decision — its badge lights up. Open the notification center, click through, and the canvas slides to the regression card. Switch to the exploration canvas and open the DAG: plan A is still running, plan B is stuck, the regression failed. Click plan B's node to land on that card, then open the board and drag the task to blocked. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
 
 ---
 
-## 你需要管理的不是终端，而是正在推进的工作
+## What you manage is not terminals, it is work in progress
 
-同时开两个 AI 编程会话很轻松，开到十个以后，真正消耗注意力的通常不是代码：
+Two AI coding sessions are easy. Once you have ten, what burns attention is rarely the code:
 
-- 这个窗口属于哪个项目、哪个需求、哪个分支？
-- 哪个 Claude Code 已完成，哪个在等确认，哪个已经出错？
-- 另一个会话刚得出的结论，是否又要复制粘贴一遍？
-- 想验证第二种方案，如何保留原会话上下文，又不污染正在工作的目录？
-- App 重启后，页签、分屏、目录、输出和 Agent 身份还能否回到原位？
+- Which project, which ticket, which branch does this window belong to?
+- Which Claude Code has finished, which one is waiting for confirmation, which one failed?
+- Do I really have to copy-paste the conclusion from that other session again?
+- How do I try a second approach without losing the original context or polluting my working directory?
+- After a restart, do tabs, splits, directories, output and agent identity come back where they were?
 
-码头把这些问题收进一个工作模型：**工作空间 → 事项 → 画布 → 会话卡片**。你看到的是目标、关系、状态和下一步，而不是一排难以辨认的终端窗口。
+Matou folds these into one model: **Workspace → Task → Canvas → Session card**. You see goals, relationships, status and next steps instead of a row of indistinguishable terminal windows.
 
-## 从混乱的终端到可管理的 AI 工作流
+## From a pile of terminals to a manageable AI workflow
 
-### 1. 用四级结构管理项目、任务和 Agent
+### 1. A four-level structure for projects, tasks and agents
 
-| 层级 | 适合放什么 | 你会在什么时候用到 |
+| Level | What goes here | When you use it |
 |---|---|---|
-| **工作空间 Workspace** | 一个代码仓库、产品或客户环境 | 同时维护多个项目时，隔离目录、任务和通知 |
-| **事项 Task** | 一项能交付的工作，例如“发布 Matou 0.1” | 按就绪、运行中、阻塞、完成推进工作，而不是寻找窗口 |
-| **画布 Canvas** | 一个事项里的阶段或场景 | 把方案探索、实现、回归放到不同页签，减少视觉噪音 |
-| **会话卡片 Session** | 一个独立的 Claude Code Agent | 并行编码、审查、测试或调研；每张卡片保留自己的输入、输出和状态 |
+| **Workspace** | A repository, product or client environment | Keep directories, tasks and notifications isolated across projects |
+| **Task** | One deliverable piece of work, e.g. "ship 0.1" | Move work through ready / active / blocked / done instead of hunting for windows |
+| **Canvas** | A phase or scene inside a task | Put exploration, implementation and regression on separate tabs to cut visual noise |
+| **Session card** | One independent Claude Code agent | Code, review, test or research in parallel; every card keeps its own input, output and status |
 
-事项支持新建、重命名、排序与看板流转；画布支持页签、水平分屏和垂直分屏；会话卡片可以独立运行、聚焦、脱出窗口或回到原画布。
+Tasks can be created, renamed, reordered and moved on a board; canvases support tabs plus horizontal and vertical splits; session cards can run independently, take focus, pop out into their own window and return to the canvas.
 
-### 2. 直接用自然语言获取其他卡片的信息
+### 2. Ask other cards for information in plain language
 
-当结果在另一张卡片里时，你不必逐个切换、滚动、复制。可以直接对当前 Claude Code 说：
+When the result lives in another card you do not have to switch, scroll and copy. Tell the current Claude Code:
 
-> “看看右边那张卡片的测试跑到哪了，给我结论。”
+> "Check how far the tests in the card on the right have got and give me the conclusion."
 
-> “读取父会话最近的输出，对比方案 A 和方案 B 的风险。”
+> "Read the parent session's latest output and compare the risks of plan A and plan B."
 
-> “让左边的会话继续运行回归，完成后把结果发回来。”
+> "Let the session on the left keep running the regression and send the result back when it is done."
 
-Matou 会向它托管的每个 Agent 提供会话定位与控制能力，使它能够识别自己、列出关联卡片、读取实时屏幕或历史输出、查看可执行命令，并向父卡片、子卡片、左右相邻卡片或指定会话发送输入。这样，跨会话协作仍然发生在你的任务结构里。
+Matou gives every agent it hosts the ability to identify itself, list related cards, read live screens or history, inspect available commands, and send input to parent, child, left/right neighbours or any named session. Cross-session collaboration stays inside your task structure.
 
-![三张 Claude Code 卡片并行：实现、回归、审查](assets/shots/workspace-demo.png)
+![Three Claude Code cards side by side: implementation, regression, review](assets/shots/workspace-demo.png)
 
-> 左侧在实现 Redis 幂等键（运行中），中间的回归测试在等你确认一条断言，右侧的审查会话直接用 `mt read left` 读取了回归结果，再给出结论。焦点卡片自动展开，其余卡片收窄排在旁边。
+> The left card is implementing a Redis idempotency key (running), the middle one is a regression run waiting for you to confirm an assertion change, and the right one is a review session that read the regression result with `mt read left` before drawing its conclusion. The focused card expands; the others sit narrow beside it.
 
 <details>
-<summary>当前版本支持的控制命令</summary>
+<summary>Control commands in the current version</summary>
 
-Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt history`、`mt commands`、`mt send`、`mt key`、`mt create`、`mt fork`、`mt remove`、`mt close`、`mt focus` 和 `mt switch`。目标可按 `self`、`left`、`right`、`parent`、`child:N`、`sibling:N` 或会话引用指定。
+Inside a hosted session: `mt identify`, `mt list`, `mt read`, `mt history`, `mt commands`, `mt send`, `mt key`, `mt create`, `mt fork`, `mt remove`, `mt close`, `mt focus` and `mt switch`. Targets can be `self`, `left`, `right`, `parent`, `child:N`, `sibling:N` or a session reference.
 
 </details>
 
-### 3. 用 DAG 看懂会话从哪里来、下一步去哪里
+### 3. Read the session DAG: where did this come from, where is it going
 
-普通标签页只能告诉你“有哪些会话”，DAG 会话图还能告诉你“它们是什么关系”。当一个问题被拆成多条验证路线时，按 `Option + Tab` 打开独立 DAG：
+Tabs only tell you *which* sessions exist. The session DAG tells you how they relate. When a problem splits into several validation paths, press `Option + Tab` to open the standalone DAG:
 
-1. **从当前节点看上下游**：快速定位父会话、当前会话和子会话。
-2. **区分两种关系**：实线 Fork 表示继承对话上下文；虚线普通关联表示建立关系但不继承对话。
-3. **不打开终端也能判断进展**：节点直接显示 Agent 类型、运行状态、目录、分支、最近输出与子会话数量。
-4. **搜索与大图导航**：按名称、路径、分支或输出搜索，配合缩放、平移和自动聚合浏览大规模会话图。
-5. **一键回到现场**：点击节点即可关闭 DAG 并聚焦对应会话；已停止节点仍保留在关系图中，方便回看决策链。
+1. **Look up and down from the current node**: find the parent, the current session and its children at a glance.
+2. **Two kinds of edges**: solid *Fork* edges inherit the conversation; dashed *association* edges create a relationship without inheriting it.
+3. **Judge progress without opening a terminal**: nodes show agent type, work status, directory, branch, latest output and child count.
+4. **Search and navigate large graphs**: search by name, path, branch or output; zoom, pan and automatic aggregation keep big graphs readable.
+5. **Jump back**: clicking a node closes the DAG and focuses that session; stopped nodes stay in the graph so the decision trail survives.
 
-![Claude Code 会话分支 DAG 可视化](assets/shots/session-dag-demo.png)
+![Session fork DAG](assets/shots/session-dag-demo.png)
 
-> 基线会话 Fork 出方案 A、方案 B 两条路线（实线，继承对话），一个跑回归的 Shell 通过普通关联挂在同一父节点下（虚线）。不打开任何终端就能看到：A 还在跑，B 在等决定，回归以退出码 1 失败。
+> A baseline session forked into plan A and plan B (solid edges, conversation inherited); a shell running the regression hangs off the same parent through an association (dashed). Without opening anything you can see that A is still running, B is waiting for a decision, and the regression exited with code 1.
 
-### 4. AI 通知：只在需要你时打断你
+### 4. Notifications: interrupt you only when it matters
 
-后台 Agent 完成任务、等待输入、请求帮助或发生错误时，Matou 会把信号送到对应会话卡片，并沿画布、事项和工作空间逐级提示。当前正在查看的卡片保持安静；点击通知即可回到产生事件的现场。
+When a background agent finishes, waits for input, asks for help or hits an error, Matou routes the signal to its card and bubbles it up through canvas, task and workspace. The card you are looking at stays quiet; clicking a notification takes you straight to where it happened.
 
-通知中心提供事件摘要、来源路径和声音开关，适合同时跑实现、测试、审查等多个 Claude Code 会话时使用。
+The notification center shows a summary, the source path and a sound toggle — built for running implementation, tests and review sessions at the same time.
 
-### 5. AI HUD：不用再问“你现在做到哪了”
+### 5. The HUD: stop asking "where are you now?"
 
-底部 HUD 把影响下一步判断的信息放在一个视线范围内：
+The bottom HUD keeps everything that affects your next decision in one line of sight:
 
-- 当前模型、权限模式、上下文窗口与已用比例
-- 周期用量、重置时间、当前目录、Git 分支与脏状态
-- MCP、工具和 Agent 数量；悬停后可把鼠标移入明细框滚动查看，不会再被右侧长文本挤掉
-- 当前项目存在 `CLAUDE.md` 时，最左侧显示 `ClaudeMd` 入口，可直接编辑并保存
-- 待办进度、需要输入、错误状态与 MCP 异常；普通“任务中”和 `Local` 不再占用空间
+- Model, permission mode, context window and usage percentage
+- Session duration, usage windows and reset time
+- Working directory, Git branch, dirty state and worktree environment
+- Running tools, todo progress, regression runs and MCP errors
 
-![Claude Code AI HUD 与分级通知中心](assets/shots/agent-hud-notifications-demo.png)
+![Agent HUD and tiered notification center](assets/shots/agent-hud-notifications-demo.png)
 
-> 通知中心按「工作空间 / 事项」标注来源，出错、等待输入、任务完成分级显示，另一个工作空间的完成事件也会进来；右侧两张卡片带「新通知」角标；底部 HUD 显示当前会话的模型、上下文用量、周用量、工具与 Agent 明细、待办进度和分支状态。
+> The notification center labels each entry with "workspace / task", grouped into error, waiting-for-input and completed; a completion from another workspace shows up too. The two cards on the right carry a "new notification" badge, and the HUD at the bottom reports the focused session's model, context usage, weekly usage, todo progress and branch state.
 
-### 6. Fork + Git Worktree：放心比较多种实现
+### 6. Fork + Git worktree: compare implementations without fear
 
-从已有会话创建 Fork，可以保留父会话，让新会话继承对话后独立继续。需要代码隔离时，为分支绑定 Git Worktree：
+Fork an existing session to keep the parent and let the child continue with the inherited conversation. When you need code isolation, bind the branch to a Git worktree:
 
-- 父会话继续守住稳定实现；
-- 子会话分别验证方案 A、方案 B；
-- 每条路线拥有清楚的会话关系、目录和 Git 状态；
-- 验证完成后，再决定合并、保留或停止。
+- the parent keeps guarding the stable implementation;
+- children validate plan A and plan B separately;
+- every path has a clear session relationship, directory and Git state;
+- when validation is done you decide what to merge, keep or stop.
 
-这适合架构选型、疑难缺陷、多方案 UI、并行代码审查和高风险重构。
+Good for architecture decisions, hard bugs, competing UI designs, parallel code review and risky refactors.
 
-### 7. 用看板判断下一步，而不是靠记忆
+### 7. Use the board to decide what is next, not your memory
 
-工作空间看板把事项分为**就绪、运行中、阻塞、完成**。拖动卡片即可更新状态；每张事项卡同时显示会话数量，让你先处理真正需要关注的工作。
+The workspace board sorts tasks into **ready, active, blocked, done**. Drag a card to update its status; every card shows its session count so you handle what really needs attention first.
 
-![Matou Workspace AI 任务看板](assets/shots/workspace-board-demo.png)
+![Workspace board](assets/shots/workspace-board-demo.png)
 
-### 8. 重启恢复与多窗口：工作现场跟着任务走
+### 8. Restart recovery and multiple windows: the workspace follows the task
 
-Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托管 Agent 的身份。窗口隐藏、应用重启或异常退出后，按不同会话类型恢复现场。会话还可以脱出为独立窗口，再归还原画布；主窗口和独立窗口共享同一 Runtime 会话。
+Matou persists tasks, tabs, splits, directories, focus, terminal output and hosted-agent identity. After the window is hidden, the app restarts or crashes, each session type is restored appropriately. A session can also pop out into its own window and return later; the main window and detached windows share the same runtime session.
 
-## 路线图
+## Roadmap
 
-**自然语言创建层级结构。** 除了读取和控制其他卡片，托管的 Agent 还可以直接创建结构：`mt create workspace|task|canvas|session`、`mt fork child|sibling|children`，以及 `mt remove preview|commit` 带预览确认的移除。你可以对当前会话说：
+**Natural-language structure creation.** Beyond reading and controlling other cards, a hosted agent can create structure directly: `mt create workspace|task|canvas|session`, `mt fork child|sibling|children`, and `mt remove preview|commit` for removal with a preview confirmation. You can tell the current session:
 
-> “根据这三个方案创建三个子卡片，分别验证性能、兼容性和回滚路径。”
+> "Create three child cards from these three plans and validate performance, compatibility and rollback separately."
 
-**代码签名与公证（未完成）。** 当前安装包未经 Apple 签名，首次打开需要手动放行；Intel Mac 安装包也尚未提供。
+**Code signing and notarization (not done).** The installer is not signed by Apple yet, so the first launch needs a manual override; an Intel build is not provided yet.
 
-## 适合谁
+## Who it is for
 
-- 同时运行多个 Claude Code 会话的独立开发者
-- 希望把 AI coding agent 从“聊天窗口”变成可管理工作流的团队
-- 需要 DAG visualization 回溯方案分支、上下文来源和决策路径的复杂项目
-- 经常使用 Git Worktree 并行开发、测试、审查和修复的工程师
-- 关注会话恢复、通知分级和上下文用量的重度 AI 编程用户
+- Independent developers running several Claude Code sessions at once
+- Teams that want to turn AI coding agents from "chat windows" into a manageable workflow
+- Complex projects that need a DAG to trace plan branches, context origin and decision paths
+- Engineers who develop, test, review and fix in parallel with Git worktrees
+- Heavy AI-coding users who care about session recovery, notification tiers and context usage
 
-## 下载安装
+## Install
 
-1. 到 [Releases](https://github.com/icesword0760/matou/releases/latest) 下载最新的 `Matou-<版本>-mac-arm64.dmg`（Apple Silicon）。
-2. 打开 DMG，把「码头」拖进「应用程序」。
-3. 安装包尚未签名和公证，首次打开时 macOS 会提示无法验证开发者。任选一种方式放行：打开「系统设置 → 隐私与安全性」，在页面底部点击「仍要打开」；或者在终端执行：
+1. Download the latest `Matou-<version>-mac-arm64.dmg` (Apple Silicon) from [Releases](https://github.com/icesword0760/matou/releases/latest).
+2. Open the DMG and drag **码头** into Applications.
+3. The installer is not signed or notarized yet, so macOS will say it cannot verify the developer. Either open **System Settings → Privacy & Security** and click **Open Anyway** at the bottom, or run:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/码头.app
 ```
 
-使用前请确认本机已安装并登录 Claude Code CLI。之后有新版本时，应用内会提示更新。
+Make sure the Claude Code CLI is installed and logged in on this machine. New versions are announced inside the app.
 
-## 从源码运行
+## Run from source
 
-### 环境要求
+### Requirements
 
-- macOS（目前唯一支持的平台；Linux 和 Windows 未经验证）
+- macOS (the only supported platform; Linux and Windows are untested)
 - Node.js `>=22.16.0`
-- pnpm `10.17.1`（通过 `corepack enable` 启用）
-- 已安装并登录的 Claude Code CLI
+- pnpm `10.17.1` (enable with `corepack enable`)
+- Claude Code CLI installed and logged in
 
-### 启动
+### Start
 
 ```bash
 git clone https://github.com/icesword0760/matou.git
@@ -189,62 +188,72 @@ pnpm install
 pnpm dev
 ```
 
-`pnpm install` 会自动校正 node-pty macOS 预构建包中 `spawn-helper` 的可执行权限；`pnpm dev` 会先构建 packages 和 runtime，再启动 Electron，首次启动需要几分钟。
+`pnpm install` fixes the executable bit on node-pty's macOS `spawn-helper`; `pnpm dev` builds the packages and the runtime before launching Electron, so the first start takes a few minutes.
 
-## 常用命令
+## Common commands
 
 ```bash
-pnpm test               # 单元与集成测试
-pnpm typecheck          # 全工作区类型检查
-pnpm build              # 生产构建
-pnpm test:e2e           # Electron → Runtime → PTY → xterm 完整链路
-pnpm check:identifiers  # 品牌与命名门禁
+pnpm test               # unit and integration tests
+pnpm typecheck          # workspace-wide type check
+pnpm build              # production build
+pnpm test:e2e           # full Electron → Runtime → PTY → xterm journeys
+pnpm check:identifiers  # brand and naming gate
 ```
 
-## 项目结构
+## Project layout
 
 ```text
 apps/
-├── desktop/              Electron Main、Preload、React Renderer、xterm
-└── runtime/              UtilityProcess、PTY、会话、Journal、SQLite
+├── desktop/              Electron main, preload, React renderer, xterm
+└── runtime/              UtilityProcess, PTY, sessions, journal, SQLite
 
 packages/
-├── contracts/            跨进程协议与运行时校验
-├── domain/               领域类型与不变量
-└── ui/                   共享 UI 边界
+├── contracts/            cross-process protocol and runtime validation
+├── domain/               domain types and invariants
+└── ui/                   shared UI boundary
 
 docs/
-├── architecture/         进程、领域、协议与 ADR
-├── prd/                  产品需求与交互规格
-├── acceptance/           验收记录与运行证据
-└── parity/               产品行为对照矩阵
+├── architecture/         processes, domain, protocol and ADRs
+├── prd/                  product requirements and interaction specs
+├── acceptance/           acceptance records and run evidence
+└── parity/               behaviour parity matrices
 
-tests/e2e/                真实 Electron 用户旅程
+tests/e2e/                real Electron user journeys
 ```
 
-## 架构与质量
+## Architecture and quality
 
-- Electron Main 创建并监督 app-scoped Runtime UtilityProcess；终端数据通过 `MessageChannelMain` 直达 Renderer。
-- Runtime 使用 node-pty 管理 PTY，以 credit window 和累计 ACK 控制输出流量。
-- Renderer 只消费可重建投影；会话、层级、持久化和进程生命周期由 Runtime 维护。
-- SQLite 保存结构元数据，分段 Journal 保存终端输出与恢复检查点。
-- 跨进程协议使用精确版本握手与 Zod schema 校验。
-- Renderer 保持 `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`。
+- Electron main creates and supervises an app-scoped runtime UtilityProcess; terminal data reaches the renderer directly over `MessageChannelMain`.
+- The runtime manages PTYs with node-pty and throttles output with a credit window and cumulative ACKs.
+- The renderer only consumes rebuildable projections; sessions, hierarchy, persistence and process lifecycle live in the runtime.
+- SQLite stores structural metadata; a segmented journal stores terminal output and recovery checkpoints.
+- The cross-process protocol uses an exact version handshake and Zod schema validation.
+- The renderer keeps `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`.
 
-进一步阅读：[进程模型](docs/architecture/process-model.md) · [领域模型](docs/architecture/domain-model.md) · [事件与流协议](docs/architecture/event-and-stream-protocol.md) · [ADR-0001](docs/architecture/adr/0001-app-scoped-utility-process.md)
+Further reading (Chinese): [process model](docs/architecture/process-model.md) · [domain model](docs/architecture/domain-model.md) · [event and stream protocol](docs/architecture/event-and-stream-protocol.md) · [ADR-0001](docs/architecture/adr/0001-app-scoped-utility-process.md)
 
-## 反馈与交流
+## FAQ
 
-- 在 [Issues](https://github.com/icesword0760/matou/issues) 提交问题或建议。
-- 涉及恢复、分支、通知或多窗口问题时，请附上复现步骤、macOS 版本和可公开的演示数据。
-- 加入 QQ 体验反馈群 **454249629**，或扫码：
+**Windows or Linux?** Not yet — macOS on Apple Silicon only for now. The runtime (PTY, journal, SQLite, protocol) is platform-neutral; the blockers are macOS-specific window code and testing. Track [#2](https://github.com/icesword0760/matou/issues/2) for Windows/Linux and [#3](https://github.com/icesword0760/matou/issues/3) for Intel Macs.
 
-<img src="assets/qq-group.png" width="200" alt="码头使用体验反馈群 QQ 群二维码">
+**How is this different from other Claude Code session managers?** Most of them give you a list of sessions or worktrees to switch between. Matou puts three views on the same sessions: cards you scroll through and talk to in parallel, a DAG of how they forked from each other, and a board for where each piece of work stands. Sessions can also read and steer each other with `mt` commands from inside Claude Code, so hand-offs do not go through your clipboard.
 
-## 许可证
+**Why Electron?** xterm.js for the terminal, React for the canvas and DAG, and an isolated UtilityProcess for the runtime. The renderer runs with `nodeIntegration: false`, `contextIsolation: true` and `sandbox: true`. It also keeps the door open for other platforms later.
 
-本项目以 [GNU General Public License v3.0](LICENSE) 发布。你可以自由使用、修改和分发，但基于本项目的衍生作品必须以相同协议开源。
+**Does anything leave my machine?** Matou itself makes one network request: the update check. Session metadata and terminal output stay on disk in the app's data directory. Claude Code talks to Anthropic exactly as it does in a plain terminal. If you configure a custom model endpoint in settings, your requests go to that endpoint and nowhere else.
+
+**Is the UI in English?** Not yet — the product UI is Chinese today. An English UI that follows the system language is in progress ([#4](https://github.com/icesword0760/matou/issues/4)).
+
+## Feedback
+
+- Open an [issue](https://github.com/icesword0760/matou/issues) for bugs or ideas.
+- For recovery, fork, notification or multi-window problems, please include reproduction steps, your macOS version and shareable demo data.
+- Chinese-speaking users can also join the QQ feedback group **454249629** (QR code in the [Chinese README](README.zh-CN.md#反馈与交流)).
+
+## License
+
+Released under the [GNU General Public License v3.0](LICENSE). You are free to use, modify and redistribute it; derivative works must be released under the same license.
 
 ---
 
-如果 Matou 让你少花一点时间寻找终端、确认上下文，欢迎点一个 ⭐。
+If Matou saves you a little time hunting for terminals and re-checking context, a ⭐ is appreciated.
