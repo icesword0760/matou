@@ -345,7 +345,9 @@ export function SessionLoaderDialog(props: {
                       <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>
                       {session.availability === 'loaded-here' && <small>{m.loadedHere}</small>}
                       {session.availability === 'loaded-elsewhere' &&
-                        <small>{m.loadedElsewhere(session.loadedSessionTitle ?? m.otherCard)}</small>}
+                        <small>{m.loadedElsewhere(session.loadedSessionTitle
+                          ? m.quoted(session.loadedSessionTitle)
+                          : m.otherCard)}</small>}
                     </button>
                   </article>
                 </div>
@@ -424,8 +426,10 @@ export function SessionLoaderDialog(props: {
       {confirmDuplicate && <ConfirmDialog
         title={m.duplicateTitle}
         body={m.duplicateBody(
-          selectedSession?.title ?? m.thisSession,
-          selectedSession?.loadedSessionTitle ?? m.otherCard
+          selectedSession?.title ? m.quoted(selectedSession.title) : m.thisSession,
+          selectedSession?.loadedSessionTitle
+            ? m.quoted(selectedSession.loadedSessionTitle)
+            : m.otherCard
         )}
         confirmLabel={m.loadAnyway} onCancel={() => setConfirmDuplicate(false)}
         onConfirm={() => { setConfirmDuplicate(false); void submitLoad(true) }} />}

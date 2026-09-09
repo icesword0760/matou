@@ -1,4 +1,5 @@
 import type { CatalogShape } from '../catalog'
+import { hudEn } from './hud'
 
 export const sessionCanvasZhCN = {
   // SessionCanvas
@@ -161,8 +162,13 @@ export const sessionCanvasZhCN = {
     previewSession: (title: string) => `预览会话：${title}`,
     entries: (count: number) => `${count} 条内容`,
     loadedHere: '已载入当前卡片',
-    loadedElsewhere: (title: string) => `已载入“${title}”`,
-    otherCard: '其他卡片',
+    loadedElsewhere: (card: string) => `已载入${card}`,
+    /**
+     * Wraps a session or card name the user chose. The generic fallbacks below carry their own
+     * quotes so English can leave `another card` / `this session` unquoted.
+     */
+    quoted: (name: string) => `“${name}”`,
+    otherCard: '“其他卡片”',
     loadingMore: '正在载入更多会话…',
     noMatchingSessions: '左侧没有匹配的会话',
     noSessions: '当前工作空间内没有 Claude Code 会话',
@@ -186,8 +192,8 @@ export const sessionCanvasZhCN = {
     loadHere: '载入到当前卡片',
     duplicateTitle: '会话已在当前工作空间载入',
     duplicateBody: (session: string, card: string) =>
-      `“${session}”已载入到“${card}”。仍然可以载入到当前卡片，两张卡片将关联同一个 Claude Code 会话。`,
-    thisSession: '该会话',
+      `${session}已载入到${card}。仍然可以载入到当前卡片，两张卡片将关联同一个 Claude Code 会话。`,
+    thisSession: '“该会话”',
     loadAnyway: '仍然载入',
     /** Keyed by ClaudeSessionPermissionMode. */
     permission: {
@@ -221,7 +227,7 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
     starting: 'Running',
     idle: 'Idle',
     running: 'Running',
-    'needs-input': 'Waiting for input',
+    'needs-input': 'Needs input',
     error: 'Error',
     interrupted: 'Interrupted',
     exited: 'Stopped'
@@ -239,7 +245,7 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
     starting: 'Running',
     idle: 'Idle',
     running: 'Running',
-    'needs-input': 'Waiting for input',
+    'needs-input': 'Needs input',
     error: 'Error',
     interrupted: 'Interrupted',
     exited: 'Idle'
@@ -250,16 +256,17 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
 
   // ChildSessionBadge
   childBadge: {
-    viewChildren: (count: number) =>
-      count === 1 ? 'View 1 child session' : `View ${count} child sessions`,
+    viewChildren: (count: number) => (count === 1 ? 'View 1 fork' : `View ${count} forks`),
     branches: (count: number) => (count === 1 ? '1 fork' : `${count} forks`),
     summaryError: (count: number) => (count === 1 ? '1 error' : `${count} errors`),
-    summaryNeedsInput: (count: number) => `${count} waiting`,
+    summaryNeedsInput: (count: number) =>
+      count === 1 ? '1 needs input' : `${count} need input`,
     summaryRunning: (count: number) => `${count} running`,
     summaryStarting: (count: number) => `${count} starting`,
     detailRunning: (count: number) => `${count} running`,
     detailStarting: (count: number) => `${count} starting`,
-    detailNeedsInput: (count: number) => `${count} waiting for input`,
+    detailNeedsInput: (count: number) =>
+      count === 1 ? '1 needs input' : `${count} need input`,
     detailError: (count: number) => (count === 1 ? '1 error' : `${count} errors`),
     detailJoin: '; '
   },
@@ -293,12 +300,16 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
   // StoppedSessionCard
   stoppedCard: {
     restoring: 'Recovering the session…',
-    removeNodeOf: (title: string) => `Remove node…: ${title}`
+    removeNodeOf: (title: string) => `Remove node: ${title}`
   },
 
   // BranchDialog
   branchDialog: {
-    title: { child: 'Fork a child session', sibling: 'Fork a sibling session', peer: 'Fork session' },
+    title: {
+      child: 'Fork a child session',
+      sibling: 'Fork a sibling session',
+      peer: 'Fork this session'
+    },
     peerDescription: (title: string) =>
       `Copy the current conversation from "${title}" into this list`,
     branchDescription: (title: string) => `Continue a separate line of work from "${title}"`,
@@ -371,7 +382,8 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
     previewSession: (title: string) => `Preview session: ${title}`,
     entries: (count: number) => (count === 1 ? '1 entry' : `${count} entries`),
     loadedHere: 'Loaded in this card',
-    loadedElsewhere: (title: string) => `Loaded in "${title}"`,
+    loadedElsewhere: (card: string) => `Loaded in ${card}`,
+    quoted: (name: string) => `"${name}"`,
     otherCard: 'another card',
     loadingMore: 'Loading more sessions…',
     noMatchingSessions: 'No matching sessions',
@@ -397,16 +409,11 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
     loadHere: 'Load into this card',
     duplicateTitle: 'This session is already loaded in this workspace',
     duplicateBody: (session: string, card: string) =>
-      `"${session}" is already loaded in "${card}". You can still load it into this card, and both cards will then share the same Claude Code session.`,
-    thisSession: 'this session',
+      `${session} is already loaded in ${card}. You can still load it into this card, and both cards will then share the same Claude Code session.`,
+    thisSession: 'This session',
     loadAnyway: 'Load anyway',
-    permission: {
-      default: 'Default permissions',
-      auto: 'Auto mode',
-      acceptEdits: 'Accept edits automatically',
-      plan: 'Plan mode',
-      bypassPermissions: 'All permissions granted'
-    },
+    /** Claude Code's own mode names, shared with the HUD so the two cannot drift. */
+    permission: hudEn.permission,
     timeUnknown: 'Time unknown',
     justNow: 'Just now',
     hoursAgo: (hours: number) => (hours === 1 ? '1 hour ago' : `${hours} hours ago`),
