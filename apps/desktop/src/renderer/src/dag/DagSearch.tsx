@@ -9,7 +9,8 @@ export function DagSearch(props: {
   onPreview(sessionId: string): void
   onChoose(sessionId: string): void
 }) {
-  const m = useMessages().dag.search
+  const dag = useMessages().dag
+  const m = dag.search
   const { nodes, onPreview, onChoose } = props
   const [query, setQuery] = useState('')
   const [selected, setSelected] = useState(0)
@@ -35,7 +36,7 @@ export function DagSearch(props: {
       {results.slice(0, 12).map((node, index) => <button key={node.sessionId} role="option"
         aria-selected={index === selected} onPointerEnter={() => setSelected(index)}
         onClick={() => choose(node.sessionId)}>
-        <strong>{node.title}</strong><span>{node.currentMode === 'claude-code' ? 'Claude Code' : 'Shell'} · {node.cwd}</span>
+        <strong>{node.title}</strong><span>{dag.nodeCard.mode[node.currentMode]} · {node.cwd}</span>
       </button>)}
     </div>}
   </div>

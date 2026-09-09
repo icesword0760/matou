@@ -109,10 +109,10 @@ export const dagEn: CatalogShape<typeof dagZhCN> = {
     focusCurrent: 'Focus the current node',
     legend: 'Relationship legend',
     legendFork: 'Fork: inherits the conversation',
-    legendDerived: 'Plain link: does not inherit the conversation',
+    legendDerived: 'Link: does not inherit the conversation',
     relationLabel: {
       'forked-from': 'Fork: inherits the parent session conversation context',
-      'derived-from': 'Plain parent-child link: shares the level, does not inherit the conversation context'
+      'derived-from': 'Link: shares the level, does not inherit the conversation context'
     }
   },
 
@@ -144,7 +144,7 @@ export const dagEn: CatalogShape<typeof dagZhCN> = {
   },
 
   aggregateCard: {
-    expand: (summary: string) => `Expand the distant sessions: ${summary}`,
+    expand: (summary: string) => `Expand distant sessions: ${summary}`,
     summary: (sessionCount: number, running: number, needsInput: number, error: number) =>
       `${sessionCount === 1 ? '1 session' : `${sessionCount} sessions`} in total, ${running} running, ` +
       `${needsInput === 1 ? '1 needs input' : `${needsInput} need input`}, ` +
@@ -154,7 +154,7 @@ export const dagEn: CatalogShape<typeof dagZhCN> = {
     depthRange: (from: number, to: number) =>
       from === to ? `Level ${from} · click to expand` : `Levels ${from}–${to} · click to expand`,
     countRunning: (count: number) => `${count} running`,
-    countNeedsInput: (count: number) => `${count} needing input`,
+    countNeedsInput: (count: number) => (count === 1 ? '1 needs input' : `${count} need input`),
     countError: (count: number) => (count === 1 ? '1 error' : `${count} errors`)
   },
 
