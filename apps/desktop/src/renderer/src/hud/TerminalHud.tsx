@@ -9,15 +9,19 @@ import {
   environmentLabel,
   type SessionEnvironmentActions
 } from './EnvironmentControlMenu'
+import { useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
 import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 
-const PERMISSION_MODES: Array<{ value: HudPermissionMode; label: string; abbreviation: string }> = [
-  { value: 'default', label: 'Default', abbreviation: 'D' },
-  { value: 'auto', label: 'Auto', abbreviation: 'A' },
-  { value: 'acceptEdits', label: 'Accept Edits', abbreviation: 'AE' },
-  { value: 'plan', label: 'Plan Mode', abbreviation: 'PM' },
-  { value: 'bypassPermissions', label: 'Bypass Permissions', abbreviation: 'BP' }
+type HudMessages = Messages['hud']
+
+const PERMISSION_MODES: Array<{ value: HudPermissionMode; abbreviation: string }> = [
+  { value: 'default', abbreviation: 'D' },
+  { value: 'auto', abbreviation: 'A' },
+  { value: 'acceptEdits', abbreviation: 'AE' },
+  { value: 'plan', abbreviation: 'PM' },
+  { value: 'bypassPermissions', abbreviation: 'BP' }
 ]
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
@@ -33,6 +37,7 @@ export function TerminalHud(props: {
   environmentActions?: SessionEnvironmentActions
 }) {
   const { hud } = props
+  const m = useMessages().hud
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
   const disabled = Boolean(props.disabledReason)
@@ -83,8 +88,9 @@ export function TerminalHud(props: {
   const git = hud
     ? legacyGitState(hud)
     : props.git ?? (props.environment ? { state: 'unavailable' as const, dirty: false } : undefined)
-  const gitDisplay = git ? gitStateLabel(git) : ''
+  const gitDisplay = git ? gitStateLabel(git, m) : ''
   const gitCwd = props.environment?.state === 'ready' ? props.environment.path : hud?.cwd
+  const permissionTitle = m.permissionSwitch(m.permission[permissionMode])
   const openPermissionMenu = (event: React.MouseEvent<HTMLElement>) => {
     if (disabled || switching || !props.onPermissionMode) return
     if (menu === 'permission') { setMenu(null); return }
@@ -96,8 +102,8 @@ export function TerminalHud(props: {
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
     {hud?.mode === 'agent' && hud.configCounts?.projectInstructionFileExists === true && <button type="button"
       className="status-field status-instructions is-clickable"
-      aria-label="编辑 ClaudeMd" disabled={!gitClient}
-      title="编辑当前项目的 CLAUDE.md"
+      aria-label={m.editClaudeMd} disabled={!gitClient}
+      title={m.editClaudeMdTitle}
       onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen(false); setInstructionsOpen(true)
       }}>ClaudeMd</button>}
@@ -105,18 +111,18 @@ export function TerminalHud(props: {
     {hud?.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
         disabled={disabled || switching || !props.onPermissionMode}
-        title={props.disabledReason ?? `当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
-        aria-label={`当前权限模式：${permissionLabel(permissionMode)}，点击切换`}
+        title={props.disabledReason ?? permissionTitle}
+        aria-label={permissionTitle}
         onClick={openPermissionMenu}>{permissionAbbreviation(permissionMode)}</button>
-      {modelLabel(hud) && <span className="status-field status-model status-priority-8"
-        title={`当前模型：${modelLabel(hud)}`}>{modelLabel(hud)}</span>}
+      {modelLabel(hud, m) && <span className="status-field status-model status-priority-8"
+        title={m.modelTitle(modelLabel(hud, m))}>{modelLabel(hud, m)}</span>}
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
       {hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
-        label={`${hud.configCounts.mcpServers} MCPs`} title="MCP 服务"
+        label={`${hud.configCounts.mcpServers} MCPs`} title={m.mcpServers}
         items={(hud.configCounts.mcpServerNames ?? []).map((name) => name)} />}
-      {toolTotal(hud) > 0 && <HudDetail label={`${toolTotal(hud)} Tools`} title="工具调用"
-        items={toolDetails(hud)} />}
-      {(hud.subagentCount ?? 0) > 0 && <HudDetail label={`${hud.subagentCount} Agents`} title="子 Agent"
+      {toolTotal(hud) > 0 && <HudDetail label={`${toolTotal(hud)} Tools`} title={m.toolCalls}
+        items={toolDetails(hud, m)} />}
+      {(hud.subagentCount ?? 0) > 0 && <HudDetail label={`${hud.subagentCount} Agents`} title={m.subagents}
         items={hud.subagents ?? []} />}
       {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
@@ -126,7 +132,7 @@ export function TerminalHud(props: {
         title={usageTitle(window)} key={`${window.label}:${index}`}>
         {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {formatReset(window.resetsAt)}</small>}
       </span>)}
-      {taskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus)}</span>}
+      {hasTaskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus, m)}</span>}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
@@ -141,8 +147,8 @@ export function TerminalHud(props: {
     {hud?.mode === 'agent' && hasAgentInfo(hud) && (shortCwd || gitDisplay) && <span className="status-divider status-priority-3" />}
     {shortCwd && <span className="status-field status-cwd status-priority-3" title={hud?.cwd}>{shortCwd}</span>}
     {git && <button type="button" className="status-field status-git is-clickable"
-      disabled={disabled || !gitClient || git.state === 'unavailable'} aria-label="打开 Git"
-      title={props.disabledReason ?? gitStateTitle(git)}
+      disabled={disabled || !gitClient || git.state === 'unavailable'} aria-label={m.openGit}
+      title={props.disabledReason ?? gitStateTitle(git, m)}
       onClick={() => { setMenu(null); setEnvironmentOpen(false); setGitOpen((open) => !open) }}>{gitDisplay}</button>}
     {props.environment && <EnvironmentButton environment={props.environment}
       disabled={!props.environmentActions} onClick={() => {
@@ -151,8 +157,8 @@ export function TerminalHud(props: {
     </div>
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
-    }}><div className="perm-menu" style={menuStyle} role="menu" aria-label="权限模式">
-      <div className="perm-menu__title">权限模式</div>
+    }}><div className="perm-menu" style={menuStyle} role="menu" aria-label={m.permissionMenu}>
+      <div className="perm-menu__title">{m.permissionMenu}</div>
       {PERMISSION_MODES.filter(({ value }) => value !== 'auto').map((option) => <button type="button" role="menuitem"
         className={`perm-menu__item${permissionMode === option.value ? ' is-active' : ''}`} key={option.value}
         onClick={() => {
@@ -166,14 +172,14 @@ export function TerminalHud(props: {
           setPermissionMode(option.value)
           void Promise.resolve(props.onPermissionMode?.(sessionId, option.value, false)).catch(() => {})
         }}><span className={`perm-menu__dot perm-${option.value}`} />
-        <span className="perm-menu__label">{option.label}</span>
+        <span className="perm-menu__label">{m.permission[option.value]}</span>
         {permissionMode === option.value && <span className="perm-menu__check">✓</span>}
       </button>)}
     </div></div>, document.body)}
     {confirmTarget && hud && !disabled && props.onPermissionMode && createPortal(<ConfirmDialog
-      title={confirmTarget === 'bypassPermissions' ? '切换到高权限模式' : '退出高权限模式'}
-      body={bypassCopy(confirmTarget, hud.resumable === true)}
-      confirmLabel={confirmTarget === 'bypassPermissions' ? '确认切换' : '确认退出'}
+      title={confirmTarget === 'bypassPermissions' ? m.bypassEnterTitle : m.bypassExitTitle}
+      body={bypassCopy(confirmTarget, hud.resumable === true, m)}
+      confirmLabel={confirmTarget === 'bypassPermissions' ? m.bypassEnterConfirm : m.bypassExitConfirm}
       onCancel={() => setConfirmTarget(null)}
       onConfirm={() => {
         const target = confirmTarget
@@ -182,7 +188,7 @@ export function TerminalHud(props: {
         void Promise.resolve(props.onPermissionMode?.(sessionId, target, true)).then(() => {
           setPermissionMode(target)
         }).catch((error: unknown) => {
-          setSwitchError(`切换失败：${error instanceof Error ? error.message : '未知错误'}`)
+          setSwitchError(m.switchFailed(error instanceof Error ? error.message : m.unknownError))
           window.setTimeout(() => setSwitchError(''), 3_000)
         }).finally(() => setSwitching(false))
       }} />, document.body)}
@@ -197,7 +203,7 @@ export function TerminalHud(props: {
     )}
     {gitOpen && !disabled && git?.state === 'ready' && gitClient && gitCwd && createPortal(<GitControlMenu client={gitClient}
       cwd={gitCwd} sessionId={sessionId} {...(props.gitContext ? { context: props.gitContext } : {})}
-      dialogLabel="Git 与 Worktree" branchRowsAsButtons
+      dialogLabel={m.gitMenu} branchRowsAsButtons
       onClose={() => setGitOpen(false)} />, document.body)}
     {instructionsOpen && gitClient && createPortal(<InstructionFileDialog client={gitClient}
       sessionId={sessionId} readOnly={disabled} onClose={() => setInstructionsOpen(false)} />, document.body)}
@@ -209,17 +215,20 @@ function EnvironmentButton(props: {
   disabled: boolean
   onClick(): void
 }) {
-  const label = environmentLabel(props.environment)
+  const m = useMessages().hud
+  const label = environmentLabel(props.environment, m)
+  const localIcon = props.environment.state === 'ready' && props.environment.kind === 'local'
   return <button type="button"
-    className={`status-field status-environment is-clickable state-${props.environment.state}${label === 'Local' ? ' is-local-icon' : ''}`}
-    disabled={props.disabled} aria-label={`打开运行环境：${label}`} title="运行环境"
-    onClick={props.onClick}>{label === 'Local' ? <svg viewBox="0 0 16 16" aria-hidden="true">
+    className={`status-field status-environment is-clickable state-${props.environment.state}${localIcon ? ' is-local-icon' : ''}`}
+    disabled={props.disabled} aria-label={m.openEnvironment(label)} title={m.environmentMenu}
+    onClick={props.onClick}>{localIcon ? <svg viewBox="0 0 16 16" aria-hidden="true">
       <rect x="2" y="2.5" width="12" height="8.5" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
       <path d="M5 13.5h6M8 11v2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </svg> : label}</button>
 }
 
 function HudDetail(props: { label: string; title: string; items: string[] }) {
+  const m = useMessages().hud
   const [open, setOpen] = useState(false)
   const [style, setStyle] = useState<CSSProperties>({})
   const closeTimer = useRef<number | undefined>(undefined)
@@ -240,13 +249,13 @@ function HudDetail(props: { label: string; title: string; items: string[] }) {
   }
   return <>
     <span className="status-field status-detail status-config" role="button" tabIndex={0}
-      aria-label={`查看${props.title}列表`}
+      aria-label={m.detailList(props.title)}
       onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={scheduleClose}
       onFocus={(event) => show(event.currentTarget)} onBlur={scheduleClose}>{props.label}</span>
     {open && createPortal(<div className="hud-detail-tooltip" role="tooltip" style={style}
       onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
       <strong>{props.title}</strong>
-      <ul>{(props.items.length > 0 ? props.items : ['详情将在状态刷新后显示']).map((item, index) =>
+      <ul>{(props.items.length > 0 ? props.items : [m.detailPending]).map((item, index) =>
         <li key={`${item}:${index}`}>{item}</li>)}</ul>
     </div>, document.body)}
   </>
@@ -258,6 +267,8 @@ function InstructionFileDialog(props: {
   readOnly: boolean
   onClose(): void
 }) {
+  const messages = useMessages()
+  const m = messages.hud
   const [path, setPath] = useState('')
   const [content, setContent] = useState('')
   const [loading, setLoading] = useState(true)
@@ -273,12 +284,12 @@ function InstructionFileDialog(props: {
       setPath(result.path)
       setContent(result.content)
     }).catch((reason: unknown) => {
-      if (active) setError(errorText(reason, '读取失败'))
+      if (active) setError(errorText(reason, m.instructionsReadFailed, m))
     }).finally(() => {
       if (active) setLoading(false)
     })
     return () => { active = false }
-  }, [props.client, props.sessionId])
+  }, [props.client, props.sessionId, m])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -301,7 +312,7 @@ function InstructionFileDialog(props: {
       }, { timeoutMs: 10_000 })
       props.onClose()
     } catch (reason) {
-      setError(errorText(reason, '保存失败'))
+      setError(errorText(reason, m.instructionsSaveFailed, m))
     } finally {
       setSaving(false)
     }
@@ -309,24 +320,24 @@ function InstructionFileDialog(props: {
 
   return <div className="instruction-file-overlay" onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onClose()
-  }}><section className="instruction-file-dialog" role="dialog" aria-modal="true" aria-label="编辑 ClaudeMd">
-    <header><div><h2>ClaudeMd</h2><p>{path || '当前项目 / CLAUDE.md'}</p></div>
-      <button type="button" aria-label="关闭 ClaudeMd 编辑器" onClick={props.onClose}>×</button></header>
-    {loading ? <div className="instruction-file-state">正在读取…</div> : <textarea
-      aria-label="ClaudeMd 内容" value={content} readOnly={props.readOnly}
+  }}><section className="instruction-file-dialog" role="dialog" aria-modal="true" aria-label={m.editClaudeMd}>
+    <header><div><h2>ClaudeMd</h2><p>{path || m.instructionsFallbackPath}</p></div>
+      <button type="button" aria-label={m.instructionsClose} onClick={props.onClose}>×</button></header>
+    {loading ? <div className="instruction-file-state">{m.instructionsReading}</div> : <textarea
+      aria-label={m.instructionsContent} value={content} readOnly={props.readOnly}
       spellCheck={false} autoFocus onChange={(event) => setContent(event.target.value)} />}
     {error && <div className="instruction-file-error" role="alert">{error}</div>}
-    <footer><span>{props.readOnly ? '恢复期间为只读' : '保存后立即用于当前项目的新请求'}</span>
-      <div><button type="button" onClick={props.onClose}>取消</button>
+    <footer><span>{props.readOnly ? m.instructionsReadOnly : m.instructionsSaveHint}</span>
+      <div><button type="button" onClick={props.onClose}>{messages.common.cancel}</button>
         <button type="button" className="is-primary" disabled={loading || saving || props.readOnly}
-          onClick={() => void save()}>{saving ? '保存中…' : '保存'}</button></div></footer>
+          onClick={() => void save()}>{saving ? m.saving : m.save}</button></div></footer>
   </section></div>
 }
 
 interface InstructionFileResult { path: string; content: string; exists: boolean }
 
-function errorText(reason: unknown, fallback: string): string {
-  return reason instanceof Error && reason.message ? `${fallback}：${reason.message}` : fallback
+function errorText(reason: unknown, label: string, m: HudMessages): string {
+  return reason instanceof Error && reason.message ? m.errorDetail(label, reason.message) : label
 }
 
 function ContextRing({ percent }: { percent: number }) {
@@ -352,29 +363,24 @@ function legacyGitState(hud: SessionHudView | undefined): SessionGitState | unde
     ? { state: 'ready', branch: hud.gitBranch, dirty: hud.gitDirty === true }
     : undefined
 }
-function gitStateLabel(git: SessionGitState): string {
-  if (git.state === 'unavailable') return 'Git 不可用'
+function gitStateLabel(git: SessionGitState, m: HudMessages): string {
+  if (git.state === 'unavailable') return m.gitUnavailable
   const reference = git.branch ?? `HEAD ${git.detachedHead.slice(0, 7)}`
   return `${reference}${git.dirty ? '*' : ''}`
 }
-function gitStateTitle(git: SessionGitState): string {
-  if (git.state === 'unavailable') return '当前目录不是可用的 Git 工作区'
-  return git.branch ? `Git 分支：${git.branch}` : `Git detached HEAD：${git.detachedHead}`
-}
-function permissionLabel(mode: HudPermissionMode): string {
-  return PERMISSION_MODES.find(({ value }) => value === mode)?.label ?? 'Default'
+function gitStateTitle(git: SessionGitState, m: HudMessages): string {
+  if (git.state === 'unavailable') return m.gitTitle.unavailable
+  return git.branch === undefined ? m.gitTitle.detached(git.detachedHead) : m.gitTitle.branch(git.branch)
 }
 function permissionAbbreviation(mode: HudPermissionMode): string {
   return PERMISSION_MODES.find(({ value }) => value === mode)?.abbreviation ?? 'D'
 }
-function modelLabel(hud: SessionHudView): string {
+function modelLabel(hud: SessionHudView, m: HudMessages): string {
   const name = hud.model?.trim()
   let label = name?.replace(/^Claude\s+/i, '') ?? ''
-  if (!label && hud.modelStrategy === 'claude-opus-4-6') label = 'Opus 4.6'
-  if (!label && hud.modelStrategy === 'claude-sonnet-4-6') label = 'Sonnet 4.6'
-  if (!label && hud.modelStrategy === 'opusplan') label = 'Opus Plan'
+  if (!label && hud.modelStrategy) label = m.model[hud.modelStrategy]
   const context = formatContextWindow(hud.contextWindowSize)
-  return label && context ? `${label} (${context} context)` : label
+  return label && context ? m.modelWithContext(label, context) : label
 }
 function formatContextWindow(size: number | undefined): string {
   if (!size) return ''
@@ -399,16 +405,18 @@ function toolTotal(hud: SessionHudView): number {
   return (hud.runningTools?.length ?? 0) +
     (hud.toolCounts ?? []).reduce((total, tool) => total + tool.count, 0)
 }
-function toolDetails(hud: SessionHudView): string[] {
+function toolDetails(hud: SessionHudView, m: HudMessages): string[] {
   return [
-    ...(hud.runningTools ?? []).map(({ name, target }) =>
-      `${name} · 运行中${target ? ` · ${target}` : ''}`),
-    ...(hud.toolCounts ?? []).map(({ name, count }) => `${name} · ${count} 次`)
+    ...(hud.runningTools ?? []).map(({ name, target }) => m.toolRunning(name, target)),
+    ...(hud.toolCounts ?? []).map(({ name, count }) => m.toolCallCount(name, count))
   ]
 }
-function taskStatusLabel(status: SessionHudView['taskStatus']): string {
-  if (status === 'needs-input') return '待输入'
-  if (status === 'error') return '错误'
+function hasTaskStatusLabel(status: SessionHudView['taskStatus']): boolean {
+  return status === 'needs-input' || status === 'error'
+}
+function taskStatusLabel(status: SessionHudView['taskStatus'], m: HudMessages): string {
+  if (status === 'needs-input') return m.taskStatus['needs-input']
+  if (status === 'error') return m.taskStatus.error
   return ''
 }
 function teamTone(status: SessionHudView['teamStatus']): string {
@@ -431,14 +439,12 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
     : null
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
-  return Boolean(hud.modelStrategy || hud.contextPercent !== undefined || taskStatusLabel(hud.taskStatus) ||
+  return Boolean(hud.modelStrategy || hud.contextPercent !== undefined || hasTaskStatusLabel(hud.taskStatus) ||
     (hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || (hud.mcpErrors?.length ?? 0) > 0 ||
     (hud.subagentCount ?? 0) > 0 || hud.teamRole || todoDisplay(hud))
 }
 
-function bypassCopy(target: HudPermissionMode, resumable: boolean): string {
-  if (!resumable) return '当前 Claude 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 Claude 会话，当前内容将不会保留。\n\n是否确认？'
-  return target === 'bypassPermissions'
-    ? '切换到 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？'
-    : '退出 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？'
+function bypassCopy(target: HudPermissionMode, resumable: boolean, m: HudMessages): string {
+  if (!resumable) return m.bypassNotResumable
+  return target === 'bypassPermissions' ? m.bypassEnterBody : m.bypassExitBody
 }

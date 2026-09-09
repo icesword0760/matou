@@ -6,6 +6,10 @@ import type {
 
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 import { AppIcon } from '../ui/AppIcon'
+import { useLocale, useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
+
+type HudMessages = Messages['hud']
 
 export interface GitControlContext {
   windowId: string
@@ -27,6 +31,9 @@ export function GitControlMenu(props: {
   branchRowsAsButtons?: boolean
   onClose(): void
 }) {
+  const messages = useMessages()
+  const m = messages.hud
+  const locale = useLocale()
   const [status, setStatus] = useState<GitRepositoryStatus>()
   const [view, setView] = useState<GitControlView>('branches')
   const [query, setQuery] = useState('')
@@ -62,9 +69,9 @@ export function GitControlMenu(props: {
     let active = true
     void request<GitRepositoryStatus>('git.status', { cwd: props.cwd }).then((next) => {
       if (active) setStatus(next)
-    }).catch((reason: unknown) => active && setError(errorText(reason)))
+    }).catch((reason: unknown) => active && setError(errorText(reason, m)))
     return () => { active = false }
-  }, [props.cwd])
+  }, [props.cwd, m])
 
   useEffect(() => setSelectedBranchIndex(0), [query])
   useEffect(() => {
@@ -89,23 +96,23 @@ export function GitControlMenu(props: {
       const next = await action()
       if (next) setStatus(next)
     } catch (reason) {
-      setError(errorText(reason))
+      setError(errorText(reason, m))
     } finally {
       runningRef.current = false
       setBusy('')
     }
   }
-  const checkout = async (branch: string) => run('正在切换分支…', async () => {
+  const checkout = async (branch: string) => run(m.switchingBranch, async () => {
     const result = await request<GitCheckoutResult>('git.checkout', { cwd: props.cwd, branch })
     if (result.kind === 'blocked-by-working-tree-changes') {
       setBlocked(result)
       return result.status
     }
-    setNotice(`已切换到 ${branch}`)
+    setNotice(m.switchedToBranch(branch))
     props.onClose()
     return result.status
   })
-  const commit = async (thenPush = false) => run(thenPush ? '正在提交并推送…' : '正在提交…', async () => {
+  const commit = async (thenPush = false) => run(thenPush ? m.committingAndPushing : m.committing, async () => {
     if (!status) return
     let checkoutStillBlocked = false
     let next = await request<GitRepositoryStatus>('git.commit', {
@@ -127,7 +134,7 @@ export function GitControlMenu(props: {
         setView('branches')
       }
     }
-    if (!checkoutStillBlocked) setNotice(thenPush ? '提交与推送已完成' : '提交已完成')
+    if (!checkoutStillBlocked) setNotice(thenPush ? m.commitAndPushDone : m.commitDone)
     return next
   })
   const branches = useMemo(() => {
@@ -155,12 +162,12 @@ export function GitControlMenu(props: {
     <div className="git-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) props.onClose()
     }}>
-      <section className="git-control-menu" role="dialog" aria-label={props.dialogLabel ?? 'Git 控制'}>
-        {!status && !error && <div className="git-control-menu__empty">正在读取仓库状态…</div>}
+      <section className="git-control-menu" role="dialog" aria-label={props.dialogLabel ?? m.gitControl}>
+        {!status && !error && <div className="git-control-menu__empty">{m.readingRepository}</div>}
         {status && view === 'branches' && <div className="git-picker-view">
           <label className="git-search-field">
             <SearchIcon />
-            <span className="sr-only">搜索分支</span>
+            <span className="sr-only">{m.searchBranches}</span>
             <input value={query} onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'ArrowDown') { event.preventDefault(); selectBranchByKeyboard(1) }
@@ -169,17 +176,17 @@ export function GitControlMenu(props: {
                   event.preventDefault(); void checkout(selectedBranch.name)
                 }
               }}
-              placeholder="搜索 matou 分支" autoFocus />
-            {query && <button type="button" className="git-search-clear" aria-label="清空搜索"
+              placeholder={m.searchBranchesPlaceholder} autoFocus />
+            {query && <button type="button" className="git-search-clear" aria-label={m.clearSearch}
               onClick={() => setQuery('')}><AppIcon name="x" /></button>}
           </label>
-          <div className="git-section-label">分支</div>
-          <div className="git-branch-list" role="listbox" aria-label="Git 分支">
+          <div className="git-section-label">{m.branchesSection}</div>
+          <div className="git-branch-list" role="listbox" aria-label={m.branchList}>
             {branches.map((branch, index) => <button type="button"
               {...(props.branchRowsAsButtons ? {} : { role: 'option', 'aria-selected': branch.current })}
               className={`git-branch-row${branch.current ? ' is-current' : ''}${selectedBranchIndex === index ? ' is-keyboard' : ''}`}
               key={branch.name} disabled={Boolean(busy)}
-              title={branch.checkedOutPath && !branch.current ? `已在 ${branch.checkedOutPath} 中打开` : undefined}
+              title={branch.checkedOutPath && !branch.current ? m.branchCheckedOutAt(branch.checkedOutPath) : undefined}
               onPointerMove={() => setSelectedBranchIndex(index)}
               onClick={() => {
                 if (branch.current || branch.checkedOutPath) return
@@ -187,96 +194,96 @@ export function GitControlMenu(props: {
               }}>
               <BranchIcon />
               <span className="git-branch-copy"><strong>{branch.name}</strong>
-                {branch.current && pendingFiles > 0 && <small>未提交：{pendingFiles.toLocaleString('zh-CN')} 个文件</small>}
-                {!branch.current && branch.checkedOutPath && <small>已在 Worktree 中</small>}
+                {branch.current && pendingFiles > 0 && <small>{m.uncommittedFiles(pendingFiles, pendingFiles.toLocaleString(locale))}</small>}
+                {!branch.current && branch.checkedOutPath && <small>{m.branchInWorktree}</small>}
               </span>
               {branch.current && <span className="git-row-check">✓</span>}
             </button>)}
-            {branches.length === 0 && <div className="git-list-empty">没有匹配的分支</div>}
+            {branches.length === 0 && <div className="git-list-empty">{m.noMatchingBranches}</div>}
           </div>
           <div className="git-picker-actions">
-            <button type="button" onClick={() => showView('create-branch')}><PlusIcon /><span>创建并检出新分支…</span></button>
-            <button type="button" aria-label={`管理 Worktree… ${additionalWorktreeCount}`} onClick={() => showView('worktrees')}><WorktreeIcon /><span>管理 Worktree…</span>{additionalWorktreeCount > 0 && <small>{additionalWorktreeCount}</small>}</button>
-            <button type="button" aria-label="提交与推送…" onClick={() => showView('commit')}><CommitIcon /><span>提交与推送…</span>{pendingFiles > 0 && <small>{pendingFiles.toLocaleString('zh-CN')}</small>}</button>
+            <button type="button" onClick={() => showView('create-branch')}><PlusIcon /><span>{m.createBranchAction}</span></button>
+            <button type="button" aria-label={`${m.manageWorktrees} ${additionalWorktreeCount}`} onClick={() => showView('worktrees')}><WorktreeIcon /><span>{m.manageWorktrees}</span>{additionalWorktreeCount > 0 && <small>{additionalWorktreeCount}</small>}</button>
+            <button type="button" aria-label={m.commitAndPushAction} onClick={() => showView('commit')}><CommitIcon /><span>{m.commitAndPushAction}</span>{pendingFiles > 0 && <small>{pendingFiles.toLocaleString(locale)}</small>}</button>
           </div>
         </div>}
 
         {status && view === 'create-branch' && <div className="git-subview git-create-view">
-          <SubviewHeader title="创建新分支" backLabel="返回分支列表" onBack={() => showView('branches')} />
+          <SubviewHeader title={m.createBranchTitle} backLabel={m.backToBranches} onBack={() => showView('branches')} />
           <form onSubmit={(event) => {
             event.preventDefault()
             if (!newBranch.trim()) return
-            void run('正在创建分支…', async () => {
+            void run(m.creatingBranch, async () => {
               const next = await request<GitRepositoryStatus>('git.create-branch', {
                 cwd: props.cwd, branch: newBranch.trim()
               })
-              setNewBranch(''); setNotice(`已创建并切换到 ${next.currentBranch}`)
+              setNewBranch(''); setNotice(m.branchCreated(next.currentBranch ?? 'HEAD'))
               props.onClose()
               return next
             })
           }}>
-            <label htmlFor="git-new-branch">分支名称</label>
+            <label htmlFor="git-new-branch">{m.branchName}</label>
             <input id="git-new-branch" value={newBranch} onChange={(event) => setNewBranch(event.target.value)}
-              placeholder="例如 feature/improve-git-menu" autoFocus />
-            <div className="git-base-row"><BranchIcon />基于当前分支 <strong>{status.currentBranch ?? 'HEAD'}</strong></div>
-            <div className="git-form-actions"><button type="button" onClick={() => showView('branches')}>取消</button>
-              <button className="is-primary" disabled={!newBranch.trim() || Boolean(busy)}>创建并检出</button></div>
+              placeholder={m.branchNamePlaceholder} autoFocus />
+            <div className="git-base-row"><BranchIcon />{m.basedOnBranch}{' '}<strong>{status.currentBranch ?? 'HEAD'}</strong></div>
+            <div className="git-form-actions"><button type="button" onClick={() => showView('branches')}>{messages.common.cancel}</button>
+              <button className="is-primary" disabled={!newBranch.trim() || Boolean(busy)}>{m.createAndCheckout}</button></div>
           </form>
         </div>}
 
         {status && view === 'worktrees' && <div className="git-subview git-worktree-view">
-          <SubviewHeader title="Worktree" backLabel="返回分支列表" onBack={() => showView('branches')} />
+          <SubviewHeader title={m.worktreesTitle} backLabel={m.backToBranches} onBack={() => showView('branches')} />
           <div className="git-worktree-list">
             {status.worktrees.map((worktree) => <article className="git-worktree-row" key={worktree.path}>
               <WorktreeIcon />
               <div className="git-worktree-copy"><strong>{worktree.branch}</strong><small>{compactPath(worktree.path)}</small>
-                <div className="git-worktree-tags">{worktree.current && <span className="is-current">当前</span>}
-                  {worktree.dirty && <span>有更改</span>}{worktree.sessionCount > 0 && <span>{worktree.sessionCount} 会话</span>}</div>
+                <div className="git-worktree-tags">{worktree.current && <span className="is-current">{m.worktreeCurrent}</span>}
+                  {worktree.dirty && <span>{m.worktreeDirty}</span>}{worktree.sessionCount > 0 && <span>{m.worktreeSessions(worktree.sessionCount)}</span>}</div>
               </div>
               <div className="git-worktree-row-actions">
-                <button type="button" className="git-worktree-more" aria-label={`${worktree.branch} 更多操作`}
+                <button type="button" className="git-worktree-more" aria-label={m.worktreeMoreActions(worktree.branch)}
                   onClick={() => setWorktreeMenuPath((path) => path === worktree.path ? '' : worktree.path)}><AppIcon name="ellipsis" /></button>
               </div>
               {worktreeMenuPath === worktree.path && <div className="git-worktree-menu">
                 <button type="button" onClick={() => {
                   setWorktreeMenuPath('')
                   void window.matouDesktop?.revealDirectory(worktree.path)
-                }}>在 Finder 中显示</button>
+                }}>{messages.hierarchyShell.taskSidebar.revealInFinder}</button>
                 {worktree.managed && !worktree.current && <button type="button" className="is-danger"
                   disabled={worktree.sessionCount > 0 || Boolean(busy)}
-                  title={worktree.sessionCount > 0 ? '先移出关联会话' : undefined}
-                  onClick={() => void removeWorktree(worktree)}>移除 Worktree</button>}
+                  title={worktree.sessionCount > 0 ? m.removeWorktreeBlocked : undefined}
+                  onClick={() => void removeWorktree(worktree)}>{m.removeWorktree}</button>}
               </div>}
             </article>)}
           </div>
-          <div className="git-subview-footer"><button type="button" onClick={() => showView('create-worktree')}><PlusIcon />创建新 Worktree…</button></div>
+          <div className="git-subview-footer"><button type="button" onClick={() => showView('create-worktree')}><PlusIcon />{m.createWorktreeAction}</button></div>
         </div>}
 
         {status && view === 'create-worktree' && <div className="git-subview git-create-view">
-          <SubviewHeader title="创建 Worktree" backLabel="返回 Worktree 列表" onBack={() => showView('worktrees')} />
+          <SubviewHeader title={m.createWorktreeTitle} backLabel={m.backToWorktrees} onBack={() => showView('worktrees')} />
           <form onSubmit={(event) => {
             event.preventDefault()
             if (!newBranch.trim()) return
-            void run('正在创建 Worktree…', async () => {
+            void run(m.creatingWorktree, async () => {
               const next = await request<GitRepositoryStatus>('git.worktree-create', {
                 cwd: props.cwd, sessionId: props.sessionId, branch: newBranch.trim(),
                 baseRef: status.currentBranch ?? 'HEAD'
               })
-              setNewBranch(''); setNotice('Worktree 已创建'); setView('worktrees')
+              setNewBranch(''); setNotice(m.worktreeCreated); setView('worktrees')
               return next
             })
           }}>
-            <label htmlFor="git-new-worktree">新 Worktree 分支</label>
+            <label htmlFor="git-new-worktree">{m.newWorktreeBranch}</label>
             <input id="git-new-worktree" value={newBranch} onChange={(event) => setNewBranch(event.target.value)}
-              placeholder="例如 feature/new-worktree" autoFocus />
-            <div className="git-base-row"><WorktreeIcon />创建在 Matou Worktree 目录</div>
-            <div className="git-form-actions"><button type="button" onClick={() => showView('worktrees')}>取消</button>
-              <button className="is-primary" disabled={!newBranch.trim() || Boolean(busy)}>创建</button></div>
+              placeholder={m.newWorktreeBranchPlaceholder} autoFocus />
+            <div className="git-base-row"><WorktreeIcon />{m.worktreeLocationHint}</div>
+            <div className="git-form-actions"><button type="button" onClick={() => showView('worktrees')}>{messages.common.cancel}</button>
+              <button className="is-primary" disabled={!newBranch.trim() || Boolean(busy)}>{m.create}</button></div>
           </form>
         </div>}
 
         {status && view === 'commit' && <div className="git-subview git-commit-view">
-          <SubviewHeader title="提交与推送" backLabel="返回分支列表" onBack={() => showView('branches')} />
+          <SubviewHeader title={m.commitAndPushTitle} backLabel={m.backToBranches} onBack={() => showView('branches')} />
           <div className="git-commit-branch"><BranchIcon /><strong>{status.currentBranch ?? status.detachedHead ?? 'HEAD'}</strong><span>⌄</span></div>
           <textarea value={message} onChange={(event) => setMessage(event.target.value)}
             onKeyDown={(event) => {
@@ -284,35 +291,35 @@ export function GitControlMenu(props: {
                 event.preventDefault(); void commit(false)
               }
             }}
-            placeholder="提交信息（留空将自动生成）…" rows={4} autoFocus />
-          <label className="git-commit-scope"><input type="checkbox" aria-label="包含未暂存的更改" checked={includeUnstaged}
-            onChange={(event) => setIncludeUnstaged(event.target.checked)} /><span>包含未暂存的更改</span>
-            <span className="git-line-stats"><span>◌</span><b>+{status.additions.toLocaleString('zh-CN')}</b><i>-{status.deletions.toLocaleString('zh-CN')}</i></span></label>
+            placeholder={m.commitMessagePlaceholder} rows={4} autoFocus />
+          <label className="git-commit-scope"><input type="checkbox" aria-label={m.includeUnstaged} checked={includeUnstaged}
+            onChange={(event) => setIncludeUnstaged(event.target.checked)} /><span>{m.includeUnstaged}</span>
+            <span className="git-line-stats"><span>◌</span><b>+{status.additions.toLocaleString(locale)}</b><i>-{status.deletions.toLocaleString(locale)}</i></span></label>
           <div className="git-commit-actions">
-            <button type="button" aria-label="提交" disabled={!canCommit || Boolean(busy)}
-              title={!canCommit ? '当前没有可提交的更改' : undefined}
-              onClick={() => void commit(false)}><CommitIcon />提交<span className="git-shortcut">⌘↵</span></button>
+            <button type="button" aria-label={m.commit} disabled={!canCommit || Boolean(busy)}
+              title={!canCommit ? m.nothingToCommit : undefined}
+              onClick={() => void commit(false)}><CommitIcon />{m.commit}<span className="git-shortcut">⌘↵</span></button>
             <button type="button" disabled={!canCommit || !status.hasRemote || Boolean(busy)}
-              title={!canCommit ? '当前没有可提交的更改' : !status.hasRemote ? '仓库尚未配置远端' : undefined}
-              onClick={() => void commit(true)}><PushIcon />提交并推送</button>
+              title={!canCommit ? m.nothingToCommit : !status.hasRemote ? m.noRemote : undefined}
+              onClick={() => void commit(true)}><PushIcon />{m.commitAndPush}</button>
             <button type="button" disabled={!status.hasRemote || !status.currentBranch || !status.canPush || Boolean(busy)}
-              title={!status.hasRemote ? '仓库尚未配置远端' : !status.canPush ? '当前没有待推送的提交' : undefined}
-              onClick={() => void run('正在推送…', async () => {
+              title={!status.hasRemote ? m.noRemote : !status.canPush ? m.nothingToPush : undefined}
+              onClick={() => void run(m.pushing, async () => {
                 const next = await request<GitRepositoryStatus>('git.push', { cwd: props.cwd })
-                setNotice('推送已完成'); return next
-              })}><PushIcon />推送</button>
+                setNotice(m.pushDone); return next
+              })}><PushIcon />{m.push}</button>
           </div>
         </div>}
 
         {(busy || notice || error) && <footer className={`git-control-menu__feedback${error ? ' is-error' : ''}`} role="status">
           {error || busy || notice}
-          {!busy && <button onClick={() => { setError(''); setNotice(''); void refresh() }}>刷新</button>}
+          {!busy && <button onClick={() => { setError(''); setNotice(''); void refresh() }}>{m.refresh}</button>}
         </footer>}
       </section>
     </div>
-    {blocked && <ConfirmDialog title="切换前需要处理当前更改"
-      body={`${blocked.conflictingPaths.length > 0 ? `${blocked.conflictingPaths.length} 个文件会被覆盖。` : '当前更改会与目标分支冲突。'}提交后将继续切换到 ${blocked.targetBranch}。`}
-      confirmLabel="填写提交信息" onCancel={() => setBlocked(undefined)} onConfirm={() => {
+    {blocked && <ConfirmDialog title={m.checkoutBlockedTitle}
+      body={m.checkoutBlockedBody(blocked.conflictingPaths.length, blocked.targetBranch)}
+      confirmLabel={m.writeCommitMessage} onCancel={() => setBlocked(undefined)} onConfirm={() => {
         setPendingCheckout(blocked.targetBranch)
         setBlocked(undefined)
         setView('commit')
@@ -320,9 +327,9 @@ export function GitControlMenu(props: {
   </>
 
   function removeWorktree(worktree: GitWorktreeSummary) {
-    return run('正在移除 Worktree…', async () => {
+    return run(m.removingWorktree, async () => {
       const next = await request<GitRepositoryStatus>('git.worktree-remove', { worktreeId: worktree.worktreeId })
-      setNotice(worktree.dirty ? '本地更改已保留，Worktree 未移除' : 'Worktree 已移除')
+      setNotice(worktree.dirty ? m.worktreeKept : m.worktreeRemoved)
       return next
     })
   }
@@ -357,8 +364,8 @@ function generatedCommitMessage(status: GitRepositoryStatus): string {
   return `chore: update ${count} ${count === 1 ? 'file' : 'files'}`
 }
 
-function errorText(reason: unknown): string {
-  return reason instanceof Error ? reason.message : 'Git 操作失败'
+function errorText(reason: unknown, m: HudMessages): string {
+  return reason instanceof Error ? reason.message : m.gitActionFailed
 }
 
 function compactPath(path: string): string {
