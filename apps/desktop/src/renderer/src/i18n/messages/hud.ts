@@ -188,7 +188,7 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
   mcpServers: 'MCP servers',
   toolCalls: 'Tool calls',
   subagents: 'Subagents',
-  detailList: (title: string) => `View the ${title} list`,
+  detailList: (title: string) => `View ${title}`,
   detailPending: 'Details appear after the next status refresh',
   toolRunning: (name: string, target: string | undefined) =>
     `${name} · running${target ? ` · ${target}` : ''}`,
@@ -210,7 +210,7 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
   bypassEnterConfirm: 'Switch',
   bypassExitConfirm: 'Leave',
   bypassNotResumable:
-    'The current Claude session has no resumable session id yet. Switching now starts a brand new Claude session, and the current content is not kept.\n\nContinue?',
+    'The current Claude session has no resumable session ID yet. Switching now starts a brand new Claude session, and the current content is not kept.\n\nContinue?',
   bypassEnterBody:
     'Switching to Bypass Permissions restarts the Claude session process, so any running task is interrupted. The session history is resumed automatically after the restart.\n\nContinue?',
   bypassExitBody:
@@ -240,7 +240,7 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
   branchCheckedOutAt: (path: string) => `Already open in ${path}`,
   uncommittedFiles: (count: number, formatted: string) =>
     `${formatted} uncommitted ${count === 1 ? 'file' : 'files'}`,
-  branchInWorktree: 'Open in a worktree',
+  branchInWorktree: 'Already in a worktree',
   noMatchingBranches: 'No matching branches',
   createBranchAction: 'Create and check out a branch…',
   manageWorktrees: 'Manage worktrees…',
@@ -262,7 +262,7 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
   worktreesTitle: 'Worktrees',
   backToWorktrees: 'Back to the worktree list',
   worktreeCurrent: 'Current',
-  worktreeDirty: 'Changes',
+  worktreeDirty: 'Uncommitted',
   worktreeSessions: (count: number) => (count === 1 ? '1 session' : `${count} sessions`),
   worktreeMoreActions: (branch: string) => `More actions for ${branch}`,
   removeWorktree: 'Remove worktree',
@@ -294,7 +294,7 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
       : 'The current changes conflict with the target branch. '}Committing them continues the switch to ${branch}.`,
   writeCommitMessage: 'Write a commit message',
   removingWorktree: 'Removing the worktree…',
-  worktreeKept: 'Local changes kept, the worktree was not removed',
+  worktreeKept: 'Local changes were kept; the worktree was not removed',
   worktreeRemoved: 'Worktree removed',
   gitActionFailed: 'The Git action failed',
 
