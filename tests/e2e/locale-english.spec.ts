@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { expect, test } from '@playwright/test'
 
 import { launchMatou } from './matou-fixture'
@@ -7,10 +9,13 @@ test('renders the English UI when MATOU_LOCALE=en', async () => {
   try {
     await expect(fixture.page.locator('html')).toHaveAttribute('lang', 'en')
     await expect(fixture.page.getByRole('button', { name: 'New task' })).toBeVisible()
-    await fixture.page.screenshot({
-      path: '/Users/icesword/Documents/AIProjects/matou/.superpowers/sdd/2026-09-09-english-ui-i18n/en-main-window.png',
-      fullPage: false
-    })
+    const screenshotDirectory = process.env.MATOU_E2E_SCREENSHOT_DIR
+    if (screenshotDirectory) {
+      await fixture.page.screenshot({
+        path: join(screenshotDirectory, 'en-main-window.png'),
+        fullPage: false
+      })
+    }
   } finally {
     await fixture.close()
   }
