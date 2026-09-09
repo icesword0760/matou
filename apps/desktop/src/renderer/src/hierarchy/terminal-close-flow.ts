@@ -1,8 +1,10 @@
+import { messages } from '../i18n/current'
+
 export interface ConfirmStep {
   title: string
   body: string
   confirmLabel: string
-  cancelLabel: '取消'
+  cancelLabel: string
   confirmTone?: 'default' | 'danger'
 }
 
@@ -15,11 +17,13 @@ export function taskDeleteFlow(input: {
   sessionCount: number
   taskName: string
 }): CloseFlow {
+  const all = messages()
+  const m = all.hierarchyTerminal.closeFlow
   const regular: ConfirmStep = {
-    title: '提示',
-    body: `删除 "${input.taskName}" 会丢失该事项下所有终端会话，但不会删除本地目录。 是否继续？`,
-    confirmLabel: '确定',
-    cancelLabel: '取消'
+    title: all.hierarchyShell.notice,
+    body: m.taskDeleteBody(input.taskName),
+    confirmLabel: all.hierarchyShell.confirmOk,
+    cancelLabel: all.common.cancel
   }
   return {
     action: 'confirm',
@@ -37,21 +41,27 @@ export function sceneCloseFlow(input: {
   needsInputCount?: number
 }): CloseFlow {
   if (input.isLastScene && input.isLastTask) return { action: 'hide-window', steps: [] }
+  const all = messages()
+  const m = all.hierarchyTerminal.closeFlow
   const runningCount = input.runningCount ?? 0
   const needsInputCount = input.needsInputCount ?? 0
   const affected = [
-    runningCount > 0 ? `${runningCount} 个运行中会话` : '',
-    needsInputCount > 0 ? `${needsInputCount} 个待输入会话` : ''
-  ].filter(Boolean).join('和 ')
-  const activity = affected ? `其中 ${affected}将停止。` : ''
+    runningCount > 0 ? m.runningSessions(runningCount) : '',
+    needsInputCount > 0 ? m.needsInputSessions(needsInputCount) : ''
+  ].filter(Boolean).join(m.affectedJoin)
+  const activity = affected ? m.activity(affected) : ''
   return {
     action: 'confirm',
     steps: [{
-      title: '关闭画布',
-      body: `关闭后，“${input.sceneName ?? '当前画布'}”下的 ${input.sessionCount ?? 0} 个会话会全部从界面移除。${activity}项目文件和工作树保持原样。`,
-      confirmLabel: '关闭画布',
+      title: m.closeCanvas,
+      body: m.sceneCloseBody(
+        input.sceneName ?? all.hierarchyShell.sceneTabBar.currentCanvas,
+        input.sessionCount ?? 0,
+        activity
+      ),
+      confirmLabel: m.closeCanvas,
       confirmTone: 'danger',
-      cancelLabel: '取消'
+      cancelLabel: all.common.cancel
     }]
   }
 }
@@ -67,14 +77,16 @@ export function sessionDeleteFlow(input: {
   const childCount = input.childCount ?? 0
   const active = input.workStatus === 'running' || input.workStatus === 'needs-input'
   if (!active && childCount === 0) return { action: 'silent', steps: [] }
-  const activity = active ? '正在运行' : '当前空闲'
-  const descendants = childCount > 0 ? `，并有 ${childCount} 个子会话` : ''
+  const all = messages()
+  const m = all.hierarchyTerminal.closeFlow
+  const activity = active ? m.running : m.idle
+  const descendants = childCount > 0 ? m.childSessions(childCount) : ''
   return {
     action: 'confirm',
     steps: [{
-      title: '停止会话',
-      body: `“${input.sessionTitle ?? '当前会话'}”${activity}${descendants}。停止后，该节点会在会话列表和 DAG 中保持为“已停止”，子会话继续工作。`,
-      confirmLabel: '停止会话', cancelLabel: '取消'
+      title: m.stopSession,
+      body: m.sessionDeleteBody(input.sessionTitle ?? m.currentSession, activity, descendants),
+      confirmLabel: m.stopSession, cancelLabel: all.common.cancel
     }]
   }
 }

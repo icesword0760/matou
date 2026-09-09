@@ -16,16 +16,18 @@ import { useTerminalShortcuts } from './useTerminalShortcuts'
 import { DEFAULT_TERMINAL_THEME, type TerminalThemeKey } from '../terminal/terminal-themes'
 import { useDagShortcut } from '../dag/useDagShortcut'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
-import { ReadOnlyRecoveryBanner, READ_ONLY_REASON } from '../recovery/ReadOnlyRecoveryBanner'
+import { ReadOnlyRecoveryBanner } from '../recovery/ReadOnlyRecoveryBanner'
 import { StorageFaultOverlay } from './StorageFaultOverlay'
 import {
   DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
   usePersistentTerminalFontSize
 } from '../terminal/usePersistentTerminalFontSize'
-
-const STORAGE_FAULT_MUTATION_REASON = '终端存储异常，请先恢复或结束当前会话'
+import { useMessages } from '../i18n/LocaleProvider'
 
 export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: RuntimeMode }) {
+  const messages = useMessages()
+  const m = messages.hierarchyTerminal.detachedWindow
+  const shell = messages.hierarchyShell
   const client = useRuntimeClient()
   const readOnly = runtimeMode === 'read-only'
   const query = new URLSearchParams(window.location.search)
@@ -37,7 +39,7 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
   const isTeamMember = requestedProfile === 'agent-team-member'
   const profile = requestedProfile === 'claude-code' || requestedProfile === 'codex'
     ? requestedProfile : 'shell'
-  const title = query.get('title') ?? '独立终端'
+  const title = query.get('title') ?? m.defaultTitle
   const windowId = query.get('windowId') ?? ''
   const [hud, setHud] = useState<SessionHudView>(() => ({
     sessionId,
@@ -198,8 +200,8 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
   }, [themeKey])
   return <main className="detached-terminal-app" data-theme={themeKey}>
     <header><strong>{title}</strong><span>{isTeamMember
-      ? '独立窗口 · 队友摘要'
-      : readOnly ? '独立窗口 · 只读历史' : '独立窗口 · 会话保持运行'}</span></header>
+      ? m.teamMember
+      : readOnly ? m.readOnly : m.running}</span></header>
     {readOnly && <ReadOnlyRecoveryBanner onSearch={() => setSearchOpen(true)} exportBundle={() =>
       window.matouDesktop.exportDatabaseRecoveryBundle()} />}
     {!isTeamMember && <TerminalSearchBar open={searchOpen} themeKey={themeKey}
@@ -225,10 +227,12 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
       fault={{ code: storageFault.code, retainedBytes: storageFault.retainedBytes }}
       onRetry={() => client?.retryTerminalStorage(sessionId)}
       onEnd={() => client?.endTerminalAfterStorageFault(sessionId)} />}
-    {!isTeamMember && <div className="shortcut-bar" aria-label="快捷指令栏">
+    {!isTeamMember && <div className="shortcut-bar" aria-label={shell.shell.shortcutBar}>
       <TerminalHud hud={hud} onPermissionMode={setPermissionMode}
         {...(readOnly || storageFault ? {
-          disabledReason: readOnly ? READ_ONLY_REASON : STORAGE_FAULT_MUTATION_REASON
+          disabledReason: readOnly
+            ? shell.readOnlyRecoveryReason
+            : shell.shell.storageFaultMutationReason
         } : {})} />
     </div>}
     {!isTeamMember && <ShortcutPanel open={shortcutPanelOpen} isMac={isMac} themeKey={themeKey}

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
 
+import { useMessages } from '../i18n/LocaleProvider'
+
 type SurfaceState = {
   nodes: number[]
   velocities: number[]
@@ -35,6 +37,7 @@ export function SessionRecoveryWater({
   sessionTitle: string
   phase?: 'loading' | 'recovery'
 }) {
+  const m = useMessages().hierarchyTerminal.recoveryWater
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
@@ -283,12 +286,10 @@ export function SessionRecoveryWater({
     }
   }, [])
 
-  const statusLabel = phase === 'recovery' ? '正在恢复终端' : '正在加载终端'
-  const detail = phase === 'recovery'
-    ? '正在恢复最近的终端内容与运行状态'
-    : '正在加载终端内容与运行状态'
+  const statusLabel = m.status[phase]
+  const detail = m.detail[phase]
   return <div className="session-recovery-overlay session-recovery-water" data-testid="session-recovery-water"
-    data-loading-phase={phase} role="status" aria-label={`${statusLabel}：${sessionTitle}`}
+    data-loading-phase={phase} role="status" aria-label={m.label(statusLabel, sessionTitle)}
     onPointerDown={(event) => event.stopPropagation()}>
     <span className="visually-hidden">{detail}</span>
     <canvas ref={canvasRef} className="session-recovery-water__canvas" aria-hidden="true" />

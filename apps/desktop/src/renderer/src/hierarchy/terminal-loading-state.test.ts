@@ -33,7 +33,7 @@ describe('terminal loading presentation', () => {
   it('uses loading water while an exited Session is repainting after activation', () => {
     expect(terminalLoadingPresentation({
       ...base(), activationLoading: true, runtimeStatus: 'exited'
-    })).toEqual({ phase: 'loading', label: '加载中' })
+    })).toEqual({ phase: 'loading', labelKey: 'loading' })
   })
 
   it.each([

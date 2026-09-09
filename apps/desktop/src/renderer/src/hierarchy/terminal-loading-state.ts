@@ -16,7 +16,8 @@ export interface TerminalLoadingState {
 
 export interface TerminalLoadingPresentation {
   phase: 'loading' | 'recovery'
-  label: '加载中' | '恢复中'
+  /** The component resolves the text through `hierarchyTerminal.loading`. */
+  labelKey: 'loading' | 'recovering'
 }
 
 /**
@@ -38,10 +39,10 @@ export function terminalLoadingPresentation(
     state.environmentUnavailable
   ) return null
 
-  if (activationLoading) return { phase: 'loading', label: '加载中' }
+  if (activationLoading) return { phase: 'loading', labelKey: 'loading' }
   if (state.terminalVisualReady || state.runtimeStatus === 'exited') return null
 
   return state.recoveryState === undefined
-    ? { phase: 'loading', label: '加载中' }
-    : { phase: 'recovery', label: '恢复中' }
+    ? { phase: 'loading', labelKey: 'loading' }
+    : { phase: 'recovery', labelKey: 'recovering' }
 }
