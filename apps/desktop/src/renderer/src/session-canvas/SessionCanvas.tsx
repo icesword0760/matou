@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import type { RemoveNodeScope, SessionGraphNodeView, SessionGraphView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 import { SessionCarousel } from './SessionCarousel'
 import { StoppedSessionCard } from './StoppedSessionCard'
 import { indexSessionGraph } from './session-graph-index'
@@ -20,6 +21,7 @@ export function SessionCanvas(props: {
   geometry?: Array<{ ownerKey: string; geometry: Record<string, unknown> }>
   onPutGeometry?(ownerKey: string, geometry: Record<string, unknown>): unknown
 }) {
+  const m = useMessages().sessionCanvas
   const {
     graph, levelParentSessionId, disabled = false, disabledReason, renderSession, onActivate,
     onRemoveBranch, onNavigateToChildren,
@@ -131,9 +133,9 @@ export function SessionCanvas(props: {
       flushGeometry()
     }, 180)
   }
-  if (!levelFocus) return <div className="session-canvas-empty" role="status">当前画布没有活跃会话</div>
+  if (!levelFocus) return <div className="session-canvas-empty" role="status">{m.emptyCanvas}</div>
 
-  return <section className="session-canvas" aria-label="会话画布" aria-busy={geometryPending}
+  return <section className="session-canvas" aria-label={m.canvas} aria-busy={geometryPending}
     data-last-saved-scroll-left={lastSavedScrollLeft}
     data-parent-session-id={parentId ?? ''}>
     <SessionCarousel nodes={siblings} focusedSessionId={levelFocus.sessionId}

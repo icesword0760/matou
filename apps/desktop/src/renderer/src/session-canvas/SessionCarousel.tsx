@@ -4,6 +4,7 @@ import {
 } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 import { ParentProjection } from './ParentProjection'
 import {
   ParentPullController,
@@ -35,6 +36,7 @@ export function SessionCarousel(props: {
     options?: { continuous?: boolean }
   ): void
 }) {
+  const m = useMessages().sessionCanvas
   const {
     nodes, focusedSessionId, renderSession, onActivate, onEnsureSessionVisible,
     parent, onCommitParent, geometryKey, initialScrollLeft = 0, initialAnchor,
@@ -886,7 +888,7 @@ export function SessionCarousel(props: {
     {parent && pull.distance > 0 && <ParentProjection parent={parent}
       pullDistance={pull.distance} progress={pull.progress} effectIntensity={pull.effectIntensity} />}
     <div className={`session-carousel${nodes.length > visibleCount ? ' has-overflow' : ''}${narrow ? ' is-narrow' : ''}`}
-      ref={viewportRef} role="region" aria-label="同级会话列表"
+      ref={viewportRef} role="region" aria-label={m.siblingSessions}
       data-visible-columns={visibleCount} data-total-sessions={nodes.length}
       data-foreground-terminals={foregroundTerminalCount}
       data-viewport-moving={viewportMoving ? 'true' : 'false'}
@@ -953,11 +955,11 @@ export function SessionCarousel(props: {
           {renderSession(node, inViewport.has(node.sessionId), viewportMoving)}
           {narrow && <div className="session-compact-summary" aria-hidden={node.sessionId === focusedSessionId}>
             <strong>{node.title}</strong>
-            <span className={`status-${node.workStatus}`}>{compactStatus(node.workStatus)}</span>
+            <span className={`status-${node.workStatus}`}>{m.compactStatus[node.workStatus]}</span>
             {(node.providerRestoreState === 'failed' || node.activeChildCount > 0) &&
               <div className="session-compact-summary__priority">
-                {node.providerRestoreState === 'failed' && <b>Claude 恢复失败</b>}
-                {node.activeChildCount > 0 && <small>子会话 {node.activeChildCount}</small>}
+                {node.providerRestoreState === 'failed' && <b>{m.claudeRestoreFailed}</b>}
+                {node.activeChildCount > 0 && <small>{m.childSessionCount(node.activeChildCount)}</small>}
               </div>}
             <pre title={node.cwd}>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>
           </div>}
@@ -1046,13 +1048,4 @@ export function visibleColumnsForWidth(_nodeCount: number, width: number): numbe
   // two Sessions still keeps inactive cards compact instead of stretching
   // every item to fill the row and making them look selected.
   return Math.min(4, Math.max(1, available))
-}
-
-function compactStatus(status: SessionGraphNodeView['workStatus']): string {
-  if (status === 'needs-input') return '等待输入'
-  if (status === 'running' || status === 'starting') return '运行中'
-  if (status === 'error') return '异常'
-  if (status === 'interrupted') return '中断'
-  if (status === 'exited') return '已停止'
-  return '空闲'
 }

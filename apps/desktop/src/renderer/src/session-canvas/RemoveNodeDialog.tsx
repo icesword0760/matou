@@ -2,6 +2,10 @@ import { useState } from 'react'
 
 import type { RemoveNodeScope, SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
+import { useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
+
+type RemoveDialogMessages = Messages['sessionCanvas']['removeDialog']
 
 export function RemoveNodeDialog(props: {
   title: string
@@ -10,6 +14,7 @@ export function RemoveNodeDialog(props: {
   onCancel(): void
   onConfirm(scope: RemoveNodeScope): void
 }) {
+  const m = useMessages().sessionCanvas.removeDialog
   const [scope, setScope] = useState<RemoveNodeScope>('node-only')
   const branchNodes = [props.current, ...props.descendants]
   const leaf = props.descendants.length === 0
@@ -17,30 +22,30 @@ export function RemoveNodeDialog(props: {
   const branch = impactSummary(branchNodes)
   const selected = scope === 'node-only' ? nodeOnly : branch
 
-  return <ConfirmDialog title={`移除节点“${props.title}”？`}
+  return <ConfirmDialog title={m.title(props.title)}
     body={leaf
       ? <div className="remove-node-leaf-copy">
-          <p>{impactLabel(nodeOnly)}。移除后，该会话会从会话列表和 DAG 中消失。</p>
-          <p>项目文件和自有 Worktree 保持原样。</p>
+          <p>{m.leafBody(impactLabel(nodeOnly, m))}</p>
+          <p>{m.filesUnchanged}</p>
         </div>
       : <div className="remove-node-dialog">
-          <p>请选择移除范围。项目文件和自有 Worktree 保持原样。</p>
-          <fieldset aria-label="移除范围">
+          <p>{m.chooseScope}</p>
+          <fieldset aria-label={m.scopeLabel}>
             <RemovalChoice scope="node-only" selected={scope} onSelect={setScope}
-              title="仅移除当前节点" impact={nodeOnly}
+              title={m.nodeOnly} impact={nodeOnly}
               description={props.current.parentSessionId
-                ? '后代会话将重连到当前节点的父级。'
-                : '直接后代会话将成为根节点。'} />
+                ? m.reparentDescendants
+                : m.descendantsBecomeRoots} />
             <RemovalChoice scope="node-and-descendants" selected={scope} onSelect={setScope}
-              title="移除当前节点及全部后代" impact={branch}
-              description={`当前节点与 ${props.descendants.length} 个后代会话会全部移除。`} />
+              title={m.nodeAndDescendants} impact={branch}
+              description={m.descendantsRemoved(props.descendants.length)} />
           </fieldset>
           {selected.active > 0 && <p className="remove-node-dialog__warning">
-            其中 {activityLabel(selected)}的会话将先停止。
+            {m.activeWarning(activityLabel(selected, m))}
           </p>}
         </div>}
-    confirmLabel={leaf ? '移除' : scope === 'node-only' ? '移除当前节点' : `移除 ${branch.sessions} 个会话`}
-    confirmTone="danger" cancelLabel="取消" scope="session"
+    confirmLabel={leaf ? m.remove : scope === 'node-only' ? m.removeNodeOnly : m.removeSessions(branch.sessions)}
+    confirmTone="danger" scope="session"
     onCancel={props.onCancel} onConfirm={() => props.onConfirm(scope)} />
 }
 
@@ -52,10 +57,11 @@ function RemovalChoice(props: {
   description: string
   onSelect(scope: RemoveNodeScope): void
 }) {
+  const m = useMessages().sessionCanvas.removeDialog
   return <label className={`remove-node-choice${props.selected === props.scope ? ' is-selected' : ''}`}>
     <input type="radio" name="remove-node-scope" value={props.scope}
       checked={props.selected === props.scope} onChange={() => props.onSelect(props.scope)} />
-    <span><strong>{props.title}</strong><small>{impactLabel(props.impact)}</small>
+    <span><strong>{props.title}</strong><small>{impactLabel(props.impact, m)}</small>
       <em>{props.description}</em></span>
   </label>
 }
@@ -88,15 +94,17 @@ function impactSummary(
   }
 }
 
-function impactLabel(impact: RemovalImpact): string {
-  const activity = activityLabel(impact)
-  const worktrees = impact.ownedWorktrees === undefined ? '' : `、${impact.ownedWorktrees} 个自有 Worktree`
-  return `影响 ${impact.sessions} 个会话${worktrees}${activity ? `；其中 ${activity}` : ''}`
+function impactLabel(impact: RemovalImpact, m: RemoveDialogMessages): string {
+  const activity = activityLabel(impact, m)
+  const worktrees = impact.ownedWorktrees === undefined
+    ? ''
+    : m.impactWorktrees(m.ownedWorktrees(impact.ownedWorktrees))
+  return `${m.impactSessions(impact.sessions)}${worktrees}${activity ? m.impactActivity(activity) : ''}`
 }
 
-function activityLabel(impact: RemovalImpact): string {
+function activityLabel(impact: RemovalImpact, m: RemoveDialogMessages): string {
   return [
-    impact.running > 0 ? `${impact.running} 个运行中` : '',
-    impact.needsInput > 0 ? `${impact.needsInput} 个待输入` : ''
-  ].filter(Boolean).join('、')
+    impact.running > 0 ? m.running(impact.running) : '',
+    impact.needsInput > 0 ? m.needsInput(impact.needsInput) : ''
+  ].filter(Boolean).join(m.activityJoin)
 }

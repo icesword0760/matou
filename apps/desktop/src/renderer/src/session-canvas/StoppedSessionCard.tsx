@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import type { RemoveNodeScope } from '../hierarchy/hierarchy-types'
 import { RemoveNodeIcon } from '../hierarchy/TerminalPane'
+import { useMessages } from '../i18n/LocaleProvider'
 import { RemoveNodeDialog } from './RemoveNodeDialog'
 
 export function StoppedSessionCard(props: {
@@ -12,6 +13,8 @@ export function StoppedSessionCard(props: {
   disabledReason?: string
   onRemoveBranch?(sessionId: string, scope: RemoveNodeScope): unknown
 }) {
+  const messages = useMessages()
+  const m = messages.sessionCanvas.stoppedCard
   const {
     node, descendantNodes = [], disabled = false,
     disabledReason, onRemoveBranch
@@ -22,10 +25,10 @@ export function StoppedSessionCard(props: {
   }, [disabled])
   return <div className="stopped-session-card">
     <header><strong>{node.title}</strong><div className="stopped-session-card__actions">
-      <span>正在恢复会话…</span>
+      <span>{m.restoring}</span>
       {onRemoveBranch && <button className="pane-fork pane-remove" type="button"
-        aria-label={`移除节点…：${node.title}`} disabled={disabled}
-        title={disabledReason ?? '移除节点…'}
+        aria-label={m.removeNodeOf(node.title)} disabled={disabled}
+        title={disabledReason ?? messages.hierarchyTerminal.pane.removeNodeAction}
         onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
         onClick={(event) => {
           event.stopPropagation()

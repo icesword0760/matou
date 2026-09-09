@@ -1,10 +1,15 @@
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
 import { AppIcon } from '../ui/AppIcon'
+
+type ChildBadgeMessages = Messages['sessionCanvas']['childBadge']
 
 export function ChildSessionBadge(props: {
   children: SessionGraphNodeView[]
   onOpen(): void
 }) {
+  const m = useMessages().sessionCanvas.childBadge
   const { children, onOpen } = props
   if (children.length === 0) return null
   const counts = statusCounts(children)
@@ -13,11 +18,11 @@ export function ChildSessionBadge(props: {
   const highest = highestStatus(counts)
   const detail = [
     `Claude ${claude} · Shell ${shell}`,
-    statusDetail(counts)
-  ].filter((value) => Boolean(value)).join('；')
-  const status = summaryStatus(counts)
-  const summary = `${children.length} 分支${status ? ` · ${status}` : ''}`
-  const accessibleLabel = `查看 ${children.length} 个子会话`
+    statusDetail(counts, m)
+  ].filter((value) => Boolean(value)).join(m.detailJoin)
+  const status = summaryStatus(counts, m)
+  const summary = `${m.branches(children.length)}${status ? ` · ${status}` : ''}`
+  const accessibleLabel = m.viewChildren(children.length)
   return <span className="child-session-badge-wrap">
     <button type="button" className={`child-session-badge status-${highest}`}
       aria-label={accessibleLabel}
@@ -52,19 +57,19 @@ function highestStatus(counts: ReturnType<typeof statusCounts>): string {
   return 'idle'
 }
 
-function summaryStatus(counts: ReturnType<typeof statusCounts>): string {
-  if (counts.error > 0) return `${counts.error} 异常`
-  if (counts.needsInput > 0) return `${counts.needsInput} 待输入`
-  if (counts.running > 0) return `${counts.running} 运行中`
-  if (counts.starting > 0) return `${counts.starting} 准备中`
+function summaryStatus(counts: ReturnType<typeof statusCounts>, m: ChildBadgeMessages): string {
+  if (counts.error > 0) return m.summaryError(counts.error)
+  if (counts.needsInput > 0) return m.summaryNeedsInput(counts.needsInput)
+  if (counts.running > 0) return m.summaryRunning(counts.running)
+  if (counts.starting > 0) return m.summaryStarting(counts.starting)
   return ''
 }
 
-function statusDetail(counts: ReturnType<typeof statusCounts>): string {
+function statusDetail(counts: ReturnType<typeof statusCounts>, m: ChildBadgeMessages): string {
   return [
-    counts.running > 0 ? `运行中 ${counts.running}` : '',
-    counts.starting > 0 ? `准备中 ${counts.starting}` : '',
-    counts.needsInput > 0 ? `待输入 ${counts.needsInput}` : '',
-    counts.error > 0 ? `错误 ${counts.error}` : ''
+    counts.running > 0 ? m.detailRunning(counts.running) : '',
+    counts.starting > 0 ? m.detailStarting(counts.starting) : '',
+    counts.needsInput > 0 ? m.detailNeedsInput(counts.needsInput) : '',
+    counts.error > 0 ? m.detailError(counts.error) : ''
   ].filter(Boolean).join(' · ')
 }

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { useMessages } from '../i18n/LocaleProvider'
+
 export interface BranchDialogSubmit {
   name: string
   worktreeMode: 'current' | 'new'
@@ -13,6 +15,8 @@ export function BranchDialog(props: {
   onCancel(): void
   onConfirm(input: BranchDialogSubmit): Promise<unknown> | unknown
 }) {
+  const messages = useMessages()
+  const m = messages.sessionCanvas.branchDialog
   const { relationMode, sourceTitle, gitAvailable, onCancel, onConfirm } = props
   const [name, setName] = useState('')
   const [worktreeMode, setWorktreeMode] = useState<'current' | 'new'>('current')
@@ -23,9 +27,7 @@ export function BranchDialog(props: {
   const submissionKey = submissionKeyRef.current ?? crypto.randomUUID()
   submissionKeyRef.current = submissionKey
   const inputRef = useRef<HTMLInputElement>(null)
-  const title = relationMode === 'child'
-    ? '创建子会话分支'
-    : relationMode === 'sibling' ? '创建同级分支' : 'Fork 会话'
+  const title = m.title[relationMode]
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
@@ -33,12 +35,12 @@ export function BranchDialog(props: {
     if (submittingRef.current) return
     const displayName = name.trim()
     if (!displayName) {
-      setError('请输入分支名称')
+      setError(m.nameRequired)
       inputRef.current?.focus()
       return
     }
     if ([...displayName].length > 64) {
-      setError('分支名称最多 64 个字符')
+      setError(m.nameTooLong)
       inputRef.current?.focus()
       return
     }
@@ -67,16 +69,16 @@ export function BranchDialog(props: {
         <div>
           <h2 id="branch-dialog-title">{title}</h2>
           <p>{relationMode === 'peer'
-            ? `复制“${sourceTitle}”的当前对话并加入当前列表`
-            : `从“${sourceTitle}”继续一条独立工作路径`}</p>
+            ? m.peerDescription(sourceTitle)
+            : m.branchDescription(sourceTitle)}</p>
         </div>
-        <button type="button" aria-label="关闭创建分支" disabled={submitting} onClick={onCancel}>×</button>
+        <button type="button" aria-label={m.close} disabled={submitting} onClick={onCancel}>×</button>
       </header>
 
       <label className="branch-dialog__field">
-        <span>分支名称</span>
-        <input ref={inputRef} aria-label="分支名称" value={name} maxLength={128}
-          placeholder="例如：修复登录流程" disabled={submitting}
+        <span>{m.name}</span>
+        <input ref={inputRef} aria-label={m.name} value={name} maxLength={128}
+          placeholder={m.namePlaceholder} disabled={submitting}
           onChange={(event) => { setName(event.target.value); setError('') }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') { event.preventDefault(); void submit() }
@@ -86,32 +88,32 @@ export function BranchDialog(props: {
       </label>
 
       <fieldset className="branch-dialog__worktrees">
-        <legend>工作目录</legend>
+        <legend>{m.worktreeSection}</legend>
         <label className={`branch-worktree-card${worktreeMode === 'current' ? ' is-selected' : ''}`}>
           <input type="radio" name="worktree-mode" checked={worktreeMode === 'current'}
             disabled={submitting} onChange={() => setWorktreeMode('current')} />
-          <span><strong>使用当前工作树</strong><small>{relationMode === 'peer'
-            ? '和当前会话使用同一目录，适合连续处理同一份改动'
-            : '和父会话使用同一目录，适合连续处理同一份改动'}</small></span>
+          <span><strong>{m.useCurrentWorktree}</strong><small>{relationMode === 'peer'
+            ? m.currentWorktreeHint.peer
+            : m.currentWorktreeHint.branch}</small></span>
         </label>
         <label className={`branch-worktree-card${worktreeMode === 'new' ? ' is-selected' : ''}${gitAvailable ? '' : ' is-disabled'}`}>
           <input type="radio" name="worktree-mode" checked={worktreeMode === 'new'}
             disabled={submitting || !gitAvailable} onChange={() => setWorktreeMode('new')} />
-          <span><strong>从新工作树创建</strong><small>创建隔离的 Git worktree，适合多个功能并行开发</small>
-            {!gitAvailable && <em>需要 Git 仓库</em>}</span>
+          <span><strong>{m.useNewWorktree}</strong><small>{m.newWorktreeHint}</small>
+            {!gitAvailable && <em>{m.needsGitRepository}</em>}</span>
         </label>
       </fieldset>
 
       {worktreeMode === 'new' && <p className="branch-dialog__notice">
-        原目录中的未提交修改会保留在原处；新工作树从当前 HEAD 创建。
+        {m.newWorktreeNotice}
       </p>}
       {error && <p className="branch-dialog__error" role="alert">{error}</p>}
-      {submitting && <p className="branch-dialog__progress" role="status">正在创建分支…</p>}
+      {submitting && <p className="branch-dialog__progress" role="status">{m.creating}</p>}
 
       <footer className="branch-dialog__footer">
-        <button type="button" disabled={submitting} onClick={onCancel}>取消</button>
+        <button type="button" disabled={submitting} onClick={onCancel}>{messages.common.cancel}</button>
         <button type="button" className="primary" disabled={submitting} onClick={() => void submit()}>
-          创建分支
+          {m.create}
         </button>
       </footer>
     </section>

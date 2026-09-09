@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 
 export function ParentProjection(props: {
   parent: SessionGraphNodeView
@@ -8,6 +9,7 @@ export function ParentProjection(props: {
   progress: number
   effectIntensity: number
 }) {
+  const m = useMessages().sessionCanvas
   const { parent, pullDistance, progress, effectIntensity } = props
   const ready = progress >= 1
   const percent = Math.round(Math.max(0, Math.min(1, progress)) * 100)
@@ -20,27 +22,19 @@ export function ParentProjection(props: {
     } as CSSProperties}>
     <div className="parent-projection__card">
       <span className={`parent-projection__status status-${parent.workStatus}`}>
-        {statusLabel(parent.workStatus)}
+        {m.parentStatus[parent.workStatus]}
       </span>
       <strong>{parent.title}</strong>
       <span>{parent.currentMode === 'claude-code' ? 'Claude Code' : 'Shell'}</span>
       {parent.latestLines.length > 0 && <pre>{parent.latestLines.slice(-3).join('\n')}</pre>}
       <div className="parent-projection__instruction">
-        <b>{ready ? '已到达 · 松手返回父会话' : '右拉至目标，松手返回父会话'}</b>
+        <b>{ready ? m.parentPullReady : m.parentPullHint}</b>
         <span>{percent}%</span>
       </div>
-      <div className="parent-projection__energy" role="progressbar" aria-label="返回父会话进度"
+      <div className="parent-projection__energy" role="progressbar" aria-label={m.parentPullProgress}
         aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
         <span /><i />
       </div>
     </div>
   </aside>
-}
-
-function statusLabel(status: SessionGraphNodeView['workStatus']): string {
-  if (status === 'needs-input') return '等待输入'
-  if (status === 'running' || status === 'starting') return '运行中'
-  if (status === 'error') return '异常'
-  if (status === 'interrupted') return '已中断'
-  return '空闲'
 }

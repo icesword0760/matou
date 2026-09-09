@@ -1,6 +1,7 @@
 import type { FocusEvent, ReactNode } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
+import { useMessages } from '../i18n/LocaleProvider'
 
 export function SessionCard(props: {
   node: SessionGraphNodeView
@@ -11,10 +12,11 @@ export function SessionCard(props: {
   onActivate(sessionId: string): void
   onHover(sessionId: string): void
 }) {
+  const m = useMessages().sessionCanvas
   const { node, focused, inViewport, expanded, children, onActivate, onHover } = props
   return <article className={`session-card${focused ? ' is-focused' : ''}${expanded ? ' is-expanded' : ''}`}
     data-session-card={node.sessionId} data-in-viewport={inViewport}
-    aria-label={`会话：${node.title}`} aria-current={focused ? 'true' : undefined}
+    aria-label={m.sessionCard(node.title)} aria-current={focused ? 'true' : undefined}
     onMouseEnter={() => onHover(node.sessionId)}
     onPointerDownCapture={(event) => {
       // A mounted terminal may keep its hidden textarea focused even after

@@ -13,6 +13,10 @@ import type {
   ClaudeSessionSummary
 } from '@matou/contracts'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
+import { useMessages } from '../i18n/LocaleProvider'
+import type { Messages } from '../i18n/messages'
+
+type LoaderMessages = Messages['sessionCanvas']['loader']
 
 const SESSION_PAGE_SIZE = 50
 const EVENT_PAGE_SIZE = 200
@@ -38,6 +42,8 @@ export function SessionLoaderDialog(props: {
   onCancel(): void
   portalTarget?: Element
 }) {
+  const messages = useMessages()
+  const m = messages.sessionCanvas.loader
   const {
     targetTitle, targetRunning, listSessions, loadDetail, searchSession,
     onLoad, onCancel, portalTarget
@@ -297,24 +303,25 @@ export function SessionLoaderDialog(props: {
   return createPortal(<div className="session-loader-backdrop" role="presentation"
     onPointerDown={(event) => { if (event.target === event.currentTarget) onCancel() }}>
     <section className="session-loader-dialog" role="dialog" aria-modal="true"
-      aria-label="载入 Claude Code 会话">
+      aria-label={messages.hierarchyTerminal.pane.loadClaudeSession}>
       <header className="session-loader-header">
-        <div><strong>载入 Claude Code 会话</strong><span>载入到“{targetTitle}”</span></div>
-        <button type="button" aria-label="关闭会话管理" onClick={onCancel}>×</button>
+        <div><strong>{messages.hierarchyTerminal.pane.loadClaudeSession}</strong>
+          <span>{m.loadInto(targetTitle)}</span></div>
+        <button type="button" aria-label={m.close} onClick={onCancel}>×</button>
       </header>
       <div className="session-loader-body">
-        <aside className="session-loader-list" aria-label="可恢复会话">
+        <aside className="session-loader-list" aria-label={m.resumableSessions}>
           <label className="session-loader-search" data-search-scope="sessions">
             <SearchIcon />
-            <input ref={sessionSearchRef} type="search" aria-label="筛选左侧会话"
-              value={sessionQuery} placeholder="筛选左侧：标题、路径、模型或会话 ID"
+            <input ref={sessionSearchRef} type="search" aria-label={m.filterSessions}
+              value={sessionQuery} placeholder={m.filterSessionsPlaceholder}
               onChange={(event) => setSessionQuery(event.target.value)} />
-            {sessionQuery && <button type="button" aria-label="清除会话筛选"
+            {sessionQuery && <button type="button" aria-label={m.clearSessionFilter}
               onClick={() => setSessionQuery('')}>×</button>}
           </label>
           <div className="session-loader-list-meta">
-            <span>{loadingList ? '正在查找…' : `${sessions.length} / ${sessionTotal} 个会话`}</span>
-            <span>{hasMoreSessions ? '滚动加载更多' : '已加载全部'}</span>
+            <span>{loadingList ? m.searching : m.sessionsOf(sessions.length, sessionTotal)}</span>
+            <span>{hasMoreSessions ? m.scrollForMore : m.allLoaded}</span>
           </div>
           <div ref={sessionScrollRef} className="session-loader-results" onKeyDown={onListKeyDown}
             onScroll={(event) => {
@@ -331,43 +338,43 @@ export function SessionLoaderDialog(props: {
                   className="session-loader-virtual-row">
                   <article className={`session-loader-result${selectedId === session.providerSessionId ? ' selected' : ''}`}>
                     <button type="button" className="session-loader-result-main"
-                      aria-label={`预览会话：${session.title}`}
+                      aria-label={m.previewSession(session.title)}
                       onClick={() => setSelectedId(session.providerSessionId)}>
                       <strong>{session.title}</strong>
-                      <span>{relativeTime(session.updatedAt)} · {session.model ?? 'Claude Code'}</span>
-                      <small>{permissionLabel(session.permissionMode)} · {session.eventCount} 条内容</small>
-                      {session.availability === 'loaded-here' && <small>已载入当前卡片</small>}
+                      <span>{relativeTime(session.updatedAt, m)} · {session.model ?? 'Claude Code'}</span>
+                      <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>
+                      {session.availability === 'loaded-here' && <small>{m.loadedHere}</small>}
                       {session.availability === 'loaded-elsewhere' &&
-                        <small>已载入“{session.loadedSessionTitle ?? '其他卡片'}”</small>}
+                        <small>{m.loadedElsewhere(session.loadedSessionTitle ?? m.otherCard)}</small>}
                     </button>
                   </article>
                 </div>
               })}
             </div>
-            {loadingMoreSessions && <div className="session-loader-page-status">正在载入更多会话…</div>}
+            {loadingMoreSessions && <div className="session-loader-page-status">{m.loadingMore}</div>}
             {!loadingList && sessions.length === 0 && <div className="session-loader-empty">
-              {effectiveSessionQuery ? '左侧没有匹配的会话' : '当前工作空间内没有 Claude Code 会话'}
+              {effectiveSessionQuery ? m.noMatchingSessions : m.noSessions}
             </div>}
           </div>
         </aside>
-        <section className="session-loader-preview" aria-label="会话预览">
+        <section className="session-loader-preview" aria-label={m.preview}>
           <header>
-            <div><strong>{detail?.title ?? '选择会话查看内容'}</strong>
-              {detail && <span>{detail.model ?? 'Claude Code'} · {permissionLabel(detail.permissionMode)}</span>}
+            <div><strong>{detail?.title ?? m.selectSession}</strong>
+              {detail && <span>{detail.model ?? 'Claude Code'} · {m.permission[detail.permissionMode]}</span>}
             </div>
             <div className="session-loader-content-search-group">
               <label className="session-loader-search" data-search-scope="content">
                 <SearchIcon />
-                <input ref={contentSearchRef} type="search" aria-label="查找右侧会话内容"
-                  value={contentQuery} placeholder="查找右侧内容" disabled={!selectedId}
+                <input ref={contentSearchRef} type="search" aria-label={m.searchContent}
+                  value={contentQuery} placeholder={m.searchContentPlaceholder} disabled={!selectedId}
                   onChange={(event) => setContentQuery(event.target.value)} />
-                {contentQuery && <button type="button" aria-label="清除内容查找"
+                {contentQuery && <button type="button" aria-label={m.clearContentSearch}
                   onClick={() => setContentQuery('')}>×</button>}
               </label>
-              {effectiveContentQuery && <div className="session-loader-match-nav" aria-label="右侧内容匹配位置">
+              {effectiveContentQuery && <div className="session-loader-match-nav" aria-label={m.matchNav}>
                 <span>{searchPage?.total ? activeMatchAbsolute + 1 : 0}/{searchPage?.total ?? 0}</span>
-                <button type="button" aria-label="上一个匹配" onClick={() => void stepMatch(-1)}>↑</button>
-                <button type="button" aria-label="下一个匹配" onClick={() => void stepMatch(1)}>↓</button>
+                <button type="button" aria-label={m.previousMatch} onClick={() => void stepMatch(-1)}>↑</button>
+                <button type="button" aria-label={m.nextMatch} onClick={() => void stepMatch(1)}>↓</button>
               </div>}
             </div>
           </header>
@@ -375,10 +382,10 @@ export function SessionLoaderDialog(props: {
             onScroll={(event) => { if (event.currentTarget.scrollTop < 64) void loadEarlier() }}>
             {detail && <div className="session-loader-history-status" role="status">
               {effectiveContentQuery
-                ? `全文共 ${searchPage?.total ?? 0} 处匹配`
-                : `已加载 ${previewEvents.length} / ${detail.page.total} 条`}
+                ? m.matches(searchPage?.total ?? 0)
+                : m.entriesLoaded(previewEvents.length, detail.page.total)}
             </div>}
-            {loadingEarlier && <div className="session-loader-page-status">正在载入更早内容…</div>}
+            {loadingEarlier && <div className="session-loader-page-status">{m.loadingEarlier}</div>}
             <div className="session-loader-virtual-events" style={{ height: eventVirtualizer.getTotalSize() }}>
               {(visibleEventRows.length > 0 ? visibleEventRows : previewEvents.slice(0, 12).map((_, index) => ({
                 index, start: index * 126
@@ -390,7 +397,7 @@ export function SessionLoaderDialog(props: {
                   <article className={`session-loader-event is-${event.kind}${
                     matched ? ' matched active-match' : ''}`}>
                     <div><strong>{highlightMatches(
-                      event.kind === 'tool' ? event.toolName ?? '工具' : event.role === 'user' ? '你' : 'Claude',
+                      event.kind === 'tool' ? event.toolName ?? m.tool : event.role === 'user' ? m.you : 'Claude',
                       effectiveContentQuery
                     )}</strong>
                       <span>#{event.index}</span></div>
@@ -399,25 +406,28 @@ export function SessionLoaderDialog(props: {
                 </div>
               })}
             </div>
-            {loadingDetail && <div className="session-loader-empty">正在载入预览…</div>}
+            {loadingDetail && <div className="session-loader-empty">{m.loadingPreview}</div>}
           </div>
         </section>
       </div>
       <footer className="session-loader-footer">
         <div>
           {error && <span className="session-loader-error" role="alert">{error}</span>}
-          {confirmRunning && <span className="session-loader-confirm">当前卡片正在运行，继续会结束当前进程。</span>}
+          {confirmRunning && <span className="session-loader-confirm">{m.runningWarning}</span>}
         </div>
-        <button type="button" onClick={onCancel}>取消</button>
+        <button type="button" onClick={onCancel}>{messages.common.cancel}</button>
         <button type="button" className="primary" disabled={!selectedId || loadingSession}
           onClick={() => void submitLoad()}>
-          {loadingSession ? '正在载入…' : confirmRunning ? '结束当前运行并载入' : '载入到当前卡片'}
+          {loadingSession ? m.loading : confirmRunning ? m.endAndLoad : m.loadHere}
         </button>
       </footer>
       {confirmDuplicate && <ConfirmDialog
-        title="会话已在当前工作空间载入"
-        body={`“${selectedSession?.title ?? '该会话'}”已载入到“${selectedSession?.loadedSessionTitle ?? '其他卡片'}”。仍然可以载入到当前卡片，两张卡片将关联同一个 Claude Code 会话。`}
-        confirmLabel="仍然载入" onCancel={() => setConfirmDuplicate(false)}
+        title={m.duplicateTitle}
+        body={m.duplicateBody(
+          selectedSession?.title ?? m.thisSession,
+          selectedSession?.loadedSessionTitle ?? m.otherCard
+        )}
+        confirmLabel={m.loadAnyway} onCancel={() => setConfirmDuplicate(false)}
         onConfirm={() => { setConfirmDuplicate(false); void submitLoad(true) }} />}
     </section>
   </div>, portalTarget ?? document.body)
@@ -452,14 +462,6 @@ function SearchIcon() {
     <path d="m12.5 12.5 4 4" /></svg>
 }
 
-function permissionLabel(mode: ClaudeSessionSummary['permissionMode']): string {
-  if (mode === 'bypassPermissions') return '开放所有权限'
-  if (mode === 'auto') return '自动模式'
-  if (mode === 'acceptEdits') return '自动接受编辑'
-  if (mode === 'plan') return '计划模式'
-  return '默认权限'
-}
-
 function highlightMatches(text: string, query: string) {
   const needle = query.trim()
   if (!needle) return text
@@ -484,12 +486,12 @@ function markMatch(text: string, key: number) {
   return <mark key={key}>{text}</mark>
 }
 
-function relativeTime(timestamp: number): string {
-  if (!timestamp) return '时间未知'
+function relativeTime(timestamp: number, m: LoaderMessages): string {
+  if (!timestamp) return m.timeUnknown
   const elapsed = Math.max(0, Date.now() - timestamp)
   const hours = Math.floor(elapsed / 3_600_000)
-  if (hours < 24) return hours <= 0 ? '刚刚' : `${hours} 小时前`
-  return `${Math.floor(hours / 24)} 天前`
+  if (hours < 24) return hours <= 0 ? m.justNow : m.hoursAgo(hours)
+  return m.daysAgo(Math.floor(hours / 24))
 }
 
 function errorMessage(error: unknown): string {
