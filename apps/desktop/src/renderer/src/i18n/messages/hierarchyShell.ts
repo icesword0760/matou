@@ -213,7 +213,7 @@ export const hierarchyShellZhCN = {
 
 export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
   emptyWorkspace: { title: 'No workspace yet', hint: 'Pick a local directory to start working.', create: 'New workspace' },
-  readOnlyRecoveryReason: 'The database is in read-only recovery mode',
+  readOnlyRecoveryReason: 'The database is in read-only recovery mode.',
   workspacePathUnavailable: 'The workspace directory is unavailable. Restore the original path locally, or remove the workspace.',
   defaultWorkspaceName: 'Workspace',
   confirmOk: 'OK',
@@ -231,7 +231,7 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     groups: 'Workspaces and tasks',
     workspaceGroup: (name: string) => `${name} workspace`,
     defaultBadge: 'Default',
-    newTaskIn: () => 'New task',
+    newTaskIn: (workspace: string) => `New task in ${workspace}`,
     newTask: 'New task',
     relinkWorkspace: (name: string) => `Relink workspace directory: ${name}`,
     relinkHint: 'Choose a new location for the workspace',
@@ -282,7 +282,7 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
       missing: 'The directory does not exist',
       'not-directory': 'The path is not a directory',
       'no-access': 'Directory access is denied',
-      unknown: 'The directory state is abnormal'
+      unknown: 'The directory state could not be determined'
     }
   },
   kanban: {
@@ -326,15 +326,15 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
   },
   shell: {
     storageFaultMutationReason: 'Terminal storage failed. Recover or end the current session first.',
-    recoveryMutationReason: 'This terminal has to finish recovering first',
-    environmentMutationReason: 'The current environment has to be recovered or handed off first',
+    recoveryMutationReason: 'This terminal has to finish recovering first.',
+    environmentMutationReason: 'The current environment has to be recovered or handed off first.',
     sessionLoaderClosed: 'The session loader is closed',
     workspaceStage: (name: string) => `${name} workspace stage`,
     workspaceStageFallback: 'Workspace stage',
     dagOpenFailed: 'The session graph could not be opened. The session list and the return control still work.',
     retryDag: 'Retry opening the DAG',
     dismissDagError: 'Dismiss the DAG error',
-    checkingDetachedWindows: 'Checking earlier windows…',
+    checkingDetachedWindows: 'Checking detached windows…',
     sceneLayout: (name: string) => `${name} terminal layout`,
     noTask: 'Select or create a task to start working',
     shortcutBar: 'Shortcut bar'
@@ -348,7 +348,7 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     levelUnavailable: 'The navigation target level is unavailable',
     taskNotInWindow: 'The navigation target task is not in this window',
     windowPathMismatch: 'The navigation target window does not match the requested path',
-    pageClosed: 'The navigating page was closed',
+    pageClosed: 'The page was closed during navigation',
     requestExpired: 'The navigation request expired',
     sessionNotVisible: 'The navigation target session is not visible yet',
     stage: {
@@ -409,7 +409,7 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     apiEndpoint: 'API endpoint',
     apiKeyKeepHint: 'Leave blank to keep the current key',
     apiKeyPlaceholder: 'Enter the API key',
-    advanced: '▸ Advanced  Model mappings and unknown configuration fields are kept here',
+    advanced: '▸ Advanced – Model mappings and unknown configuration fields are kept here',
     deleteProvider: 'Delete provider',
     saving: 'Saving…',
     saveConfiguration: 'Save configuration',

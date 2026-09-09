@@ -396,13 +396,13 @@ function HierarchyProduct({
   const loadLoaderDetail = useCallback((providerSessionId: string, options = {}) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
-  }, [commands, loaderSessionId, loaderTitleRevision])
+  }, [commands, loaderSessionId, loaderTitleRevision, m])
   const searchLoaderSession = useCallback((
     providerSessionId: string, query: string, offset?: number, limit?: number
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit)
-  }, [commands, loaderSessionId, loaderTitleRevision])
+  }, [commands, loaderSessionId, loaderTitleRevision, m])
   const cancelSessionLoader = useCallback(() => {
     setSessionLoader(null)
     setTerminalFocusRequest((value) => value + 1)

@@ -22,7 +22,10 @@ describe('Hierarchy chrome in English', () => {
       <WorkspaceSwitcher projection={projection} commands={commands()} />
     </LocaleProvider>)
 
-    expect(screen.getByRole('button', { name: 'New task' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'New task in Frontend' })).toBeTruthy()
+    // Playwright matches an accessible name as a case-insensitive substring, so the
+    // downstream `New task` lookup still resolves against the per-workspace name.
+    expect(screen.getByRole('button', { name: /New task/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Switch workspace' })).toBeTruthy()
   })
 

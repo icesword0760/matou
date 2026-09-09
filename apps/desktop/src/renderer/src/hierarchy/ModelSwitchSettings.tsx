@@ -53,7 +53,7 @@ export function ModelSwitchSettings({ client, onClose }: {
     } finally {
       setLoading(false)
     }
-  }, [client])
+  }, [client, m])
 
   useEffect(() => { void refresh() }, [refresh])
   useEffect(() => {
