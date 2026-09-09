@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { HOST_CONTROL_FORK_SETTLEMENT_TIMEOUT_MS } from './host-control-deadlines'
+import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction } from '../storage/database'
 
 export type ForkSettlementWaitErrorCode =
@@ -44,14 +45,14 @@ export async function waitUntilForkSettled(
     if (stage === undefined) {
       throw new ForkSettlementWaitError(
         'FORK_SETTLEMENT_MISSING',
-        'Fork 状态记录不可用',
+        runtimeMessages().control.forkSettlement.missing,
         `Fork settlement intent is missing for session ${sessionId}`
       )
     }
     if (now() >= deadline) {
       throw new ForkSettlementWaitError(
         'FORK_SETTLEMENT_TIMEOUT',
-        'Fork 状态确认超时',
+        runtimeMessages().control.forkSettlement.timeout,
         `Fork settlement timed out for session ${sessionId}`
       )
     }

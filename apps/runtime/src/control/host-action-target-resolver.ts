@@ -11,6 +11,7 @@ import type {
 import type { HostCallerIdentity, HostListScope, HostTarget } from './host-control-types'
 import { HostTopologyProjector } from './host-topology-projector'
 import { hostTargetRevision } from './host-target-revision'
+import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
 
 export interface ResolvedHierarchyPath {
@@ -171,14 +172,17 @@ export class HostActionTargetResolver {
     if (!sourceGit) {
       throw new HostActionTargetResolverError(
         'WORKTREE_CONFLICT',
-        '普通目录只能继续使用当前执行环境'
+        runtimeMessages().control.target.plainDirectoryOnly
       )
     }
 
     if (choice.mode === 'existing-worktree') {
       const worktreeId = parseStableRef(choice.worktreeRef, 'worktree')
       if (!worktreeId) {
-        throw new HostActionTargetResolverError('WORKTREE_CONFLICT', '提交的 Worktree 引用无效')
+        throw new HostActionTargetResolverError(
+          'WORKTREE_CONFLICT',
+          runtimeMessages().control.target.worktreeRefInvalid
+        )
       }
       const worktree = this.#database.get<WorktreeRow>(
         `SELECT worktrees.id, worktrees.execution_context_id, worktrees.branch_name,
@@ -191,7 +195,10 @@ export class HostActionTargetResolver {
         worktreeId
       )
       if (!worktree || !isReusableWorktreeState(worktree.state)) {
-        throw new HostActionTargetResolverError('WORKTREE_CONFLICT', '指定的 Worktree 已不可用')
+        throw new HostActionTargetResolverError(
+          'WORKTREE_CONFLICT',
+          runtimeMessages().control.target.worktreeUnavailable
+        )
       }
       if (
         worktree.branch_name !== choice.branch ||
@@ -200,7 +207,7 @@ export class HostActionTargetResolver {
       ) {
         throw new HostActionTargetResolverError(
           'BRANCH_CONFLICT',
-          `Worktree 当前分支与提交的 ${choice.branch} 不一致`
+          runtimeMessages().control.target.worktreeBranchMismatch(choice.branch)
         )
       }
       return {
@@ -215,7 +222,7 @@ export class HostActionTargetResolver {
     if (this.#localBranchExists(sourceGit.repository_root, choice.branch)) {
       throw new HostActionTargetResolverError(
         'BRANCH_CONFLICT',
-        `分支 ${choice.branch} 已存在`
+        runtimeMessages().control.target.branchExists(choice.branch)
       )
     }
     return { mode: 'new-worktree', branch: choice.branch }
@@ -289,7 +296,7 @@ export class HostActionTargetResolver {
     if (expectedRevision !== currentRevision || selector.projectionRevision !== expectedRevision) {
       throw new HostActionTargetResolverError(
         'STALE_PROJECTION',
-        '目标列表已更新，请重新列举后再执行'
+        runtimeMessages().control.target.staleProjection
       )
     }
   }
@@ -315,11 +322,11 @@ export class HostActionTargetResolver {
         .map((target) => this.#candidateForTarget(target))
       throw new HostActionTargetResolverError(
         'AMBIGUOUS_TARGET',
-        `目标 ${ref} 匹配多个层级位置`,
+        runtimeMessages().control.target.ambiguous(ref),
         candidates
       )
     }
-    throw new HostActionTargetResolverError('TARGET_NOT_FOUND', `目标 ${ref} 不存在`)
+    throw new HostActionTargetResolverError('TARGET_NOT_FOUND', runtimeMessages().control.target.notFound(ref))
   }
 
   #resolveWorkspace(workspaceId: string): ResolvedHostEntity {
@@ -410,7 +417,9 @@ export class HostActionTargetResolver {
     row: EntityRow | undefined,
     id: string
   ): ResolvedHostEntity {
-    if (!row) throw new HostActionTargetResolverError('TARGET_NOT_FOUND', `目标 ${id} 不存在`)
+    if (!row) {
+      throw new HostActionTargetResolverError('TARGET_NOT_FOUND', runtimeMessages().control.target.notFound(id))
+    }
     const path = {
       windowId: row.window_id ?? `unplaced:${row.task_id}`,
       workspaceId: row.workspace_id,
@@ -434,7 +443,7 @@ export class HostActionTargetResolver {
     } catch (error) {
       throw new HostActionTargetResolverError(
         'TARGET_NOT_FOUND',
-        error instanceof Error ? error.message : '当前调用会话不存在'
+        error instanceof Error ? error.message : runtimeMessages().control.target.callerSessionMissing
       )
     }
   }
@@ -445,7 +454,7 @@ export class HostActionTargetResolver {
     } catch (error) {
       throw new HostActionTargetResolverError(
         'TARGET_NOT_FOUND',
-        error instanceof Error ? error.message : '目标会话不存在'
+        error instanceof Error ? error.message : runtimeMessages().control.target.targetSessionMissing
       )
     }
   }
@@ -454,7 +463,10 @@ export class HostActionTargetResolver {
     if ('environment' in source) {
       const contextId = parseStableRef(source.environment.executionContextRef, 'context')
       if (!contextId) {
-        throw new HostActionTargetResolverError('TARGET_NOT_FOUND', '来源执行环境引用无效')
+        throw new HostActionTargetResolverError(
+          'TARGET_NOT_FOUND',
+          runtimeMessages().control.target.sourceContextRefInvalid
+        )
       }
       return contextId
     }
@@ -462,7 +474,10 @@ export class HostActionTargetResolver {
       'SELECT execution_context_id FROM sessions WHERE id = ? AND archived_at IS NULL',
       source.sessionId
     )
-    if (!row) throw new HostActionTargetResolverError('TARGET_NOT_FOUND', '来源会话不存在')
+    if (!row) throw new HostActionTargetResolverError(
+      'TARGET_NOT_FOUND',
+      runtimeMessages().control.target.sourceSessionMissing
+    )
     return row.execution_context_id
   }
 
@@ -487,7 +502,7 @@ export class HostActionTargetResolver {
     if (result.error || (result.status !== 0 && result.status !== 1)) {
       throw new HostActionTargetResolverError(
         'WORKTREE_CONFLICT',
-        `仓库分支状态校验失败: ${branch}`
+        runtimeMessages().control.target.branchCheckFailed(branch)
       )
     }
     return result.status === 0
@@ -584,7 +599,12 @@ export class HostActionTargetResolver {
       target.windowId,
       target.workspaceId
     )
-    if (!row) throw new HostActionTargetResolverError('TARGET_NOT_FOUND', '影响目标已不存在')
+    if (!row) {
+      throw new HostActionTargetResolverError(
+        'TARGET_NOT_FOUND',
+        runtimeMessages().control.target.impactTargetMissing
+      )
+    }
     return {
       window: {
         ref: `window:${target.windowId}`,
@@ -631,7 +651,8 @@ function compareProjectedTarget(left: HostTarget, right: HostTarget): number {
 }
 
 function windowTitle(kind: ResultPathRow['window_kind']): string {
-  return kind === 'detached-terminal' ? '独立终端窗口' : '主窗口'
+  const titles = runtimeMessages().control.windowTitle
+  return kind === 'detached-terminal' ? titles.detachedTerminal : titles.main
 }
 
 function displayPath(path: HostResultPath): string {

@@ -1,3 +1,5 @@
+import { runtimeMessages } from '../i18n/messages'
+
 export interface ProviderReadyIdentity {
   sessionId: string
   runId: string
@@ -44,7 +46,7 @@ export class ProviderReadyRegistry {
         reject,
         timer: setTimeout(() => {
           this.#remove(sessionId, waiter)
-          reject(new Error(`等待会话 ${sessionId} 的 Provider 就绪超时`))
+          reject(new Error(runtimeMessages().control.providerReady.waitTimeout(sessionId)))
         }, timeoutMs),
         ...(signal === undefined ? {} : { signal })
       }
@@ -75,7 +77,10 @@ export class ProviderReadyRegistry {
     return true
   }
 
-  cancel(sessionId: string, reason = new Error(`等待会话 ${sessionId} 就绪已取消`)): void {
+  cancel(
+    sessionId: string,
+    reason = new Error(runtimeMessages().control.providerReady.waitCancelled(sessionId))
+  ): void {
     const sessionWaiters = this.#waiters.get(sessionId)
     if (!sessionWaiters) return
     this.#waiters.delete(sessionId)
@@ -85,7 +90,7 @@ export class ProviderReadyRegistry {
     }
   }
 
-  cancelAll(reason = new Error('Provider 就绪等待已取消')): void {
+  cancelAll(reason = new Error(runtimeMessages().control.providerReady.allCancelled)): void {
     for (const sessionId of [...this.#waiters.keys()]) this.cancel(sessionId, reason)
   }
 
@@ -106,5 +111,6 @@ export class ProviderReadyRegistry {
 }
 
 function abortError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error('Provider 就绪等待已取消')
+  if (signal.reason instanceof Error) return signal.reason
+  return new Error(runtimeMessages().control.providerReady.allCancelled)
 }

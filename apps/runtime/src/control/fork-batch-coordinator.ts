@@ -13,6 +13,7 @@ import type {
   ResolvedHostEntity
 } from './host-action-target-resolver'
 import type { HostCallerIdentity } from './host-control-types'
+import { runtimeMessages } from '../i18n/messages'
 import type {
   CreateForkInput,
   ForkWorkflowResult,
@@ -230,12 +231,12 @@ export class ForkBatchCoordinator {
     if (
       accepted.public_request_fingerprint !== publicFingerprint ||
       accepted.resolved_request_json === null
-    ) throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+    ) throw new Error(runtimeMessages().control.forkBatch.inputMismatch(input.batchKey))
     const resolved = JSON.parse(
       accepted.resolved_request_json
     ) as StoredResolvedForkBatchRequest
     if (resolved.environments.length !== input.items.length) {
-      throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+      throw new Error(runtimeMessages().control.forkBatch.inputMismatch(input.batchKey))
     }
     return {
       source: resolved.source,
@@ -286,7 +287,7 @@ export class ForkBatchCoordinator {
   ): Promise<ForkBatchResult> {
     validateBatch(input)
     if (input.items.length !== 1) {
-      throw new Error('已接受的单节点 Fork 必须只有一个项目')
+      throw new Error(runtimeMessages().control.forkBatch.singleItemRequired)
     }
     requiredText(input.sessionId, 'sessionId')
     const ledgerFingerprint = batchFingerprint(input)
@@ -329,7 +330,7 @@ export class ForkBatchCoordinator {
       })
       row = this.#itemRow(input.batchKey, item.itemKey)
     } else if (row.session_id !== input.sessionId) {
-      throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+      throw new Error(runtimeMessages().control.forkBatch.inputMismatch(input.batchKey))
     }
     if (shouldResumeStart(row)) {
       await this.#startItem(input.batchKey, item, row)
@@ -366,7 +367,7 @@ export class ForkBatchCoordinator {
       if (!selected.has(item.itemKey)) continue
       let attemptItem = requireValue(
         attemptItems.get(item.itemKey),
-        `重试 ${attempt.attempt_id} 缺少项目 ${item.itemKey}`
+        runtimeMessages().control.forkBatch.attemptMissingItem(attempt.attempt_id, item.itemKey)
       )
       if (attemptItem.state === 'completed' || attemptItem.state === 'failed') continue
       let row = this.#refreshItem(input.batchKey, item)
@@ -403,7 +404,7 @@ export class ForkBatchCoordinator {
         }
       } else {
         if (row.session_id !== null && !isSettlementFailureReceipt(row.failure_receipt)) {
-          throw new Error(`项目 ${item.itemKey} 的失败 Fork 记录缺失`)
+          throw new Error(runtimeMessages().control.forkBatch.failureRecordMissing(item.itemKey))
         }
         row = await this.#createItem(
           input, item, `retry-create:${attempt.attempt_id}:${item.itemKey}`
@@ -570,14 +571,14 @@ export class ForkBatchCoordinator {
     if (sessionId === null) {
       this.#recordFailure(batchKey, item.itemKey, {
         sessionId: null,
-        error: accepted.error ?? 'Fork 未返回已创建的会话',
+        error: accepted.error ?? runtimeMessages().control.forkBatch.noCreatedSession,
         receipt: fallbackFailureReceipt
       })
     } else if (accepted.forkState === 'failed') {
       const intent = this.#intent(itemSubmissionKey(batchKey, item.itemKey))
       this.#recordFailure(batchKey, item.itemKey, {
         sessionId,
-        error: accepted.error ?? intent?.error_message ?? 'Fork 创建失败',
+        error: accepted.error ?? intent?.error_message ?? runtimeMessages().control.forkBatch.createFailed,
         receipt: intent?.stage === 'failed'
           ? intentFailureReceipt(intent)
           : fallbackFailureReceipt
@@ -637,8 +638,8 @@ export class ForkBatchCoordinator {
         state: 'created',
         startState: uncertain ? 'uncertain' : 'failed',
         error: uncertain
-          ? `节点已创建，任务投递结果待确认：${errorMessage(error)}`
-          : `节点已创建，任务仍待启动：${errorMessage(error)}`
+          ? runtimeMessages().control.forkBatch.deliveryUncertain(errorMessage(error))
+          : runtimeMessages().control.forkBatch.startPending(errorMessage(error))
       })
     } finally {
       abort.abort(new Error('provider readiness completed'))
@@ -654,14 +655,14 @@ export class ForkBatchCoordinator {
         assertSameBatch(input.batchKey, existing.request_fingerprint, fingerprint)
         this.#assertPublicRequest(input, existing)
         if (existing.item_count !== input.items.length) {
-          throw new Error(`批次 ${input.batchKey} 的持久条目数量不一致`)
+          throw new Error(runtimeMessages().control.forkBatch.itemCountMismatch(input.batchKey))
         }
         const rows = tx.all<BatchItemRow>(
           'SELECT * FROM fork_batch_items WHERE batch_key = ? ORDER BY ordinal', input.batchKey
         )
         for (const [index, item] of input.items.entries()) {
           if (rows[index]?.item_fingerprint !== itemFingerprint(item)) {
-            throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+            throw new Error(runtimeMessages().control.forkBatch.inputMismatch(input.batchKey))
           }
         }
         return
@@ -669,7 +670,7 @@ export class ForkBatchCoordinator {
       if (!create) {
         throw new ForkBatchCoordinatorError(
           'TARGET_NOT_FOUND',
-          `批次 ${input.batchKey} 没有可重试的上一轮结果`
+          runtimeMessages().control.forkBatch.noRetryableResult(input.batchKey)
         )
       }
 
@@ -730,7 +731,7 @@ export class ForkBatchCoordinator {
         input.publicRequest
       ) ||
       existing.resolved_request_json !== resolvedRequestJson(input)
-    ) throw new Error(`批次 ${input.batchKey} 与已提交输入不一致`)
+    ) throw new Error(runtimeMessages().control.forkBatch.inputMismatch(input.batchKey))
   }
 
   #resolveRetryAttempt(
@@ -741,7 +742,10 @@ export class ForkBatchCoordinator {
       this.#itemRows(input.batchKey).map((row) => [row.item_key, row])
     )
     const failureGenerations = input.retryItemKeys.map((itemKey) => {
-      const row = requireValue(byKey.get(itemKey), `批次 ${input.batchKey} 缺少项目 ${itemKey}`)
+      const row = requireValue(
+        byKey.get(itemKey),
+        runtimeMessages().control.forkBatch.missingItem(input.batchKey, itemKey)
+      )
       return { itemKey, failureGeneration: row.failure_generation }
     })
     const requestFingerprint = hash(canonicalJson({
@@ -762,7 +766,7 @@ export class ForkBatchCoordinator {
         existing.retry_keys_json !== canonicalJson(input.retryItemKeys) ||
         existing.failure_generations_json !== canonicalJson(failureGenerations)
       ) {
-        throw new Error(`批次 ${input.batchKey} 的重试凭据与请求不一致`)
+        throw new Error(runtimeMessages().control.forkBatch.retryTicketMismatch(input.batchKey))
       }
       return existing
     }
@@ -776,7 +780,7 @@ export class ForkBatchCoordinator {
     if (invalid.length > 0) {
       throw new ForkBatchCoordinatorError(
         'INVALID_REQUEST',
-        `仅可重试上一轮失败的项目：${invalid.join(', ')}`
+        runtimeMessages().control.forkBatch.retryOnlyFailed(invalid.join(', '))
       )
     }
     const attemptId = hash(`fork-batch-retry:${requestFingerprint}`)
@@ -816,7 +820,7 @@ export class ForkBatchCoordinator {
       this.#database.get<RetryAttemptRow>(
         'SELECT * FROM fork_batch_retry_attempts WHERE attempt_id = ?', attemptId
       ),
-      `重试 ${attemptId} 未写入`
+      runtimeMessages().control.forkBatch.attemptNotWritten(attemptId)
     )
   }
 
@@ -868,7 +872,7 @@ export class ForkBatchCoordinator {
         attemptId,
         itemKey
       ),
-      `重试 ${attemptId} 缺少项目 ${itemKey}`
+      runtimeMessages().control.forkBatch.attemptMissingItem(attemptId, itemKey)
     )
   }
 
@@ -937,7 +941,7 @@ export class ForkBatchCoordinator {
     if (row.start_state === 'delivering') {
       this.#writeItem(batchKey, item.itemKey, {
         state: 'created', startState: 'uncertain',
-        error: '节点已创建，任务投递结果待确认'
+        error: runtimeMessages().control.forkBatch.deliveryUncertainShort
       })
       row = this.#itemRow(batchKey, item.itemKey)
     }
@@ -953,7 +957,7 @@ export class ForkBatchCoordinator {
       if (isRetryCallReceiptFor(row.failure_receipt, intent)) return row
       this.#recordFailure(batchKey, item.itemKey, {
         sessionId: intent.session_id,
-        error: intent.error_message ?? 'Fork 创建失败',
+        error: intent.error_message ?? runtimeMessages().control.forkBatch.createFailed,
         receipt: intentFailureReceipt(intent)
       })
     } else if (row.start_state === 'completed') {
@@ -999,7 +1003,7 @@ export class ForkBatchCoordinator {
         'SELECT * FROM fork_batch_items WHERE batch_key = ? AND item_key = ?',
         batchKey,
         itemKey
-      ), `批次 ${batchKey} 缺少项目 ${itemKey}`)
+      ), runtimeMessages().control.forkBatch.missingItem(batchKey, itemKey))
       const failureGeneration = row.failure_receipt === failure.receipt
         ? row.failure_generation
         : row.failure_generation + 1
@@ -1112,7 +1116,7 @@ export class ForkBatchCoordinator {
       batchKey,
       itemKey
     )
-    if (!row) throw new Error(`批次 ${batchKey} 缺少项目 ${itemKey}`)
+    if (!row) throw new Error(runtimeMessages().control.forkBatch.missingItem(batchKey, itemKey))
     return row
   }
 
@@ -1272,7 +1276,7 @@ function itemFingerprint(item: ResolvedForkItemInput): string {
 }
 
 function assertSameBatch(batchKey: string, prior: string, next: string): void {
-  if (prior !== next) throw new Error(`批次 ${batchKey} 与已提交输入不一致`)
+  if (prior !== next) throw new Error(runtimeMessages().control.forkBatch.inputMismatch(batchKey))
 }
 
 function publicEnvironment(environment: ResolvedForkEnvironment): ForkEnvironmentChoice {
@@ -1342,11 +1346,12 @@ function settlementFailure(error: unknown, sessionId: string): {
     candidate?.code === 'FORK_SETTLEMENT_MISSING'
     ? candidate.code
     : 'FORK_SETTLEMENT_FAILED'
+  const forkBatchMessages = runtimeMessages().control.forkBatch
   const publicMessage = code === 'FORK_SETTLEMENT_TIMEOUT'
-    ? 'Fork 状态确认超时，请稍后仅重试此项'
+    ? forkBatchMessages.settlementTimeout
     : code === 'FORK_SETTLEMENT_MISSING'
-      ? 'Fork 状态记录不可用，请仅重试此项'
-      : 'Fork 状态确认失败，请稍后仅重试此项'
+      ? forkBatchMessages.settlementMissing
+      : forkBatchMessages.settlementFailed
   const diagnostic = typeof candidate?.diagnostic === 'string'
     ? candidate.diagnostic
     : `${errorMessage(error)}; session=${sessionId}`

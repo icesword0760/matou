@@ -10,6 +10,7 @@ import {
   HOST_CONTROL_DEFAULT_TIMEOUT_MS,
   hostControlResponseTimeoutMs
 } from './host-control-deadlines'
+import { runtimeMessages } from '../i18n/messages'
 
 export interface HostControlClientOptions {
   endpoint: string
@@ -61,7 +62,7 @@ export class HostControlClient {
       deadlineAt
     }))
     if (body.byteLength > HOST_CONTROL_MAX_FRAME_BYTES) {
-      throw new HostControlClientError('INVALID_REQUEST', 'Host Control 请求超过大小限制')
+      throw new HostControlClientError('INVALID_REQUEST', runtimeMessages().control.client.requestTooLarge)
     }
     const socket = await connectWithin(this.#endpoint, connectTimeoutMs)
     try {
@@ -70,12 +71,12 @@ export class HostControlClient {
       socket.write(Buffer.concat([prefix, body]))
       const response = parseControlResponse(await readFrame(socket, responseTimeoutMs))
       if (response.requestId !== requestId) {
-        throw new HostControlClientError('INVALID_RESPONSE', 'Host Control 返回了不匹配的请求标识')
+        throw new HostControlClientError('INVALID_RESPONSE', runtimeMessages().control.client.mismatchedRequestId)
       }
       if (!response.ok) {
         throw new HostControlClientError(
           response.error?.code ?? 'INTERNAL_ERROR',
-          response.error?.message ?? 'Host Control 请求失败',
+          response.error?.message ?? runtimeMessages().control.client.requestFailed,
           parseErrorDetails(response.error?.code, response.error?.details)
         )
       }
@@ -110,7 +111,7 @@ function parseControlResponse(body: Buffer): ControlResponse {
 function invalidResponse(cause?: unknown): HostControlClientError {
   return new HostControlClientError(
     'INVALID_RESPONSE',
-    'Matou Host Control 返回了无效响应；请重试',
+    runtimeMessages().control.client.invalidResponse,
     undefined,
     cause === undefined ? undefined : { cause }
   )
@@ -144,7 +145,7 @@ function connectWithin(endpoint: string, timeoutMs: number): Promise<Socket> {
       socket.destroy()
       reject(new HostControlClientError(
         'TIMEOUT',
-        '连接 Matou Host Control 超时；请确认 Matou 仍在运行后重试'
+        runtimeMessages().control.client.connectTimeout
       ))
     }, timeoutMs)
     const onConnect = () => {
@@ -156,7 +157,7 @@ function connectWithin(endpoint: string, timeoutMs: number): Promise<Socket> {
       socket.destroy()
       reject(new HostControlClientError(
         'CONNECTION_ERROR',
-        '未连接到 Matou Host Control；请在 Matou 托管终端中重试',
+        runtimeMessages().control.client.notConnected,
         undefined,
         { cause }
       ))
@@ -178,7 +179,7 @@ function readFrame(socket: Socket, timeoutMs: number): Promise<Buffer> {
       cleanup()
       reject(new HostControlClientError(
         'TIMEOUT',
-        '等待 Matou Host Control 响应超时；请确认 Matou 仍在运行后重试'
+        runtimeMessages().control.client.responseTimeout
       ))
     }, timeoutMs)
     const onData = (chunk: Buffer) => {
@@ -187,7 +188,7 @@ function readFrame(socket: Socket, timeoutMs: number): Promise<Buffer> {
       const length = buffered.readUInt32BE(0)
       if (length > HOST_CONTROL_MAX_FRAME_BYTES) {
         cleanup()
-        reject(new HostControlClientError('INVALID_RESPONSE', 'Host Control 响应超过大小限制'))
+        reject(new HostControlClientError('INVALID_RESPONSE', runtimeMessages().control.client.responseTooLarge))
         return
       }
       if (buffered.byteLength < length + 4) return
@@ -199,7 +200,7 @@ function readFrame(socket: Socket, timeoutMs: number): Promise<Buffer> {
       cleanup()
       reject(new HostControlClientError(
         'CONNECTION_ERROR',
-        '与 Matou Host Control 的连接已中断；请重试',
+        runtimeMessages().control.client.connectionLost,
         undefined,
         { cause }
       ))

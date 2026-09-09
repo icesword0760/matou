@@ -46,6 +46,7 @@ import {
   withHostControlPostResponseEffect
 } from './host-control-post-response'
 import type { HostCallerIdentity } from './host-control-types'
+import { runtimeMessages } from '../i18n/messages'
 import {
   HierarchyApplicationService,
   readHierarchyResult,
@@ -290,7 +291,7 @@ export class RuntimeHostActionFacade {
       if (active.requestHash !== command.requestHash) {
         throw new RuntimeHostActionError(
           'PATH_CONFLICT',
-          'submission key 已被不同输入使用'
+          runtimeMessages().control.facade.submissionKeyReused
         )
       }
       return active.promise
@@ -354,7 +355,7 @@ export class RuntimeHostActionFacade {
     if (!stored.session || !stored.scene) {
       throw new RuntimeHostActionError(
         'TARGET_NOT_FOUND',
-        '已接受的 Fork 结果缺少稳定会话路径'
+        runtimeMessages().control.facade.acceptedForkMissingPath
       )
     }
     const publicItem = singleForkPublicItem(request)
@@ -475,7 +476,7 @@ export class RuntimeHostActionFacade {
   ): Extract<HostActionResult, { kind: 'forked' }> {
     if (result.forkState === 'failed' || !result.session) {
       throw new RuntimeHostActionError(
-        'TARGET_NOT_READY', result.error ?? 'Fork 节点尚未准备完成'
+        'TARGET_NOT_READY', result.error ?? runtimeMessages().control.facade.forkNodeNotReady
       )
     }
     return {
@@ -656,7 +657,7 @@ export class RuntimeHostActionFacade {
     if (record.action !== action) {
       throw new RuntimeHostActionError(
         'CONFIRMATION_STALE',
-        '确认对应的操作已变化，请重新预览'
+        runtimeMessages().control.confirmation.actionChanged
       )
     }
     let target: ResolvedHostEntity
@@ -666,7 +667,7 @@ export class RuntimeHostActionFacade {
       if (error instanceof HostActionTargetResolverError && error.code === 'TARGET_NOT_FOUND') {
         throw new RuntimeHostActionError(
           'CONFIRMATION_STALE',
-          '确认对应的目标或影响已变化，请重新预览',
+          runtimeMessages().control.confirmation.stale,
           { cause: error }
         )
       }
@@ -771,7 +772,7 @@ export class RuntimeHostActionFacade {
       taskId
     )
     if (!route) {
-      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标当前没有可用的主窗口')
+      throw new RuntimeHostActionError('TARGET_NOT_READY', runtimeMessages().control.facade.noMainWindow)
     }
     return route.window_id
   }
@@ -803,7 +804,7 @@ export class RuntimeHostActionFacade {
       workspaceId
     )
     if (!fallback) {
-      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标工作空间没有可用事项')
+      throw new RuntimeHostActionError('TARGET_NOT_READY', runtimeMessages().control.facade.noTaskInWorkspace)
     }
     return fallback.task_id
   }
@@ -830,7 +831,7 @@ export class RuntimeHostActionFacade {
       taskId
     )
     if (!fallback) {
-      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标事项没有可用画布')
+      throw new RuntimeHostActionError('TARGET_NOT_READY', runtimeMessages().control.facade.noCanvasInTask)
     }
     return fallback.scene_id
   }
@@ -921,7 +922,7 @@ export class RuntimeHostActionFacade {
 
   #hostPath(result: WorkspaceHierarchyResult): HostResultPath {
     if (!result.workspace) {
-      throw new RuntimeHostActionError('TARGET_NOT_FOUND', '操作完成后没有可用工作空间')
+      throw new RuntimeHostActionError('TARGET_NOT_FOUND', runtimeMessages().control.facade.noWorkspaceAfterAction)
     }
     return {
       window: this.#window(result.navigation.windowId),
@@ -948,7 +949,9 @@ export class RuntimeHostActionFacade {
     )?.kind
     return {
       ref: `window:${windowId}`,
-      title: kind === 'detached-terminal' ? '独立终端窗口' : '主窗口'
+      title: kind === 'detached-terminal'
+        ? runtimeMessages().control.windowTitle.detachedTerminal
+        : runtimeMessages().control.windowTitle.main
     }
   }
 
@@ -974,7 +977,7 @@ export class RuntimeHostActionFacade {
       sceneId
     )
     if (!fallback) {
-      throw new RuntimeHostActionError('TARGET_NOT_READY', '目标画布没有可用会话锚点')
+      throw new RuntimeHostActionError('TARGET_NOT_READY', runtimeMessages().control.facade.noSessionAnchor)
     }
     return fallback.session_id
   }
@@ -1057,7 +1060,7 @@ export class RuntimeHostActionFacade {
     if (target.kind === 'canvas') {
       throw new RuntimeHostActionError(
         'TARGET_NOT_READY',
-        '画布使用关闭画布操作'
+        runtimeMessages().control.facade.canvasUsesCloseAction
       )
     }
     if (target.kind === 'workspace') {
@@ -1065,7 +1068,7 @@ export class RuntimeHostActionFacade {
         'SELECT is_default FROM workspaces WHERE id = ?', target.workspaceId
       )?.is_default
       if (isDefault === 1) {
-        throw new RuntimeHostActionError('TARGET_NOT_READY', '默认工作空间会保留在侧栏中')
+        throw new RuntimeHostActionError('TARGET_NOT_READY', runtimeMessages().control.facade.defaultWorkspaceKept)
       }
     }
   }
@@ -1106,7 +1109,7 @@ export class RuntimeHostActionFacade {
     if (stored.request_hash !== command.requestHash) {
       throw new RuntimeHostActionError(
         'PATH_CONFLICT',
-        'submission key 已被不同输入使用'
+        runtimeMessages().control.facade.submissionKeyReused
       )
     }
     return JSON.parse(stored.response_json) as T
@@ -1254,7 +1257,7 @@ function requireEntity<K extends ResolvedHostEntity['kind']>(
   if (target.kind !== kind) {
     throw new RuntimeHostActionError(
       'TARGET_NOT_FOUND',
-      `目标类型不匹配，需要 ${kind}`
+      runtimeMessages().control.facade.entityKindMismatch(kind)
     )
   }
   return target as Extract<ResolvedHostEntity, { kind: K }>
@@ -1312,7 +1315,7 @@ async function validateWorkspaceDirectory(path: string): Promise<void> {
   } catch (error) {
     throw new RuntimeHostActionError(
       'PATH_CONFLICT',
-      `工作空间目录不可用: ${path}`,
+      runtimeMessages().control.facade.workspaceDirectoryUnavailable(path),
       { cause: error }
     )
   }
@@ -1365,8 +1368,11 @@ function normalizeFacadeError(error: unknown): unknown {
     return new RuntimeHostActionError('TARGET_NOT_READY', error.message, { cause: error })
   }
   if (error instanceof Error) {
+    // Fragment matching classifies plain Errors thrown by the hierarchy, canvas and
+    // storage layers. Those layers still emit fixed text, so their Chinese fragments
+    // stay listed next to the English ones until each thrower moves to the catalog.
     if (
-      error.message.includes('与已提交输入不一致') ||
+      error.message.includes(runtimeMessages().control.forkBatch.inputMismatchFragment) ||
       error.message.includes('was already used for a different request') ||
       error.message.includes('当前事项下已存在同名页签') ||
       error.message.includes('already exists in this Workspace') ||
@@ -1392,24 +1398,24 @@ function normalizeFacadeError(error: unknown): unknown {
 
 function invalidRequestMessage(error: ZodError): string {
   const issue = error.issues[0]
-  if (!issue) return '请求参数不符合动作约束'
+  if (!issue) return runtimeMessages().control.facade.invalidRequest
   if (issue.code === 'unrecognized_keys') {
     const fields = issue.keys.slice(0, 3).map(safeFieldName).join(', ')
-    return `请求参数包含不支持的字段: ${fields}`
+    return runtimeMessages().control.facade.unrecognizedKeys(fields)
   }
   const field = issue.path.length > 0
     ? issue.path.map((part) => safeFieldName(String(part))).join('.')
     : 'params'
   if (issue.code === 'invalid_type') {
-    return `请求参数 ${field} 缺失或类型不正确`
+    return runtimeMessages().control.facade.invalidType(field)
   }
   if (issue.code === 'invalid_value') {
-    return `请求参数 ${field} 的值不受支持`
+    return runtimeMessages().control.facade.invalidValue(field)
   }
   if (issue.code === 'invalid_union') {
-    return `请求参数 ${field} 不符合可用选择器格式`
+    return runtimeMessages().control.facade.invalidUnion(field)
   }
-  return `请求参数 ${field} 不符合约束`
+  return runtimeMessages().control.facade.invalidConstraint(field)
 }
 
 function safeFieldName(value: string): string {

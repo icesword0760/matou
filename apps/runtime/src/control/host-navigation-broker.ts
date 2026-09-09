@@ -7,6 +7,8 @@ import {
   type HostNavigationResultWire
 } from '@matou/contracts'
 
+import { runtimeMessages } from '../i18n/messages'
+
 export type HostNavigationBrokerErrorCode = 'NAVIGATION_TIMEOUT' | 'TARGET_NOT_READY'
 
 export class HostNavigationBrokerError extends Error {
@@ -53,13 +55,15 @@ interface PendingNavigation {
   timer: ReturnType<typeof setTimeout> | undefined
 }
 
-const TARGET_NOT_READY_MESSAGE = '目标窗口当前未就绪，请稍后重试'
-const REQUEST_IN_PROGRESS_MESSAGE = '导航请求正在处理中，请稍后重试'
-const SEND_FAILED_MESSAGE = '导航请求发送失败，请稍后重试'
-const RENDERER_REJECTED_MESSAGE = '目标窗口未完成导航，请重试'
-const INVALID_ACK_MESSAGE = '目标窗口返回的导航结果无效，请重试'
-const TIMEOUT_MESSAGE = '目标窗口响应超时，请重试'
-const CLOSED_MESSAGE = '导航服务已停止，请稍后重试'
+// Read at call time: the catalog is chosen from the locale this process was forked with,
+// and a module-level constant would freeze the text before that locale is known.
+const targetNotReadyMessage = (): string => runtimeMessages().control.navigation.targetNotReady
+const requestInProgressMessage = (): string => runtimeMessages().control.navigation.requestInProgress
+const sendFailedMessage = (): string => runtimeMessages().control.navigation.sendFailed
+const rendererRejectedMessage = (): string => runtimeMessages().control.navigation.rendererRejected
+const invalidAckMessage = (): string => runtimeMessages().control.navigation.invalidAck
+const timeoutMessage = (): string => runtimeMessages().control.navigation.timeout
+const closedMessage = (): string => runtimeMessages().control.navigation.closed
 
 /**
  * Process-scoped request broker between Host Control and authenticated main-window ports.
@@ -79,7 +83,7 @@ export class HostNavigationBroker {
 
   registerWindow(windowId: string, sender: HostNavigationSender): HostNavigationRegistration {
     if (this.#closed) {
-      throw new HostNavigationBrokerError('TARGET_NOT_READY', CLOSED_MESSAGE)
+      throw new HostNavigationBrokerError('TARGET_NOT_READY', closedMessage())
     }
     const previous = this.#registrations.get(windowId)
     const registration = Object.freeze({
@@ -91,7 +95,7 @@ export class HostNavigationBroker {
     if (previous) {
       this.#rejectRegistration(
         previous,
-        new HostNavigationBrokerError('TARGET_NOT_READY', TARGET_NOT_READY_MESSAGE, {
+        new HostNavigationBrokerError('TARGET_NOT_READY', targetNotReadyMessage(), {
           cause: diagnostic(`replaced route window ${windowId}`)
         })
       )
@@ -105,7 +109,7 @@ export class HostNavigationBroker {
     this.#registrations.delete(windowId)
     this.#rejectRegistration(
       current,
-      new HostNavigationBrokerError('TARGET_NOT_READY', TARGET_NOT_READY_MESSAGE, {
+      new HostNavigationBrokerError('TARGET_NOT_READY', targetNotReadyMessage(), {
         cause: diagnostic(`disconnected route window ${windowId}`)
       })
     )
@@ -114,7 +118,7 @@ export class HostNavigationBroker {
 
   navigate(input: HostNavigationRequestInput): Promise<HostNavigationAcknowledgement> {
     if (this.#closed) {
-      return Promise.reject(new HostNavigationBrokerError('TARGET_NOT_READY', CLOSED_MESSAGE))
+      return Promise.reject(new HostNavigationBrokerError('TARGET_NOT_READY', closedMessage()))
     }
     if (input.deadlineAt <= this.#now()) {
       return Promise.reject(this.#timeoutError(input.requestId))
@@ -123,7 +127,7 @@ export class HostNavigationBroker {
     if (!registration) {
       return Promise.reject(new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        TARGET_NOT_READY_MESSAGE,
+        targetNotReadyMessage(),
         { cause: diagnostic(`offline route=${input.routeWindowId} target=${input.targetWindowId}`) }
       ))
     }
@@ -131,7 +135,7 @@ export class HostNavigationBroker {
     if (this.#pending.has(key)) {
       return Promise.reject(new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        REQUEST_IN_PROGRESS_MESSAGE,
+        requestInProgressMessage(),
         { cause: diagnostic(`duplicate navigation request ${input.requestId}`) }
       ))
     }
@@ -159,7 +163,7 @@ export class HostNavigationBroker {
     } catch (error) {
       this.#reject(pending, new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        SEND_FAILED_MESSAGE,
+        sendFailedMessage(),
         { cause: error }
       ))
     }
@@ -194,7 +198,7 @@ export class HostNavigationBroker {
     if (!result.ok) {
       this.#reject(pending, new HostNavigationBrokerError(
         'TARGET_NOT_READY',
-        RENDERER_REJECTED_MESSAGE,
+        rendererRejectedMessage(),
         { cause: result.error === undefined ? undefined : diagnostic(result.error) }
       ))
       return true
@@ -212,7 +216,7 @@ export class HostNavigationBroker {
     if (this.#closed) return
     this.#closed = true
     this.#registrations.clear()
-    const error = new HostNavigationBrokerError('TARGET_NOT_READY', CLOSED_MESSAGE)
+    const error = new HostNavigationBrokerError('TARGET_NOT_READY', closedMessage())
     for (const pending of [...this.#pending.values()]) this.#reject(pending, error)
   }
 
@@ -278,7 +282,7 @@ export class HostNavigationBroker {
   ): void {
     this.#reject(pending, new HostNavigationBrokerError(
       'TARGET_NOT_READY',
-      INVALID_ACK_MESSAGE,
+      invalidAckMessage(),
       { cause: diagnostic(`invalid navigation acknowledgement ${JSON.stringify(result)}`) }
     ))
   }
@@ -286,7 +290,7 @@ export class HostNavigationBroker {
   #timeoutError(requestId: string): HostNavigationBrokerError {
     return new HostNavigationBrokerError(
       'NAVIGATION_TIMEOUT',
-      TIMEOUT_MESSAGE,
+      timeoutMessage(),
       { cause: diagnostic(`navigation request ${requestId} exceeded its deadline`) }
     )
   }

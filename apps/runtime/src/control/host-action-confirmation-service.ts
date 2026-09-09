@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 
 import type { HostImpactSummary } from './host-action-types'
 import type { HostCallerIdentity } from './host-control-types'
+import { runtimeMessages } from '../i18n/messages'
 
 export type HostActionConfirmationCode =
   | 'CONFIRMATION_REQUIRED'
@@ -88,7 +89,7 @@ export class HostActionConfirmationService {
 
     const ref = this.#randomRef()
     if (this.#records.has(ref)) {
-      throw new Error('生成了重复的确认引用')
+      throw new Error(runtimeMessages().control.confirmation.duplicateRef)
     }
 
     const impact = cloneImpact(input.impact)
@@ -113,7 +114,7 @@ export class HostActionConfirmationService {
     if (!record) {
       throw new HostActionConfirmationError(
         'CONFIRMATION_REQUIRED',
-        '确认已失效，请先重新预览'
+        runtimeMessages().control.confirmation.required
       )
     }
 
@@ -123,14 +124,14 @@ export class HostActionConfirmationService {
     if (!sameCaller(record.caller, input.caller)) {
       throw new HostActionConfirmationError(
         'CONFIRMATION_REQUIRED',
-        '当前运行没有可用的确认'
+        runtimeMessages().control.confirmation.noneForRun
       )
     }
 
     if (requestedRecordExpired) {
       throw new HostActionConfirmationError(
         'CONFIRMATION_EXPIRED',
-        '确认已过期，请重新预览'
+        runtimeMessages().control.confirmation.expired
       )
     }
 
@@ -150,7 +151,7 @@ export class HostActionConfirmationService {
     ) {
       throw new HostActionConfirmationError(
         'CONFIRMATION_STALE',
-        '确认对应的目标或影响已变化，请重新预览'
+        runtimeMessages().control.confirmation.stale
       )
     }
 

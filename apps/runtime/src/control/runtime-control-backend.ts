@@ -20,6 +20,7 @@ import { NotificationProjection } from '../product/experience-foundation'
 import { TerminalScreenProjector } from './terminal-screen-projector'
 import { CONTROL_KEY_SEQUENCES, TerminalInputQueue } from './terminal-input-queue'
 import { HostControlTargetNotReadyError } from './host-control-types'
+import { runtimeMessages } from '../i18n/messages'
 
 export type HostActionExecutor = (
   method: HostActionMethod,
@@ -185,7 +186,7 @@ export class RuntimeControlBackend implements HostControlBackend {
     this.#notifications.ingest({
       eventId: `task-log:${taskId}:${id}`,
       type: 'error',
-      title: '事项出错',
+      title: runtimeMessages().control.backend.taskError,
       subtitle: source,
       body: message,
       workspaceId: target.workspace_id,
@@ -226,7 +227,7 @@ export class RuntimeControlBackend implements HostControlBackend {
 
   #requireActive(sessionId: string): PtySession {
     const session = this.#active.get(sessionId)
-    if (!session) throw new HostControlTargetNotReadyError('目标会话当前没有可输入的终端进程')
+    if (!session) throw new HostControlTargetNotReadyError(runtimeMessages().control.backend.noInputTerminal)
     return session
   }
 

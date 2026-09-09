@@ -12,6 +12,7 @@ import {
 } from '@matou/contracts'
 
 import { RuntimeServer, type RuntimePort } from './runtime-server'
+import { runtimeMessages } from './i18n/messages'
 import {
   HostControlServer,
   CapabilityTokenService,
@@ -500,7 +501,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     retryChild: (command, input) => forkWorkflow.retryFork(command, input),
     startSession: async (sessionId) => {
       const descriptor = forkExecutionDescriptor(database, sessionId)
-      if (!descriptor) throw new Error(`会话 ${sessionId} 尚未准备完成`)
+      if (!descriptor) throw new Error(runtimeMessages().server.sessionNotReady(sessionId))
       await backgroundServer.startOrResumeSession(descriptor)
     },
     waitUntilReady: (sessionId, signal) => providerReady.wait(
@@ -555,10 +556,12 @@ async function initializeRuntime(): Promise<RuntimeState> {
           event: {
             eventType: notification.status === 'succeeded' ? 'completed' : 'error',
             title: 'Claude Code',
-            subtitle: notification.status === 'succeeded' ? '分支已就绪' : '分支创建失败',
+            subtitle: notification.status === 'succeeded'
+              ? runtimeMessages().server.branchReady
+              : runtimeMessages().server.branchFailed,
             body: notification.status === 'succeeded'
-              ? '新的分支会话已经可以继续工作'
-              : notification.error ?? '分支创建未完成',
+              ? runtimeMessages().server.branchReadyBody
+              : notification.error ?? runtimeMessages().server.branchIncomplete,
             sound: true,
             cooldownKey: 'Notification',
             replacementKey: notification.replacementKey
@@ -601,7 +604,7 @@ function shutdown(): Promise<void> {
   return lifecycleCoordinator.shutdown(runtimeReady, {
     closeIncoming: () => {
       if (runtimeState?.mode === 'normal') {
-        runtimeState.providerReady.cancelAll(new Error('Runtime 正在关闭'))
+        runtimeState.providerReady.cancelAll(new Error(runtimeMessages().server.runtimeShuttingDown))
       }
       forkCoordinator?.stop()
       forkCoordinator = undefined
@@ -768,7 +771,7 @@ function deterministicStartupFailure(error: unknown): {
     return {
       type: 'runtime.startup-failure',
       code: 'MIGRATION_HISTORY_MISMATCH',
-      message: '工作区升级记录与当前版本不一致，原数据保持原样。',
+      message: runtimeMessages().server.migrationHistoryMismatch,
       retryable: false
     }
   }
@@ -776,7 +779,7 @@ function deterministicStartupFailure(error: unknown): {
     return {
       type: 'runtime.startup-failure',
       code: 'DATABASE_SCHEMA_UNSUPPORTED',
-      message: '工作区数据来自较新的 Matou 版本，请更新应用后重新检查。',
+      message: runtimeMessages().server.databaseSchemaUnsupported,
       retryable: false
     }
   }
@@ -870,7 +873,7 @@ async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): 
     if (command.action === 'export-recovery-bundle') {
       try {
         const state = await runtimeReady
-        if (state.mode !== 'read-only') throw new Error('当前数据库不在只读恢复模式')
+        if (state.mode !== 'read-only') throw new Error(runtimeMessages().server.databaseNotReadOnly)
         const destinationRoot = resolve(
           process.env.MATOU_RECOVERY_EXPORT_DIR ?? resolve(os.homedir(), 'Downloads', 'Matou-Recovery')
         )
@@ -892,7 +895,7 @@ async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): 
     }
     parentPort.postMessage({
       type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
-      error: '当前没有待处理的数据库恢复操作'
+      error: runtimeMessages().server.noPendingRecovery
     })
     return
   }
@@ -902,7 +905,7 @@ async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): 
   ) {
     parentPort?.postMessage({
       type: 'runtime.recovery-result', requestId: command.requestId, ok: false,
-      error: '数据库恢复周期已更新，本次操作已停止'
+      error: runtimeMessages().server.recoveryCycleChanged
     })
     return
   }
@@ -913,7 +916,7 @@ async function executeDatabaseRecoveryCommand(command: RuntimeRecoveryCommand): 
       if (result.bootstrap.kind === 'recovery-required') {
         pendingDatabaseRecovery = result.bootstrap
         lifecyclePublisher.recoveryRequired(result.bootstrap)
-        throw new Error('重新检查后数据库仍需要恢复')
+        throw new Error(runtimeMessages().server.recoveryStillRequired)
       }
       pendingDatabaseRecovery = undefined
       settleDatabaseRecovery.resolve(result.bootstrap)

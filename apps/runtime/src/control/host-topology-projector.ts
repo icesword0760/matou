@@ -7,6 +7,7 @@ import {
   type HostTargetEnvironment,
   type HostTargetSelector
 } from './host-control-types'
+import { runtimeMessages } from '../i18n/messages'
 
 interface TargetRow {
   session_id: string
@@ -52,7 +53,7 @@ export class HostTopologyProjector {
 
   identify(caller: HostCallerIdentity): { caller: HostCallerIdentity; target: HostTarget } {
     const target = this.#allTargets().find(({ sessionId }) => sessionId === caller.sessionId)
-    if (!target) throw new HostControlTargetNotFoundError('当前调用会话已不在 Matou 会话图中')
+    if (!target) throw new HostControlTargetNotFoundError(runtimeMessages().control.topology.callerNotInGraph)
     return { caller: { ...caller }, target }
   }
 
@@ -60,7 +61,7 @@ export class HostTopologyProjector {
     const targets = this.#allTargets()
     if (scope === 'all') return targets
     const current = targets.find(({ sessionId }) => sessionId === caller.sessionId)
-    if (!current) throw new HostControlTargetNotFoundError('当前调用会话已不在 Matou 会话图中')
+    if (!current) throw new HostControlTargetNotFoundError(runtimeMessages().control.topology.callerNotInGraph)
     const parentRef = current.dag.parentRef
     return targets.filter((target) =>
       target.canvas.id === current.canvas.id && target.dag.parentRef === parentRef
@@ -70,19 +71,19 @@ export class HostTopologyProjector {
   resolve(caller: HostCallerIdentity, selector: HostTargetSelector): string {
     const targets = this.#allTargets()
     const current = targets.find(({ sessionId }) => sessionId === caller.sessionId)
-    if (!current) throw new HostControlTargetNotFoundError('当前调用会话已不在 Matou 会话图中')
+    if (!current) throw new HostControlTargetNotFoundError(runtimeMessages().control.topology.callerNotInGraph)
 
     if (selector.kind === 'self') return current.sessionId
     if (selector.kind === 'session') {
       return requireTarget(
         targets.find(({ sessionId }) => sessionId === selector.sessionId),
-        '指定会话已不在 Matou 会话图中'
+        runtimeMessages().control.topology.sessionNotInGraph
       ).sessionId
     }
     if (selector.kind === 'ref') {
       return requireTarget(
         targets.find(({ ref }) => ref === selector.ref),
-        `目标 ${selector.ref} 已不在 Matou 会话图中`
+        runtimeMessages().control.topology.refNotInGraph(selector.ref)
       ).sessionId
     }
 
@@ -90,28 +91,35 @@ export class HostTopologyProjector {
       target.canvas.id === current.canvas.id && target.dag.parentRef === current.dag.parentRef
     )
     if (selector.kind === 'sibling') {
-      return requireTarget(siblings[selector.ordinal - 1], `当前层级没有第 ${selector.ordinal} 个会话`).sessionId
+      return requireTarget(
+        siblings[selector.ordinal - 1],
+        runtimeMessages().control.topology.siblingOutOfRange(selector.ordinal)
+      ).sessionId
     }
     if (selector.kind === 'relative') {
       const index = siblings.findIndex(({ sessionId }) => sessionId === current.sessionId)
       const offset = selector.direction === 'left' ? -1 : 1
       return requireTarget(
         siblings[index + offset],
-        selector.direction === 'left' ? '当前会话左侧没有同层会话' : '当前会话右侧没有同层会话'
+        selector.direction === 'left'
+          ? runtimeMessages().control.topology.noSessionLeft
+          : runtimeMessages().control.topology.noSessionRight
       ).sessionId
     }
     if (selector.relation === 'parent') {
-      if (!current.dag.parentRef) throw new HostControlTargetNotFoundError('当前会话没有父会话')
+      if (!current.dag.parentRef) {
+        throw new HostControlTargetNotFoundError(runtimeMessages().control.topology.noParent)
+      }
       return requireTarget(
         targets.find(({ ref }) => ref === current.dag.parentRef),
-        '父会话已不在 Matou 会话图中'
+        runtimeMessages().control.topology.parentNotInGraph
       ).sessionId
     }
     const ordinal = selector.ordinal ?? 1
     const childRef = current.dag.childRefs[ordinal - 1]
     return requireTarget(
       targets.find(({ ref }) => ref === childRef),
-      `当前会话没有第 ${ordinal} 个子会话`
+      runtimeMessages().control.topology.childOutOfRange(ordinal)
     ).sessionId
   }
 

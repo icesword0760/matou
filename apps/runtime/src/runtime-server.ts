@@ -18,6 +18,7 @@ import {
 } from '@matou/contracts'
 
 import { DomainEventStore } from './events/domain-event-store'
+import { runtimeMessages } from './i18n/messages'
 import {
   JournalCorruptionError,
   SegmentJournal,
@@ -746,7 +747,7 @@ export class RuntimeServer {
         const lastInput = this.#lastProviderInputs.get(message.sessionId)
         if (!session || session.profile === 'shell' || !lastInput) {
           this.#sendError(
-            'INVALID_MESSAGE', '当前会话没有可重试的上一轮输入', message.sessionId
+            'INVALID_MESSAGE', runtimeMessages().server.noRetryableInput, message.sessionId
           )
           break
         }
@@ -2082,7 +2083,7 @@ export class RuntimeServer {
           const forkIncomplete = Boolean(forkLaunch && forkState && forkState !== 'succeeded')
           let forkFailure = Boolean(forkIncomplete && (!wasCurrent || forkState === 'failed'))
           if (wasCurrent && forkIncomplete && forkState !== 'failed') {
-            const reason = `Fork 会话进程已退出，代码：${exitCode}`
+            const reason = runtimeMessages().server.forkProcessExited(exitCode)
             if (this.#failFork(message.sessionId, reason, forkAuthority)) {
               forkFailure = true
               void this.#appendForkExitFailure(message.sessionId, reason, exited.lastSequence + 1)
@@ -2128,13 +2129,14 @@ export class RuntimeServer {
             }
           }
           if (shellStartupFailure) {
-            const executable = process.env.SHELL ?? '系统默认 Shell'
+            const serverMessages = runtimeMessages().server
+            const executable = process.env.SHELL ?? serverMessages.defaultShell
             const termination = signal === undefined
-              ? `退出代码 ${exitCode}`
-              : `信号 ${signal}`
+              ? serverMessages.exitCode(exitCode)
+              : serverMessages.signal(signal)
             this.#sendError(
               'INTERNAL_ERROR',
-              `Shell 进程启动失败：${executable} 未产生可用输出并退出（${termination}）`,
+              serverMessages.shellStartFailed(executable, termination),
               message.sessionId
             )
             return false
@@ -2234,7 +2236,7 @@ export class RuntimeServer {
       this.#rejectProviderDerivedOutput(message.sessionId)
       await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
       if (forkLaunch && !providerProcessStarted) {
-        const reason = `Fork 会话进程启动失败：${errorMessage(error)}`
+        const reason = runtimeMessages().server.forkProcessStartFailed(errorMessage(error))
         await this.#presentForkFailure(message, reason, forkAuthority, attachView)
         return
       }
@@ -2268,7 +2270,7 @@ export class RuntimeServer {
       session.dispose({ notifyExit: false })
       return
     }
-    session.display('\r\n\u001b[33m[Fork 未完成，请检查上方原因后重试]\u001b[0m\r\n')
+    session.display(`\r\n\u001b[33m${runtimeMessages().server.forkIncompleteBanner}\u001b[0m\r\n`)
     this.#sessions.delete(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
@@ -2282,7 +2284,7 @@ export class RuntimeServer {
     attachView = true
   ): Promise<void> {
     if (!this.#failFork(message.sessionId, reason, authority)) return
-    const banner = '[Fork 未完成，请检查上方原因后重试]'
+    const banner = runtimeMessages().server.forkIncompleteBanner
     const tail = await this.#history.page({
       sessionId: message.sessionId,
       lineLimit: 16
@@ -2383,7 +2385,7 @@ export class RuntimeServer {
 
   async #appendForkExitFailure(sessionId: string, reason: string, sequence: number): Promise<void> {
     try {
-      const banner = '[Fork 未完成，请检查上方原因后重试]'
+      const banner = runtimeMessages().server.forkIncompleteBanner
       const journal = await SegmentJournal.open(
         this.#dataRoot,
         sessionId,
@@ -2465,7 +2467,7 @@ export class RuntimeServer {
       message,
       session,
       binding.id,
-      'AI 会话返回的上下文与待恢复会话不一致，请重试恢复'
+      runtimeMessages().server.providerIdentityMismatch
     )
     this.flushSemanticEvents()
     return true
@@ -2507,7 +2509,7 @@ export class RuntimeServer {
       this.#beginForkFailure(
         message,
         session,
-        'Fork 会话身份确认超时，请重试',
+        runtimeMessages().server.forkIdentityTimeout,
         authority
       )
       this.flushSemanticEvents()
@@ -2636,7 +2638,7 @@ export class RuntimeServer {
     if (binding.state !== 'ready') {
       this.#sendError(
         'SESSION_ENVIRONMENT_UNAVAILABLE',
-        '该会话的运行目录正在恢复或需要重新定位，请先处理运行环境后继续',
+        runtimeMessages().server.environmentRecovering,
         sessionId
       )
       return false
@@ -2666,7 +2668,7 @@ export class RuntimeServer {
       )
       this.#sendError(
         'SESSION_ENVIRONMENT_UNAVAILABLE',
-        '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续',
+        runtimeMessages().server.worktreeUnavailable,
         sessionId
       )
       return false
@@ -2689,7 +2691,7 @@ export class RuntimeServer {
       )
       this.#sendError(
         'SESSION_ENVIRONMENT_UNAVAILABLE',
-        '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续',
+        runtimeMessages().server.worktreeUnavailable,
         sessionId
       )
       return false
@@ -2704,7 +2706,7 @@ export class RuntimeServer {
     )
     this.#sendError(
       'SESSION_ENVIRONMENT_UNAVAILABLE',
-      '该会话的 Worktree 当前不可用，请恢复、重新定位或切换到 Local 后继续',
+      runtimeMessages().server.worktreeUnavailable,
       sessionId
     )
     return false
