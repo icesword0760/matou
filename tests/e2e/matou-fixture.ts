@@ -67,6 +67,7 @@ async function startMatou(root: string, options: LaunchMatouOptions = {}): Promi
     ],
     env: {
       ...process.env,
+      MATOU_LOCALE: 'zh-CN',
       ...options.env,
       MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
       MATOU_DEFAULT_WORKSPACE: workspaceDirectory,

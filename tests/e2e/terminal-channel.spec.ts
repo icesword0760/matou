@@ -15,6 +15,7 @@ test('streams PTY output from UtilityProcess to xterm over a transferred Message
     args: [resolve(import.meta.dirname, '../../apps/desktop')],
     env: {
       ...process.env,
+      MATOU_LOCALE: 'zh-CN',
       MATOU_E2E: '1',
       MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
       MATOU_DATA_DIR: dataDirectory,
@@ -105,6 +106,7 @@ test('drops reference-visible paths as safe single argv without executing them',
     args: [resolve(import.meta.dirname, '../../apps/desktop')],
     env: {
       ...process.env,
+      MATOU_LOCALE: 'zh-CN',
       MATOU_E2E: '1',
       MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
       MATOU_DATA_DIR: dataDirectory,
@@ -175,6 +177,7 @@ test('drops native files and directories through Electron webUtils as exact zsh 
     args: [resolve(import.meta.dirname, '../../apps/desktop')],
     env: {
       ...process.env,
+      MATOU_LOCALE: 'zh-CN',
       MATOU_E2E: '1',
       MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
       MATOU_DATA_DIR: dataDirectory,

@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     // Several suites drive real shells and PTYs; shared CI runners make their
     // timing flaky. Retry there only, so a genuine regression still fails.
-    retry: process.env.CI ? 2 : 0
+    retry: process.env.CI ? 2 : 0,
+    env: { MATOU_LOCALE: 'zh-CN' }
   }
 })

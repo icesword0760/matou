@@ -7,6 +7,7 @@ export default defineConfig({
     fileParallelism: false,
     maxWorkers: 1,
     // Shared CI runners make timing-sensitive suites flaky; retry there only.
-    retry: process.env.CI ? 2 : 0
+    retry: process.env.CI ? 2 : 0,
+    env: { MATOU_LOCALE: 'zh-CN' }
   }
 })

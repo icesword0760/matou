@@ -90,7 +90,7 @@ async function runPackagedSmoke(
     mkdir(electronUserDataDirectory, { recursive: true })
   ])
   const launchEnvironment = {
-    ...process.env, MATOU_E2E: '1', MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
+    ...process.env, MATOU_LOCALE: 'zh-CN', MATOU_E2E: '1', MATOU_E2E_TERMINAL_DIAGNOSTICS: '1',
     MATOU_DATA_DIR: dataDirectory,
     MATOU_DEFAULT_WORKSPACE: workspaceDirectory,
     HOME: homeDirectory,
