@@ -33,7 +33,7 @@ Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. I
 
 > **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page.
 
-![Matou workspace demo with five parallel Claude Code sessions](assets/shots/workspace-demo.gif)
+![Matou workspace demo with five parallel Claude Code sessions](assets/shots/en/workspace-demo.gif)
 
 > One stretch of work: you are coding in the implementation card when the background regression finishes and needs a decision — its badge lights up. Open the notification center, click through, and the canvas slides to the regression card. Switch to the exploration canvas and open the DAG: plan A is still running, plan B is stuck, the regression failed. Click plan B's node to land on that card, then open the board and drag the task to blocked. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
 
@@ -76,7 +76,7 @@ When the result lives in another card you do not have to switch, scroll and copy
 
 Matou gives every agent it hosts the ability to identify itself, list related cards, read live screens or history, inspect available commands, and send input to parent, child, left/right neighbours or any named session. Cross-session collaboration stays inside your task structure.
 
-![Three Claude Code cards side by side: implementation, regression, review](assets/shots/workspace-demo.png)
+![Three Claude Code cards side by side: implementation, regression, review](assets/shots/en/workspace-demo.png)
 
 > The left card is implementing a Redis idempotency key (running), the middle one is a regression run waiting for you to confirm an assertion change, and the right one is a review session that read the regression result with `mt read left` before drawing its conclusion. The focused card expands; the others sit narrow beside it.
 
@@ -97,7 +97,7 @@ Tabs only tell you *which* sessions exist. The session DAG tells you how they re
 4. **Search and navigate large graphs**: search by name, path, branch or output; zoom, pan and automatic aggregation keep big graphs readable.
 5. **Jump back**: clicking a node closes the DAG and focuses that session; stopped nodes stay in the graph so the decision trail survives.
 
-![Session fork DAG](assets/shots/session-dag-demo.png)
+![Session fork DAG](assets/shots/en/session-dag-demo.png)
 
 > A baseline session forked into plan A and plan B (solid edges, conversation inherited); a shell running the regression hangs off the same parent through an association (dashed). Without opening anything you can see that A is still running, B is waiting for a decision, and the regression exited with code 1.
 
@@ -116,7 +116,7 @@ The bottom HUD keeps everything that affects your next decision in one line of s
 - Working directory, Git branch, dirty state and worktree environment
 - Running tools, todo progress, regression runs and MCP errors
 
-![Agent HUD and tiered notification center](assets/shots/agent-hud-notifications-demo.png)
+![Agent HUD and tiered notification center](assets/shots/en/agent-hud-notifications-demo.png)
 
 > The notification center labels each entry with "workspace / task", grouped into error, waiting-for-input and completed; a completion from another workspace shows up too. The two cards on the right carry a "new notification" badge, and the HUD at the bottom reports the focused session's model, context usage, weekly usage, todo progress and branch state.
 
@@ -135,7 +135,7 @@ Good for architecture decisions, hard bugs, competing UI designs, parallel code 
 
 The workspace board sorts tasks into **ready, active, blocked, done**. Drag a card to update its status; every card shows its session count so you handle what really needs attention first.
 
-![Workspace board](assets/shots/workspace-board-demo.png)
+![Workspace board](assets/shots/en/workspace-board-demo.png)
 
 ### 8. Restart recovery and multiple windows: the workspace follows the task
 

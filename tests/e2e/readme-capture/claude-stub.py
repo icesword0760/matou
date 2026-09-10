@@ -56,7 +56,7 @@ with open(os.path.join(ROOT, 'launches.log'), 'a') as log:
 
 spec = roles[role]
 # Report the conversation the host asked us to resume. Without this a catalog load (which resumes
-# a real session id) fails the restore identity handshake and the card shows "Claude Code 恢复失败".
+# a real session id) fails the restore identity handshake and the card reports a failed recovery.
 provider_id = resume or f'demo-{role}'
 url = json.load(open(settings))['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
 base = {'session_id': provider_id, 'cwd': os.getcwd()}

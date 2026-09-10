@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { chmod, cp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { LOCALE, demo, ui } from './locale'
 import { transcripts, widestLine } from './transcripts'
 
 const run = promisify(execFile)
@@ -15,10 +16,10 @@ export type Ids = { workspaceId: string; taskId: string; sceneId: string; sessio
 
 // ---------- fixtures ----------
 
-export async function prepareHome(home: string, demo: string): Promise<void> {
+export async function prepareHome(home: string, demoRoot: string): Promise<void> {
   await mkdir(join(home, '.claude'), { recursive: true })
-  await writeFile(join(home, '.zshrc'), `PROMPT='%F{blue}%~%f %# '\nexport PATH="${join(demo, 'bin')}:$PATH"\n`)
-  await writeFile(join(home, '.claude', 'CLAUDE.md'), '# 全局约定\n\n- 回复使用中文\n')
+  await writeFile(join(home, '.zshrc'), `PROMPT='%F{blue}%~%f %# '\nexport PATH="${join(demoRoot, 'bin')}:$PATH"\n`)
+  await writeFile(join(home, '.claude', 'CLAUDE.md'), demo.files.homeClaudeMd)
   await writeFile(join(home, '.claude', 'settings.json'), JSON.stringify({
     hooks: { Notification: [], SessionStart: [] }
   }, null, 2))
@@ -28,7 +29,7 @@ export async function prepareHome(home: string, demo: string): Promise<void> {
 export async function prepareShopPlatform(dir: string): Promise<void> {
   await prepareRepo(dir, {
     'package.json': JSON.stringify({ name: 'shop-api', private: true, version: '3.14.0' }, null, 2) + '\n',
-    'CLAUDE.md': '# shop-api\n\n- 支付相关改动必须带回归测试\n- 迁移脚本先在 staging 验证\n',
+    'CLAUDE.md': demo.files.workspaceClaudeMd,
     '.mcp.json': JSON.stringify({ mcpServers: { postgres: {}, browser_bridge: {} } }, null, 2) + '\n',
     '.claude/settings.local.json': JSON.stringify({ hooks: { PreToolUse: [], PostToolUse: [], Stop: [] } }, null, 2) + '\n',
     'src/payments/webhook.ts': [
@@ -44,7 +45,7 @@ export async function prepareShopPlatform(dir: string): Promise<void> {
     ].join('\n'),
     'src/payments/apply.ts': 'export async function apply() {}\n',
     'prisma/schema.prisma': 'model PaymentCallback {\n  id       Int    @id\n  eventId  String\n}\n',
-    'docs/payments.md': '# 支付回调约定\n'
+    'docs/payments.md': demo.files.paymentsDoc
   })
   await run('git', ['checkout', '-q', '-b', 'feat/webhook-idempotency'], { cwd: dir })
   await writeFile(join(dir, 'src/payments/webhook.ts'), [
@@ -79,30 +80,25 @@ export async function prepareRepo(dir: string, files: Record<string, string>): P
   await run('git', ['commit', '-q', '-m', 'init'], { cwd: dir, env })
 }
 
-export async function prepareDemo(demo: string): Promise<void> {
-  await mkdir(demo, { recursive: true })
+export async function prepareDemo(demoRoot: string): Promise<void> {
+  await mkdir(demoRoot, { recursive: true })
   for (const [name, content] of Object.entries(transcripts)) {
     const widest = widestLine(name)
     if (widest > 56) throw new Error(`transcript ${name} has a ${widest}-cell line`)
-    await writeFile(join(demo, `${name}.ans`), content)
+    await writeFile(join(demoRoot, `${name}.ans`), content)
   }
-  await cp(resolve(import.meta.dirname, 'claude-stub.py'), join(demo, 'claude'))
-  await chmod(join(demo, 'claude'), 0o755)
-  await mkdir(join(demo, 'bin'), { recursive: true })
-  await writeFile(join(demo, 'bin', 'pnpm'), `#!/bin/sh\ncat "${join(demo, 'vitest.ans')}"\nexit 1\n`)
-  await chmod(join(demo, 'bin', 'pnpm'), 0o755)
-  await writeFile(join(demo, 'roles.queue'),
+  await cp(resolve(import.meta.dirname, 'claude-stub.py'), join(demoRoot, 'claude'))
+  await chmod(join(demoRoot, 'claude'), 0o755)
+  await mkdir(join(demoRoot, 'bin'), { recursive: true })
+  await writeFile(join(demoRoot, 'bin', 'pnpm'), `#!/bin/sh\ncat "${join(demoRoot, 'vitest.ans')}"\nexit 1\n`)
+  await chmod(join(demoRoot, 'bin', 'pnpm'), 0o755)
+  await writeFile(join(demoRoot, 'roles.queue'),
     ['implementation', 'regression', 'review', 'docs', 'coordinate', 'planA1', 'planB1', 'baseline', 'planA', 'planB'].join('\n') + '\n')
   const day = 86_400
   const minute = 60_000
   const base = { model: 'Claude Opus 5', weekly: 41, resets_in: 3 * day + 5 * 3600 }
-  const todos = [
-    { content: '梳理回调处理链路', status: 'completed' },
-    { content: '选择幂等键存储：Redis SETNX + 24h 过期', status: 'completed' },
-    { content: '入口加幂等校验', status: 'in_progress' },
-    { content: '为重复回调补测试', status: 'pending' },
-    { content: '更新 docs/payments.md 回调约定', status: 'pending' }
-  ]
+  const todoStatus = ['completed', 'completed', 'in_progress', 'pending', 'pending']
+  const todos = demo.todos.map((content, index) => ({ content, status: todoStatus[index]! }))
   const waiting = ['hook', 'Notification', { message: 'Claude is waiting for your input' }]
   const planA = {
     ...base, transcript: 'planA', permission: 'acceptEdits', context: 41, duration_ms: 16 * minute,
@@ -129,7 +125,7 @@ export async function prepareDemo(demo: string): Promise<void> {
       waiting
     ]
   }
-  await writeFile(join(demo, 'roles.json'), JSON.stringify({
+  await writeFile(join(demoRoot, 'roles.json'), JSON.stringify({
     implementation: {
       ...base, transcript: 'implementation', permission: 'acceptEdits', context: 62, duration_ms: 47 * minute,
       events: [
@@ -149,7 +145,7 @@ export async function prepareDemo(demo: string): Promise<void> {
         ['tool', 'Write', 'rev-2', { file_path: 'docs/adr/0007-idempotency.md' }, 'ok'],
         ['hook', 'UserPromptSubmit', {}],
         ['tool', 'Bash', 'rev-3', { command: 'mt read left --lines 12' }, 'ok'],
-        ['hook', 'Stop', { last_assistant_message: '结论：方案 A（Redis）为主路径，方案 B 唯一索引兜底，ADR 已更新。' }]
+        ['hook', 'Stop', { last_assistant_message: demo.summaries.review }]
       ]
     },
     docs: {
@@ -158,7 +154,7 @@ export async function prepareDemo(demo: string): Promise<void> {
         ['hook', 'UserPromptSubmit', {}],
         ['tool', 'Read', 'doc-1', { file_path: 'docs/payments.md' }, 'ok'],
         ['tool', 'Edit', 'doc-2', { file_path: 'docs/payments.md' }, 'ok'],
-        ['hook', 'Stop', { last_assistant_message: '文档已更新，和 webhook.ts 里的实现保持一致。' }]
+        ['hook', 'Stop', { last_assistant_message: demo.summaries.docs }]
       ]
     },
     coordinate: {
@@ -168,8 +164,8 @@ export async function prepareDemo(demo: string): Promise<void> {
         ['tool', 'Bash', 'co-1', { command: 'mt list' }, 'ok'],
         ['tool', 'Bash', 'co-2', { command: 'mt read sibling:2 --lines 8' }, 'ok'],
         ['hook', 'UserPromptSubmit', {}],
-        ['tool', 'Bash', 'co-3', { command: 'mt send sibling:2 "改成新行为，并同步 docs/payments.md" --enter' }, 'ok'],
-        ['hook', 'Stop', { last_assistant_message: '已经交给回归卡片了，完成后我再读一次。' }]
+        ['tool', 'Bash', 'co-3', { command: `mt send sibling:2 "${demo.coordinateHandoff}" --enter` }, 'ok'],
+        ['hook', 'Stop', { last_assistant_message: demo.summaries.coordinate }]
       ]
     },
     baseline: {
@@ -177,7 +173,7 @@ export async function prepareDemo(demo: string): Promise<void> {
       events: [
         ['hook', 'UserPromptSubmit', {}],
         ['tool', 'Read', 'base-1', { file_path: 'src/payments/webhook.ts' }, 'ok'],
-        ['hook', 'Stop', { last_assistant_message: '建议分两条路线并行验证：Redis SETNX / DB 唯一索引。' }]
+        ['hook', 'Stop', { last_assistant_message: demo.summaries.baseline }]
       ]
     },
     planA1: planA,
@@ -186,76 +182,40 @@ export async function prepareDemo(demo: string): Promise<void> {
     planB,
     'baseline-three': {
       ...base, transcript: 'baseline-three', permission: 'default', context: 21, duration_ms: 7 * minute,
-      events: [['hook', 'UserPromptSubmit', {}], ['hook', 'Stop', { last_assistant_message: '三个幂等方案已列出，等待选择。' }]]
+      events: [['hook', 'UserPromptSubmit', {}], ['hook', 'Stop', { last_assistant_message: demo.summaries.baselineThree }]]
     },
     'ai-read': {
       ...base, transcript: 'ai-read', permission: 'acceptEdits', context: 12, duration_ms: 2 * minute,
       events: [
         ['hook', 'UserPromptSubmit', {}],
         ['exec', 'mt read left --lines 12', 'mt read left --lines 12'],
-        ['hook', 'Stop', { last_assistant_message: '结论：左边回归 27 个用例通过，1 个与新行为冲突，需要你确认是否更新断言。' }]
+        ['hook', 'Stop', { last_assistant_message: demo.summaries.aiRead }]
       ]
     },
     'ai-fork': {
       ...base, transcript: 'ai-fork', permission: 'acceptEdits', context: 15, duration_ms: 3 * minute,
       events: [
         ['hook', 'UserPromptSubmit', {}],
-        ['exec', `mt fork children self --items-json '${JSON.stringify([
-          { itemKey: 'redis', title: '方案 1 · Redis SETNX', environment: { mode: 'current' } },
-          { itemKey: 'unique', title: '方案 2 · DB 唯一索引', environment: { mode: 'current' } },
-          { itemKey: 'dedupe', title: '方案 3 · 去重表', environment: { mode: 'current' } }
-        ])}' --json`, 'mt fork children self --items-json …'],
-        ['hook', 'Stop', { last_assistant_message: '三张子卡片已创建，DAG 里可以看到三条分支。' }]
+        ['exec', `mt fork children self --items-json '${JSON.stringify(
+          ['redis', 'unique', 'dedupe'].map((itemKey, index) => (
+            { itemKey, title: demo.forkPlans[index]!, environment: { mode: 'current' } }
+          ))
+        )}' --json`, 'mt fork children self --items-json …'],
+        ['hook', 'Stop', { last_assistant_message: demo.summaries.aiFork }]
       ]
     }
   }, null, 2))
 }
 
 // Seeds three fake Claude Code session transcripts into the isolated HOME's history storage so the
-// "载入 Claude Code 会话" dialog has believable sessions to list. The row shape mirrors what the real
+// session loader dialog has believable sessions to list. The row shape mirrors what the real
 // Claude Code CLI writes and what ClaudeSessionCatalog (apps/runtime/src/session/claude-session-catalog.ts)
 // reads back: one JSON object per line, keyed by `type`/`sessionId`/`cwd`/`timestamp`/`message`.
 export async function seedClaudeHistory(home: string, workspace: string): Promise<void> {
   const projectDirectory = join(home, '.claude', 'projects', encodeClaudeProjectPath(workspace))
   await mkdir(projectDirectory, { recursive: true })
-  const sessions: Array<{ startedAt: string; turns: Array<['user' | 'assistant', string]> }> = [
-    {
-      startedAt: '2026-08-25T09:00:00.000Z',
-      turns: [
-        ['user', '支付回调幂等键设计'],
-        ['assistant', '先看当前回调处理的幂等策略，是否已有唯一约束。'],
-        ['user', '目前用的是 Redis SETNX，但过期时间设置不统一'],
-        ['assistant', '建议统一为 24 小时过期，并给键加上 provider 前缀避免冲突'],
-        ['user', 'DB 层要不要也加唯一索引兜底？'],
-        ['assistant', '建议加 (provider, event_id) 唯一索引作为最后一道防线'],
-        ['assistant', '已整理成 ADR，稍后同步给你']
-      ]
-    },
-    {
-      startedAt: '2026-08-28T09:00:00.000Z',
-      turns: [
-        ['user', '订单分页超时排查'],
-        ['assistant', '先看慢查询日志，定位是不是 offset 分页导致的'],
-        ['user', '是的，offset 越大越慢，P99 到了 8s'],
-        ['assistant', '建议改成游标分页，按 (created_at, id) 做 keyset'],
-        ['user', '历史数据要不要重新生成索引？'],
-        ['assistant', '需要，迁移窗口建议放在低峰期'],
-        ['assistant', '迁移脚本已经写好，跑一遍看看效果']
-      ]
-    },
-    {
-      startedAt: '2026-08-31T09:00:00.000Z',
-      turns: [
-        ['user', 'Prisma 6 升级评估'],
-        ['assistant', '先扫一遍 breaking changes，重点看关系查询语法'],
-        ['user', '有没有影响到我们现有的迁移文件？'],
-        ['assistant', '迁移文件兼容，但 relationJoins 预览特性要单独开启'],
-        ['user', '升级之后测试全过了吗？'],
-        ['assistant', '27 个用例通过，1 个跟排序相关的失败，正在看'],
-        ['assistant', '已修复排序失败用例，可以合并升级分支']
-      ]
-    }
-  ]
+  const startTimes = ['2026-08-25T09:00:00.000Z', '2026-08-28T09:00:00.000Z', '2026-08-31T09:00:00.000Z']
+  const sessions = demo.history.map((turns, index) => ({ startedAt: startTimes[index]!, turns }))
   for (const session of sessions) {
     const sessionId = randomUUID()
     const startedAt = Date.parse(session.startedAt)
@@ -292,6 +252,7 @@ export async function launch(input: { root: string; home: string; workspace: str
       ZDOTDIR: input.home,
       CLAUDE_CONFIG_DIR: join(input.home, '.claude'),
       MATOU_E2E: '1',
+      MATOU_LOCALE: LOCALE,
       MATOU_DATA_DIR: dataDirectory,
       MATOU_DEFAULT_WORKSPACE: input.workspace,
       ELECTRON_USER_DATA_DIR: userData,
@@ -490,22 +451,22 @@ export async function terminalCommand(surface: Locator, command: string): Promis
   await textarea.press('Enter')
 }
 
-export async function promoteToClaude(surface: Locator, demo: string): Promise<void> {
+export async function promoteToClaude(surface: Locator, demoRoot: string): Promise<void> {
   const sessionId = await surface.getAttribute('data-session-id')
   const stable = surface.page().locator(`.terminal-surface[data-session-id="${sessionId}"]`)
-  const before = await launches(demo)
+  const before = await launches(demoRoot)
   await terminalCommand(stable, 'claude')
   await expect(stable).toHaveAttribute('data-profile', 'claude-code')
-  await expect.poll(() => launches(demo)).toBe(before + 1)
+  await expect.poll(() => launches(demoRoot)).toBe(before + 1)
   await surface.page().waitForTimeout(900)
 }
 
-export async function waitForRole(demo: string, role: string): Promise<void> {
-  await expect.poll(async () => (await readFile(join(demo, 'launches.log'), 'utf8').catch(() => '')).includes(`"role": "${role}"`)).toBe(true)
+export async function waitForRole(demoRoot: string, role: string): Promise<void> {
+  await expect.poll(async () => (await readFile(join(demoRoot, 'launches.log'), 'utf8').catch(() => '')).includes(`"role": "${role}"`)).toBe(true)
 }
 
-export async function launches(demo: string): Promise<number> {
-  const log = await readFile(join(demo, 'launches.log'), 'utf8').catch(() => '')
+export async function launches(demoRoot: string): Promise<number> {
+  const log = await readFile(join(demoRoot, 'launches.log'), 'utf8').catch(() => '')
   return log.split('\n').filter(Boolean).length
 }
 
@@ -513,17 +474,17 @@ export async function renameSession(page: Page, surface: Locator, title: string)
   const pane = paneOf(surface)
   await pane.locator('.pane-title').scrollIntoViewIfNeeded()
   await pane.locator('.pane-title').click({ button: 'right' })
-  await page.getByRole('menuitem', { name: '重命名…' }).click()
-  await page.getByRole('textbox', { name: '会话名称' }).fill(title)
-  await page.getByRole('button', { name: '确定' }).click()
+  await page.getByRole('menuitem', { name: ui.hierarchyTerminal.pane.rename }).click()
+  await page.getByRole('textbox', { name: ui.hierarchyTerminal.pane.sessionName }).fill(title)
+  await page.getByRole('button', { name: ui.hierarchyShell.confirmOk, exact: true }).click()
   await expect(pane.locator('.pane-title')).toHaveText(title)
 }
 
 export async function renameTask(page: Page, from: string, to: string): Promise<void> {
-  await page.getByRole('button', { name: `事项菜单：${from}` }).click()
-  await page.getByRole('menuitem', { name: '重命名' }).click()
-  await page.getByRole('textbox', { name: '事项名称' }).fill(to)
-  await page.getByRole('button', { name: '确定' }).click()
+  await page.getByRole('button', { name: ui.hierarchyShell.taskSidebar.taskMenu(from) }).click()
+  await page.getByRole('menuitem', { name: ui.hierarchyShell.taskSidebar.rename, exact: true }).click()
+  await page.getByRole('textbox', { name: ui.hierarchyShell.taskSidebar.taskName }).fill(to)
+  await page.getByRole('button', { name: ui.hierarchyShell.confirmOk, exact: true }).click()
   await expect(page.getByTestId('active-task')).toHaveText(to)
 }
 
@@ -534,30 +495,31 @@ export async function selectTask(page: Page, title: string): Promise<void> {
 
 export async function renameActiveTab(page: Page, name: string): Promise<void> {
   await page.locator('.tab-item.active .tab-title').dblclick()
-  await page.getByRole('textbox', { name: '页签名称' }).fill(name)
-  await page.getByRole('button', { name: '确定' }).click()
+  await page.getByRole('textbox', { name: ui.hierarchyShell.sceneTabBar.tabName }).fill(name)
+  await page.getByRole('button', { name: ui.hierarchyShell.confirmOk, exact: true }).click()
   await expect(page.locator('.tab-item.active .tab-title')).toHaveText(name)
 }
 
 export async function forkChild(page: Page, pane: Locator, title: string, branch: string): Promise<void> {
-  const button = pane.getByRole('button', { name: `从“${title}”创建子分支` })
+  const button = pane.getByRole('button', { name: ui.hierarchyTerminal.pane.forkChildFrom(title) })
   await expect(button).not.toHaveAttribute('aria-disabled', 'true')
   await button.click()
   await fillForkDialog(page, branch)
 }
 
 export async function forkSibling(page: Page, pane: Locator, title: string, branch: string): Promise<void> {
-  const button = pane.getByRole('button', { name: `从共同父会话创建“${title}”的兄弟分支` })
+  const button = pane.getByRole('button', { name: ui.hierarchyTerminal.pane.forkSiblingFrom(title) })
   await expect(button).not.toHaveAttribute('aria-disabled', 'true')
   await button.click()
   await fillForkDialog(page, branch)
 }
 
 export async function fillForkDialog(page: Page, branch: string): Promise<void> {
-  await page.getByLabel('分支名称').fill(branch)
-  await expect(page.getByRole('radio', { name: /使用当前工作树/ })).toBeChecked()
-  await page.getByRole('button', { name: '创建分支', exact: true }).click()
-  await expect(page.getByLabel('分支名称')).toHaveCount(0)
+  const dialog = ui.sessionCanvas.branchDialog
+  await page.getByLabel(dialog.name).fill(branch)
+  await expect(page.getByRole('radio', { name: dialog.useCurrentWorktree })).toBeChecked()
+  await page.getByRole('button', { name: dialog.create, exact: true }).click()
+  await expect(page.getByLabel(dialog.name)).toHaveCount(0)
 }
 
 export async function hierarchyIds(page: Page, surface: Locator): Promise<Ids> {
@@ -571,23 +533,24 @@ export async function hierarchyIds(page: Page, surface: Locator): Promise<Ids> {
 
 export async function moveTask(page: Page, title: string, column: string): Promise<void> {
   // The board keeps the dragged id in React state, so each drag event needs its own task turn.
+  const columnLabel = ui.hierarchyShell.kanban.column(column)
   const steps: Array<['card' | 'column', string]> = [
     ['card', 'dragstart'], ['column', 'dragenter'], ['column', 'dragover'], ['column', 'drop'], ['card', 'dragend']
   ]
   for (const [on, type] of steps) {
-    await page.evaluate(({ title, column, on, type }) => {
+    await page.evaluate(({ title, columnLabel, on, type }) => {
       const card = document.querySelector<HTMLElement>(`article.board-task-card[aria-label="${title}"]`)
-      const target = document.querySelector<HTMLElement>(`section[aria-label="${column}列"]`)
-      if (!card || !target) throw new Error(`board card or column missing: ${title} → ${column}`)
+      const target = document.querySelector<HTMLElement>(`section[aria-label="${columnLabel}"]`)
+      if (!card || !target) throw new Error(`board card or column missing: ${title} → ${columnLabel}`)
       const scope = window as unknown as { __readmeDragData?: DataTransfer }
       scope.__readmeDragData ??= new DataTransfer()
       const element = on === 'card' ? card : target
       element.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: scope.__readmeDragData }))
       if (type === 'dragend') delete scope.__readmeDragData
-    }, { title, column, on, type })
+    }, { title, columnLabel, on, type })
     await page.waitForTimeout(60)
   }
-  await expect(page.locator(`section[aria-label="${column}列"] article.board-task-card[aria-label="${title}"]`)).toBeVisible()
+  await expect(page.locator(`section[aria-label="${columnLabel}"] article.board-task-card[aria-label="${title}"]`)).toBeVisible()
 }
 
 export function stageRecorder(page: Page, root: string) {

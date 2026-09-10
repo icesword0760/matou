@@ -1,5 +1,8 @@
 // Canned terminal output that mimics Claude Code's TUI for the README demo cards.
 // Scene 1 lines stay within 52 cells: non-focused cards get one of four columns.
+// Each transcript exists once per locale; the English set mirrors the Chinese one line for line and
+// keeps the same cell budget, because the card widths do not change with the locale.
+import { LOCALE } from './locale'
 
 const R = '\x1b[0m'
 const B = '\x1b[1m'
@@ -285,18 +288,288 @@ const aiFork = [
   say('好，按方案 1、2、3 各建一张子卡片，继承当前上下文。')
 ]
 
+// ---------- English ----------
+
+const implementationEn = [
+  ...welcome('~/work/shop-api'),
+  '',
+  prompt('Make the payment webhook idempotent: a repeat'),
+  '  of the same event_id must return 200 without',
+  '  posting the payment twice',
+  '',
+  say('Reading the current handler before picking a layer.'),
+  '',
+  tool('Read(src/payments/webhook.ts)'),
+  out(`Read 142 lines ${DIM}(ctrl+r to expand)${R}`),
+  '',
+  tool('Search(pattern: "event_id", path: "src")'),
+  out(`Found 6 lines ${DIM}(ctrl+r to expand)${R}`),
+  '',
+  tool('Update Todos'),
+  out(`${GREEN}☒${R} ${DIM}Map the webhook handling path${R}`),
+  cont(`${GREEN}☒${R} ${DIM}Pick the store: Redis SETNX + 24h expiry${R}`),
+  cont('☐ Add the idempotency check to handleWebhook'),
+  cont('☐ Cover repeated callbacks with a test'),
+  cont('☐ Update the contract in docs/payments.md'),
+  '',
+  tool('Update(src/payments/webhook.ts)'),
+  out(`Updated src/payments/webhook.ts with ${GREEN}8 additions${R}`),
+  `       ${DIM}21${R}    export async function handleWebhook(req) {`,
+  `       ${DIM}22${R}      const event = parseEvent(req.body)`,
+  `       ${DIM}23${R} ${GREEN}+    const key = \`pay:cb:\${event.id}\`${R}`,
+  `       ${DIM}24${R} ${GREEN}+    const fresh = await redis.set(${R}`,
+  `       ${DIM}25${R} ${GREEN}+      key, '1', 'NX', 'EX', 86_400)${R}`,
+  `       ${DIM}26${R} ${GREEN}+    if (!fresh) {${R}`,
+  `       ${DIM}27${R} ${GREEN}+      log.info({ id: event.id }, 'dup')${R}`,
+  `       ${DIM}28${R} ${GREEN}+      return ok({ duplicate: true })${R}`,
+  `       ${DIM}29${R} ${GREEN}+    }${R}`,
+  `       ${DIM}30${R}      await paymentService.apply(event)`,
+  '',
+  say('Guard added at the entry point. Running the tests.'),
+  '',
+  tool('Bash(pnpm vitest run src/payments --reporter=dot)', false),
+  out(`${DIM}Running…${R}`),
+  '',
+  `${ORANGE}✻${R} ${DIM}Running… (8s · esc to interrupt)${R}`
+]
+
+const regressionEn = [
+  prompt('Run the payments regression and'),
+  '  see what the idempotency change broke',
+  '',
+  tool('Bash(pnpm vitest run src/payments)'),
+  out(`${DIM}RUN${R}  v4.1.11 ~/work/shop-api`),
+  cont(`${GREEN}✓${R} parse-event.test.ts ${DIM}(8) 41ms${R}`),
+  cont(`${GREEN}✓${R} apply.test.ts ${DIM}(12) 187ms${R}`),
+  cont(`${GREEN}✓${R} refund.test.ts ${DIM}(5) 96ms${R}`),
+  cont(`${RED}❯${R} webhook.duplicate.test.ts ${RED}(1)${R}`),
+  cont(`  ${RED}×${R} repeat callback returns 409`),
+  cont(`    ${RED}AssertionError: expected 200${R}`),
+  cont(`    ${RED}to be 409${R}`),
+  '',
+  cont(`${DIM}Test Files${R}  ${RED}1 failed${R} | ${GREEN}3 passed${R}`),
+  cont(`${DIM}     Tests${R}  ${RED}1 failed${R} | ${GREEN}27 passed${R}`),
+  '',
+  say('27 tests pass, 1 fails.'),
+  '  It expects 409 for a repeat',
+  '  callback, but the new code returns',
+  '  200 + duplicate: true (the gateway',
+  '  only stops retrying on 2xx).',
+  '',
+  '  That is a behavior change, not a',
+  '  regression. Update the assertion to',
+  '  the new behavior? I will sync',
+  '  docs/payments.md with it.',
+  '',
+  ...narrowInput(),
+  `  ${DIM}? for shortcuts${R}`
+]
+
+const reviewEn = [
+  prompt('Compare Redis SETNX with a DB'),
+  '  unique index, write it up as an ADR',
+  '',
+  tool('Read(prisma/schema.prisma)'),
+  out('Read 88 lines'),
+  '',
+  say(`${B}Axis       Redis       DB unique${R}`),
+  '  Latency    ~1ms        ~8ms',
+  `  Redis down ${YELLOW}unguarded ⚠${R} unaffected`,
+  '  Change     8 lines     migration + 12',
+  '',
+  tool('Write(docs/adr/0007-idempotency.md)'),
+  out('Wrote 46 lines'),
+  '',
+  prompt('Check the regression card on the'),
+  '  left and fold the result in',
+  '',
+  tool('Bash(mt read left --lines 12)'),
+  out(`Test Files  ${RED}1 failed${R} | ${GREEN}3 passed${R}`),
+  cont(`${RED}×${R} repeat callback returns 409`),
+  cont(`${DIM}(that session is waiting for input)${R}`),
+  '',
+  say('The only failure is an old assertion'),
+  '  that conflicts with the new behavior,',
+  '  not a functional regression. Verdict:',
+  '  Redis is the main path, the unique',
+  '  index the fallback. ADR updated.',
+  '',
+  ...narrowInput()
+]
+
+const docsEn = [
+  prompt('Write the new callback contract'),
+  '  into docs/payments.md',
+  '',
+  tool('Read(docs/payments.md)'),
+  out('Read 64 lines'),
+  '',
+  tool('Update(docs/payments.md)'),
+  out(`Updated with ${GREEN}11 additions${R}`),
+  `       ${DIM}18${R}    ## Callback idempotency`,
+  `       ${DIM}19${R} ${GREEN}+  The gateway may retry the${R}`,
+  `       ${DIM}20${R} ${GREEN}+  same event_id; the server${R}`,
+  `       ${DIM}21${R} ${GREEN}+  de-duplicates on it:${R}`,
+  `       ${DIM}22${R} ${GREEN}+  - first: post, return 200${R}`,
+  `       ${DIM}23${R} ${GREEN}+  - repeat: no post, 200 +${R}`,
+  `       ${DIM}24${R} ${GREEN}+    { duplicate: true }${R}`,
+  `       ${DIM}25${R} ${GREEN}+  Only 2xx stops the retries,${R}`,
+  `       ${DIM}26${R} ${GREEN}+  so never answer 409 here.${R}`,
+  '',
+  say('Docs now match the implementation.'),
+  '',
+  ...narrowInput()
+]
+
+const coordinateEn = [
+  prompt('How far did the regression card'),
+  '  get? Give me the conclusion',
+  '',
+  tool('Bash(mt list)'),
+  out('1. Implement · Redis [claude-code]'),
+  cont('2. Regression · tests [claude-code]'),
+  cont('3. Review · plan A/B [claude-code]'),
+  cont('4. Docs · contract [claude-code]'),
+  cont('5. Coordinate · cards [claude-code]'),
+  '',
+  tool('Bash(mt read sibling:2 --lines 8)'),
+  out(`Test Files  ${RED}1 failed${R} | ${GREEN}3 passed${R}`),
+  cont(`     Tests  ${RED}1 failed${R} | ${GREEN}27 passed${R}`),
+  cont('Update the assertion to the new'),
+  cont('behavior?'),
+  '',
+  say('It finished: 27 pass, 1 fails. The'),
+  '  failing one expects 409 for a repeat',
+  '  callback, which the new idempotency',
+  '  behavior contradicts. Not a',
+  '  regression; it is waiting on your',
+  '  call about the assertion.',
+  '',
+  prompt('Tell it to take the new behavior'),
+  '  and update the docs too',
+  '',
+  tool('Bash(mt send sibling:2 "switch to the'),
+  '       new behavior and sync',
+  '       docs/payments.md" --enter)',
+  out('Sent to "Regression · tests"'),
+  '',
+  say('Handed to the regression card; I will'),
+  '  read it again once it finishes.',
+  '',
+  ...narrowInput()
+]
+
+const baselineEn = [
+  prompt('Map the payment callback path'),
+  '  and where idempotency stands',
+  '',
+  tool('Read(src/payments/webhook.ts)'),
+  out('Read 142 lines'),
+  '',
+  say('Path: webhook → apply → state'),
+  '  machine. No guard today, so',
+  '  a retry posts the payment twice.',
+  '',
+  say('Verify two routes in parallel:'),
+  '  A Redis SETNX, B DB unique index.'
+]
+
+const planAEn = [
+  prompt('Implement the Redis SETNX plan'),
+  '  and run the tests',
+  '',
+  tool('Update(src/payments/webhook.ts)'),
+  out(`Updated with ${GREEN}8 additions${R}`),
+  '',
+  tool('Bash(pnpm vitest run src/payments)', false),
+  out(`${GREEN}✓${R} 27 passed ${DIM}· 1 still running${R}`),
+  '',
+  `${ORANGE}✻${R} ${DIM}Running… (21s · esc)${R}`
+]
+
+const planBEn = [
+  prompt('Add a unique constraint on'),
+  '  event_id and run the migration',
+  '',
+  tool('Update(prisma/schema.prisma)'),
+  out(`Updated with ${GREEN}2 additions${R}`),
+  '',
+  toolErr('Bash(pnpm prisma migrate dev)'),
+  out(`${RED}Error: P2002 unique constraint${R}`),
+  cont(`${RED}37 duplicate event_id rows${R}`),
+  '',
+  say('Migration aborted. The existing'),
+  '  rows need cleaning up first.',
+  '  Want me to write that script?',
+  '',
+  ...narrowBox()
+]
+
+const vitestEn = [
+  '',
+  ` ${B}RUN${R}  ${DIM}v4.1.11 ~/work/shop-api${R}`,
+  '',
+  ` ${GREEN}✓${R} parse-event.test.ts ${DIM}(8) 41ms${R}`,
+  ` ${GREEN}✓${R} apply.test.ts ${DIM}(12) 187ms${R}`,
+  ` ${GREEN}✓${R} refund.test.ts ${DIM}(5) 96ms${R}`,
+  ` ${RED}❯${R} webhook.duplicate.test.ts ${RED}(1)${R}`,
+  `   ${RED}× repeat callback returns 409${R}`,
+  '',
+  ` ${DIM}Test Files${R}  ${RED}1 failed${R} | ${GREEN}3 passed${R}`,
+  ` ${DIM}     Tests${R}  ${RED}1 failed${R} | ${GREEN}27 passed${R}`,
+  ` ${DIM}  Duration${R}  1.42s`,
+  ''
+]
+
+const baselineThreeEn = [
+  ...welcome('~/work/shop-api'),
+  '',
+  prompt('Payment callbacks post twice. Give me a few'),
+  '  idempotency options, do not touch the code yet',
+  '',
+  say('Three directions, each with a trade-off:'),
+  cont('1. Redis SETNX key with 24h expiry, fastest'),
+  cont('2. DB unique index on event_id, safest'),
+  cont('3. Dedupe table on the consumer + cleanup job'),
+  '',
+  say('Open one path per option; I will wait here.'),
+  '',
+  ...inputBox()
+]
+const aiReadEn = [
+  ...welcome('~/work/shop-api'),
+  '',
+  prompt('How far did the card on the left get? Give me'),
+  '  the conclusion',
+  '',
+  say('Let me read that card\'s live output first.')
+]
+const aiForkEn = [
+  '',
+  prompt('Open a child card for each of the three plans'),
+  '',
+  say('One child card per plan, inheriting the context.')
+]
+
 // Scene-1 cards are printed while narrow and widen when focused; xterm reflows every line except the
 // cursor line, so those transcripts end with a newline. DAG previews show the last four lines, so the
 // scene-2 transcripts keep the cursor on their final line instead.
 const trailingNewline = new Set(['implementation', 'regression', 'review', 'docs', 'coordinate'])
 
-const transcriptSource: Record<string, string[]> = {
-  implementation, regression, review, docs, coordinate, baseline, planA, planB, vitest,
-  'baseline-three': baselineThree, 'ai-read': aiRead, 'ai-fork': aiFork
+const transcriptSource: Record<'zh-CN' | 'en', Record<string, string[]>> = {
+  'zh-CN': {
+    implementation, regression, review, docs, coordinate, baseline, planA, planB, vitest,
+    'baseline-three': baselineThree, 'ai-read': aiRead, 'ai-fork': aiFork
+  },
+  en: {
+    implementation: implementationEn, regression: regressionEn, review: reviewEn, docs: docsEn,
+    coordinate: coordinateEn, baseline: baselineEn, planA: planAEn, planB: planBEn, vitest: vitestEn,
+    'baseline-three': baselineThreeEn, 'ai-read': aiReadEn, 'ai-fork': aiForkEn
+  }
 }
 
 export const transcripts: Record<string, string> = Object.fromEntries(
-  Object.entries(transcriptSource)
+  Object.entries(transcriptSource[LOCALE])
     .map(([name, lines]) => [name, lines.join('\r\n') + (trailingNewline.has(name) ? '\r\n' : '')])
 )
 
