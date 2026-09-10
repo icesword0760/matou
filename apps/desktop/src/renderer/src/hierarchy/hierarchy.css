@@ -1098,6 +1098,15 @@ html[data-theme="light"] .git-worktree-menu { box-shadow: 0 10px 26px rgba(23,28
 .model-provider__actions button:hover { background: #fff; }
 .model-provider__actions button.primary { border-color: var(--workspace-accent-line); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
 .model-provider__actions button:disabled { border-color: transparent; color: var(--workspace-faint); background: rgba(222,226,232,.58); cursor: default; }
+.model-settings__language { margin-top: 23px; }
+.model-settings__language-options { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-panel-muted); box-shadow: 0 1px 2px rgba(34,45,60,.02); }
+.model-settings__language-options label { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 13px; border-bottom: 1px solid var(--workspace-line); color: #414a57; cursor: pointer; font-size: 10px; font-weight: 650; transition: background 120ms ease; }
+.model-settings__language-options label:last-child { border-bottom: 0; }
+.model-settings__language-options label:hover { background: #fff; }
+.model-settings__language-options label.is-active { color: var(--workspace-accent); background: #f5f8fc; box-shadow: inset 2px 0 var(--workspace-accent); }
+.model-settings__language-options input { width: 13px; height: 13px; margin: 0; accent-color: var(--workspace-accent); }
+.model-settings__language-options input:focus-visible { outline: 2px solid var(--workspace-accent-line); outline-offset: 1px; }
+.model-settings__note { margin: 11px 2px 0; color: var(--workspace-muted); font-size: 9px; line-height: 1.5; }
 .model-settings__impact { display: flex; align-items: center; gap: 5px; margin: 11px 2px 0; color: var(--workspace-muted); font-size: 9px; line-height: 1.5; }
 .model-settings__impact b { color: #6a7481; }
 .model-settings__state,.model-settings__error { margin-top: 23px; padding: 14px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-panel); font-size: 10px; }
@@ -1139,6 +1148,10 @@ html[data-theme="light"] .git-worktree-menu { box-shadow: 0 10px 26px rgba(23,28
 .hierarchy-shell[data-theme="dark"] .model-provider__name strong,.hierarchy-shell[data-theme="dark"] .model-provider__model strong { color: #dde2e8; }
 .hierarchy-shell[data-theme="dark"] .model-provider__actions button { color: #cbd1d9; background: rgba(255,255,255,.045); }
 .hierarchy-shell[data-theme="dark"] .model-provider__actions button:disabled { color: #6e7782; background: rgba(255,255,255,.04); }
+.hierarchy-shell[data-theme="dark"] .model-settings__language-options { background: rgba(37,40,45,.78); }
+.hierarchy-shell[data-theme="dark"] .model-settings__language-options label { color: #dde2e8; }
+.hierarchy-shell[data-theme="dark"] .model-settings__language-options label:hover { background: rgba(255,255,255,.035); }
+.hierarchy-shell[data-theme="dark"] .model-settings__language-options label.is-active { color: var(--workspace-accent); background: rgba(44,73,107,.22); }
 .hierarchy-shell[data-theme="dark"] .model-settings__impact b { color: #a3abb5; }
 .hierarchy-shell[data-theme="dark"] .model-settings__state { background: rgba(255,255,255,.035); }
 .hierarchy-shell[data-theme="dark"] .provider-dialog { background: rgba(37,40,45,.98); }

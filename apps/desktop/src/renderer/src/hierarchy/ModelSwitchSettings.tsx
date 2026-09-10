@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import {
   CLI_DEFAULT_MODEL,
+  type Locale, type LocalePreference,
   type ProviderCli, type ProviderConfigActivationResult, type ProviderConfigInput,
   type ProviderConfigSnapshot, type ProviderConfigView, type RpcMethod
 } from '@matou/contracts'
@@ -27,11 +28,17 @@ const EMPTY_DRAFT: ProviderDraft = {
   name: '', endpoint: 'https://', model: '', apiKey: ''
 }
 
+/** The settings panel shows one pane per category; the nav column switches between them. */
+type SettingsCategory = 'model' | 'language'
+
 export function ModelSwitchSettings({ client, onClose }: {
   client: ProviderConfigClient | null
   onClose(): void
 }) {
-  const m = useMessages().hierarchyShell.modelSettings
+  const shell = useMessages().hierarchyShell
+  const m = shell.modelSettings
+  const language = shell.languageSettings
+  const [category, setCategory] = useState<SettingsCategory>('model')
   const [cli, setCli] = useState<ProviderCli>('claude-code')
   const [snapshot, setSnapshot] = useState<ProviderConfigSnapshot>()
   const [loading, setLoading] = useState(true)
@@ -146,22 +153,32 @@ export function ModelSwitchSettings({ client, onClose }: {
     <div className="model-settings__frame">
       <nav className="model-settings__nav" aria-label={m.categories}>
         <span className="model-settings__section-label">{m.aiServices}</span>
-        <button className="model-settings__nav-item is-active" type="button">
+        <button className={`model-settings__nav-item${category === 'model' ? ' is-active' : ''}`}
+          type="button" aria-current={category === 'model'} onClick={() => setCategory('model')}>
           <SlidersIcon /><span>{m.modelSwitch}</span>
         </button>
-        <p>{m.globalHint(APP_DISPLAY_NAME)}</p>
+        <span className="model-settings__section-label">{language.general}</span>
+        <button className={`model-settings__nav-item${category === 'language' ? ' is-active' : ''}`}
+          type="button" aria-current={category === 'language'} onClick={() => setCategory('language')}>
+          <GlobeIcon /><span>{language.title}</span>
+        </button>
+        {category === 'model' && <p>{m.globalHint(APP_DISPLAY_NAME)}</p>}
       </nav>
       <main className="model-settings__main">
         <header className="model-settings__heading">
-          <div><h1>{m.modelSwitch}</h1><p>{m.heading}</p></div>
+          <div>
+            <h1>{category === 'model' ? m.modelSwitch : language.title}</h1>
+            <p>{category === 'model' ? m.heading : language.heading}</p>
+          </div>
           <button type="button" aria-label={m.close} onClick={onClose}>×</button>
         </header>
-        <div className="model-settings__tabs" role="tablist" aria-label={m.cliType}>
+        {category === 'language' && <LanguageSettings />}
+        {category === 'model' && <div className="model-settings__tabs" role="tablist" aria-label={m.cliType}>
           {([['claude-code', 'Claude Code'], ['codex', 'Codex']] as const).map(([id, label]) =>
             <button key={id} role="tab" aria-selected={cli === id} className={cli === id ? 'is-active' : ''}
               type="button" onClick={() => { setCli(id); setFailure('') }}>{label}</button>)}
-        </div>
-        {loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
+        </div>}
+        {category === 'model' && (loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
           {active && <section className="model-settings__current" aria-label={m.activeProvider}>
             <ProviderLogo provider={active} />
             <div><strong>{active.name}</strong><span>{modelLabel(active.model, m.cliDefaultModel)} · {shortEndpoint(active.endpoint)}</span></div>
@@ -193,7 +210,7 @@ export function ModelSwitchSettings({ client, onClose }: {
             })}
           </div>
           <p className="model-settings__impact"><span>ⓘ</span><b>{m.impactTitle(APP_DISPLAY_NAME)}</b> {m.impactBody}</p>
-        </>}
+        </>)}
       </main>
     </div>
     {draft && <ProviderDialog cli={cli} draft={draft} failure={failure} saving={saving}
@@ -201,6 +218,55 @@ export function ModelSwitchSettings({ client, onClose }: {
       onSave={() => void save()} onDelete={() => void remove()} />}
     {toast && <div className="model-settings__toast" role="status"><i>✓</i>{toast}</div>}
   </section>
+}
+
+/** The stored preference lives in the main process; the pane stays usable without a bridge. */
+function LanguageSettings() {
+  const m = useMessages().hierarchyShell.languageSettings
+  const [preference, setPreference] = useState<LocalePreference>('system')
+  const [forced, setForced] = useState<Locale>()
+
+  useEffect(() => {
+    const bridge = desktopBridge()
+    if (!bridge?.getLocalePreference) return
+    let active = true
+    void bridge.getLocalePreference()
+      .then((stored) => { if (active) setPreference(stored) })
+      // A failed read keeps the default 'system' selection instead of blocking the pane.
+      .catch(() => {})
+    return () => { active = false }
+  }, [])
+
+  const choose = async (next: LocalePreference) => {
+    setPreference(next); setForced(undefined)
+    const bridge = desktopBridge()
+    if (!bridge?.setLocalePreference) return
+    try {
+      const effective = await bridge.setLocalePreference(next)
+      // MATOU_LOCALE overrides a concrete preference; 'system' never equals a locale.
+      if (next !== 'system' && next !== effective) setForced(effective)
+    } catch {
+      // The tray menu stays available when the preference cannot be stored.
+    }
+  }
+
+  const options: readonly (readonly [LocalePreference, string])[] = [
+    ['system', m.followSystem], ['zh-CN', m.chinese], ['en', m.english]
+  ]
+  return <div className="model-settings__language">
+    <div className="model-settings__language-options" role="radiogroup" aria-label={m.options}>
+      {options.map(([value, label]) =>
+        <label key={value} className={preference === value ? 'is-active' : ''}>
+          <input type="radio" name="matou-locale-preference" value={value}
+            checked={preference === value} onChange={() => void choose(value)} />
+          <span>{label}</span>
+        </label>)}
+    </div>
+    <p className="model-settings__note">{m.note}</p>
+    {forced && <p className="model-settings__note" role="status">
+      {m.envForced(forced === 'en' ? m.english : m.chinese)}
+    </p>}
+  </div>
 }
 
 function ProviderDialog({ cli, draft, failure, saving, onChange, onCancel, onSave, onDelete }: {
@@ -237,6 +303,8 @@ function ProviderLogo({ provider }: { provider: ProviderConfigView }) {
   return <span className={`model-provider__logo tone-${tone(provider.name)}`}>{initial}</span>
 }
 function SlidersIcon() { return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg> }
+function GlobeIcon() { return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.2 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.2-3.6-8.5S9.6 5.8 12 3.5Z"/></svg> }
+function desktopBridge() { return window.matouDesktop as Partial<typeof window.matouDesktop> | undefined }
 function shortEndpoint(value: string) { return value.replace(/^https?:\/\//, '').replace(/\/$/, '') }
 /** The runtime stores a sentinel when a provider keeps the model the CLI picks. */
 function modelLabel(model: string, cliDefault: string) { return model === CLI_DEFAULT_MODEL ? cliDefault : model }

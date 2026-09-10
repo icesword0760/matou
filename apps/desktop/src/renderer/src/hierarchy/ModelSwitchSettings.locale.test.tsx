@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { CLI_DEFAULT_MODEL, type ProviderConfigSnapshot } from '@matou/contracts'
@@ -21,6 +22,22 @@ describe('Model switch settings in English', () => {
 
     expect((await screen.findAllByText('CLI default')).length).toBeGreaterThan(0)
     expect(screen.queryByText(CLI_DEFAULT_MODEL)).toBeNull()
+  })
+
+  it('offers the language category with its three options', async () => {
+    render(<LocaleProvider initialLocale="en">
+      <ModelSwitchSettings client={fakeClient()} onClose={vi.fn()} />
+    </LocaleProvider>)
+
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Language' }))
+
+    expect(screen.getByRole('heading', { name: 'Language' })).toBeTruthy()
+    expect(screen.getByRole('radio', { name: 'Follow system' })).toBeTruthy()
+    expect(screen.getByRole('radio', { name: '中文' })).toBeTruthy()
+    expect(screen.getByRole('radio', { name: 'English' })).toBeTruthy()
+    expect(screen.getByText(
+      'The interface switches immediately; runtime messages switch after a restart'
+    )).toBeTruthy()
   })
 })
 

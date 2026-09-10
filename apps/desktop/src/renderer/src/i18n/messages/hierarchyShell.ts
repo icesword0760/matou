@@ -210,6 +210,17 @@ export const hierarchyShellZhCN = {
     endpointScheme: 'API 地址需要使用 HTTP 或 HTTPS',
     endpointInvalid: '请输入有效的 API 地址',
     errorDetail: (fallback: string, detail: string) => `${fallback}：${detail}`
+  },
+  languageSettings: {
+    general: '通用',
+    title: '语言',
+    heading: '选择界面语言，设置对所有窗口生效。',
+    options: '界面语言',
+    followSystem: '跟随系统',
+    chinese: '中文',
+    english: 'English',
+    note: '界面立即切换；运行时消息在重启后切换',
+    envForced: (locale: string) => `当前由环境变量 MATOU_LOCALE 固定为 ${locale}`
   }
 }
 
@@ -421,5 +432,16 @@ export const hierarchyShellEn: CatalogShape<typeof hierarchyShellZhCN> = {
     endpointScheme: 'The API endpoint must use HTTP or HTTPS',
     endpointInvalid: 'Enter a valid API endpoint',
     errorDetail: (fallback: string, detail: string) => `${fallback}: ${detail}`
+  },
+  languageSettings: {
+    general: 'General',
+    title: 'Language',
+    heading: 'Choose the interface language. The setting applies to every window.',
+    options: 'Interface language',
+    followSystem: 'Follow system',
+    chinese: '中文',
+    english: 'English',
+    note: 'The interface switches immediately; runtime messages switch after a restart',
+    envForced: (locale: string) => `Currently fixed to ${locale} by the MATOU_LOCALE environment variable`
   }
 }
