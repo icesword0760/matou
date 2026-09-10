@@ -32,6 +32,8 @@
 Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. It puts your Claude Code sessions, tasks, branches and context into one recoverable workspace, so you can push several coding agents forward at once and still know what each one is doing, what it needs, and where it branched off from.
 
 > **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page.
+>
+> **Demo video**: [4-minute walkthrough on YouTube](https://youtu.be/1OYvkryUNFo) · [34-second cut](https://youtu.be/gNwf-YyB6oQ)
 
 ![Matou workspace demo with five parallel Claude Code sessions](assets/shots/en/workspace-demo.gif)
 
