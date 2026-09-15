@@ -300,7 +300,16 @@ export function projectSceneGraphFrom(
          ON provider.id = (
            SELECT binding.id FROM provider_bindings AS binding
            WHERE binding.session_id = sessions.id
-           ORDER BY binding.updated_at DESC, binding.id DESC LIMIT 1
+           ORDER BY
+             CASE
+               WHEN binding.restore_state IN ('restoring', 'failed') THEN 0
+               WHEN binding.invalidated_at IS NULL
+                 AND binding.resume_state NOT IN ('failed', 'expired') THEN 1
+               ELSE 2
+             END,
+             binding.updated_at DESC,
+             binding.id DESC
+           LIMIT 1
          )
        LEFT JOIN session_fork_intents AS fork ON fork.session_id = sessions.id
        LEFT JOIN worktrees ON worktrees.execution_context_id = sessions.execution_context_id

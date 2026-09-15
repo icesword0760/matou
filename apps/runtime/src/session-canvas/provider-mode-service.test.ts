@@ -90,6 +90,34 @@ describe('ProviderModeService', () => {
     ].sort())
   })
 
+  it('projects the newly loaded conversation when its binding id sorts before the replaced binding', () => {
+    const initial = bootstrapClaudeTree()
+    providerModes.loadClaudeSession(command('load-previous-conversation'), {
+      sessionId: initial.childSessionId,
+      bindingId: 'zzz-previous-binding',
+      providerSessionId: 'provider-previous',
+      title: '之前的会话',
+      permissionMode: 'default',
+      now: 25
+    })
+
+    const result = providerModes.loadClaudeSession(command('load-with-lower-binding-id'), {
+      sessionId: initial.childSessionId,
+      bindingId: '000-new-binding',
+      providerSessionId: 'provider-newly-selected',
+      title: '用户刚选择的会话',
+      permissionMode: 'bypassPermissions',
+      now: 30
+    })
+
+    expect(result.graph.nodes.find(({ sessionId }) => sessionId === initial.childSessionId))
+      .toMatchObject({
+        providerRestoreState: 'restoring',
+        providerSpawnRevision: 30,
+        canFork: false
+      })
+  })
+
   it('enables Fork after a loaded catalog conversation is confirmed live', () => {
     const initial = bootstrapClaudeTree({ canFork: false })
 
