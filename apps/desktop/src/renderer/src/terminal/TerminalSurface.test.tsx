@@ -11,6 +11,7 @@ const state = vi.hoisted(() => ({
   searchNext: vi.fn(),
   searchPrevious: vi.fn(),
   clearDecorations: vi.fn(),
+  clearSelection: vi.fn(),
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
@@ -72,6 +73,7 @@ vi.mock('@xterm/xterm', () => ({
       return { dispose: vi.fn() }
     })
     reset = state.terminalReset
+    clearSelection = state.clearSelection
     dispose = state.terminalDisposed
   }
 }))
@@ -132,6 +134,7 @@ describe('TerminalSurface focus continuity', () => {
     state.searchNext.mockClear()
     state.searchPrevious.mockClear()
     state.clearDecorations.mockClear()
+    state.clearSelection.mockClear()
     state.searchResultsListener = undefined
     state.onMessage = undefined
     state.onData = undefined
@@ -859,6 +862,23 @@ describe('TerminalSurface focus continuity', () => {
       }} />)
 
     await waitFor(() => expect(state.clearDecorations).toHaveBeenCalled())
+    expect(state.clearSelection).toHaveBeenCalled()
+  })
+
+  it('clears terminal search decorations when the search bar closes', async () => {
+    const view = render(<TerminalSurface sessionId="session-1" active visible
+      searchRequest={{
+        query: '梁主任', direction: 'next', sequence: 1,
+        options: { caseSensitive: false, regex: false, wholeWord: false }
+      }} />)
+    await waitFor(() => expect(state.searchNext).toHaveBeenCalled())
+    state.clearDecorations.mockClear()
+    state.clearSelection.mockClear()
+
+    view.rerender(<TerminalSurface sessionId="session-1" active visible />)
+
+    await waitFor(() => expect(state.clearDecorations).toHaveBeenCalled())
+    expect(state.clearSelection).toHaveBeenCalled()
   })
 
   it('falls back to archived history when the xterm buffer has no match', async () => {

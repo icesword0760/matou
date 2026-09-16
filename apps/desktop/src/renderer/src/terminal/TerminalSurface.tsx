@@ -858,9 +858,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
 
   useEffect(() => {
     const search = searchRef.current
-    if (!search || !searchRequest) return
-    if (!searchRequest.query) {
+    if (!search) return
+    if (!searchRequest?.query) {
       search.clearDecorations()
+      terminalRef.current?.clearSelection()
       historyRequestGenerationRef.current += 1
       historyModeRef.current = false
       historyOpenedSearchSequenceRef.current = undefined
