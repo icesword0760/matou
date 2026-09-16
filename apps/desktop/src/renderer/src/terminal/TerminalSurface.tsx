@@ -9,7 +9,6 @@ import {
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { SerializeAddon } from '@xterm/addon-serialize'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 
 import { messages } from '../i18n/current'
@@ -32,46 +31,6 @@ const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const TERMINAL_RESIZE_SETTLE_MS = 80
 const RECOVERY_LAYOUT_SETTLE_WINDOW_MS = 800
 const NOOP = () => {}
-
-interface QueuedWebglActivation {
-  cancelled: boolean
-  activate(): void
-}
-
-const queuedWebglActivations: QueuedWebglActivation[] = []
-let webglActivationFrameScheduled = false
-let webglActivationMicrotaskScheduled = false
-
-// Cold cards can enter the carousel in batches. Promote at most one fallback
-// renderer to WebGL per frame so GPU setup never lands as a single scroll hitch.
-function flushQueuedWebglActivation() {
-  webglActivationFrameScheduled = false
-  webglActivationMicrotaskScheduled = false
-  let next = queuedWebglActivations.shift()
-  while (next?.cancelled) next = queuedWebglActivations.shift()
-  next?.activate()
-  while (queuedWebglActivations[0]?.cancelled) queuedWebglActivations.shift()
-  if (queuedWebglActivations.length > 0) scheduleQueuedWebglActivationFrame()
-}
-
-function scheduleQueuedWebglActivationFrame() {
-  if (webglActivationFrameScheduled || webglActivationMicrotaskScheduled) return
-  webglActivationFrameScheduled = true
-  requestAnimationFrame(flushQueuedWebglActivation)
-}
-
-function scheduleInitialWebglActivation() {
-  if (webglActivationFrameScheduled || webglActivationMicrotaskScheduled) return
-  webglActivationMicrotaskScheduled = true
-  queueMicrotask(flushQueuedWebglActivation)
-}
-
-function queueWebglActivation(activate: () => void) {
-  const entry: QueuedWebglActivation = { cancelled: false, activate }
-  queuedWebglActivations.push(entry)
-  scheduleInitialWebglActivation()
-  return () => { entry.cancelled = true }
-}
 
 export type RuntimeStatus =
   | 'waiting-for-port' | 'handshaking' | 'starting-session'
@@ -143,8 +102,6 @@ interface CachedTerminalModel {
   fit: FitAddon
   search: SearchAddon
   serialize: SerializeAddon
-  webgl: WebglAddon | undefined
-  webglAttempted: boolean
   opened: boolean
   lastAppliedSequence: number
   lastCheckpointSequence: number
@@ -172,7 +129,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const [archivedSearch, setArchivedSearch] = useState<ArchivedSearchView | undefined>()
   const [historyContext, setHistoryContext] = useState<HistoryContextView | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
-  const e2eRowsRef = useRef<HTMLDivElement>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const searchRef = useRef<SearchAddon | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
@@ -195,9 +151,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const checkpointNowRef = useRef<() => void>(NOOP)
   const flushOutputRef = useRef<() => void>(NOOP)
   const resumeVisualRef = useRef<() => void>(NOOP)
-  const activateWebglRef = useRef<() => void>(NOOP)
-  const scheduleWebglRef = useRef<() => void>(NOOP)
-  const cancelWebglRef = useRef<() => void>(NOOP)
   const dragOverCounterRef = useRef(0)
   const historyModeRef = useRef(false)
   const historyRequestGenerationRef = useRef(0)
@@ -272,10 +225,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     let activationTimer: ReturnType<typeof setTimeout> | undefined
     if (visible || active) {
-      if (active) {
-        cancelWebglRef.current()
-        activateWebglRef.current()
-      } else scheduleWebglRef.current()
       const catchupTimer = active || viewportMoving
         ? undefined
         : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
@@ -369,6 +318,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     setPid(undefined)
     const model = foregroundTerminalModels.acquire(sessionId, () => {
+      // Keep xterm's built-in DOM renderer. Its measured glyph layout preserves
+      // synthetic italic CJK at every supported zoom level; the WebGL atlas
+      // clips those wide fallback glyphs and makes intact text look corrupted.
       const terminal = new Terminal({
         cursorBlink: true,
         cursorStyle: 'bar',
@@ -385,12 +337,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminal.loadAddon(search)
       terminal.loadAddon(serialize)
       const model: CachedTerminalModel = {
-        terminal, fit, search, serialize, webgl: undefined, webglAttempted: false, opened: false,
+        terminal, fit, search, serialize, opened: false,
         lastAppliedSequence: 0, lastCheckpointSequence: -1, screenEpoch: 0,
         suspend: () => {
-          model.webgl?.dispose()
-          model.webgl = undefined
-          model.webglAttempted = false
           terminal.element?.remove()
         },
         dispose: () => terminal.dispose()
@@ -398,50 +347,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       return model
     }) as CachedTerminalModel
     const { terminal, fit, search, serialize } = model
-    const e2eRows = new URLSearchParams(window.location.search).get('e2e') === '1'
-      ? e2eRowsRef.current
-      : null
     const reusedTerminalModel = model.opened
-    let webglScheduled = false
-    let cancelQueuedWebgl = NOOP
-    const cancelWebgl = () => {
-      if (!webglScheduled) return
-      webglScheduled = false
-      cancelQueuedWebgl()
-      cancelQueuedWebgl = NOOP
-    }
-    const activateWebgl = () => {
-      cancelWebgl()
-      if (model.webglAttempted) return
-      model.webglAttempted = true
-      try {
-        const webgl = new WebglAddon()
-        model.webgl = webgl
-        webgl.onContextLoss(() => {
-          webgl.dispose()
-          if (model.webgl === webgl) model.webgl = undefined
-          e2eRows?.classList.remove('xterm-rows')
-        })
-        terminal.loadAddon(webgl)
-        e2eRows?.classList.add('xterm-rows')
-      } catch {
-        // xterm keeps its built-in renderer when WebGL is unavailable. This is
-        // expected on remote desktops and after Chromium exhausts GPU contexts.
-        model.webgl = undefined
-      }
-    }
-    const scheduleWebgl = () => {
-      if (model.webglAttempted || webglScheduled) return
-      webglScheduled = true
-      cancelQueuedWebgl = queueWebglActivation(() => {
-        webglScheduled = false
-        cancelQueuedWebgl = NOOP
-        activateWebgl()
-      })
-    }
-    activateWebglRef.current = activateWebgl
-    scheduleWebglRef.current = scheduleWebgl
-    cancelWebglRef.current = cancelWebgl
     terminal.options.fontSize = fontSize
     terminal.options.theme = TERMINAL_THEMES[themeKey]
     if (!model.opened) {
@@ -449,9 +355,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       model.opened = true
     } else if (terminal.element) {
       container.appendChild(terminal.element)
-      if (model.webgl) e2eRows?.classList.add('xterm-rows')
     }
-    activeRef.current ? activateWebgl() : scheduleWebgl()
     terminalRef.current = terminal
     fit.fit()
     const publishTerminalDimensions = () => {
@@ -481,7 +385,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let visualReplayPending = false
     let recoveryLayoutResizeDeadline = 0
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
-    let e2eRowsTimer: ReturnType<typeof setTimeout> | undefined
     const reportVisualReady = () => {
       if (visualReadyReported || surfaceDisposed) return
       visualReadyReported = true
@@ -500,27 +403,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminal.refresh(0, Math.max(0, terminal.rows - 1))
     }
     if (reusedTerminalModel && model.lastAppliedSequence > 0) awaitRenderedTerminalFrame()
-    const publishE2eRows = () => {
-      e2eRowsTimer = undefined
-      if (!e2eRows?.classList.contains('xterm-rows')) return
-      const buffer = terminal.buffer.active
-      const lines: string[] = []
-      const first = Math.max(0, buffer.length - 10_000)
-      for (let index = first; index < buffer.length; index += 1) {
-        lines.push(buffer.getLine(index)?.translateToString(true) ?? '')
-      }
-      const row = e2eRows.firstElementChild
-      if (row) row.textContent = lines.join('\n')
-    }
-    const scheduleE2eRows = () => {
-      if (!e2eRows?.classList.contains('xterm-rows')) return
-      if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
-      // Publish only after output becomes quiet. This is an observation of the
-      // parsed xterm buffer for real Electron acceptance tests; debouncing keeps
-      // sustained-output performance measurements representative.
-      e2eRowsTimer = setTimeout(publishE2eRows, 80)
-    }
-    scheduleE2eRows()
     const clearCheckpointTimer = () => {
       if (checkpointTimer !== undefined) clearTimeout(checkpointTimer)
       checkpointTimer = undefined
@@ -558,7 +440,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         client.acknowledgeTerminal(sessionId, sequence)
         if (surfaceDisposed) return
         awaitRenderedTerminalFrame()
-        scheduleE2eRows()
         scheduleCheckpoint()
         if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
           terminal.focus()
@@ -657,7 +538,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           : new Uint8Array(message.data)
         terminal.write(bytes, () => {
           awaitRenderedTerminalFrame()
-          scheduleE2eRows()
         })
       } else if (message.type === 'terminal.exited') {
         spawned = false
@@ -684,8 +564,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           `\r\n[${message.reason === 'corruption' ? gapText.historyCorrupted : gapText.historyTrimmed}]\r\n`,
           () => {
             awaitRenderedTerminalFrame()
-            scheduleE2eRows()
-          }
+            }
         )
       } else if (message.type === 'protocol.error') {
         visualCatchupRequested = false
@@ -716,8 +595,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
             : new Uint8Array(message.checkpoint.snapshot)
           terminal.write(snapshot, () => {
             awaitRenderedTerminalFrame()
-            scheduleE2eRows()
-          })
+            })
         }
       } else if (message.type === 'terminal.replay-resize') {
         // Resize is part of VT history: zsh and full-screen tools emit cursor
@@ -725,14 +603,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // sequence instead of replaying every byte at today's card width.
         terminal.write('', () => {
           terminal.resize(message.cols, message.rows)
-          scheduleE2eRows()
           publishTerminalDimensions()
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-reset') {
         terminal.write('', () => {
           terminal.reset()
-          scheduleE2eRows()
           model.screenEpoch = message.screenEpoch
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
@@ -755,7 +631,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           scheduleCheckpoint(0)
           onReplayComplete(`replayed-through:${message.throughSequence}`)
           awaitRenderedTerminalFrame()
-          scheduleE2eRows()
         })
       }
     }
@@ -944,12 +819,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         activationReadyFrameRef.current = undefined
       }
       clearCheckpointTimer()
-      if (e2eRowsTimer !== undefined) clearTimeout(e2eRowsTimer)
       output.dispose()
-      cancelWebgl()
-      activateWebglRef.current = NOOP
-      scheduleWebglRef.current = NOOP
-      cancelWebglRef.current = NOOP
       flushOutputRef.current = NOOP
       resumeVisualRef.current = NOOP
       storeCheckpoint()
@@ -1054,7 +924,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     onDragLeave={handleTerminalDragLeave} onDrop={handleTerminalDrop}>
     <div className="terminal-surface__viewport" ref={containerRef}
       aria-hidden={historyContext !== undefined} />
-    <div className="e2e-terminal-observer" ref={e2eRowsRef} aria-hidden="true"><div /></div>
     {historyContext && <TerminalHistoryContextView view={historyContext}
       anchorRef={historyAnchorRef} onClose={exitHistoryView} />}
     {archivedSearch && !historyContext && <div className="terminal-history-result" role="status"

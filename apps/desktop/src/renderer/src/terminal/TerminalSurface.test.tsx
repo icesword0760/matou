@@ -275,18 +275,11 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.focus).toHaveBeenCalledTimes(1))
   })
 
-  it('uses WebGL after opening xterm and falls back when the GPU context is lost', async () => {
-    window.history.replaceState({}, '', '/?e2e=1')
-    render(<TerminalSurface sessionId="session-webgl" active visible />)
-    await waitFor(() => expect(state.webglConstructed).toHaveBeenCalledTimes(1))
-    expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
-      .toBe(true)
+  it('keeps the built-in renderer for accurate italic CJK glyph layout', async () => {
+    render(<TerminalSurface sessionId="session-cjk-italic" active visible fontSize={14} />)
+    await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(1))
 
-    state.webglContextLossListener?.()
-
-    expect(state.webglDisposed).toHaveBeenCalledTimes(1)
-    expect(document.querySelector('.e2e-terminal-observer')?.classList.contains('xterm-rows'))
-      .toBe(false)
+    expect(state.webglConstructed).not.toHaveBeenCalled()
   })
 
   it('fits and resizes the PTY once after a burst of card width changes settles', () => {
@@ -471,36 +464,6 @@ describe('TerminalSurface focus continuity', () => {
     })
     expect(state.fit).not.toHaveBeenCalled()
     expect(state.resizeTerminal).not.toHaveBeenCalled()
-  })
-
-  it('spreads cold WebGL setup for inactive moving cards across animation frames', async () => {
-    const animationFrames: FrameRequestCallback[] = []
-    const activationMicrotasks: VoidFunction[] = []
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      animationFrames.push(callback)
-      return animationFrames.length
-    })
-    vi.stubGlobal('queueMicrotask', (callback: VoidFunction) => {
-      activationMicrotasks.push(callback)
-    })
-    render(<>
-      <TerminalSurface sessionId="session-moving-1" active={false} visible viewportMoving />
-      <TerminalSurface sessionId="session-moving-2" active={false} visible viewportMoving />
-    </>)
-    expect(state.terminalConstructed).toHaveBeenCalledTimes(2)
-    expect(state.webglConstructed).not.toHaveBeenCalled()
-
-    act(() => {
-      activationMicrotasks.shift()?.()
-    })
-    expect(state.webglConstructed).toHaveBeenCalledTimes(1)
-
-    act(() => {
-      while (animationFrames.length > 0 && state.webglConstructed.mock.calls.length === 1) {
-        animationFrames.shift()?.(16)
-      }
-    })
-    expect(state.webglConstructed).toHaveBeenCalledTimes(2)
   })
 
   it('reuses its xterm VT model after foreground card DOM virtualization', async () => {
