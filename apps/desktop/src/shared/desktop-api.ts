@@ -14,6 +14,7 @@ export interface MatouDesktopApi {
   onWorkspaceOpenRequested(listener: () => void): () => void
   revealDirectory(path: string): Promise<void>
   openDirectoryInTerminal(path: string): Promise<void>
+  writeClipboardText(text: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
   showWindow(windowId: string): Promise<void>
   requestDetachedTerminalFocus(input: DetachedTerminalFocusRequest): Promise<boolean>
@@ -187,6 +188,7 @@ export const DESKTOP_CHANNELS = {
   workspaceOpenRequested: 'matou:workspace-open-requested',
   revealDirectory: 'matou:reveal-directory',
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
+  writeClipboardText: 'matou:write-clipboard-text',
   hideWindow: 'matou:hide-window',
   showWindow: 'matou:show-window',
   requestDetachedTerminalFocus: 'matou:request-detached-terminal-focus',

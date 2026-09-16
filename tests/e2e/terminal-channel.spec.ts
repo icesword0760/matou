@@ -41,6 +41,35 @@ test('streams PTY output from UtilityProcess to xterm over a transferred Message
   }
 })
 
+test('copies selected text from a live terminal', async () => {
+  const fixture = await launchMatou()
+  try {
+    const surface = activeTerminalSurface(fixture.page)
+    await expect(surface).toHaveAttribute('data-pid', /[1-9][0-9]*/)
+    const marker = `MATOU_LIVE_COPY_${Date.now()}`
+    const textarea = surface.locator('.xterm-helper-textarea')
+    await textarea.focus()
+    await textarea.pressSequentially(`printf '${marker}\\n'`, { delay: 2 })
+    await textarea.press('Enter')
+    await expect(surface.locator('.xterm-rows')).toContainText(marker)
+
+    await fixture.app.evaluate(({ clipboard }) => clipboard.writeText('MATOU_COPY_SENTINEL'))
+    const screen = surface.locator('.xterm-screen')
+    const box = await screen.boundingBox()
+    if (!box) throw new Error('Expected terminal viewport geometry')
+    await fixture.page.mouse.move(box.x + 2, box.y + 2)
+    await fixture.page.mouse.down()
+    await fixture.page.mouse.move(box.x + box.width - 2, box.y + box.height - 2, { steps: 12 })
+    await fixture.page.mouse.up()
+    await fixture.page.keyboard.press(`${process.platform === 'darwin' ? 'Meta' : 'Control'}+c`)
+
+    await expect.poll(() => fixture.app.evaluate(({ clipboard }) => clipboard.readText()))
+      .toContain(marker)
+  } finally {
+    await fixture.close()
+  }
+})
+
 test('stores a real xterm checkpoint and restores it before the Journal tail after Renderer reload', async () => {
   test.setTimeout(60_000)
   const fixture = await launchMatou({ env: { MATOU_E2E_TERMINAL_DIAGNOSTICS: '1' } })

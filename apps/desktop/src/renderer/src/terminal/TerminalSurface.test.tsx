@@ -12,6 +12,8 @@ const state = vi.hoisted(() => ({
   searchPrevious: vi.fn(),
   clearDecorations: vi.fn(),
   clearSelection: vi.fn(),
+  customKeyHandler: undefined as undefined | ((event: KeyboardEvent) => boolean),
+  selectionText: '',
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
@@ -74,6 +76,11 @@ vi.mock('@xterm/xterm', () => ({
     })
     reset = state.terminalReset
     clearSelection = state.clearSelection
+    hasSelection = vi.fn(() => state.selectionText.length > 0)
+    getSelection = vi.fn(() => state.selectionText)
+    attachCustomKeyEventHandler = vi.fn((handler: (event: KeyboardEvent) => boolean) => {
+      state.customKeyHandler = handler
+    })
     dispose = state.terminalDisposed
   }
 }))
@@ -135,6 +142,8 @@ describe('TerminalSurface focus continuity', () => {
     state.searchPrevious.mockClear()
     state.clearDecorations.mockClear()
     state.clearSelection.mockClear()
+    state.customKeyHandler = undefined
+    state.selectionText = ''
     state.searchResultsListener = undefined
     state.onMessage = undefined
     state.onData = undefined
@@ -188,6 +197,37 @@ describe('TerminalSurface focus continuity', () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
 
     await waitFor(() => expect(state.focus).toHaveBeenCalled())
+  })
+
+  it('copies selected terminal text through the desktop clipboard bridge', async () => {
+    const writeClipboardText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { writeClipboardText }
+    })
+    state.selectionText = '已选择的终端文本'
+    render(<TerminalSurface sessionId="session-1" active visible />)
+
+    await waitFor(() => expect(state.customKeyHandler).toBeTypeOf('function'))
+    const event = new KeyboardEvent('keydown', { key: 'c', metaKey: true })
+    expect(state.customKeyHandler?.(event)).toBe(false)
+    await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith('已选择的终端文本'))
+  })
+
+  it('copies selected terminal text from the native Edit menu', async () => {
+    const writeClipboardText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', {
+      configurable: true,
+      value: { writeClipboardText }
+    })
+    state.selectionText = '菜单复制的终端文本'
+    const view = render(<TerminalSurface sessionId="session-1" active visible />)
+    const terminalElement = view.container.querySelector('.terminal-surface__viewport > div')
+    expect(terminalElement).toBeTruthy()
+
+    terminalElement?.dispatchEvent(new Event('copy', { bubbles: true, cancelable: true }))
+
+    await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith('菜单复制的终端文本'))
   })
 
   it('reports visual readiness only after terminal output has been applied', async () => {

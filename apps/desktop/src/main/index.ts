@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -538,6 +539,9 @@ ipcMain.handle(DESKTOP_CHANNELS.openDirectoryInTerminal, async (_event, path: st
     return
   }
   await shell.openPath(path)
+})
+ipcMain.handle(DESKTOP_CHANNELS.writeClipboardText, (_event, text: string) => {
+  clipboard.writeText(text)
 })
 ipcMain.handle(DESKTOP_CHANNELS.hideWindow, (_event, windowId: string) => {
   windows.hideWindow(windowId)

@@ -356,6 +356,26 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     } else if (terminal.element) {
       container.appendChild(terminal.element)
     }
+    terminal.attachCustomKeyEventHandler((event) => {
+      const copyModifier = event.metaKey || (!isMacPlatform() && event.ctrlKey)
+      const copySelection = event.type === 'keydown' && !event.altKey && !event.shiftKey &&
+        copyModifier && event.key.toLowerCase() === 'c'
+      if (!copySelection || !terminal.hasSelection()) return true
+      const selection = terminal.getSelection()
+      if (!selection) return true
+      event.preventDefault()
+      event.stopPropagation()
+      void window.matouDesktop.writeClipboardText(selection)
+      return false
+    })
+    const copyTerminalSelection = (event: ClipboardEvent) => {
+      const selection = terminal.getSelection()
+      if (!selection) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      void window.matouDesktop.writeClipboardText(selection)
+    }
+    terminal.element?.addEventListener('copy', copyTerminalSelection, true)
     terminalRef.current = terminal
     fit.fit()
     const publishTerminalDimensions = () => {
@@ -824,6 +844,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       resumeVisualRef.current = NOOP
       storeCheckpoint()
       checkpointNowRef.current = NOOP
+      terminal.element?.removeEventListener('copy', copyTerminalSelection, true)
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
       if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
