@@ -958,9 +958,9 @@ export class ForkWorkflowService {
       }
       tx.run(
         `INSERT INTO sessions (
-           id, task_id, execution_context_id, kind, status, title, cwd,
+           id, task_id, execution_context_id, kind, status, title, title_source, cwd,
            created_at, updated_at, last_activity_at, version
-         ) VALUES (?, ?, ?, ?, 'starting', ?, ?, ?, ?, ?, 1)`,
+         ) VALUES (?, ?, ?, ?, 'starting', ?, 'manual', ?, ?, ?, ?, 1)`,
         ids.sessionId, source.task.id, environment.executionContextId, providerContext.profile,
         displayName, environment.cwd, input.now, input.now, input.now
       )

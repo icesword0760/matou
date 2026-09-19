@@ -18,6 +18,7 @@ import {
   type ExecuteForkInput
 } from './fork-workflow-service'
 import { SessionForkIntentRepository } from '../session/session-fork-intent-repository'
+import { SessionRepository } from '../domain/session-repository'
 
 const exec = promisify(execFile)
 
@@ -101,6 +102,27 @@ describe('ForkWorkflowService', () => {
       cwd: workspaceRoot
     })
     expect(result.session!.cwd).not.toBe(contextCwd)
+  })
+
+  it('keeps the submitted Fork title after the provider reports its inherited conversation title', async () => {
+    const source = bootstrapClaude('provider-manual-fork-title')
+    const created = await service.createForkChild(command('manual-fork-title'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: '第三集', worktreeMode: 'current', now: 30
+    })
+    const sessions = new SessionRepository(database, new DomainTransactionManager(database))
+
+    const observed = sessions.observeProviderTitle(command('observe-inherited-title'), {
+      sessionId: created.session!.id,
+      title: '快乐生活视频制作优化',
+      now: 31
+    }).result
+
+    expect(observed).toMatchObject({
+      title: '第三集',
+      titleSource: 'manual',
+      providerTitle: '快乐生活视频制作优化'
+    })
   })
 
   it('uses the submitted branch when creating a new Worktree', async () => {

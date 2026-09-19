@@ -1445,5 +1445,25 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
       CREATE INDEX fork_batch_public_request_idx
       ON fork_batch_ledger(public_request_fingerprint);
     `
+  },
+  {
+    version: 34,
+    name: 'fork-manual-title-ownership',
+    sql: `
+      UPDATE sessions
+      SET title = (
+            SELECT fork.display_name
+            FROM session_fork_intents AS fork
+            WHERE fork.session_id = sessions.id
+          ),
+          title_source = 'manual'
+      WHERE title_source <> 'manual'
+        AND EXISTS (
+          SELECT 1
+          FROM session_fork_intents AS fork
+          WHERE fork.session_id = sessions.id
+            AND TRIM(fork.display_name) <> ''
+        );
+    `
   }
 ]
