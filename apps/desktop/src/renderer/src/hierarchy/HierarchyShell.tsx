@@ -112,6 +112,13 @@ export function HierarchyShell({ fixture, runtimeMode = 'normal', terminalDiagno
     }
     storeRef.current.applyCommandResult(result, context)
     const sceneId = mutationSceneId(result, context)
+    if (isImmediateNavigationCommand(context.type)) {
+      // A cold Scene can take long enough to hydrate that the first click
+      // otherwise looks lost even though Runtime has already persisted the
+      // navigation. Commit the authoritative navigation result first, then
+      // enrich the selected Scene without holding back the visible switch.
+      setProjection(toHierarchyProjection(storeRef.current.view().hierarchy))
+    }
     if (client && sceneId && requiresFreshSceneSnapshot(context.type)) {
       const [sceneSnapshot, sceneGraph] = await Promise.all([
         client.request<SceneSnapshotProjection>('hierarchy.get-scene-snapshot', { sceneId }),
@@ -2040,6 +2047,12 @@ export function requiresFreshSceneSnapshot(type: string): boolean {
     'hierarchy.retry-fork', 'hierarchy.remove-failed-fork',
     'hierarchy.remove-session-branch',
     'hierarchy.detach-session', 'hierarchy.return-session', 'hierarchy.replace-layout'
+  ].includes(type)
+}
+
+function isImmediateNavigationCommand(type: string): boolean {
+  return [
+    'hierarchy.activate-workspace', 'hierarchy.activate-task', 'hierarchy.activate-scene'
   ].includes(type)
 }
 

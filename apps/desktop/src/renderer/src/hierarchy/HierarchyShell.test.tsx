@@ -1434,6 +1434,57 @@ describe('PRD 05 hierarchy shell', () => {
     expect(activePane?.textContent).toContain('终端 A1')
   })
 
+  it('shows a clicked Task before its cold Scene hydration finishes', async () => {
+    const data = fixture()
+    data.tasks.push({ id: 'task-a2', workspaceId: 'workspace-a', title: '事项 A2' })
+    data.scenes.push({ id: 'scene-a3', taskId: 'task-a2', name: '页签 A3', rootNodeId: 'node-a3' })
+    data.sessions.push({
+      id: 'session-a3', taskId: 'task-a2', title: '终端 A3', executionContextId: 'context-a'
+    })
+    data.sceneSnapshots!.push(
+      snapshot('scene-a3', 'task-a2', '页签 A3', 'node-a3', 'mount-a3', 'session-a3')
+    )
+    data.navigation.sceneByTask['task-a2'] = 'scene-a3'
+    data.navigation.sessionByScene['scene-a3'] = 'session-a3'
+    const nextNavigation = structuredClone(data.navigation)
+    nextNavigation.taskByWorkspace['workspace-a'] = 'task-a2'
+    const pendingHydration = new Promise<never>(() => {})
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'hierarchy.validate-workspace-path') {
+        return { workspaceId: 'workspace-a', status: 'valid', reason: '' }
+      }
+      if (method === 'hierarchy.activate-task') {
+        return {
+          task: data.tasks.find(({ id }) => id === 'task-a2'),
+          scene: data.scenes.find(({ id }) => id === 'scene-a3'),
+          session: data.sessions.find(({ id }) => id === 'session-a3'),
+          navigation: nextNavigation
+        }
+      }
+      if (method === 'hierarchy.get-scene-snapshot' || method === 'hierarchy.get-scene-session-graph') {
+        return pendingHydration
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn(() => () => {}),
+      setForegroundTerminalSessions: vi.fn()
+    }
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+
+    await userEvent.setup().click(screen.getByText('事项 A2'))
+    await waitFor(() => expect(request).toHaveBeenCalledWith(
+      'hierarchy.get-scene-snapshot', { sceneId: 'scene-a3' }
+    ))
+
+    expect(screen.getByTestId('active-task').textContent).toContain('事项 A2')
+  })
+
   it('keeps the foreground terminal bound, releases inactive Scenes and blocks input for an invalid path', () => {
     const data = fixture()
     data.pathStates = [{ workspaceId: 'workspace-a', status: 'invalid', reason: 'missing' }]
