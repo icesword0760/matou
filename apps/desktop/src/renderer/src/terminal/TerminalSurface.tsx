@@ -377,7 +377,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     terminal.element?.addEventListener('copy', copyTerminalSelection, true)
     terminalRef.current = terminal
-    fit.fit()
     const publishTerminalDimensions = () => {
       container.dataset.terminalCols = String(terminal.cols)
       container.dataset.terminalRows = String(terminal.rows)
@@ -404,9 +403,17 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let terminalContentApplied = false
     let visualReplayPending = false
     let recoveryLayoutResizeDeadline = 0
+    let initialFitPending = true
+    let initialVisualLayoutPending = visibleRef.current && profileRef.current !== 'shell'
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
+    let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined
+    let settleTerminalResize = NOOP
+    const scheduleTerminalResize = () => {
+      if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
+      resizeSettleTimer = setTimeout(settleTerminalResize, TERMINAL_RESIZE_SETTLE_MS)
+    }
     const reportVisualReady = () => {
-      if (visualReadyReported || surfaceDisposed) return
+      if (visualReadyReported || surfaceDisposed || initialVisualLayoutPending) return
       visualReadyReported = true
       requestAnimationFrame(() => {
         if (!surfaceDisposed) onVisualReadyRef.current()
@@ -638,16 +645,12 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           visualReplayPending = false
           visualCatchupRequested = false
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.throughSequence)
-          fit.fit()
           // The carousel can still be completing its responsive flex transition
-          // when an inactive Session finishes replay. Permit exactly one later
-          // settled resize so the restored grid fills that card, without making
-          // ordinary inactive hover previews resize the live PTY repeatedly.
+          // when replay finishes. Wait for the width burst to settle before
+          // fitting, otherwise the provider is briefly resized to a tiny grid
+          // and its restored text is permanently formatted into narrow rows.
           recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
-          publishTerminalDimensions()
-          if (validTerminalDimensions(terminal.cols, terminal.rows)) {
-            resizeCoalescer.offer(terminal.cols, terminal.rows)
-          }
+          scheduleTerminalResize()
           scheduleCheckpoint(0)
           onReplayComplete(`replayed-through:${message.throughSequence}`)
           awaitRenderedTerminalFrame()
@@ -793,34 +796,50 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         setArchivedSearch(undefined)
       })
     })
-    let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined
-    const settleTerminalResize = () => {
+    settleTerminalResize = () => {
       resizeSettleTimer = undefined
       // Hover previews animate between compact and expanded widths. Keeping
       // that animation visual avoids making shells redraw their prompt into
       // durable scrollback after the card has already lost input focus. The
       // final focused grid is published when that card becomes active again.
+      const settlingInitialLayout = initialFitPending
       const settlingRecoveredLayout = performance.now() <= recoveryLayoutResizeDeadline
-      if (!visibleRef.current || (!activeRef.current && !settlingRecoveredLayout)) return
+      if (
+        !visibleRef.current ||
+        (!activeRef.current && !settlingInitialLayout && !settlingRecoveredLayout)
+      ) return
+      initialFitPending = false
+      initialVisualLayoutPending = false
       recoveryLayoutResizeDeadline = 0
+      const colsBeforeFit = terminal.cols
+      const rowsBeforeFit = terminal.rows
       fit.fit()
       publishTerminalDimensions()
-      if (validTerminalDimensions(terminal.cols, terminal.rows)) {
+      const dimensionsChanged = terminal.cols !== colsBeforeFit || terminal.rows !== rowsBeforeFit
+      if (
+        validTerminalDimensions(terminal.cols, terminal.rows) &&
+        (!settlingInitialLayout || dimensionsChanged)
+      ) {
         resizeCoalescer.offer(terminal.cols, terminal.rows)
       }
       if (activationReadyPendingRef.current && !viewportMovingRef.current) {
         reportActivatedVisualReady()
       }
+      if (terminalContentApplied) awaitRenderedTerminalFrame()
     }
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       if (activationReadyPendingRef.current && activeRef.current) {
         activationResizeObservedRef.current = true
       }
-      if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
-      resizeSettleTimer = setTimeout(settleTerminalResize, TERMINAL_RESIZE_SETTLE_MS)
+      scheduleTerminalResize()
     })
     observer.observe(container)
+    // ResizeObserver does not consistently emit an initial notification when
+    // a cached xterm element is reparented into a card whose flex transition
+    // has already started. Always run one settled fit after the Runtime view is
+    // attached; subsequent observer events keep postponing it until width is stable.
+    scheduleTerminalResize()
     const wheel = (event: WheelEvent) => {
       const zoom = (isMacPlatform() && (event.metaKey || event.ctrlKey)) || (!isMacPlatform() && event.ctrlKey)
       if (!zoom || event.deltaY === 0) return

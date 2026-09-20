@@ -257,12 +257,17 @@ describe('TerminalSurface focus continuity', () => {
     expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps recovery visible when xterm renders a blank control-sequence frame', async () => {
+  it('keeps recovery visible when xterm renders a blank control-sequence frame', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0)
+      return 1
+    })
     const onVisualReady = vi.fn()
     state.terminalViewportLines = ['   ', '']
     render(<TerminalSurface sessionId="session-blank-frame" active visible
       profile="claude-code" onVisualReady={onVisualReady} />)
-    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    expect(state.onMessage).toBeTypeOf('function')
 
     state.onMessage?.({
       type: 'terminal.data', sessionId: 'session-blank-frame', sequence: 1,
@@ -272,15 +277,21 @@ describe('TerminalSurface focus continuity', () => {
     expect(onVisualReady).not.toHaveBeenCalled()
 
     state.terminalViewportLines = ['Claude Code']
+    act(() => { vi.advanceTimersByTime(80) })
     state.onRender?.({ start: 0, end: 1 })
     expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps recovery visible through replay intermediate frames until replay completes', async () => {
+  it('keeps recovery visible through replay intermediate frames until replay completes', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0)
+      return 1
+    })
     const onVisualReady = vi.fn()
     render(<TerminalSurface sessionId="session-replay-ready" active visible
       profile="claude-code" onVisualReady={onVisualReady} />)
-    await waitFor(() => expect(state.onMessage).toBeTypeOf('function'))
+    expect(state.onMessage).toBeTypeOf('function')
 
     state.onMessage?.({
       type: 'terminal.spawned', sessionId: 'session-replay-ready', pid: 456,
@@ -301,6 +312,7 @@ describe('TerminalSurface focus continuity', () => {
     state.onMessage?.({
       type: 'terminal.replay-complete', sessionId: 'session-replay-ready', throughSequence: 2
     })
+    act(() => { vi.advanceTimersByTime(80) })
     state.onRender?.({ start: 0, end: 1 })
     expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
@@ -323,6 +335,44 @@ describe('TerminalSurface focus continuity', () => {
     await waitFor(() => expect(state.attachTerminal).toHaveBeenCalledTimes(1))
 
     expect(state.webglConstructed).not.toHaveBeenCalled()
+  })
+
+  it('attaches the PTY before fitting a newly mounted card that is still settling', () => {
+    vi.useFakeTimers()
+    render(<TerminalSurface sessionId="session-restoring-layout" active visible />)
+
+    expect(state.attachTerminal).toHaveBeenCalledTimes(1)
+    expect(state.fit).not.toHaveBeenCalled()
+    act(() => { vi.advanceTimersByTime(80) })
+    expect(state.fit).toHaveBeenCalled()
+    expect(state.attachTerminal.mock.invocationCallOrder[0]).toBeLessThan(
+      state.fit.mock.invocationCallOrder[0]!
+    )
+    expect(state.attachTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-restoring-layout', cols: 80, rows: 24
+    }))
+  })
+
+  it('keeps the recovery cover until the mounted card has fitted its settled width', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      callback(0)
+      return 1
+    })
+    const onVisualReady = vi.fn()
+    render(<TerminalSurface sessionId="session-restoring-layout" active visible profile="claude-code"
+      onVisualReady={onVisualReady} />)
+
+    state.onMessage?.({
+      type: 'terminal.data', sessionId: 'session-restoring-layout', sequence: 1,
+      data: new TextEncoder().encode('restored terminal frame')
+    })
+    state.onRender?.({ start: 0, end: 1 })
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    act(() => { vi.advanceTimersByTime(80) })
+    state.onRender?.({ start: 0, end: 1 })
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 
   it('fits and resizes the PTY once after a burst of card width changes settles', () => {
