@@ -14,6 +14,7 @@ import {
   type RuntimeMessage
 } from '@matou/contracts'
 
+import { TerminalScreenProjector } from './control/terminal-screen-projector'
 import { SegmentJournal, readSegmentFrames, readSessionFrames } from './journal/segment-journal'
 import {
   readSessionJournalBounds
@@ -2350,6 +2351,49 @@ sleep 30
       sessionId: 'external-git-session'
     })
     await waitUntil(() => port.last('terminal.hud')?.hud?.gitDirty === true)
+  })
+
+  it('restores a live provider from Runtime VT state and continues incremental output without stale checkpoint text', async () => {
+    const executable = join(root, 'snapshot-provider.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'live-vt-snapshot', 'claude-code')
+    const restored = new TerminalScreenProjector(80, 24)
+    try {
+      port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'live-vt-snapshot', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24 })
+      await waitUntil(() => port.last('terminal.spawned') !== undefined)
+      const session = [...testSessionRegistries][0]!.get('live-vt-snapshot')!
+      session.display('正文完整\r\nstatus: 1')
+      await session.replayMetadata()
+      await new CheckpointManager(root, database).create({
+        sessionId: 'live-vt-snapshot', terminalSequence: session.lastSequence,
+        domainEventSequence: 0, screenEpoch: 0, cols: 80, rows: 24,
+        snapshot: new TextEncoder().encode('POISONED_RENDERER_SCREEN')
+      })
+      port.receive({ type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'live-vt-snapshot', fromSequence: 0 })
+      await waitUntil(() => port.last('terminal.replay-complete') !== undefined)
+      const start = port.last('terminal.replay-start')!
+      expect(start.checkpoint).toBeDefined()
+      const snapshot = new TextDecoder().decode(start.checkpoint!.snapshot)
+      expect(snapshot).not.toContain('POISONED_RENDERER_SCREEN')
+      await restored.write(snapshot)
+      expect(await restored.snapshot()).toEqual(await session.snapshotScreen())
+      const update = '\r\u001b[2Kstatus: 2\r\n下一轮'
+      session.display(update)
+      await session.replayMetadata()
+      await restored.write(update)
+      expect(await restored.snapshot()).toEqual(await session.snapshotScreen())
+      expect((await restored.snapshot()).text).toContain('正文完整')
+      expect((await restored.snapshot()).text).not.toContain('status: 1')
+    } finally {
+      restored.dispose()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previous)
+    }
   })
 
   it('advertises replay and replays durable output after a Runtime reconnect', async () => {
@@ -7277,13 +7321,13 @@ async function waitUntilAsync(predicate: () => Promise<boolean>, timeoutMs = 2_0
 }
 
 function terminalText(port: MockPort): string {
-  const decoder = new TextDecoder()
-  return port.sent
-    .filter((message): message is Extract<RuntimeMessage, { type: 'terminal.data' }> =>
-      message.type === 'terminal.data'
-    )
-    .map(({ data }) => decoder.decode(data))
-    .join('')
+  return port.sent.map((message) => {
+    if (message.type === 'terminal.data') return new TextDecoder().decode(message.data)
+    if (message.type === 'terminal.replay-start' && message.checkpoint) {
+      return new TextDecoder().decode(message.checkpoint.snapshot)
+    }
+    return ''
+  }).join('')
 }
 
 function workStatus(sessionId: string): string | undefined {

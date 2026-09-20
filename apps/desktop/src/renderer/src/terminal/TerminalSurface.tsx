@@ -14,7 +14,6 @@ import { Terminal } from '@xterm/xterm'
 import { messages } from '../i18n/current'
 import { useMessages } from '../i18n/LocaleProvider'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
-import { ResizeCoalescer } from './resize-coalescer'
 import { quoteDroppedPath } from './shell-path-quote'
 import { foregroundTerminalModels } from './terminal-model-cache'
 import { TerminalOutputCoalescer } from './terminal-output-coalescer'
@@ -129,7 +128,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const [archivedSearch, setArchivedSearch] = useState<ArchivedSearchView | undefined>()
   const [historyContext, setHistoryContext] = useState<HistoryContextView | undefined>()
   const containerRef = useRef<HTMLDivElement>(null)
-  const fitRef = useRef<FitAddon | null>(null)
+  const scheduleFitRef = useRef(NOOP)
   const searchRef = useRef<SearchAddon | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const visibleRef = useRef(visible)
@@ -257,7 +256,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     fontSizeRef.current = fontSize
     if (!terminalRef.current) return
     terminalRef.current.options.fontSize = fontSize
-    requestAnimationFrame(() => fitRef.current?.fit())
+    scheduleFitRef.current()
   }, [fontSize])
   useEffect(() => {
     if (!terminalRef.current) return
@@ -280,7 +279,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     setHistoryContext(undefined)
     setArchivedSearch(undefined)
     requestAnimationFrame(() => {
-      fitRef.current?.fit()
+      scheduleFitRef.current()
       if (activeRef.current && visibleRef.current) terminalRef.current?.focus()
     })
   }
@@ -382,11 +381,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       container.dataset.terminalRows = String(terminal.rows)
     }
     publishTerminalDimensions()
-    fitRef.current = fit
     searchRef.current = search
-    const resizeCoalescer = new ResizeCoalescer((cols, rows) => {
-      if (!readOnly) client.resizeTerminal(sessionId, cols, rows)
-    })
     if (activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
       requestAnimationFrame(() => {
         if (terminalFocusAllowed(container)) terminal.focus()
@@ -406,14 +401,8 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let initialFitPending = true
     let initialVisualLayoutPending = visibleRef.current && profileRef.current !== 'shell'
     let checkpointAfterRecoveryLayout = false
-    let providerRedrawAfterRecoveryLayout = false
-    let providerRedrawPending = false
-    let providerRedrawPhase: 'idle' | 'intermediate' | 'final' = 'idle'
-    let providerRedrawFinalCols = 0
-    let providerRedrawFinalRows = 0
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
     let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined
-    let providerRedrawSettleTimer: ReturnType<typeof setTimeout> | undefined
     let settleTerminalResize = NOOP
     const scheduleTerminalResize = () => {
       if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
@@ -444,7 +433,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const storeCheckpoint = () => {
       clearCheckpointTimer()
       if (
-        readOnly || replaying || providerRedrawAfterRecoveryLayout || providerRedrawPending ||
+        readOnly || replaying ||
         model.lastAppliedSequence <= 0 ||
         model.lastAppliedSequence <= model.lastCheckpointSequence
       ) return
@@ -463,44 +452,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const scheduleCheckpoint = (delay = CHECKPOINT_QUIET_MS) => {
       clearCheckpointTimer()
       if (
-        readOnly || replaying || providerRedrawAfterRecoveryLayout || providerRedrawPending ||
+        readOnly || replaying ||
         model.lastAppliedSequence <= 0 ||
         model.lastAppliedSequence <= model.lastCheckpointSequence
       ) return
       checkpointTimer = setTimeout(storeCheckpoint, delay)
-    }
-    const clearProviderRedrawTimers = () => {
-      if (providerRedrawSettleTimer !== undefined) clearTimeout(providerRedrawSettleTimer)
-      providerRedrawSettleTimer = undefined
-    }
-    const settleProviderRedraw = () => {
-      providerRedrawSettleTimer = undefined
-      if (!providerRedrawPending || surfaceDisposed) return
-      if (providerRedrawPhase === 'intermediate') {
-        // Keep the local VT grid and the provider PTY grid identical at every
-        // step. Sending SIGWINCH for the final width while xterm still has the
-        // intermediate width makes cursor-addressed output land in the wrong
-        // cells and permanently scrambles the restored screen.
-        providerRedrawPhase = 'final'
-        terminalContentApplied = false
-        terminal.resize(providerRedrawFinalCols, providerRedrawFinalRows)
-        publishTerminalDimensions()
-        client.resizeTerminal(sessionId, providerRedrawFinalCols, providerRedrawFinalRows)
-        return
-      }
-      if (providerRedrawPhase !== 'final') return
-      providerRedrawPhase = 'idle'
-      providerRedrawPending = false
-      visualReplayPending = false
-      awaitRenderedTerminalFrame()
-      scheduleCheckpoint(0)
-    }
-    const scheduleProviderRedrawSettle = () => {
-      if (providerRedrawSettleTimer !== undefined) clearTimeout(providerRedrawSettleTimer)
-      providerRedrawSettleTimer = setTimeout(
-        settleProviderRedraw,
-        TERMINAL_RESIZE_SETTLE_MS
-      )
     }
     checkpointNowRef.current = storeCheckpoint
     const writeLiveOutput = (bytes: Uint8Array, sequence: number) => {
@@ -509,8 +465,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         client.acknowledgeTerminal(sessionId, sequence)
         if (surfaceDisposed) return
         awaitRenderedTerminalFrame()
-        if (providerRedrawPending) scheduleProviderRedrawSettle()
-        else if (!providerRedrawAfterRecoveryLayout) scheduleCheckpoint()
+        scheduleCheckpoint()
         if (!historyModeRef.current && activeRef.current && visibleRef.current && terminalFocusAllowed(container)) {
           terminal.focus()
         }
@@ -533,6 +488,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     resumeVisualRef.current = requestVisualCatchup
     const markSpawned = () => {
+      if (!spawned) {
+        recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
+        scheduleTerminalResize()
+      }
       spawned = true
       if (pendingInputRef.current) {
         client.sendTerminalInput(sessionId, pendingInputRef.current)
@@ -627,10 +586,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         visualCatchupPending = false
         visualCatchupRequested = false
         preserveExistingModelForReplay = false
-        providerRedrawAfterRecoveryLayout = false
-        providerRedrawPending = false
-        providerRedrawPhase = 'idle'
-        clearProviderRedrawTimers()
         recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
         scheduleTerminalResize()
         // Resolved here rather than at module load, so the banner follows the
@@ -657,13 +612,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         terminalContentApplied = false
         visualCatchupPending = false
         const preservingExistingModel = preserveExistingModelForReplay && !message.checkpoint
-        providerRedrawAfterRecoveryLayout = (
-          profileRef.current !== 'shell' &&
-          !preservingExistingModel
-        )
-        providerRedrawPending = false
-        providerRedrawPhase = 'idle'
-        clearProviderRedrawTimers()
         if (!preservingExistingModel) {
           terminal.reset()
           model.lastAppliedSequence = message.checkpoint?.terminalSequence ?? 0
@@ -702,7 +650,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       } else if (message.type === 'terminal.replay-complete') {
         terminal.write('', () => {
           replaying = false
-          visualReplayPending = providerRedrawAfterRecoveryLayout
+          visualReplayPending = false
           visualCatchupRequested = false
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.throughSequence)
           // The carousel can still be completing its responsive flex transition
@@ -710,7 +658,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           // fitting, otherwise the provider is briefly resized to a tiny grid
           // and its restored text is permanently formatted into narrow rows.
           recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
-          checkpointAfterRecoveryLayout = !providerRedrawAfterRecoveryLayout
+          checkpointAfterRecoveryLayout = true
           scheduleTerminalResize()
           onReplayComplete(`replayed-through:${message.throughSequence}`)
           awaitRenderedTerminalFrame()
@@ -863,7 +811,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       // changes cursor coordinates, corrupts the restored screen, and then
       // persists that corruption in the next checkpoint. Replay-complete
       // schedules a new settled fit, so keep every layout request pending here.
-      if (replaying || (visualReplayPending && !providerRedrawAfterRecoveryLayout)) return
+      if (replaying || visualReplayPending) return
       // Hover previews animate between compact and expanded widths. Keeping
       // that animation visual avoids making shells redraw their prompt into
       // durable scrollback after the card has already lost input focus. The
@@ -877,39 +825,14 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       initialFitPending = false
       initialVisualLayoutPending = false
       recoveryLayoutResizeDeadline = 0
-      const colsBeforeFit = terminal.cols
-      const rowsBeforeFit = terminal.rows
       fit.fit()
       publishTerminalDimensions()
-      const dimensionsChanged = terminal.cols !== colsBeforeFit || terminal.rows !== rowsBeforeFit
-      if (
-        !providerRedrawAfterRecoveryLayout &&
-        validTerminalDimensions(terminal.cols, terminal.rows) &&
-        (!settlingInitialLayout || dimensionsChanged)
-      ) {
-        resizeCoalescer.offer(terminal.cols, terminal.rows)
-      }
-      if (providerRedrawAfterRecoveryLayout) {
-        // Replay reconstructs the visible provider screen, but not the live
-        // PTY's private cursor/wrap state. Even a valid checkpoint can diverge
-        // after fitting to today's card, so later status output may overwrite
-        // restored text. Clear the replayed view once, then make the live
-        // provider emit one complete frame at the settled card size.
-        providerRedrawAfterRecoveryLayout = false
-        providerRedrawPending = true
-        providerRedrawPhase = 'intermediate'
-        terminal.reset()
-        terminalContentApplied = false
-        visualReplayPending = true
-        providerRedrawFinalCols = terminal.cols
-        providerRedrawFinalRows = terminal.rows
-        const redrawCols = providerRedrawFinalCols > 2
-          ? providerRedrawFinalCols - 1
-          : providerRedrawFinalCols + 1
-        terminal.resize(redrawCols, providerRedrawFinalRows)
-        publishTerminalDimensions()
-        client.resizeTerminal(sessionId, redrawCols, providerRedrawFinalRows)
-        return
+      // A pre-spawn resize may have been ignored by Runtime. Re-send after
+      // attach/replay even when fitting returns the same local dimensions.
+      // This path is already debounced; a second coalescer would incorrectly
+      // deduplicate that required resend against an unacknowledged request.
+      if (!readOnly && validTerminalDimensions(terminal.cols, terminal.rows)) {
+        client.resizeTerminal(sessionId, terminal.cols, terminal.rows)
       }
       if (activationReadyPendingRef.current && !viewportMovingRef.current) {
         reportActivatedVisualReady()
@@ -920,6 +843,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         scheduleCheckpoint(0)
       }
     }
+    scheduleFitRef.current = scheduleTerminalResize
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
       if (activationReadyPendingRef.current && activeRef.current) {
@@ -951,7 +875,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         activationReadyFrameRef.current = undefined
       }
       clearCheckpointTimer()
-      clearProviderRedrawTimers()
       output.dispose()
       flushOutputRef.current = NOOP
       resumeVisualRef.current = NOOP
@@ -961,15 +884,13 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       container.removeEventListener('wheel', wheel)
       observer.disconnect()
       if (resizeSettleTimer !== undefined) clearTimeout(resizeSettleTimer)
-      resizeCoalescer.flush()
-      resizeCoalescer.dispose()
       input.dispose()
       rendered.dispose()
       window.removeEventListener('matou:forward-terminal-tab', forwardTab)
       searchResults.dispose()
       for (const handler of oscHandlers) handler.dispose()
       detach()
-      fitRef.current = null
+      scheduleFitRef.current = NOOP
       searchRef.current = null
       terminalRef.current = null
       sendInputRef.current = NOOP

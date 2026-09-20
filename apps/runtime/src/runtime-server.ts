@@ -1190,6 +1190,12 @@ export class RuntimeServer {
         : undefined
       activeSession?.detach(this.#sendToPort)
       detachedSession = activeSession
+      // The live Runtime VT model has consumed every byte in order since this
+      // PTY started. Prefer it over a renderer checkpoint or a mid-frame tail.
+      const liveScreen = activeSession && activeSession.profile !== 'shell' &&
+        !message.preserveExistingModel
+        ? await activeSession.captureReplayScreen()
+        : undefined
       const metadata = activeSession
         ? await activeSession.replayMetadata(10_000)
         : await readSessionReplayMetadata(this.#dataRoot, message.sessionId, 10_000)
@@ -1211,10 +1217,10 @@ export class RuntimeServer {
       // checkpoint cannot replace that prefix: resetting to it and then
       // starting at requestedFrom would leave a visible hole. A newer
       // checkpoint already contains that prefix and is the fastest exact base.
-      const checkpoint = !message.preserveExistingModel && checkpointHasGrid(candidateCheckpoint) && (
+      const checkpoint = liveScreen ?? (!message.preserveExistingModel && checkpointHasGrid(candidateCheckpoint) && (
         message.fromSequence === 0 ||
         candidateCheckpoint.terminalSequence >= message.fromSequence
-      ) ? candidateCheckpoint : undefined
+      ) ? candidateCheckpoint : undefined)
       if (
         message.fromSequence > 0 &&
         availableFromSequence > 0 &&

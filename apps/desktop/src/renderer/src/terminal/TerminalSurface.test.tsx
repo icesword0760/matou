@@ -314,19 +314,6 @@ describe('TerminalSurface focus continuity', () => {
     })
     act(() => { vi.advanceTimersByTime(80) })
     state.onRender?.({ start: 0, end: 1 })
-    expect(onVisualReady).not.toHaveBeenCalled()
-
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-replay-ready', sequence: 3,
-      data: new TextEncoder().encode('intermediate provider redraw')
-    })
-    act(() => { vi.advanceTimersByTime(80) })
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-replay-ready', sequence: 4,
-      data: new TextEncoder().encode('final provider redraw')
-    })
-    act(() => { vi.advanceTimersByTime(80) })
-    state.onRender?.({ start: 0, end: 1 })
     expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 
@@ -356,97 +343,48 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.fit).toHaveBeenCalledTimes(1)
   })
 
-  it('forces a clean provider redraw after a checkpoint-free truncated replay', async () => {
+  it('resends the settled grid when a slow provider finally attaches', async () => {
     vi.useFakeTimers()
-    render(<TerminalSurface sessionId="session-truncated-redraw" active visible
-      profile="claude-code" />)
-
-    state.onMessage?.({
-      type: 'terminal.replay-start', sessionId: 'session-truncated-redraw', source: 'tail',
-      fromSequence: 100, throughSequence: 100, instantLineLimit: 10_000,
-      availableFromSequence: 1, liveSequence: 100
-    })
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-truncated-redraw', sequence: 100,
-      data: new TextEncoder().encode('partial VT tail')
-    })
-    state.onMessage?.({
-      type: 'terminal.replay-complete', sessionId: 'session-truncated-redraw', throughSequence: 100
-    })
-
+    render(<TerminalSurface sessionId="late-spawn-grid" active visible profile="claude-code" />)
     await act(() => vi.advanceTimersByTimeAsync(80))
-    expect(state.terminalReset).toHaveBeenCalledTimes(2)
-    expect(state.terminalResize).toHaveBeenLastCalledWith(79, 24)
-    expect(state.resizeTerminal).toHaveBeenLastCalledWith('session-truncated-redraw', 79, 24)
-    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
-
-    await act(() => vi.advanceTimersByTimeAsync(79))
-    expect(state.resizeTerminal).toHaveBeenCalledTimes(1)
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-truncated-redraw', sequence: 101,
-      data: new TextEncoder().encode('intermediate provider redraw')
-    })
+    state.resizeTerminal.mockClear()
+    state.onMessage?.({ type: 'terminal.spawned', sessionId: 'late-spawn-grid', pid: 123, reattached: false })
     await act(() => vi.advanceTimersByTimeAsync(80))
-    expect(state.terminalResize).toHaveBeenLastCalledWith(80, 24)
-    expect(state.resizeTerminal).toHaveBeenLastCalledWith('session-truncated-redraw', 80, 24)
-    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
-
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-truncated-redraw', sequence: 102,
-      data: new TextEncoder().encode('clean provider redraw')
-    })
-    await act(() => vi.advanceTimersByTimeAsync(80))
-    await act(() => vi.runOnlyPendingTimersAsync())
-
-    expect(state.storeTerminalCheckpoint).toHaveBeenCalledWith(
-      'session-truncated-redraw', 102, 0, 80, 24, '\u001b[2Jserialized screen'
-    )
+    expect(state.resizeTerminal).toHaveBeenLastCalledWith('late-spawn-grid', 80, 24)
   })
 
-  it('forces the same coordinated redraw after restoring a provider checkpoint', async () => {
+  it('preserves the replayed provider cursor instead of resetting and guessing a redraw', async () => {
     vi.useFakeTimers()
-    render(<TerminalSurface sessionId="session-checkpoint-redraw" active visible
-      profile="claude-code" />)
-
+    render(<TerminalSurface sessionId="provider-cursor" active visible profile="claude-code" />)
     state.onMessage?.({
-      type: 'terminal.replay-start', sessionId: 'session-checkpoint-redraw',
-      source: 'checkpoint', fromSequence: 101, throughSequence: 100,
-      instantLineLimit: 10_000, availableFromSequence: 1, liveSequence: 100,
-      checkpoint: {
-        terminalSequence: 100, domainEventSequence: 0, screenEpoch: 0,
-        cols: 80, rows: 24,
-        snapshot: new TextEncoder().encode('\u001b[2Jrestored provider screen')
-      }
+      type: 'terminal.replay-start', sessionId: 'provider-cursor', source: 'checkpoint',
+      fromSequence: 101, throughSequence: 100, availableFromSequence: 1, liveSequence: 100,
+      checkpoint: { terminalSequence: 100, domainEventSequence: 0, screenEpoch: 0,
+        cols: 80, rows: 24, snapshot: new TextEncoder().encode('screen with cursor') }
     })
-    state.onMessage?.({
-      type: 'terminal.replay-complete', sessionId: 'session-checkpoint-redraw',
-      throughSequence: 100
-    })
+    state.onMessage?.({ type: 'terminal.replay-complete', sessionId: 'provider-cursor', throughSequence: 100 })
+    await act(() => vi.advanceTimersByTimeAsync(200))
+    expect(state.terminalReset).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).not.toHaveBeenCalledWith('provider-cursor', 79, 24)
+    state.onMessage?.({ type: 'terminal.data', sessionId: 'provider-cursor', sequence: 101,
+      data: new TextEncoder().encode('\u001b[1A\rnext status') })
+    expect(state.terminalReset).toHaveBeenCalledTimes(1)
+  })
 
+  it('schedules font fitting through the same PTY resize path and defers it during replay', async () => {
+    vi.useFakeTimers()
+    const view = render(<TerminalSurface sessionId="font-grid" active visible fontSize={14} />)
     await act(() => vi.advanceTimersByTimeAsync(80))
-    expect(state.terminalReset).toHaveBeenCalledTimes(2)
-    expect(state.terminalResize).toHaveBeenLastCalledWith(79, 24)
-    expect(state.resizeTerminal).toHaveBeenLastCalledWith('session-checkpoint-redraw', 79, 24)
-    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
-
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-checkpoint-redraw', sequence: 101,
-      data: new TextEncoder().encode('intermediate provider redraw')
-    })
+    state.fit.mockClear()
+    state.onMessage?.({ type: 'terminal.replay-start', sessionId: 'font-grid', source: 'tail',
+      fromSequence: 1, throughSequence: 1, availableFromSequence: 1, liveSequence: 1 })
+    view.rerender(<TerminalSurface sessionId="font-grid" active visible fontSize={16} />)
     await act(() => vi.advanceTimersByTimeAsync(80))
-    expect(state.terminalResize).toHaveBeenLastCalledWith(80, 24)
-    expect(state.resizeTerminal).toHaveBeenLastCalledWith('session-checkpoint-redraw', 80, 24)
-
-    state.onMessage?.({
-      type: 'terminal.data', sessionId: 'session-checkpoint-redraw', sequence: 102,
-      data: new TextEncoder().encode('final provider redraw')
-    })
+    expect(state.fit).not.toHaveBeenCalled()
+    state.onMessage?.({ type: 'terminal.replay-complete', sessionId: 'font-grid', throughSequence: 1 })
     await act(() => vi.advanceTimersByTimeAsync(80))
-    await act(() => vi.runOnlyPendingTimersAsync())
-
-    expect(state.storeTerminalCheckpoint).toHaveBeenCalledWith(
-      'session-checkpoint-redraw', 102, 0, 80, 24, '\u001b[2Jserialized screen'
-    )
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenLastCalledWith('font-grid', 80, 24)
   })
 
   it('keeps a switch-only host navigation from moving terminal input focus', async () => {

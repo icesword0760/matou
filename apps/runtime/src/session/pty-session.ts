@@ -265,6 +265,20 @@ export class PtySession {
     return this.#journal.replayMetadata(maxLines)
   }
 
+  captureReplayScreen() {
+    this.#outputBatcher.flush()
+    const terminalSequence = this.#sequence
+    const screen = this.#screen.serialize()
+    return screen.then((snapshot) => ({
+      terminalSequence,
+      domainEventSequence: this.domainEventSequenceAtOrBefore(terminalSequence),
+      screenEpoch: 0,
+      cols: snapshot.cols,
+      rows: snapshot.rows,
+      snapshot: this.#encoder.encode(snapshot.snapshot)
+    }))
+  }
+
   snapshotScreen(): Promise<TerminalScreenSnapshot> {
     return this.#screen.snapshot()
   }
