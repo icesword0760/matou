@@ -131,10 +131,11 @@ export function TerminalPane(props: {
   const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
+  const cachedAtMount = recoveryState === 'ready' && foregroundTerminalModels.has(session.id)
   const [terminalVisualReady, setTerminalVisualReady] = useState(
-    () => recoveryState === 'ready' && foregroundTerminalModels.has(session.id)
+    () => cachedAtMount && !active
   )
-  const [activationLoading, setActivationLoading] = useState(false)
+  const [activationLoading, setActivationLoading] = useState(() => cachedAtMount && active)
   const previousActive = useRef(active)
   const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
   const [forkReadinessHint, setForkReadinessHint] = useState(false)

@@ -130,6 +130,18 @@ describe('Terminal pane', () => {
     expect(screen.queryByTestId('session-recovery-water')).toBeNull()
   })
 
+  it('covers a cached Session that mounts active until its reparented frame paints', () => {
+    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn() }))
+    foregroundTerminalModels.release('session-1')
+
+    render(<TerminalPane {...fixture()} active visible />)
+
+    expect(screen.getByRole('status', { name: '正在加载终端：Claude 主会话' })).toBeTruthy()
+    expect(screen.getByText('加载中')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '触发终端首帧' }))
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+  })
+
   it('reveals a startup failure that arrives before the recovered terminal paints', () => {
     render(<TerminalPane {...fixture()} recoveryState="ready" />)
     expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
