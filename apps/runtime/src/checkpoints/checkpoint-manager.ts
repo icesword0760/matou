@@ -13,7 +13,11 @@ import { join } from 'node:path'
 
 import type { RuntimeDatabase } from '../storage/database'
 
-const MAGIC = Buffer.from('MTCPV1\n', 'ascii')
+// V4 invalidates snapshots captured while the provider PTY and local xterm
+// briefly used different widths during the recovery redraw. Those files can
+// pass checksum validation while already containing a scrambled VT screen, so
+// recovery must rebuild them once with coordinated grids.
+const MAGIC = Buffer.from('MTCPV4\n', 'ascii')
 export const MAX_CHECKPOINT_SNAPSHOT_BYTES = 16 * 1024 * 1024
 
 export type CheckpointFaultPhase =

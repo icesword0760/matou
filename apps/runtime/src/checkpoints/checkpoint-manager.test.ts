@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,6 +76,29 @@ describe('CheckpointManager', () => {
     expect(
       database.get<{ valid: number }>('SELECT valid FROM journal_checkpoints WHERE id = ?', newest.id)
     ).toEqual({ valid: 0 })
+  })
+
+  it('rejects pre-V4 renderer snapshots captured with mismatched recovery grids', async () => {
+    const created = await checkpoints.create({
+      sessionId: 'session-1', terminalSequence: 2, domainEventSequence: 1,
+      screenEpoch: 1, cols: 80, rows: 24, snapshot: Uint8Array.from([1, 2, 3])
+    })
+    const bytes = await readFile(created.filePath)
+    bytes.write('MTCPV3\n', 0, 'ascii')
+    await writeFile(created.filePath, bytes)
+    database.run(
+      'UPDATE journal_checkpoints SET checksum = ? WHERE session_id = ?',
+      createHash('sha256').update(bytes).digest('hex'),
+      'session-1'
+    )
+
+    await expect(
+      checkpoints.loadLatest('session-1', { terminalSequence: 2, domainEventSequence: 1 })
+    ).resolves.toBeUndefined()
+    expect(database.get<{ valid: number }>(
+      'SELECT valid FROM journal_checkpoints WHERE session_id = ?',
+      'session-1'
+    )).toEqual({ valid: 0 })
   })
 
   it('ignores a checkpoint ahead of the recovered journal/event watermark', async () => {
