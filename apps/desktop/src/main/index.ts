@@ -1,3 +1,4 @@
+import { installNativeCopyShortcut, setTerminalCopyFocus } from './native-copy-shortcut'
 import { mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { execFile, spawnSync } from 'node:child_process'
@@ -213,6 +214,7 @@ async function createWindow(): Promise<BrowserWindow> {
 
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
+  installNativeCopyShortcut(window.webContents)
   installNativeDagShortcut(window)
   installNativeScrollGesture(window)
   window.webContents.setWindowOpenHandler(() => {
@@ -271,6 +273,7 @@ async function createDetachedTerminalWindow(input: DetachedTerminalWindowInput):
   detachedWindowContexts.set(input.windowId, input)
   window.once('ready-to-show', () => window.show())
   window.webContents.on('did-finish-load', () => runtimeHost?.connect(window.webContents))
+  installNativeCopyShortcut(window.webContents)
   installNativeDagShortcut(window)
   let closeNotified = false
   const notifyOwner = () => {
@@ -540,6 +543,10 @@ ipcMain.handle(DESKTOP_CHANNELS.openDirectoryInTerminal, async (_event, path: st
   }
   await shell.openPath(path)
 })
+ipcMain.on(DESKTOP_CHANNELS.terminalCopyFocus, (event, focused: boolean) => {
+  setTerminalCopyFocus(event.sender, focused === true)
+})
+
 ipcMain.handle(DESKTOP_CHANNELS.writeClipboardText, (_event, text: string) => {
   clipboard.writeText(text)
 })

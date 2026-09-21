@@ -359,20 +359,20 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       const copyModifier = event.metaKey || (!isMacPlatform() && event.ctrlKey)
       const copySelection = event.type === 'keydown' && !event.altKey && !event.shiftKey &&
         copyModifier && event.key.toLowerCase() === 'c'
-      if (!copySelection || !terminal.hasSelection()) return true
+      if (!copySelection || (!event.metaKey && !terminal.hasSelection())) return true
       const selection = terminal.getSelection()
-      if (!selection) return true
       event.preventDefault()
       event.stopPropagation()
-      void window.matouDesktop.writeClipboardText(selection)
+      if (selection) void window.matouDesktop.writeClipboardText(selection)
+      // Mouse-aware providers own their selection and copy through OSC 52.
+      // Do not let the empty helper textarea overwrite that clipboard value.
       return false
     })
     const copyTerminalSelection = (event: ClipboardEvent) => {
       const selection = terminal.getSelection()
-      if (!selection) return
       event.preventDefault()
       event.stopImmediatePropagation()
-      void window.matouDesktop.writeClipboardText(selection)
+      if (selection) void window.matouDesktop.writeClipboardText(selection)
     }
     terminal.element?.addEventListener('copy', copyTerminalSelection, true)
     terminalRef.current = terminal
@@ -702,6 +702,21 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const oscHandlers = [9, 99, 777].map((oscId) => terminal.parser.registerOscHandler(oscId, (content) => {
       if (!replaying) onOscNotificationRef.current(oscId, content)
       return false
+    }))
+    oscHandlers.push(terminal.parser.registerOscHandler(52, (content) => {
+      // OSC 52 is write-only here: never disclose the system clipboard to a PTY.
+      // Historical output and background sessions must not change the clipboard.
+      if (replaying || !visibleRef.current || !activeRef.current) return true
+      const separator = content.indexOf(';')
+      if (separator < 0) return true
+      const payload = content.slice(separator + 1)
+      if (!payload || payload === '?' || payload.length > 4 * 1024 * 1024) return true
+      try {
+        const bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0))
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        void window.matouDesktop.writeClipboardText(text)
+      } catch { /* Ignore malformed provider clipboard output. */ }
+      return true
     }))
     let archivedResult: {
       key: string

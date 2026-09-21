@@ -189,6 +189,7 @@ export const DESKTOP_CHANNELS = {
   revealDirectory: 'matou:reveal-directory',
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
   writeClipboardText: 'matou:write-clipboard-text',
+  terminalCopyFocus: 'matou:terminal-copy-focus',
   hideWindow: 'matou:hide-window',
   showWindow: 'matou:show-window',
   requestDetachedTerminalFocus: 'matou:request-detached-terminal-focus',

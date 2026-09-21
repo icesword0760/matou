@@ -5,6 +5,20 @@ import type { Locale } from '@matou/contracts'
 import type { MatouDesktopApi, RuntimeConnectionState } from '../shared/desktop-api'
 import { DESKTOP_CHANNELS } from '../shared/desktop-api'
 
+// Track both DOM focus and window reactivation: macOS may blur the window
+// without changing its focused textarea or sending a subsequent focusin.
+const reportCopyOwner = () => {
+  ipcRenderer.send(DESKTOP_CHANNELS.terminalCopyFocus,
+    document.activeElement?.matches('.xterm-helper-textarea') === true)
+}
+window.addEventListener('focusin', reportCopyOwner, true)
+window.addEventListener('focus', reportCopyOwner, true)
+window.addEventListener('focusout', () => queueMicrotask(reportCopyOwner), true)
+window.addEventListener('pointerdown', (event) => {
+  ipcRenderer.send(DESKTOP_CHANNELS.terminalCopyFocus,
+    event.target instanceof Element && event.target.closest('.xterm') !== null)
+}, true)
+
 const PORT_CHANNEL = 'matou:terminal-port'
 const RENDERER_READY = 'matou:renderer-ready'
 let pendingPort: MessagePort | undefined

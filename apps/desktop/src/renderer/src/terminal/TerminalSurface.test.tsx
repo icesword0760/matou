@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   clearSelection: vi.fn(),
   customKeyHandler: undefined as undefined | ((event: KeyboardEvent) => boolean),
   selectionText: '',
+  oscHandlers: new Map<number, (content: string) => boolean>(),
   searchResultsListener: undefined as undefined | ((result: { resultIndex: number; resultCount: number }) => void),
   onMessage: undefined as undefined | ((message: unknown) => void),
   onData: undefined as undefined | ((data: string) => void),
@@ -58,7 +59,10 @@ vi.mock('@xterm/xterm', () => ({
         })
       }
     }
-    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) }
+    parser = { registerOscHandler: vi.fn((id: number, handler: (content: string) => boolean) => {
+      state.oscHandlers.set(id, handler)
+      return { dispose: vi.fn() }
+    }) }
     loadAddon = vi.fn()
     constructor() { state.terminalConstructed() }
     open = vi.fn((container: HTMLElement) => container.appendChild(this.element))
@@ -144,6 +148,7 @@ describe('TerminalSurface focus continuity', () => {
     state.clearSelection.mockClear()
     state.customKeyHandler = undefined
     state.selectionText = ''
+    state.oscHandlers.clear()
     state.searchResultsListener = undefined
     state.onMessage = undefined
     state.onData = undefined
@@ -212,6 +217,46 @@ describe('TerminalSurface focus continuity', () => {
     const event = new KeyboardEvent('keydown', { key: 'c', metaKey: true })
     expect(state.customKeyHandler?.(event)).toBe(false)
     await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith('已选择的终端文本'))
+  })
+
+  it('accepts live provider clipboard writes but ignores replay, queries and malformed data', () => {
+    const writeClipboardText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: { writeClipboardText } })
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    const copy = () => state.oscHandlers.get(52)?.('c;' + btoa(unescape(encodeURIComponent('中文复制'))))
+    copy()
+    expect(writeClipboardText).toHaveBeenCalledWith('中文复制')
+    writeClipboardText.mockClear()
+    state.oscHandlers.get(52)?.('c;?')
+    state.oscHandlers.get(52)?.('c;%%%')
+    state.onMessage?.({ type: 'terminal.replay-start', sessionId: 'session-1', fromSequence: 0 })
+    copy()
+    expect(writeClipboardText).not.toHaveBeenCalled()
+  })
+
+  it('does not clear a provider-owned clipboard selection on Command+C', () => {
+    render(<TerminalSurface sessionId="session-1" active visible />)
+    const event = new KeyboardEvent('keydown', { key: 'c', metaKey: true, cancelable: true })
+    expect(state.customKeyHandler?.(event)).toBe(false)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('preserves provider clipboard data when native Copy targets an empty helper textarea', () => {
+    const writeClipboardText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: { writeClipboardText } })
+    const view = render(<TerminalSurface sessionId="session-1" active visible />)
+    const event = new Event('copy', { bubbles: true, cancelable: true })
+    view.container.querySelector('.terminal-surface__viewport > div')?.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(true)
+    expect(writeClipboardText).not.toHaveBeenCalled()
+  })
+
+  it('ignores clipboard writes from background terminals', () => {
+    const writeClipboardText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(window, 'matouDesktop', { configurable: true, value: { writeClipboardText } })
+    render(<TerminalSurface sessionId="session-1" active={false} visible />)
+    state.oscHandlers.get(52)?.('c;' + btoa('background'))
+    expect(writeClipboardText).not.toHaveBeenCalled()
   })
 
   it('copies selected terminal text from the native Edit menu', async () => {
