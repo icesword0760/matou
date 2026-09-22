@@ -57,6 +57,20 @@ test.describe('real PTY continuity across background Scenes', () => {
       expect(await processExists(fixture, pidA)).toBe(true)
       await expectAllVisibleWindowsOnColorLcd(fixture)
 
+      // Sample actual DOM rows at every browser paint, not after replay settles.
+      await fixture.page.evaluate((id) => {
+        const probe = { frames: [] as Array<{ elapsed: number; hasRows: boolean }>, started: performance.now(), stop: false }
+        ;(window as any).__warmPaintProbe = probe
+        const sample = () => {
+          const surface = document.querySelector(`.session-card-slot[data-session-id="${id}"]`)
+          if (surface && surface.getBoundingClientRect().width > 0) {
+            probe.frames.push({ elapsed: performance.now() - probe.started,
+              hasRows: !!surface.querySelector('.xterm-rows')?.textContent?.trim() })
+          }
+          if (!probe.stop) requestAnimationFrame(sample)
+        }
+        requestAnimationFrame(sample)
+      }, sessionA)
       await fixture.page.locator(`[data-scene-id="${sceneAId}"]`).getByRole('tab').click()
       const restoredA = activeSurface(fixture.page)
       await expect(restoredA).toHaveAttribute('data-session-id', sessionA)
@@ -72,6 +86,15 @@ test.describe('real PTY continuity across background Scenes', () => {
       for (let index = 1; index <= 12; index += 1) {
         expect(restoredText).toContain(`A_BACKGROUND_${String(index).padStart(2, '0')}`)
       }
+
+      const paintFrames = await fixture.page.evaluate(() => {
+        const probe = (window as any).__warmPaintProbe
+        probe.stop = true
+        return probe.frames as Array<{ elapsed: number; hasRows: boolean }>
+      })
+      console.log('warm navigation paint frames', JSON.stringify(paintFrames))
+      expect(paintFrames.length).toBeGreaterThan(0)
+      expect(paintFrames.filter((frame) => !frame.hasRows)).toEqual([])
 
       await terminalCommand(restoredA, 'printf "A_INPUT_AFTER_RETURN\\n"')
       await expect(restoredA.locator('.xterm-rows')).toContainText('A_INPUT_AFTER_RETURN')

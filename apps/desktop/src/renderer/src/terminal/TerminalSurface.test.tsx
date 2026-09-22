@@ -687,6 +687,24 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.terminalConstructed).toHaveBeenCalledTimes(1)
   })
 
+  it('reattaches cached painted rows before the first navigation paint without waiting for Runtime', () => {
+    const first = render(<TerminalSurface sessionId="warm-first-frame" active visible foreground />)
+    const cachedElement = first.container.querySelector('.terminal-surface__viewport')!.firstElementChild!
+    cachedElement.textContent = 'CACHED_VISIBLE_ROWS'
+    first.unmount()
+    let textAtLayout = ''
+    function NavigationFrame() {
+      useLayoutEffect(() => {
+        textAtLayout = document.querySelector('.terminal-surface__viewport')?.textContent ?? ''
+      }, [])
+      return <TerminalSurface sessionId="warm-first-frame" active visible foreground />
+    }
+    render(<NavigationFrame />)
+    expect(textAtLayout).toContain('CACHED_VISIBLE_ROWS')
+    expect(state.requestTerminalReplay).not.toHaveBeenCalled()
+    expect(state.terminalReset).not.toHaveBeenCalled()
+  })
+
   it('keeps cached history when a restarted Runtime reattaches the foreground terminal', async () => {
     foregroundTerminalModels.setForegroundSessions(['session-1'])
     const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)

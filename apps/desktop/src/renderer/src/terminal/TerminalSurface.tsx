@@ -1,4 +1,4 @@
-import { type DragEvent, useEffect, useRef, useState } from 'react'
+import { type DragEvent, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import {
   MAX_CHECKPOINT_SNAPSHOT_BYTES,
@@ -309,7 +309,11 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     })
     return () => cancelAnimationFrame(frame)
   }, [active, sessionId, visible])
-  useEffect(() => {
+  // A warm terminal already owns painted DOM rows. Reparent them during the
+  // navigation commit, before the browser can paint the empty card. A passive
+  // effect allows a blank frame (and expensive sibling effects can prolong it).
+  // Runtime catch-up and the settled grid resize still happen asynchronously.
+  useLayoutEffect(() => {
     const container = containerRef.current
     if (!container || !client) {
       onStatusChange('waiting-for-port')
