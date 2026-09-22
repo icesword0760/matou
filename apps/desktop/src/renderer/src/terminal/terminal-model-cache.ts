@@ -1,6 +1,7 @@
 export interface DisposableTerminalModel {
   dispose(): void
   suspend?(): void
+  hasVisibleContent?(): boolean
 }
 
 /**
@@ -28,6 +29,10 @@ export class ForegroundTerminalModelCache<T extends DisposableTerminalModel> {
   get size(): number { return this.#models.size }
 
   has(sessionId: string): boolean { return this.#models.has(sessionId) }
+
+  hasVisibleContent(sessionId: string): boolean {
+    return this.#models.get(sessionId)?.hasVisibleContent?.() === true
+  }
 
   setForegroundSessions(sessionIds: readonly string[]): void {
     const next = new Set(sessionIds)

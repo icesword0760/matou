@@ -705,6 +705,31 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.terminalReset).not.toHaveBeenCalled()
   })
 
+  it('uses the live screen when an empty offscreen provider becomes visible without remounting', () => {
+    state.terminalViewportLines = []
+    const view = render(<TerminalSurface sessionId="blank-provider" profile="claude-code" active visible foreground />)
+    state.onMessage?.({ type: 'terminal.data', sessionId: 'blank-provider', sequence: 41,
+      data: new TextEncoder().encode('\x1b[2J') })
+    view.rerender(<TerminalSurface sessionId="blank-provider" profile="claude-code" active={false} visible={false} foreground />)
+    state.onMessage?.({ type: 'terminal.data', sessionId: 'blank-provider', sequence: 42,
+      data: new TextEncoder().encode('background redraw') })
+    state.requestTerminalReplay.mockClear()
+    view.rerender(<TerminalSurface sessionId="blank-provider" profile="claude-code" active visible foreground />)
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('blank-provider', 0, false)
+  })
+
+  it('requests the live screen for an opened but never painted provider cache', () => {
+    const first = render(<TerminalSurface sessionId="empty-provider-cache" profile="claude-code" active={false} visible={false} foreground />)
+    state.onMessage?.({ type: 'terminal.spawned', sessionId: 'empty-provider-cache',
+      pid: 123, reattached: true, replayFromSequence: 4100 })
+    first.unmount()
+    state.requestTerminalReplay.mockClear()
+    render(<TerminalSurface sessionId="empty-provider-cache" profile="claude-code" active visible foreground />)
+    state.onMessage?.({ type: 'terminal.spawned', sessionId: 'empty-provider-cache',
+      pid: 123, reattached: true, replayFromSequence: 4100 })
+    expect(state.requestTerminalReplay).toHaveBeenCalledWith('empty-provider-cache', 0, false)
+  })
+
   it('keeps cached history when a restarted Runtime reattaches the foreground terminal', async () => {
     foregroundTerminalModels.setForegroundSessions(['session-1'])
     const first = render(<TerminalSurface sessionId="session-1" active visible foreground />)

@@ -120,7 +120,7 @@ describe('Terminal pane', () => {
   })
 
   it('shows a cached Session immediately when returning to it', () => {
-    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn() }))
+    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn(), hasVisibleContent: () => true }))
     foregroundTerminalModels.release('session-1')
     const props = fixture()
     const view = render(<TerminalPane {...props} active={false} visible />)
@@ -131,13 +131,20 @@ describe('Terminal pane', () => {
   })
 
   it('shows a warm active Session immediately after project navigation', () => {
-    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn() }))
+    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn(), hasVisibleContent: () => true }))
     foregroundTerminalModels.release('session-1')
 
     render(<TerminalPane {...fixture()} active visible />)
 
     expect(screen.queryByTestId('session-recovery-water')).toBeNull()
     expect(screen.queryByText('加载中')).toBeNull()
+  })
+
+  it('keeps loading feedback for a cached object with no painted content', () => {
+    foregroundTerminalModels.acquire('session-1', () => ({ dispose: vi.fn(), hasVisibleContent: () => false }))
+    foregroundTerminalModels.release('session-1')
+    render(<TerminalPane {...fixture()} active visible />)
+    expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
   })
 
   it('reveals a startup failure that arrives before the recovered terminal paints', () => {

@@ -131,7 +131,7 @@ export function TerminalPane(props: {
   const [storageFault, setStorageFault] = useState<TerminalStorageFaultMessage | null>(null)
   const [startupRetry, setStartupRetry] = useState(0)
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
-  const cachedAtMount = recoveryState === 'ready' && foregroundTerminalModels.has(session.id)
+  const cachedAtMount = recoveryState === 'ready' && foregroundTerminalModels.hasVisibleContent(session.id)
   const [terminalVisualReady, setTerminalVisualReady] = useState(
     () => cachedAtMount
   )
@@ -186,7 +186,7 @@ export function TerminalPane(props: {
     const becameActive = active && !previousActive.current
     previousActive.current = active
     if (!becameActive) return
-    if (!recoveryBusy && foregroundTerminalModels.has(session.id)) {
+    if (!recoveryBusy && foregroundTerminalModels.hasVisibleContent(session.id)) {
       setTerminalVisualReady(true)
       setActivationLoading(false)
       return

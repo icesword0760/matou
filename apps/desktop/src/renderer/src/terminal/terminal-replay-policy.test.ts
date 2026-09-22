@@ -13,6 +13,12 @@ describe('PRD 04 terminal replay policy', () => {
     )).toBe(42)
   })
 
+  it('uses a live provider screen when a cached object has never painted output', () => {
+    expect(replayFromSequenceForSpawn(
+      { reattached: true, replayFromSequence: 4100 }, true, 'claude-code', 0
+    )).toBe(0)
+  })
+
   it('keeps a fresh Shell model out of raw interrupted history', () => {
     expect(replayFromSequenceForSpawn({ reattached: true, replayFromSequence: 41 }, false, 'shell')).toBe(41)
   })

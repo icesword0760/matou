@@ -105,6 +105,7 @@ interface CachedTerminalModel {
   lastAppliedSequence: number
   lastCheckpointSequence: number
   screenEpoch: number
+  hasVisibleContent(): boolean
   suspend(): void
   dispose(): void
 }
@@ -342,6 +343,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       const model: CachedTerminalModel = {
         terminal, fit, search, serialize, opened: false,
         lastAppliedSequence: 0, lastCheckpointSequence: -1, screenEpoch: 0,
+        hasVisibleContent: () => model.lastAppliedSequence > 0 && terminalViewportHasContent(terminal),
         suspend: () => {
           terminal.element?.remove()
         },
@@ -484,7 +486,9 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       // Rebuild from Runtime's bounded tail rather than parsing an unbounded
       // offscreen byte stream. Runtime and its Journal stay live throughout;
       // only hidden xterm painting is suspended.
-      const fromSequence = model.lastAppliedSequence > 0
+      const fromSequence = model.lastAppliedSequence > 0 && (
+        profileRef.current === 'shell' || model.hasVisibleContent()
+      )
         ? model.lastAppliedSequence + 1
         : 0
       preserveExistingModelForReplay = fromSequence > 0
@@ -519,13 +523,16 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         markSpawned()
         setPid(message.pid)
         onStatusChange('streaming')
+        const hasReusableScreen = reusedTerminalModel && (
+          profileRef.current === 'shell' || model.hasVisibleContent()
+        )
         const replayFromSequence = replayFromSequenceForSpawn(
-          message, reusedTerminalModel, profileRef.current, model.lastAppliedSequence
+          message, hasReusableScreen, profileRef.current, model.lastAppliedSequence
         )
         if (replayFromSequence !== undefined && !replayRequested) {
           visualReplayPending = true
           if (visibleRef.current) {
-            preserveExistingModelForReplay = reusedTerminalModel && replayFromSequence > 0
+            preserveExistingModelForReplay = hasReusableScreen && replayFromSequence > 0
             replayRequested = true
             client.requestTerminalReplay(
               sessionId,
