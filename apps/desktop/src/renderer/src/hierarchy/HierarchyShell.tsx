@@ -390,6 +390,16 @@ function HierarchyProduct({
   const workspaceStageRef = useRef<HTMLElement>(null)
   const loaderSessionId = sessionLoader?.sessionId ?? ''
   const loaderSceneId = sessionLoader?.sceneId ?? ''
+  const [loaderBindingRevision, setLoaderBindingRevision] = useState(0)
+  useEffect(() => {
+    if (!loaderSessionId || !client?.subscribeProjection) return
+    return client.subscribeProjection((message) => {
+      if (message.type === 'events.batch' && message.events.some((event) =>
+        event.eventType.startsWith('provider-binding.'))) {
+        setLoaderBindingRevision((revision) => revision + 1)
+      }
+    })
+  }, [client, loaderSessionId])
   const loaderTitleRevision = useMemo(() => projection.sessions
     .map(({ id, title }) => `${id}\u0000${title}`)
     .join('\u0001'), [projection.sessions])
@@ -400,17 +410,17 @@ function HierarchyProduct({
       sessions: [], total: 0, offset: 0, limit: limit ?? 50, nextOffset: 0, hasMore: false
     })
     return commands.listClaudeSessions(loaderSessionId, query, searchScope, offset, limit)
-  }, [commands, loaderSessionId, loaderTitleRevision])
+  }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision])
   const loadLoaderDetail = useCallback((providerSessionId: string, options = {}) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
-  }, [commands, loaderSessionId, loaderTitleRevision, m])
+  }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
   const searchLoaderSession = useCallback((
     providerSessionId: string, query: string, offset?: number, limit?: number
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit)
-  }, [commands, loaderSessionId, loaderTitleRevision, m])
+  }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
   const cancelSessionLoader = useCallback(() => {
     setSessionLoader(null)
     setTerminalFocusRequest((value) => value + 1)

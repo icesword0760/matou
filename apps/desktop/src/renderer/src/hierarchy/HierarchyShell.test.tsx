@@ -287,7 +287,8 @@ describe('PRD 05 hierarchy shell', () => {
       request,
       startProjection: vi.fn(),
       subscribeProjection: vi.fn((listener) => {
-        projectionListener = listener
+        const previous = projectionListener
+        projectionListener = (message) => { previous?.(message); listener(message) }
         return () => { projectionListener = undefined }
       })
     }
@@ -310,6 +311,76 @@ describe('PRD 05 hierarchy shell', () => {
     }))
 
     expect(await screen.findByRole('button', { name: '预览会话：新卡片名称' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '预览会话：旧卡片名称' })).toBeNull()
+  })
+
+  it('refreshes an open session manager when a fork binding arrives without a card rename', async () => {
+    const data = fixture()
+    data.sessions[1] = {
+      ...data.sessions[1]!, kind: 'claude-code', title: '旧卡片名称'
+    }
+    let projectionListener: ((message: unknown) => void) | undefined
+    let loadedTitle = '旧卡片名称'
+    const request = vi.fn(async (method: string) => {
+      if (method === 'hierarchy.bootstrap-window' || method === 'hierarchy.validate-workspace-path') return {}
+      if (method === 'projection.snapshot') return projectionSnapshot(data)
+      if (method === 'claude-sessions.list') return {
+        total: 1,
+        offset: 0,
+        limit: 50,
+        nextOffset: 1,
+        hasMore: false,
+        sessions: [{
+          providerSessionId: 'provider-loaded', title: loadedTitle, cwd: '/tmp/a',
+          updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
+          availability: 'loaded-elsewhere', loadedSessionId: 'session-a2',
+          loadedSessionTitle: loadedTitle
+        }]
+      }
+      if (method === 'claude-sessions.detail') return {
+        providerSessionId: 'provider-loaded', title: loadedTitle, cwd: '/tmp/a',
+        updatedAt: 10, permissionMode: 'default', eventCount: 1, matchCount: 0, hits: [],
+        availability: 'loaded-elsewhere', loadedSessionId: 'session-a2',
+        loadedSessionTitle: loadedTitle,
+        events: [{ index: 1, kind: 'user', role: 'user', text: '已有内容', matched: false }],
+        page: {
+          startEventIndex: 1,
+          endEventIndex: 1,
+          total: 1,
+          hasEarlier: false,
+          hasLater: false
+        }
+      }
+      throw new Error(`unexpected Runtime request: ${method}`)
+    })
+    runtime.current = {
+      request,
+      startProjection: vi.fn(),
+      subscribeProjection: vi.fn((listener) => {
+        const previous = projectionListener
+        projectionListener = (message) => { previous?.(message); listener(message) }
+        return () => { projectionListener = undefined }
+      })
+    }
+
+    render(<HierarchyShell />)
+    await screen.findByRole('region', { name: 'Workspace A 工作现场' })
+    await userEvent.setup().click(screen.getByRole('button', {
+      name: '载入 Claude Code 会话到“终端 A1”'
+    }))
+    expect(await screen.findByRole('button', { name: '预览会话：旧卡片名称' })).toBeTruthy()
+
+    loadedTitle = 'Fork 身份确认后的名称'
+    act(() => projectionListener?.({
+      type: 'events.batch', runtimeGeneration: 'readonly-runtime', events: [{
+        sequence: 18, eventId: 'rename-loaded-card', eventType: 'provider-binding.recorded',
+        aggregateType: 'session', aggregateId: 'session-a2',
+        payload: { binding: { id: 'new-binding', sessionId: 'session-a2' } },
+        schemaVersion: 1, commandId: 'rename-loaded-card', occurredAt: 18
+      }]
+    }))
+
+    expect(await screen.findByRole('button', { name: '预览会话：Fork 身份确认后的名称' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: '预览会话：旧卡片名称' })).toBeNull()
   })
 
@@ -1191,7 +1262,8 @@ describe('PRD 05 hierarchy shell', () => {
       request,
       startProjection: vi.fn(),
       subscribeProjection: vi.fn((listener) => {
-        projectionListener = listener
+        const previous = projectionListener
+        projectionListener = (message) => { previous?.(message); listener(message) }
         return () => { projectionListener = undefined }
       })
     }

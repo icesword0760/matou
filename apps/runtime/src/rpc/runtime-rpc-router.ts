@@ -267,6 +267,7 @@ export class RuntimeRpcRouter {
       const sessionId = text(input.sessionId, 'sessionId')
       const result = await this.#claudeSessions.list({
         cwd: this.#sessionCwd(sessionId),
+        titleForSession: (providerSessionId) => this.#providerConversationUsage(providerSessionId, sessionId).loadedSessionTitle,
         query: optionalString(input.query),
         searchScope: input.searchScope === 'metadata' ? 'metadata' : 'all',
         offset: optionalInteger(input.offset, 0, 'offset', 0),
@@ -994,12 +995,20 @@ export class RuntimeRpcRouter {
        JOIN sessions AS owner ON owner.id = binding.session_id
        JOIN tasks ON tasks.id = owner.task_id
        WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?
-         AND tasks.workspace_id = ?`,
+         AND tasks.workspace_id = ?
+         AND binding.validated_at IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM provider_bindings AS newer
+           WHERE newer.session_id = binding.session_id AND newer.provider = binding.provider
+             AND newer.invalidated_at IS NULL AND newer.validated_at IS NOT NULL
+             AND newer.resume_state IN ('available', 'resuming', 'resumed')
+             AND newer.validated_at > binding.validated_at
+         )`,
       providerSessionId, workspaceId
     ).filter((binding) => binding.archived_at === null && binding.task_archived_at === null &&
       binding.kind === 'claude-code' && binding.invalidated_at === null &&
       ['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state))
-    const binding = bindings.find(({ session_id }) => session_id !== targetSessionId) ?? bindings[0]
+    const binding = bindings.find(({ session_id }) => session_id === targetSessionId) ?? bindings[0]
     if (!binding) return { availability: 'available' }
     return {
       availability: binding.session_id === targetSessionId ? 'loaded-here' : 'loaded-elsewhere',

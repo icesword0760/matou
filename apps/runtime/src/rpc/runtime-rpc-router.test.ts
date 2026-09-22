@@ -239,6 +239,18 @@ describe('RuntimeRpcRouter', () => {
     })).resolves.toMatchObject({
       providerSessionId: 'provider-occupied', title: '手动修改后的卡片名'
     })
+    await expect(router.handle('claude-sessions.list', {
+      sessionId: 'loader-target', query: '手动修改后的', searchScope: 'metadata'
+    })).resolves.toMatchObject({ total: 1, sessions: [{ title: '手动修改后的卡片名' }] })
+    // A fork's inherited provisional reference must not claim its parent's history.
+    database.run(`INSERT INTO provider_bindings
+      (id,session_id,provider,provider_session_id,resume_state,metadata_json,created_at,updated_at)
+      VALUES ('inherited', 'loader-target', 'claude-code', 'provider-occupied', 'unknown', '{}', 4, 4)`)
+    database.run(`UPDATE sessions SET kind = 'claude-code', title = '子卡片名字' WHERE id = 'loader-target'`)
+    await expect(router.handle('claude-sessions.detail', {
+      sessionId: initial.session.id, providerSessionId: 'provider-occupied'
+    })).resolves.toMatchObject({ title: '手动修改后的卡片名', availability: 'loaded-here' })
+    database.run("DELETE FROM provider_bindings WHERE id = 'inherited'")
     await expect(router.handle('claude-sessions.load', payload('duplicate-load', {
       sessionId: 'loader-target', providerSessionId: 'provider-occupied', now: 4
     }))).resolves.toMatchObject({

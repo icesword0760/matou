@@ -133,9 +133,9 @@ export function TerminalPane(props: {
   const [restoreRetryPending, setRestoreRetryPending] = useState(false)
   const cachedAtMount = recoveryState === 'ready' && foregroundTerminalModels.has(session.id)
   const [terminalVisualReady, setTerminalVisualReady] = useState(
-    () => cachedAtMount && !active
+    () => cachedAtMount
   )
-  const [activationLoading, setActivationLoading] = useState(() => cachedAtMount && active)
+  const [activationLoading, setActivationLoading] = useState(false)
   const previousActive = useRef(active)
   const [dismissedRestoreNotice, setDismissedRestoreNotice] = useState<string | null>(null)
   const [forkReadinessHint, setForkReadinessHint] = useState(false)

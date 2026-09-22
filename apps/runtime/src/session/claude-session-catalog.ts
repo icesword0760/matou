@@ -82,6 +82,7 @@ export class ClaudeSessionCatalog {
     offset?: number
     limit?: number
     searchScope?: CatalogSearchScope
+    titleForSession?(providerSessionId: string): string | undefined
   }): Promise<ClaudeSessionListResult> {
     const transcripts = await this.#readWorkspace(input.cwd)
     const query = normalizeQuery(input.query)
@@ -90,7 +91,8 @@ export class ClaudeSessionCatalog {
       const contentHits = query && searchScope === 'all'
         ? await this.#searchTranscript(transcript, query)
         : []
-      return summarize(transcript, query, searchScope, contentHits)
+      const title = input.titleForSession?.(transcript.providerSessionId)
+      return summarize(title ? { ...transcript, title } : transcript, query, searchScope, contentHits)
     })))
       .filter((session) => !query || session.matchCount > 0)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.title.localeCompare(right.title))
