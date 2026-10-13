@@ -33,3 +33,6 @@ await Promise.all(requiredRuntimeResources.map((path) => access(join(destination
 if (process.platform !== 'win32') {
   await chmod(join(destination, 'control-assets', 'bin', 'mt'), 0o755)
 }
+
+// Ship the pinned upstream account engine; end users need neither uv nor Python.
+await import('./claude-accounts/build.mjs')

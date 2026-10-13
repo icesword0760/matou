@@ -1,3 +1,4 @@
+import type { ClaudeAccountCommand, ClaudeAccountsState } from './claude-accounts'
 import type {
   Locale,
   LocalePreference,
@@ -7,6 +8,9 @@ import type {
 } from '@matou/contracts'
 
 export interface MatouDesktopApi {
+  getClaudeAccounts?(): Promise<ClaudeAccountsState>
+  claudeAccountCommand?(command: ClaudeAccountCommand): Promise<ClaudeAccountsState>
+  onClaudeAccounts?(listener: (state: ClaudeAccountsState) => void): () => void
   getPathForFile(file: File): string
   selectWorkspaceDirectory(): Promise<string | null>
   selectSessionEnvironmentDirectory(): Promise<string | null>
@@ -181,6 +185,9 @@ export interface DagNodeSelection extends Omit<DagWindowContext, 'initialGraph' 
 }
 
 export const DESKTOP_CHANNELS = {
+  getClaudeAccounts: 'matou:claude-accounts-snapshot',
+  claudeAccountCommand: 'matou:claude-accounts-command',
+  claudeAccounts: 'matou:claude-accounts-state',
   selectWorkspaceDirectory: 'matou:select-workspace-directory',
   selectSessionEnvironmentDirectory: 'matou:select-session-environment-directory',
   consumeWorkspaceOpenRequests: 'matou:consume-workspace-open-requests',

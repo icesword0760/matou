@@ -52,6 +52,10 @@
       {
         "from": "build/finder-quick-action/进入码头.workflow",
         "to": "finder-quick-action/进入码头.workflow"
+      },
+      {
+        "from": "package-resources/claude-accounts",
+        "to": "claude-accounts"
       }
     ],
     "mac": {

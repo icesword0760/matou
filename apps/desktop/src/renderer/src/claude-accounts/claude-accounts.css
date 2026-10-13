@@ -1,0 +1,484 @@
+.ca-trigger {
+  flex:none!important;
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  margin-left:8px;
+  padding:5px 8px!important;
+  border-radius:5px;
+  color:#647e9f;
+  cursor:pointer;
+  max-width:186px;
+  white-space:nowrap;
+  background:transparent;
+  border:0;
+  font:inherit}
+.ca-trigger-label {
+  overflow:hidden;
+  text-overflow:ellipsis}
+.ca-trigger:hover,.ca-trigger.is-open {
+  background:#e8f0fc;
+  color:#317bdb}
+.ca-dot {
+  width:5px;
+  height:5px;
+  border-radius:50%;
+  background:#d79842;
+  flex:none}
+.ca-panel {
+  --ca-bg:#fff;
+  --ca-text:#34445b;
+  --ca-muted:#7186a3;
+  position:fixed;
+  z-index:1500;
+  right:12px;
+  bottom:46px;
+  width:min(410px,calc(100vw - 24px));
+  max-height:calc(100dvh - 70px);
+  display:flex;
+  flex-direction:column;
+  background:var(--ca-bg);
+  color:var(--ca-text);
+  border:1px solid #d9e3f1;
+  border-radius:12px;
+  box-shadow:0 16px 42px #263d6126,0 3px 10px #263d610c;
+  font:12px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  text-align:left;
+  animation:ca-appear .15s ease-out;
+  overflow:hidden}
+.ca-panel * {
+  box-sizing:border-box}
+.ca-panel button,.ca-panel input {
+  font:inherit}
+.ca-panel button {
+  cursor:pointer}
+.ca-panel button:disabled {
+  cursor:default;
+  opacity:.55}
+.ca-panel button:focus-visible,.ca-panel input:focus-visible,.ca-trigger:focus-visible {
+  outline:2px solid #518ef0;
+  outline-offset:3px}
+.ca-header {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:15px 18px;
+  flex:none}
+.ca-header h2 {
+  font-size:14px;
+  line-height:1.3;
+  margin:0;
+  font-weight:650;
+  outline:none}
+.ca-badge {
+  font-size:9px;
+  color:#7189a8;
+  border:1px solid #e0e8f3;
+  padding:0 5px;
+  border-radius:3px}
+.ca-icon {
+  border:0;
+  background:none;
+  font-size:21px!important;
+  line-height:24px!important;
+  width:26px;
+  height:26px;
+  color:#8b9db5;
+  display:grid;
+  place-items:center;
+  border-radius:5px}
+.ca-icon:hover {
+  background:#eef3f9}
+.ca-close {
+  margin-left:auto}
+.ca-scroll {
+  overflow:auto;
+  overscroll-behavior:contain;
+  min-height:0;
+  padding:0 8px 8px;
+  scrollbar-width:thin}
+.ca-account {
+  display:flex;
+  text-align:left;
+  width:100%;
+  gap:12px;
+  padding:12px;
+  border:1px solid transparent;
+  background:transparent;
+  color:inherit;
+  border-radius:8px;
+  margin-bottom:3px}
+.ca-account:disabled {
+  opacity:1!important}
+.ca-account:hover:not(:disabled) {
+  background:#f7f9fd}
+.ca-account.is-current {
+  background:#f4f8fe;
+  border-color:#e3ecf9}
+.ca-avatar {
+  display:grid;
+  place-items:center;
+  width:30px;
+  height:30px;
+  flex:none;
+  border-radius:8px;
+  font-size:13px;
+  font-weight:600}
+.tone-0 {
+  background:#e9f1fc;
+  color:#658fbe}
+.tone-1 {
+  background:#edf4ed;
+  color:#75917a}
+.tone-2 {
+  background:#f4eee6;
+  color:#a48660}
+.ca-account-main {
+  min-width:0;
+  flex:1}
+.ca-account-title {
+  display:flex;
+  gap:10px;
+  align-items:center}
+.ca-account-title strong {
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis;
+  font-weight:600}
+.ca-account-title>span {
+  margin-left:auto;
+  flex:none;
+  font-size:9px;
+  color:#4582d1}
+.ca-email {
+  font-size:11px;
+  color:var(--ca-muted);
+  margin:3px 0 8px;
+  overflow-wrap:anywhere}
+.ca-quotas {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+  color:var(--ca-muted);
+  font-size:10px}
+.ca-quota>div:first-child {
+  display:flex;
+  justify-content:space-between;
+  gap:5px}
+.ca-quota b {
+  font-weight:600;
+  color:#7496c0}
+.ca-quota .ca-warning {
+  color:#be822a}
+.ca-track {
+  height:3px;
+  background:#e8eef7;
+  margin:5px 0;
+  border-radius:2px;
+  overflow:hidden}
+.ca-track>span {
+  display:block;
+  height:100%;
+  background:#80adee}
+.ca-track>span.is-high {
+  background:#dba354}
+.ca-quota small {
+  font-size:9px;
+  color:#8798af}
+.ca-measured {
+  display:block;
+  margin-top:5px;
+  font-size:9px;
+  color:#8d9bb0}
+.ca-expired {
+  color:#b77a43;
+  font-size:11px}
+.ca-helper {
+  font-size:11px!important;
+  color:#8898af!important;
+  margin:12px!important;
+  line-height:1.6}
+.ca-refresh {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:12px 10px 0;
+  font-size:10px;
+  color:#8998ae}
+.ca-link {
+  border:0;
+  background:none;
+  color:#6a85aa;
+  padding:5px 1px;
+  border-radius:3px;
+  text-align:left}
+.ca-link:hover:not(:disabled) {
+  color:#2b78d9}
+.ca-actions {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:9px 24px 14px;
+  flex:none}
+.ca-actions button {
+  font-weight:550}
+.ca-footer {
+  display:flex;
+  gap:8px;
+  align-items:flex-start;
+  padding:11px 18px;
+  background:#f7f9fc;
+  border-top:1px solid #edf1f7;
+  font-size:10px;
+  color:#7b8da6;
+  flex:none}
+.ca-form {
+  padding:6px 14px 14px}
+.ca-form h3,.ca-welcome h3 {
+  font-size:18px;
+  font-weight:620;
+  margin:8px 0 10px;
+  letter-spacing:-.3px}
+.ca-form p,.ca-welcome p {
+  font-size:12px;
+  color:var(--ca-muted);
+  line-height:1.8;
+  margin:9px 0 16px}
+.ca-notice {
+  margin:4px 10px 13px;
+  border:1px solid #e1eaf7;
+  border-radius:7px;
+  background:#f5f8fe;
+  padding:11px 13px;
+  color:#6b84a7;
+  font-size:11px}
+.ca-form .ca-notice {
+  margin:12px 0}
+.ca-notice p {
+  margin:5px 0!important;
+  font-size:11px;
+  line-height:1.65}
+.ca-notice strong {
+  font-size:12px;
+  color:#527eb0;
+  font-weight:600}
+.ca-success {
+  background:#f0f8f3;
+  border-color:#dfede3}
+.ca-success strong {
+  color:#4e8161}
+.ca-amber {
+  background:#fff8ec;
+  border-color:#f1e4ca}
+.ca-amber strong {
+  color:#a38145}
+.ca-error {
+  background:#fff5f2;
+  border-color:#f0ded7}
+.ca-error strong,.ca-error p {
+  color:#a66458}
+.ca-primary,.ca-secondary {
+  padding:9px 14px;
+  min-height:35px;
+  border-radius:6px;
+  font-weight:550!important;
+  border:1px solid transparent;
+  line-height:1.3!important}
+.ca-primary {
+  background:#3284ed;
+  color:#fff;
+  box-shadow:0 3px 9px #3385ed18}
+.ca-primary:hover:not(:disabled) {
+  background:#2479e4}
+.ca-secondary {
+  background:#f7f9fc;
+  color:#6c84a3;
+  border-color:#e0e7f0}
+.ca-secondary:hover:not(:disabled) {
+  background:#edf3fc}
+.ca-wide {
+  width:100%;
+  text-align:center;
+  margin:6px 0}
+.ca-button-row {
+  display:flex;
+  justify-content:flex-end;
+  gap:9px;
+  margin-top:20px;
+  flex-wrap:wrap}
+.ca-welcome {
+  padding:12px 18px 16px}
+.ca-welcome-icon {
+  color:#7198ca;
+  font-size:28px}
+.ca-welcome ol {
+  padding-left:19px;
+  color:#7b8ba2;
+  font-size:11px;
+  line-height:2.4;
+  margin:14px 0 20px}
+.ca-center {
+  text-align:center}
+.ca-browser {
+  width:96px;
+  height:63px;
+  position:relative;
+  display:grid;
+  place-items:center;
+  margin:17px auto 24px;
+  border:1px solid #d5e1f2;
+  border-radius:8px;
+  background:#f4f8fe;
+  color:#7299c9;
+  font-size:26px}
+.ca-browser:before {
+  content:'';
+  position:absolute;
+  top:12px;
+  left:0;
+  right:0;
+  border-top:1px solid #dce6f4}
+.ca-spinner {
+  display:inline-block;
+  width:16px;
+  height:16px;
+  border:2px solid #d5e3f5;
+  border-top-color:#4d8bdb;
+  border-radius:50%;
+  animation:ca-spin 1s linear infinite;
+  vertical-align:middle;
+  margin-right:7px}
+.ca-browser .ca-spinner {
+  position:absolute;
+  bottom:-5px;
+  right:-12px;
+  background:#fff;
+  width:23px;
+  height:23px}
+.ca-steps {
+  display:flex;
+  justify-content:space-around;
+  gap:9px;
+  margin:18px 0;
+  color:#8298b4;
+  font-size:10px}
+.ca-form label:not(.ca-check) {
+  display:flex;
+  justify-content:space-between;
+  margin:19px 0 7px;
+  font-size:11px;
+  font-weight:600}
+.ca-form label small {
+  color:#94a1b4;
+  font-weight:400}
+.ca-form input:not([type=checkbox]) {
+  width:100%;
+  height:38px;
+  border:1px solid #dbe4f0;
+  border-radius:6px;
+  background:#fbfcfe;
+  color:inherit;
+  padding:0 10px}
+.ca-form .ca-helper {
+  margin:7px 0 13px!important}
+.ca-check {
+  display:flex;
+  align-items:flex-start;
+  gap:6px;
+  color:#8293a9;
+  font-size:11px;
+  margin:16px 0}
+.ca-check input {
+  accent-color:#3688f1;
+  margin-top:3px}
+.ca-success-icon {
+  display:grid;
+  place-items:center;
+  width:40px;
+  height:40px;
+  border-radius:50%;
+  background:#ebf5ef;
+  color:#54916b;
+  margin:10px auto 20px;
+  font-size:20px}
+.ca-edit-actions {
+  display:flex;
+  justify-content:space-between;
+  margin-top:20px;
+  padding-top:14px;
+  border-top:1px solid #edf1f6}
+.ca-danger {
+  color:#b46e63}
+.ca-destructive {
+  background:#b66e63}
+.ca-manage-row {
+  display:flex;
+  gap:10px;
+  align-items:center;
+  padding:13px 0;
+  border-bottom:1px solid #edf1f6}
+.ca-manage-row>div {
+  min-width:0;
+  flex:1}
+.ca-manage-row strong {
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-weight:600}
+.ca-manage-row small {
+  display:block;
+  color:#8798b0;
+  font-size:10px;
+  overflow-wrap:anywhere}
+.ca-manage-row button {
+  flex:none}
+.ca-identity {
+  overflow-wrap:anywhere}
+.ca-panel:has(.ca-scroll:empty) {
+  min-height:150px}
+@keyframes ca-spin {
+  to {
+  transform:rotate(360deg)}
+}
+@keyframes ca-appear {
+  from {
+  opacity:0;
+  transform:translateY(5px)}
+to {
+  opacity:1;
+  transform:translateY(0)}
+}
+@media(prefers-reduced-motion:reduce) {
+  .ca-panel {
+  animation:none}
+.ca-spinner {
+  animation-duration:2s}
+}
+@media(max-width:640px) {
+  .ca-trigger {
+  max-width:126px;
+  margin-left:3px}
+.ca-quotas {
+  gap:9px}
+}
+
+[data-theme=dark] .ca-panel {
+  --ca-bg:#232a34;
+  --ca-text:#e1e6ed;
+  --ca-muted:#a4b3c8;
+  border-color:#3c4858;
+  box-shadow:0 16px 42px #0005}
+.ca-panel:where([data-theme=dark] *) .ca-account.is-current,.ca-panel:where([data-theme=dark] *) .ca-notice {
+  background:#293549;
+  border-color:#374c68}
+.ca-panel:where([data-theme=dark] *) .ca-footer,.ca-panel:where([data-theme=dark] *) .ca-secondary {
+  background:#28313e;
+  border-color:#394759;
+  color:#acbdd3}
+.ca-panel:where([data-theme=dark] *) input:not([type=checkbox]) {
+  background:#1f2835;
+  border-color:#40516b}
+.ca-panel:where([data-theme=dark] *) .ca-account:hover:not(:disabled) {
+  background:#2c3747}
+

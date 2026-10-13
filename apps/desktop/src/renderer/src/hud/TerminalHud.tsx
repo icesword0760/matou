@@ -1,3 +1,4 @@
+import { ClaudeAccountsControl } from '../claude-accounts/ClaudeAccountsControl'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -154,6 +155,7 @@ export function TerminalHud(props: {
       disabled={!props.environmentActions} onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
       }} />}
+    <ClaudeAccountsControl sessionId={sessionId} />
     </div>
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)

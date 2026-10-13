@@ -630,6 +630,20 @@ process.once('SIGTERM', () => {
 })
 
 parentPort.on('message', async (event) => {
+  if (event.data?.type === 'runtime.claude-accounts-request') {
+    const request = event.data
+    if (typeof request.requestId !== 'string' || !['snapshot', 'hold', 'release', 'resume'].includes(request.action) ||
+        (request.action === 'resume' && (typeof request.sessionId !== 'string' || typeof request.runId !== 'string'))) return
+    try {
+      await runtimeReady
+      const result = await RuntimeServer.accountCommand(request.action, request.sessionId, request.runId)
+      parentPort.postMessage({ type: 'runtime.claude-accounts-result', requestId: request.requestId, sessions: result })
+    } catch {
+      parentPort.postMessage({ type: 'runtime.claude-accounts-result', requestId: request.requestId, error: 'busy' })
+    }
+    return
+  }
+
   if (
     process.env.MATOU_E2E_SCALE === '1' &&
     event.data &&

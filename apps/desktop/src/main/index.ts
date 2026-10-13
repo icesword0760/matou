@@ -1,3 +1,6 @@
+import { ClaudeSwapEngine, engineLaunch, AccountFault } from './claude-accounts/engine'
+import { ClaudeAccountsManager, AccountPreferenceStore } from './claude-accounts/manager'
+import { isAccountCommand } from '../shared/claude-accounts'
 import { mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { execFile, spawnSync } from 'node:child_process'
@@ -51,6 +54,7 @@ import {
 import { APP_DISPLAY_NAME, APP_STORAGE_DIRECTORY_NAME } from '../shared/brand'
 
 let runtimeHost: RuntimeHost | undefined
+let claudeAccounts: ClaudeAccountsManager | undefined
 const windows = new WindowManager(() => app.focus({ steal: true }))
 const workspaceOpenRequests = new WorkspaceOpenRequests()
 const browserWindows = new Map<string, BrowserWindow>()
@@ -443,6 +447,20 @@ if (primaryInstance) app.whenReady().then(async () => {
     locale: () => localeStore.current()
   })
   await runtimeHost.start()
+  const accountRoot = join(app.getPath('userData'), 'claude-accounts')
+  const accountLaunch = engineLaunch(app.getAppPath(), process.resourcesPath, isPackagedApplication, accountRoot)
+  if (!isPackagedApplication && process.env.MATOU_E2E === '1' && process.env.MATOU_E2E_ACCOUNTS_BRIDGE) {
+    accountLaunch.args = [process.env.MATOU_E2E_ACCOUNTS_BRIDGE]
+  }
+  claudeAccounts = new ClaudeAccountsManager(
+    new ClaudeSwapEngine(accountLaunch),
+    new AccountPreferenceStore(join(accountRoot, 'preferences.json')),
+    { request: async (action, sessionId, runId) => {
+      try { return await runtimeHost!.accountRequest(action, sessionId, runId) }
+      catch (e) { throw new AccountFault(e instanceof Error && e.message === 'busy' ? 'busy' : 'runtime') }
+    } },
+    state => { for (const window of browserWindows.values()) if (!window.isDestroyed()) window.webContents.send(DESKTOP_CHANNELS.claudeAccounts, state) }
+  )
   await createWindow()
   if (isPackagedApplication) {
     void installFinderQuickAction({
@@ -617,6 +635,20 @@ ipcMain.handle(DESKTOP_CHANNELS.getAppUpdateState, () => updateManager?.state() 
 ipcMain.handle(DESKTOP_CHANNELS.checkForAppUpdates, () => updateManager?.check())
 ipcMain.handle(DESKTOP_CHANNELS.downloadAppUpdate, () => updateManager?.download())
 ipcMain.handle(DESKTOP_CHANNELS.installAppUpdate, () => updateManager?.install())
+// Only app-owned top-level windows receive the narrow account command bridge.
+function assertAccountSender(event: Electron.IpcMainInvokeEvent) {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!window || ![...browserWindows.values()].includes(window) || event.senderFrame !== event.sender.mainFrame) throw new Error('Invalid sender')
+  if (!claudeAccounts) throw new Error('Account service is starting')
+  return claudeAccounts
+}
+ipcMain.handle(DESKTOP_CHANNELS.getClaudeAccounts, event => assertAccountSender(event).snapshot())
+ipcMain.handle(DESKTOP_CHANNELS.claudeAccountCommand, (event, command: unknown) => {
+  const manager = assertAccountSender(event)
+  if (!isAccountCommand(command)) throw new Error('Invalid account command')
+  return manager.command(command)
+})
+
 ipcMain.handle(DESKTOP_CHANNELS.getLocale, () => localeStore.current())
 ipcMain.handle(DESKTOP_CHANNELS.getLocalePreference, () => localeStore.preference())
 ipcMain.handle(DESKTOP_CHANNELS.setLocalePreference, (_event, preference: LocalePreference) => {
@@ -627,6 +659,7 @@ ipcMain.handle(DESKTOP_CHANNELS.setLocalePreference, (_event, preference: Locale
 app.on('before-quit', () => {
   quitting = true
   updateManager?.dispose()
+  void claudeAccounts?.dispose()
   tray?.destroy()
 })
 
@@ -638,7 +671,7 @@ app.on('will-quit', (event) => {
 
 async function shutdownRuntime(): Promise<void> {
   if (runtimeShutdownComplete || !runtimeHost) return
-  runtimeShutdownPromise ??= runtimeHost.stop().then(() => {
+  runtimeShutdownPromise ??= Promise.resolve(claudeAccounts?.dispose()).then(() => runtimeHost!.stop()).then(() => {
     runtimeShutdownComplete = true
   })
   await runtimeShutdownPromise

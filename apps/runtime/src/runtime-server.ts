@@ -1,3 +1,4 @@
+import type { ClaudeAccountSession, ClaudeAccountRuntimeAction } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { watch, type FSWatcher } from 'node:fs'
@@ -199,6 +200,70 @@ const PROVIDER_HOOK_REGISTRATIONS = new WeakMap<
 const configuredCcLaunches = new Map<string, Promise<InteractiveClaudeLaunch | undefined>>()
 
 export class RuntimeServer {
+  static #accountBarrier: Promise<void> | undefined
+  static #releaseAccounts: (() => void) | undefined
+  static #accountOperations = 0
+
+  /** All windows share this gate; hooks/output continue while input briefly waits. */
+  static async accountCommand(action: ClaudeAccountRuntimeAction, sessionId?: string, runId?: string): Promise<ClaudeAccountSession[]> {
+    if (action === 'release') {
+      RuntimeServer.#releaseAccounts?.()
+      RuntimeServer.#accountBarrier = undefined
+      RuntimeServer.#releaseAccounts = undefined
+      return []
+    }
+    if (action === 'hold') {
+      if (RuntimeServer.#accountBarrier || RuntimeServer.#accountOperations > 0) throw new Error('busy')
+      RuntimeServer.#accountBarrier = new Promise(resolve => { RuntimeServer.#releaseAccounts = resolve })
+      try {
+        const sessions = await RuntimeServer.accountCommand('snapshot')
+        if (sessions.some(s => s.busy)) throw new Error('busy')
+        return sessions
+      } catch (error) {
+        await RuntimeServer.accountCommand('release')
+        throw error
+      }
+    }
+    const owners = new Map<string, RuntimeServer>()
+    for (const server of RuntimeServer.#instances) {
+      for (const session of server.#sessions.values()) {
+        if (session.profile !== 'claude-code') continue
+        const previous = owners.get(session.sessionId)
+        if (!previous || (server.#spawnDescriptors.get(session.sessionId)?.spawnRevision ?? -1) >
+            (previous.#spawnDescriptors.get(session.sessionId)?.spawnRevision ?? -1)) owners.set(session.sessionId, server)
+      }
+    }
+    const snapshot: ClaudeAccountSession[] = []
+    for (const [id, owner] of owners) {
+      const session = owner.#sessions.get(id)!
+      const binding = owner.#sessionRepository.getResumeBinding(id, 'claude-code')
+      const provider = providerLaunchSettingsFromMetadata(binding?.metadata).providerConfigId
+      const status = owner.#workStatuses.get(id)
+      const defaultLogin = (!provider || provider === 'anthropic-official') &&
+        !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN &&
+        !process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.CLAUDE_CODE_USE_BEDROCK &&
+        !process.env.CLAUDE_CODE_USE_VERTEX && !process.env.CLAUDE_CODE_USE_FOUNDRY
+      snapshot.push({ sessionId: id, runId: session.runId ?? '', defaultLogin,
+        busy: status !== 'idle' && status !== 'exited' || owner.#sessions.providerIdentityPending(id),
+        resumable: Boolean(binding && owner.#spawnDescriptors.has(id) && session.durabilityState === 'healthy') })
+    }
+    if (RuntimeServer.#accountOperations > 0 && action === 'snapshot') snapshot.push({
+      sessionId: 'runtime:transition', runId: '', busy: true, defaultLogin: false, resumable: false
+    })
+    if (action !== 'resume') return snapshot
+    const target = snapshot.find(s => s.sessionId === sessionId && s.runId === runId)
+    const owner = sessionId ? owners.get(sessionId) : undefined
+    if (!target || !owner || target.busy || !target.resumable || !target.defaultLogin) throw new Error('busy')
+    await owner.#sessions.runExclusive(target.sessionId, async () => {
+      const current = owner.#sessions.get(target.sessionId)
+      if (!current || current.runId !== runId || owner.#workStatuses.get(target.sessionId) !== 'idle') throw new Error('busy')
+      owner.#assertProviderMutationAllowed(target.sessionId)
+      const mode = owner.#hud.snapshot(target.sessionId)?.permissionMode ?? 'default'
+      await owner.#respawnWithPermission(target.sessionId, mode)
+    })
+    return RuntimeServer.accountCommand('snapshot')
+  }
+
   static readonly #instances = new Set<RuntimeServer>()
   readonly #runtimeId = randomUUID()
   readonly #port: RuntimePort
@@ -353,6 +418,11 @@ export class RuntimeServer {
       this.#worktreeHealth
     )
     this.#control = control
+    control?.backend.setInputGate(async operation => {
+      if (RuntimeServer.#accountBarrier) await RuntimeServer.#accountBarrier
+      RuntimeServer.#accountOperations++
+      try { operation() } finally { RuntimeServer.#accountOperations-- }
+    })
     this.#sessions = sessions
     this.#providerHookRegistrations = PROVIDER_HOOK_REGISTRATIONS.get(sessions) ??
       new Map<string, Map<string, TrackedProviderHookRegistration>>()
@@ -620,6 +690,20 @@ export class RuntimeServer {
   }
 
   async #receive(rawMessage: unknown): Promise<void> {
+    const { type, method } = (rawMessage as { type?: string; method?: string } | null) ?? {}
+    // Read-only RPCs stay responsive while a credential transaction is pending.
+    const providerMutation = type === 'rpc.request' && [
+      'provider-config.activate', 'provider-config.upsert', 'provider-config.delete',
+      'session.set-permission-mode', 'session.set-model'
+    ].includes(method ?? '')
+    const gated = type === 'terminal.input' || type === 'terminal.spawn' || providerMutation
+    if (gated && RuntimeServer.#accountBarrier) await RuntimeServer.#accountBarrier
+    if (gated) RuntimeServer.#accountOperations++
+    try { await this.#receiveReady(rawMessage) }
+    finally { if (gated) RuntimeServer.#accountOperations-- }
+  }
+
+  async #receiveReady(rawMessage: unknown): Promise<void> {
     if (this.#closed || this.#portClosed) return
     let message: RendererMessage
     try {
@@ -1560,6 +1644,18 @@ export class RuntimeServer {
   }
 
   async #spawn(
+    message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
+    forkAuthority?: ForkExecutionAuthority,
+    executionMode?: 'attach-only',
+    attachView = true
+  ): Promise<void> {
+    if (RuntimeServer.#accountBarrier) await RuntimeServer.#accountBarrier
+    RuntimeServer.#accountOperations++
+    try { await this.#spawnAccountReady(message, forkAuthority, executionMode, attachView) }
+    finally { RuntimeServer.#accountOperations-- }
+  }
+
+  async #spawnAccountReady(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     forkAuthority?: ForkExecutionAuthority,
     executionMode?: 'attach-only',
@@ -2757,7 +2853,10 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     attachView = true
   ): Promise<void> {
-    await this.#execution.startOrResume(message.sessionId, message, undefined, attachView)
+    if (RuntimeServer.#accountBarrier) await RuntimeServer.#accountBarrier
+    RuntimeServer.#accountOperations++
+    try { await this.#execution.startOrResume(message.sessionId, message, undefined, attachView) }
+    finally { RuntimeServer.#accountOperations-- }
   }
 
   #session(sessionId: string): PtySession | undefined {
