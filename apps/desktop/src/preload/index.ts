@@ -58,6 +58,13 @@ window.addEventListener('message', (event) => {
 })
 
 const desktopApi: MatouDesktopApi = {
+  getClaudeAccounts: () => ipcRenderer.invoke(DESKTOP_CHANNELS.getClaudeAccounts),
+  claudeAccountCommand: command => ipcRenderer.invoke(DESKTOP_CHANNELS.claudeAccountCommand, command),
+  onClaudeAccounts: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, value: Parameters<typeof listener>[0]) => listener(value)
+    ipcRenderer.on(DESKTOP_CHANNELS.claudeAccounts, handler)
+    return () => ipcRenderer.removeListener(DESKTOP_CHANNELS.claudeAccounts, handler)
+  },
   getPathForFile: (file) => webUtils.getPathForFile(file),
   selectWorkspaceDirectory: () => ipcRenderer.invoke(DESKTOP_CHANNELS.selectWorkspaceDirectory),
   selectSessionEnvironmentDirectory: () =>

@@ -1,6 +1,6 @@
 {
   "name": "@matou/desktop",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "productName": "码头",
   "private": true,
   "type": "module",
@@ -52,6 +52,10 @@
       {
         "from": "build/finder-quick-action/进入码头.workflow",
         "to": "finder-quick-action/进入码头.workflow"
+      },
+      {
+        "from": "package-resources/claude-accounts",
+        "to": "claude-accounts"
       }
     ],
     "mac": {

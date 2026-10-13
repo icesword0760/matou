@@ -95,6 +95,50 @@ afterEach(async () => {
   database.close()
 })
 
+describe('RuntimeServer Claude account coordination', () => {
+  it('includes hidden windows, blocks active tasks, and releases a rejected hold', async () => {
+    const registry = createTestSessionRegistry()
+    const hidden = new RuntimeServer(new MockPort(), root, database, undefined, undefined, registry)
+    registerSession(database, 'account-hidden', 'claude-code')
+    database.run("UPDATE sessions SET work_status = 'running' WHERE id = 'account-hidden'")
+    registry.set({ sessionId: 'account-hidden', runId: 'hidden-run', profile: 'claude-code', durabilityState: 'healthy' } as never)
+    try {
+      expect(await RuntimeServer.accountCommand('snapshot')).toContainEqual(expect.objectContaining({ sessionId: 'account-hidden', busy: true }))
+      await expect(RuntimeServer.accountCommand('hold')).rejects.toThrow('busy')
+      database.run("UPDATE sessions SET work_status = 'idle' WHERE id = 'account-hidden'")
+      await expect(RuntimeServer.accountCommand('hold')).resolves.toContainEqual(expect.objectContaining({ sessionId: 'account-hidden', busy: false }))
+    } finally {
+      await RuntimeServer.accountCommand('release')
+      registry.delete('account-hidden')
+      hidden.close()
+    }
+  })
+  it('holds UI commands without losing them and drains after switching', async () => {
+    try {
+      await RuntimeServer.accountCommand('hold')
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'account-held-rpc', method: 'provider-config.activate',
+        capability: 'renderer', deadlineAt: Date.now() + 10_000, payload: { cli: 'claude-code', providerId: 'anthropic-official' }
+      })
+      await settle()
+      expect(port.findRpcResponse('account-held-rpc')).toBeUndefined()
+      port.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'account-readonly-rpc', method: 'provider-config.snapshot',
+        capability: 'renderer', deadlineAt: Date.now() + 10_000, payload: {}
+      })
+      await waitUntil(() => port.findRpcResponse('account-readonly-rpc') !== undefined)
+      await RuntimeServer.accountCommand('release')
+      await waitUntil(() => port.findRpcResponse('account-held-rpc') !== undefined)
+      expect(port.findRpcError('account-held-rpc')).toBeUndefined()
+    } finally { await RuntimeServer.accountCommand('release') }
+  })
+  it('rejects a stale session resume instead of restarting another run', async () => {
+    await expect(RuntimeServer.accountCommand('resume', 'missing-session', 'old-run')).rejects.toThrow('busy')
+  })
+})
+
 describe('RuntimeServer host navigation registration', () => {
   it('registers a main window only after hello and forwards its bound acknowledgement', async () => {
     const navigation = new HostNavigationBroker()

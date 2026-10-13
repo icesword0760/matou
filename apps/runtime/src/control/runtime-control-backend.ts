@@ -48,6 +48,7 @@ export class RuntimeControlBackend implements HostControlBackend {
   readonly #topology: HostTopologyProjector
   readonly #inputQueue = new TerminalInputQueue()
   #hostActionExecutor: HostActionExecutor | undefined
+  #inputGate: ((operation: () => void) => Promise<void>) | undefined
 
   constructor(
     database: RuntimeDatabase,
@@ -64,6 +65,20 @@ export class RuntimeControlBackend implements HostControlBackend {
     this.#taskMigrations = new TaskWindowMigrationService(
       database, new DomainTransactionManager(database)
     )
+  }
+
+  setInputGate(gate: (operation: () => void) => Promise<void>): void {
+    this.#inputGate = gate
+  }
+
+  async #writeInput(sessionId: string, data: string): Promise<void> {
+    const session = this.#requireActive(sessionId)
+    const write = () => {
+      if (this.#active.get(sessionId) !== session) throw new Error('SessionRun changed while input was waiting')
+      session.write(data)
+    }
+    if (this.#inputGate) await this.#inputGate(write)
+    else write()
   }
 
   register(sessionId: string, session: PtySession): void {
@@ -141,15 +156,11 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   async sendText(sessionId: string, text: string, submit = false): Promise<void> {
-    await this.#inputQueue.enqueue(sessionId, () => {
-      this.#requireActive(sessionId).write(text + (submit ? '\r' : ''))
-    })
+    await this.#inputQueue.enqueue(sessionId, () => this.#writeInput(sessionId, text + (submit ? '\r' : '')))
   }
 
   async sendKey(sessionId: string, key: Parameters<HostControlBackend['sendKey']>[1]): Promise<void> {
-    await this.#inputQueue.enqueue(sessionId, () => {
-      this.#requireActive(sessionId).write(CONTROL_KEY_SEQUENCES[key])
-    })
+    await this.#inputQueue.enqueue(sessionId, () => this.#writeInput(sessionId, CONTROL_KEY_SEQUENCES[key]))
   }
 
   async writeTaskStatus(taskId: string, key: string, value: string | null): Promise<void> {

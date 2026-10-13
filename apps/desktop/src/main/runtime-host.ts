@@ -1,3 +1,4 @@
+import type { ClaudeAccountRuntimeAction, ClaudeAccountSession, ClaudeAccountRuntimeResult } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 
 import { MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron'
@@ -24,7 +25,7 @@ import { mainMessages, type MainMessages } from './messages'
 
 const RESTART_DELAYS = [100, 500, 1_000, 2_000, 5_000] as const
 
-type RuntimeChildMessage = RuntimeLifecycleEvent | RuntimeStartupFailure | {
+type RuntimeChildMessage = ClaudeAccountRuntimeResult | RuntimeLifecycleEvent | RuntimeStartupFailure | {
   type: 'runtime.recovery-details'
   recovery: RuntimeRecoveryDetails
 } | {
@@ -105,6 +106,7 @@ export class RuntimeHost {
   readonly #locale: () => Locale
   readonly #renderers = new Set<WebContents>()
   readonly #connectedRenderers = new Set<WebContents>()
+  readonly #pendingAccounts = new Map<string, { resolve(value: ClaudeAccountSession[]): void; reject(error: Error): void }>()
   readonly #pendingRecoveryCommands = new Map<string, PendingRecoveryCommand>()
   readonly #pendingScaleMetrics = new Map<string, PendingScaleMetrics>()
   #child: UtilityProcess | undefined
@@ -207,6 +209,23 @@ export class RuntimeHost {
     return result
   }
 
+  accountRequest(action: ClaudeAccountRuntimeAction, sessionId?: string, runId?: string): Promise<ClaudeAccountSession[]> {
+    if (!this.#child || !this.#isRuntimeReady()) return Promise.reject(new Error('runtime'))
+    const requestId = randomUUID()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pendingAccounts.delete(requestId)
+        if (action === 'hold') this.#child?.postMessage({ type: 'runtime.claude-accounts-request', requestId: randomUUID(), action: 'release' })
+        reject(new Error('runtime'))
+      }, action === 'resume' ? 60_000 : 15_000)
+      this.#pendingAccounts.set(requestId, {
+        resolve: value => { clearTimeout(timer); resolve(value) },
+        reject: error => { clearTimeout(timer); reject(error) }
+      })
+      this.#child!.postMessage({ type: 'runtime.claude-accounts-request', requestId, action, sessionId, runId })
+    })
+  }
+
   async #launch(): Promise<void> {
     const child = utilityProcess.fork(this.#runtimeEntry, [], {
       serviceName: 'Matou Terminal Runtime',
@@ -240,6 +259,8 @@ export class RuntimeHost {
           true
         )
         this.#rejectScaleMetrics(new Error('Runtime exited during scale measurement'))
+        for (const pending of this.#pendingAccounts.values()) pending.reject(new Error('runtime'))
+        this.#pendingAccounts.clear()
         if (!this.#stopping && !this.#startupBlocked) {
           this.#markReconnecting()
           this.#scheduleRestart()
@@ -293,6 +314,13 @@ export class RuntimeHost {
   #receive(message: unknown): void {
     if (!message || typeof message !== 'object' || !('type' in message)) return
     const candidate = message as RuntimeChildMessage
+    if (candidate.type === 'runtime.claude-accounts-result') {
+      const pending = this.#pendingAccounts.get(candidate.requestId)
+      this.#pendingAccounts.delete(candidate.requestId)
+      if (candidate.error) pending?.reject(new Error(candidate.error))
+      else pending?.resolve(candidate.sessions ?? [])
+      return
+    }
     if (candidate.type === 'runtime.lifecycle') {
       let event: RuntimeLifecycleEvent
       try {

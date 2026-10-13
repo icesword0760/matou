@@ -20,3 +20,8 @@ apps/desktop/prototypes/
 # 宣发素材与视频流水线（本地保留，不入库）
 marketing/
 tests/e2e/launch-video/
+
+# Python sidecar build and local dependency environment
+tooling/claude-accounts/.venv/
+tooling/claude-accounts/build/
+__pycache__/
