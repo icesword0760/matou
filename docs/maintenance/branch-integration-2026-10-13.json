@@ -411,6 +411,6 @@
     "fullTestPassed": true,
     "packagedRuntimePassed": true,
     "realAccountAcceptance": "pending-user",
-    "installedUIValidation": "account entry visible; loading blocked pending macOS file-access permission review"
+    "installedUIValidation": "After user accepted macOS permission: terminal loading overlays cleared, account list loaded, add-account page shows isolated private window CTA. Real OAuth and account switching remain pending user acceptance."
   }
 }
