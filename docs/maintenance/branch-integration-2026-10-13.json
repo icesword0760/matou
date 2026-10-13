@@ -1,0 +1,416 @@
+{
+  "baseline": "1cf3d521f65a9f76e616f0ad170ed88d2a523a66",
+  "integrationCommit": "67b947d3a89da03e4ef28d375bb2811e12aa071c",
+  "localBranchCount": 50,
+  "unmergedBranchCount": 0,
+  "branches": [
+    {
+      "branch": "codex/archive-history-context",
+      "head": "7cf78670e48b1f392ec290d421c1d8464097ec5d",
+      "content": "历史搜索的冷数据上下文",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "7cf7867 → 55e97cb",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/brand-gate-final",
+      "head": "956d113785a16dd97d9a9aaf93294dc02e6c9d96",
+      "content": "品牌命名清理与检查",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "956d113 → fa829de,c1f2e4f",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/claude-accounts-acceptance",
+      "head": "5c98ab8e139a769f1949c147934e92d5be956b88",
+      "content": "账户切换及独立临时浏览器登录",
+      "result": "实际新增代码合入",
+      "evidence": "5c98ab8；浏览器及账户专项验证",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/claude-provider-recovery-e2e",
+      "head": "e5f5ae54123c38fc680e457815420d28c7b51255",
+      "content": "Claude 恢复失败时保留会话及恢复测试",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "e5f5ae5 → 38a6cfd",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/cloud-release-test",
+      "head": "835fd6f42fcb6c0544c447d80d50d2dd84ddc968",
+      "content": "旧 0.1.1 云更新实验",
+      "result": "历史归档；保留 0.2.5，不回退至 0.1.1",
+      "evidence": "835fd6f 仅改版本号；output 原地保留",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/d01-foreground-terminal-lifecycle",
+      "head": "0245cde485176fb4c1b1f1a871fbd295213783f1",
+      "content": "前台终端在卡片虚拟化过程中的连续性",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "0245cde → 72a5f9c",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/d08-dag-aggregation",
+      "head": "790e48cd068a331efcb1118aff73d670e0a58fe0",
+      "content": "远处会话分支聚合",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "790e48c → 48c7658",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/d09-delete-scope-ui",
+      "head": "bd5a640243003cc15e560e07475d3110ce1b72ea",
+      "content": "统一会话节点移除范围",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "bd5a640 → ecf9aa1",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/dag-10k-electron-e2e",
+      "head": "28219ec4dddfd4834b5e8ad08269b523b0f3fa13",
+      "content": "一万节点的真实 Electron 测试",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "28219ec → 33282ca",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/detached-return-retry",
+      "head": "f32a6f05441d542bb62051dd1d27d480a95a02af",
+      "content": "独立窗口返回重试",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "f32a6f0 → c8f3386",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/durability-gate-overflow",
+      "head": "46284213897e209a38cfc1f4a57db9074cd8f147",
+      "content": "终端持久化背压及压缩压力测试",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "f7f8c1d → ba18d9b",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/final-fork-e2e-fixes",
+      "head": "35893acfab9cccb5f1445f771e6a399ccb061dc2",
+      "content": "Fork 失败展示及恢复焦点",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "35893ac → 950485a",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/final-ui-e2e-fixes",
+      "head": "8e60147fc1c793eb3e47cd85b02ec187ff071416",
+      "content": "DAG、会话投影与卡片交互稳定性",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "8e60147 → ea59fc7",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/final-window-recovery-e2e-fixes",
+      "head": "88c10a16833a8e15835b762bc939ab0302bc58e7",
+      "content": "独立窗口、Shell 和回放恢复",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "88c10a1 → 0ba451b",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/fork-background-e2e",
+      "head": "32358bd15acf0f33b1295a01262879bd1a901080",
+      "content": "后台 Fork 设置测试",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "32358bd → 2cd5440",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/git-workflow",
+      "head": "c8d2bcba6d7a56468d61435ab84cf228c4c5d752",
+      "content": "Git 交互工作流",
+      "result": "检查前已合入，保持现状",
+      "evidence": "c8d2bcb",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/hud-e2e-fix",
+      "head": "5015d20a94cf2b6d43b20e4ff1477d24c10ad1ac",
+      "content": "底栏交互响应",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "5015d20 → b0e5c48",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/internal-hardening-audit",
+      "head": "93518651e55fea4ffce50a1073857e632c7e55be",
+      "content": "内部稳定性审计",
+      "result": "检查前已合入，保持现状",
+      "evidence": "9351865",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/journal-range-replay",
+      "head": "1fbebce63817135e43a2494ff6e1217a2d0e0285",
+      "content": "日志按范围读取和流式回放",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "1fbebce → bc9d7fb",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/layered-recovery",
+      "head": "b41c0845257b745b8526386e8e4f35041317d894",
+      "content": "分层恢复调度与卡片进度",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "5f3173a → ce68c81; d6f24e6 → 10415c4; b41c084 → 现行命名门禁",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/layered-recovery-merge-fixes",
+      "head": "c9167c33dd3dfd3be6076e8139b8997903966b69",
+      "content": "恢复并发竞态修复",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "c9167c3 → 310e40e",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/ledger-update",
+      "head": "441b38d0dc029d2f2e05826e7299ae3640817cce",
+      "content": "验收台账整理",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "441b38d → d2266a5",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/loaded-session-fork",
+      "head": "177aaaa2eaf666fa9252fae56b8621bde51f0c89",
+      "content": "已载入会话 Fork",
+      "result": "检查前已合入，保持现状",
+      "evidence": "177aaaa",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/long-terminal-history-gate",
+      "head": "553d445130409bc84f9abaef339476e4f0f0ea18",
+      "content": "长终端历史稳健性测试",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "553d445 → 0ee3eb6",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/main-wip-backup-20260901-154452",
+      "head": "76419fe327ba4f6debc2a346a459c6c4c11a6e87",
+      "content": "历史混合工作备份：看板、模型配置、标题、DAG、侧栏原型",
+      "result": "新版已覆盖功能；保留旧原型历史",
+      "evidence": "3db69f6、97dfa98、d153f27、297af76；a58b7e0 排除原型",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/migration-interruption-e2e",
+      "head": "74354992208ad97c33921b8bd36d194139264547",
+      "content": "数据库迁移中断恢复测试",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "7435499 → e0091bb",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/native-window-focus-e2e",
+      "head": "82ef8c5eca2602703b199285d588ca12c1a5c834",
+      "content": "原生窗口焦点恢复测试",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "82ef8c5 → 6dbac18",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/projection-10k-incremental",
+      "head": "0bce16879af531e9109e1cae2c2f672f9e1abd1d",
+      "content": "一万节点增量状态投影",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "0bce168 → 314f9ac",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/provider-identity-gate",
+      "head": "5c62c757f0824c9f2169c593099185df4184fd8d",
+      "content": "恢复时核对服务身份",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "5c62c75 → 1cdf80a",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/real-claude-storage-resume",
+      "head": "c52088b5e7aa1805249cb295efc9ea316af0fe09",
+      "content": "等待真实 Claude 恢复就绪",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "c52088b → 2faedac",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/recovery-notification-fix",
+      "head": "faed3982b9a942f9f4e62cd8b651aa7036e66508",
+      "content": "恢复通知、关闭与移除确认",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "2c50e37 → d822b62,57a9888",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/recovery-readonly-gates",
+      "head": "0434d6bb95b9e3bdb17ee32a69f00b68fdab88c0",
+      "content": "只读恢复验收",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "0434d6b → ed1a841",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/recovery-scale-gate",
+      "head": "21e11755680d175061449e431902a98003fd8473",
+      "content": "大规模终端恢复",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "21e1175 → d356d94",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/recovery-scale-worktrees",
+      "head": "66cdecc43fad7ded7536f8fff445b942a3ecc929",
+      "content": "工作树规模恢复",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "66cdecc → 299acbf",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/runtime-crash-e2e",
+      "head": "e36af44f5492b7b6a984b706062a15b9c94bd09d",
+      "content": "后台运行进程崩溃恢复",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "e36af44 → a66715f",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/runtime-enospc-card-isolation",
+      "head": "4bccf5cab87c43843d44d1345366354d13363478",
+      "content": "磁盘写满时单卡片隔离及后台终端连续性",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "6c11809 → e4509f9; 4bccf5c → 3730d97",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/runtime-pty-stress-matrix",
+      "head": "f7f8c1d060db67a5299b2d5f791d5c58e5e2a514",
+      "content": "真实终端压力测试",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "f7f8c1d → ba18d9b",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/scale-dag",
+      "head": "31b6539ab33d2349220335acb3fdf81a5add5d62",
+      "content": "大规模会话及 DAG 性能",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "31b6539 → 2bea7b7",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/session-history-pagination",
+      "head": "25f3f84c496e8f292975d2f6d6002da5ce4fbc5b",
+      "content": "完整历史分页",
+      "result": "检查前已合入，保持现状",
+      "evidence": "25f3f84",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/task10-offscreen-terminal-e2e",
+      "head": "2a827aba4aba314eb8162e9795dabec2d2f5c68f",
+      "content": "离屏前台终端连续性",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "2a827ab → e9f07f2",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/task2-graph-layout-index",
+      "head": "1973fb0d860913e6d390c30cc1c11b9eb80cd6f2",
+      "content": "迭代式会话图遍历",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "1973fb0 → 6e53029",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/task6-checkpoint-segment-protection",
+      "head": "7c344a0710fe850caa31ee5ef9cf263549fe0c3e",
+      "content": "日志压缩时保护恢复检查点",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "7c344a0 → 8716d0b",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/terminal-history",
+      "head": "ee0e947dffae1145ad460d4a650e79d1be5b3ca8",
+      "content": "持久终端历史归档和搜索",
+      "result": "已在主线调整整合，补齐历史归并",
+      "evidence": "ee0e947 → 437ea1f",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/terminal-history-fixes",
+      "head": "c77af9cb5ad99ec4fcb2284f75f7f7635c378bde",
+      "content": "日志轮转恢复",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "c77af9c → b6349bc",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/unit-gate-audit",
+      "head": "e36e27d99c86e710c888b1dbc43ae67b5e7cff85",
+      "content": "发布稳定性门禁",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "e36e27d → 6670ad1",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "codex/worktree-recovery-e2e",
+      "head": "7cb75984a7ff4d3aa3354823d668978425cc1a8f",
+      "content": "工作树迁移恢复",
+      "result": "全部补丁等价，补齐历史归并",
+      "evidence": "7cb7598 → 1ecbc76",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "feat/settings-language",
+      "head": "47c54b6aa8d5d4863ede0870b93a7cc5b7ef04a1",
+      "content": "原开发目录的语言设置及账户初稿",
+      "result": "初稿快照后归并，采用新版实现",
+      "evidence": "47c54b6 → 5c98ab8",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "feature/prd-05-hierarchy",
+      "head": "76972d3bf2017ff99706701454f5e844a8411836",
+      "content": "工作区、事项与标签层级",
+      "result": "检查前已合入，保持现状",
+      "evidence": "76972d3",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "feature/session-dag-canvas",
+      "head": "9ba568c6d1e1dcf5b5ad1cdadea5222acaf4fbcf",
+      "content": "会话画布与 DAG",
+      "result": "检查前已合入，保持现状",
+      "evidence": "9ba568c",
+      "ancestorOfMain": true
+    },
+    {
+      "branch": "main",
+      "head": "67b947d3a89da03e4ef28d375bb2811e12aa071c",
+      "content": "稳定产品主线",
+      "result": "检查前已合入，保持现状",
+      "evidence": "1cf3d52",
+      "ancestorOfMain": true
+    }
+  ],
+  "delivery": {
+    "installedVersion": "0.2.5",
+    "installedApp": "/Applications/码头.app",
+    "fullTestPassed": true,
+    "packagedRuntimePassed": true,
+    "realAccountAcceptance": "pending-user",
+    "installedUIValidation": "account entry visible; loading blocked pending macOS file-access permission review"
+  }
+}

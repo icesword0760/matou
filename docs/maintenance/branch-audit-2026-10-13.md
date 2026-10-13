@@ -1,5 +1,7 @@
 # Matou 分支检查与清理（2026-10-13）
 
+> 这是第一轮检查快照。后续逐分支整合已完成，最终状态见 `branch-integration-2026-10-13.md`。
+
 本地分支：55 → 50。仅删除以下 5 个已合入 main、没有 worktree 占用的本地分支。未删除任何工作目录、未提交文件或远程分支。
 
 检查时 main 与 origin/main 一致：`1cf3d521f65a9f76e616f0ad170ed88d2a523a66`。已执行 git fetch origin。
