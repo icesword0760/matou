@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   CLI_DEFAULT_MODEL,
@@ -9,23 +9,11 @@ import {
 
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
 import { messages } from '../i18n/current'
-import { useMessages } from '../i18n/LocaleProvider'
+import { ProviderSetupDialog } from './ProviderSetupDialog'
+import { useLocale, useMessages } from '../i18n/LocaleProvider'
 
 export interface ProviderConfigClient {
   request(method: RpcMethod, payload: unknown): Promise<unknown>
-}
-
-interface ProviderDraft {
-  id?: string
-  name: string
-  endpoint: string
-  model: string
-  apiKey: string
-  builtIn?: boolean
-}
-
-const EMPTY_DRAFT: ProviderDraft = {
-  name: '', endpoint: 'https://', model: '', apiKey: ''
 }
 
 /** The settings panel shows one pane per category; the nav column switches between them. */
@@ -35,6 +23,7 @@ export function ModelSwitchSettings({ client, onClose }: {
   client: ProviderConfigClient | null
   onClose(): void
 }) {
+  const zh = useLocale() === 'zh-CN', t = (cn: string, en: string) => zh ? cn : en
   const shell = useMessages().hierarchyShell
   const m = shell.modelSettings
   const language = shell.languageSettings
@@ -43,9 +32,17 @@ export function ModelSwitchSettings({ client, onClose }: {
   const [snapshot, setSnapshot] = useState<ProviderConfigSnapshot>()
   const [loading, setLoading] = useState(true)
   const [failure, setFailure] = useState('')
-  const [toast, setToast] = useState('')
-  const [draft, setDraft] = useState<ProviderDraft>()
-  const [saving, setSaving] = useState(false)
+  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string }>()
+  const [editor, setEditor] = useState<{ existing?: ProviderConfigView }>()
+  const [switching, setSwitching] = useState('')
+  const [transitionResult, setTransitionResult] = useState<ProviderConfigActivationResult>()
+  const [showSessions, setShowSessions] = useState(false)
+  const operation = useRef(false)
+  const revision = useRef(-1)
+  const accept = (next: ProviderConfigSnapshot) => {
+    if (next.revision < revision.current) return
+    revision.current = next.revision; setSnapshot(next)
+  }
 
   const refresh = useCallback(async () => {
     if (!client) {
@@ -55,7 +52,7 @@ export function ModelSwitchSettings({ client, onClose }: {
     }
     try {
       const next = await client.request('provider-config.snapshot', {}) as ProviderConfigSnapshot
-      setSnapshot(next); setFailure('')
+      accept(next); setFailure('')
     } catch (error) {
       setFailure(message(error, m.loadFailed))
     } finally {
@@ -66,100 +63,80 @@ export function ModelSwitchSettings({ client, onClose }: {
   useEffect(() => { void refresh() }, [refresh])
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      draft ? setDraft(undefined) : onClose()
+      if (event.key !== 'Escape' || editor || operation.current) return
+      onClose()
     }
     window.addEventListener('keydown', onEscape)
     return () => window.removeEventListener('keydown', onEscape)
-  }, [draft, onClose])
+  }, [editor, onClose])
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return
     const channel = new BroadcastChannel('matou-provider-config')
     channel.onmessage = () => { void refresh() }
     return () => channel.close()
   }, [refresh])
-  useEffect(() => {
-    if (!toast) return
-    const timer = window.setTimeout(() => setToast(''), 2_400)
-    return () => window.clearTimeout(timer)
-  }, [toast])
 
   const providers = snapshot?.providers[cli] ?? []
   const activeId = snapshot?.activeProviderIds[cli]
-  const active = providers.find(({ id }) => id === activeId)
   const announceChange = () => {
     if (typeof BroadcastChannel === 'undefined') return
     const channel = new BroadcastChannel('matou-provider-config')
     channel.postMessage({ changed: true }); channel.close()
   }
   const activate = async (provider: ProviderConfigView) => {
-    if (!client || provider.id === activeId) return
+    if (!client || operation.current) return
+    if (provider.id === activeId) { setEditor(undefined); return }
+    operation.current = true; setSwitching(provider.id); setNotice(undefined); setTransitionResult(undefined)
     try {
-      const next = await client.request('provider-config.activate', {
-        cli, providerId: provider.id
-      }) as ProviderConfigActivationResult
-      setSnapshot(next); announceChange()
-      if (cli === 'claude-code') {
-        const transitions = next.sessionTransitions ?? []
-        const updated = transitions.filter(({ status }) => status === 'updated').length
-        const deferred = transitions.length - updated
-        setToast(deferred > 0
-          ? m.switchedDeferred(provider.name, updated, deferred)
-          : updated > 0
-            ? m.switchedUpdated(provider.name, updated)
-            : m.switchedClaude(provider.name))
-      } else {
-        setToast(m.switchedCodex(provider.name))
-      }
+      const next = await client.request('provider-config.activate', { cli, providerId: provider.id }) as ProviderConfigActivationResult
+      accept(next); announceChange(); setTransitionResult(next); setShowSessions(false)
+      const transitions = next.sessionTransitions ?? []
+      const updated = transitions.filter(({ status }) => status === 'updated').length
+      const deferred = transitions.length - updated
+      setNotice({ kind: 'success', text: cli === 'codex' ? m.switchedCodex(provider.name) : deferred > 0 ? m.switchedDeferred(provider.name, updated, deferred) : updated > 0 ? m.switchedUpdated(provider.name, updated) : m.switchedClaude(provider.name) })
+      setEditor(undefined)
     } catch (error) {
-      setToast(message(error, m.switchFailed))
+      setNotice({ kind: 'error', text: message(error, m.switchFailed) })
+      // A failed RPC is not proof that no server-side change happened.
+      void refresh()
+      throw error
+    } finally { operation.current = false; setSwitching('') }
+  }
+  const save = async (provider: ProviderConfigInput, use: boolean) => {
+    if (!client) throw new Error(m.serviceConnecting)
+    const result = await client.request('provider-config.upsert', { provider }) as { provider: ProviderConfigView }
+    await refresh(); announceChange(); setEditor(undefined); setTransitionResult(undefined); setShowSessions(false)
+    setNotice({ kind: 'success', text: provider.id ? m.configurationSaved : t('供应商已保存，尚未切换。', 'Provider saved; not switched yet.') })
+    if (use) {
+      try { await activate(result.provider) }
+      catch { setNotice({ kind: 'error', text: t('配置已保存，但切换未确认完成。请核对当前默认供应商后重试，无需重新添加。', 'Configuration saved, but switching was not confirmed. Check the current default and retry; do not add it again.') }) }
     }
   }
-  const save = async () => {
-    if (!client || !draft || saving) return
-    const validation = validateDraft(draft)
-    if (validation) { setFailure(validation); return }
-    setSaving(true); setFailure('')
-    const provider: ProviderConfigInput = {
-      ...(draft.id ? { id: draft.id } : {}), cli,
-      name: draft.name.trim(), endpoint: draft.endpoint.trim(),
-      model: draft.model.trim() || '__cli_default__',
-      ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {})
-    }
-    try {
-      await client.request('provider-config.upsert', { provider })
-      setDraft(undefined); await refresh(); announceChange()
-      setToast(draft.id ? m.configurationSaved : m.providerAdded)
-    } catch (error) {
-      setFailure(message(error, m.saveFailed))
-    } finally {
-      setSaving(false)
-    }
+  const remove = async (provider: ProviderConfigView) => {
+    if (!client) throw new Error(m.serviceConnecting)
+    const next = await client.request('provider-config.delete', { cli, providerId: provider.id }) as ProviderConfigSnapshot
+    accept(next); setEditor(undefined); announceChange(); setTransitionResult(undefined); setShowSessions(false); setNotice({ kind: 'success', text: m.providerDeleted })
   }
-  const remove = async () => {
-    if (!client || !draft?.id || draft.builtIn || saving) return
-    setSaving(true); setFailure('')
-    try {
-      const next = await client.request('provider-config.delete', {
-        cli, providerId: draft.id
-      }) as ProviderConfigSnapshot
-      setSnapshot(next); setDraft(undefined); announceChange(); setToast(m.providerDeleted)
-    } catch (error) {
-      setFailure(message(error, m.deleteFailed))
-    } finally { setSaving(false) }
-  }
+  const deferredReason = (reason: string) => ({
+    'durability-fault': t('会话存储待恢复', 'Session storage needs recovery'),
+    'recovery-not-ready': t('会话正在恢复', 'Session is recovering'),
+    'provider-identity-pending': t('正在确认会话身份', 'Waiting for session identity'),
+    'session-not-running': t('会话未运行', 'Session is not running'),
+    'binding-update-failed': t('会话配置更新失败', 'Session configuration update failed'),
+    'restart-unavailable': t('会话暂未重连', 'Session has not reconnected')
+  }[reason] ?? t('保留原配置', 'Kept previous configuration'))
 
-  return <section className="model-settings" aria-label={m.region}>
+  return <section className="model-settings provider-settings" aria-label={m.region}>
     <div className="model-settings__frame">
       <nav className="model-settings__nav" aria-label={m.categories}>
         <span className="model-settings__section-label">{m.aiServices}</span>
         <button className={`model-settings__nav-item${category === 'model' ? ' is-active' : ''}`}
           type="button" aria-current={category === 'model'} onClick={() => setCategory('model')}>
-          <SlidersIcon /><span>{m.modelSwitch}</span>
+          <SlidersIcon /><span>{t('服务供应商', 'Service providers')}</span>
         </button>
         <span className="model-settings__section-label">{language.general}</span>
         <button className={`model-settings__nav-item${category === 'language' ? ' is-active' : ''}`}
-          type="button" aria-current={category === 'language'} onClick={() => setCategory('language')}>
+          type="button" aria-current={category === 'language'} disabled={Boolean(switching)} onClick={() => setCategory('language')}>
           <GlobeIcon /><span>{language.title}</span>
         </button>
         {category === 'model' && <p>{m.globalHint(APP_DISPLAY_NAME)}</p>}
@@ -167,28 +144,29 @@ export function ModelSwitchSettings({ client, onClose }: {
       <main className="model-settings__main">
         <header className="model-settings__heading">
           <div>
-            <h1>{category === 'model' ? m.modelSwitch : language.title}</h1>
+            <h1>{category === 'model' ? t('服务供应商', 'Service providers') : language.title}</h1>
             <p>{category === 'model' ? m.heading : language.heading}</p>
           </div>
-          <button type="button" aria-label={m.close} onClick={onClose}>×</button>
+          <button type="button" aria-label={m.close} disabled={Boolean(switching)} onClick={onClose}>×</button>
         </header>
         {category === 'language' && <LanguageSettings />}
         {category === 'model' && <div className="model-settings__tabs" role="tablist" aria-label={m.cliType}>
           {([['claude-code', 'Claude Code'], ['codex', 'Codex']] as const).map(([id, label]) =>
             <button key={id} role="tab" aria-selected={cli === id} className={cli === id ? 'is-active' : ''}
-              type="button" onClick={() => { setCli(id); setFailure('') }}>{label}</button>)}
+              type="button" disabled={Boolean(switching)} onClick={() => { setCli(id); setFailure(''); setNotice(undefined); setTransitionResult(undefined) }}>{label}</button>)}
         </div>}
         {category === 'model' && (loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
-          {active && <section className="model-settings__current" aria-label={m.activeProvider}>
-            <ProviderLogo provider={active} />
-            <div><strong>{active.name}</strong><span>{modelLabel(active.model, m.cliDefaultModel)} · {shortEndpoint(active.endpoint)}</span></div>
-            <b>{m.inGlobalUse}</b>
+          {notice && <section className={`provider-result is-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
+            <span className="provider-result__icon">{notice.kind === 'error' ? '!' : '✓'}</span><div><strong>{notice.kind === 'error' ? t('需要检查', 'Needs attention') : transitionResult ? t('默认供应商已切换', 'Default provider switched') : t('配置已保存', 'Configuration saved')}</strong><p>{notice.text}</p>
+            {Boolean(transitionResult?.sessionTransitions?.length) && <button className="provider-link" type="button" onClick={() => setShowSessions(!showSessions)}>{showSessions ? t('收起会话', 'Hide sessions') : t('查看会话', 'View sessions')} →</button>}
+            {showSessions && <ul className="provider-session-results">{transitionResult?.sessionTransitions?.map(row => <li key={row.sessionId}><span>{t('会话', 'Session')} {row.sessionId}</span><b>{row.status === 'updated' ? t('已更新', 'Updated') : deferredReason(row.reason)}</b></li>)}</ul>}
+            </div><button className="provider-icon-button" aria-label={t('关闭提示', 'Dismiss notice')} type="button" onClick={() => { setNotice(undefined); setShowSessions(false) }}>×</button>
           </section>}
           <div className="model-settings__toolbar">
             <h2>{m.providers} <span>{m.providerCount(providers.length)}</span></h2>
-            <button type="button" aria-label={m.newProvider} onClick={() => setDraft({ ...EMPTY_DRAFT })}>{m.newProviderAction}</button>
+            <button type="button" aria-label={m.newProvider} disabled={Boolean(switching)} onClick={() => setEditor({})}>{m.newProviderAction}</button>
           </div>
-          {failure && !draft && <div className="model-settings__error" role="alert">{failure}</div>}
+          {failure && !editor && <div className="model-settings__error" role="alert">{failure}<button type="button" onClick={() => void refresh()}>{t('重试', 'Retry')}</button></div>}
           <div className="model-settings__providers">
             {providers.map((provider) => {
               const current = provider.id === activeId
@@ -197,14 +175,10 @@ export function ModelSwitchSettings({ client, onClose }: {
                 <div className="model-provider__name"><strong>{provider.name}{current && <i>{m.inUse}</i>}</strong><span>{shortEndpoint(provider.endpoint)}</span></div>
                 <div className="model-provider__model"><strong>{modelLabel(provider.model, m.cliDefaultModel)}</strong><span>{m.defaultModel}{provider.hasApiKey ? m.keyConfigured : ''}</span></div>
                 <div className="model-provider__actions">
-                  <button type="button" onClick={() => setDraft({
-                    id: provider.id, name: provider.name, endpoint: provider.endpoint,
-                    model: provider.builtIn && provider.model === CLI_DEFAULT_MODEL ? '' : provider.model,
-                    apiKey: '', ...(provider.builtIn ? { builtIn: true } : {})
-                  })}>{m.edit}</button>
-                  <button className="primary" type="button" disabled={current}
+                  <button type="button" disabled={Boolean(switching)} onClick={() => setEditor({ existing: provider })}>{m.edit}</button>
+                  <button className="primary" type="button" disabled={current || Boolean(switching)}
                     aria-label={current ? m.currentConfigurationOf(provider.name) : m.switchTo(provider.name)}
-                    onClick={() => void activate(provider)}>{current ? m.currentConfiguration : m.switchAction}</button>
+                    onClick={() => { void activate(provider).catch(() => {}) }}>{switching === provider.id ? t('切换中…', 'Switching…') : current ? t('默认使用', 'Default') : m.switchAction}</button>
                 </div>
               </article>
             })}
@@ -213,10 +187,9 @@ export function ModelSwitchSettings({ client, onClose }: {
         </>)}
       </main>
     </div>
-    {draft && <ProviderDialog cli={cli} draft={draft} failure={failure} saving={saving}
-      onChange={setDraft} onCancel={() => { setDraft(undefined); setFailure('') }}
-      onSave={() => void save()} onDelete={() => void remove()} />}
-    {toast && <div className="model-settings__toast" role="status"><i>✓</i>{toast}</div>}
+    {editor && <ProviderSetupDialog key={cli} cli={cli} existing={editor.existing}
+      official={providers.find(p => p.builtIn)} activeId={activeId} client={client}
+      onClose={() => setEditor(undefined)} onSave={save} onUseOfficial={activate} onDelete={remove} />}
   </section>
 }
 
@@ -269,35 +242,6 @@ function LanguageSettings() {
   </div>
 }
 
-function ProviderDialog({ cli, draft, failure, saving, onChange, onCancel, onSave, onDelete }: {
-  cli: ProviderCli; draft: ProviderDraft; failure: string; saving: boolean
-  onChange(value: ProviderDraft): void; onCancel(): void; onSave(): void; onDelete(): void
-}) {
-  const catalog = useMessages()
-  const m = catalog.hierarchyShell.modelSettings
-  const update = (key: keyof ProviderDraft, value: string) => onChange({ ...draft, [key]: value })
-  return <div className="provider-dialog-layer" onPointerDown={(event) => {
-    if (event.currentTarget === event.target) onCancel()
-  }}>
-    <section className="provider-dialog" role="dialog" aria-modal="true" aria-label={draft.id ? m.editProvider(draft.name) : m.newProvider}>
-      <header><strong>{draft.id ? m.editProvider(draft.name) : m.newProvider}</strong><button type="button" aria-label={catalog.common.close} onClick={onCancel}>×</button></header>
-      <div className="provider-dialog__body">
-        <label>{m.providerName}<input aria-label={m.providerName} autoFocus value={draft.name} onChange={(event) => update('name', event.target.value)} /></label>
-        <label>{m.defaultModel}<input aria-label={m.defaultModel} value={draft.model} placeholder={cli === 'claude-code' ? 'claude-opus-5' : 'gpt-5.6-sol'} onChange={(event) => update('model', event.target.value)} /></label>
-        <label className="wide">{m.apiEndpoint}<input aria-label={m.apiEndpoint} value={draft.endpoint} onChange={(event) => update('endpoint', event.target.value)} /></label>
-        <label className="wide">API Key<input aria-label="API Key" type="password" value={draft.apiKey} placeholder={draft.id ? m.apiKeyKeepHint : m.apiKeyPlaceholder} onChange={(event) => update('apiKey', event.target.value)} /></label>
-        <div className="provider-dialog__advanced wide">{m.advanced}</div>
-        {failure && <div className="provider-dialog__error wide" role="alert">{failure}</div>}
-      </div>
-      <footer>
-        <span>{draft.id && !draft.builtIn && <button className="delete" type="button" onClick={onDelete}>{m.deleteProvider}</button>}</span>
-        <button type="button" onClick={onCancel}>{catalog.common.cancel}</button>
-        <button className="primary" type="button" disabled={saving} onClick={onSave}>{saving ? m.saving : m.saveConfiguration}</button>
-      </footer>
-    </section>
-  </div>
-}
-
 function ProviderLogo({ provider }: { provider: ProviderConfigView }) {
   const initial = useMemo(() => provider.name.trim().slice(0, 1).toUpperCase() || 'P', [provider.name])
   return <span className={`model-provider__logo tone-${tone(provider.name)}`}>{initial}</span>
@@ -309,16 +253,7 @@ function shortEndpoint(value: string) { return value.replace(/^https?:\/\//, '')
 /** The runtime stores a sentinel when a provider keeps the model the CLI picks. */
 function modelLabel(model: string, cliDefault: string) { return model === CLI_DEFAULT_MODEL ? cliDefault : model }
 function tone(name: string) { return name.toLowerCase().includes('openai') ? 'openai' : name.toLowerCase().includes('anthropic') ? 'anthropic' : 'custom' }
-function validateDraft(draft: ProviderDraft): string {
-  const m = messages().hierarchyShell.modelSettings
-  if (!draft.name.trim()) return m.nameRequired
-  if (!draft.model.trim() && !draft.builtIn) return m.modelRequired
-  try {
-    const url = new URL(draft.endpoint.trim())
-    if (!['http:', 'https:'].includes(url.protocol)) return m.endpointScheme
-  } catch { return m.endpointInvalid }
-  return ''
-}
+
 function message(error: unknown, fallback: string) {
   return error instanceof Error
     ? messages().hierarchyShell.modelSettings.errorDetail(fallback, error.message)

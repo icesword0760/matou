@@ -18,6 +18,7 @@ export interface MatouDesktopApi {
   onWorkspaceOpenRequested(listener: () => void): () => void
   revealDirectory(path: string): Promise<void>
   openDirectoryInTerminal(path: string): Promise<void>
+  openProviderKeyPage?(cli: 'claude-code' | 'codex', presetId: string): Promise<void>
   writeClipboardText(text: string): Promise<void>
   hideWindow(windowId: string): Promise<void>
   showWindow(windowId: string): Promise<void>
@@ -195,6 +196,7 @@ export const DESKTOP_CHANNELS = {
   workspaceOpenRequested: 'matou:workspace-open-requested',
   revealDirectory: 'matou:reveal-directory',
   openDirectoryInTerminal: 'matou:open-directory-in-terminal',
+  openProviderKeyPage: 'matou:provider-key-page',
   writeClipboardText: 'matou:write-clipboard-text',
   terminalCopyFocus: 'matou:terminal-copy-focus',
   hideWindow: 'matou:hide-window',

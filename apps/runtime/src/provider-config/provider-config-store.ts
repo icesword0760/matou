@@ -4,8 +4,10 @@ import { join } from 'node:path'
 
 import {
   CLI_DEFAULT_MODEL,
-  type ProviderCli, type ProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView
+  type ProviderModelsInput, type ProviderModelsResult, type ProviderCli, type ProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView
 } from '@matou/contracts'
+
+import { discoverProviderModels } from './provider-models'
 
 import { EntityMissingError } from '../errors'
 import { runtimeMessages } from '../i18n/messages'
@@ -17,6 +19,7 @@ interface StoredProvider {
   endpoint: string
   model: string
   apiKey?: string
+  modelMapping?: ProviderConfigInput['modelMapping']
   builtIn?: boolean
 }
 
@@ -74,18 +77,32 @@ export class ProviderConfigStore {
     return publicSnapshot(await this.#read())
   }
 
+  async discoverModels(input: ProviderModelsInput): Promise<ProviderModelsResult> {
+    if (!['claude-code', 'codex'].includes(input.cli)) return { error: 'invalid' }
+    const state = await this.#read()
+    const saved = input.providerId ? state.providers[input.cli].find(p => p.id === input.providerId) : undefined
+    // A retained secret may only be sent to the exact saved endpoint.
+    const sameEndpoint = saved?.endpoint.replace(/\/$/, '') === input.endpoint.trim().replace(/\/$/, '')
+    const apiKey = input.apiKey?.trim() || (sameEndpoint ? saved?.apiKey : undefined)
+    if (!apiKey) return { error: 'key-required' }
+    return discoverProviderModels({ ...input, apiKey })
+  }
+
   async upsert(input: ProviderConfigInput): Promise<ProviderConfigView> {
     return this.#mutate(async (state) => {
       const normalized = normalizeInput(input)
       const list = state.providers[normalized.cli]
       const existing = input.id ? list.find(({ id }) => id === input.id) : undefined
+      if (existing?.apiKey && normalized.endpoint !== existing.endpoint && !normalized.apiKey) throw new Error('Endpoint changed: enter the API key for the new service')
       const apiKey = normalized.apiKey || existing?.apiKey
       const provider: StoredProvider = {
+        ...existing,
         id: existing?.id ?? randomUUID(),
         cli: normalized.cli,
         name: normalized.name,
         endpoint: normalized.endpoint,
         model: normalized.model,
+        ...((normalized.modelMapping ?? existing?.modelMapping) ? { modelMapping: normalized.modelMapping ?? existing!.modelMapping! } : {}),
         ...(existing?.builtIn ? { builtIn: true } : {}),
         ...(apiKey ? { apiKey } : {})
       }
@@ -156,6 +173,7 @@ export class ProviderConfigStore {
             ANTHROPIC_API_KEY: provider.apiKey,
             ANTHROPIC_AUTH_TOKEN: provider.apiKey
           } : {}),
+          ...Object.fromEntries(Object.entries(provider.modelMapping ?? {}).filter(([, value]) => value).map(([role, value]) => [`ANTHROPIC_DEFAULT_${role.toUpperCase()}_MODEL`, value as string])),
           ...(endpoint ? { ANTHROPIC_BASE_URL: endpoint } : {})
         }
       }
@@ -218,7 +236,16 @@ function normalizeInput(input: ProviderConfigInput): ProviderConfigInput & { api
   } catch {
     throw new Error(runtimeMessages().providerConfig.endpointInvalid)
   }
-  return { ...input, name, model, endpoint, apiKey: input.apiKey?.trim() ?? '' }
+  const apiKey = input.apiKey?.trim() ?? ''
+  if (apiKey && !/^[\x21-\x7e]+$/.test(apiKey)) throw new Error('API Key contains invalid characters')
+  const modelMapping = input.modelMapping === undefined ? undefined : Object.fromEntries(
+    ['opus', 'sonnet', 'haiku'].map(role => {
+      const value = input.modelMapping?.[role as 'opus']
+      if (value !== undefined && typeof value !== 'string') throw new Error('Invalid model mapping')
+      return [role, value?.trim() ?? '']
+    })
+  )
+  return { ...input, name, model, endpoint, apiKey, ...(modelMapping ? { modelMapping } : {}) }
 }
 
 function normalizeState(value: Partial<StoredProviderState>): StoredProviderState {
@@ -253,6 +280,7 @@ function view(provider: StoredProvider): ProviderConfigView {
   return {
     id: provider.id, cli: provider.cli, name: provider.name,
     endpoint: provider.endpoint, model: provider.model || CLI_DEFAULT_MODEL,
+    ...(provider.modelMapping ? { modelMapping: provider.modelMapping } : {}),
     hasApiKey: Boolean(provider.apiKey), ...(provider.builtIn ? { builtIn: true } : {})
   }
 }

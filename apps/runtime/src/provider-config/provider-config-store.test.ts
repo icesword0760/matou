@@ -104,4 +104,22 @@ describe('ProviderConfigStore', () => {
     expect((await store.launchConfig('codex')).env.OPENAI_API_KEY).toBe('TOKEN')
     await expect(store.delete('codex', saved.id)).rejects.toThrow(/使用中的供应商/)
   })
+
+  it('requires a new secret for a changed destination in both edit and discovery', async () => {
+    const store = new ProviderConfigStore(await mkdtemp(join(tmpdir(), 'matou-provider-config-')))
+    const saved = await store.upsert({ cli: 'claude-code', name: 'Private gateway', endpoint: 'https://original.example/v1', model: 'test', apiKey: 'PRIVATE_TOKEN' })
+    await expect(store.upsert({ ...saved, endpoint: 'https://other.example/v1', apiKey: '' })).rejects.toThrow('Endpoint changed')
+    expect(await store.discoverModels({ cli: 'claude-code', providerId: saved.id, endpoint: 'https://other.example/v1' })).toEqual({ error: 'key-required' })
+    expect((await store.launchSelection('claude-code', saved.id)).env.ANTHROPIC_BASE_URL).toBe('https://original.example/v1')
+  })
+
+  it('roundtrips, preserves and explicitly clears model role mappings', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-provider-config-'))
+    const store = new ProviderConfigStore(root)
+    const saved = await store.upsert({ cli: 'claude-code', name: 'Mapped', endpoint: 'https://mapping.example', model: 'test', apiKey: 'TOKEN', modelMapping: { opus: 'big', haiku: 'small' } })
+    await store.upsert({ cli: 'claude-code', id: saved.id, name: 'Renamed', endpoint: saved.endpoint, model: saved.model })
+    expect((await new ProviderConfigStore(root).launchSelection('claude-code', saved.id)).env).toMatchObject({ ANTHROPIC_DEFAULT_OPUS_MODEL: 'big', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small' })
+    await store.upsert({ ...saved, modelMapping: { opus: '', haiku: '' } })
+    expect((await store.launchSelection('claude-code', saved.id)).env).not.toHaveProperty('ANTHROPIC_DEFAULT_OPUS_MODEL')
+  })
 })

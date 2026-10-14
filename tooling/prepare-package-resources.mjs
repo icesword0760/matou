@@ -12,6 +12,7 @@ await rm(join(root, 'apps', 'desktop', 'package-resources'), { recursive: true, 
 await mkdir(destination, { recursive: true })
 await cp(join(root, 'apps', 'runtime', 'dist'), destination, { recursive: true })
 await cp(nodePtyRoot, join(destination, 'node-pty'), { recursive: true })
+await cp(join(root, 'packages/contracts/third-party/provider-presets-LICENSE'), join(destination, 'provider-presets-LICENSE'))
 const runtimeEntry = join(destination, 'index.cjs')
 const bundledRuntime = await readFile(runtimeEntry, 'utf8')
 await writeFile(

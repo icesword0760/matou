@@ -202,7 +202,7 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
 
     await fixture.page.getByRole('button', { name: '设置' }).click()
     const providerSettings = fixture.page.getByRole('region', { name: '模型切换设置' })
-    await expect(providerSettings.getByRole('heading', { name: '模型切换' })).toBeVisible()
+    await expect(providerSettings.getByRole('heading', { name: '服务供应商' })).toBeVisible()
     await expect(providerSettings).toContainText('Anthropic 官方')
     const settingsBounds = await providerSettings.boundingBox()
     const frameBounds = await providerSettings.locator('.model-settings__frame').boundingBox()

@@ -78,6 +78,7 @@ const desktopApi: MatouDesktopApi = {
   revealDirectory: (path) => ipcRenderer.invoke(DESKTOP_CHANNELS.revealDirectory, path),
   openDirectoryInTerminal: (path) =>
     ipcRenderer.invoke(DESKTOP_CHANNELS.openDirectoryInTerminal, path),
+  openProviderKeyPage: (cli, presetId) => ipcRenderer.invoke(DESKTOP_CHANNELS.openProviderKeyPage, cli, presetId),
   writeClipboardText: (text) => ipcRenderer.invoke(DESKTOP_CHANNELS.writeClipboardText, text),
   hideWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.hideWindow, windowId),
   showWindow: (windowId) => ipcRenderer.invoke(DESKTOP_CHANNELS.showWindow, windowId),

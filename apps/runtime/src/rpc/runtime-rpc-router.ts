@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
-import type { ProviderCli, ProviderConfigInput } from '@matou/contracts'
+import type { ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
 import type {
   DomainCommandMetadata,
   LayoutNode,
@@ -155,6 +155,7 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
+    if (method === 'provider-config.models') return this.#providerConfigs.discoverModels(record(payload) as unknown as ProviderModelsInput)
     if (method === 'provider-config.snapshot') return this.#providerConfigs.snapshot()
     if (method === 'provider-config.upsert') {
       const input = record(payload)

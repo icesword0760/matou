@@ -381,6 +381,7 @@ describe('parseRendererMessage', () => {
 
   it('allowlists global provider configuration and switching', () => {
     expect(RPC_METHODS).toEqual(expect.arrayContaining([
+      'provider-config.models',
       'provider-config.snapshot',
       'provider-config.upsert',
       'provider-config.delete',
