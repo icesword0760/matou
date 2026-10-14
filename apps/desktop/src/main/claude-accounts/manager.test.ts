@@ -25,7 +25,7 @@ describe('Claude account orchestration delegates to upstream engine', () => {
   it('holds runtime before switch, publishes default only after success, and resumes separately', async () => {
     const { manager, engine, runtime, publish } = setup()
     await manager.command({ type: 'inspect' })
-    const pending = manager.command({ type: 'switch', id: 'b', waitForIdle: true, rememberScope: true })
+    const pending = manager.command({ type: 'switch', id: 'b', rememberScope: true })
     await pending
     expect(engine.run).toHaveBeenCalledWith({ action: 'switch', id: 'b' })
     expect(runtime.request).toHaveBeenCalledWith('hold')
@@ -41,30 +41,50 @@ describe('Claude account orchestration delegates to upstream engine', () => {
     const { manager, engine, runtime } = setup()
     await manager.command({ type: 'inspect' })
     vi.mocked(engine.run).mockRejectedValueOnce(new AccountFault('switch-failed'))
-    await manager.command({ type: 'switch', id: 'b', waitForIdle: true, rememberScope: false })
+    await manager.command({ type: 'switch', id: 'b', rememberScope: false })
     expect(manager.state()).toMatchObject({ currentId: 'a', error: 'switch-failed' })
     expect(runtime.request).toHaveBeenLastCalledWith('release')
   })
-  it('queues while any window is busy and cancels without activating', async () => {
+  it('switches immediately with visible and hidden busy sessions without restarting or scheduling', async () => {
     vi.useFakeTimers()
     const { manager, runtime, engine } = setup()
-    vi.mocked(runtime.request).mockResolvedValue([{ sessionId: 'hidden', runId: 'r', busy: true, resumable: true, defaultLogin: true }])
+    vi.mocked(runtime.request).mockResolvedValue([
+      { sessionId: 'visible', runId: 'v', busy: true, resumable: true, defaultLogin: true },
+      { sessionId: 'hidden', runId: 'h', busy: true, resumable: true, defaultLogin: true },
+      { sessionId: 'custom', runId: 'c', busy: true, resumable: true, defaultLogin: false }
+    ])
     await manager.command({ type: 'inspect' })
-    await manager.command({ type: 'switch', id: 'b', waitForIdle: true, rememberScope: false })
-    expect(manager.state().queuedId).toBe('b')
-    await manager.command({ type: 'cancel-switch' }); await vi.advanceTimersByTimeAsync(4000)
-    expect(engine.run).not.toHaveBeenCalledWith({ action: 'switch', id: 'b' })
+    vi.mocked(engine.run).mockClear(); vi.mocked(runtime.request).mockClear()
+    await manager.command({ type: 'switch', id: 'b', rememberScope: true })
+    expect(engine.run).toHaveBeenCalledExactlyOnceWith({ action: 'switch', id: 'b' })
+    expect(manager.state()).toMatchObject({ currentId: 'b', pendingSessionIds: ['visible', 'hidden'], rememberScope: true, operation: 'idle' })
+    expect(manager.state().error).toBeUndefined()
+    expect(vi.mocked(runtime.request).mock.calls.map(([action]) => action)).toEqual(['hold', 'release'])
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(engine.run).toHaveBeenCalledTimes(1)
     await manager.dispose()
   })
-  it('executes an idle queue once and rejects runtime unavailability', async () => {
-    vi.useFakeTimers()
+  it('keeps the account unchanged if runtime coordination is unavailable', async () => {
     const { manager, runtime, engine } = setup()
-    vi.mocked(runtime.request).mockResolvedValue([{ sessionId: 's', runId: 'r', busy: true, resumable: true, defaultLogin: true }])
-    await manager.command({ type: 'switch', id: 'b', waitForIdle: true, rememberScope: false })
-    vi.mocked(runtime.request).mockResolvedValue([])
-    await vi.advanceTimersByTimeAsync(2100)
+    await manager.command({ type: 'inspect' })
+    vi.mocked(engine.run).mockClear()
+    vi.mocked(runtime.request).mockRejectedValueOnce(new AccountFault('runtime'))
+    await manager.command({ type: 'switch', id: 'b', rememberScope: false })
+    expect(engine.run).not.toHaveBeenCalled()
+    expect(manager.state()).toMatchObject({ currentId: 'a', operation: 'idle', error: 'runtime' })
+    await manager.dispose()
+  })
+  it('coalesces repeated clicks while a switch is in progress', async () => {
+    const { manager, engine } = setup()
+    await manager.command({ type: 'inspect' })
+    let finish!: (state: EngineState) => void
+    vi.mocked(engine.run).mockClear().mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const first = manager.command({ type: 'switch', id: 'b', rememberScope: false })
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    await manager.command({ type: 'switch', id: 'b', rememberScope: false })
+    finish({ accounts: [a, b], currentId: 'b' }); await first
     expect(engine.run).toHaveBeenCalledTimes(1)
-    expect(manager.state()).toMatchObject({ currentId: 'b', operation: 'idle' })
+    expect(manager.state().currentId).toBe('b')
     await manager.dispose()
   })
   it('adds via isolated engine login and never implicitly switches', async () => {
@@ -104,6 +124,8 @@ describe('Claude account orchestration delegates to upstream engine', () => {
     expect(engine.run).toHaveBeenLastCalledWith({ action: 'remove', id: 'a' })
   })
   it('validates command types and labels before entering main service', () => {
+    expect(isAccountCommand({ type: 'switch', id: 'b', rememberScope: true })).toBe(true)
+    expect(isAccountCommand({ type: 'cancel-switch' })).toBe(false)
     expect(isAccountCommand({ type: 'rename', id: 'a', name: '工作账户' })).toBe(true)
     for (const value of [{ type: 'exec', command: 'anything' }, { type: 'rename', id: 'a', name: '' }, { type: 'rename', id: 'a', name: 'a'.repeat(13) }, { type: 'switch', id: 'a' }]) expect(isAccountCommand(value)).toBe(false)
   })

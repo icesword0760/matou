@@ -60,9 +60,6 @@ export class ClaudeAccountsManager {
   private nonce: string | undefined
   private loginCodeSubmitted = false
   private loginAbort: AbortController | undefined
-  private queuedId: string | undefined
-  private timer: ReturnType<typeof setTimeout> | undefined
-  private queueFlight: Promise<void> | undefined
   private cleaned = false
   private sessions: ClaudeAccountSession[] = []
   private pending = new Map<string, string>()
@@ -82,7 +79,7 @@ export class ClaudeAccountsManager {
       ...(this.operation === 'login' && this.nonce && this.loginAbort && !this.loginAbort.signal.aborted ? { loginAttemptId: this.nonce, loginCodeSubmitted: this.loginCodeSubmitted } : {}),
       operation: this.operation, sessions: this.sessions, pendingSessionIds: [...this.pending.keys()],
       ...(this.draft ? { draft: this.named(this.draft) } : {}), ...(this.error ? { error: this.error } : {}),
-      ...(this.queuedId ? { queuedId: this.queuedId } : {}), ...(this.switchedAt ? { switchedAt: this.switchedAt } : {}) }
+      ...(this.switchedAt ? { switchedAt: this.switchedAt } : {}) }
   }
   private emit() { this.revision++; if (!this.disposed) this.publish(this.state()) }
   async snapshot() {
@@ -194,7 +191,6 @@ export class ClaudeAccountsManager {
       this.reauthId = undefined
       this.emit(); return this.state()
     }
-    if (command.type === 'cancel-switch') { if (this.operation === 'switching') return this.state(); this.cancelQueue(); this.emit(); return this.state() }
     if (command.type === 'dismiss-error') { this.error = undefined; this.emit(); return this.state() }
     if (this.operation !== 'idle') return this.state()
     this.error = undefined
@@ -209,7 +205,6 @@ export class ClaudeAccountsManager {
         case 'login': {
           if (command.replaceId && !this.value.accounts.some(a => a.id === command.replaceId)) throw new AccountFault('conflict')
           this.reauthId = command.replaceId
-          this.cancelQueue() // A repair never competes with a queued account change.
           if (this.nonce) await this.engine.run({ action: 'cancel-login', nonce: this.nonce })
           const nonce = randomUUID(), abort = new AbortController()
           this.nonce = nonce; this.loginCodeSubmitted = false; this.error = undefined; this.draft = undefined; this.loginAbort = abort
@@ -246,7 +241,6 @@ export class ClaudeAccountsManager {
         case 'remove': {
           this.value = await this.engine.run({ action: 'remove', id: command.id })
           const { [command.id]: _, ...names } = this.prefs.names; await this.savePrefs({ ...this.prefs, names, ...(this.prefs.renewedIds ? { renewedIds: this.prefs.renewedIds.filter(id => id !== command.id) } : {}) })
-          if (this.queuedId === command.id) this.cancelQueue()
           break
         }
         case 'apply-reauth': {
@@ -255,16 +249,11 @@ export class ClaudeAccountsManager {
           break
         }
         case 'switch': {
-          this.sessions = await this.runtime.request('snapshot')
-          if (this.sessions.some(s => s.busy)) {
-            if (!command.waitForIdle) throw new AccountFault('busy')
-            this.queuedId = command.id; this.schedule()
-          } else await this.switchTo(command.id)
+          await this.switchTo(command.id)
           await this.savePrefs({ ...this.prefs, rememberScope: command.rememberScope })
           break
         }
         case 'restart-all': {
-          this.cancelQueue()
           this.sessions = await this.runtime.request('snapshot')
           const targets = [...new Map(this.sessions.filter(s => s.runId).map(s => [s.sessionId, s])).values()]
           this.restartResult = { total: targets.length, restarted: 0, failed: 0, completed: false }; this.emit()
@@ -306,40 +295,24 @@ export class ClaudeAccountsManager {
   private async switchTo(id: string, repair = false) {
     let held = false
     try {
+      // Serialize against provider mutations only; working Claude processes keep running.
+      // Upstream coordinates credential writes with Claude Code's own locks.
       this.sessions = await this.runtime.request('hold'); held = true
-      if (this.sessions.some(s => s.busy)) throw new AccountFault('busy')
       this.value = await this.engine.run({ action: repair ? 'reauth' : 'switch', id })
       if (this.value.currentId !== id) throw new AccountFault('switch-failed')
       this.pending = new Map(this.sessions.filter(s => s.defaultLogin).map(s => [s.sessionId, s.runId]))
       this.appliedReauthId = repair ? id : undefined
       this.restartResult = undefined
-      this.switchedAt = Date.now(); this.usageDue = true; this.cancelQueue()
+      this.switchedAt = Date.now(); this.usageDue = true
       if (this.prefs.renewedIds?.includes(id)) await this.savePrefs({ ...this.prefs, renewedIds: this.prefs.renewedIds.filter(value => value !== id) })
     } finally { if (held) await this.runtime.request('release').catch(() => {}) }
   }
-  private schedule() {
-    if (this.timer) clearTimeout(this.timer)
-    this.timer = setTimeout(() => { this.queueFlight = this.tick() }, 2_000)
-  }
-  private async tick() {
-    if (!this.queuedId || this.disposed) return
-    if (this.operation !== 'idle') { this.schedule(); return }
-    this.operation = 'loading'
-    const target = this.queuedId
-    try {
-      this.usageAbort?.abort(); await this.usageFlight
-      this.sessions = await this.runtime.request('snapshot')
-      if (!this.disposed && this.queuedId === target && !this.sessions.some(s => s.busy)) { this.operation = 'switching'; this.emit(); await this.switchTo(target) }
-    } catch (e) { this.error = fault(e); this.cancelQueue() }
-    finally { this.operation = 'idle'; this.emit(); if (this.queuedId) this.schedule(); this.scheduleUsage() }
-  }
-  private cancelQueue() { this.queuedId = undefined; if (this.timer) clearTimeout(this.timer) }
   dispose(): Promise<void> {
     this.closing ??= (async () => {
-      this.disposed = true; this.cancelQueue(); this.loginAbort?.abort(); this.usageAbort?.abort()
+      this.disposed = true; this.loginAbort?.abort(); this.usageAbort?.abort()
       if (this.usageTimer) clearTimeout(this.usageTimer)
       this.usageOwners.clear()
-      await Promise.allSettled([...this.inFlight, this.queueFlight, this.usageFlight])
+      await Promise.allSettled([...this.inFlight, this.usageFlight])
       if (this.nonce) await this.engine.run({ action: 'cancel-login', nonce: this.nonce }).catch(() => {})
     })()
     return this.closing

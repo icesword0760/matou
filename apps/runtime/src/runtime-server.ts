@@ -216,9 +216,9 @@ export class RuntimeServer {
       if (RuntimeServer.#accountBarrier || RuntimeServer.#accountOperations > 0) throw new Error('busy')
       RuntimeServer.#accountBarrier = new Promise(resolve => { RuntimeServer.#releaseAccounts = resolve })
       try {
-        const sessions = await RuntimeServer.accountCommand('snapshot')
-        if (sessions.some(s => s.busy)) throw new Error('busy')
-        return sessions
+        // A credential swap does not restart tasks. Only concurrent provider
+        // mutations above need serialization, not ordinary task activity.
+        return await RuntimeServer.accountCommand('snapshot')
       } catch (error) {
         await RuntimeServer.accountCommand('release')
         throw error

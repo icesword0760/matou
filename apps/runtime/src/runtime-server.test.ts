@@ -96,7 +96,7 @@ afterEach(async () => {
 })
 
 describe('RuntimeServer Claude account coordination', () => {
-  it('includes hidden windows, blocks active tasks, and releases a rejected hold', async () => {
+  it('permits switching with hidden active tasks while rejecting an overlapping hold', async () => {
     const registry = createTestSessionRegistry()
     const hidden = new RuntimeServer(new MockPort(), root, database, undefined, undefined, registry)
     registerSession(database, 'account-hidden', 'claude-code')
@@ -104,7 +104,9 @@ describe('RuntimeServer Claude account coordination', () => {
     registry.set({ sessionId: 'account-hidden', runId: 'hidden-run', profile: 'claude-code', durabilityState: 'healthy' } as never)
     try {
       expect(await RuntimeServer.accountCommand('snapshot')).toContainEqual(expect.objectContaining({ sessionId: 'account-hidden', busy: true }))
+      await expect(RuntimeServer.accountCommand('hold')).resolves.toContainEqual(expect.objectContaining({ sessionId: 'account-hidden', busy: true, runId: 'hidden-run' }))
       await expect(RuntimeServer.accountCommand('hold')).rejects.toThrow('busy')
+      await RuntimeServer.accountCommand('release')
       database.run("UPDATE sessions SET work_status = 'idle' WHERE id = 'account-hidden'")
       await expect(RuntimeServer.accountCommand('hold')).resolves.toContainEqual(expect.objectContaining({ sessionId: 'account-hidden', busy: false }))
     } finally {

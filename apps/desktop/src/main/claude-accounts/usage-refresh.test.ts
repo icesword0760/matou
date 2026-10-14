@@ -39,7 +39,7 @@ describe('shared account usage scheduler',()=>{
   })
   it('refreshes after saving or switching, without waiting for the regular interval',async()=>{
     const {manager,calls}=await setup();manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    await manager.command({type:'switch',id:'a',rememberScope:false,waitForIdle:false})
+    await manager.command({type:'switch',id:'a',rememberScope:false})
     await vi.advanceTimersByTimeAsync(0);expect(calls()).toBe(2)
     await manager.dispose()
   })
@@ -92,7 +92,7 @@ describe('shared account usage scheduler',()=>{
       return Promise.resolve({accounts:[account],currentId:input.action==='switch'?'b':'a'})
     })
     manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    await manager.command({type:'switch',id:'b',rememberScope:false,waitForIdle:false})
+    await manager.command({type:'switch',id:'b',rememberScope:false})
     expect(aborted).toBe(true);expect(manager.state().currentId).toBe('b');expect(manager.state().usageRefreshFailed).toBe(false)
     await manager.dispose()
   })

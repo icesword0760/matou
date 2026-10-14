@@ -37,7 +37,6 @@ export interface ClaudeAccountsState {
   loginAttemptId?: string
   loginCodeSubmitted?: boolean
   draft?: ClaudeAccountView
-  queuedId?: string
   switchedAt?: number
   pendingSessionIds: string[]
   error?: AccountError
@@ -46,13 +45,13 @@ export type ClaudeAccountCommand =
   | { type: 'restart-all'; confirmed: true }
   | { type: 'ensure-usage' }
   | { type: 'usage-visibility'; visible: boolean; recheck?: boolean }
-  | { type: 'inspect' | 'refresh-sessions' | 'refresh-usage' | 'cancel-login' | 'cancel-switch' | 'dismiss-error' | 'recover' }
+  | { type: 'inspect' | 'refresh-sessions' | 'refresh-usage' | 'cancel-login' | 'dismiss-error' | 'recover' }
   | { type: 'login'; replaceId?: string }
   | { type: 'submit-login-code'; attemptId: string; code: string }
   | { type: 'save-detected' | 'save-draft'; name: string }
   | { type: 'rename'; id: string; name: string }
   | { type: 'remove' | 'apply-reauth'; id: string }
-  | { type: 'switch'; id: string; rememberScope: boolean; waitForIdle: boolean }
+  | { type: 'switch'; id: string; rememberScope: boolean }
   | { type: 'resume'; sessionId: string; runId: string }
 
 export function isAccountCommand(value: unknown): value is ClaudeAccountCommand {
@@ -64,13 +63,13 @@ export function isAccountCommand(value: unknown): value is ClaudeAccountCommand 
     case 'restart-all': return v.confirmed === true
     case 'ensure-usage': return true
     case 'usage-visibility': return typeof v.visible === 'boolean' && (v.recheck === undefined || typeof v.recheck === 'boolean')
-    case 'inspect': case 'refresh-sessions': case 'refresh-usage': case 'cancel-login': case 'cancel-switch': case 'dismiss-error': case 'recover': return true
+    case 'inspect': case 'refresh-sessions': case 'refresh-usage': case 'cancel-login': case 'dismiss-error': case 'recover': return true
     case 'submit-login-code': return id('attemptId') && typeof v.code === 'string' && v.code.length <= 4096
     case 'login': return v.replaceId === undefined || id('replaceId')
     case 'save-detected': case 'save-draft': return name()
     case 'rename': return id('id') && name()
     case 'remove': case 'apply-reauth': return id('id')
-    case 'switch': return id('id') && typeof v.rememberScope === 'boolean' && typeof v.waitForIdle === 'boolean'
+    case 'switch': return id('id') && typeof v.rememberScope === 'boolean'
     case 'resume': return id('sessionId') && id('runId')
     default: return false
   }

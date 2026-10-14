@@ -2,10 +2,11 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { launchMatou } from './matou-fixture'
-const evidence=resolve('docs/acceptance/evidence/claude-accounts-hud-restart')
+const evidence=process.env.MATOU_E2E_ACCOUNTS_EVIDENCE ?? resolve('docs/acceptance/evidence/claude-accounts-hud-restart')
 async function setup() {
   const root=await mkdtemp('/tmp/matou-accounts-hud-')
-  const f=await launchMatou({root,env:{MATOU_E2E_DISPLAY:'primary',MATOU_E2E_ACCOUNTS_BRIDGE:resolve('tests/e2e/fixtures/claude-accounts-engine.py'),MATOU_E2E_ACCOUNTS_SCENARIO:'usage-normal',MATOU_CLAUDE_COMMAND:resolve('tests/e2e/fixtures/account-restart-provider.py'),MATOU_ACCOUNT_RESTART_FIXTURE:root,MATOU_CLAUDE_PROJECTS_ROOT:join(root,'projects'),CLAUDE_CONFIG_DIR:'',CLAUDE_SECURESTORAGE_CONFIG_DIR:'',ANTHROPIC_API_KEY:'',ANTHROPIC_AUTH_TOKEN:'',CLAUDE_CODE_OAUTH_TOKEN:''}})
+  const f=await launchMatou({root,env:{MATOU_LOCALE:'',MATOU_E2E_DISPLAY:'primary',MATOU_E2E_ACCOUNTS_BRIDGE:resolve('tests/e2e/fixtures/claude-accounts-engine.py'),MATOU_E2E_ACCOUNTS_SCENARIO:'usage-normal',MATOU_CLAUDE_COMMAND:resolve('tests/e2e/fixtures/account-restart-provider.py'),MATOU_ACCOUNT_RESTART_FIXTURE:root,MATOU_CLAUDE_PROJECTS_ROOT:join(root,'projects'),CLAUDE_CONFIG_DIR:'',CLAUDE_SECURESTORAGE_CONFIG_DIR:'',ANTHROPIC_API_KEY:'',ANTHROPIC_AUTH_TOKEN:'',CLAUDE_CODE_OAUTH_TOKEN:''}})
+  await f.page.evaluate(()=>window.matouDesktop.setLocalePreference('zh-CN'))
   await f.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1400,850))
   await mkdir(evidence,{recursive:true})
   return f
@@ -21,7 +22,9 @@ async function startClaude(f: Awaited<ReturnType<typeof setup>>) {
 async function switchAccount(f:Awaited<ReturnType<typeof setup>>) {
   const p=f.page;await p.getByRole('button',{name:'Claude 账户',exact:true}).click()
   await p.locator('.ca-account').filter({hasText:'个人账户'}).getByRole('button',{name:'切换',exact:true}).click()
-  await p.getByRole('button',{name:'确认切换',exact:true}).click()
+  await expect(p.getByRole('button',{name:'立即切换',exact:true})).toBeEnabled()
+  await expect(p.locator('.ca-panel')).not.toContainText('任务结束后')
+  await p.getByRole('button',{name:'立即切换',exact:true}).click()
   await expect(p.locator('.ca-switch-feedback')).toContainText('已切换账户，现有会话通常会在约 30 秒内使用新账户，或者选择立即重启并接续。')
 }
 test('switch synchronizes HUD without restarting, cancel is inert, confirm restarts all Claude not shells',async()=>{
@@ -35,6 +38,9 @@ test('switch synchronizes HUD without restarting, cancel is inert, confirm resta
     const before=await p.locator('.terminal-surface').evaluateAll(nodes=>nodes.map(n=>({id:n.getAttribute('data-session-id'),pid:n.getAttribute('data-pid')})))
     await p.locator('.terminal-surface .xterm-helper-textarea').nth(0).focus()
     await expect(p.locator('.ca-trigger-label')).toHaveText('工作账户')
+    // Both tasks are already working BEFORE the switch, not only before restart.
+    await writeFile(join(f.rootDirectory,'busy'),'yes')
+    await expect.poll(async()=>{const s=await p.evaluate(()=>window.matouDesktop.claudeAccountCommand({type:'refresh-sessions'}));return s.sessions.filter(x=>x.busy).length}).toBe(2)
     await switchAccount(f)
     await expect(p.locator('.ca-trigger-label')).toHaveText('个人账户')
     await expect(p.locator('.status-usage')).toContainText(['5h 12%','Weekly 24%'])
@@ -93,7 +99,10 @@ test('a detached hidden Claude session restarts once along with the main window 
     const window=await f.app.browserWindow(detached);await window.evaluate(w=>w.hide())
     const main=await f.app.browserWindow(p);await main.evaluate(w=>{w.show();w.focus()})
     await p.locator('.terminal-surface .xterm-helper-textarea').last().focus()
+    await writeFile(join(f.rootDirectory,'busy'),'yes')
+    await expect.poll(async()=>(await p.evaluate(()=>window.matouDesktop.claudeAccountCommand({type:'refresh-sessions'}))).sessions.filter(s=>s.busy).length).toBe(2)
     await switchAccount(f)
+    await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-pid',oldPid!)
     await p.getByRole('button',{name:'立即重启',exact:true}).click();await p.getByRole('alertdialog').getByRole('button',{name:'确定',exact:true}).click()
     await expect(p.locator('.ca-restart-result')).toContainText('已重启并接续 2 个正在运行的 Claude 会话。',{timeout:60_000})
     await expect(detached.locator('.terminal-surface')).toHaveAttribute('data-session-id',detachedId!)
@@ -101,4 +110,34 @@ test('a detached hidden Claude session restarts once along with the main window 
     const runs=(await readFile(join(f.rootDirectory,'runs.jsonl'),'utf8')).trim().split('\n')
     expect(runs).toHaveLength(4)
   }finally{await f.close()}
+})
+
+
+test('busy switching supports cancel, compact English confirmation, and remembered direct switching', async () => {
+  const f=await setup();const p=f.page
+  try {
+    await startClaude(f)
+    await writeFile(join(f.rootDirectory,'busy'),'yes')
+    await expect.poll(async()=>(await p.evaluate(()=>window.matouDesktop.claudeAccountCommand({type:'refresh-sessions'}))).sessions.some(s=>s.busy)).toBe(true)
+    const pid=await p.locator('.terminal-surface').getAttribute('data-pid')
+    await p.getByRole('button',{name:'Claude 账户',exact:true}).click()
+    await p.locator('.ca-account').filter({hasText:'个人账户'}).getByRole('button',{name:'切换',exact:true}).click()
+    await p.getByRole('button',{name:'暂不切换',exact:true}).click()
+    expect((await p.evaluate(()=>window.matouDesktop.getClaudeAccounts())).currentId).toBe('fixture-a')
+    await p.locator('.ca-account').filter({hasText:'个人账户'}).getByRole('button',{name:'切换',exact:true}).click()
+    await p.getByLabel('已了解范围，下次直接切换').check()
+    await p.evaluate(()=>window.matouDesktop.setLocalePreference('en'))
+    await f.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(820,560))
+    await expect(p.getByRole('button',{name:'Switch now',exact:true})).toBeInViewport()
+    await expect(p.locator('.ca-panel')).not.toContainText('when idle')
+    await p.screenshot({path:join(evidence,'immediate-switch-compact-en.jpg')})
+    await p.getByRole('button',{name:'Switch now',exact:true}).click()
+    await expect(p.locator('.ca-switch-feedback')).toContainText('Account switched')
+    await expect(p.getByRole('button',{name:'Restart now',exact:true})).toBeVisible()
+    await p.locator('.ca-account').filter({hasText:'工作账户'}).getByRole('button',{name:'Switch',exact:true}).click()
+    await expect(p.locator('.ca-trigger-label')).toHaveText('工作账户')
+    await expect(p.getByRole('button',{name:'Switch now',exact:true})).toHaveCount(0)
+    await expect(p.locator('.terminal-surface')).toHaveAttribute('data-pid',pid!)
+    expect((await readFile(join(f.rootDirectory,'runs.jsonl'),'utf8')).trim().split('\n')).toHaveLength(1)
+  } finally { await f.close() }
 })

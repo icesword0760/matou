@@ -30,7 +30,7 @@ const text = {
   work: en ? 'Work' : '工作账户',
   personal: en ? 'Personal' : '个人账户',
   switch: en ? 'Switch' : '切换',
-  confirmSwitch: en ? 'Confirm switch' : '确认切换',
+  confirmSwitch: en ? 'Switch now' : '立即切换',
   restartNow: en ? 'Restart now' : '立即重启',
   restartTitle: en ? 'Restart all running Claude session windows?' : '确定重启所有正在运行的 Claude 会话窗口吗？',
   confirm: en ? 'Confirm' : '确定',
