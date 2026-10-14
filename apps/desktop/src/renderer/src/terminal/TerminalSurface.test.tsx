@@ -179,6 +179,8 @@ describe('TerminalSurface focus continuity', () => {
     state.acknowledgeTerminal.mockClear()
     state.requestTerminalReplay.mockClear()
     state.terminalViewportLines = ['observed terminal buffer']
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(600)
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
     vi.stubGlobal('ResizeObserver', class {
       constructor(callback: ResizeObserverCallback) { state.resizeObserverCallback = callback }
       observe() {}
@@ -196,6 +198,7 @@ describe('TerminalSurface focus continuity', () => {
     Reflect.deleteProperty(window, 'matouDesktop')
     delete document.documentElement.dataset.hostNavigationTerminalFocus
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('focuses a newly mounted active terminal without an extra click', async () => {
@@ -520,24 +523,30 @@ describe('TerminalSurface focus continuity', () => {
     expect(state.resizeTerminal).toHaveBeenCalledWith('session-resize-settle', 80, 24)
   })
 
-  it('keeps an inactive preview from resizing the PTY when its card expands', () => {
+  it('fits an expanded inactive preview once without taking keyboard focus', () => {
     vi.useFakeTimers()
     render(<TerminalSurface sessionId="session-preview" active={false} visible />)
     act(() => { vi.runOnlyPendingTimers() })
     state.fit.mockClear()
     state.resizeTerminal.mockClear()
+    state.focus.mockClear()
 
     act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(40)
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(40)
       state.resizeObserverCallback?.([], {} as ResizeObserver)
       vi.advanceTimersByTime(80)
       vi.runOnlyPendingTimers()
     })
 
-    expect(state.fit).not.toHaveBeenCalled()
-    expect(state.resizeTerminal).not.toHaveBeenCalled()
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
+    expect(state.focus).not.toHaveBeenCalled()
   })
 
-  it('settles an inactive card once when its width changes just after recovery replay', () => {
+  it('keeps fitting a visible inactive card after recovery when its width changes again', () => {
     vi.useFakeTimers()
     render(<TerminalSurface sessionId="session-restored" profile="claude-code"
       active={false} visible />)
@@ -565,11 +574,11 @@ describe('TerminalSurface focus continuity', () => {
       vi.advanceTimersByTime(80)
       vi.runOnlyPendingTimers()
     })
-    expect(state.fit).not.toHaveBeenCalled()
-    expect(state.resizeTerminal).not.toHaveBeenCalled()
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-restored', 80, 24)
   })
 
-  it('publishes only the settled focused dimensions when an inactive card becomes active', () => {
+  it('fits an already-expanded preview on activation without a ResizeObserver notification', () => {
     vi.useFakeTimers()
     const view = render(<TerminalSurface sessionId="session-preview" active={false} visible />)
     act(() => { vi.runOnlyPendingTimers() })
@@ -577,19 +586,79 @@ describe('TerminalSurface focus continuity', () => {
     state.resizeTerminal.mockClear()
 
     view.rerender(<TerminalSurface sessionId="session-preview" active visible />)
-    act(() => { vi.runOnlyPendingTimers() })
+    act(() => { vi.advanceTimersByTime(79) })
 
     expect(state.fit).not.toHaveBeenCalled()
     expect(state.resizeTerminal).not.toHaveBeenCalled()
 
     act(() => {
-      state.resizeObserverCallback?.([], {} as ResizeObserver)
-      vi.advanceTimersByTime(80)
+      vi.advanceTimersByTime(1)
       vi.runOnlyPendingTimers()
     })
 
-    expect(state.fit).toHaveBeenCalled()
+    expect(state.fit).toHaveBeenCalledTimes(1)
     expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
+  })
+
+  it('defers preview activation fitting until replay completes', () => {
+    vi.useFakeTimers()
+    const view = render(<TerminalSurface sessionId="session-preview" active={false} visible />)
+    act(() => { vi.runOnlyPendingTimers() })
+    state.onMessage?.({ type: 'terminal.replay-start', sessionId: 'session-preview' })
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    const onVisualReady = vi.fn()
+
+    view.rerender(<TerminalSurface sessionId="session-preview" active visible onVisualReady={onVisualReady} />)
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+    expect(onVisualReady).not.toHaveBeenCalled()
+
+    state.onMessage?.({ type: 'terminal.replay-complete', sessionId: 'session-preview', throughSequence: 8 })
+    act(() => { vi.advanceTimersByTime(100) })
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
+    expect(onVisualReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves offscreen grids untouched and fits on reveal without a ResizeObserver notification', () => {
+    vi.useFakeTimers()
+    const view = render(<TerminalSurface sessionId="session-hidden" active={false} visible={false} />)
+    act(() => { vi.runOnlyPendingTimers() })
+    state.fit.mockClear()
+    state.resizeTerminal.mockClear()
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+    })
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+
+    view.rerender(<TerminalSurface sessionId="session-hidden" active={false} visible />)
+    act(() => { vi.advanceTimersByTime(80) })
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-hidden', 80, 24)
+  })
+
+  it('does not fit a CSS-hidden compact terminal even when its card is in the viewport', () => {
+    vi.useFakeTimers()
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(0)
+    render(<TerminalSurface sessionId="session-compact" active={false} visible />)
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.runOnlyPendingTimers()
+    })
+    expect(state.fit).not.toHaveBeenCalled()
+    expect(state.resizeTerminal).not.toHaveBeenCalled()
+
+    width.mockReturnValue(600)
+    act(() => {
+      state.resizeObserverCallback?.([], {} as ResizeObserver)
+      vi.advanceTimersByTime(80)
+    })
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-compact', 80, 24)
   })
 
   it('reports a fresh painted frame after an existing terminal becomes active', () => {
@@ -657,7 +726,7 @@ describe('TerminalSurface focus continuity', () => {
     expect(onVisualReady).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the old active PTY grid stable after it loses focus', () => {
+  it('fits the old active card to its settled compact width after it loses focus', () => {
     vi.useFakeTimers()
     const view = render(<TerminalSurface sessionId="session-preview" active visible />)
     act(() => { vi.runAllTimers() })
@@ -670,8 +739,8 @@ describe('TerminalSurface focus continuity', () => {
       vi.advanceTimersByTime(80)
       vi.runOnlyPendingTimers()
     })
-    expect(state.fit).not.toHaveBeenCalled()
-    expect(state.resizeTerminal).not.toHaveBeenCalled()
+    expect(state.fit).toHaveBeenCalledTimes(1)
+    expect(state.resizeTerminal).toHaveBeenCalledWith('session-preview', 80, 24)
   })
 
   it('reuses its xterm VT model after foreground card DOM virtualization', async () => {

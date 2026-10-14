@@ -28,7 +28,6 @@ const CHECKPOINT_QUIET_MS = 500
 const CHECKPOINT_SCROLLBACK_LINES = 10_000
 const INACTIVE_VIEWPORT_SETTLE_MS = 500
 const TERMINAL_RESIZE_SETTLE_MS = 80
-const RECOVERY_LAYOUT_SETTLE_WINDOW_MS = 800
 const NOOP = () => {}
 
 export type RuntimeStatus =
@@ -159,7 +158,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const historyAnchorRef = useRef<HTMLDivElement>(null)
   const interactiveRef = useRef(active && visible)
   const activationReadyPendingRef = useRef(false)
-  const activationResizeObservedRef = useRef(false)
   const activationReadyFrameRef = useRef<number | undefined>(undefined)
   const reportActivatedVisualReady = () => {
     if (
@@ -179,7 +177,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         !visibleRef.current || viewportMovingRef.current
       ) return
       activationReadyPendingRef.current = false
-      activationResizeObservedRef.current = false
       onVisualReadyRef.current()
     })
   }
@@ -217,31 +214,26 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     if (becameInteractive) activationReadyPendingRef.current = true
     if (!active || !visible) {
       activationReadyPendingRef.current = false
-      activationResizeObservedRef.current = false
       if (activationReadyFrameRef.current !== undefined) {
         cancelAnimationFrame(activationReadyFrameRef.current)
         activationReadyFrameRef.current = undefined
       }
     }
-    let activationTimer: ReturnType<typeof setTimeout> | undefined
     if (visible || active) {
       const catchupTimer = active || viewportMoving
         ? undefined
         : setTimeout(() => resumeVisualRef.current(), INACTIVE_VIEWPORT_SETTLE_MS)
       if (active && !viewportMoving) resumeVisualRef.current()
-      if (activationReadyPendingRef.current && !viewportMoving) {
-        // A wide, content-heavy xterm can take a full layout turn to reflow
-        // after its card becomes focused. Keep the card's loading cover until
-        // the settled grid has been fitted and a fresh frame is requested.
-        activationResizeObservedRef.current = false
-        activationTimer = setTimeout(() => {
-          if (!activationResizeObservedRef.current) reportActivatedVisualReady()
-        }, TERMINAL_RESIZE_SETTLE_MS + 20)
+      if (visible && !viewportMoving) {
+        // Clicking an already-expanded preview (or revealing a cached card)
+        // may not change its DOM size, so ResizeObserver need not fire. Use
+        // the same settled fit as layout changes, and only report activation
+        // ready after that fit instead of refreshing a stale narrow grid.
+        scheduleFitRef.current()
       }
       flushOutputRef.current()
       return () => {
         if (catchupTimer !== undefined) clearTimeout(catchupTimer)
-        if (activationTimer !== undefined) clearTimeout(activationTimer)
       }
     }
     return undefined
@@ -403,8 +395,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     let visualReadyReported = false
     let terminalContentApplied = false
     let visualReplayPending = false
-    let recoveryLayoutResizeDeadline = 0
-    let initialFitPending = true
     let initialVisualLayoutPending = visibleRef.current && profileRef.current !== 'shell'
     let checkpointAfterRecoveryLayout = false
     let checkpointTimer: ReturnType<typeof setTimeout> | undefined
@@ -497,7 +487,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     resumeVisualRef.current = requestVisualCatchup
     const markSpawned = () => {
       if (!spawned) {
-        recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
         scheduleTerminalResize()
       }
       spawned = true
@@ -597,7 +586,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         visualCatchupPending = false
         visualCatchupRequested = false
         preserveExistingModelForReplay = false
-        recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
         scheduleTerminalResize()
         // Resolved here rather than at module load, so the banner follows the
         // locale that is active when the gap actually happens.
@@ -668,7 +656,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           // when replay finishes. Wait for the width burst to settle before
           // fitting, otherwise the provider is briefly resized to a tiny grid
           // and its restored text is permanently formatted into narrow rows.
-          recoveryLayoutResizeDeadline = performance.now() + RECOVERY_LAYOUT_SETTLE_WINDOW_MS
           checkpointAfterRecoveryLayout = true
           scheduleTerminalResize()
           onReplayComplete(`replayed-through:${message.throughSequence}`)
@@ -838,19 +825,15 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       // persists that corruption in the next checkpoint. Replay-complete
       // schedules a new settled fit, so keep every layout request pending here.
       if (replaying || visualReplayPending) return
-      // Hover previews animate between compact and expanded widths. Keeping
-      // that animation visual avoids making shells redraw their prompt into
-      // durable scrollback after the card has already lost input focus. The
-      // final focused grid is published when that card becomes active again.
-      const settlingInitialLayout = initialFitPending
-      const settlingRecoveredLayout = performance.now() <= recoveryLayoutResizeDeadline
-      if (
-        !visibleRef.current ||
-        (!activeRef.current && !settlingInitialLayout && !settlingRecoveredLayout)
-      ) return
-      initialFitPending = false
+      // Visible previews need the same grid as their card even without input
+      // focus. Otherwise hover expansion leaves the screen at its compact
+      // width. The debounce above coalesces the whole flex animation into one
+      // resize; offscreen cards still leave the live PTY untouched.
+      if (!visibleRef.current) return
+      // Narrow layouts show a compact summary instead of the terminal. Their
+      // card can be in the viewport while the terminal itself is display:none.
+      if (container.clientWidth <= 0 || container.clientHeight <= 0) return
       initialVisualLayoutPending = false
-      recoveryLayoutResizeDeadline = 0
       fit.fit()
       publishTerminalDimensions()
       // A pre-spawn resize may have been ignored by Runtime. Re-send after
@@ -872,9 +855,6 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     scheduleFitRef.current = scheduleTerminalResize
     const observer = new ResizeObserver(() => {
       if (!visibleRef.current) return
-      if (activationReadyPendingRef.current && activeRef.current) {
-        activationResizeObservedRef.current = true
-      }
       scheduleTerminalResize()
     })
     observer.observe(container)

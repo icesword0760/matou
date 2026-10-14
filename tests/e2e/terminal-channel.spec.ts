@@ -88,15 +88,20 @@ test('stores a real xterm checkpoint and restores it before the Journal tail aft
     await textarea.press('Enter')
     await expect(surface.locator('.xterm-rows')).toContainText(marker)
 
-    await expect.poll(() => checkpointProbeEntries(page).then((entries) => entries.some((entry) =>
-      entry.direction === 'in' && entry.type === 'terminal.checkpoint-stored' &&
-      entry.sessionId === sessionId
-    ))).toBe(true)
-    const beforeReload = await checkpointProbeEntries(page)
-    const offered = beforeReload.findLast((entry) =>
-      entry.direction === 'out' && entry.type === 'terminal.checkpoint' &&
-      entry.sessionId === sessionId
+    // Startup/replay may checkpoint the prompt before this command finishes.
+    // Wait for the marker's snapshot and its own acknowledgement, not any
+    // earlier stored checkpoint whose frame only contains part of the input.
+    const storedMarkerCheckpoint = (entries: CheckpointProbeEntry[]) => entries.findLast((entry) =>
+      entry.direction === 'out' && entry.type === 'terminal.checkpoint' && entry.sessionId === sessionId &&
+      entry.snapshot?.includes(marker) && entries.some((ack) =>
+        ack.direction === 'in' && ack.type === 'terminal.checkpoint-stored' &&
+        ack.sessionId === sessionId && ack.throughSequence === entry.throughSequence
+      )
     )
+    await expect.poll(() => checkpointProbeEntries(page).then((entries) =>
+      storedMarkerCheckpoint(entries) !== undefined
+    )).toBe(true)
+    const offered = storedMarkerCheckpoint(await checkpointProbeEntries(page))
     expect(offered).toMatchObject({ sessionId, snapshot: expect.stringContaining(marker) })
 
     await page.reload()
