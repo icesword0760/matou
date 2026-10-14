@@ -19,6 +19,7 @@ import { PtyExecutionPauser } from './pty-execution-pauser'
 import { PtyOutputBatcher } from './pty-output-batcher'
 import { resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
+import { ClaudeResumeNoticeStorageError, quietClaudeResumeNotices } from './claude-resume-notices'
 import { shellIntegrationEnvironment } from './shell-integration'
 
 export interface PtySessionOptions {
@@ -190,6 +191,20 @@ export class PtySession {
       delete baseEnvironment.NO_COLOR
       baseEnvironment.COLORTERM = 'truecolor'
       baseEnvironment.FORCE_COLOR = '1'
+      if (options.providerSessionId && !options.forkSession) {
+        try {
+          const result = await quietClaudeResumeNotices({
+            cwd: options.cwd, providerSessionId: options.providerSessionId, env: baseEnvironment
+          })
+          if (result.skipped) console.warn(`[claude.resume-notices] ${options.sessionId}: ${result.skipped}; keeping original display`)
+        } catch (error) {
+          if (error instanceof ClaudeResumeNoticeStorageError) {
+            await journal.close()
+            throw error
+          }
+          console.warn(`[claude.resume-notices] ${options.sessionId}: ${error instanceof Error ? error.message : String(error)}; keeping original display`)
+        }
+      }
     }
     const providerCommandEnvironment = profile === 'shell'
       ? {}

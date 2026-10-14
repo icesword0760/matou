@@ -237,12 +237,8 @@ export class RuntimeServer {
     for (const [id, owner] of owners) {
       const session = owner.#sessions.get(id)!
       const binding = owner.#sessionRepository.getResumeBinding(id, 'claude-code')
-      const provider = providerLaunchSettingsFromMetadata(binding?.metadata).providerConfigId
       const status = owner.#workStatuses.get(id)
-      const defaultLogin = (!provider || provider === 'anthropic-official') &&
-        !process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN &&
-        !process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.CLAUDE_CODE_USE_BEDROCK &&
-        !process.env.CLAUDE_CODE_USE_VERTEX && !process.env.CLAUDE_CODE_USE_FOUNDRY
+      const defaultLogin = owner.#usesDefaultClaudeLogin(id)
       snapshot.push({ sessionId: id, runId: session.runId ?? '', defaultLogin,
         busy: status !== 'idle' && status !== 'exited' || owner.#sessions.providerIdentityPending(id),
         resumable: Boolean(binding && owner.#spawnDescriptors.has(id) && session.durabilityState === 'healthy') })
@@ -250,16 +246,27 @@ export class RuntimeServer {
     if (RuntimeServer.#accountOperations > 0 && action === 'snapshot') snapshot.push({
       sessionId: 'runtime:transition', runId: '', busy: true, defaultLogin: false, resumable: false
     })
-    if (action !== 'resume') return snapshot
+    if (action !== 'resume' && action !== 'restart') return snapshot
     const target = snapshot.find(s => s.sessionId === sessionId && s.runId === runId)
     const owner = sessionId ? owners.get(sessionId) : undefined
-    if (!target || !owner || target.busy || !target.resumable || !target.defaultLogin) throw new Error('busy')
+    if (!target || !owner || !target.resumable || (action === 'resume' && (target.busy || !target.defaultLogin))) throw new Error('busy')
     await owner.#sessions.runExclusive(target.sessionId, async () => {
       const current = owner.#sessions.get(target.sessionId)
-      if (!current || current.runId !== runId || owner.#workStatuses.get(target.sessionId) !== 'idle') throw new Error('busy')
+      if (!current || current.profile !== 'claude-code' || current.runId !== runId || (action === 'resume' && owner.#workStatuses.get(target.sessionId) !== 'idle')) throw new Error('busy')
       owner.#assertProviderMutationAllowed(target.sessionId)
       const mode = owner.#hud.snapshot(target.sessionId)?.permissionMode ?? 'default'
-      await owner.#respawnWithPermission(target.sessionId, mode)
+      // Explicit restart confirmation permits interrupting busy Claude sessions,
+      // but preserves each session's provider, model, permission and saved binding.
+      if (action === 'restart') {
+        const recovery = owner.#waitForProviderRecovery(target.sessionId)
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await owner.#respawnWithPermission(target.sessionId, mode)
+          await Promise.race([recovery.promise, new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('restart-timeout')), 35_000)
+          })])
+        } finally { clearTimeout(timer); recovery.cancel() }
+      } else await owner.#respawnWithPermission(target.sessionId, mode)
     })
     return RuntimeServer.accountCommand('snapshot')
   }
@@ -1150,7 +1157,7 @@ export class RuntimeServer {
         ))
       }
       await this.#applyHudRpc(message.method, message.payload, beforeHud?.permissionMode)
-      const sessionHuds = this.#hud.snapshots()
+      const sessionHuds = this.#hud.snapshots().map(hud => ({ ...hud, defaultAccountUsage: this.#usesDefaultClaudeLogin(hud.sessionId) }))
       if (message.method === 'projection.snapshot') result = withSessionHuds(result, sessionHuds)
       if (message.method === 'hierarchy.get-scene-session-graph') {
         result = withSessionRuntimeEnvironment(result, sessionHuds)
@@ -3116,11 +3123,22 @@ export class RuntimeServer {
     })
   }
 
+  #usesDefaultClaudeLogin(sessionId: string): boolean {
+    if (this.#sessions.get(sessionId)?.profile !== 'claude-code') return false
+    const binding = this.#sessionRepository.getResumeBinding(sessionId, 'claude-code')
+    const provider = providerLaunchSettingsFromMetadata(binding?.metadata).providerConfigId
+    return Boolean(binding) && (!provider || provider === 'anthropic-official') &&
+      !['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN',
+        'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+        'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'].some(key => process.env[key])
+  }
+
   publishSessionHud(sessionId: string): void {
     if (this.#closed || this.#portClosed || !this.#attachedSessionIds.has(sessionId)) return
+    const hud = this.#hud.snapshot(sessionId)
     this.#port.postMessage({
       type: 'terminal.hud', protocolVersion: PROTOCOL_VERSION,
-      sessionId, hud: this.#hud.snapshot(sessionId) ?? null
+      sessionId, hud: hud ? { ...hud, defaultAccountUsage: this.#usesDefaultClaudeLogin(sessionId) } : null
     })
   }
 
@@ -3382,11 +3400,20 @@ export class RuntimeServer {
     session.dispose({ notifyExit: false })
     await session.whenClosed()
     this.#permissionOverrides.set(sessionId, target)
-    await this.#spawn(descriptor)
+    const wasAttached = this.#attachedSessionIds.has(sessionId)
+    await this.#spawn(descriptor, undefined, undefined, wasAttached)
     const replacement = this.#sessions.get(sessionId)
     if (!replacement || replacement === session || replacement.profile === 'shell') {
       this.#permissionOverrides.delete(sessionId)
       throw new RpcFault('INTERNAL_ERROR', 'AI Session permission respawn failed')
+    }
+    // A detached window may own the visible attachment while this server owns
+    // the launch descriptor. Rebind its existing view to the new PTY as well;
+    // otherwise its input, output and displayed PID remain on the retired run.
+    for (const peer of RuntimeServer.#instances) {
+      if (peer === this || peer.#sessions !== this.#sessions || peer.#portClosed ||
+          !peer.#attachedSessionIds.has(sessionId)) continue
+      await peer.#spawnAccountReady(descriptor, undefined, 'attach-only')
     }
     await Promise.race([
       replacement.whenClosed(),

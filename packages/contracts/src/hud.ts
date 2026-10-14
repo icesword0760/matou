@@ -34,6 +34,8 @@ export interface SessionHudWire {
   runningTools?: Array<{ name: string; target?: string }>
   toolCounts?: HudToolCount[]
   lastTool?: HudToolActivity
+  /** Quota may follow the device account only for a verified default-login Claude session. */
+  defaultAccountUsage?: boolean
   usageWindows?: HudUsageWindow[]
   configCounts?: HudConfigCounts
   mcpErrors?: string[]

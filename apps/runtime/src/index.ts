@@ -632,8 +632,8 @@ process.once('SIGTERM', () => {
 parentPort.on('message', async (event) => {
   if (event.data?.type === 'runtime.claude-accounts-request') {
     const request = event.data
-    if (typeof request.requestId !== 'string' || !['snapshot', 'hold', 'release', 'resume'].includes(request.action) ||
-        (request.action === 'resume' && (typeof request.sessionId !== 'string' || typeof request.runId !== 'string'))) return
+    if (typeof request.requestId !== 'string' || !['snapshot', 'hold', 'release', 'resume', 'restart'].includes(request.action) ||
+        (['resume', 'restart'].includes(request.action) && (typeof request.sessionId !== 'string' || typeof request.runId !== 'string'))) return
     try {
       await runtimeReady
       const result = await RuntimeServer.accountCommand(request.action, request.sessionId, request.runId)

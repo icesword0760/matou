@@ -1,0 +1,69 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 4.6 · API Usage Billing
+  ▝▝ ▝▝    /private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project
+
+
+❯ EARLY USER HISTORY                                                                                                                                  
+
+                                                                                                                      02:11 PM claude-opus-4-6
+⏺ EARLY ASSISTANT HISTORY
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded: 
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded: 
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded: 
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded: 
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+❯ LATEST USER AFTER OLD NOTICES                                                                                                                       
+
+                                                                                                                      02:11 PM claude-opus-4-6
+⏺ LATEST ASSISTANT AFTER OLD NOTICES
+
+agents-md: no CLAUDE.md found; AGENTS.md loaded:
+/private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+⏺ agents-md: no CLAUDE.md found; AGENTS.md loaded:
+  /private/var/folders/pz/y1l2jfbn2k78f6__84v18jhc0000gn/T/matou-native-quiet-vhh4B7/project/AGENTS.md
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Showing detailed transcript · ctrl+o to toggle · ctrl+e to show all                                                                         verbose
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

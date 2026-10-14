@@ -1,3 +1,5 @@
+import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
+import { useAccountUsageDemand } from './use-account-usage'
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { validLoginCode } from '../../../shared/claude-accounts'
@@ -6,7 +8,7 @@ import { useLocale } from '../i18n/LocaleProvider'
 import './claude-accounts.css'
 
 const EMPTY: ClaudeAccountsState = { revision: 0, accounts: [], sessions: [], pendingSessionIds: [], operation: 'idle', rememberScope: false }
-type Page = 'list' | 'add' | 'detected' | 'draft' | 'saved' | 'scope' | 'manage' | 'edit' | 'remove' | 'resume' | 'reauth' | 'repaired'
+type Page = 'list' | 'add' | 'detected' | 'draft' | 'saved' | 'scope' | 'manage' | 'edit' | 'remove' | 'reauth' | 'repaired'
 const ERRORS: Record<AccountError, [string, string]> = {
   'browser-missing': ['账户登录需要 Chrome、Edge 或 Brave。安装其中一个后重试；原浏览器登录保持不变。', 'Install Chrome, Edge or Brave to add an account in an isolated window. Your usual browser stays signed in.'],
   'browser-closed': ['登录窗口已关闭。点击下方按钮，可以重新开始本次登录。', 'The sign-in window was closed. Use the button below to try again.'],
@@ -39,6 +41,9 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
   const bridge = window.matouDesktop
   const [state, setState] = useState(EMPTY)
   const [open, setOpen] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const restartButton = useRef<HTMLButtonElement>(null)
+  useAccountUsageDemand(open)
   const [checking, setChecking] = useState(false)
   const [page, setPage] = useState<Page>('list')
   const [selectedId, setSelectedId] = useState('')
@@ -64,7 +69,7 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     return () => { active = false; off() }
   }, [bridge])
   useEffect(() => {
-    if (!open) return
+    if (!open || confirmRestart) return
     title.current?.focus({ preventScroll: true })
     const click = (event: PointerEvent) => {
       if (event.target instanceof Node && !panel.current?.contains(event.target) && !trigger.current?.contains(event.target)) close(false)
@@ -74,7 +79,7 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     }
     document.addEventListener('pointerdown', click, true); document.addEventListener('keydown', key, true)
     return () => { document.removeEventListener('pointerdown', click, true); document.removeEventListener('keydown', key, true) }
-  }, [open, page])
+  }, [open, page, confirmRestart])
   useEffect(() => {
     if (state.draft) { setName(state.draft.name); setSelectedId(state.draft.id); setPage('draft') }
   }, [state.draft?.id])
@@ -100,19 +105,6 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     const timer = setInterval(() => { void bridge.claudeAccountCommand!({ type: 'refresh-sessions' }).then(apply).catch(() => {}) }, 2000)
     return () => clearInterval(timer)
   }, [open, bridge])
-  useEffect(() => {
-    if (!bridge?.claudeAccountCommand) return
-    const visible = () => open && document.visibilityState === 'visible' && document.hasFocus()
-    const report = () => { void bridge.claudeAccountCommand!({ type: 'usage-visibility', visible: visible(), recheck: true }).then(apply).catch(() => {}) }
-    report()
-    window.addEventListener('focus', report); window.addEventListener('blur', report); window.addEventListener('online', report)
-    document.addEventListener('visibilitychange', report)
-    return () => {
-      window.removeEventListener('focus', report); window.removeEventListener('blur', report); window.removeEventListener('online', report)
-      document.removeEventListener('visibilitychange', report)
-      void bridge.claudeAccountCommand!({ type: 'usage-visibility', visible: false }).catch(() => {})
-    }
-  }, [open, bridge])
   const refreshUsage = () => {
     if (!bridge?.claudeAccountCommand || state.usageRefreshing) return
     void bridge.claudeAccountCommand({ type: 'refresh-usage' }).then(apply).catch(() => setState(v => ({ ...v, usageRefreshFailed: true })))
@@ -120,8 +112,6 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
   if (!bridge?.getClaudeAccounts) return null
   const current = state.accounts.find(a => a.id === state.currentId)
   const selected = state.accounts.find(a => a.id === selectedId)
-  const activeSession = state.sessions.find(s => s.sessionId === sessionId)
-  const pending = state.pendingSessionIds.includes(sessionId)
   const busy = state.operation !== 'idle' || submitting
   const running = state.sessions.filter(s => s.busy).length
   const error = localError || (state.error ? t(...ERRORS[state.error]) : '')
@@ -140,7 +130,7 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     else setPage('scope')
   }
   const displayPage = state.operation === 'login' ? 'add' : page
-  const heading = displayPage === 'manage' ? t('管理账户', 'Manage accounts') : displayPage === 'edit' ? t('编辑账户', 'Edit account') : displayPage === 'scope' ? t('切换本机默认账户', 'Switch device default') : displayPage === 'resume' ? t('续接当前对话', 'Resume this conversation') : t('Claude 账户', 'Claude accounts')
+  const heading = displayPage === 'manage' ? t('管理账户', 'Manage accounts') : displayPage === 'edit' ? t('编辑账户', 'Edit account') : displayPage === 'scope' ? t('切换本机默认账户', 'Switch device default') : t('Claude 账户', 'Claude accounts')
   const back = () => { setLocalError(''); setPage('list'); if (state.reauthId && !state.draft && state.operation === 'idle') void call({ type: 'cancel-login' }) }
   const date = (stamp: string | number) => {
     if (!stamp || !Number.isFinite(new Date(stamp).getTime())) return '—'
@@ -165,7 +155,7 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
         if (open) { close(); return }
         setOpen(true)
         if (state.operation === 'idle' && !state.draft) { setChecking(true); void call({ type: 'inspect' }).finally(() => setChecking(false)) }
-      }}><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-3a7 7 0 0 1 14 0v3"/></svg><span className="ca-trigger-label">{current ? `${t('默认：', 'Default: ')}${current.name}` : t('Claude 账户', 'Claude accounts')}</span>{state.queuedId || pending || current?.needsLogin || state.renewedIds?.length ? <i className="ca-dot" /> : null}<span aria-hidden="true">⌃</span></button>
+      }}><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="8" r="3.5"/><path d="M5 21v-3a7 7 0 0 1 14 0v3"/></svg><span className="ca-trigger-label">{current ? `${t('默认：', 'Default: ')}${current.name}` : t('Claude 账户', 'Claude accounts')}</span>{state.queuedId || current?.needsLogin || state.renewedIds?.length ? <i className="ca-dot" /> : null}<span aria-hidden="true">⌃</span></button>
     {open && createPortal(<div className="ca-panel" ref={panel} role="dialog" aria-labelledby={titleId} data-testid="claude-accounts-panel">
       <header className="ca-header">{displayPage !== 'list' && !busy && <button type="button" className="ca-icon" onClick={back} aria-label={t('返回账户列表', 'Back to accounts')}>‹</button>}<h2 id={titleId} ref={title} tabIndex={-1}>{heading}</h2>{displayPage === 'list' && state.accounts.length > 0 && <button className="ca-refresh-button" type="button" aria-label={t('刷新用量', 'Refresh usage')} disabled={busy || state.usageRefreshing} onClick={refreshUsage}><svg className={state.usageRefreshing ? 'is-spinning' : ''} aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9"/></svg>{t('刷新', 'Refresh')}</button>}<button type="button" className="ca-icon ca-close" onClick={() => close()} aria-label={t('关闭账户面板', 'Close accounts')}>×</button></header>
       <div className="ca-scroll">
@@ -173,7 +163,8 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
         {(state.operation === 'switching' || state.operation === 'resuming') && <div className="ca-notice" role="status"><span className="ca-spinner" />{state.operation === 'switching' ? t('正在切换，请稍候…', 'Switching, please wait…') : t('正在重启并续接对话…', 'Restarting and resuming…')}</div>}
         {displayPage === 'list' && <>
           {state.queuedId && <div className="ca-notice" role="status"><strong>{t('已安排任务结束后切换', 'Switch scheduled after tasks finish')}</strong><p>{t('可以继续查看工作。退出 Matou 会取消这次安排。', 'Keep reviewing your work. Quitting Matou cancels this schedule.')}</p><button className="ca-link" disabled={state.operation === 'switching'} onClick={() => { void call({ type: 'cancel-switch' }) }}>{t('取消安排', 'Cancel schedule')}</button></div>}
-          {state.switchedAt && <div className="ca-notice ca-success" role="status"><strong>{state.appliedReauthId ? t('本机默认登录已修复', 'Device default sign-in repaired') : t('本机默认账户已更新', 'Device default updated')}</strong><p>{pending ? t('当前对话仍可能使用原账户。准备好后，可重启 Claude 并续接已保存的对话。', 'This conversation may still use the previous account. Restart Claude to resume the saved conversation.') : t('新启动的默认登录会话会读取该账户。运行中的进程以各自实际状态为准。', 'New default-login sessions read this account. Running processes may retain their previous login.')}</p>{pending && !activeSession?.resumable && <p>{t('当前对话暂未提供自动续接。请保留终端，确认任务结束后按 Claude 的登录提示继续。', 'Resume is not available for this conversation yet. Keep the terminal and follow Claude’s sign-in instructions when its task finishes.')}</p>}{pending && activeSession?.resumable && activeSession.defaultLogin && <button className="ca-link" disabled={busy || activeSession.busy} onClick={() => setPage('resume')}>{activeSession.busy ? t('任务结束后可续接', 'Resume after the task finishes') : t('重启并续接当前对话', 'Restart and resume this conversation')}</button>}</div>}
+          {state.switchedAt && <div className="ca-switch-feedback" role="status"><span className="ca-switch-check" aria-hidden="true">✓</span><div>{state.appliedReauthId ? t('登录已更新，现有会话通常会在约 30 秒内使用新登录，或者选择立即重启并接续。', 'Sign-in updated. Existing sessions usually pick it up within about 30 seconds, or you can restart and resume now.') : t('已切换账户，现有会话通常会在约 30 秒内使用新账户，或者选择立即重启并接续。', 'Account switched. Existing sessions usually pick it up within about 30 seconds, or you can restart and resume now.')} <button ref={restartButton} type="button" className="ca-restart-inline" disabled={busy} onClick={() => setConfirmRestart(true)}>{state.operation === 'resuming' ? t('正在重启…', 'Restarting…') : t('立即重启', 'Restart now')}</button></div></div>}
+          {state.restartResult && <div className={`ca-restart-result ${state.restartResult.failed ? 'has-error' : ''}`} role={state.restartResult.failed ? 'alert' : 'status'}>{!state.restartResult.completed ? t(`正在重启 Claude 会话… ${state.restartResult.restarted + state.restartResult.failed}/${state.restartResult.total}`, `Restarting Claude sessions… ${state.restartResult.restarted + state.restartResult.failed}/${state.restartResult.total}`) : state.restartResult.total === 0 ? t('没有正在运行的 Claude 会话，无需重启。', 'No running Claude sessions to restart.') : state.restartResult.failed ? t(`已接续 ${state.restartResult.restarted} 个，${state.restartResult.failed} 个未完成。请检查对应终端；启动中、存储异常或超时的会话会保留恢复入口。`, `Resumed ${state.restartResult.restarted}; ${state.restartResult.failed} did not finish. Check the affected terminals for startup, storage, or timeout recovery.`) : t(`已重启并接续 ${state.restartResult.restarted} 个正在运行的 Claude 会话。`, `Restarted and resumed ${state.restartResult.restarted} running Claude sessions.`)}</div>}
           {state.draft && <div className="ca-notice"><strong>{t('登录已完成，等待保存', 'Sign-in complete, ready to save')}</strong><button className="ca-link ca-wide" disabled={busy} onClick={() => setPage('draft')}>{t('继续核对账户', 'Continue reviewing account')}</button></div>}{state.detected && <div className="ca-notice"><strong>{t('发现本机已有 Claude 登录', 'Existing Claude sign-in found')}</strong><p>{state.detected.email}<br />{t('保存后就能随时切回来，无需重新登录。', 'Save it to switch back later without signing in again.')}</p><button className="ca-primary" disabled={busy} onClick={() => { setName(state.detected!.name); setPage('detected') }}>{t('保存当前账户', 'Save current account')}</button></div>}
           {checking && !state.accounts.length && !state.detected && <div className="ca-welcome" role="status"><span className="ca-spinner" />{t('正在读取本机账户…', 'Reading device accounts…')}</div>}
           {!checking && !state.accounts.length && !state.detected && <div className="ca-welcome"><span className="ca-welcome-icon" aria-hidden="true">⇄</span><h3>{t('多个账户，随手切换', 'Your accounts, one click away')}</h3><p>{t('每个账户只需登录一次。以后在这里查看用量、选择账户，不打断你的工作节奏。', 'Sign in once per account. Check usage and choose an account here when you need it.')}</p><ol><li>{t('在官方页面登录 Claude', 'Sign in on the official Claude page')}</li><li>{t('保存账户，按需设为默认', 'Save it, then choose when to switch')}</li></ol><button className="ca-primary ca-wide" disabled={busy} onClick={() => setPage('add')}>{t('添加第一个账户', 'Add your first account')}</button></div>}
@@ -211,10 +202,15 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
         {displayPage === 'scope' && selected && <div className="ca-form"><h3>{t('切换到', 'Switch to')}「{selected.name}」</h3><p>{t('这是本机默认登录，不是只切换当前卡片。', 'This changes the device default, not only the current card.')}</p><div className="ca-notice"><strong>{t('共享默认登录的 Claude 实例都会受影响', 'Shared default-login instances are affected')}</strong><p>{t('包括 Matou 内的默认登录会话，以及应用外的终端和编辑器。API Key、自定义服务不在此范围。', 'This includes Matou default-login sessions and external terminals or editors. API keys and custom providers are separate.')}</p></div>{running > 0 && <div className="ca-notice ca-amber"><strong>{t('任务仍在运行', 'Tasks are still running')}</strong><p>{t('等 Matou 内任务结束后再切换；安排可随时取消。', 'Switch after Matou tasks finish. You can cancel the schedule.')}</p></div>}<p>{t('应用外任务请自行确认。已有对话是否生效，会在切换后单独提示。', 'Check external tasks yourself. Existing conversations may need a separate restart after switching.')}</p><label className="ca-check"><input type="checkbox" checked={remember} onChange={e => setRemember(e.target.checked)} /><span>{t('已了解范围，下次空闲时直接切换', 'Remember this scope and switch directly when idle')}</span></label><div className="ca-button-row"><button className="ca-secondary" onClick={back} disabled={busy}>{t('暂不切换', 'Not now')}</button><button className="ca-primary" disabled={busy} onClick={() => { void call({ type: 'switch', id: selected.id, rememberScope: remember, waitForIdle: true }).then(next => { if (next && !next.error) back() }) }}>{running ? t('任务结束后切换', 'Switch when idle') : t('确认切换', 'Confirm switch')}</button></div></div>}
         {displayPage === 'manage' && <div className="ca-form"><p>{t('账户登录由 claude-swap 管理。这里的名称只影响 Matou 显示。', 'Sign-ins are managed by claude-swap. Names here only affect Matou.')}</p>{state.accounts.map((a, i) => <div className="ca-manage-row" key={a.id}><span className={`ca-avatar tone-${i % 3}`}>{a.name.slice(0, 1)}</span><div><strong>{a.name}</strong><small>{a.email}{a.id === state.currentId ? ` · ${t('本机默认', 'Default')}` : ''}</small></div><button className="ca-link" disabled={busy} onClick={() => { setSelectedId(a.id); setName(a.name); setPage('edit') }}>{t('编辑', 'Edit')}</button></div>)}<p className="ca-helper">{t('移除会删除 claude-swap 保存的账户副本，不执行 Claude 退出登录。', 'Removing deletes the copy saved by claude-swap; it does not sign Claude out.')}</p><button className="ca-secondary ca-wide" disabled={busy} onClick={() => setPage('add')}>＋ {t('添加账户', 'Add account')}</button></div>}
         {displayPage === 'remove' && <div className="ca-form"><h3>{t('移除', 'Remove')}「{selected?.name}」？</h3><p>{t('将删除 claude-swap 中保存的登录。下次添加需要重新登录；本机当前登录与项目文件保留。', 'This deletes the saved sign-in from claude-swap. You will need to sign in to add it again. The current device login and project files remain.')}</p><div className="ca-button-row"><button className="ca-secondary" disabled={busy} onClick={() => setPage('edit')}>{t('保留账户', 'Keep account')}</button><button className="ca-primary ca-destructive" disabled={busy} onClick={() => { void call({ type: 'remove', id: selectedId }).then(next => { if (next && !next.error) setPage('manage') }) }}>{t('确认移除', 'Remove account')}</button></div></div>}
-        {displayPage === 'resume' && <div className="ca-form"><h3>{t('重启 Claude，续接已保存的对话', 'Restart Claude and resume the saved conversation')}</h3><p>{t('当前卡片的 Claude 进程会重启。项目文件与已保存的对话保留；未提交的输入、进行中的命令和子代理临时状态不作恢复保证。', 'Claude in this card will restart. Project files and saved conversation history remain. Unsubmitted input, active commands, and temporary subagent state may be lost.')}</p><div className="ca-notice">{t('启动后请以 Claude 的实际账户状态为准。这里确认的是续接进程已启动。', 'Verify the account inside Claude after launch. This confirms that the resume process started, not the account used by a request.')}</div><div className="ca-button-row"><button className="ca-secondary" disabled={busy} onClick={back}>{t('稍后处理', 'Later')}</button><button className="ca-primary" disabled={busy || !activeSession?.resumable || activeSession.busy} onClick={() => { if (activeSession) void call({ type: 'resume', sessionId, runId: activeSession.runId }).then(next => { if (next && !next.error) back() }) }}>{t('重启并续接', 'Restart and resume')}</button></div></div>}
+
       </div>
       {displayPage === 'list' && state.accounts.length > 0 && <div className="ca-actions"><button type="button" className="ca-primary" disabled={busy} onClick={() => setPage('add')}>＋ {t('添加账户', 'Add account')}</button><button type="button" className="ca-link" disabled={busy} onClick={() => setPage('manage')}>{t('管理账户', 'Manage accounts')}</button></div>}
       {displayPage !== 'list' && <footer className="ca-footer"><span aria-hidden="true">▣</span>{t('切换本机默认账户，会影响共用登录的 Claude 实例。', 'Changing the device default affects Claude instances sharing this login.')}</footer>}
     </div>, document.body)}
+    {confirmRestart && <ConfirmDialog title={t('确定重启所有正在运行的 Claude 会话窗口吗？', 'Restart all running Claude session windows?')}
+      body={<><p>{t('这会造成进行中任务的中断。', 'This will interrupt tasks in progress.')}</p><p>{t('仅重启 Matou 内正在运行的 Claude 会话。已退出的会话不计入，也不会自动打开；普通 Shell 和其他会话不受影响。', 'Only running Claude sessions inside Matou restart. Exited sessions are not counted or opened. Ordinary shells and other sessions are unaffected.')}</p></>}
+      confirmLabel={t('确定', 'Confirm')} cancelLabel={t('取消', 'Cancel')}
+      onCancel={() => { setConfirmRestart(false); requestAnimationFrame(() => restartButton.current?.focus()) }}
+      onConfirm={() => { setConfirmRestart(false); void call({ type: 'restart-all', confirmed: true }); requestAnimationFrame(() => restartButton.current?.focus()) }} />}
   </>
 }

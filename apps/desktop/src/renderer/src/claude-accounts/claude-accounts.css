@@ -534,3 +534,11 @@ to {
 [data-theme=dark] .ca-account { background: #232a34; border-color: #3c4858; }
 [data-theme=dark] .ca-account.is-current { background: #293549; border-color: #374c68; }
 @media(prefers-reduced-motion:reduce) { .ca-track > span { transition: none; } .ca-refresh-button svg.is-spinning { animation-duration: 3s; } }
+
+/* One inline explanation and one confirmation, no extra continuation page. */
+.ca-switch-feedback { display: flex; align-items: flex-start; gap: 8px; margin: 0 4px 12px; font-size: 12px; line-height: 1.75; color: var(--ca-text); }
+.ca-switch-check { color: #36a779; font-weight: 700; flex: none; }
+.ca-restart-inline { display: inline; padding: 2px 7px; border: 1px solid #70a6f0; background: transparent; color: #287cdd; border-radius: 5px; font: inherit; white-space: nowrap; }
+.ca-restart-result { margin: 0 4px 10px; font-size: 11px; color: #56836f; line-height: 1.6; }
+.ca-restart-result.has-error { color: #a66622; }
+.status-usage-account { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

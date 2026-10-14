@@ -6,7 +6,7 @@ export interface ClaudeAccountSession {
   resumable: boolean
   defaultLogin: boolean
 }
-export type ClaudeAccountRuntimeAction = 'snapshot' | 'hold' | 'release' | 'resume'
+export type ClaudeAccountRuntimeAction = 'snapshot' | 'hold' | 'release' | 'resume' | 'restart'
 export interface ClaudeAccountRuntimeRequest {
   type: 'runtime.claude-accounts-request'
   requestId: string

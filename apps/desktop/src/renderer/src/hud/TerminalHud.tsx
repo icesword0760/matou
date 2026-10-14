@@ -1,3 +1,4 @@
+import { useAccountUsage } from '../claude-accounts/use-account-usage'
 import { ClaudeAccountsControl } from '../claude-accounts/ClaudeAccountsControl'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
@@ -10,7 +11,7 @@ import {
   environmentLabel,
   type SessionEnvironmentActions
 } from './EnvironmentControlMenu'
-import { useMessages } from '../i18n/LocaleProvider'
+import { useLocale, useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'
@@ -39,6 +40,18 @@ export function TerminalHud(props: {
 }) {
   const { hud } = props
   const m = useMessages().hud
+  const accountState = useAccountUsage(hud?.mode === 'agent' && hud.defaultAccountUsage === true)
+  const account = accountState?.accounts.find(a => a.id === accountState.currentId) ??
+    (accountState?.detected?.id === accountState?.currentId ? accountState?.detected : undefined)
+  const useDeviceQuota = hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
+  const deviceWindows = account?.needsLogin ? [] : ([['5h', account?.usage?.fiveHour], ['Weekly', account?.usage?.weekly]] as const)
+    .flatMap(([label, value]) => value ? [{ label, percent: Math.round(value.used), resetsAt: Date.parse(value.resetsAt) }] : [])
+  const zh = useLocale() === 'zh-CN'
+  const quotaAccount = `${zh ? '默认账户' : 'Default account'}: ${account?.name ?? '—'}`
+  const quotaProblem = account?.needsLogin ? (zh ? '登录已失效' : 'Sign-in expired') :
+    account?.usageIssue === 'rate-limited' ? (zh ? '限流，稍后重试' : 'Rate limited; retrying later') :
+    account?.usageIssue === 'unsupported' ? (zh ? '暂无用量数据' : 'Usage unavailable') :
+    accountState?.usageRefreshFailed || account?.usageIssue || account?.usage?.stale ? (zh ? '更新失败，保留上次数据' : 'Update failed; last known usage') : ''
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
   const disabled = Boolean(props.disabledReason)
@@ -128,11 +141,14 @@ export function TerminalHud(props: {
       {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {(hud.usageWindows ?? []).map((window, index) => <span
+      {useDeviceQuota && <span className="status-field status-usage-account status-priority-6" title={quotaAccount}>{quotaAccount}</span>}
+      {useDeviceQuota && deviceWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status" title={quotaAccount}>{quotaProblem || (accountState?.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') : (zh ? '用量更新中…' : 'Updating usage…'))}</span>}
+      {(useDeviceQuota ? deviceWindows : hud.usageWindows ?? []).map((window, index) => <span
         className="status-field status-usage status-priority-6"
-        title={usageTitle(window)} key={`${window.label}:${index}`}>
+        title={useDeviceQuota ? `${quotaAccount} · ${usageTitle(window)}${quotaProblem ? ` · ${quotaProblem}` : ''}` : usageTitle(window)} key={`${window.label}:${index}`}>
         {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {formatReset(window.resetsAt)}</small>}
       </span>)}
+      {useDeviceQuota && deviceWindows.length > 0 && quotaProblem && <span className="status-field status-priority-6" title={`${quotaAccount} · ${quotaProblem}`}>{zh ? '上次数据' : 'Last known'}</span>}
       {hasTaskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus, m)}</span>}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}

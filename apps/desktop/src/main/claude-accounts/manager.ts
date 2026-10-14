@@ -36,6 +36,8 @@ export class AccountPreferenceStore implements PreferenceStore {
 }
 const fault = (e: unknown): AccountError => e instanceof AccountFault ? e.code : 'engine-error'
 export class ClaudeAccountsManager {
+  private initialized = false
+  private restartResult: ClaudeAccountsState['restartResult']
   private usageOwners = new Set<number>()
   private usageTimer: ReturnType<typeof setTimeout> | undefined
   private usageFlight: Promise<ClaudeAccountsState> | undefined
@@ -72,7 +74,7 @@ export class ClaudeAccountsManager {
     private readonly runtime: AccountRuntime, private readonly publish: (state: ClaudeAccountsState) => void) {}
   private named(a: ClaudeAccountView) { return { ...a, name: this.prefs.names[a.id] || a.name } }
   state(): ClaudeAccountsState {
-    return { ...this.value, usageRefreshing: Boolean(this.usageFlight), usageRefreshFailed: this.usageRefreshFailed, accounts: this.value.accounts.map(a => this.named(a)),
+    return { ...this.value, ...(this.restartResult ? { restartResult: { ...this.restartResult } } : {}), usageRefreshing: Boolean(this.usageFlight), usageRefreshFailed: this.usageRefreshFailed, accounts: this.value.accounts.map(a => this.named(a)),
       ...(this.value.detected ? { detected: this.named(this.value.detected) } : {}),
       revision: this.revision, rememberScope: this.prefs.rememberScope,
       ...(this.reauthId ? { reauthId: this.reauthId } : {}), renewedIds: this.prefs.renewedIds ?? [],
@@ -90,7 +92,7 @@ export class ClaudeAccountsManager {
   private async savePrefs(next: AccountPreferences) { await this.store.save(next); this.prefs = next }
   private async refresh(action: 'snapshot' | 'refresh' = 'snapshot') {
     if (!this.cleaned && !this.nonce) { await this.engine.run({ action: 'cleanup-logins' }); this.cleaned = true }
-    this.value = await this.engine.run({ action })
+    this.value = await this.engine.run({ action }); this.initialized = true
     this.sessions = await this.runtime.request('snapshot')
     for (const [id, run] of this.pending) if (!this.sessions.some(s => s.sessionId === id && s.runId === run)) this.pending.delete(id)
   }
@@ -157,6 +159,7 @@ export class ClaudeAccountsManager {
   private async execute(command: ClaudeAccountCommand): Promise<ClaudeAccountsState> {
     await this.snapshot()
     if (!this.loaded || this.disposed) return this.state()
+    if (command.type === 'ensure-usage' && this.initialized) return this.state()
     if (command.type === 'usage-visibility') return this.state() // Owner identity is supplied by main IPC.
     if (command.type === 'refresh-usage') return this.refreshUsage()
     if (command.type === 'refresh-sessions') {
@@ -195,14 +198,14 @@ export class ClaudeAccountsManager {
     if (command.type === 'dismiss-error') { this.error = undefined; this.emit(); return this.state() }
     if (this.operation !== 'idle') return this.state()
     this.error = undefined
-    this.operation = command.type === 'login' ? 'login' : (command.type === 'switch' || command.type === 'apply-reauth') ? 'switching' : command.type === 'resume' ? 'resuming' : 'loading'
+    this.operation = command.type === 'login' ? 'login' : (command.type === 'switch' || command.type === 'apply-reauth') ? 'switching' : (command.type === 'resume' || command.type === 'restart-all') ? 'resuming' : 'loading'
     this.emit()
     try {
       // Foreground actions preempt quota collection; never merge an old roster into a new login.
       this.usageAbort?.abort()
       await this.usageFlight
       switch (command.type) {
-        case 'inspect': case 'recover': await this.refresh(); break
+        case 'ensure-usage': case 'inspect': case 'recover': await this.refresh(); break
         case 'login': {
           if (command.replaceId && !this.value.accounts.some(a => a.id === command.replaceId)) throw new AccountFault('conflict')
           this.reauthId = command.replaceId
@@ -260,6 +263,29 @@ export class ClaudeAccountsManager {
           await this.savePrefs({ ...this.prefs, rememberScope: command.rememberScope })
           break
         }
+        case 'restart-all': {
+          this.cancelQueue()
+          this.sessions = await this.runtime.request('snapshot')
+          const targets = [...new Map(this.sessions.filter(s => s.runId).map(s => [s.sessionId, s])).values()]
+          this.restartResult = { total: targets.length, restarted: 0, failed: 0, completed: false }; this.emit()
+          // Bounded parallelism keeps many windows responsive without a launch storm.
+          const queue = [...targets]
+          const worker = async () => {
+            while (queue.length && !this.disposed) {
+              const target = queue.shift()!
+              try {
+                await this.runtime.request('restart', target.sessionId, target.runId)
+                this.restartResult!.restarted++; this.pending.delete(target.sessionId)
+              } catch { this.restartResult!.failed++ }
+              this.emit()
+            }
+          }
+          await Promise.all(Array.from({ length: Math.min(3, targets.length) }, worker))
+          this.restartResult.completed = true
+          this.sessions = await this.runtime.request('snapshot').catch(() => this.sessions)
+          this.usageDue = true
+          break
+        }
         case 'resume': {
           if (this.pending.get(command.sessionId) !== command.runId) throw new AccountFault('conflict')
           const check = await this.engine.run({ action: 'snapshot' })
@@ -286,6 +312,7 @@ export class ClaudeAccountsManager {
       if (this.value.currentId !== id) throw new AccountFault('switch-failed')
       this.pending = new Map(this.sessions.filter(s => s.defaultLogin).map(s => [s.sessionId, s.runId]))
       this.appliedReauthId = repair ? id : undefined
+      this.restartResult = undefined
       this.switchedAt = Date.now(); this.usageDue = true; this.cancelQueue()
       if (this.prefs.renewedIds?.includes(id)) await this.savePrefs({ ...this.prefs, renewedIds: this.prefs.renewedIds.filter(value => value !== id) })
     } finally { if (held) await this.runtime.request('release').catch(() => {}) }

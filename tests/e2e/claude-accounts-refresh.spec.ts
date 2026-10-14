@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { launchMatou } from './matou-fixture'
-const evidence = resolve('docs/acceptance/evidence/claude-accounts-compact')
+const evidence = resolve(process.env.MATOU_E2E_ACCOUNTS_EVIDENCE ?? 'docs/acceptance/evidence/claude-accounts-compact')
 const fixturePath = resolve('tests/e2e/fixtures/claude-accounts-engine.py')
 const env = (scenario:string) => ({MATOU_E2E_ACCOUNTS_BRIDGE:fixturePath,MATOU_E2E_ACCOUNTS_SCENARIO:scenario,MATOU_E2E_DISPLAY:'primary'})
 test.beforeAll(async()=>{await mkdir(evidence,{recursive:true})})

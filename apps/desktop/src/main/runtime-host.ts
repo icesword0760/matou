@@ -217,7 +217,7 @@ export class RuntimeHost {
         this.#pendingAccounts.delete(requestId)
         if (action === 'hold') this.#child?.postMessage({ type: 'runtime.claude-accounts-request', requestId: randomUUID(), action: 'release' })
         reject(new Error('runtime'))
-      }, action === 'resume' ? 60_000 : 15_000)
+      }, (action === 'resume' || action === 'restart') ? 60_000 : 15_000)
       this.#pendingAccounts.set(requestId, {
         resolve: value => { clearTimeout(timer); resolve(value) },
         reject: error => { clearTimeout(timer); reject(error) }

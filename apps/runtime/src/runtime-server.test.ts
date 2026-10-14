@@ -134,6 +134,48 @@ describe('RuntimeServer Claude account coordination', () => {
       expect(port.findRpcError('account-held-rpc')).toBeUndefined()
     } finally { await RuntimeServer.accountCommand('release') }
   })
+  it('enumerates only Claude sessions and rejects restart against ordinary Shell and Codex runs', async () => {
+    const registry = createTestSessionRegistry()
+    const hidden = new RuntimeServer(new MockPort(), root, database, undefined, undefined, registry)
+    for (const [id, profile] of [['only-claude', 'claude-code'], ['keep-shell', 'shell'], ['keep-codex', 'codex']] as const) {
+      registerSession(database, id, profile)
+      registry.set({sessionId:id,runId:`${id}-run`,profile,durabilityState:'healthy'} as never)
+    }
+    try {
+      const rows=await RuntimeServer.accountCommand('snapshot')
+      expect(rows.some(s=>s.sessionId==='only-claude')).toBe(true)
+      expect(rows.some(s=>s.sessionId==='keep-shell'||s.sessionId==='keep-codex')).toBe(false)
+      await expect(RuntimeServer.accountCommand('restart','keep-shell','keep-shell-run')).rejects.toThrow('busy')
+      await expect(RuntimeServer.accountCommand('restart','keep-codex','keep-codex-run')).rejects.toThrow('busy')
+      await expect(RuntimeServer.accountCommand('restart','only-claude','outdated-run')).rejects.toThrow('busy')
+      // No saved binding: report a failure without replacing it with a new chat.
+      await expect(RuntimeServer.accountCommand('restart','only-claude','only-claude-run')).rejects.toThrow('busy')
+    } finally {
+      for(const id of ['only-claude','keep-shell','keep-codex'])registry.delete(id)
+      hidden.close()
+    }
+  })
+  it('marks only default-login Claude sessions for shared account HUD quota', async () => {
+    const registry=createTestSessionRegistry()
+    const owner=new RuntimeServer(new MockPort(),root,database,undefined,undefined,registry)
+    const keys=['ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_BASE_URL','CLAUDE_CODE_OAUTH_TOKEN','CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY','CLAUDE_CONFIG_DIR','CLAUDE_SECURESTORAGE_CONFIG_DIR']
+    for(const key of keys)vi.stubEnv(key,'')
+    try {
+      for (const [id,provider] of [['quota-default','anthropic-official'],['quota-custom','fixture-custom']] as const) {
+        registerSession(database,id,'claude-code')
+        database.run(`INSERT INTO provider_bindings (id,session_id,provider,provider_session_id,resume_state,metadata_json,created_at,updated_at,validated_at) VALUES (?,?,'claude-code',?,'available',?,1,1,1)`,`${id}-binding`,id,`${id}-conversation`,JSON.stringify({providerConfigId:provider}))
+        registry.set({sessionId:id,runId:`${id}-run`,profile:'claude-code',durabilityState:'healthy'} as never)
+      }
+      let rows=await RuntimeServer.accountCommand('snapshot')
+      expect(rows.find(s=>s.sessionId==='quota-default')?.defaultLogin).toBe(true)
+      expect(rows.find(s=>s.sessionId==='quota-custom')?.defaultLogin).toBe(false)
+      vi.stubEnv('CLAUDE_CONFIG_DIR','/fixture/isolated')
+      rows=await RuntimeServer.accountCommand('snapshot')
+      expect(rows.find(s=>s.sessionId==='quota-default')?.defaultLogin).toBe(false)
+    } finally {
+      registry.delete('quota-default');registry.delete('quota-custom');owner.close();vi.unstubAllEnvs()
+    }
+  })
   it('rejects a stale session resume instead of restarting another run', async () => {
     await expect(RuntimeServer.accountCommand('resume', 'missing-session', 'old-run')).rejects.toThrow('busy')
   })
@@ -5962,7 +6004,8 @@ sleep 30
       expect(secondaryPort.sent.slice(beforeTakeoverOutput).filter((message) =>
         message.type === 'terminal.hud' && message.hud?.permissionMode === 'bypassPermissions'
       )).toHaveLength(1)
-      await waitUntil(() => terminalText(secondaryPort).includes('API Error: provider unavailable'))
+      // The shell fixture delivers its trap after the active sleep completes.
+      await waitUntil(() => terminalText(secondaryPort).includes('API Error: provider unavailable'), 5_000)
       expect(database.get<{ work_status: string }>(
         'SELECT work_status FROM sessions WHERE id = ?', 'provider-cross-window'
       )?.work_status).not.toBe('error')
