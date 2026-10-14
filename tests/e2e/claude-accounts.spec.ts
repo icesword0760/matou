@@ -154,3 +154,64 @@ test('duplicate sign-in offers a fresh login instead of silently adding the old 
     await expect(p.getByRole('button', { name: '保存账户', exact: true })).toBeEnabled()
   } finally { await f.close() }
 })
+
+for (const scenario of ['manual', 'manual-failed']) {
+  test(`authorization-code ${scenario}: paste, validate, submit and recover`, async () => {
+    const f = await launchMatou({ env: env(scenario) })
+    try {
+      const p = f.page
+      await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+      await p.getByRole('button', { name: '添加第一个账户' }).click()
+      await p.getByRole('button', { name: '打开独立隐私窗口' }).click()
+      await expect(p.getByLabel('授权码', { exact: true })).toBeEnabled()
+      await expect(p.locator('.ca-panel')).toContainText('隐私窗口由你自行关闭')
+      await p.getByLabel('授权码', { exact: true }).fill('https://example.com')
+      await p.getByRole('button', { name: '完成登录', exact: true }).click()
+      await expect(p.getByRole('alert')).toContainText('完整授权码')
+      await p.getByLabel('授权码', { exact: true }).fill('fixture_code_123456#fixture_state_123456')
+      await p.getByRole('button', { name: '完成登录', exact: true }).click()
+      if (scenario === 'manual') {
+        await expect(p.getByLabel('账户名称')).toBeVisible()
+        await p.getByLabel('账户名称').fill('新账户')
+        await p.getByRole('button', { name: '保存账户', exact: true }).click()
+        await expect(p.locator('.ca-panel')).toContainText('账户已保存')
+        await expect(p.locator('.ca-trigger')).not.toContainText('默认：新账户')
+      } else {
+        await expect(p.getByRole('alert')).toContainText('登录尚未完成')
+        await expect(p.getByRole('button', { name: '打开独立隐私窗口' })).toBeEnabled()
+        await expect(p.getByLabel('授权码', { exact: true })).toHaveCount(0)
+      }
+    } finally { await f.close() }
+  })
+}
+
+test('manual login can close panel, return, cancel and retry with a fresh attempt', async () => {
+  const f = await launchMatou({ env: env('manual') })
+  try {
+    const p = f.page
+    await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+    await p.getByRole('button', { name: '添加第一个账户' }).click()
+    await p.getByRole('button', { name: '打开独立隐私窗口' }).click()
+    await expect(p.getByLabel('授权码', { exact: true })).toBeEnabled()
+    const first = (await p.evaluate(() => window.matouDesktop.getClaudeAccounts())).loginAttemptId!
+    await p.getByLabel('授权码', { exact: true }).fill('unsent_sensitive_draft')
+    await p.getByRole('button', { name: '关闭账户面板' }).click()
+    await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+    await expect(p.getByLabel('授权码', { exact: true })).toHaveValue('')
+    await f.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(820, 560))
+    await expect(p.getByRole('button', { name: '完成登录', exact: true })).toBeInViewport()
+    await expect(p.getByRole('button', { name: '取消本次登录', exact: true })).toBeInViewport()
+    await p.screenshot({ path: `${evidence}/11-manual-code-compact-electron.png`, animations: 'disabled' })
+    await p.getByRole('button', { name: '取消本次登录' }).click()
+    await expect(p.getByRole('button', { name: '打开独立隐私窗口' })).toBeEnabled()
+    await p.getByRole('button', { name: '打开独立隐私窗口' }).click()
+    await expect(p.getByLabel('授权码', { exact: true })).toBeEnabled()
+    const second = (await p.evaluate(() => window.matouDesktop.getClaudeAccounts())).loginAttemptId!
+    expect(second).not.toBe(first)
+    await p.evaluate(id => window.matouDesktop.claudeAccountCommand({ type: 'submit-login-code', attemptId: id, code: 'fixture_code_123456#fixture_state_123456' }), first)
+    await expect(p.getByRole('alert')).toContainText('这次登录已结束')
+    await p.getByLabel('授权码', { exact: true }).fill('fixture_code_123456#fixture_state_123456')
+    await p.getByLabel('授权码', { exact: true }).press('Enter')
+    await expect(p.getByLabel('账户名称')).toBeVisible()
+  } finally { await f.close() }
+})

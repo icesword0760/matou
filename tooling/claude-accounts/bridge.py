@@ -139,7 +139,7 @@ def dispatch(request: dict, root: Path) -> dict:
             profile.mkdir(parents=True, exist_ok=False, mode=0o700)
             try:
                 with login_environment(profile):
-                    isolated_login(claude, profile)
+                    isolated_login(claude, profile, code_input=sys.stdin, nonce=request.get("nonce"))
             except BaseException:
                 cleanup(profile)
                 raise

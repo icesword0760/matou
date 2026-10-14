@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { ClaudeAccountRuntimeAction, ClaudeAccountSession } from '@matou/contracts'
+import { validLoginCode } from '../../shared/claude-accounts'
 import type { AccountError, ClaudeAccountCommand, ClaudeAccountsState, ClaudeAccountView } from '../../shared/claude-accounts'
 import { AccountFault, type AccountEngine, type EngineState } from './engine'
 
@@ -43,6 +44,7 @@ export class ClaudeAccountsManager {
   private error: AccountError | undefined
   private draft: ClaudeAccountView | undefined
   private nonce: string | undefined
+  private loginCodeSubmitted = false
   private loginAbort: AbortController | undefined
   private queuedId: string | undefined
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -61,6 +63,7 @@ export class ClaudeAccountsManager {
     return { ...this.value, accounts: this.value.accounts.map(a => this.named(a)),
       ...(this.value.detected ? { detected: this.named(this.value.detected) } : {}),
       revision: this.revision, rememberScope: this.prefs.rememberScope,
+      ...(this.operation === 'login' && this.nonce && this.loginAbort && !this.loginAbort.signal.aborted ? { loginAttemptId: this.nonce, loginCodeSubmitted: this.loginCodeSubmitted } : {}),
       operation: this.operation, sessions: this.sessions, pendingSessionIds: [...this.pending.keys()],
       ...(this.draft ? { draft: this.named(this.draft) } : {}), ...(this.error ? { error: this.error } : {}),
       ...(this.queuedId ? { queuedId: this.queuedId } : {}), ...(this.switchedAt ? { switchedAt: this.switchedAt } : {}) }
@@ -86,6 +89,23 @@ export class ClaudeAccountsManager {
   private async execute(command: ClaudeAccountCommand): Promise<ClaudeAccountsState> {
     await this.snapshot()
     if (!this.loaded || this.disposed) return this.state()
+    if (command.type === 'submit-login-code') {
+      if (this.operation !== 'login' || !this.loginAbort || this.loginAbort.signal.aborted || this.nonce !== command.attemptId) {
+        this.error = 'login-ended'; this.emit(); return this.state()
+      }
+      if (this.loginCodeSubmitted) return this.state()
+      if (!validLoginCode(command.code)) { this.error = 'login-code-invalid'; this.emit(); return this.state() }
+      this.loginCodeSubmitted = true; this.error = undefined; this.emit()
+      try {
+        if (!this.engine.submitLoginCode) throw new AccountFault('login-ended')
+        await this.engine.submitLoginCode(command.attemptId, command.code)
+      } catch (e) {
+        if (this.nonce === command.attemptId && this.loginAbort && !this.loginAbort.signal.aborted) {
+          this.loginCodeSubmitted = false; this.error = fault(e); this.emit()
+        }
+      }
+      return this.state()
+    }
     if (command.type === 'cancel-login') {
       this.loginAbort?.abort()
       if (!this.loginAbort && this.nonce) {
@@ -107,11 +127,11 @@ export class ClaudeAccountsManager {
         case 'login': {
           if (this.nonce) await this.engine.run({ action: 'cancel-login', nonce: this.nonce })
           const nonce = randomUUID(), abort = new AbortController()
-          this.nonce = nonce; this.draft = undefined; this.loginAbort = abort
+          this.nonce = nonce; this.loginCodeSubmitted = false; this.error = undefined; this.draft = undefined; this.loginAbort = abort
           this.emit() // Clear the previous identity before a repeated sign-in completes.
           try {
             const result = await this.engine.run({ action: 'login', nonce, replaceId: command.replaceId }, abort.signal)
-            if (!abort.signal.aborted) this.draft = result.draft
+            if (!abort.signal.aborted) { this.draft = result.draft; this.error = undefined }
           } catch (e) {
             await this.engine.run({ action: 'cancel-login', nonce }).catch(() => {})
             this.nonce = undefined

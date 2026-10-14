@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { validLoginCode } from '../../../shared/claude-accounts'
 import type { AccountError, ClaudeAccountCommand, ClaudeAccountsState, ClaudeAccountView } from '../../../shared/claude-accounts'
 import { useLocale } from '../i18n/LocaleProvider'
 import './claude-accounts.css'
@@ -12,6 +13,8 @@ const ERRORS: Record<AccountError, [string, string]> = {
   network: ['网络暂时没有响应，请稍后重试。', 'The network did not respond. Try again shortly.'],
   'login-required': ['登录已失效，请重新登录这个账户。', 'Sign in to this account again.'],
   'login-timeout': ['登录等待已结束。你可以重新打开登录流程。', 'Sign-in timed out. Start again when ready.'],
+  'login-code-invalid': ['请粘贴浏览器提供的完整授权码（包含 # 后面的部分），不要粘贴网址。', 'Paste the complete authorization code, including the part after #, not the page URL.'],
+  'login-ended': ['这次登录已结束，请重新打开登录流程并获取新的授权码。', 'This sign-in has ended. Start again to get a new authorization code.'],
   'login-failed': ['登录尚未完成，请重试并在浏览器中完成授权。', 'Sign-in did not finish. Try again and complete it in your browser.'],
   storage: ['账户偏好保存失败，请检查磁盘空间后重试。', 'Preferences were not saved. Check disk space and retry.'],
   keychain: ['请解锁系统钥匙串，并允许账户组件访问后重试。', 'Unlock the system keychain and allow access, then retry.'],
@@ -40,6 +43,8 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
   const [page, setPage] = useState<Page>('list')
   const [selectedId, setSelectedId] = useState('')
   const [name, setName] = useState('')
+  const [loginCode, setLoginCode] = useState('')
+  const [codeSending, setCodeSending] = useState(false)
   const [remember, setRemember] = useState(false)
   const [localError, setLocalError] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -50,7 +55,7 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     if (next.revision < latestRevision.current) return
     latestRevision.current = next.revision; setState(next)
   }
-  const close = (restore = true) => { setOpen(false); if (restore) trigger.current?.focus() }
+  const close = (restore = true) => { setLoginCode(''); setOpen(false); if (restore) trigger.current?.focus() }
   useEffect(() => {
     if (!bridge?.getClaudeAccounts || !bridge.onClaudeAccounts) return
     let active = true
@@ -79,6 +84,16 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     try { const next = await bridge.claudeAccountCommand(command); apply(next); return next }
     catch { setLocalError(t(...ERRORS.runtime)); return undefined }
     finally { setSubmitting(false) }
+  }
+  useEffect(() => { setLoginCode(''); setCodeSending(false) }, [state.loginAttemptId])
+  const submitCode = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (codeSending || state.loginCodeSubmitted || !state.loginAttemptId) return
+    if (!validLoginCode(loginCode)) { setLocalError(t(...ERRORS['login-code-invalid'])); return }
+    setCodeSending(true)
+    const code = loginCode.trim(); setLoginCode('')
+    try { await call({ type: 'submit-login-code', attemptId: state.loginAttemptId, code }) }
+    finally { setCodeSending(false) }
   }
   if (!bridge?.getClaudeAccounts) return null
   const current = state.accounts.find(a => a.id === state.currentId)
@@ -138,7 +153,21 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
           {state.accounts.length === 1 && <p className="ca-helper">{t('再添加一个账户，需要时就能在这里切换。', 'Add another account to switch whenever you need.')}</p>}
           {state.accounts.length > 0 && <div className="ca-refresh"><span>{t('用量由 claude-swap 获取', 'Usage from claude-swap')}</span><button className="ca-link" disabled={busy} onClick={() => { void call({ type: 'refresh-usage' }) }}>{busy ? t('更新中…', 'Updating…') : t('刷新用量', 'Refresh usage')}</button></div>}
         </>}
-        {displayPage === 'add' && <div className="ca-form ca-center"><div className="ca-browser" aria-hidden="true">↗{state.operation === 'login' && <span className="ca-spinner" />}</div><h3>{state.operation === 'login' ? t('在独立窗口登录另一个账户', 'Sign in to another account in the separate window') : t('添加 Claude 账户', 'Add a Claude account')}</h3><p>{t('将打开独立的临时隐私窗口，不沿用原浏览器的登录。请在 Claude 官方页面登录要添加的账户。', 'A separate temporary private window opens without your existing browser sign-in. Sign in to the account you want to add on the official Claude page.')}</p><div className="ca-steps"><span>1 {t('独立窗口登录', 'Private sign-in')}</span><span>2 {t('核对并保存', 'Review and save')}</span></div>{state.operation === 'login' ? <><p role="status">{t('原账户保持登录。完成授权后窗口会关闭，回到这里核对并保存。添加账户不会切换当前默认账户。', 'Your original account stays signed in. After authorization, the private window closes; return here to review and save. Your default account stays unchanged.')}</p><button className="ca-secondary" onClick={() => { void call({ type: 'cancel-login' }) }}>{t('取消本次登录', 'Cancel sign-in')}</button></> : <button className="ca-primary ca-wide" disabled={busy} onClick={() => startLogin()}>{t('打开独立隐私窗口', 'Open private sign-in window')}</button>}</div>}
+        {displayPage === 'add' && <div className={`ca-form ca-center${state.operation === 'login' ? ' ca-login' : ''}`}>
+        {state.operation !== 'login' && <div className="ca-browser" aria-hidden="true">↗</div>}<h3>{state.operation === 'login' ? t('在独立窗口登录另一个账户', 'Sign in to another account in the separate window') : t('添加 Claude 账户', 'Add a Claude account')}</h3>{state.operation !== 'login' && <><p>{t('将打开独立的临时隐私窗口，不沿用原浏览器的登录。请在 Claude 官方页面登录要添加的账户。', 'A separate temporary private window opens without your existing browser sign-in. Sign in to the account you want to add on the official Claude page.')}</p><div className="ca-steps"><span>1 {t('独立窗口登录', 'Private sign-in')}</span><span>2 {t('核对并保存', 'Review and save')}</span></div></>}{state.operation === 'login' ? <><p role="status">{t('请在浏览器中完成授权，然后回到这里核对并保存。当前默认账户保持不变。', 'Authorize in your browser, then return here to review and save. Your default account stays unchanged.')}</p><form className="ca-code-form" onSubmit={submitCode}>
+          <label htmlFor={`${titleId}-code`}>{t('浏览器显示了授权码？', 'Browser showing an authorization code?')}</label>
+          <p>{t('复制完整授权码并粘贴到这里，即可继续添加。自动返回成功时无需填写。', 'Paste the complete code here to continue. Skip this if sign-in returns automatically.')}</p>
+          <input id={`${titleId}-code`} aria-label={t('授权码', 'Authorization code')} type="password" autoComplete="off" spellCheck={false}
+            value={loginCode} disabled={codeSending || state.loginCodeSubmitted || !state.loginAttemptId}
+            placeholder={t('粘贴完整授权码', 'Paste the complete authorization code')}
+            onChange={event => { setLoginCode(event.target.value); setLocalError('') }} />
+          <button className="ca-primary ca-wide" type="submit" disabled={!loginCode.trim() || codeSending || state.loginCodeSubmitted || !state.loginAttemptId}>
+            {codeSending || state.loginCodeSubmitted ? t('正在完成登录…', 'Completing sign-in…') : t('完成登录', 'Complete sign-in')}
+          </button>
+          {state.loginCodeSubmitted && <p role="status">{t('授权码已提交，正在核对账户。', 'Code submitted. Checking account identity.')}</p>}
+        </form>
+        <p className="ca-muted">{t('隐私窗口由你自行关闭，Matou 不会自动关闭。', 'Close the private window when you are ready. Matou leaves it open.')}</p>
+        <button className="ca-secondary" onClick={() => { setLoginCode(''); void call({ type: 'cancel-login' }) }}>{t('取消本次登录', 'Cancel sign-in')}</button></> : <button className="ca-primary ca-wide" disabled={busy} onClick={() => startLogin()}>{t('打开独立隐私窗口', 'Open private sign-in window')}</button>}</div>}
         {(displayPage === 'detected' || displayPage === 'draft' || displayPage === 'edit') && <form className="ca-form" onSubmit={event => {
           event.preventDefault()
           if (!name.trim() || [...name.trim()].length > 12) { setLocalError(t('请输入 1–12 个字符的账户名称。', 'Enter a name with 1–12 characters.')); return }

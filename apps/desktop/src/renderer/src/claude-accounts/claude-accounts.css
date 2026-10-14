@@ -482,3 +482,15 @@ to {
 .ca-panel:where([data-theme=dark] *) .ca-account:hover:not(:disabled) {
   background:#2c3747}
 
+
+.ca-code-form { width: 100%; text-align: left; padding: 16px; border: 1px solid var(--ca-border, #dce5f0); border-radius: 12px; background: rgba(235, 242, 252, .45); box-sizing: border-box; margin: 12px 0; }
+.ca-code-form label { display: block; font-size: 14px; font-weight: 600; }
+.ca-code-form p { font-size: 12px; line-height: 1.6; margin: 8px 0 12px; }
+.ca-code-form input { box-sizing: border-box; width: 100%; min-height: 40px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 9px 11px; background: #fff; color: #334155; font: inherit; margin-bottom: 10px; }
+.ca-code-form input:focus { outline: 2px solid #88b8fa; outline-offset: 2px; }
+.ca-code-form input:disabled { opacity: .65; }
+
+.ca-login.ca-form { padding: 8px 14px 12px; }
+.ca-login.ca-form h3 { font-size: 16px; margin: 4px 0 8px; }
+.ca-login.ca-form > p { margin: 4px 0 8px; font-size: 12px; }
+.ca-login .ca-code-form { margin: 8px 0; padding: 12px; }

@@ -18,7 +18,16 @@ result = value
 if action == "login":
     if scenario in ("browser-missing", "browser-closed"):
         print(json.dumps({"ok": False, "error": scenario})); sys.exit(0)
-    time.sleep(.35)
+    if scenario in ('manual', 'manual-failed'):
+        submitted = json.loads(sys.stdin.readline())
+        assert submitted['nonce'] == request['nonce']
+        assert submitted['action'] == 'submit-login-code'
+        assert submitted['code'] == 'fixture_code_123456#fixture_state_123456'
+        time.sleep(.25)
+        if scenario == 'manual-failed':
+            print(json.dumps({'ok': False, 'error': 'login-failed'})); sys.exit(0)
+    else:
+        time.sleep(.35)
     result = {"draft": b}
 elif action == "save-draft":
     value["accounts"] = [x for x in value["accounts"] if x["id"] != b["id"]] + [b]

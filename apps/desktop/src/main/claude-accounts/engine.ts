@@ -1,7 +1,8 @@
-import { execFile, spawn } from 'node:child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { validLoginCode } from '../../shared/claude-accounts'
 import type { AccountError, ClaudeAccountView } from '../../shared/claude-accounts'
 
 export class AccountFault extends Error {
@@ -15,6 +16,7 @@ export interface EngineState {
   draft?: ClaudeAccountView
 }
 export interface AccountEngine {
+  submitLoginCode?(attemptId: string, code: string): Promise<void>
   run(input: Record<string, unknown>, signal?: AbortSignal): Promise<EngineState>
 }
 export interface EngineLaunch {
@@ -24,6 +26,19 @@ export interface EngineLaunch {
 }
 /** This process bridge contains no OAuth, Keychain, refresh, or switch logic. */
 export class ClaudeSwapEngine implements AccountEngine {
+  private login: { nonce: string; child: ChildProcessWithoutNullStreams; sent: boolean } | undefined
+  async submitLoginCode(attemptId: string, code: string): Promise<void> {
+    if (!validLoginCode(code)) throw new AccountFault('login-code-invalid')
+    const login = this.login
+    if (!login || login.nonce !== attemptId || login.child.stdin.destroyed) throw new AccountFault('login-ended')
+    if (login.sent) return
+    login.sent = true
+    await new Promise<void>((resolve, reject) => {
+      login.child.stdin.write(JSON.stringify({ action: 'submit-login-code', nonce: attemptId, code: code.trim() }) + '\n', error => {
+        if (error) reject(new AccountFault('login-ended')); else resolve()
+      })
+    })
+  }
   private environment: Promise<NodeJS.ProcessEnv> | undefined
   constructor(private readonly launch: EngineLaunch, private readonly baseEnv = process.env) {}
   private env() {
@@ -47,6 +62,9 @@ export class ClaudeSwapEngine implements AccountEngine {
     if (signal?.aborted) throw new AccountFault('login-failed')
     return new Promise((resolve, reject) => {
       const child = spawn(this.launch.executable, [...this.launch.args, this.launch.stateRoot], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+      const login = input.action === 'login' && typeof input.nonce === 'string' ? { nonce: input.nonce, child, sent: false } : undefined
+      if (login) this.login = login
+      const clearLogin = () => { if (this.login === login) this.login = undefined }
       let output = '', overflow = false
       // Never forward raw engine output: even error paths can include identities.
       child.stdout.on('data', (data: Buffer) => {
@@ -54,10 +72,11 @@ export class ClaudeSwapEngine implements AccountEngine {
         else overflow = true
       })
       child.stderr.resume()
-      const abort = () => child.kill('SIGTERM')
+      const abort = () => { clearLogin(); child.kill('SIGTERM') }
       signal?.addEventListener('abort', abort, { once: true })
-      child.once('error', () => { signal?.removeEventListener('abort', abort); reject(new AccountFault('engine-missing')) })
+      child.once('error', () => { clearLogin(); signal?.removeEventListener('abort', abort); reject(new AccountFault('engine-missing')) })
       child.once('close', code => {
+        clearLogin()
         signal?.removeEventListener('abort', abort)
         if (signal?.aborted) { reject(new AccountFault('login-failed')); return }
         try {
@@ -73,7 +92,9 @@ export class ClaudeSwapEngine implements AccountEngine {
         } catch (error) { reject(error instanceof AccountFault ? error : new AccountFault('engine-error')) }
       })
       child.stdin.on('error', () => {})
-      child.stdin.end(JSON.stringify(input) + '\n')
+      if (login) child.stdin.write(JSON.stringify(input) + '\n')
+      else child.stdin.end(JSON.stringify(input) + '\n')
+      if (signal?.aborted) abort()
     })
   }
 }
