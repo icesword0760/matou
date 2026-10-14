@@ -7,7 +7,7 @@
 <p align="center">
   <strong>Claude Code 多智能体桌面工作台</strong><br>
   A macOS desktop workbench for running many Claude Code agents side by side —<br>
-  session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.
+  session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, Git worktrees, and switching between Claude accounts and model providers.
 </p>
 
 <p align="center">
@@ -50,6 +50,7 @@
 - 另一个会话刚得出的结论，是否又要复制粘贴一遍？
 - 想验证第二种方案，如何保留原会话上下文，又不污染正在工作的目录？
 - App 重启后，页签、分屏、目录、输出和 Agent 身份还能否回到原位？
+- 一个账户的周额度用完了，或者想让日常杂活换个便宜的模型，难道要退出登录、改环境变量、再把终端挨个重开？
 
 码头把这些问题收进一个工作模型：**工作空间 → 事项 → 画布 → 会话卡片**。你看到的是目标、关系、状态和下一步，而不是一排难以辨认的终端窗口。
 
@@ -114,7 +115,7 @@ Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt hi
 底部 HUD 把影响下一步判断的信息放在一个视线范围内：
 
 - 当前模型、权限模式、上下文窗口与已用比例
-- 周期用量、重置时间、当前目录、Git 分支与脏状态
+- 当前默认账户的 5h / Weekly 用量与重置时间、当前目录、Git 分支与脏状态
 - MCP、工具和 Agent 数量；悬停后可把鼠标移入明细框滚动查看，不会再被右侧长文本挤掉
 - 当前项目存在 `CLAUDE.md` 时，最左侧显示 `ClaudeMd` 入口，可直接编辑并保存
 - 待办进度、需要输入、错误状态与 MCP 异常；普通“任务中”和 `Local` 不再占用空间
@@ -144,6 +145,32 @@ Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt hi
 
 Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托管 Agent 的身份。窗口隐藏、应用重启或异常退出后，按不同会话类型恢复现场。会话还可以脱出为独立窗口，再归还原画布；主窗口和独立窗口共享同一 Runtime 会话。
 
+### 9. Claude 账户：在底栏切换订阅，不用退出登录
+
+工作号和个人号，或者第一个订阅的周额度用完了想换第二个。打开底栏最右侧的 **Claude 账户**，几个账户都放在码头里管：
+
+- 添加账户走官方的 `claude auth login`，在一个全新的 Chrome、Edge 或 Brave 隐私窗口里登录，不会沿用浏览器里已经登着的账号。登录页给出授权码、没有自动跳回时，把授权码粘回码头即可。
+- 每个账户显示 5 小时和每周用量，以及这组数字的获取时间。面板开着时每隔几分钟在后台刷新一次；网络出错时保留上一次的数值，不会显示成 0%。
+- 点「切换」，把这个账户设为本机 Claude Code 的默认登录。码头里还有任务在跑时，会等任务结束再切。本机其他终端里的 Claude Code 也会跟着用新账户，第一次切换时码头会说明这一点。
+- 运行中的会话一般在 30 秒左右用上新账户。想立刻生效就点「立即重启」：确认一次后，码头里所有运行中的 Claude 会话会重启并接回各自的对话。进行中的任务会被打断，普通 Shell 不受影响。
+- 登录过期时，在该账户的卡片上重新登录。账户名称保留；新登录要由你点一下才会应用，期间不会重启任何会话。
+
+底部 HUD 的 5h / Weekly 用量跟随当前默认账户，并标出账户名，用的是哪个账户的额度不会搞混。
+
+账户的保存、切换和用量读取由 [claude-swap](https://github.com/realiti4/claude-swap)（MIT）完成。码头里保存的账户，和它的 `cswap` 命令行看到的是同一份。
+
+### 10. 服务供应商：接入 DeepSeek、GLM、Kimi、MiniMax，不用改环境变量
+
+打开 **设置 → 服务供应商 → 新增供应商**，先选服务再填表：官方 Claude 登录、DeepSeek、智谱 GLM、Kimi、MiniMax，或者自定义地址。
+
+- 预设会填好 API 地址、默认模型，以及 opus / sonnet / haiku 三个档位的模型映射，通常只需要粘贴密钥。「获取密钥」会打开对应厂商的控制台。
+- 「获取模型」在保存之前就能查出这个密钥可用的模型，可以搜索，也可以手填模型名。
+- 「仅保存」只加入列表，「添加并使用」同时设为默认；已保存的供应商点「切换」即可。
+- 切换是全局的。运行中的 Claude Code 会话会重启到新供应商，并接着原来的对话继续；还在启动或恢复中的会话保留原配置，并单独列出原因，不会被一句「已切换」带过。
+- 密钥被拒或请求超时，填好的内容都还在，可以直接重试。编辑时只要不改地址，原密钥不用重填。
+
+API Key 只保存在本机，只发给你配置的服务。预设的地址和模型取自 [cc-switch](https://github.com/farion1231/cc-switch)（MIT）。
+
 ## 路线图
 
 **自然语言创建层级结构。** 除了读取和控制其他卡片，托管的 Agent 还可以直接创建结构：`mt create workspace|task|canvas|session`、`mt fork child|sibling|children`，以及 `mt remove preview|commit` 带预览确认的移除。你可以对当前会话说：
@@ -159,6 +186,7 @@ Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托�
 - 需要 DAG visualization 回溯方案分支、上下文来源和决策路径的复杂项目
 - 经常使用 Git Worktree 并行开发、测试、审查和修复的工程师
 - 关注会话恢复、通知分级和上下文用量的重度 AI 编程用户
+- 手上有多个 Claude 订阅，或者想把一部分工作交给 DeepSeek、GLM、Kimi、MiniMax 的用户
 
 ## 下载安装
 
@@ -243,7 +271,7 @@ tests/e2e/                真实 Electron 用户旅程
 
 **为什么用 Electron？** 终端用 xterm.js，画布和 DAG 用 React，运行时跑在独立的 UtilityProcess 里。渲染进程保持 `nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`。这也为以后支持其他平台留了路。
 
-**数据会离开我的电脑吗？** 码头自己只发一种网络请求：检查更新。会话元数据和终端输出都保存在本机应用数据目录。Claude Code 与 Anthropic 的通信和你在普通终端里完全一样。如果你在设置里配置了自定义模型端点，请求只会发往那个端点。
+**数据会离开我的电脑吗？** 码头自己发出的请求只有几类：检查更新；保存了 Claude 账户时，通过 claude-swap 向 Anthropic 读取这些账户的用量；在供应商设置里点「获取模型」时，向你正在配置的服务查询模型列表。会话元数据和终端输出都保存在本机应用数据目录。Claude Code 与 Anthropic（或你切换到的供应商）之间的通信，和在普通终端里完全一样。账户凭据由 claude-swap 保存在本机；供应商的 API Key 保存在码头的本地配置里，只发给对应的服务。
 
 **有英文界面吗？** 有。界面会跟随系统语言自动切换中文或英文，也可以在托盘菜单里手动指定：Language → Follow system / 中文 / English。运行时消息（如会话与终端文案）在重启后生效。详见 [#4](https://github.com/icesword0760/matou/issues/4)。
 

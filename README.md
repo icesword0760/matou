@@ -7,7 +7,7 @@
 <p align="center">
   <strong>A multi-agent desktop workbench for Claude Code</strong><br>
   Run many Claude Code agents side by side on macOS —<br>
-  session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, and Git worktrees.
+  session management, natural-language collaboration across sessions, DAG visualization, tiered notifications, an agent HUD, Git worktrees, and switching between Claude accounts and model providers.
 </p>
 
 <p align="center">
@@ -50,6 +50,7 @@ Two AI coding sessions are easy. Once you have ten, what burns attention is rare
 - Do I really have to copy-paste the conclusion from that other session again?
 - How do I try a second approach without losing the original context or polluting my working directory?
 - After a restart, do tabs, splits, directories, output and agent identity come back where they were?
+- One account ran out of weekly usage, or you want a cheaper model for routine work: do you log out, edit env vars and restart every terminal?
 
 Matou folds these into one model: **Workspace → Task → Canvas → Session card**. You see goals, relationships, status and next steps instead of a row of indistinguishable terminal windows.
 
@@ -114,7 +115,7 @@ The notification center shows a summary, the source path and a sound toggle — 
 The bottom HUD keeps everything that affects your next decision in one line of sight:
 
 - Model, permission mode, context window and usage percentage
-- Session duration, usage windows and reset time
+- Session duration, the default account's 5h / weekly usage and reset time
 - Working directory, Git branch, dirty state and worktree environment
 - Running tools, todo progress, regression runs and MCP errors
 
@@ -143,6 +144,32 @@ The workspace board sorts tasks into **ready, active, blocked, done**. Drag a ca
 
 Matou persists tasks, tabs, splits, directories, focus, terminal output and hosted-agent identity. After the window is hidden, the app restarts or crashes, each session type is restored appropriately. A session can also pop out into its own window and return later; the main window and detached windows share the same runtime session.
 
+### 9. Claude accounts: switch subscriptions from the bottom bar
+
+A work account and a personal one, or a second subscription for when the first runs out of weekly usage. Open **Claude accounts** at the far right of the bottom bar and keep them all in Matou:
+
+- Add an account through the official `claude auth login`. It opens in a fresh private Chrome, Edge or Brave window, so it never picks up the account your browser is already signed in to. If the page shows an authorization code instead of returning on its own, paste the code into Matou.
+- Every saved account shows its 5-hour and weekly usage and when that was fetched. While the panel is open the numbers refresh in the background every few minutes; a network error keeps the last known values instead of showing 0%.
+- Click **Switch** to make an account this Mac's default Claude Code login. If a Matou task is still running, the switch waits for it to finish. Claude Code in other terminals uses the new default too, and Matou explains this the first time you switch.
+- Running sessions usually pick up the new account within about 30 seconds. **Restart now** does it immediately: after one confirmation it restarts every running Claude session in Matou and resumes each conversation. Work in progress is interrupted; plain shells are left alone.
+- When a login expires, sign in again from that account's card. The account keeps its name, and nothing restarts until you choose to apply the new login.
+
+The bottom HUD shows 5h / Weekly usage for the current default account, labelled with its name, so you always know whose quota you are spending.
+
+Saving, switching and reading usage are handled by [claude-swap](https://github.com/realiti4/claude-swap) (MIT). Accounts saved in Matou are the same ones its `cswap` command line sees.
+
+### 10. Service providers: DeepSeek, GLM, Kimi or MiniMax without editing env vars
+
+Open **Settings → Service providers → New provider** and pick a service before filling anything in: your official Claude sign-in, DeepSeek, Zhipu GLM, Kimi, MiniMax, or a custom endpoint.
+
+- A preset fills in the API URL, the default model and the opus / sonnet / haiku model mapping, so usually you only paste a key. **Get API key** opens that provider's console.
+- **Get models** asks the service which models your key can use, before you save. Search the list or type a model ID yourself.
+- **Save only** adds the provider to the list; **Add and use** also makes it the default. Any saved provider is one **Switch** away.
+- Switching is global. Running Claude Code sessions restart on the new provider and continue their conversation. A session that is still starting or recovering keeps its old configuration and is listed with the reason, rather than hidden behind a single "switched" message.
+- A rejected key or a timeout keeps your draft so you can retry. Editing keeps the saved key unless you change the URL.
+
+API keys stay on this Mac and are sent only to the service you configured. Preset URLs and models come from [cc-switch](https://github.com/farion1231/cc-switch) (MIT).
+
 ## Roadmap
 
 **Natural-language structure creation.** Beyond reading and controlling other cards, a hosted agent can create structure directly: `mt create workspace|task|canvas|session`, `mt fork child|sibling|children`, and `mt remove preview|commit` for removal with a preview confirmation. You can tell the current session:
@@ -158,6 +185,7 @@ Matou persists tasks, tabs, splits, directories, focus, terminal output and host
 - Complex projects that need a DAG to trace plan branches, context origin and decision paths
 - Engineers who develop, test, review and fix in parallel with Git worktrees
 - Heavy AI-coding users who care about session recovery, notification tiers and context usage
+- People with more than one Claude subscription, or who send part of their work to DeepSeek, GLM, Kimi or MiniMax
 
 ## Install
 
@@ -242,7 +270,7 @@ Further reading (Chinese): [process model](docs/architecture/process-model.md) �
 
 **Why Electron?** xterm.js for the terminal, React for the canvas and DAG, and an isolated UtilityProcess for the runtime. The renderer runs with `nodeIntegration: false`, `contextIsolation: true` and `sandbox: true`. It also keeps the door open for other platforms later.
 
-**Does anything leave my machine?** Matou itself makes one network request: the update check. Session metadata and terminal output stay on disk in the app's data directory. Claude Code talks to Anthropic exactly as it does in a plain terminal. If you configure a custom model endpoint in settings, your requests go to that endpoint and nowhere else.
+**Does anything leave my machine?** Matou itself sends only a few kinds of requests: the update check; if you save Claude accounts, their usage, read from Anthropic through claude-swap; and when you click Get models, a model-list request to the provider you are setting up. Session metadata and terminal output stay on disk in the app's data directory. Claude Code talks to Anthropic, or to the provider you switched to, exactly as it does in a plain terminal. Saved account credentials are kept locally by claude-swap; provider API keys stay in Matou's local configuration and go only to that provider.
 
 **Is the UI in English?** Yes — the UI follows your system language (Chinese or English), with a manual override in the tray menu: Language → Follow system / 中文 / English. Runtime messages (e.g. session and terminal text) switch after a restart. See [#4](https://github.com/icesword0760/matou/issues/4).
 
