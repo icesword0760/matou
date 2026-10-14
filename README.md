@@ -20,6 +20,7 @@
 </p>
 
 <p align="center">
+  <a href="#new-switch-claude-accounts-without-logging-out">What's new</a> ·
   <a href="#install">Install</a> ·
   <a href="#from-a-pile-of-terminals-to-a-manageable-ai-workflow">Core scenarios</a> ·
   <a href="#3-read-the-session-dag-where-did-this-come-from-where-is-it-going">DAG</a> ·
@@ -34,10 +35,48 @@ Matou (码头, "the dock") is a desktop workbench for AI-assisted programming. I
 > **Status**: early preview, macOS (Apple Silicon) only. Installer on the [Releases](https://github.com/icesword0760/matou/releases/latest) page.
 >
 > **Demo video**: [4-minute walkthrough on YouTube](https://youtu.be/1OYvkryUNFo) · [34-second cut](https://youtu.be/gNwf-YyB6oQ)
+>
+> **New in 0.2.11**: switch Claude accounts from the bottom bar without logging out, and add DeepSeek, GLM, Kimi or MiniMax as a model provider in a few clicks. [See how it works](#new-switch-claude-accounts-without-logging-out).
 
 ![Matou workspace demo with five parallel Claude Code sessions](assets/shots/en/workspace-demo.gif)
 
 > One stretch of work: you are coding in the implementation card when the background regression finishes and needs a decision — its badge lights up. Open the notification center, click through, and the canvas slides to the regression card. Switch to the exploration canvas and open the DAG: plan A is still running, plan B is stuck, the regression failed. Click plan B's node to land on that card, then open the board and drag the task to blocked. All screenshots come from an isolated demo environment; the project, terminal output and notifications were constructed for the demo.
+
+---
+
+## New: switch Claude accounts without logging out
+
+![Switching Claude accounts from the bottom bar and resuming every running session](assets/shots/en/account-switch-demo.gif)
+
+> The Work account has used 94% of its 5-hour window. Open Claude accounts and switch to Personal: the HUD follows at once. Restart now restarts the three running Claude sessions, and each one resumes its own conversation. Accounts and usage in this recording are demo data.
+
+A work account and a personal one, or a second subscription for when the first runs out of weekly usage. Open **Claude accounts** at the far right of the bottom bar and keep them all in Matou:
+
+- Add an account through the official `claude auth login`. It opens in a fresh private Chrome, Edge or Brave window, so it never picks up the account your browser is already signed in to. If the page shows an authorization code instead of returning on its own, paste the code into Matou.
+- Every saved account shows its 5-hour and weekly usage and when that was fetched. While the panel is open the numbers refresh in the background every few minutes; a network error keeps the last known values instead of showing 0%.
+- Click **Switch** to make an account this Mac's default Claude Code login. If a Matou task is still running, the switch waits for it to finish. Claude Code in other terminals uses the new default too, and Matou explains this the first time you switch.
+- Running sessions usually pick up the new account within about 30 seconds. **Restart now** does it immediately: after one confirmation it restarts every running Claude session in Matou and resumes each conversation. Work in progress is interrupted; plain shells are left alone.
+- When a login expires, sign in again from that account's card. The account keeps its name, and nothing restarts until you choose to apply the new login.
+
+The 5h / Weekly usage in the bottom HUD always belongs to the current default account, whose name sits on the account button at the right end of the bar.
+
+Saving, switching and reading usage are handled by [claude-swap](https://github.com/realiti4/claude-swap) (MIT). Accounts saved in Matou are the same ones its `cswap` command line sees.
+
+### Also new: service providers without editing env vars
+
+![Adding DeepSeek from a preset and switching the running sessions to it](assets/shots/en/provider-setup-demo.gif)
+
+> Pick DeepSeek, paste a key, and the URL, default model and opus / sonnet / haiku mapping are already filled in. Add and use moves the running Claude Code sessions over, and the HUD shows the new model. The key in this recording is a placeholder.
+
+Open **Settings → Service providers → New provider** and pick a service before filling anything in: your official Claude sign-in, DeepSeek, Zhipu GLM, Kimi, MiniMax, or a custom endpoint.
+
+- A preset fills in the API URL, the default model and the opus / sonnet / haiku model mapping, so usually you only paste a key. **Get API key** opens that provider's console.
+- **Get models** asks the service which models your key can use, before you save. Search the list or type a model ID yourself.
+- **Save only** adds the provider to the list; **Add and use** also makes it the default. Any saved provider is one **Switch** away.
+- Switching is global. Running Claude Code sessions restart on the new provider and continue their conversation. A session that is still starting or recovering keeps its old configuration and is listed with the reason, rather than hidden behind a single "switched" message.
+- A rejected key or a timeout keeps your draft so you can retry. Editing keeps the saved key unless you change the URL.
+
+API keys stay on this Mac and are sent only to the service you configured. Preset URLs and models come from [cc-switch](https://github.com/farion1231/cc-switch) (MIT).
 
 ---
 
@@ -143,32 +182,6 @@ The workspace board sorts tasks into **ready, active, blocked, done**. Drag a ca
 ### 8. Restart recovery and multiple windows: the workspace follows the task
 
 Matou persists tasks, tabs, splits, directories, focus, terminal output and hosted-agent identity. After the window is hidden, the app restarts or crashes, each session type is restored appropriately. A session can also pop out into its own window and return later; the main window and detached windows share the same runtime session.
-
-### 9. Claude accounts: switch subscriptions from the bottom bar
-
-A work account and a personal one, or a second subscription for when the first runs out of weekly usage. Open **Claude accounts** at the far right of the bottom bar and keep them all in Matou:
-
-- Add an account through the official `claude auth login`. It opens in a fresh private Chrome, Edge or Brave window, so it never picks up the account your browser is already signed in to. If the page shows an authorization code instead of returning on its own, paste the code into Matou.
-- Every saved account shows its 5-hour and weekly usage and when that was fetched. While the panel is open the numbers refresh in the background every few minutes; a network error keeps the last known values instead of showing 0%.
-- Click **Switch** to make an account this Mac's default Claude Code login. If a Matou task is still running, the switch waits for it to finish. Claude Code in other terminals uses the new default too, and Matou explains this the first time you switch.
-- Running sessions usually pick up the new account within about 30 seconds. **Restart now** does it immediately: after one confirmation it restarts every running Claude session in Matou and resumes each conversation. Work in progress is interrupted; plain shells are left alone.
-- When a login expires, sign in again from that account's card. The account keeps its name, and nothing restarts until you choose to apply the new login.
-
-The bottom HUD shows 5h / Weekly usage for the current default account, labelled with its name, so you always know whose quota you are spending.
-
-Saving, switching and reading usage are handled by [claude-swap](https://github.com/realiti4/claude-swap) (MIT). Accounts saved in Matou are the same ones its `cswap` command line sees.
-
-### 10. Service providers: DeepSeek, GLM, Kimi or MiniMax without editing env vars
-
-Open **Settings → Service providers → New provider** and pick a service before filling anything in: your official Claude sign-in, DeepSeek, Zhipu GLM, Kimi, MiniMax, or a custom endpoint.
-
-- A preset fills in the API URL, the default model and the opus / sonnet / haiku model mapping, so usually you only paste a key. **Get API key** opens that provider's console.
-- **Get models** asks the service which models your key can use, before you save. Search the list or type a model ID yourself.
-- **Save only** adds the provider to the list; **Add and use** also makes it the default. Any saved provider is one **Switch** away.
-- Switching is global. Running Claude Code sessions restart on the new provider and continue their conversation. A session that is still starting or recovering keeps its old configuration and is listed with the reason, rather than hidden behind a single "switched" message.
-- A rejected key or a timeout keeps your draft so you can retry. Editing keeps the saved key unless you change the URL.
-
-API keys stay on this Mac and are sent only to the service you configured. Preset URLs and models come from [cc-switch](https://github.com/farion1231/cc-switch) (MIT).
 
 ## Roadmap
 

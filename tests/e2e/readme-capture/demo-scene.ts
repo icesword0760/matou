@@ -239,7 +239,9 @@ function encodeClaudeProjectPath(cwd: string): string {
   return resolve(cwd).replace(/[^A-Za-z0-9]/g, '-')
 }
 
-export async function launch(input: { root: string; home: string; workspace: string; demo: string }): Promise<ElectronApplication> {
+export async function launch(input: {
+  root: string; home: string; workspace: string; demo: string; env?: Record<string, string>
+}): Promise<ElectronApplication> {
   const dataDirectory = join(input.root, 'data')
   const userData = join(input.root, 'electron-user-data')
   await mkdir(userData, { recursive: true })
@@ -259,7 +261,8 @@ export async function launch(input: { root: string; home: string; workspace: str
       MATOU_RUNTIME_ENTRY: join(REPO, 'apps/runtime/dist/index.cjs'),
       MATOU_CLAUDE_COMMAND: join(input.demo, 'claude'),
       MATOU_DEMO_ROOT: input.demo,
-      MATOU_DISABLE_AUTO_UPDATE: '1'
+      MATOU_DISABLE_AUTO_UPDATE: '1',
+      ...input.env
     }
   })
 }
@@ -375,14 +378,14 @@ export function frameRecorder(app: ElectronApplication, dir: string, fps = 10) {
   }
 }
 
-export async function encodeAnimation(concatList: string, gifPath: string, mp4Path: string): Promise<void> {
+export async function encodeAnimation(concatList: string, gifPath: string, mp4Path: string, gifWidth = 1000): Promise<void> {
   const input = ['-f', 'concat', '-safe', '0', '-i', concatList]
   const scratch = join(concatList, '..')
   const intermediate = join(scratch, 'animation.mov')
   const palette = join(scratch, 'palette.png')
   // Drop the static frames inside each hold (mpdecimate) but keep their real timing through a
   // lossless intermediate; a single filtergraph loses the variable frame durations in GIF output.
-  await run('ffmpeg', ['-y', '-loglevel', 'error', ...input, '-vf', 'mpdecimate=hi=768:lo=320:frac=0.33,scale=1000:-1:flags=lanczos', '-fps_mode', 'vfr', '-c:v', 'png', intermediate])
+  await run('ffmpeg', ['-y', '-loglevel', 'error', ...input, '-vf', `mpdecimate=hi=768:lo=320:frac=0.33,scale=${gifWidth}:-1:flags=lanczos`, '-fps_mode', 'vfr', '-c:v', 'png', intermediate])
   await run('ffmpeg', ['-y', '-loglevel', 'error', '-i', intermediate, '-vf', 'palettegen=max_colors=256:stats_mode=full', palette])
   await run('ffmpeg', ['-y', '-loglevel', 'error', '-i', intermediate, '-i', palette, '-lavfi', 'paletteuse=dither=none:diff_mode=rectangle', '-fps_mode', 'vfr', '-loop', '0', gifPath])
   await run('ffmpeg', ['-y', '-loglevel', 'error', ...input, '-vf', 'scale=1400:-2:flags=lanczos,fps=15', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '23', '-movflags', '+faststart', mp4Path])

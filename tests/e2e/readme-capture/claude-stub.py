@@ -18,9 +18,12 @@ ROOT = os.environ['MATOU_DEMO_ROOT']
 args = sys.argv[1:]
 settings = None
 resume = None
+launch_model = None
 for index, value in enumerate(args):
     if value == '--settings' and index + 1 < len(args):
         settings = args[index + 1]
+    if value == '--model' and index + 1 < len(args):
+        launch_model = args[index + 1]
     if value == '--resume' and index + 1 < len(args):
         resume = args[index + 1]
 # A Fork passes the source conversation with --fork-session and the real CLI answers with a new
@@ -79,22 +82,41 @@ def hook(name, **extra):
     post({'hook_event_name': name, **base, **extra})
 
 
-with open(os.path.join(ROOT, spec['transcript'] + '.ans'), 'rb') as transcript:
-    sys.stdout.buffer.write(b'\x1b[2J\x1b[H' + transcript.read())
-    sys.stdout.buffer.flush()
+# A resumed Claude Code session waits quietly at its prompt. MATOU_DEMO_QUIET_RESUME=1 (set by the
+# feature capture) keeps a resumed stub from replaying its turn, which would raise fresh notifications,
+# and redraws the conversation only after startup, as the real CLI does: the host clears a restarted
+# terminal once the new process is up, which would wipe an instant redraw.
+quiet_resume = restored is not None and os.environ.get('MATOU_DEMO_QUIET_RESUME') == '1'
+
+
+def show_transcript():
+    with open(os.path.join(ROOT, spec['transcript'] + '.ans'), 'rb') as transcript:
+        sys.stdout.buffer.write(b'\x1b[2J\x1b[H' + transcript.read())
+        sys.stdout.buffer.flush()
+
+
+if not quiet_resume:
+    show_transcript()
 
 hook('SessionStart')
-post({
+# Like the real CLI, report the model the host launched with (a provider switch passes --model), and
+# no Anthropic usage windows when requests go to a third-party endpoint.
+status = {
     **base,
     'permission_mode': spec['permission'],
-    'model': {'display_name': spec['model']},
+    'model': {'display_name': launch_model or spec['model']},
     'cost': {'total_duration_ms': spec['duration_ms']},
     'context_window': {'used_percentage': spec['context'], 'context_window_size': 200000},
-    'rate_limits': {'seven_day': {
+}
+if not os.environ.get('ANTHROPIC_BASE_URL'):
+    status['rate_limits'] = {'seven_day': {
         'used_percentage': spec['weekly'], 'resets_at': time.time() + spec['resets_in']}}
-})
+post(status)
+if quiet_resume:
+    time.sleep(0.8)
+    show_transcript()
 ran_exec = False
-for event in spec['events']:
+for event in ([] if quiet_resume else spec['events']):
     kind = event[0]
     if kind == 'exec':
         ran_exec = True

@@ -18,6 +18,16 @@ if scenario.startswith('usage-'):
     b = {**b, "usage": {**b["usage"], "fiveHour": {"used":12,"resetsAt":"2026-10-14T08:00:00Z"},"weekly":{"used":24,"resetsAt":"2026-10-17T08:00:00Z"}}}
     initial = {"accounts": [a] if scenario in ('usage-single','usage-expired') else [a,b], "currentId": a["id"]}
     if scenario == 'usage-expired': initial["accounts"] = [{**a,"needsLogin":True}]
+if scenario == 'readme':
+    # README capture: the default account is nearly out of quota, the second one is fresh.
+    en = os.environ.get('MATOU_LOCALE') == 'en'
+    now = time.time()
+    at = lambda seconds: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now + seconds))
+    a = {**a, "name": "Work" if en else "工作账户", "usage": {"checkedAt": int(now*1000), "stale": False,
+         "fiveHour": {"used": 94, "resetsAt": at(2*3600 + 13*60)}, "weekly": {"used": 81, "resetsAt": at(3*86400 + 5*3600)}}}
+    b = {**b, "name": "Personal" if en else "个人账户", "usage": {"checkedAt": int(now*1000), "stale": False,
+         "fiveHour": {"used": 6, "resetsAt": at(4*3600 + 40*60)}, "weekly": {"used": 22, "resetsAt": at(5*86400 + 2*3600)}}}
+    initial = {"accounts": [a, b], "currentId": a["id"]}
 value = json.loads(path.read_text()) if path.exists() else initial
 request = json.loads(sys.stdin.readline())
 action = request["action"]
