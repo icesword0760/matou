@@ -17,11 +17,14 @@ function setup() {
 afterEach(()=>{cleanup();window.matouDesktop=original;vi.restoreAllMocks()})
 describe('account quota in HUD',()=>{
   it('uses the new account cache immediately while context and model stay session-local',async()=>{
-    const f=setup();const view=render(<TerminalHud hud={hud}/>);await screen.findByText('默认账户: Work')
+    const f=setup();const view=render(<TerminalHud hud={hud}/>);await screen.findByText('Work')
     await waitFor(()=>expect(view.container.textContent).toContain('38%'));expect(view.container.textContent).not.toContain('99%')
     const b={...base.accounts[0]!,id:'b',name:'Personal',usage:{checkedAt:2,stale:false,fiveHour:{used:12,resetsAt:''}}}
     f.emit({...base,currentId:'b',accounts:[...base.accounts,b],revision:2})
-    await screen.findByText('默认账户: Personal')
+    await screen.findByText('Personal')
+    expect(view.container.textContent).not.toContain('默认账户:')
+    expect(view.container.querySelector('.ca-trigger-label')?.textContent).toBe('Personal')
+    expect(view.container.querySelector('.status-usage')?.getAttribute('title')).toContain('默认账户: Personal')
     const next=view
     expect(next.container.textContent).toContain('12%');expect(next.container.textContent).not.toContain('38%')
     expect(next.container.textContent).toContain('72%');expect(next.container.textContent).toContain('Claude')

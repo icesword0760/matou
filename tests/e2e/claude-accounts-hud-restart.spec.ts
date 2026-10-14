@@ -14,7 +14,8 @@ async function startClaude(f: Awaited<ReturnType<typeof setup>>) {
   const input=f.page.locator('.terminal-surface .xterm-helper-textarea').last()
   await input.focus();await input.pressSequentially('claude');await input.press('Enter')
   await expect(f.page.locator('.status-info')).toHaveAttribute('data-hud-mode','agent')
-  await expect(f.page.locator('.status-usage-account')).toHaveText('默认账户: 工作账户')
+  await expect(f.page.locator('.ca-trigger-label')).toHaveText('工作账户')
+  await expect(f.page.locator('.status-info__primary')).not.toContainText('默认账户')
   await expect(f.page.locator('.status-usage')).toContainText(['5h 38%','Weekly 62%'])
 }
 async function switchAccount(f:Awaited<ReturnType<typeof setup>>) {
@@ -33,9 +34,9 @@ test('switch synchronizes HUD without restarting, cancel is inert, confirm resta
     await expect(p.locator('.terminal-surface[data-pid]')).toHaveCount(3)
     const before=await p.locator('.terminal-surface').evaluateAll(nodes=>nodes.map(n=>({id:n.getAttribute('data-session-id'),pid:n.getAttribute('data-pid')})))
     await p.locator('.terminal-surface .xterm-helper-textarea').nth(0).focus()
-    await expect(p.locator('.status-usage-account')).toHaveText('默认账户: 工作账户')
+    await expect(p.locator('.ca-trigger-label')).toHaveText('工作账户')
     await switchAccount(f)
-    await expect(p.locator('.status-usage-account')).toHaveText('默认账户: 个人账户')
+    await expect(p.locator('.ca-trigger-label')).toHaveText('个人账户')
     await expect(p.locator('.status-usage')).toContainText(['5h 12%','Weekly 24%'])
     await expect(p.locator('.status-info')).toContainText('72%')
     await p.screenshot({path:join(evidence,'switched-hud.png')})

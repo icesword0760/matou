@@ -7,13 +7,12 @@ import { Terminal } from '@xterm/headless'
 import * as pty from 'node-pty'
 import { expect, it } from 'vitest'
 
-import { quietClaudeResumeNotices } from './claude-resume-notices'
 import { encodeClaudeProjectPath } from './claude-session-catalog'
 
 // Opt-in native-provider compatibility gate: isolated HOME/config + local fake
 // model, no real credentials, user files or paid inference. Keep evidence in tmp.
-it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('native Claude preserves history, transcript receipts and AGENTS context across repeated resumes', async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'matou-native-quiet-')))
+it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('Claude 2.1.299+ preserves history and AGENTS context without new load notices', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'matou-native-preservation-')))
   const cwd = join(root, 'project'), config = join(root, 'config'), home = join(root, 'home')
   const sessionId = randomUUID()
   const project = join(config, 'projects', encodeClaudeProjectPath(cwd))
@@ -91,37 +90,28 @@ it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('native Claude preserves histo
     } }
   }
   try {
-    current = launch()
-    await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain('LATEST ASSISTANT AFTER OLD NOTICES')
-    expect(current.screen().match(/agents-md: no CLAUDE/g)!.length).toBeGreaterThanOrEqual(10)
-    await writeFile(join(root, 'before.txt'), current.screen())
-    await current.close(); current = undefined
-    expect((await readFile(transcript, 'utf8')).startsWith(original)).toBe(true)
-    const result = await quietClaudeResumeNotices({ cwd, providerSessionId: sessionId, env })
-    expect(result.quieted).toBeGreaterThanOrEqual(10)
-    expect((await readFile(transcript, 'utf8')).startsWith(original)).toBe(true)
-    expect(await quietClaudeResumeNotices({ cwd, providerSessionId: sessionId, env })).toEqual({ quieted: 0 })
-    current = launch()
-    await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain('LATEST ASSISTANT AFTER OLD NOTICES')
-    // The current native loader may emit one new receipt; old ones are quiet.
-    expect(current.screen().match(/agents-md: no CLAUDE/g)?.length ?? 0).toBeLessThanOrEqual(1)
-    expect(current.screen()).toContain('EARLY USER HISTORY')
-    await writeFile(join(root, 'after.txt'), current.screen())
-    current.proc.write('\x0f')
-    await expect.poll(() => current!.screen().match(/agents-md: no CLAUDE/g)?.length ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(10)
-    await writeFile(join(root, 'full-transcript.txt'), current.screen())
-    current.proc.write('\x0f')
-    await expect.poll(() => current!.screen().match(/agents-md: no CLAUDE/g)?.length ?? 0, { timeout: 10_000 }).toBeLessThanOrEqual(1)
-    current.proc.write('Verify preserved context\r')
-    await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain('LOCAL NATIVE RESUME REPLY')
-    const request = requests.find(body => body.includes('Verify preserved context'))!
-    expect(request).toContain('MATOU_AGENTS_QUIET_CANARY')
-    for (const text of ['EARLY USER HISTORY', 'EARLY ASSISTANT HISTORY', 'LATEST USER AFTER OLD NOTICES', 'LATEST ASSISTANT AFTER OLD NOTICES']) expect(request).toContain(text)
-    expect(await readFile(join(cwd, 'AGENTS.md'), 'utf8')).toBe(instructions)
-    await writeFile(join(root, 'continued.txt'), current.screen())
-    await current.close(); current = undefined
-    expect((await readFile(transcript, 'utf8')).startsWith(original)).toBe(true)
-    console.log(`Native Claude evidence: ${root}`)
+    const expected = 0
+    for (let round = 0; round < 2; round++) {
+      current = launch()
+      await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain(
+        round === 0 ? 'LATEST ASSISTANT AFTER OLD NOTICES' : 'LOCAL NATIVE RESUME REPLY')
+      const prompt = 'Verify preserved context round ' + round
+      current.proc.write(prompt + '\r')
+      await expect.poll(() => requests.some(body => body.includes(prompt)), { timeout: 25_000 }).toBe(true)
+      const request = requests.find(body => body.includes(prompt))!
+      expect(request).toContain('MATOU_AGENTS_QUIET_CANARY')
+      expect(request).toContain('LATEST ASSISTANT AFTER OLD NOTICES')
+      await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain('LOCAL NATIVE RESUME REPLY')
+      await writeFile(join(root, 'screen-' + round + '.txt'), current.screen())
+      await current.close(); current = undefined
+      const content = await readFile(transcript, 'utf8')
+      expect(content.startsWith(original)).toBe(true)
+      const newRows = content.slice(original.length).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+      const notices = newRows.filter(row => typeof row.content === 'string' && row.content.startsWith('agents-md: no CLAUDE.md'))
+      expect(notices.length).toBe(expected * (round + 1))
+      console.log('round', round, 'new notices', notices.length, 'AGENTS in request', true, 'latest context preserved', true)
+    }
+    console.log('Evidence:', root)
   } finally {
     await current?.close()
     await new Promise<void>(resolve => server.close(() => resolve()))

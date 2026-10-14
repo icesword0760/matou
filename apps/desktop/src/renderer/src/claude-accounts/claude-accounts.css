@@ -541,4 +541,3 @@ to {
 .ca-restart-inline { display: inline; padding: 2px 7px; border: 1px solid #70a6f0; background: transparent; color: #287cdd; border-radius: 5px; font: inherit; white-space: nowrap; }
 .ca-restart-result { margin: 0 4px 10px; font-size: 11px; color: #56836f; line-height: 1.6; }
 .ca-restart-result.has-error { color: #a66622; }
-.status-usage-account { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

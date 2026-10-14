@@ -141,7 +141,6 @@ export function TerminalHud(props: {
       {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {useDeviceQuota && <span className="status-field status-usage-account status-priority-6" title={quotaAccount}>{quotaAccount}</span>}
       {useDeviceQuota && deviceWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status" title={quotaAccount}>{quotaProblem || (accountState?.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') : (zh ? '用量更新中…' : 'Updating usage…'))}</span>}
       {(useDeviceQuota ? deviceWindows : hud.usageWindows ?? []).map((window, index) => <span
         className="status-field status-usage status-priority-6"
