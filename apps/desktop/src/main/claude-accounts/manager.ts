@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { ClaudeAccountRuntimeAction, ClaudeAccountSession } from '@matou/contracts'
+import { expiredUsageWindow, validAccountUsage } from '../../shared/account-usage'
+import type { AccountUsage } from '../../shared/claude-accounts'
 import { validLoginCode } from '../../shared/claude-accounts'
 import type { AccountError, ClaudeAccountCommand, ClaudeAccountsState, ClaudeAccountView } from '../../shared/claude-accounts'
 import { AccountFault, type AccountEngine, type EngineState } from './engine'
@@ -9,9 +11,9 @@ import { AccountFault, type AccountEngine, type EngineState } from './engine'
 export interface AccountRuntime {
   request(action: ClaudeAccountRuntimeAction, sessionId?: string, runId?: string): Promise<ClaudeAccountSession[]>
 }
-export interface AccountPreferences { names: Record<string, string>; rememberScope: boolean; renewedIds?: string[] }
+export interface AccountPreferences { names: Record<string, string>; rememberScope: boolean; renewedIds?: string[]; usage?: Record<string, AccountUsage> }
 export interface PreferenceStore { load(): Promise<AccountPreferences>; save(value: AccountPreferences): Promise<void> }
-/** Presentation preferences only. All credential storage belongs to claude-swap. */
+/** Presentation preferences and last official quota only; never credentials. */
 export class AccountPreferenceStore implements PreferenceStore {
   constructor(private readonly path: string) {}
   async load(): Promise<AccountPreferences> {
@@ -19,6 +21,8 @@ export class AccountPreferenceStore implements PreferenceStore {
       const v = JSON.parse(await readFile(this.path, 'utf8')) as AccountPreferences
       if (!v.names || typeof v.names !== 'object' || Array.isArray(v.names) || Object.values(v.names).some(name => typeof name !== 'string' || !name.trim() || [...name].length > 12) || typeof v.rememberScope !== 'boolean') throw new Error('schema')
       if (v.renewedIds !== undefined && (!Array.isArray(v.renewedIds) || v.renewedIds.some(id => typeof id !== 'string' || !id || id.length > 200))) throw new Error('schema')
+      if (v.usage) v.usage = typeof v.usage === 'object' && !Array.isArray(v.usage)
+        ? Object.fromEntries(Object.entries(v.usage).filter(([, u]) => validAccountUsage(u))) : {}
       return v
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { names: {}, rememberScope: false }
@@ -37,15 +41,12 @@ export class AccountPreferenceStore implements PreferenceStore {
 const fault = (e: unknown): AccountError => e instanceof AccountFault ? e.code : 'engine-error'
 export class ClaudeAccountsManager {
   private initialized = false
+  private rosterCheckedAt = 0
   private restartResult: ClaudeAccountsState['restartResult']
-  private usageOwners = new Set<number>()
   private usageTimer: ReturnType<typeof setTimeout> | undefined
   private usageFlight: Promise<ClaudeAccountsState> | undefined
   private usageAbort: AbortController | undefined
-  private usageLastAttempt = 0
   private usageRefreshFailed = false
-  private usageFailures = 0
-  private usageDue = false
   private usageSuspended = false
   private prefs: AccountPreferences = { names: {}, rememberScope: false }
   private load: Promise<void> | undefined
@@ -69,7 +70,14 @@ export class ClaudeAccountsManager {
   private closing: Promise<void> | undefined
   constructor(private readonly engine: AccountEngine, private readonly store: PreferenceStore,
     private readonly runtime: AccountRuntime, private readonly publish: (state: ClaudeAccountsState) => void) {}
-  private named(a: ClaudeAccountView) { return { ...a, name: this.prefs.names[a.id] || a.name } }
+  private named(a: ClaudeAccountView) {
+    const usage = this.prefs.usage?.[a.id] ?? a.usage
+    const active = this.value.currentId ?? this.value.detected?.id
+    return { ...a, name: this.prefs.names[a.id] || a.name, ...(usage ? { usage: { ...usage,
+      stale: a.id !== active || usage.stale || Date.now() - usage.checkedAt > 180_000 ||
+        expiredUsageWindow(usage.fiveHour) || expiredUsageWindow(usage.weekly)
+    } } : {}) }
+  }
   state(): ClaudeAccountsState {
     return { ...this.value, ...(this.restartResult ? { restartResult: { ...this.restartResult } } : {}), usageRefreshing: Boolean(this.usageFlight), usageRefreshFailed: this.usageRefreshFailed, accounts: this.value.accounts.map(a => this.named(a)),
       ...(this.value.detected ? { detected: this.named(this.value.detected) } : {}),
@@ -87,60 +95,63 @@ export class ClaudeAccountsManager {
     await this.load; return this.state()
   }
   private async savePrefs(next: AccountPreferences) { await this.store.save(next); this.prefs = next }
-  private async refresh(action: 'snapshot' | 'refresh' = 'snapshot') {
+  private async refresh(action: 'snapshot' | 'refresh' = 'snapshot', signal?: AbortSignal) {
     if (!this.cleaned && !this.nonce) { await this.engine.run({ action: 'cleanup-logins' }); this.cleaned = true }
-    this.value = await this.engine.run({ action }); this.initialized = true
+    const previous = this.value.currentId ?? this.value.detected?.id
+    const next = await this.engine.run({ action }, signal)
+    if (signal?.aborted) return
+    this.value = next; this.initialized = true; this.rosterCheckedAt = Date.now()
+    if (previous !== (this.value.currentId ?? this.value.detected?.id)) await this.runtime.request('usage-reset')
     this.sessions = await this.runtime.request('snapshot')
+    await this.rememberUsage(this.sessions)
     for (const [id, run] of this.pending) if (!this.sessions.some(s => s.sessionId === id && s.runId === run)) this.pending.delete(id)
   }
-  /** One scheduler for all windows. Upstream owns network TTL/backoff and credentials. */
-  setUsageVisible(owner: number, visible: boolean, recheck = false) {
-    if (visible) this.usageOwners.add(owner); else this.usageOwners.delete(owner)
-    if (visible && recheck) this.recheckUsage()
-    this.scheduleUsage()
-    return this.state()
+  /** Poll local runtime observations only, including hidden sessions. No HTTP. */
+  setUsageVisible(_owner: number, _visible: boolean, _recheck = false) {
+    this.scheduleUsage(); return this.state()
   }
-  private recheckUsage() {
-    // A restored connection may recover sooner than local retry backoff. Upstream
-    // still enforces its own Retry-After. Coalesce bursts of focus/online events.
-    if (Date.now() - this.usageLastAttempt >= 180_000 && this.value.accounts.some(a => !a.needsLogin && (!a.usage || Date.now() - a.usage.checkedAt >= 180_000))) this.usageDue = true
-  }
-  suspendUsage(suspended: boolean) { this.usageSuspended = suspended; if (!suspended) this.recheckUsage(); this.scheduleUsage() }
+  suspendUsage(suspended: boolean) { this.usageSuspended = suspended; this.scheduleUsage() }
   private scheduleUsage() {
     if (this.usageTimer) clearTimeout(this.usageTimer)
-    if (this.disposed || this.usageSuspended || !this.usageOwners.size || !this.value.accounts.length || this.operation !== 'idle' || this.usageFlight) return
-    const now = Date.now()
-    const interval = Math.min(1_800_000, 180_000 * 2 ** this.usageFailures)
-    let due = this.usageDue ? now : this.usageLastAttempt + interval
-    for (const account of this.value.accounts) {
-      if (account.needsLogin) continue
-      for (const window of [account.usage?.fiveHour, account.usage?.weekly]) {
-        const reset = Date.parse(window?.resetsAt ?? '') + 15_000
-        if (reset > this.usageLastAttempt) due = Math.min(due, reset)
-      }
-    }
-    this.usageTimer = setTimeout(() => { void this.refreshUsage() }, Math.max(0, due - now))
+    if (this.disposed || this.usageSuspended || !this.initialized || this.operation !== 'idle' || this.usageFlight) return
+    this.usageTimer = setTimeout(() => { void this.refreshUsage() }, 5_000)
   }
-  private refreshUsage(): Promise<ClaudeAccountsState> {
+  private async rememberUsage(sessions: ClaudeAccountSession[]) {
+    const id = this.value.currentId ?? this.value.detected?.id
+    if (!id) return
+    const latest = sessions.filter(s => s.defaultLogin && s.usage?.accountId === id && s.usage.observedAt <= Date.now() + 1_000)
+      .map(s => s.usage!).sort((a, b) => b.observedAt - a.observedAt)[0]
+    const old = this.prefs.usage?.[id] ?? this.value.accounts.find(a => a.id === id)?.usage
+    if (!latest || latest.observedAt <= (old?.checkedAt ?? 0)) return
+    const usage: AccountUsage = { checkedAt: latest.observedAt, stale: false }
+    for (const [label, key] of [['5h', 'fiveHour'], ['Weekly', 'weekly']] as const) {
+      const window = latest.windows.find(w => w.label === label)
+      if (window && Number.isFinite(window.percent)) usage[key] = { used: Math.max(0, Math.min(100, window.percent)),
+        resetsAt: window.resetsAt && Number.isFinite(new Date(window.resetsAt).getTime()) ? new Date(window.resetsAt).toISOString() : '' }
+    }
+    await this.savePrefs({ ...this.prefs, usage: { ...this.prefs.usage, [id]: usage } })
+    // A fresh successful official response supersedes a prior local missing-login flag.
+    this.value = { ...this.value, accounts: this.value.accounts.map(a => a.id === id ? { ...a, needsLogin: false } : a) }
+  }
+  private refreshUsage(inspect = false): Promise<ClaudeAccountsState> {
     if (this.usageFlight) return this.usageFlight
-    if (this.disposed || this.operation !== 'idle' || !this.value.accounts.length) return Promise.resolve(this.state())
-    this.usageLastAttempt = Date.now(); this.usageDue = false
+    if (this.disposed || this.operation !== 'idle' || !this.initialized) return Promise.resolve(this.state())
     const abort = new AbortController(); this.usageAbort = abort
-    const timeout = setTimeout(() => abort.abort(), 30_000)
     this.usageFlight = (async () => {
-      // Start on the next microtask so the in-flight flag is already observable.
-      await Promise.resolve(); this.emit()
+      await Promise.resolve()
+      if (inspect) this.emit()
       try {
-        const next = await this.engine.run({ action: 'refresh' }, abort.signal)
-        if (!abort.signal.aborted && !this.disposed && this.operation === 'idle') {
-          this.value = next; this.usageRefreshFailed = false; this.usageFailures = 0
+        if (inspect || Date.now() - this.rosterCheckedAt >= 60_000) await this.refresh('snapshot', abort.signal) // local roster read, never network
+        else {
+          const sessions = await this.runtime.request('snapshot')
+          if (!abort.signal.aborted && !this.disposed && this.operation === 'idle') {
+            this.sessions = sessions; await this.rememberUsage(sessions)
+          }
         }
-      } catch {
-        if (!this.disposed && this.operation === 'idle') {
-          this.usageRefreshFailed = true; this.usageFailures = Math.min(4, this.usageFailures + 1)
-        }
-      } finally {
-        clearTimeout(timeout); this.usageFlight = undefined; this.usageAbort = undefined
+        this.usageRefreshFailed = false
+      } catch { if (!abort.signal.aborted) this.usageRefreshFailed = true }
+      finally {
+        this.usageFlight = undefined; this.usageAbort = undefined
         this.emit(); this.scheduleUsage()
       }
       return this.state()
@@ -158,7 +169,7 @@ export class ClaudeAccountsManager {
     if (!this.loaded || this.disposed) return this.state()
     if (command.type === 'ensure-usage' && this.initialized) return this.state()
     if (command.type === 'usage-visibility') return this.state() // Owner identity is supplied by main IPC.
-    if (command.type === 'refresh-usage') return this.refreshUsage()
+    if (command.type === 'refresh-usage') return this.refreshUsage(true)
     if (command.type === 'refresh-sessions') {
       if (this.operation === 'idle') {
         try { this.sessions = await this.runtime.request('snapshot'); this.emit() } catch {}
@@ -240,7 +251,9 @@ export class ClaudeAccountsManager {
         }
         case 'remove': {
           this.value = await this.engine.run({ action: 'remove', id: command.id })
-          const { [command.id]: _, ...names } = this.prefs.names; await this.savePrefs({ ...this.prefs, names, ...(this.prefs.renewedIds ? { renewedIds: this.prefs.renewedIds.filter(id => id !== command.id) } : {}) })
+          const { [command.id]: _, ...names } = this.prefs.names
+          const { [command.id]: _usage, ...usage } = this.prefs.usage ?? {}
+          await this.savePrefs({ ...this.prefs, names, usage, ...(this.prefs.renewedIds ? { renewedIds: this.prefs.renewedIds.filter(id => id !== command.id) } : {}) })
           break
         }
         case 'apply-reauth': {
@@ -272,7 +285,6 @@ export class ClaudeAccountsManager {
           await Promise.all(Array.from({ length: Math.min(3, targets.length) }, worker))
           this.restartResult.completed = true
           this.sessions = await this.runtime.request('snapshot').catch(() => this.sessions)
-          this.usageDue = true
           break
         }
         case 'resume': {
@@ -287,7 +299,6 @@ export class ClaudeAccountsManager {
     } catch (e) { this.error = fault(e) }
     finally {
       this.operation = 'idle'; this.emit()
-      if (!this.error && ['save-detected', 'save-draft', 'switch', 'apply-reauth'].includes(command.type)) this.usageDue = true
       this.scheduleUsage()
     }
     return this.state()
@@ -298,12 +309,14 @@ export class ClaudeAccountsManager {
       // Serialize against provider mutations only; working Claude processes keep running.
       // Upstream coordinates credential writes with Claude Code's own locks.
       this.sessions = await this.runtime.request('hold'); held = true
+      await this.rememberUsage(this.sessions).catch(() => { this.usageRefreshFailed = true })
       this.value = await this.engine.run({ action: repair ? 'reauth' : 'switch', id })
       if (this.value.currentId !== id) throw new AccountFault('switch-failed')
+      await this.runtime.request('usage-reset')
       this.pending = new Map(this.sessions.filter(s => s.defaultLogin).map(s => [s.sessionId, s.runId]))
       this.appliedReauthId = repair ? id : undefined
       this.restartResult = undefined
-      this.switchedAt = Date.now(); this.usageDue = true
+      this.switchedAt = Date.now()
       if (this.prefs.renewedIds?.includes(id)) await this.savePrefs({ ...this.prefs, renewedIds: this.prefs.renewedIds.filter(value => value !== id) })
     } finally { if (held) await this.runtime.request('release').catch(() => {}) }
   }
@@ -311,8 +324,8 @@ export class ClaudeAccountsManager {
     this.closing ??= (async () => {
       this.disposed = true; this.loginAbort?.abort(); this.usageAbort?.abort()
       if (this.usageTimer) clearTimeout(this.usageTimer)
-      this.usageOwners.clear()
       await Promise.allSettled([...this.inFlight, this.usageFlight])
+      if (this.initialized) await this.runtime.request('snapshot').then(s => this.rememberUsage(s)).catch(() => {})
       if (this.nonce) await this.engine.run({ action: 'cancel-login', nonce: this.nonce }).catch(() => {})
     })()
     return this.closing

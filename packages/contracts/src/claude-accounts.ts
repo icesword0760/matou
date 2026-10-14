@@ -5,8 +5,10 @@ export interface ClaudeAccountSession {
   busy: boolean
   resumable: boolean
   defaultLogin: boolean
+  /** Fresh official CLI response, never an HTTP query from account management. */
+  usage?: { accountId: string; observedAt: number; windows: Array<{ label: string; percent: number; resetsAt?: number }> }
 }
-export type ClaudeAccountRuntimeAction = 'snapshot' | 'hold' | 'release' | 'resume' | 'restart'
+export type ClaudeAccountRuntimeAction = 'snapshot' | 'usage-reset' | 'hold' | 'release' | 'resume' | 'restart'
 export interface ClaudeAccountRuntimeRequest {
   type: 'runtime.claude-accounts-request'
   requestId: string

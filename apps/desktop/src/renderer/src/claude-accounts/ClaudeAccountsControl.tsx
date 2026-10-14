@@ -1,3 +1,4 @@
+import { expiredUsageWindow } from '../../../shared/account-usage'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 import { useAccountUsageDemand } from './use-account-usage'
 import { useEffect, useId, useRef, useState } from 'react'
@@ -142,10 +143,11 @@ export function ClaudeAccountsControl({ sessionId }: { sessionId: string }) {
     <div className="ca-quotas">{(['fiveHour', 'weekly'] as const).map((key, i) => {
       const value = account.usage?.[key]
       return <div className="ca-quota" key={key}><div><span>{i === 0 ? t('5 小时已用', '5-hour used') : t('每周已用', 'Weekly used')}</span><b className={value && value.used >= 90 ? 'ca-warning' : ''}>{value ? `${Math.round(value.used)}%` : '—'}</b></div>
-        {value && <><div className="ca-track"><span className={value.used >= 90 ? 'is-high' : ''} style={{ width: `${value.used}%` }} /></div><small>{date(value.resetsAt)} {t('重置', 'reset')}</small></>}</div>
+        {value && <><div className="ca-track"><span className={value.used >= 90 ? 'is-high' : ''} style={{ width: `${value.used}%` }} /></div><small>{date(value.resetsAt)} {expiredUsageWindow(value) ? t('已到重置时间，待更新', 'reset time passed; awaiting update') : t('重置', 'reset')}</small></>}</div>
     })}</div>
     {account.usageIssue ? <div className="ca-usage-feedback" role="status">{account.usageIssue === 'rate-limited' ? t('请求较频繁，稍后自动重试', 'Rate limited; retrying later') : account.usageIssue === 'unsupported' ? t('此登录方式暂无用量数据', 'Usage is not available for this sign-in') : t('用量更新失败', 'Usage update failed')}{account.usageIssue !== 'unsupported' && <button className="ca-link" disabled={busy || state.usageRefreshing} onClick={refreshUsage}>{t('重试', 'Retry')}</button>}</div> : null}
-    {account.usage && <span className="ca-measured">{account.usage.stale || state.usageRefreshFailed ? t('上次数据', 'Last known') : t('更新于', 'Updated')} {date(account.usage.checkedAt)}</span>}
+    {!account.usage && <span className="ca-measured">{t('使用此账户后自动记录用量', 'Usage is recorded after using this account')}</span>}
+    {account.usage && <span className="ca-measured">{account.id !== state.currentId || account.usage.stale || state.usageRefreshFailed ? t('上次数据', 'Last known') : t('更新于', 'Updated')} {date(account.usage.checkedAt)}</span>}
   </>
   return <>
     <button ref={trigger} type="button" className={`status-field ca-trigger ${open ? 'is-open' : ''}`} aria-expanded={open} aria-haspopup="dialog"

@@ -1,106 +1,90 @@
+import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ClaudeAccountsManager } from './manager'
-import type { EngineState } from './engine'
+import { AccountPreferenceStore, ClaudeAccountsManager, type AccountPreferences } from './manager'
+import { expiredUsageWindow } from '../../shared/account-usage'
+import type { ClaudeAccountSession } from '@matou/contracts'
 
-const account = { id: 'a', name: 'Work', email: 'wo•••@example.com', plan: 'Claude', needsLogin: false, usage: { checkedAt: 1, stale: false, fiveHour: { used: 38, resetsAt: '' } } }
+const account = { id: 'a', name: 'Work', email: 'wo•••@example.com', plan: 'Claude', needsLogin: false }
 async function setup() {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-14T04:00:00Z'))
-  let value: EngineState = {accounts:[account], currentId:'a'}
-  const run = vi.fn(async (input: Record<string,unknown>, _signal?: AbortSignal): Promise<EngineState> => {
-    if (input.action === 'switch') value = {...value,currentId:String(input.id)}
-    return value
+  let prefs: AccountPreferences = { names: {}, rememberScope: false }
+  let currentId = 'a', sessions: ClaudeAccountSession[] = []
+  const run = vi.fn(async (v: Record<string, unknown>) => {
+    if (v.action === 'switch') currentId = String(v.id)
+    return { accounts: [account, { ...account, id: 'b' }], currentId }
   })
-  const manager = new ClaudeAccountsManager({run},{load:async()=>({names:{},rememberScope:false}),save:async()=>{}},{request:async()=>[]},vi.fn())
-  await manager.command({type:'inspect'})
-  const calls = () => run.mock.calls.filter(([input])=>input.action==='refresh').length
-  return {manager,run,calls}
+  const store = { load: async () => prefs, save: vi.fn(async (v: AccountPreferences) => { prefs = v }) }
+  const runtime = { request: vi.fn(async (action: string) => { if (action === 'usage-reset') sessions = []; return sessions }) }
+  const manager = new ClaudeAccountsManager({ run }, store, runtime, vi.fn())
+  await manager.command({ type: 'inspect' })
+  const observe = (id = 'a', used = 38, observedAt = Date.now()) => {
+    sessions = [{ sessionId: 's', runId: 'r', busy: true, resumable: true, defaultLogin: true,
+      usage: { accountId: id, observedAt, windows: [{ label: '5h', percent: used, resetsAt: Date.now() + 20_000 }] } }]
+  }
+  return { manager, run, observe, runtime, store, prefs: () => prefs }
 }
-afterEach(()=>vi.useRealTimers())
-describe('shared account usage scheduler',()=>{
-  it('fetches on visible open, coalesces windows, then polls at three minutes',async()=>{
-    const {manager,calls}=await setup()
-    manager.setUsageVisible(1,true); manager.setUsageVisible(2,true)
-    await vi.advanceTimersByTimeAsync(0); expect(calls()).toBe(1)
-    await vi.advanceTimersByTimeAsync(179999); expect(calls()).toBe(1)
-    await vi.advanceTimersByTimeAsync(1); expect(calls()).toBe(2)
-    manager.setUsageVisible(1,false); manager.setUsageVisible(2,false)
-    await vi.advanceTimersByTimeAsync(600000); expect(calls()).toBe(2)
-    manager.setUsageVisible(1,true); await vi.advanceTimersByTimeAsync(0); expect(calls()).toBe(3)
-    await manager.dispose()
+afterEach(() => vi.useRealTimers())
+describe('local official usage collection', () => {
+  it('records official responses without bridge refresh requests, even with hidden windows', async () => {
+    const f = await setup(); f.observe(); await vi.advanceTimersByTimeAsync(5_000)
+    expect(f.manager.state().accounts[0]?.usage).toMatchObject({ fiveHour: { used: 38 }, stale: false })
+    f.manager.setUsageVisible(1, false)
+    await vi.advanceTimersByTimeAsync(360_000)
+    expect(f.run.mock.calls.every(([v]) => v.action !== 'refresh')).toBe(true)
+    expect(f.store.save).toHaveBeenCalledTimes(1)
+    expect(f.manager.state().accounts[0]?.needsLogin).toBe(false)
+    await f.manager.dispose()
   })
-  it('does not refetch on a quick focus return and resumes stale data after sleep',async()=>{
-    const {manager,calls}=await setup(); manager.setUsageVisible(1,true)
-    await vi.advanceTimersByTimeAsync(0)
-    manager.setUsageVisible(1,false); await vi.advanceTimersByTimeAsync(10000)
-    manager.setUsageVisible(1,true); await vi.advanceTimersByTimeAsync(0); expect(calls()).toBe(1)
-    manager.suspendUsage(true); await vi.advanceTimersByTimeAsync(600000); expect(calls()).toBe(1)
-    manager.suspendUsage(false); await vi.advanceTimersByTimeAsync(0); expect(calls()).toBe(2)
-    await manager.dispose()
+  it('saves outgoing quota before switching and rejects cross-account or older data', async () => {
+    const f = await setup(); f.observe()
+    await f.manager.command({ type: 'switch', id: 'b', rememberScope: true })
+    expect(f.prefs().usage?.a?.fiveHour?.used).toBe(38)
+    expect(f.manager.state().accounts[0]?.usage?.stale).toBe(true)
+    f.observe('a', 99); await vi.advanceTimersByTimeAsync(5_000)
+    expect(f.prefs().usage?.b).toBeUndefined()
+    f.observe('b', 61); await vi.advanceTimersByTimeAsync(5_000)
+    expect(f.prefs().usage?.b?.fiveHour?.used).toBe(61)
+    f.observe('b', 1, Date.now() - 60_000); await vi.advanceTimersByTimeAsync(5_000)
+    expect(f.prefs().usage?.b?.fiveHour?.used).toBe(61)
+    await f.manager.dispose()
   })
-  it('refreshes after saving or switching, without waiting for the regular interval',async()=>{
-    const {manager,calls}=await setup();manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    await manager.command({type:'switch',id:'a',rememberScope:false})
-    await vi.advanceTimersByTimeAsync(0);expect(calls()).toBe(2)
-    await manager.dispose()
+  it('keeps authoritative reset date and last percentage after reset, never invents a new window', async () => {
+    const f = await setup(); f.observe(); await vi.advanceTimersByTimeAsync(5_000)
+    const before = f.prefs().usage?.a
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(f.prefs().usage?.a).toEqual(before)
+    expect(expiredUsageWindow(before?.fiveHour)).toBe(true)
+    expect(f.manager.state().accounts[0]?.usage).toMatchObject({ stale: true, fiveHour: { used: 38 } })
+    await f.manager.dispose()
   })
-  it('checks a reset plus 15 seconds, without fabricating a zero percentage',async()=>{
-    const {manager,run,calls}=await setup()
-    const value = {accounts:[{...account,usage:{...account.usage,fiveHour:{used:100,resetsAt:new Date(Date.now()+20000).toISOString()}}}],currentId:'a'}
-    run.mockResolvedValue(value)
-    manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(34999);expect(calls()).toBe(1)
-    await vi.advanceTimersByTimeAsync(1);expect(calls()).toBe(2)
-    expect(manager.state().accounts[0]?.usage?.fiveHour?.used).toBe(100)
-    await vi.advanceTimersByTimeAsync(1000);expect(calls()).toBe(2)
-    await manager.dispose()
+  it('manual refresh reads local state only; shutdown stops collection', async () => {
+    const f = await setup(); f.observe(); await f.manager.command({ type: 'refresh-usage' })
+    expect(f.run.mock.calls.at(-1)?.[0]).toEqual({ action: 'snapshot' })
+    expect(f.prefs().usage?.a?.fiveHour?.used).toBe(38)
+    await f.manager.dispose(); const n = f.runtime.request.mock.calls.length
+    await vi.advanceTimersByTimeAsync(60_000); expect(f.runtime.request).toHaveBeenCalledTimes(n)
   })
-  it('retains data and separates failed usage from login failure, with backed-off retries',async()=>{
-    const {manager,run,calls}=await setup();run.mockRejectedValue(new Error('network'))
-    manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    expect(manager.state()).toMatchObject({usageRefreshFailed:true,operation:'idle',accounts:[{needsLogin:false,usage:{checkedAt:1}}]})
-    expect(manager.state().error).toBeUndefined()
-    await vi.advanceTimersByTimeAsync(180000);expect(calls()).toBe(1)
-    await vi.advanceTimersByTimeAsync(180000);expect(calls()).toBe(2)
-    await manager.dispose()
+  it('date calculation handles UTC offsets, year rollover and invalid values', () => {
+    expect(expiredUsageWindow({ resetsAt: '2027-01-01T00:00:00+08:00' }, Date.parse('2026-12-31T16:00:00Z'))).toBe(true)
+    expect(expiredUsageWindow({ resetsAt: '2027-01-01T00:00:00+08:00' }, Date.parse('2026-12-31T15:59:59Z'))).toBe(false)
+    expect(expiredUsageWindow({ resetsAt: '' })).toBe(false)
   })
-  it('rechecks on restored connectivity after the shared minimum interval', async()=>{
-    const {manager,run,calls}=await setup();run.mockRejectedValue(new Error('offline'))
-    manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    await vi.advanceTimersByTimeAsync(180000);expect(calls()).toBe(1)
-    run.mockResolvedValue({accounts:[account],currentId:'a'})
-    manager.setUsageVisible(1,true,true);await vi.advanceTimersByTimeAsync(0)
-    expect(calls()).toBe(2);expect(manager.state().usageRefreshFailed).toBe(false)
-    await manager.dispose()
-  })
-  it('coalesces manual refresh with automatic fetch and keeps other actions unlocked',async()=>{
-    const {manager,run,calls}=await setup()
-    let resolve!:(v:EngineState)=>void
-    run.mockImplementation(input=>input.action==='refresh'?new Promise(yes=>{resolve=yes}):Promise.resolve({accounts:[account]}))
-    manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    const manual=manager.command({type:'refresh-usage'})
-    await vi.advanceTimersByTimeAsync(0);expect(calls()).toBe(1)
-    expect(manager.state()).toMatchObject({operation:'idle',usageRefreshing:true})
-    resolve({accounts:[account]});await manual
-    expect(manager.state().usageRefreshing).toBe(false)
-    await manager.dispose()
-  })
-  it('cancels obsolete collection before mutation, never overwrites the changed default',async()=>{
-    const {manager,run}=await setup()
-    let aborted=false
-    run.mockImplementation((input,signal)=>{
-      if(input.action==='refresh')return new Promise((_yes,no)=>signal?.addEventListener('abort',()=>{aborted=true;no(Error('cancelled'))},{once:true}))
-      return Promise.resolve({accounts:[account],currentId:input.action==='switch'?'b':'a'})
-    })
-    manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(0)
-    await manager.command({type:'switch',id:'b',rememberScope:false})
-    expect(aborted).toBe(true);expect(manager.state().currentId).toBe('b');expect(manager.state().usageRefreshFailed).toBe(false)
-    await manager.dispose()
-  })
-  it('bounds a hung refresh and cancels timers on disposal',async()=>{
-    const {manager,run,calls}=await setup()
-    run.mockImplementation((_input,signal)=>new Promise((_yes,no)=>signal?.addEventListener('abort',()=>no(Error('timeout')),{once:true})))
-    manager.setUsageVisible(1,true);await vi.advanceTimersByTimeAsync(30000)
-    expect(manager.state()).toMatchObject({usageRefreshFailed:true,usageRefreshing:false,operation:'idle'})
-    await manager.dispose();await vi.advanceTimersByTimeAsync(900000);expect(calls()).toBe(1)
+})
+
+describe('non-secret quota persistence', () => {
+  it('survives store recreation and discards a damaged cache without losing saved names', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-usage-prefs-'))
+    const path = join(root, 'preferences.json')
+    const value: AccountPreferences = { names: { a: 'Work' }, rememberScope: true,
+      usage: { a: { checkedAt: 1791950400000, stale: false, fiveHour: { used: 81, resetsAt: '2026-10-15T01:00:00Z' } } } }
+    try {
+      await new AccountPreferenceStore(path).save(value)
+      expect(await new AccountPreferenceStore(path).load()).toEqual(value)
+      expect((await stat(path)).mode & 0o777).toBe(0o600)
+      await writeFile(path, JSON.stringify({ ...value, usage: { a: { checkedAt: 'broken' } } }))
+      expect(await new AccountPreferenceStore(path).load()).toEqual({ ...value, usage: {} })
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 })

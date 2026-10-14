@@ -37,4 +37,18 @@ describe('parseUpdateBaseUrl', () => {
       packagedConfigPath: '/missing/app-update.yml', channel: 'preview'
     })).toBe('https://updates.example.com/test')
   })
+
+  it('disables downgrades after the channel setter enables them', () => {
+    const updater = {
+      allowDowngrade: false,
+      set channel(_value: string) { this.allowDowngrade = true },
+      setFeedURL: vi.fn()
+    }
+
+    configureUpdateFeed(updater, {
+      packagedConfigPath: '/missing/app-update.yml', channel: 'stable'
+    })
+
+    expect(updater.allowDowngrade).toBe(false)
+  })
 })

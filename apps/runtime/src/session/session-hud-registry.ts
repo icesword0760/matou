@@ -1,3 +1,4 @@
+import { AccountUsageTracker } from './account-usage-tracker'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -66,6 +67,7 @@ interface MutableHud extends SessionHudSnapshot {
 }
 
 export class SessionHudRegistry {
+  readonly accountUsage: AccountUsageTracker
   readonly #states = new Map<string, MutableHud>()
   readonly #now: () => number
   readonly #configDir: string
@@ -76,6 +78,7 @@ export class SessionHudRegistry {
     configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
     transcripts = new ProviderTranscriptHudReader()
   ) {
+    this.accountUsage = new AccountUsageTracker(now)
     this.#now = now
     this.#configDir = configDir
     this.#transcripts = transcripts
@@ -92,6 +95,7 @@ export class SessionHudRegistry {
     model?: string
     resumable?: boolean
   }): void {
+    this.accountUsage.spawn(input.sessionId)
     const previous = this.#states.get(input.sessionId)
     const mode = input.profile === 'shell' ? 'shell' : 'agent'
     const permissionMode = normalizePermission(input.permissionMode)
@@ -132,7 +136,8 @@ export class SessionHudRegistry {
     const current = this.#states.get(sessionId)
     if (!current) return
     if (!options.fallbackToShell) {
-      this.#states.delete(sessionId)
+      this.accountUsage.delete(sessionId)
+    this.#states.delete(sessionId)
       return
     }
     this.#states.set(sessionId, {
@@ -152,6 +157,7 @@ export class SessionHudRegistry {
   }
 
   delete(sessionId: string): void {
+    this.accountUsage.delete(sessionId)
     this.#states.delete(sessionId)
   }
 
@@ -252,6 +258,7 @@ export class SessionHudRegistry {
     }
     const usageWindows = usageWindowsFromPayload(payload)
     if (usageWindows) current.usageWindows = usageWindows
+    this.accountUsage.observe(sessionId, payload, usageWindows)
 
     const eventName = text(payload.hook_event_name) ?? text(payload.hookEventName)
     if (!eventName) return

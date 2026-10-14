@@ -59,7 +59,7 @@ describe('Claude account orchestration delegates to upstream engine', () => {
     expect(engine.run).toHaveBeenCalledExactlyOnceWith({ action: 'switch', id: 'b' })
     expect(manager.state()).toMatchObject({ currentId: 'b', pendingSessionIds: ['visible', 'hidden'], rememberScope: true, operation: 'idle' })
     expect(manager.state().error).toBeUndefined()
-    expect(vi.mocked(runtime.request).mock.calls.map(([action]) => action)).toEqual(['hold', 'release'])
+    expect(vi.mocked(runtime.request).mock.calls.map(([action]) => action)).toEqual(['hold', 'usage-reset', 'release'])
     await vi.advanceTimersByTimeAsync(5000)
     expect(engine.run).toHaveBeenCalledTimes(1)
     await manager.dispose()

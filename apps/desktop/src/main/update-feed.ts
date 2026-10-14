@@ -4,6 +4,7 @@ export const DEFAULT_UPDATE_BASE_URL = 'https://updates.baize-ailabs.com/stable'
 
 interface UpdateFeedAdapter {
   channel?: string | null
+  allowDowngrade?: boolean
   setFeedURL(options: { provider: 'generic'; url: string; channel?: string }): void
 }
 
@@ -34,6 +35,9 @@ export function configureUpdateFeed(
     || readUpdateBaseUrl(options.packagedConfigPath)
     || DEFAULT_UPDATE_BASE_URL
   updater.channel = options.channel
+  // electron-updater enables downgrades when channel is assigned, even if unchanged.
+  // A local acceptance build must not offer the older published release as an update.
+  updater.allowDowngrade = false
   updater.setFeedURL({ provider: 'generic', url, channel: options.channel })
   return url
 }

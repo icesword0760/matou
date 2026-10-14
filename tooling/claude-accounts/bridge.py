@@ -1,7 +1,6 @@
-"""Matou IPC adapter for the pinned, unmodified claude-swap engine.
+"""Matou IPC adapter for the pinned local-only credential engine.
 
-Only presentation, isolated official CLI login, and command dispatch live here.
-Credential capture/storage/refresh/switch/rollback are upstream responsibilities.
+Upstream retains capture/storage/switch/rollback. Official CLI owns networking.
 No credential value or raw upstream exception crosses stdout/stderr.
 """
 from __future__ import annotations
@@ -26,7 +25,7 @@ logging.disable(logging.CRITICAL)
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.session import AUTH_OVERRIDE_ENV_VARS, delete_macos_keychain_entry
-from claude_swap.switcher import ClaudeAccountSwitcher
+from local_engine import LocalAccountSwitcher as ClaudeAccountSwitcher
 
 EXPECTED_VERSION = "0.27.0b1"
 
@@ -47,23 +46,15 @@ def view(row: dict) -> dict:
         "name": row.get("alias") or "Claude",
         "email": masked(row["email"]),
         "plan": row.get("organizationName") or "Claude",
-        "needsLogin": row.get("usageStatus") in ("relogin_required", "no_credentials"),
+        "needsLogin": row.get("usageStatus") == "no_credentials",
     }
     from datetime import datetime
-    status = row.get("usageStatus")
-    if status in ("unavailable", "keychain_unavailable", "foreign_credential", "token_expired"):
-        result["usageIssue"] = "rate-limited" if row.get("usageError") == "http-429" else "unavailable"
-    elif status == "api_key":
-        result["usageIssue"] = "unsupported"
-    retry = row.get("usageRetryAt")
-    if retry:
-        result["usageRetryAt"] = int(datetime.fromisoformat(retry.replace("Z", "+00:00")).timestamp() * 1000)
     if usage:
         stamp = row.get("usageFetchedAt") or row.get("lastGoodFetchedAt")
         if stamp:
             result["usage"] = {
                 "checkedAt": int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000),
-                "stale": row.get("usageStatus") != "ok",
+                "stale": True,
             }
             for source, dest in (("fiveHour", "fiveHour"), ("sevenDay", "weekly")):
                 item = usage.get(source)
@@ -73,7 +64,7 @@ def view(row: dict) -> dict:
 
 
 def roster(engine: ClaudeAccountSwitcher, refresh: bool = False) -> tuple[dict, dict[str, str]]:
-    payload = engine.list_accounts(json_output=True, fetch=None if refresh else set())
+    payload = engine.list_accounts(json_output=True, fetch=set())
     if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
         raise ValueError("engine-version")
     rows = payload["accounts"]

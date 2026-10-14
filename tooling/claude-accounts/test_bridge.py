@@ -125,19 +125,46 @@ if __name__ == "__main__":
 
 class UsagePresentation(unittest.TestCase):
     def test_only_explicit_login_failure_shows_reauthentication(self):
-        for status in ('ok', 'unavailable', 'token_expired', 'keychain_unavailable', 'foreign_credential', 'api_key'):
+        for status in ('ok', 'unavailable', 'token_expired', 'keychain_unavailable', 'foreign_credential', 'api_key', 'relogin_required'):
             row = bridge.view({'email':'fixture@example.com','usageStatus':status})
             self.assertFalse(row['needsLogin'], status)
-        for status in ('relogin_required', 'no_credentials'):
+        for status in ('no_credentials',):
             self.assertTrue(bridge.view({'email':'fixture@example.com','usageStatus':status})['needsLogin'])
     def test_cached_timestamp_is_not_changed_and_rate_limit_keeps_last_good_usage(self):
         row = bridge.view({'email':'fixture@example.com','usageStatus':'unavailable','usageError':'http-429','usageRetryAt':'2026-10-14T04:06:00Z', 'lastGoodFetchedAt':'2026-10-14T04:00:00Z','lastGoodUsage':{'fiveHour':{'pct':38,'resetsAt':'2026-10-14T05:00:00Z'}}})
-        self.assertEqual(row['usageIssue'],'rate-limited')
+        self.assertNotIn('usageIssue', row)
         self.assertEqual(row['usage']['fiveHour']['used'],38)
         self.assertTrue(row['usage']['stale'])
         self.assertEqual(row['usage']['checkedAt'],1791950400000)
-        self.assertGreater(row['usageRetryAt'],row['usage']['checkedAt'])
+        self.assertNotIn('usageRetryAt', row)
         self.assertFalse(row['needsLogin'])
-    def test_healthy_three_minute_cache_is_not_marked_stale_after_one_minute(self):
+    def test_legacy_cache_is_always_presented_as_last_known(self):
         row = bridge.view({'email':'fixture@example.com','usageStatus':'ok','usageFetchedAt':'2026-10-14T04:00:00Z','usageAgeSeconds':120,'usage':{'fiveHour':{'pct':38}}})
-        self.assertFalse(row['usage']['stale'])
+        self.assertTrue(row['usage']['stale'])
+
+class OfflineEngineIntegration(EngineIntegration):
+    def test_every_exposed_action_skips_all_upstream_network_functions(self):
+        import socket
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            calls = [stack.enter_context(patch("claude_swap.oauth." + name, side_effect=AssertionError("unexpected HTTP")))
+                     for name in ("fetch_oauth_profile", "try_refresh_oauth_credentials", "try_fetch_usage_for_account")]
+            a = self.run_action(action="snapshot")["detected"]["id"]
+            self.run_action(action="save-current", id=a)
+            self.write_login("b")
+            b = self.run_action(action="snapshot")["detected"]["id"]
+            self.run_action(action="save-current", id=b)
+            self.run_action(action="refresh")
+            self.run_action(action="switch", id=a)
+            # Official CLI full refresh-token rotation is captured on departure.
+            live = json.loads((self.profile / ".credentials.json").read_text())
+            live["claudeAiOauth"].update(accessToken="ROTATED-A", refreshToken="ROTATED-REFRESH-A")
+            (self.profile / ".credentials.json").write_text(json.dumps(live))
+            self.run_action(action="switch", id=b)
+            self.run_action(action="switch", id=a)
+            self.assertEqual(json.loads((self.profile / ".credentials.json").read_text())["claudeAiOauth"]["refreshToken"], "ROTATED-REFRESH-A")
+            self.run_action(action="remove", id=b)
+            for call in calls: call.assert_not_called()
+        with socket.socket() as client:
+            with self.assertRaisesRegex(RuntimeError, "network-disabled"):
+                client.connect(("127.0.0.1", 9))

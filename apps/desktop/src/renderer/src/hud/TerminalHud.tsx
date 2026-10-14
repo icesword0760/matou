@@ -42,7 +42,7 @@ export function TerminalHud(props: {
   const m = useMessages().hud
   const accountState = useAccountUsage(hud?.mode === 'agent' && hud.defaultAccountUsage === true)
   const account = accountState?.accounts.find(a => a.id === accountState.currentId) ??
-    (accountState?.detected?.id === accountState?.currentId ? accountState?.detected : undefined)
+    accountState?.detected
   const useDeviceQuota = hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
   const deviceWindows = account?.needsLogin ? [] : ([['5h', account?.usage?.fiveHour], ['Weekly', account?.usage?.weekly]] as const)
     .flatMap(([label, value]) => value ? [{ label, percent: Math.round(value.used), resetsAt: Date.parse(value.resetsAt) }] : [])
@@ -51,7 +51,8 @@ export function TerminalHud(props: {
   const quotaProblem = account?.needsLogin ? (zh ? '登录已失效' : 'Sign-in expired') :
     account?.usageIssue === 'rate-limited' ? (zh ? '限流，稍后重试' : 'Rate limited; retrying later') :
     account?.usageIssue === 'unsupported' ? (zh ? '暂无用量数据' : 'Usage unavailable') :
-    accountState?.usageRefreshFailed || account?.usageIssue || account?.usage?.stale ? (zh ? '更新失败，保留上次数据' : 'Update failed; last known usage') : ''
+    accountState?.usageRefreshFailed || account?.usageIssue ? (zh ? '读取失败，保留上次数据' : 'Read failed; last known usage') :
+    account?.usage?.stale ? (zh ? '上次记录，使用后更新' : 'Last known; updates after use') : ''
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
   const disabled = Boolean(props.disabledReason)
@@ -141,11 +142,11 @@ export function TerminalHud(props: {
       {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {useDeviceQuota && deviceWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status" title={quotaAccount}>{quotaProblem || (accountState?.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') : (zh ? '用量更新中…' : 'Updating usage…'))}</span>}
+      {useDeviceQuota && deviceWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status" title={quotaAccount}>{quotaProblem || (accountState?.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') : (zh ? '使用后更新用量' : 'Usage updates after use'))}</span>}
       {(useDeviceQuota ? deviceWindows : hud.usageWindows ?? []).map((window, index) => <span
         className="status-field status-usage status-priority-6"
         title={useDeviceQuota ? `${quotaAccount} · ${usageTitle(window)}${quotaProblem ? ` · ${quotaProblem}` : ''}` : usageTitle(window)} key={`${window.label}:${index}`}>
-        {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {formatReset(window.resetsAt)}</small>}
+        {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {window.resetsAt && window.resetsAt <= Date.now() ? (zh ? '待更新' : 'Pending') : formatReset(window.resetsAt)}</small>}
       </span>)}
       {useDeviceQuota && deviceWindows.length > 0 && quotaProblem && <span className="status-field status-priority-6" title={`${quotaAccount} · ${quotaProblem}`}>{zh ? '上次数据' : 'Last known'}</span>}
       {hasTaskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus, m)}</span>}

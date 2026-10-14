@@ -206,6 +206,10 @@ export class RuntimeServer {
 
   /** All windows share this gate; hooks/output continue while input briefly waits. */
   static async accountCommand(action: ClaudeAccountRuntimeAction, sessionId?: string, runId?: string): Promise<ClaudeAccountSession[]> {
+    if (action === 'usage-reset') {
+      for (const server of RuntimeServer.#instances) server.#hud.accountUsage.invalidate()
+      return []
+    }
     if (action === 'release') {
       RuntimeServer.#releaseAccounts?.()
       RuntimeServer.#accountBarrier = undefined
@@ -239,7 +243,9 @@ export class RuntimeServer {
       const binding = owner.#sessionRepository.getResumeBinding(id, 'claude-code')
       const status = owner.#workStatuses.get(id)
       const defaultLogin = owner.#usesDefaultClaudeLogin(id)
+      const usage = defaultLogin ? owner.#hud.accountUsage.snapshot(id) : undefined
       snapshot.push({ sessionId: id, runId: session.runId ?? '', defaultLogin,
+        ...(usage ? { usage } : {}),
         busy: status !== 'idle' && status !== 'exited' || owner.#sessions.providerIdentityPending(id),
         resumable: Boolean(binding && owner.#spawnDescriptors.has(id) && session.durabilityState === 'healthy') })
     }
