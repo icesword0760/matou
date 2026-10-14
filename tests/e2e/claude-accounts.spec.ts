@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { launchMatou, restartMatouGracefully } from './matou-fixture'
-const evidence = resolve(import.meta.dirname, '../../docs/acceptance/evidence/claude-accounts')
+const evidence = process.env.MATOU_E2E_ACCOUNTS_EVIDENCE ?? resolve(import.meta.dirname, '../../docs/acceptance/evidence/claude-accounts')
 const fixturePath = resolve(import.meta.dirname, 'fixtures/claude-accounts-engine.py')
 const env = (scenario: string) => ({ MATOU_E2E_ACCOUNTS_BRIDGE: fixturePath, MATOU_E2E_ACCOUNTS_SCENARIO: scenario, MATOU_E2E_DISPLAY: 'primary' })
 test.beforeAll(async () => { await mkdir(evidence, { recursive: true }) })
@@ -61,7 +61,7 @@ test('switch scope, real main/runtime coordination, keyboard, compact window and
     await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
     await expect(p.locator('.ca-account')).toHaveCount(2)
     await p.screenshot({ path: `${evidence}/04-multiple-electron.png` })
-    await p.locator('.ca-account').filter({ hasText: '个人账户' }).click()
+    await p.locator('.ca-account').filter({ hasText: '个人账户' }).getByRole('button', { name: '切换', exact: true }).click()
     await expect(p.locator('.ca-panel')).toContainText('不是只切换当前卡片')
     await p.getByLabel('已了解范围，下次空闲时直接切换').check()
     await p.screenshot({ path: `${evidence}/05-scope-electron.png` })
@@ -222,7 +222,7 @@ for (const scenario of ['reauth-auto', 'reauth-manual']) {
     try {
       let p = f.page
       await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
-      await p.getByRole('button', { name: '重新登录当前账户', exact: true }).click()
+      await p.getByRole('button', { name: '重新登录', exact: true }).click()
       await expect(p.locator('.ca-panel')).toContainText('重新登录「工作账户」')
       await expect(p.locator('.ca-panel')).toContainText('现有对话保持运行')
       await p.screenshot({ path: `${evidence}/12-reauth-intro-electron.jpg`, animations: 'disabled' })
@@ -264,7 +264,7 @@ test('reauth wrong identity keeps original account and offers a targeted retry',
   try {
     const p = f.page
     await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
-    await p.locator('.ca-account').filter({ hasText: '工作账户' }).click()
+    await p.locator('.ca-account').filter({ hasText: '工作账户' }).getByRole('button', { name: '重新登录', exact: true }).click()
     await p.getByRole('button', { name: '打开隐私窗口重新登录' }).click()
     await expect(p.getByRole('alert')).toContainText('登录的账户与选择的账户不一致')
     await expect(p.locator('.ca-panel')).toContainText('重新登录「工作账户」')

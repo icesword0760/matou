@@ -13,12 +13,23 @@ scenario = os.environ.get("MATOU_E2E_ACCOUNTS_SCENARIO", "multiple")
 initial = {"accounts": [a,b], "currentId": a["id"]} if scenario == "multiple" else {"accounts": [], **({"detected": a} if scenario == "detected" else {})}
 if scenario.startswith('reauth-'):
     initial = {"accounts": [{**a, "needsLogin": True}, b], "currentId": a["id"]}
+if scenario.startswith('usage-'):
+    a = {**a, "usage": {**a["usage"], "fiveHour": {"used":38,"resetsAt":"2026-10-14T08:00:00Z"},"weekly":{"used":62,"resetsAt":"2026-10-17T08:00:00Z"}}}
+    b = {**b, "usage": {**b["usage"], "fiveHour": {"used":12,"resetsAt":"2026-10-14T08:00:00Z"},"weekly":{"used":24,"resetsAt":"2026-10-17T08:00:00Z"}}}
+    initial = {"accounts": [a] if scenario in ('usage-single','usage-expired') else [a,b], "currentId": a["id"]}
+    if scenario == 'usage-expired': initial["accounts"] = [{**a,"needsLogin":True}]
 value = json.loads(path.read_text()) if path.exists() else initial
 request = json.loads(sys.stdin.readline())
 action = request["action"]
 with (root / "actions-fixture.jsonl").open('a') as log:
     log.write(json.dumps({"action": action})+'\n')
 result = value
+if action == 'refresh':
+    if scenario == 'usage-network' and not (root / 'allow-refresh-success').exists():
+        print(json.dumps({'ok':False,'error':'engine-error'}));sys.exit(0)
+    if scenario == 'usage-slow': time.sleep(3)
+    if scenario == 'usage-rate-limit':
+        value['accounts'] = [{**x, 'usageIssue':'rate-limited', 'usage':{**x['usage'],'stale':True}} for x in value['accounts']]
 if action == "login":
     if scenario in ("browser-missing", "browser-closed"):
         print(json.dumps({"ok": False, "error": scenario})); sys.exit(0)

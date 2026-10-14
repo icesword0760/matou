@@ -36,6 +36,15 @@ export class AccountPreferenceStore implements PreferenceStore {
 }
 const fault = (e: unknown): AccountError => e instanceof AccountFault ? e.code : 'engine-error'
 export class ClaudeAccountsManager {
+  private usageOwners = new Set<number>()
+  private usageTimer: ReturnType<typeof setTimeout> | undefined
+  private usageFlight: Promise<ClaudeAccountsState> | undefined
+  private usageAbort: AbortController | undefined
+  private usageLastAttempt = 0
+  private usageRefreshFailed = false
+  private usageFailures = 0
+  private usageDue = false
+  private usageSuspended = false
   private prefs: AccountPreferences = { names: {}, rememberScope: false }
   private load: Promise<void> | undefined
   private loaded = false
@@ -63,7 +72,7 @@ export class ClaudeAccountsManager {
     private readonly runtime: AccountRuntime, private readonly publish: (state: ClaudeAccountsState) => void) {}
   private named(a: ClaudeAccountView) { return { ...a, name: this.prefs.names[a.id] || a.name } }
   state(): ClaudeAccountsState {
-    return { ...this.value, accounts: this.value.accounts.map(a => this.named(a)),
+    return { ...this.value, usageRefreshing: Boolean(this.usageFlight), usageRefreshFailed: this.usageRefreshFailed, accounts: this.value.accounts.map(a => this.named(a)),
       ...(this.value.detected ? { detected: this.named(this.value.detected) } : {}),
       revision: this.revision, rememberScope: this.prefs.rememberScope,
       ...(this.reauthId ? { reauthId: this.reauthId } : {}), renewedIds: this.prefs.renewedIds ?? [],
@@ -85,6 +94,60 @@ export class ClaudeAccountsManager {
     this.sessions = await this.runtime.request('snapshot')
     for (const [id, run] of this.pending) if (!this.sessions.some(s => s.sessionId === id && s.runId === run)) this.pending.delete(id)
   }
+  /** One scheduler for all windows. Upstream owns network TTL/backoff and credentials. */
+  setUsageVisible(owner: number, visible: boolean, recheck = false) {
+    if (visible) this.usageOwners.add(owner); else this.usageOwners.delete(owner)
+    if (visible && recheck) this.recheckUsage()
+    this.scheduleUsage()
+    return this.state()
+  }
+  private recheckUsage() {
+    // A restored connection may recover sooner than local retry backoff. Upstream
+    // still enforces its own Retry-After. Coalesce bursts of focus/online events.
+    if (Date.now() - this.usageLastAttempt >= 180_000 && this.value.accounts.some(a => !a.needsLogin && (!a.usage || Date.now() - a.usage.checkedAt >= 180_000))) this.usageDue = true
+  }
+  suspendUsage(suspended: boolean) { this.usageSuspended = suspended; if (!suspended) this.recheckUsage(); this.scheduleUsage() }
+  private scheduleUsage() {
+    if (this.usageTimer) clearTimeout(this.usageTimer)
+    if (this.disposed || this.usageSuspended || !this.usageOwners.size || !this.value.accounts.length || this.operation !== 'idle' || this.usageFlight) return
+    const now = Date.now()
+    const interval = Math.min(1_800_000, 180_000 * 2 ** this.usageFailures)
+    let due = this.usageDue ? now : this.usageLastAttempt + interval
+    for (const account of this.value.accounts) {
+      if (account.needsLogin) continue
+      for (const window of [account.usage?.fiveHour, account.usage?.weekly]) {
+        const reset = Date.parse(window?.resetsAt ?? '') + 15_000
+        if (reset > this.usageLastAttempt) due = Math.min(due, reset)
+      }
+    }
+    this.usageTimer = setTimeout(() => { void this.refreshUsage() }, Math.max(0, due - now))
+  }
+  private refreshUsage(): Promise<ClaudeAccountsState> {
+    if (this.usageFlight) return this.usageFlight
+    if (this.disposed || this.operation !== 'idle' || !this.value.accounts.length) return Promise.resolve(this.state())
+    this.usageLastAttempt = Date.now(); this.usageDue = false
+    const abort = new AbortController(); this.usageAbort = abort
+    const timeout = setTimeout(() => abort.abort(), 30_000)
+    this.usageFlight = (async () => {
+      // Start on the next microtask so the in-flight flag is already observable.
+      await Promise.resolve(); this.emit()
+      try {
+        const next = await this.engine.run({ action: 'refresh' }, abort.signal)
+        if (!abort.signal.aborted && !this.disposed && this.operation === 'idle') {
+          this.value = next; this.usageRefreshFailed = false; this.usageFailures = 0
+        }
+      } catch {
+        if (!this.disposed && this.operation === 'idle') {
+          this.usageRefreshFailed = true; this.usageFailures = Math.min(4, this.usageFailures + 1)
+        }
+      } finally {
+        clearTimeout(timeout); this.usageFlight = undefined; this.usageAbort = undefined
+        this.emit(); this.scheduleUsage()
+      }
+      return this.state()
+    })()
+    return this.usageFlight
+  }
   command(command: ClaudeAccountCommand): Promise<ClaudeAccountsState> {
     const result = this.execute(command)
     this.inFlight.add(result)
@@ -94,6 +157,8 @@ export class ClaudeAccountsManager {
   private async execute(command: ClaudeAccountCommand): Promise<ClaudeAccountsState> {
     await this.snapshot()
     if (!this.loaded || this.disposed) return this.state()
+    if (command.type === 'usage-visibility') return this.state() // Owner identity is supplied by main IPC.
+    if (command.type === 'refresh-usage') return this.refreshUsage()
     if (command.type === 'refresh-sessions') {
       if (this.operation === 'idle') {
         try { this.sessions = await this.runtime.request('snapshot'); this.emit() } catch {}
@@ -133,9 +198,11 @@ export class ClaudeAccountsManager {
     this.operation = command.type === 'login' ? 'login' : (command.type === 'switch' || command.type === 'apply-reauth') ? 'switching' : command.type === 'resume' ? 'resuming' : 'loading'
     this.emit()
     try {
+      // Foreground actions preempt quota collection; never merge an old roster into a new login.
+      this.usageAbort?.abort()
+      await this.usageFlight
       switch (command.type) {
         case 'inspect': case 'recover': await this.refresh(); break
-        case 'refresh-usage': await this.refresh('refresh'); break
         case 'login': {
           if (command.replaceId && !this.value.accounts.some(a => a.id === command.replaceId)) throw new AccountFault('conflict')
           this.reauthId = command.replaceId
@@ -203,7 +270,11 @@ export class ClaudeAccountsManager {
         }
       }
     } catch (e) { this.error = fault(e) }
-    finally { this.operation = 'idle'; this.emit() }
+    finally {
+      this.operation = 'idle'; this.emit()
+      if (!this.error && ['save-detected', 'save-draft', 'switch', 'apply-reauth'].includes(command.type)) this.usageDue = true
+      this.scheduleUsage()
+    }
     return this.state()
   }
   private async switchTo(id: string, repair = false) {
@@ -215,7 +286,7 @@ export class ClaudeAccountsManager {
       if (this.value.currentId !== id) throw new AccountFault('switch-failed')
       this.pending = new Map(this.sessions.filter(s => s.defaultLogin).map(s => [s.sessionId, s.runId]))
       this.appliedReauthId = repair ? id : undefined
-      this.switchedAt = Date.now(); this.cancelQueue()
+      this.switchedAt = Date.now(); this.usageDue = true; this.cancelQueue()
       if (this.prefs.renewedIds?.includes(id)) await this.savePrefs({ ...this.prefs, renewedIds: this.prefs.renewedIds.filter(value => value !== id) })
     } finally { if (held) await this.runtime.request('release').catch(() => {}) }
   }
@@ -229,16 +300,19 @@ export class ClaudeAccountsManager {
     this.operation = 'loading'
     const target = this.queuedId
     try {
+      this.usageAbort?.abort(); await this.usageFlight
       this.sessions = await this.runtime.request('snapshot')
       if (!this.disposed && this.queuedId === target && !this.sessions.some(s => s.busy)) { this.operation = 'switching'; this.emit(); await this.switchTo(target) }
     } catch (e) { this.error = fault(e); this.cancelQueue() }
-    finally { this.operation = 'idle'; this.emit(); if (this.queuedId) this.schedule() }
+    finally { this.operation = 'idle'; this.emit(); if (this.queuedId) this.schedule(); this.scheduleUsage() }
   }
   private cancelQueue() { this.queuedId = undefined; if (this.timer) clearTimeout(this.timer) }
   dispose(): Promise<void> {
     this.closing ??= (async () => {
-      this.disposed = true; this.cancelQueue(); this.loginAbort?.abort()
-      await Promise.allSettled([...this.inFlight, this.queueFlight])
+      this.disposed = true; this.cancelQueue(); this.loginAbort?.abort(); this.usageAbort?.abort()
+      if (this.usageTimer) clearTimeout(this.usageTimer)
+      this.usageOwners.clear()
+      await Promise.allSettled([...this.inFlight, this.queueFlight, this.usageFlight])
       if (this.nonce) await this.engine.run({ action: 'cancel-login', nonce: this.nonce }).catch(() => {})
     })()
     return this.closing

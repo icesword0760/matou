@@ -122,3 +122,22 @@ class EngineIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class UsagePresentation(unittest.TestCase):
+    def test_only_explicit_login_failure_shows_reauthentication(self):
+        for status in ('ok', 'unavailable', 'token_expired', 'keychain_unavailable', 'foreign_credential', 'api_key'):
+            row = bridge.view({'email':'fixture@example.com','usageStatus':status})
+            self.assertFalse(row['needsLogin'], status)
+        for status in ('relogin_required', 'no_credentials'):
+            self.assertTrue(bridge.view({'email':'fixture@example.com','usageStatus':status})['needsLogin'])
+    def test_cached_timestamp_is_not_changed_and_rate_limit_keeps_last_good_usage(self):
+        row = bridge.view({'email':'fixture@example.com','usageStatus':'unavailable','usageError':'http-429','usageRetryAt':'2026-10-14T04:06:00Z', 'lastGoodFetchedAt':'2026-10-14T04:00:00Z','lastGoodUsage':{'fiveHour':{'pct':38,'resetsAt':'2026-10-14T05:00:00Z'}}})
+        self.assertEqual(row['usageIssue'],'rate-limited')
+        self.assertEqual(row['usage']['fiveHour']['used'],38)
+        self.assertTrue(row['usage']['stale'])
+        self.assertEqual(row['usage']['checkedAt'],1791950400000)
+        self.assertGreater(row['usageRetryAt'],row['usage']['checkedAt'])
+        self.assertFalse(row['needsLogin'])
+    def test_healthy_three_minute_cache_is_not_marked_stale_after_one_minute(self):
+        row = bridge.view({'email':'fixture@example.com','usageStatus':'ok','usageFetchedAt':'2026-10-14T04:00:00Z','usageAgeSeconds':120,'usage':{'fiveHour':{'pct':38}}})
+        self.assertFalse(row['usage']['stale'])

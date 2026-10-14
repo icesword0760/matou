@@ -18,6 +18,7 @@ import {
   type MenuItemConstructorOptions,
   nativeImage,
   net,
+  powerMonitor,
   screen,
   shell,
   Tray
@@ -456,6 +457,8 @@ if (primaryInstance) app.whenReady().then(async () => {
   if (!isPackagedApplication && process.env.MATOU_E2E === '1' && process.env.MATOU_E2E_ACCOUNTS_BRIDGE) {
     accountLaunch.args = [process.env.MATOU_E2E_ACCOUNTS_BRIDGE]
   }
+  powerMonitor.on('suspend', () => claudeAccounts?.suspendUsage(true))
+  powerMonitor.on('resume', () => claudeAccounts?.suspendUsage(false))
   claudeAccounts = new ClaudeAccountsManager(
     new ClaudeSwapEngine(accountLaunch),
     new AccountPreferenceStore(join(accountRoot, 'preferences.json')),
@@ -660,9 +663,18 @@ function assertAccountSender(event: Electron.IpcMainInvokeEvent) {
   return claudeAccounts
 }
 ipcMain.handle(DESKTOP_CHANNELS.getClaudeAccounts, event => assertAccountSender(event).snapshot())
+const accountUsageOwners = new Set<number>()
 ipcMain.handle(DESKTOP_CHANNELS.claudeAccountCommand, (event, command: unknown) => {
   const manager = assertAccountSender(event)
   if (!isAccountCommand(command)) throw new Error('Invalid account command')
+  if (command.type === 'usage-visibility') {
+    const owner = event.sender.id
+    if (!accountUsageOwners.has(owner)) {
+      accountUsageOwners.add(owner)
+      event.sender.once('destroyed', () => { accountUsageOwners.delete(owner); manager.setUsageVisible(owner, false) })
+    }
+    return manager.setUsageVisible(owner, command.visible, command.recheck)
+  }
   return manager.command(command)
 })
 

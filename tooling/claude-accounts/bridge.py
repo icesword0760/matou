@@ -49,13 +49,21 @@ def view(row: dict) -> dict:
         "plan": row.get("organizationName") or "Claude",
         "needsLogin": row.get("usageStatus") in ("relogin_required", "no_credentials"),
     }
+    from datetime import datetime
+    status = row.get("usageStatus")
+    if status in ("unavailable", "keychain_unavailable", "foreign_credential", "token_expired"):
+        result["usageIssue"] = "rate-limited" if row.get("usageError") == "http-429" else "unavailable"
+    elif status == "api_key":
+        result["usageIssue"] = "unsupported"
+    retry = row.get("usageRetryAt")
+    if retry:
+        result["usageRetryAt"] = int(datetime.fromisoformat(retry.replace("Z", "+00:00")).timestamp() * 1000)
     if usage:
-        from datetime import datetime
         stamp = row.get("usageFetchedAt") or row.get("lastGoodFetchedAt")
         if stamp:
             result["usage"] = {
                 "checkedAt": int(datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000),
-                "stale": row.get("usageStatus") != "ok" or (row.get("usageAgeSeconds") or 0) > 60,
+                "stale": row.get("usageStatus") != "ok",
             }
             for source, dest in (("fiveHour", "fiveHour"), ("sevenDay", "weekly")):
                 item = usage.get(source)

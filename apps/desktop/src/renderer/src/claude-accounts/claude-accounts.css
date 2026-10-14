@@ -494,3 +494,43 @@ to {
 .ca-login.ca-form h3 { font-size: 16px; margin: 4px 0 8px; }
 .ca-login.ca-form > p { margin: 4px 0 8px; font-size: 12px; }
 .ca-login .ca-code-form { margin: 8px 0; padding: 12px; }
+
+/* Compact account overview; mutation and login screens keep their existing flow. */
+.ca-header { padding: 18px 20px; gap: 12px; }
+.ca-header h2 { font-size: 17px; letter-spacing: -.2px; }
+.ca-header .ca-close { margin-left: 0; }
+.ca-header h2 { flex: 1; }
+.ca-scroll { padding: 0 12px 8px; }
+.ca-refresh-button { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; color: #287cdd; padding: 6px 4px; border-radius: 5px; flex: none; }
+.ca-refresh-button svg.is-spinning { animation: ca-spin 1s linear infinite; }
+.ca-account { display: block; padding: 16px; margin: 0 0 10px; border: 1px solid #dfe7f2; border-radius: 11px; background: #fff; }
+.ca-account:hover:not(:disabled) { background: #fff; }
+.ca-account.is-current, .ca-account.is-current:hover { background: #f3f7ff; border-color: #d8e6fc; }
+.ca-account-identity { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+.ca-account-identity .ca-avatar { width: 38px; height: 38px; font-size: 14px; }
+.ca-account-main strong { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; color: var(--ca-text); }
+.ca-account .ca-email { margin: 3px 0 0; }
+.ca-default-pill { font-size: 10px; color: #3284ed; background: #e5efff; padding: 3px 9px; border-radius: 7px; flex: none; }
+.ca-switch { border: 1px solid #70a6f0; color: #287cdd; background: #fff; border-radius: 7px; padding: 6px 12px; flex: none; }
+.ca-quotas { font-size: 11px; gap: 16px; }
+.ca-quota + .ca-quota { border-left: 1px solid #dde7f6; padding-left: 16px; }
+.ca-quota b { color: #526d91; }
+.ca-track { height: 5px; border-radius: 4px; margin: 7px 0; }
+.ca-track > span { background: #3284ed; border-radius: inherit; transition: width .2s ease; }
+.ca-quota small { font-size: 9px; }
+.ca-measured { margin-top: 10px; font-size: 9px; color: #8797ad; }
+.ca-login-warning { display: flex; align-items: center; gap: 10px; padding: 11px; background: #fff6e9; border-radius: 8px; color: #9c581e; }
+.ca-login-warning > span { display: grid; place-items: center; width: 17px; height: 17px; border-radius: 50%; background: #ec902f; color: #fff; font-weight: 700; flex: none; }
+.ca-login-warning > div { flex: 1; }
+.ca-login-warning strong { display: block; font-size: 12px; }
+.ca-login-warning small { display: block; font-size: 10px; margin-top: 3px; }
+.ca-relogin { border: 1px solid #dda56b; color: #a26025; border-radius: 6px; padding: 6px 10px; background: #fff; flex: none; }
+.ca-actions { margin: 0 12px; padding: 14px 4px; border-top: 1px solid #e4ebf5; gap: 16px; }
+.ca-actions .ca-primary { min-width: 142px; }
+.ca-actions .ca-link { color: #287cdd; padding: 7px 12px; }
+.ca-usage-feedback { display: flex; align-items: center; gap: 10px; font-size: 10px; color: #9b6b36; margin-top: 8px; }
+.ca-usage-feedback .ca-link { margin-left: auto; white-space: nowrap; }
+.ca-refresh-error { padding: 0 5px 6px; }
+[data-theme=dark] .ca-account { background: #232a34; border-color: #3c4858; }
+[data-theme=dark] .ca-account.is-current { background: #293549; border-color: #374c68; }
+@media(prefers-reduced-motion:reduce) { .ca-track > span { transition: none; } .ca-refresh-button svg.is-spinning { animation-duration: 3s; } }
