@@ -84,6 +84,38 @@ class EngineIntegration(unittest.TestCase):
             self.assertEqual(credentials["claudeAiOauth"]["accessToken"], "FIXTURE-ACCESS-a")
             self.assertEqual(credentials["mcpOAuth"], {"fixture": True})
             self.assertTrue(json.loads((self.home / ".claude.json").read_text())["keepSetting"])
+    def test_renewed_default_uses_upstream_recovery_without_overwriting_new_tokens(self):
+        ident = self.run_action(action="snapshot")["detected"]["id"]
+        self.run_action(action="save-current", id=ident)
+        nonce = "00000000-0000-4000-8000-000000000002"
+        isolated = self.home / "adapter/login" / nonce
+        isolated.mkdir(parents=True)
+        (isolated / ".claude.json").write_bytes((self.home / ".claude.json").read_bytes())
+        credentials = json.loads((self.profile / ".credentials.json").read_text())
+        credentials["claudeAiOauth"]["accessToken"] = "FIXTURE-RENEWED-a"
+        credentials["claudeAiOauth"]["refreshToken"] = "FIXTURE-RENEWED-REFRESH-a"
+        (isolated / ".credentials.json").write_text(json.dumps(credentials))
+        before = (self.profile / ".credentials.json").read_bytes()
+        self.run_action(action="save-draft", nonce=nonce, id=ident)
+        self.assertEqual((self.profile / ".credentials.json").read_bytes(), before)
+        with patch.object(ClaudeAccountSwitcher, "switch_to", autospec=True, side_effect=ClaudeAccountSwitcher.switch_to) as called:
+            result = self.run_action(action="reauth", id=ident)
+            self.assertTrue(called.call_args.kwargs["force"])
+        self.assertEqual(result["currentId"], ident)
+        live = json.loads((self.profile / ".credentials.json").read_text())
+        self.assertEqual(live["claudeAiOauth"]["accessToken"], "FIXTURE-RENEWED-a")
+        self.assertEqual(live["mcpOAuth"], {"fixture": True})
+        self.assertEqual(len(result["accounts"]), 1)
+
+    def test_repair_rejects_changed_default_without_writing(self):
+        ident = self.run_action(action="snapshot")["detected"]["id"]
+        self.run_action(action="save-current", id=ident)
+        self.write_login("b")
+        before = (self.profile / ".credentials.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            self.run_action(action="reauth", id=ident)
+        self.assertEqual((self.profile / ".credentials.json").read_bytes(), before)
+
     def test_nonce_traversal_rejected(self):
         with self.assertRaises(ValueError):
             self.run_action(action="cancel-login", nonce="../../outside")

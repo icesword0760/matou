@@ -215,3 +215,82 @@ test('manual login can close panel, return, cancel and retry with a fresh attemp
     await expect(p.getByLabel('账户名称')).toBeVisible()
   } finally { await f.close() }
 })
+
+for (const scenario of ['reauth-auto', 'reauth-manual']) {
+  test(`${scenario}: renew original account, persist pending application, apply explicitly without restarting terminals`, async () => {
+    let f = await launchMatou({ env: env(scenario) })
+    try {
+      let p = f.page
+      await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+      await p.getByRole('button', { name: '重新登录当前账户', exact: true }).click()
+      await expect(p.locator('.ca-panel')).toContainText('重新登录「工作账户」')
+      await expect(p.locator('.ca-panel')).toContainText('现有对话保持运行')
+      await p.screenshot({ path: `${evidence}/12-reauth-intro-electron.jpg`, animations: 'disabled' })
+      const pidBefore = await p.locator('.terminal-surface').first().getAttribute('data-pid')
+      await p.getByRole('button', { name: '打开隐私窗口重新登录' }).click()
+      if (scenario === 'reauth-manual') {
+        await expect(p.locator('.ca-panel')).toContainText('请使用 wo•••@example.com 完成授权')
+        await p.getByLabel('授权码', { exact: true }).fill('fixture_code_123456#fixture_state_123456')
+        await p.getByLabel('授权码', { exact: true }).press('Enter')
+      }
+      await expect(p.getByLabel('账户名称')).toHaveValue('工作账户')
+      await expect(p.getByLabel('账户名称')).toHaveAttribute('readonly', '')
+      await p.getByRole('button', { name: '保存新登录', exact: true }).click()
+      await expect(p.getByRole('button', { name: '应用到本机默认登录', exact: true })).toBeVisible()
+      await expect(p.locator('.terminal-surface').first()).toHaveAttribute('data-pid', pidBefore!)
+      let state = await p.evaluate(() => window.matouDesktop.getClaudeAccounts())
+      expect(state).toMatchObject({ currentId: 'fixture-a', renewedIds: ['fixture-a'], pendingSessionIds: [] })
+      expect(state.accounts).toHaveLength(2)
+      f = await restartMatouGracefully(f, { env: env(scenario) }); p = f.page
+      await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+      await expect(p.locator('.ca-panel')).toContainText('还需应用到本机默认登录')
+      await p.getByRole('button', { name: '继续处理', exact: true }).click()
+      await f.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(820, 560))
+      await expect(p.getByRole('button', { name: '应用到本机默认登录', exact: true })).toBeInViewport()
+      await p.screenshot({ path: `${evidence}/13-reauth-apply-electron.png`, animations: 'disabled' })
+      const pidAfterRestart = await p.locator('.terminal-surface').first().getAttribute('data-pid')
+      await p.getByRole('button', { name: '应用到本机默认登录', exact: true }).click()
+      await expect(p.locator('.ca-panel')).toContainText('本机默认登录已修复')
+      await expect(p.locator('.terminal-surface').first()).toHaveAttribute('data-pid', pidAfterRestart!)
+      state = await p.evaluate(() => window.matouDesktop.getClaudeAccounts())
+      expect(state.renewedIds).toEqual([])
+      expect(state.currentId).toBe('fixture-a')
+    } finally { await f.close() }
+  })
+}
+
+test('reauth wrong identity keeps original account and offers a targeted retry', async () => {
+  const f = await launchMatou({ env: env('reauth-wrong') })
+  try {
+    const p = f.page
+    await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+    await p.locator('.ca-account').filter({ hasText: '工作账户' }).click()
+    await p.getByRole('button', { name: '打开隐私窗口重新登录' }).click()
+    await expect(p.getByRole('alert')).toContainText('登录的账户与选择的账户不一致')
+    await expect(p.locator('.ca-panel')).toContainText('重新登录「工作账户」')
+    await expect(p.getByRole('button', { name: '重新打开隐私窗口' })).toBeEnabled()
+    const state = await p.evaluate(() => window.matouDesktop.getClaudeAccounts())
+    expect(state.currentId).toBe('fixture-a'); expect(state.renewedIds).toEqual([])
+    expect(state.draft).toBeUndefined()
+  } finally { await f.close() }
+})
+
+test('renewing a non-default account preserves default and guides an explicit later switch', async () => {
+  const f = await launchMatou({ env: env('reauth-auto') })
+  try {
+    const p = f.page
+    await p.getByRole('button', { name: 'Claude 账户', exact: true }).click()
+    await p.getByRole('button', { name: '管理账户', exact: true }).click()
+    await p.locator('.ca-manage-row').filter({ hasText: '个人账户' }).getByRole('button', { name: '编辑' }).click()
+    await p.getByRole('button', { name: '重新登录', exact: true }).click()
+    await expect(p.locator('.ca-panel')).toContainText('重新登录「个人账户」')
+    await p.getByRole('button', { name: '打开隐私窗口重新登录' }).click()
+    await p.getByRole('button', { name: '保存新登录', exact: true }).click()
+    await expect(p.locator('.ca-panel')).toContainText('当前默认账户保持不变')
+    await expect(p.getByRole('button', { name: '应用到本机默认登录', exact: true })).toHaveCount(0)
+    await expect(p.getByRole('button', { name: '切换到这个账户…', exact: true })).toBeVisible()
+    const state = await p.evaluate(() => window.matouDesktop.getClaudeAccounts())
+    expect(state.currentId).toBe('fixture-a'); expect(state.renewedIds).toEqual(['fixture-b'])
+    expect(state.accounts).toHaveLength(2)
+  } finally { await f.close() }
+})

@@ -172,12 +172,18 @@ def dispatch(request: dict, root: Path) -> dict:
         if not candidate or candidate["id"] != request.get("id"):
             raise ValueError("conflict")
         engine.add_account()
-    elif action == "switch":
+    elif action in ("switch", "reauth"):
         slot = slots.get(request.get("id"))
         if not slot:
             raise ValueError("conflict")
-        # No force flag, automatic rotation, or replacement credential algorithm.
-        result = engine.switch_to(slot, json_output=True)
+        # Explicit repair of the same default only: upstream's force recovery
+        # activates the renewed backup without overwriting it with stale live tokens.
+        if action == "reauth":
+            if output.get("currentId") != request.get("id"):
+                raise ValueError("conflict")
+            result = engine.switch_to(slot, json_output=True, force=True)
+        else:
+            result = engine.switch_to(slot, json_output=True)
         if not isinstance(result, dict):
             raise ValueError("engine-version")
     elif action == "remove":
@@ -188,7 +194,7 @@ def dispatch(request: dict, root: Path) -> dict:
     else:
         raise ValueError("invalid")
     result = roster(engine)[0]
-    if action == "switch" and result.get("currentId") != request.get("id"):
+    if action in ("switch", "reauth") and result.get("currentId") != request.get("id"):
         raise ValueError("switch-failed")
     return result
 

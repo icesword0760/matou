@@ -9,7 +9,7 @@ import { AccountFault, type AccountEngine, type EngineState } from './engine'
 export interface AccountRuntime {
   request(action: ClaudeAccountRuntimeAction, sessionId?: string, runId?: string): Promise<ClaudeAccountSession[]>
 }
-export interface AccountPreferences { names: Record<string, string>; rememberScope: boolean }
+export interface AccountPreferences { names: Record<string, string>; rememberScope: boolean; renewedIds?: string[] }
 export interface PreferenceStore { load(): Promise<AccountPreferences>; save(value: AccountPreferences): Promise<void> }
 /** Presentation preferences only. All credential storage belongs to claude-swap. */
 export class AccountPreferenceStore implements PreferenceStore {
@@ -18,6 +18,7 @@ export class AccountPreferenceStore implements PreferenceStore {
     try {
       const v = JSON.parse(await readFile(this.path, 'utf8')) as AccountPreferences
       if (!v.names || typeof v.names !== 'object' || Array.isArray(v.names) || Object.values(v.names).some(name => typeof name !== 'string' || !name.trim() || [...name].length > 12) || typeof v.rememberScope !== 'boolean') throw new Error('schema')
+      if (v.renewedIds !== undefined && (!Array.isArray(v.renewedIds) || v.renewedIds.some(id => typeof id !== 'string' || !id || id.length > 200))) throw new Error('schema')
       return v
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { names: {}, rememberScope: false }
@@ -43,6 +44,8 @@ export class ClaudeAccountsManager {
   private revision = 0
   private error: AccountError | undefined
   private draft: ClaudeAccountView | undefined
+  private reauthId: string | undefined
+  private appliedReauthId: string | undefined
   private nonce: string | undefined
   private loginCodeSubmitted = false
   private loginAbort: AbortController | undefined
@@ -63,6 +66,8 @@ export class ClaudeAccountsManager {
     return { ...this.value, accounts: this.value.accounts.map(a => this.named(a)),
       ...(this.value.detected ? { detected: this.named(this.value.detected) } : {}),
       revision: this.revision, rememberScope: this.prefs.rememberScope,
+      ...(this.reauthId ? { reauthId: this.reauthId } : {}), renewedIds: this.prefs.renewedIds ?? [],
+      ...(this.appliedReauthId ? { appliedReauthId: this.appliedReauthId } : {}),
       ...(this.operation === 'login' && this.nonce && this.loginAbort && !this.loginAbort.signal.aborted ? { loginAttemptId: this.nonce, loginCodeSubmitted: this.loginCodeSubmitted } : {}),
       operation: this.operation, sessions: this.sessions, pendingSessionIds: [...this.pending.keys()],
       ...(this.draft ? { draft: this.named(this.draft) } : {}), ...(this.error ? { error: this.error } : {}),
@@ -89,6 +94,12 @@ export class ClaudeAccountsManager {
   private async execute(command: ClaudeAccountCommand): Promise<ClaudeAccountsState> {
     await this.snapshot()
     if (!this.loaded || this.disposed) return this.state()
+    if (command.type === 'refresh-sessions') {
+      if (this.operation === 'idle') {
+        try { this.sessions = await this.runtime.request('snapshot'); this.emit() } catch {}
+      }
+      return this.state()
+    }
     if (command.type === 'submit-login-code') {
       if (this.operation !== 'login' || !this.loginAbort || this.loginAbort.signal.aborted || this.nonce !== command.attemptId) {
         this.error = 'login-ended'; this.emit(); return this.state()
@@ -112,26 +123,33 @@ export class ClaudeAccountsManager {
         await this.engine.run({ action: 'cancel-login', nonce: this.nonce }).catch(() => {})
         this.nonce = undefined; this.draft = undefined
       }
+      this.reauthId = undefined
       this.emit(); return this.state()
     }
     if (command.type === 'cancel-switch') { if (this.operation === 'switching') return this.state(); this.cancelQueue(); this.emit(); return this.state() }
     if (command.type === 'dismiss-error') { this.error = undefined; this.emit(); return this.state() }
     if (this.operation !== 'idle') return this.state()
     this.error = undefined
-    this.operation = command.type === 'login' ? 'login' : command.type === 'switch' ? 'switching' : command.type === 'resume' ? 'resuming' : 'loading'
+    this.operation = command.type === 'login' ? 'login' : (command.type === 'switch' || command.type === 'apply-reauth') ? 'switching' : command.type === 'resume' ? 'resuming' : 'loading'
     this.emit()
     try {
       switch (command.type) {
         case 'inspect': case 'recover': await this.refresh(); break
         case 'refresh-usage': await this.refresh('refresh'); break
         case 'login': {
+          if (command.replaceId && !this.value.accounts.some(a => a.id === command.replaceId)) throw new AccountFault('conflict')
+          this.reauthId = command.replaceId
+          this.cancelQueue() // A repair never competes with a queued account change.
           if (this.nonce) await this.engine.run({ action: 'cancel-login', nonce: this.nonce })
           const nonce = randomUUID(), abort = new AbortController()
           this.nonce = nonce; this.loginCodeSubmitted = false; this.error = undefined; this.draft = undefined; this.loginAbort = abort
           this.emit() // Clear the previous identity before a repeated sign-in completes.
           try {
             const result = await this.engine.run({ action: 'login', nonce, replaceId: command.replaceId }, abort.signal)
-            if (!abort.signal.aborted) { this.draft = result.draft; this.error = undefined }
+            if (!abort.signal.aborted) {
+              if (this.reauthId && result.draft?.id !== this.reauthId) throw new AccountFault('identity')
+              this.draft = result.draft; this.error = undefined
+            }
           } catch (e) {
             await this.engine.run({ action: 'cancel-login', nonce }).catch(() => {})
             this.nonce = undefined
@@ -142,9 +160,13 @@ export class ClaudeAccountsManager {
         case 'save-detected': case 'save-draft': {
           const draft = command.type === 'save-draft' ? this.draft : this.value.detected
           if (!draft) throw new AccountFault('conflict')
+          const repairing = command.type === 'save-draft' && this.reauthId
+          if (repairing && draft.id !== repairing) throw new AccountFault('identity')
           this.value = await this.engine.run({ action: command.type === 'save-draft' ? 'save-draft' : 'save-current', id: draft.id, nonce: this.nonce })
           if (command.type === 'save-draft') { this.nonce = undefined; this.draft = undefined }
-          await this.savePrefs({ ...this.prefs, names: { ...this.prefs.names, [draft.id]: command.name.trim() } })
+          await this.savePrefs({ ...this.prefs, names: { ...this.prefs.names, [draft.id]: repairing ? this.named(draft).name : command.name.trim() },
+            ...(repairing ? { renewedIds: [...new Set([...(this.prefs.renewedIds ?? []), draft.id])] } : {}) })
+          this.reauthId = undefined
           break
         }
         case 'rename': {
@@ -153,8 +175,13 @@ export class ClaudeAccountsManager {
         }
         case 'remove': {
           this.value = await this.engine.run({ action: 'remove', id: command.id })
-          const { [command.id]: _, ...names } = this.prefs.names; await this.savePrefs({ ...this.prefs, names })
+          const { [command.id]: _, ...names } = this.prefs.names; await this.savePrefs({ ...this.prefs, names, ...(this.prefs.renewedIds ? { renewedIds: this.prefs.renewedIds.filter(id => id !== command.id) } : {}) })
           if (this.queuedId === command.id) this.cancelQueue()
+          break
+        }
+        case 'apply-reauth': {
+          if (!this.prefs.renewedIds?.includes(command.id)) throw new AccountFault('conflict')
+          await this.switchTo(command.id, true)
           break
         }
         case 'switch': {
@@ -179,15 +206,17 @@ export class ClaudeAccountsManager {
     finally { this.operation = 'idle'; this.emit() }
     return this.state()
   }
-  private async switchTo(id: string) {
+  private async switchTo(id: string, repair = false) {
     let held = false
     try {
       this.sessions = await this.runtime.request('hold'); held = true
       if (this.sessions.some(s => s.busy)) throw new AccountFault('busy')
-      this.value = await this.engine.run({ action: 'switch', id })
+      this.value = await this.engine.run({ action: repair ? 'reauth' : 'switch', id })
       if (this.value.currentId !== id) throw new AccountFault('switch-failed')
       this.pending = new Map(this.sessions.filter(s => s.defaultLogin).map(s => [s.sessionId, s.runId]))
+      this.appliedReauthId = repair ? id : undefined
       this.switchedAt = Date.now(); this.cancelQueue()
+      if (this.prefs.renewedIds?.includes(id)) await this.savePrefs({ ...this.prefs, renewedIds: this.prefs.renewedIds.filter(value => value !== id) })
     } finally { if (held) await this.runtime.request('release').catch(() => {}) }
   }
   private schedule() {
