@@ -20,6 +20,7 @@ import { PtyOutputBatcher } from './pty-output-batcher'
 import { resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
+import { independentSessionEnvironment } from './independent-session-environment'
 
 export interface PtySessionOptions {
   sessionId: string
@@ -180,8 +181,10 @@ export class PtySession {
     const integrationEnvironment = profile === 'shell'
       ? await shellIntegrationEnvironment(options.dataRoot, command.file)
       : {}
+    const inheritedEnvironment = { ...process.env }
+    delete inheritedEnvironment.MATOU_AGENT_STATUS_DIR
     const baseEnvironment: NodeJS.ProcessEnv = {
-      ...process.env,
+      ...inheritedEnvironment,
       ...integrationEnvironment,
       ...options.env,
       TERM: 'xterm-256color'
@@ -199,10 +202,13 @@ export class PtySession {
       cols: options.cols,
       rows: options.rows,
       cwd: options.cwd,
-      env: {
+      // Also protect Shell cards: users can start Claude manually inside them.
+      // Sanitize at the final spawn boundary so launch-time overrides cannot
+      // accidentally reintroduce the caller's identity on resume or fork.
+      env: independentSessionEnvironment({
         ...baseEnvironment,
         ...providerCommandEnvironment
-      }
+      })
     })
     return new PtySession(options, journal, terminal)
   }

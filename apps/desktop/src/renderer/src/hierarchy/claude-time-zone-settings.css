@@ -1,0 +1,11 @@
+.claude-time-zone-settings { max-width: 520px; color: var(--workspace-text); }
+.claude-time-zone-settings > label { display: block; margin-top: 18px; font-size: 12px; font-weight: 650; }
+.claude-time-zone-settings p { color: var(--workspace-muted); font-size: 11px; line-height: 1.7; }
+.claude-time-zone-settings select { width: 100%; min-height: 36px; padding: 7px 10px; border: 1px solid var(--workspace-line-strong); border-radius: 7px; color: inherit; background: var(--workspace-panel); font: inherit; font-size: 12px; }
+.claude-time-zone-settings select:focus-visible, .claude-time-zone-settings button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+.claude-time-zone-settings__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+.claude-time-zone-settings button { min-height: 32px; padding: 0 16px; border: 1px solid var(--workspace-accent); border-radius: 7px; background: var(--workspace-accent); color: white; font-size: 11px; cursor: pointer; }
+.claude-time-zone-settings button:disabled { opacity: .5; cursor: default; }
+.claude-time-zone-settings [role="status"] { color: var(--workspace-muted); font-size: 11px; }
+.claude-time-zone-settings [role="alert"] { margin-top: 14px; color: #b34d47; font-size: 11px; }
+.claude-time-zone-settings [role="alert"] button { margin-left: 12px; }

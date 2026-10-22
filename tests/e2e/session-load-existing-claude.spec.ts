@@ -8,6 +8,54 @@ import { launchMatou, restartMatou } from './matou-fixture'
 test.describe('load an existing Claude Code session', () => {
   test.setTimeout(60_000)
 
+  test('loads the selected long conversation through the current resume confirmation and accepts input', async ({}, testInfo) => {
+    let fixture = await launchMatou()
+    const projectsRoot = join(fixture.rootDirectory, 'claude-projects')
+    const projectDirectory = join(projectsRoot, encodeClaudeProjectPath(fixture.workspaceDirectory))
+    const provider = join(fixture.rootDirectory, 'confirmed-resume.py')
+    await mkdir(projectDirectory, { recursive: true })
+    await writeFile(join(projectDirectory, 'long-conversation.jsonl'), JSON.stringify({
+      type: 'user', sessionId: 'long-conversation', cwd: fixture.workspaceDirectory,
+      timestamp: new Date().toISOString(), message: { role: 'user', content: '长会话恢复验证' }
+    }) + '\n')
+    await writeFile(provider, `#!/usr/bin/env python3
+import os, sys, termios, tty
+previous = termios.tcgetattr(0)
+tty.setraw(0)
+sys.stdout.write('Resume this conversation?\\r\\nThis conversation has been inactive for 17h 28m and is 745.7k tokens long.\\r\\n1. Resume\\r\\n2. Start a new conversation\\r\\nEnter to confirm · Esc to resume\\r\\n')
+sys.stdout.flush()
+selected = os.read(0, 1)
+termios.tcsetattr(0, termios.TCSADRAIN, previous)
+if selected != b'\\r': sys.exit(2)
+print('RESUMED:' + sys.argv[sys.argv.index('--resume') + 1], flush=True)
+for line in sys.stdin:
+    print('LOADED_INPUT:' + line.strip(), flush=True)
+`)
+    await chmod(provider, 0o755)
+    try {
+      fixture = await restartMatou(fixture, { env: { MATOU_CLAUDE_PROJECTS_ROOT: projectsRoot, MATOU_CLAUDE_COMMAND: provider } })
+      const card = fixture.page.getByTestId('terminal-pane').first()
+      const sessionId = await card.locator('.terminal-surface').getAttribute('data-session-id')
+      await fixture.page.getByRole('button', { name: /载入 Claude Code 会话到/ }).click()
+      const dialog = fixture.page.getByRole('dialog', { name: '载入 Claude Code 会话' })
+      await dialog.getByRole('button', { name: '预览会话：长会话恢复验证' }).click()
+      await dialog.getByRole('button', { name: '载入到当前卡片' }).click()
+      const confirmation = dialog.getByRole('button', { name: '结束当前运行并载入' })
+      if (await confirmation.isVisible().catch(() => false)) await confirmation.click()
+      await expect(dialog).toHaveCount(0)
+      await expect(card.locator('.xterm-rows')).toContainText('RESUMED:long-conversation')
+      await expect(card.locator('.terminal-surface')).toHaveAttribute('data-session-id', sessionId!)
+      const input = card.locator('.xterm-helper-textarea')
+      await input.focus()
+      await input.pressSequentially('LOAD_INPUT_OK')
+      await input.press('Enter')
+      await expect(card.locator('.xterm-rows')).toContainText('LOADED_INPUT:LOAD_INPUT_OK')
+      await fixture.page.screenshot({ path: testInfo.outputPath('loaded-long-conversation.png') })
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('separates left-side session filtering from right-side conversation search', async () => {
     let fixture = await launchMatou()
     try {

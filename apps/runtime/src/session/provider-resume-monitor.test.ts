@@ -7,6 +7,19 @@ import {
 } from './provider-resume-monitor'
 
 describe('ClaudeFullResumePromptMonitor', () => {
+  it('resumes the current conversation instead of selecting the new-conversation option', () => {
+    const monitor = new ClaudeFullResumePromptMonitor()
+    const prompt = 'Resume this conversation?\r\n' +
+      'This conversation has been inactive for 17h 28m and is 745.7k tokens long.\r\n' +
+      'Resuming it will use about 14% of your 5-hour usage limit.\r\n' +
+      '\u001b[34m❯ 1. Resume\r\n2. Start a new conversation\r\n' +
+      'Claude can look this one up if you refer to it later\r\nEnter to confirm · Esc to resume'
+    const matches = [...prompt].filter((character) => monitor.ingest(character))
+    expect(matches).toHaveLength(1)
+    expect(monitor.selection).toBe('\r')
+    expect(monitor.ingest(prompt)).toBe(false)
+  })
+
   it('requests the full-session choice once when the long-session resume prompt spans chunks', () => {
     const monitor = new ClaudeFullResumePromptMonitor()
 

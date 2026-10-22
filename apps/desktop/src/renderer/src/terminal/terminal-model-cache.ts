@@ -2,6 +2,7 @@ export interface DisposableTerminalModel {
   dispose(): void
   suspend?(): void
   hasVisibleContent?(): boolean
+  isHealthy?(): boolean
 }
 
 /**
@@ -63,11 +64,23 @@ export class ForegroundTerminalModelCache<T extends DisposableTerminalModel> {
     this.#leases.delete(sessionId)
     const model = this.#models.get(sessionId)
     if (!model) return false
+    if (model.isHealthy?.() === false) {
+      this.discard(sessionId, model)
+      return false
+    }
     this.#touch(sessionId)
     this.#prune()
     const retained = this.#models.has(sessionId)
     if (retained) model.suspend?.()
     return retained
+  }
+
+  /** Failed unmounted models must not keep their parser queues in the warm cache. */
+  discard(sessionId: string, expected: T): void {
+    if (this.#models.get(sessionId) !== expected || (this.#leases.get(sessionId) ?? 0) > 0) return
+    this.#models.delete(sessionId)
+    this.#lastUsed.delete(sessionId)
+    expected.dispose()
   }
 
   clear(): void {

@@ -63,7 +63,17 @@ describe('TerminalHud in English', () => {
 
     expect(screen.getByRole('button', { name: 'Permission mode: Default — click to switch' })).toBeTruthy()
     expect(screen.getByText('Opus Plan (1M context)')).toBeTruthy()
-    expect(screen.getByText('Needs input')).toBeTruthy()
+    expect(screen.queryByText('Needs input')).toBeNull()
+  })
+
+  it('omits the task error field in English', () => {
+    render(<LocaleProvider initialLocale="en"><TerminalHud hud={{
+      sessionId: 'session-1', mode: 'agent', modelStrategy: 'opusplan',
+      taskStatus: 'error', startedAt: Date.now()
+    }} /></LocaleProvider>)
+
+    expect(screen.queryByText('Error')).toBeNull()
+    expect(screen.getByText('Opus Plan')).toBeTruthy()
   })
 })
 
@@ -106,3 +116,17 @@ function environmentActions(): SessionEnvironmentActions {
     }))
   }
 }
+
+it('localizes agent states, stale detail and all English duration tiers', async () => {
+  const now = Date.now()
+  render(<LocaleProvider initialLocale="en"><TerminalHud hud={{ sessionId: 'live', mode: 'agent', startedAt: now,
+    agents: [
+      { id: 'a', label: 'One', source: 'external', state: 'running', startedAt: now - 12000 },
+      { id: 'b', label: 'Two', source: 'external', state: 'waiting', startedAt: now - 372000 },
+      { id: 'c', label: 'Three', source: 'external', state: 'warning', startedAt: now - 3660000 },
+      { id: 'd', label: 'Four', source: 'external', state: 'error', detail: '状态已停止更新' }
+    ]
+  }} /></LocaleProvider>)
+  await userEvent.setup().hover(screen.getByText('⚠ 4 Agents'))
+  for (const text of ['Running', 'Waiting', 'Attention', 'Error', '12s', '6m 12s', '1h 01m', 'Status stopped updating']) expect(screen.getByText(text)).toBeTruthy()
+})

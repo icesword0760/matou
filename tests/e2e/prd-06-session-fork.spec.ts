@@ -17,6 +17,78 @@ const evidenceDirectory = resolve(import.meta.dirname, '../../docs/acceptance/ev
 test.describe('PRD 06 session fork', () => {
   test.setTimeout(60_000)
 
+  for (const retryFailedFork of [false, true]) test(`confirms the current Claude resume dialog for ${retryFailedFork ? 'a retried' : 'a new'} fork and after restarting the same branch`, async ({}, testInfo) => {
+    let fixture = await launchMatou()
+    const provider = join(fixture.rootDirectory, 'resume-confirmation.py')
+    const invocationLog = join(fixture.rootDirectory, 'resume-invocations.jsonl')
+    const inputDirectory = join(fixture.rootDirectory, 'provider-inputs')
+    await mkdir(inputDirectory)
+    await writeFile(provider, providerScript())
+    await chmod(provider, 0o755)
+    const environment = {
+      MATOU_CLAUDE_COMMAND: provider, MATOU_PRD06_INVOCATIONS: invocationLog,
+      MATOU_PRD06_INPUT_DIR: inputDirectory, MATOU_PRD06_CONFIRM_RESUME: '1',
+      MATOU_PRD06_FAIL_FIRST_FORK: retryFailedFork ? '1' : '0'
+    }
+    try {
+      fixture = await restartMatou(fixture, { env: environment })
+      const source = visibleSurfaces(fixture.page).first()
+      const sourceId = await requiredAttribute(source, 'data-session-id')
+      await positivePid(source)
+      await expect(source.locator('.xterm-rows')).toContainText('matou_workspace')
+      await terminalCommand(source, 'claude')
+      await expect(source.locator('.xterm-rows')).toContainText('READY:provider-source-e2e')
+      await terminalCommand(source, 'SOURCE_READY')
+      await expect(source.locator('.xterm-rows')).toContainText('REPLY:provider-source-e2e:SOURCE_READY')
+      await openPaneMenu(paneForSession(fixture.page, sourceId))
+      await fixture.page.getByRole('menuitem', { name: '⑂ Fork 会话' }).click()
+      await confirmCurrentWorktreeFork(fixture.page, '恢复确认验证')
+      if (retryFailedFork) {
+        await fixture.page.getByRole('button', { name: '重试创建分支', exact: true }).click()
+      }
+      const expectedProviderId = `provider-fork-e2e-${retryFailedFork ? 2 : 1}`
+      const branch = visibleSurfaces(fixture.page).filter({ hasText: `READY:${expectedProviderId}` })
+      await expect(branch).toHaveCount(1)
+      const branchId = await requiredAttribute(branch, 'data-session-id')
+      await expect(paneForSession(fixture.page, branchId).locator('.fork-progress-overlay')).toHaveCount(0)
+      const branchPid = await positivePid(branch)
+      // A fresh Claude fork has no durable transcript until its first input.
+      // Reattaching the view must keep that process, not resume its new ID.
+      await fixture.page.reload()
+      const reattached = paneForSession(fixture.page, branchId).locator('.terminal-surface')
+      await expect(reattached).toHaveAttribute('data-pid', String(branchPid))
+      expect(await invocationLines(invocationLog)).toHaveLength(retryFailedFork ? 3 : 2)
+      await terminalCommand(reattached, 'FORK_INPUT_OK')
+      await expect(reattached.locator('.xterm-rows')).toContainText(`REPLY:${expectedProviderId}:FORK_INPUT_OK`)
+      expect(await readProviderInput(inputDirectory, 'provider-source-e2e')).not.toContain('FORK_INPUT_OK')
+      fixture = await restartMatou(fixture, { env: environment })
+      const restored = paneForSession(fixture.page, branchId).locator('.terminal-surface')
+      await expect(restored.locator('.xterm-rows')).toContainText(`READY:${expectedProviderId}`)
+      await terminalCommand(restored, 'RESUME_INPUT_OK')
+      await expect(restored.locator('.xterm-rows')).toContainText(`REPLY:${expectedProviderId}:RESUME_INPUT_OK`)
+      const invocations = await invocationLines(invocationLog)
+      expect(invocations.filter(({ args }) => args.includes('--fork-session'))).toHaveLength(retryFailedFork ? 2 : 1)
+      expect(invocations.some(({ args }) => args.includes('--resume') && args.includes(expectedProviderId) && !args.includes('--fork-session'))).toBe(true)
+      await fixture.page.screenshot({ path: testInfo.outputPath('resumed-branch.png') })
+      await writeFile(testInfo.outputPath('resume-proof.json'), JSON.stringify({ branchId, invocations, database: readForkDatabase(join(fixture.dataDirectory, 'matou.sqlite')) }, null, 2))
+    } catch (error) {
+      const db = new DatabaseSync(join(fixture.dataDirectory, 'matou.sqlite'), { readOnly: true })
+      try {
+        await writeFile(testInfo.outputPath('failure-proof.json'), JSON.stringify({
+          invocations: await invocationLines(invocationLog),
+          runs: db.prepare('SELECT * FROM session_runs').all(),
+          intents: db.prepare('SELECT * FROM session_fork_intents').all(),
+          bindings: db.prepare('SELECT * FROM provider_bindings').all(),
+          body: await fixture.page.locator('body').innerText()
+        }, null, 2))
+        await fixture.page.screenshot({ path: testInfo.outputPath('failure.png') })
+      } finally { db.close() }
+      throw error
+    } finally {
+      await fixture.close()
+    }
+  })
+
   test('forks a resumable Claude conversation on its right, isolates every branch, and restores once', async () => {
     let fixture: MatouFixture = await launchMatou()
     const provider = join(fixture.rootDirectory, 'claude-fork-fixture.py')
@@ -223,7 +295,9 @@ test.describe('PRD 06 session fork', () => {
 })
 
 function visibleSurfaces(page: Page): Locator {
-  return page.locator('.scene-stage:not([hidden]) [data-testid="terminal-pane"]:visible .terminal-surface')
+  // Adjacent carousel cards remain mounted and visible. These journeys assert
+  // the selected branch's input surface, not the number of neighboring cards.
+  return page.locator('.scene-stage:not([hidden]) .session-card.is-focused [data-testid="terminal-pane"]:visible .terminal-surface')
 }
 
 function paneForSession(page: Page, sessionId: string): Locator {
@@ -372,7 +446,7 @@ async function menuGeometry(page: Page): Promise<unknown> {
 
 function providerScript(): string {
   return `#!/usr/bin/env python3
-import fcntl, json, os, pathlib, sys, time, urllib.request
+import fcntl, json, os, pathlib, sys, termios, time, tty, urllib.request
 
 args=sys.argv[1:]
 settings=''
@@ -398,9 +472,33 @@ else:
 with open(os.environ['MATOU_PRD06_INVOCATIONS'], 'a') as log:
     log.write(json.dumps({'args': args, 'providerId': provider_id}) + '\\n')
 
+input_path=pathlib.Path(os.environ['MATOU_PRD06_INPUT_DIR']) / (provider_id + '.txt')
+if os.environ.get('MATOU_PRD06_CONFIRM_RESUME') == '1' and resume.startswith('provider-fork-e2e-') and not fork and not input_path.exists():
+    print('No conversation found with session ID: ' + resume, flush=True)
+    sys.exit(1)
+
+if fork and provider_id == 'provider-fork-e2e-1' and os.environ.get('MATOU_PRD06_FAIL_FIRST_FORK') == '1':
+    print('Fork fixture stopped before identity confirmation', flush=True)
+    sys.exit(7)
+
 if fork and os.environ.get('MATOU_PRD06_FAIL_FORK') == '1':
     print('No session found for requested id', flush=True)
     while True: time.sleep(1)
+
+if resume and os.environ.get('MATOU_PRD06_CONFIRM_RESUME') == '1':
+    previous = termios.tcgetattr(0)
+    tty.setraw(0)
+    sys.stdout.write('Resume this conversation?\\r\\n'
+        'This conversation has been inactive for 17h 28m and is 745.7k tokens long.\\r\\n'
+        'Resuming it will use about 14% of your 5-hour usage limit.\\r\\n'
+        '1. Resume\\r\\n2. Start a new conversation\\r\\n'
+        'Enter to confirm · Esc to resume\\r\\n')
+    sys.stdout.flush()
+    selected = os.read(0, 1)
+    termios.tcsetattr(0, termios.TCSADRAIN, previous)
+    if selected != b'\\r':
+        print('WRONG_RESUME_CHOICE', flush=True)
+        sys.exit(2)
 
 settings_data=json.load(open(settings))
 url=settings_data['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
@@ -415,7 +513,6 @@ print('READY:' + provider_id, flush=True)
 # first usable screen, not through an HTTP SessionStart hook. Reproduce that
 # ordering so READY means the same thing in deterministic and real-provider gates.
 post({'session_id':provider_id,'cwd':os.getcwd()})
-input_path=pathlib.Path(os.environ['MATOU_PRD06_INPUT_DIR']) / (provider_id + '.txt')
 for line in sys.stdin:
     value=line.rstrip('\\r\\n')
     hook('UserPromptSubmit')

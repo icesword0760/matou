@@ -88,6 +88,7 @@ export interface HudConfigCounts {
   hookNames?: string[]
 }
 export interface SessionHudView {
+  agents?: import('@matou/contracts').HudAgentActivity[]
   sessionId: string
   mode: 'shell' | 'agent'
   shell?: string

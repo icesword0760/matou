@@ -85,7 +85,7 @@ export class ForkOperationCoordinator {
   readonly #leaseTtlMs: number
   readonly #identityTimeoutMs: number
   readonly #running = new Map<string, Promise<void>>()
-  readonly #waitingForIdentity = new Map<string, number>()
+  readonly #waitingForIdentity = new Map<string, { deadline: number; attempt: number }>()
   readonly #notifiedTerminal = new Set<string>()
   readonly #terminalNotificationInFlight = new Set<string>()
   readonly #leases = new Map<string, ActiveLease>()
@@ -238,7 +238,9 @@ export class ForkOperationCoordinator {
           lease: active.lease
         })
         if (started && started.kind !== 'started') return
-        this.#waitingForIdentity.set(operationId, this.#now() + this.#identityTimeoutMs)
+        this.#waitingForIdentity.set(operationId, {
+          deadline: this.#now() + this.#identityTimeoutMs, attempt: current.progress.attempt
+        })
       }
       if (current.progress.stage === 'starting-window') {
         this.#assertLease(operationId, active)
@@ -257,7 +259,9 @@ export class ForkOperationCoordinator {
           lease: active.lease
         })
         if (started && started.kind !== 'started') return
-        this.#waitingForIdentity.set(operationId, this.#now() + this.#identityTimeoutMs)
+        this.#waitingForIdentity.set(operationId, {
+          deadline: this.#now() + this.#identityTimeoutMs, attempt: current.progress.attempt
+        })
       }
     } catch (error) {
       if (error instanceof ForkKillPointCrash) return
@@ -276,8 +280,15 @@ export class ForkOperationCoordinator {
   }
 
   async #settleWaitingOperations(): Promise<void> {
-    for (const [operationId, deadline] of [...this.#waitingForIdentity]) {
+    for (const [operationId, waiting] of [...this.#waitingForIdentity]) {
       const operation = this.#intents.operationById(operationId)
+      // A user can retry before the next coordinator scan observes the failed
+      // attempt. Its old identity wait and lease must not block the new launch.
+      if (operation && operation.progress.attempt !== waiting.attempt) {
+        this.#waitingForIdentity.delete(operationId)
+        this.#releaseLease(operationId)
+        continue
+      }
       if (!operation || operation.progress.stage === 'failed') {
         if (operation) await this.#notifyTerminalOnce(operation, 'failed', operation.progress.error)
         this.#waitingForIdentity.delete(operationId)
@@ -290,7 +301,7 @@ export class ForkOperationCoordinator {
         this.#releaseLease(operationId)
         continue
       }
-      if (this.#now() >= deadline) {
+      if (this.#now() >= waiting.deadline) {
         const active = this.#leases.get(operationId)
         if (active && !active.stale) {
           const reason = runtimeMessages().sessionCanvas.fork.identityTimeout

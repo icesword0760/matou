@@ -75,6 +75,34 @@
 
 @keyframes fork-progress-spin { to { transform: rotate(360deg); } }
 
+/* Provider startup may ask the user to confirm a resume or sign in. Keep its
+   terminal operable while the authoritative identity hook is still pending. */
+.fork-progress-overlay.fork-progress-overlay--interactive {
+  inset: auto 12px 12px auto;
+  display: block;
+  padding: 0;
+  pointer-events: none;
+  background: transparent;
+  backdrop-filter: none;
+}
+
+.fork-progress-overlay--interactive .fork-progress-overlay__content {
+  width: auto;
+  max-width: 260px;
+  padding: 8px 12px;
+  flex-direction: row;
+  font-size: 11px;
+}
+
+.fork-progress-overlay--interactive .fork-progress-overlay__spinner {
+  width: 12px;
+  height: 12px;
+}
+
+.fork-progress-overlay--interactive p,
+.fork-progress-overlay--interactive small,
+.fork-progress-overlay--interactive .fork-progress-overlay__bar { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .fork-progress-overlay__spinner { animation: none; }
   .fork-progress-overlay__bar > span { transition: none; }

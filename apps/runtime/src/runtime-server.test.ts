@@ -310,6 +310,40 @@ describe('RuntimeServer host navigation registration', () => {
 })
 
 describe('RuntimeServer domain RPC', () => {
+  it('applies saved time zones to actual Claude launches without changing live sessions, Shell or Codex', async () => {
+    const executable = join(root, 'time-zone-probe.sh')
+    const capture = join(root, 'time-zones.txt')
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$TZ" >> '${capture}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previous = Object.fromEntries(['TZ', 'SHELL', 'MATOU_CLAUDE_COMMAND', 'MATOU_CODEX_COMMAND'].map(key => [key, process.env[key]]))
+    process.env.TZ = 'Asia/Tokyo'
+    process.env.SHELL = executable
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.MATOU_CODEX_COMMAND = executable
+    const settings = new RuntimeRpcRouter(database)
+    try {
+      await settings.handle('claude-settings.set', { timeZone: 'UTC' })
+      const expected: string[] = []
+      for (const [index, profile, zone] of [
+        [0, 'claude-code', 'UTC'], [1, 'shell', 'Asia/Tokyo'],
+        [2, 'codex', 'Asia/Tokyo'], [3, 'claude-code', 'America/Los_Angeles'],
+        [4, 'claude-code', 'Asia/Tokyo']
+      ] as const) {
+        if (index === 3) await settings.handle('claude-settings.set', { timeZone: zone })
+        if (index === 4) await settings.handle('claude-settings.set', { timeZone: 'system' })
+        const sessionId = `time-zone-${index}`
+        registerSession(database, sessionId, profile)
+        port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context', profile, cols: 80, rows: 24 })
+        expected.push(zone)
+        await expect.poll(async () => (await readFile(capture, 'utf8').catch(() => '')).trim().split('\n')).toEqual(expected)
+      }
+      expect(process.env.TZ).toBe('Asia/Tokyo')
+    } finally {
+      for (const [key, value] of Object.entries(previous)) restoreEnv(key, value)
+    }
+  })
+
   it('retires a removed Session across backend, token, HUD, and queued recovery state', async () => {
     server.close()
     const executable = join(root, 'structure-removal-shell.sh')
@@ -721,12 +755,14 @@ sleep 30
         const token = environment.MATOU_CONTROL_TOKEN!
         const runId = environment.MATOU_CONTROL_CALLER_RUN!
         expect(environment).toMatchObject({
+          MATOU_AGENT_STATUS_DIR: join(root, 'agent-status', sessionId),
           MATOU_CONTROL_ENDPOINT: join(root, 'control.sock'),
           MATOU_CONTROL_PROTOCOL: '1',
           MATOU_CONTROL_CALLER_SESSION: sessionId,
           MATOU_CONTROL_ASSET_ROOT: controlAssetRoot,
           MATOU_CONTROL_NODE_EXECUTABLE: '/Applications/Matou'
         })
+        expect((await stat(environment.MATOU_AGENT_STATUS_DIR!)).isDirectory()).toBe(true)
         expect(environment.PATH?.split(':')[0]).toBe(join(controlAssetRoot, 'bin'))
         expect(runId).toBeTruthy()
         issuedCapabilities.push({ token, runId })
@@ -916,6 +952,7 @@ sleep 30
     }))
     const oldHistory: ProviderTranscriptHudSnapshot = {
       sessionName: 'Old in-flight title', model: 'claude-atomic-a', subagentCount: 4,
+      agents: ['old-a', 'old-b', 'old-c', 'old-d'].map(id => ({ id, label: id, source: 'claude', state: 'running' })),
       subagents: ['old-a', 'old-b', 'old-c', 'old-d'],
       runningTools: [{ name: 'Read', target: '/old/run.ts' }],
       toolCounts: [{ name: 'Read', count: 9 }],
@@ -925,6 +962,7 @@ sleep 30
     }
     const newHistory: ProviderTranscriptHudSnapshot = {
       sessionName: 'New current-run title', model: 'claude-atomic-b', subagentCount: 1,
+      agents: [{ id: 'new-a', label: 'new-a', source: 'claude', state: 'running' }],
       subagents: ['new-a'],
       runningTools: [{ name: 'Write', target: '/new/run.ts' }],
       toolCounts: [{ name: 'Write', count: 2 }],
@@ -939,6 +977,7 @@ sleep 30
       releaseOldTranscript = resolve
     })
     const transcriptReader = {
+      cached: () => undefined,
       read: vi.fn((path: string) => {
         if (path === oldTranscriptPath) {
           markOldReadStarted()
@@ -3557,6 +3596,35 @@ sleep 30
     expect(database.get('SELECT status FROM session_runs WHERE id = ?', running!.id)).toEqual({
       status: 'exited'
     })
+  })
+
+  it('creates the agent status directory before PTY launch without control and preserves it on reattachment and restart', async () => {
+    registerCanvasSession(database, 'external-status-session')
+    const directory = join(root, 'agent-status', 'external-status-session')
+    const spawn = {
+      type: 'terminal.spawn' as const, protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'external-status-session', executionContextId: 'replay-context',
+      profile: 'shell' as const, cols: 80, rows: 24
+    }
+    port.receive(spawn)
+    await waitUntil(() => port.last('terminal.spawned') !== undefined)
+    port.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: spawn.sessionId,
+      data: 'test -d "$MATOU_AGENT_STATUS_DIR" && printf "%s" "$MATOU_AGENT_STATUS_DIR" > "$MATOU_AGENT_STATUS_DIR/observed.txt"\r'
+    })
+    await waitUntilAsync(async () => (await readFile(join(directory, 'observed.txt'), 'utf8').catch(() => '')) === directory, 10_000)
+    await writeFile(join(directory, 'task.json'), '{"version":1}')
+    port.receive({ type: 'terminal.view-detach', protocolVersion: PROTOCOL_VERSION, sessionId: spawn.sessionId })
+    port.receive(spawn)
+    await settle()
+    expect(await readFile(join(directory, 'task.json'), 'utf8')).toBe('{"version":1}')
+    const previousPid = port.last('terminal.spawned')?.pid
+    port.receive({ ...spawn, spawnRevision: 1 })
+    await waitUntil(() => port.last('terminal.spawned')?.pid !== previousPid)
+    expect(await readFile(join(directory, 'task.json'), 'utf8')).toBe('{"version":1}')
+    port.receive({ type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION, sessionId: spawn.sessionId })
+    await waitUntilAsync(async () => !(await stat(directory).catch(() => undefined)))
   })
 
   it('persists an attached terminal interaction marker before its input is processed', async () => {
@@ -6329,7 +6397,9 @@ sleep 30
       expect(frames.every((frame, index) => index === 0 || frame.sequence > frames[index - 1]!.sequence))
         .toBe(true)
       await waitUntil(() => terminalText(firstPort).includes('AFTER_PROMOTION'))
-      expect((await readFile(sizeFile, 'utf8')).trim()).toBe('43 132')
+      // The PTY can echo input before the replacement process writes its size.
+      await expect.poll(async () => (await readFile(sizeFile, 'utf8').catch(() => '')).trim())
+        .toBe('43 132')
       expect(firstPort.sent.filter(({ type }) => type === 'protocol.error')).toHaveLength(0)
     } finally {
       firstPort.receive({
@@ -6652,21 +6722,26 @@ sleep 30
     }
   })
 
-  it('selects full-session resume for an idle provider session restored by the renderer', async () => {
+  it.each(['legacy', 'current', 'fork'] as const)('selects the requested conversation at the %s resume prompt', async (variant) => {
     const executable = join(root, 'full-session-resume-fixture.py')
     const inputMarker = join(root, 'full-session-resume-input.txt')
     await writeFile(inputMarker, '')
     await writeFile(executable, [
       '#!/usr/bin/python3',
       'import os, sys, time, tty',
+      'tty.setraw(0)',
+      ...(variant === 'legacy' ? [
       'sys.stdout.write("This session is 21h 34m old and 806.9k tokens.\\r\\n")',
       'sys.stdout.write("Resuming the full session will consume a substantial portion of your usage limits.\\r\\n")',
       'sys.stdout.write("1. Resume from summary (recommended)\\r\\n")',
       'sys.stdout.write("2. Resume full session as-is\\r\\n")',
       'sys.stdout.write("3. Don\\\'t ask me again\\r\\n")',
       'sys.stdout.write("Enter to confirm · Esc to cancel\\r\\n")',
+      ] : [
+        'sys.stdout.write("Resume this conversation?\\r\\nThis conversation has been inactive for 17h 28m and is 745.7k tokens long.\\r\\n")',
+        'sys.stdout.write("1. Resume\\r\\n2. Start a new conversation\\r\\nEnter to confirm · Esc to resume\\r\\n")'
+      ]),
       'sys.stdout.flush()',
-      'tty.setraw(0)',
       'data = os.read(0, 4)',
       'with open(os.environ["MATOU_TEST_FULL_RESUME_INPUT"], "w") as marker:',
       '    marker.write(data.hex())',
@@ -6688,7 +6763,13 @@ sleep 30
     )
     try {
       registerSession(database, 'full-session-resume', 'claude-code')
-      database.run(
+      if (variant === 'fork') {
+        registerSession(database, 'resume-source', 'claude-code')
+        database.run(
+          `INSERT INTO session_fork_intents (session_id, source_session_id, source_provider, source_provider_session_id, state, created_at)
+           VALUES ('full-session-resume', 'resume-source', 'claude-code', 'provider-source', 'pending', 1)`
+        )
+      } else database.run(
         `INSERT INTO provider_bindings (
            id, session_id, provider, provider_session_id, resume_state, metadata_json,
            created_at, updated_at, validated_at
@@ -6704,9 +6785,10 @@ sleep 30
         sessionId: 'full-session-resume', executionContextId: 'replay-context',
         profile: 'claude-code', cols: 80, rows: 24
       })
-      await waitUntilAsync(async () => (await readFile(inputMarker, 'utf8')) === '1b5b420d')
+      const expectedInput = variant === 'legacy' ? '1b5b420d' : '0d'
+      await waitUntilAsync(async () => (await readFile(inputMarker, 'utf8')) === expectedInput)
 
-      expect(await readFile(inputMarker, 'utf8')).toBe('1b5b420d')
+      expect(await readFile(inputMarker, 'utf8')).toBe(expectedInput)
     } finally {
       recoveryServer.close()
       restoreEnv('MATOU_CLAUDE_COMMAND', previousCommand)
@@ -7575,3 +7657,42 @@ async function childProcessCwd(pid: number): Promise<string> {
   const { stdout } = await execFileAsync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'])
   return stdout.split('\n').find((line) => line.startsWith('n'))?.slice(1) ?? ''
 }
+
+it('starts the PTY without a status variable when directory creation fails', async () => {
+  registerCanvasSession(database, 'status-create-failure')
+  const executable = join(root, 'status-env.sh')
+  const output = join(root, 'status-env.txt')
+  await writeFile(executable, `#!/bin/sh
+/usr/bin/env > '${output}'
+sleep 30
+`)
+  await chmod(executable, 0o755)
+  const previousShell = process.env.SHELL
+  const previousStatus = process.env.MATOU_AGENT_STATUS_DIR
+  process.env.SHELL = executable
+  process.env.MATOU_AGENT_STATUS_DIR = '/inherited/status'
+  await writeFile(join(root, 'agent-status'), 'occupied')
+  try {
+    port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'status-create-failure', executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24 })
+    await waitUntilAsync(async () => Boolean(await stat(output).catch(() => undefined)))
+    expect(await readFile(output, 'utf8')).not.toContain('MATOU_AGENT_STATUS_DIR=')
+    expect(port.last('terminal.spawned')).toBeDefined()
+  } finally {
+    if (previousShell === undefined) delete process.env.SHELL; else process.env.SHELL = previousShell
+    if (previousStatus === undefined) delete process.env.MATOU_AGENT_STATUS_DIR; else process.env.MATOU_AGENT_STATUS_DIR = previousStatus
+  }
+})
+
+it('continues structural disposal when status directory deletion fails', async () => {
+  registerCanvasSession(database, 'status-delete-failure')
+  port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION, sessionId: 'status-delete-failure', executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24 })
+  await waitUntil(() => port.last('terminal.spawned') !== undefined)
+  const directory = join(root, 'agent-status', 'status-delete-failure')
+  await writeFile(join(directory, 'status.json'), '{}')
+  await chmod(directory, 0o500)
+  try {
+    await expect(server.disposeSessions(['status-delete-failure'])).resolves.toBeUndefined()
+    expect(await readFile(join(directory, 'status.json'), 'utf8')).toBe('{}')
+    expect([...testSessionRegistries].some(registry => registry.has('status-delete-failure'))).toBe(false)
+  } finally { await chmod(directory, 0o700) }
+})

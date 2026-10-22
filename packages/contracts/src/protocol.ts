@@ -215,6 +215,8 @@ export const RPC_METHODS = [
   'provider-config.upsert',
   'provider-config.delete',
   'provider-config.activate',
+  'claude-settings.get',
+  'claude-settings.set',
   'workspace.create',
   'workspace.update',
   'workspace.archive',

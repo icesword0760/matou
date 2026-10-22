@@ -1177,3 +1177,39 @@ html[data-theme="light"] .git-worktree-menu { box-shadow: 0 10px 26px rgba(23,28
   .workspace-board,.model-settings,.board-feedback,.model-settings__toast,.provider-dialog,.provider-dialog-layer { animation-duration: 1ms; }
   .board-task-card { transition-duration: 1ms; }
 }
+
+/* Live Agents reuse the HUD detail shell and scrolling limits. */
+.status-detail.status-agents-error { color: #f47067; }
+.status-detail.status-agents-warning { color: #d29922; }
+.hud-agents-tooltip { max-width: 360px; }
+.hud-agents-tooltip .hud-agent-list { gap: 6px; }
+.hud-agent { position: relative; display: grid; grid-template-columns: 8px minmax(0,1fr) auto; column-gap: 6px; align-items: center; }
+.hud-agent-dot { width: 6px; height: 6px; box-sizing: border-box; border-radius: 50%; background: #4c8dff; }
+.hud-agent-dot.state-waiting { border: 1px solid #8b949e; background: transparent; }
+.hud-agent-dot.state-warning { background: #d29922; }
+.hud-agent-dot.state-error { background: #f47067; }
+.hud-agent-label { min-width: 0; overflow: hidden; color: #f0f3f6; text-overflow: ellipsis; white-space: nowrap; }
+.hud-agent-duration { color: #8b949e; text-align: right; font-variant-numeric: tabular-nums; }
+.hud-agent-detail { grid-column: 2 / -1; min-width: 0; overflow: hidden; color: #8b949e; text-overflow: ellipsis; white-space: nowrap; }
+.hud-agent.state-error .hud-agent-detail { color: #f47067; }
+.hud-agent-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+html[data-theme="light"] .status-detail.status-agents-error,
+body.light-theme .status-detail.status-agents-error,
+html[data-theme="light"] .hud-agent.state-error .hud-agent-detail,
+body.light-theme .hud-agent.state-error .hud-agent-detail { color: #cf222e; }
+html[data-theme="light"] .status-detail.status-agents-warning,
+body.light-theme .status-detail.status-agents-warning { color: #9a6700; }
+html[data-theme="light"] .hud-agent-label,
+body.light-theme .hud-agent-label { color: #24292f; }
+html[data-theme="light"] .hud-agent-duration,
+body.light-theme .hud-agent-duration,
+html[data-theme="light"] .hud-agent-detail,
+body.light-theme .hud-agent-detail { color: #57606a; }
+html[data-theme="light"] .hud-agent-dot.state-running,
+body.light-theme .hud-agent-dot.state-running { background: #0969da; }
+html[data-theme="light"] .hud-agent-dot.state-waiting,
+body.light-theme .hud-agent-dot.state-waiting { border-color: #57606a; }
+html[data-theme="light"] .hud-agent-dot.state-warning,
+body.light-theme .hud-agent-dot.state-warning { background: #9a6700; }
+html[data-theme="light"] .hud-agent-dot.state-error,
+body.light-theme .hud-agent-dot.state-error { background: #cf222e; }

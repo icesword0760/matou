@@ -1,6 +1,7 @@
+import type { HudAgentActivity } from '@matou/contracts'
 import { useAccountUsage } from '../claude-accounts/use-account-usage'
 import { ClaudeAccountsControl } from '../claude-accounts/ClaudeAccountsControl'
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type ReactNode, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
@@ -45,7 +46,7 @@ export function TerminalHud(props: {
     accountState?.detected
   const useDeviceQuota = hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
   const deviceWindows = account?.needsLogin ? [] : ([['5h', account?.usage?.fiveHour], ['Weekly', account?.usage?.weekly]] as const)
-    .flatMap(([label, value]) => value ? [{ label, percent: Math.round(value.used), resetsAt: Date.parse(value.resetsAt) }] : [])
+    .flatMap(([label, value]) => value && Number.isFinite(value.used) ? [{ label, percent: Math.round(value.used), resetsAt: Date.parse(value.resetsAt) }] : [])
   const zh = useLocale() === 'zh-CN'
   const quotaAccount = `${zh ? '默认账户' : 'Default account'}: ${account?.name ?? '—'}`
   const quotaProblem = account?.needsLogin ? (zh ? '登录已失效' : 'Sign-in expired') :
@@ -53,6 +54,11 @@ export function TerminalHud(props: {
     account?.usageIssue === 'unsupported' ? (zh ? '暂无用量数据' : 'Usage unavailable') :
     accountState?.usageRefreshFailed || account?.usageIssue ? (zh ? '读取失败，保留上次数据' : 'Read failed; last known usage') :
     account?.usage?.stale ? (zh ? '上次记录，使用后更新' : 'Last known; updates after use') : ''
+  const usageWindows = (useDeviceQuota ? deviceWindows : hud?.usageWindows ?? [])
+    .filter(window => Number.isFinite(window.percent))
+  const quotaEmpty = quotaProblem || (!accountState ? (zh ? '正在读取用量' : 'Loading usage') :
+    accountState.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') :
+      (zh ? '使用后更新用量' : 'Usage updates after use'))
   const contextClient = useRuntimeClient()
   const gitClient = props.runtimeClient ?? contextClient
   const disabled = Boolean(props.disabledReason)
@@ -99,6 +105,7 @@ export function TerminalHud(props: {
 
   const sessionId = hud?.sessionId ?? props.sessionId
   if (!sessionId || (!hud && !props.environment && !props.git)) return null
+  const agents = hud ? agentDisplay(hud) : { count: 0, items: [] }
   const shortCwd = cwdShortName(hud?.cwd)
   const git = hud
     ? legacyGitState(hud)
@@ -137,19 +144,23 @@ export function TerminalHud(props: {
         items={(hud.configCounts.mcpServerNames ?? []).map((name) => name)} />}
       {toolTotal(hud) > 0 && <HudDetail label={`${toolTotal(hud)} Tools`} title={m.toolCalls}
         items={toolDetails(hud, m)} />}
-      {(hud.subagentCount ?? 0) > 0 && <HudDetail label={`${hud.subagentCount} Agents`} title={m.subagents}
-        items={hud.subagents ?? []} />}
+      {agents.count > 0 && <HudDetail
+        label={`${agents.items.some(a => a.state === 'error' || a.state === 'warning') ? '⚠ ' : ''}${agents.count} Agents`}
+        title={m.subagents} items={[]}
+        className={agents.items.some(a => a.state === 'error') ? 'status-agents-error' : agents.items.some(a => a.state === 'warning') ? 'status-agents-warning' : ''}
+        tooltipClassName="hud-agents-tooltip">
+        <AgentDetails agents={agents.items} />
+      </HudDetail>}
       {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {useDeviceQuota && deviceWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status" title={quotaAccount}>{quotaProblem || (accountState?.operation === 'idle' && !account ? (zh ? '添加账户后查看用量' : 'Add an account to view usage') : (zh ? '使用后更新用量' : 'Usage updates after use'))}</span>}
-      {(useDeviceQuota ? deviceWindows : hud.usageWindows ?? []).map((window, index) => <span
+      {usageWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status"
+        title={useDeviceQuota ? `${quotaAccount} · ${quotaEmpty}` : (zh ? '暂无用量数据' : 'Usage unavailable')}>—</span>}
+      {usageWindows.map((window, index) => <span
         className="status-field status-usage status-priority-6"
-        title={useDeviceQuota ? `${quotaAccount} · ${usageTitle(window)}${quotaProblem ? ` · ${quotaProblem}` : ''}` : usageTitle(window)} key={`${window.label}:${index}`}>
-        {window.label} <strong>{window.percent}%</strong>{formatReset(window.resetsAt) && <small> · {window.resetsAt && window.resetsAt <= Date.now() ? (zh ? '待更新' : 'Pending') : formatReset(window.resetsAt)}</small>}
+        title={`${useDeviceQuota ? `${quotaAccount} · ` : ''}${usageTitle(window, zh)}${useDeviceQuota && quotaProblem ? ` · ${quotaProblem}` : ''}`} key={`${window.label}:${index}`}>
+        {window.label} <strong>{window.percent}%</strong><small> · {formatReset(window.resetsAt)}</small>
       </span>)}
-      {useDeviceQuota && deviceWindows.length > 0 && quotaProblem && <span className="status-field status-priority-6" title={`${quotaAccount} · ${quotaProblem}`}>{zh ? '上次数据' : 'Last known'}</span>}
-      {hasTaskStatusLabel(hud.taskStatus) && <span className="status-field status-priority-6">{taskStatusLabel(hud.taskStatus, m)}</span>}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
@@ -245,7 +256,7 @@ function EnvironmentButton(props: {
     </svg> : label}</button>
 }
 
-function HudDetail(props: { label: string; title: string; items: string[] }) {
+function HudDetail(props: { label: string; title: string; items: string[]; children?: ReactNode; className?: string; tooltipClassName?: string }) {
   const m = useMessages().hud
   const [open, setOpen] = useState(false)
   const [style, setStyle] = useState<CSSProperties>({})
@@ -266,15 +277,15 @@ function HudDetail(props: { label: string; title: string; items: string[] }) {
     setOpen(true)
   }
   return <>
-    <span className="status-field status-detail status-config" role="button" tabIndex={0}
+    <span className={`status-field status-detail status-config ${props.className ?? ''}`} role="button" tabIndex={0}
       aria-label={m.detailList(props.title)}
       onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={scheduleClose}
       onFocus={(event) => show(event.currentTarget)} onBlur={scheduleClose}>{props.label}</span>
-    {open && createPortal(<div className="hud-detail-tooltip" role="tooltip" style={style}
+    {open && createPortal(<div className={`hud-detail-tooltip ${props.tooltipClassName ?? ''}`} role="tooltip" style={style}
       onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
       <strong>{props.title}</strong>
-      <ul>{(props.items.length > 0 ? props.items : [m.detailPending]).map((item, index) =>
-        <li key={`${item}:${index}`}>{item}</li>)}</ul>
+      {props.children ?? <ul>{(props.items.length > 0 ? props.items : [m.detailPending]).map((item, index) =>
+        <li key={`${item}:${index}`}>{item}</li>)}</ul>}
     </div>, document.body)}
   </>
 }
@@ -407,7 +418,13 @@ function formatContextWindow(size: number | undefined): string {
   return String(Math.round(size))
 }
 function formatReset(resetsAt: number | undefined): string {
-  if (!resetsAt) return ''
+  if (!resetsAt || !Number.isFinite(resetsAt)) return '—'
+  if (resetsAt <= Date.now()) {
+    const date = new Date(resetsAt)
+    const pad = (value: number) => String(value).padStart(2, '0')
+    const year = date.getFullYear() === new Date().getFullYear() ? '' : `${date.getFullYear()}/`
+    return `${year}${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  }
   const minutes = Math.max(0, Math.ceil((resetsAt - Date.now()) / 60_000))
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
@@ -415,10 +432,14 @@ function formatReset(resetsAt: number | undefined): string {
   const days = Math.floor(hours / 24)
   return `${days}d${hours % 24 ? `${hours % 24}h` : ''}`
 }
-function usageTitle(window: NonNullable<SessionHudView['usageWindows']>[number]): string {
-  const reset = formatReset(window.resetsAt)
-  return `${window.label} usage: ${window.percent}%${reset ? ` · resets in ${reset}` : ''}`
+function usageTitle(window: NonNullable<SessionHudView['usageWindows']>[number], zh: boolean): string {
+  const validReset = Boolean(window.resetsAt && Number.isFinite(window.resetsAt))
+  const reset = !validReset ? (zh ? '暂无重置时间' : 'Reset time unavailable') :
+    window.resetsAt! <= Date.now() ? `${zh ? '上次记录的重置时间' : 'Last recorded reset'}: ${formatReset(window.resetsAt)} · ${zh ? '已到重置时间，使用后更新' : 'Reset time reached; updates after use'}` :
+      `${zh ? '距离重置' : 'resets in'} ${formatReset(window.resetsAt)}`
+  return `${window.label} usage: ${window.percent}% · ${reset}`
 }
+
 function toolTotal(hud: SessionHudView): number {
   return (hud.runningTools?.length ?? 0) +
     (hud.toolCounts ?? []).reduce((total, tool) => total + tool.count, 0)
@@ -428,14 +449,6 @@ function toolDetails(hud: SessionHudView, m: HudMessages): string[] {
     ...(hud.runningTools ?? []).map(({ name, target }) => m.toolRunning(name, target)),
     ...(hud.toolCounts ?? []).map(({ name, count }) => m.toolCallCount(name, count))
   ]
-}
-function hasTaskStatusLabel(status: SessionHudView['taskStatus']): boolean {
-  return status === 'needs-input' || status === 'error'
-}
-function taskStatusLabel(status: SessionHudView['taskStatus'], m: HudMessages): string {
-  if (status === 'needs-input') return m.taskStatus['needs-input']
-  if (status === 'error') return m.taskStatus.error
-  return ''
 }
 function teamTone(status: SessionHudView['teamStatus']): string {
   if (status === 'running') return 'running'
@@ -457,12 +470,46 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
     : null
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
-  return Boolean(hud.modelStrategy || hud.contextPercent !== undefined || hasTaskStatusLabel(hud.taskStatus) ||
+  return Boolean(hud.modelStrategy || hud.contextPercent !== undefined ||
     (hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || (hud.mcpErrors?.length ?? 0) > 0 ||
-    (hud.subagentCount ?? 0) > 0 || hud.teamRole || todoDisplay(hud))
+    agentDisplay(hud).count > 0 || hud.teamRole || todoDisplay(hud))
 }
 
 function bypassCopy(target: HudPermissionMode, resumable: boolean, m: HudMessages): string {
   if (!resumable) return m.bypassNotResumable
   return target === 'bypassPermissions' ? m.bypassEnterBody : m.bypassExitBody
+}
+
+function agentDisplay(hud: SessionHudView): { count: number; items: HudAgentActivity[] } {
+  if (hud.agents !== undefined) return { count: hud.agents.length, items: hud.agents }
+  const items: HudAgentActivity[] = (hud.subagents ?? []).map((label, index) => ({
+    id: `legacy:${index}`, label, source: 'claude', state: 'running'
+  }))
+  return { count: hud.subagentCount ?? items.length, items }
+}
+
+function AgentDetails({ agents }: { agents: HudAgentActivity[] }) {
+  const m = useMessages().hud
+  const zh = useLocale() === 'zh-CN'
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  return <ul className="hud-agent-list">{agents.map(agent => <li className={`hud-agent state-${agent.state}`} key={agent.id}>
+    <span className={`hud-agent-dot state-${agent.state}`} aria-hidden="true" />
+    <span className="hud-agent-label">{agent.label}</span>
+    <span className="hud-agent-duration">{agent.startedAt === undefined ? '' : agentDuration(now - agent.startedAt, zh)}</span>
+    <span className="hud-agent-sr-only">{m.agentState[agent.state]}</span>
+    {agent.detail && <span className="hud-agent-detail">{agent.detail === '状态已停止更新' ? m.agentStale : agent.detail}</span>}
+  </li>)}</ul>
+}
+
+function agentDuration(milliseconds: number, zh: boolean): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000))
+  if (seconds < 60) return `${seconds}${zh ? '秒' : 's'}`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return zh ? `${minutes}分${seconds % 60}秒` : `${minutes}m ${seconds % 60}s`
+  const remainder = String(minutes % 60).padStart(2, '0')
+  return zh ? `${Math.floor(minutes / 60)}时${remainder}分` : `${Math.floor(minutes / 60)}h ${remainder}m`
 }

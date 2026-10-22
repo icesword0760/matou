@@ -1,6 +1,6 @@
 {
   "mode": "shell",
-  "text": "zsh~/matou_workspacehud-main*",
+  "text": "zsh~/matou_workspacehud-main*Claude 账户⌃",
   "fields": [
     {
       "className": "status-field",
@@ -17,6 +17,10 @@
     {
       "className": "status-field status-environment is-clickable state-ready is-local-icon",
       "text": ""
+    },
+    {
+      "className": "status-field ca-trigger ",
+      "text": "Claude 账户⌃"
     }
   ],
   "bar": {

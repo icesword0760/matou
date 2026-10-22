@@ -2,6 +2,7 @@ import { chmod, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
+import { MessageChannel } from 'node:worker_threads'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -25,6 +26,33 @@ afterEach(async () => {
 })
 
 describe('SegmentJournal', () => {
+  it('sends only each replay payload across IPC instead of cloning the journal read buffer', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'matou-journal-ipc-'))
+    temporaryDirectories.push(directory)
+    const journal = await SegmentJournal.open(directory, 'session-ipc')
+    const payload = new Uint8Array(59).fill(65)
+    for (let sequence = 1; sequence <= 32; sequence += 1) await journal.appendOutput(sequence, payload)
+    await journal.close()
+    const frames = (await readSegmentFrames(journal.path)).filter((frame) => frame.kind === 'output')
+    const { port1, port2 } = new MessageChannel()
+    try {
+      const received: Uint8Array[] = []
+      await new Promise<void>((resolve) => {
+        port2.on('message', (data: Uint8Array) => {
+          received.push(data)
+          if (received.length === frames.length) resolve()
+        })
+        for (const frame of frames) port1.postMessage(frame.data)
+      })
+      expect(received).toHaveLength(32)
+      expect(received.every((data) => Buffer.from(data).equals(Buffer.from(payload)))).toBe(true)
+      expect(received.reduce((sum, data) => sum + data.buffer.byteLength, 0)).toBe(32 * 59)
+    } finally {
+      port1.close()
+      port2.close()
+    }
+  })
+
   it('replays output and exit frames in append order', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'matou-journal-'))
     temporaryDirectories.push(directory)

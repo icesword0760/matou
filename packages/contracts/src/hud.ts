@@ -1,3 +1,13 @@
+export type HudAgentState = 'running' | 'waiting' | 'warning' | 'error'
+export interface HudAgentActivity {
+  id: string
+  label: string
+  source: 'claude' | 'external'
+  state: HudAgentState
+  detail?: string
+  startedAt?: number
+}
+
 export type HudPermissionMode = 'default' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
 export type HudModelStrategy = 'opusplan' | 'claude-opus-4-6' | 'claude-sonnet-4-6'
 export interface HudUsageWindow { label: string; percent: number; resetsAt?: number }
@@ -29,6 +39,7 @@ export interface SessionHudWire {
   taskStatus?: 'idle' | 'running' | 'needs-input' | 'error'
   teamRole?: string
   teamStatus?: 'idle' | 'running' | 'needs-input' | 'error'
+  agents?: HudAgentActivity[]
   subagentCount?: number
   subagents?: string[]
   runningTools?: Array<{ name: string; target?: string }>

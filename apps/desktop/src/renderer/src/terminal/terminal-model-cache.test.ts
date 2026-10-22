@@ -3,6 +3,17 @@ import { describe, expect, it, vi } from 'vitest'
 import { ForegroundTerminalModelCache } from './terminal-model-cache'
 
 describe('ForegroundTerminalModelCache', () => {
+  it('discards failed displays instead of reusing their stalled write queues', () => {
+    const cache = new ForegroundTerminalModelCache()
+    const dispose = vi.fn()
+    const model = cache.acquire('failed', () => ({ dispose, isHealthy: () => false }))
+    cache.discard('failed', model)
+    expect(dispose).not.toHaveBeenCalled()
+    expect(cache.release('failed')).toBe(false)
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(cache.has('failed')).toBe(false)
+  })
+
   it('reports whether a Session can reuse an existing xterm model', () => {
     const cache = new ForegroundTerminalModelCache<{ dispose(): void }>()
 

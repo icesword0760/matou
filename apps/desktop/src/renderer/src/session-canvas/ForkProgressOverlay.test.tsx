@@ -13,6 +13,11 @@ const progress = {
 }
 
 describe('ForkProgressOverlay', () => {
+  it.each(['restoring-provider', 'starting-window'] as const)('leaves the terminal available during %s', (stage) => {
+    render(<ForkProgressOverlay progress={{ ...progress, stage }} />)
+    expect(screen.getByRole('status').classList.contains('fork-progress-overlay--interactive')).toBe(true)
+  })
+
   it('covers the card with authoritative stage progress and no cancel action', () => {
     render(<ForkProgressOverlay progress={progress} />)
 

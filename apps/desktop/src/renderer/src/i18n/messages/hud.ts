@@ -25,12 +25,13 @@ export const hudZhCN = {
   mcpServers: 'MCP 服务',
   toolCalls: '工具调用',
   subagents: '子 Agent',
+  agentState: { running: '运行中', waiting: '等待中', warning: '需注意', error: '出错' },
+  agentStale: '状态已停止更新',
   detailList: (title: string) => `查看${title}列表`,
   detailPending: '详情将在状态刷新后显示',
   toolRunning: (name: string, target: string | undefined) =>
     `${name} · 运行中${target ? ` · ${target}` : ''}`,
   toolCallCount: (name: string, count: number) => `${name} · ${count} 次`,
-  taskStatus: { 'needs-input': '待输入', error: '错误' },
   gitUnavailable: 'Git 不可用',
   /** Keyed by SessionGitState. */
   gitTitle: {
@@ -188,13 +189,14 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
   mcpServers: 'MCP servers',
   toolCalls: 'Tool calls',
   subagents: 'Subagents',
+  agentState: { running: 'Running', waiting: 'Waiting', warning: 'Attention', error: 'Error' },
+  agentStale: 'Status stopped updating',
   detailList: (title: string) => `View ${title}`,
   detailPending: 'Details appear after the next status refresh',
   toolRunning: (name: string, target: string | undefined) =>
     `${name} · running${target ? ` · ${target}` : ''}`,
   toolCallCount: (name: string, count: number) =>
     `${name} · ${count === 1 ? '1 call' : `${count} calls`}`,
-  taskStatus: { 'needs-input': 'Needs input', error: 'Error' },
   gitUnavailable: 'Git unavailable',
   gitTitle: {
     unavailable: 'This directory is not a Git repository',

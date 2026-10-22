@@ -8,8 +8,55 @@ import type { RuntimeMessage } from '@matou/contracts'
 
 import { PtySession } from './pty-session'
 import { readSessionJournalBounds } from '../journal/journal-range-reader'
+import { CALLER_SESSION_MARKERS } from './independent-session-environment'
 
 const roots: string[] = []
+
+describe('PtySession caller environment isolation', () => {
+  it.each(['shell', 'claude-code', 'codex'] as const)(
+    'starts independent %s cards even when Matou was launched by an agent', async (profile) => {
+      const root = await mkdtemp(join(tmpdir(), 'matou-independent-session-'))
+      roots.push(root)
+      const executable = join(root, 'provider.cjs')
+      await writeFile(executable, `#!/usr/bin/env node
+const keys = ${JSON.stringify(CALLER_SESSION_MARKERS)};
+console.log('ISOLATION_RESULT=' + JSON.stringify({
+  markers: keys.filter(key => process.env[key] !== undefined),
+  auth: process.env.ANTHROPIC_API_KEY,
+  caller: process.env.MATOU_CONTROL_CALLER_SESSION
+}));
+setInterval(() => {}, 1000);
+`)
+      await chmod(executable, 0o755)
+      const commandKey = profile === 'shell' ? 'SHELL'
+        : profile === 'claude-code' ? 'MATOU_CLAUDE_COMMAND' : 'MATOU_CODEX_COMMAND'
+      const keys = [...CALLER_SESSION_MARKERS, commandKey]
+      const previous = new Map(keys.map(key => [key, process.env[key]]))
+      for (const key of CALLER_SESSION_MARKERS) process.env[key] = 'parent-marker'
+      process.env[commandKey] = executable
+      let session: PtySession | undefined
+      let output = ''
+      try {
+        session = await PtySession.create({
+          sessionId: `independent-${profile}`, executionContextId: 'local-default',
+          cols: 100, rows: 24, cwd: root, dataRoot: root, profile,
+          ...(profile === 'shell' ? {} : { providerSessionId: 'fixture-resume' }),
+          env: { ANTHROPIC_API_KEY: 'fixture-key', MATOU_CONTROL_CALLER_SESSION: 'new-card',
+            CLAUDE_CODE_CHILD_SESSION: 'override-parent' },
+          onOutput: data => { output += data }
+        })
+        await waitUntil(() => output.includes('ISOLATION_RESULT='))
+        expect(output).toContain('"markers":[]')
+        expect(output).toContain('"auth":"fixture-key"')
+        expect(output).toContain('"caller":"new-card"')
+        for (const key of CALLER_SESSION_MARKERS) expect(process.env[key]).toBe('parent-marker')
+      } finally {
+        await session?.shutdownForRuntime({ gracePeriodMs: 100, hardKillWaitMs: 1000 })
+        for (const [key, value] of previous) restoreEnv(key, value)
+      }
+    }
+  )
+})
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))

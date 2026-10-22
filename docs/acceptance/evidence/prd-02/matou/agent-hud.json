@@ -1,6 +1,6 @@
 {
   "mode": "agent",
-  "text": "ClaudeMdAFable 5 (1M context)72%1 MCPs3 Tools2 hooksWeekly 8% · 4d22h⚠ browser_bridge▸实现 HUD(1/2)~/matou_workspace",
+  "text": "ClaudeMdAFable 5 (1M context)72%1 MCPs3 Tools⚠ 4 Agents2 hooksWeekly 8% · 4d22h⚠ browser_bridge▸实现 HUD(1/2)~/matou_workspaceClaude 账户⌃",
   "fields": [
     {
       "className": "status-field status-instructions is-clickable",
@@ -19,15 +19,19 @@
       "text": "72%"
     },
     {
-      "className": "status-field status-detail status-config",
+      "className": "status-field status-detail status-config ",
       "text": "1 MCPs"
     },
     {
-      "className": "status-field status-detail status-config",
+      "className": "status-field status-detail status-config ",
       "text": "3 Tools"
     },
     {
-      "className": "status-field status-detail status-config",
+      "className": "status-field status-detail status-config status-agents-error",
+      "text": "⚠ 4 Agents"
+    },
+    {
+      "className": "status-field status-detail status-config ",
       "text": "2 hooks"
     },
     {
@@ -53,6 +57,10 @@
     {
       "className": "status-field status-environment is-clickable state-ready is-local-icon",
       "text": ""
+    },
+    {
+      "className": "status-field ca-trigger ",
+      "text": "Claude 账户⌃"
     }
   ],
   "bar": {

@@ -17,6 +17,7 @@ import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { quoteDroppedPath } from './shell-path-quote'
 import { foregroundTerminalModels } from './terminal-model-cache'
 import { TerminalOutputCoalescer } from './terminal-output-coalescer'
+import { TerminalWriteGuard } from './terminal-write-guard'
 import { replayFromSequenceForSpawn, shouldRunReplayProbe } from './terminal-replay-policy'
 import {
   DEFAULT_TERMINAL_THEME, TERMINAL_THEMES, type TerminalThemeKey
@@ -104,6 +105,9 @@ interface CachedTerminalModel {
   lastAppliedSequence: number
   lastCheckpointSequence: number
   screenEpoch: number
+  writer: TerminalWriteGuard
+  onWriteFailure?: (() => void) | undefined
+  isHealthy(): boolean
   hasVisibleContent(): boolean
   suspend(): void
   dispose(): void
@@ -124,6 +128,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
   const m = useMessages().terminal
   const client = useRuntimeClient()
   const [pid, setPid] = useState<number | undefined>()
+  const [displayRevision, setDisplayRevision] = useState(0)
   const [isDragOverTerminal, setIsDragOverTerminal] = useState(false)
   const [archivedSearch, setArchivedSearch] = useState<ArchivedSearchView | undefined>()
   const [historyContext, setHistoryContext] = useState<HistoryContextView | undefined>()
@@ -335,15 +340,23 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       const model: CachedTerminalModel = {
         terminal, fit, search, serialize, opened: false,
         lastAppliedSequence: 0, lastCheckpointSequence: -1, screenEpoch: 0,
+        writer: new TerminalWriteGuard(terminal, () => {
+          // Recreate only the display, then replay the durable checkpoint and
+          // suffix. The running PTY and provider conversation remain intact.
+          model.onWriteFailure?.()
+          foregroundTerminalModels.discard(sessionId, model)
+        }),
+        isHealthy: () => model.writer.healthy,
         hasVisibleContent: () => model.lastAppliedSequence > 0 && terminalViewportHasContent(terminal),
         suspend: () => {
           terminal.element?.remove()
         },
-        dispose: () => terminal.dispose()
+        dispose: () => { model.writer.dispose(); terminal.dispose() }
       }
       return model
     }) as CachedTerminalModel
-    const { terminal, fit, search, serialize } = model
+    const { terminal, fit, search, serialize, writer } = model
+    model.onWriteFailure = () => setDisplayRevision((revision) => revision + 1)
     const reusedTerminalModel = model.opened
     terminal.options.fontSize = fontSize
     terminal.options.theme = TERMINAL_THEMES[themeKey]
@@ -429,7 +442,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     const storeCheckpoint = () => {
       clearCheckpointTimer()
       if (
-        readOnly || replaying ||
+        readOnly || replaying || !model.isHealthy() ||
         model.lastAppliedSequence <= 0 ||
         model.lastAppliedSequence <= model.lastCheckpointSequence
       ) return
@@ -456,7 +469,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
     }
     checkpointNowRef.current = storeCheckpoint
     const writeLiveOutput = (bytes: Uint8Array, sequence: number) => {
-      terminal.write(bytes, () => {
+      writer.write(bytes, () => {
         model.lastAppliedSequence = Math.max(model.lastAppliedSequence, sequence)
         client.acknowledgeTerminal(sessionId, sequence)
         if (surfaceDisposed) return
@@ -565,7 +578,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         const bytes = message.data instanceof Uint8Array
           ? message.data
           : new Uint8Array(message.data)
-        terminal.write(bytes, () => {
+        writer.write(bytes, () => {
           awaitRenderedTerminalFrame()
         })
       } else if (message.type === 'terminal.exited') {
@@ -590,7 +603,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // Resolved here rather than at module load, so the banner follows the
         // locale that is active when the gap actually happens.
         const gapText = messages().terminal
-        terminal.write(
+        writer.write(
           `\r\n[${message.reason === 'corruption' ? gapText.historyCorrupted : gapText.historyTrimmed}]\r\n`,
           () => {
             awaitRenderedTerminalFrame()
@@ -627,7 +640,7 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
           const snapshot = message.checkpoint.snapshot instanceof Uint8Array
             ? message.checkpoint.snapshot
             : new Uint8Array(message.checkpoint.snapshot)
-          terminal.write(snapshot, () => {
+          writer.write(snapshot, () => {
             awaitRenderedTerminalFrame()
             })
         }
@@ -635,19 +648,19 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
         // Resize is part of VT history: zsh and full-screen tools emit cursor
         // movements relative to the active grid. Apply it at its original
         // sequence instead of replaying every byte at today's card width.
-        terminal.write('', () => {
+        writer.write('', () => {
           terminal.resize(message.cols, message.rows)
           publishTerminalDimensions()
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-reset') {
-        terminal.write('', () => {
+        writer.write('', () => {
           terminal.reset()
           model.screenEpoch = message.screenEpoch
           model.lastAppliedSequence = Math.max(model.lastAppliedSequence, message.sequence)
         })
       } else if (message.type === 'terminal.replay-complete') {
-        terminal.write('', () => {
+        writer.write('', () => {
           replaying = false
           visualReplayPending = false
           visualCatchupRequested = false
@@ -901,9 +914,10 @@ export function TerminalSurface(props: TerminalSurfaceProps) {
       terminalRef.current = null
       sendInputRef.current = NOOP
       const retained = foregroundTerminalModels.release(sessionId)
+      model.onWriteFailure = undefined
       if (retained) terminal.element?.remove()
     }
-  }, [client, diagnosticsProbe, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, readOnly, sessionId, spawnRevision])
+  }, [client, diagnosticsProbe, displayRevision, executionContextId, onReplayComplete, onRuntimeError, onSmokeMarker, onStatusChange, readOnly, sessionId, spawnRevision])
 
   useEffect(() => {
     if (!active || !visible || focusRequest <= 0) return

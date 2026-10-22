@@ -201,6 +201,27 @@ describe('TerminalSurface focus continuity', () => {
     vi.restoreAllMocks()
   })
 
+  it('rebuilds a stalled display, replays history, and restores input without replacing the session', async () => {
+    vi.useFakeTimers()
+    render(<TerminalSurface sessionId="stalled-display" active visible />)
+    state.terminalWrite.mockImplementationOnce(() => {})
+    act(() => state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([65]), sequence: 1 }))
+    expect(state.acknowledgeTerminal).not.toHaveBeenCalled()
+    await act(() => vi.advanceTimersByTimeAsync(5_001))
+    expect(state.terminalDisposed).toHaveBeenCalledTimes(1)
+    expect(state.terminalConstructed).toHaveBeenCalledTimes(2)
+    expect(state.attachTerminal).toHaveBeenCalledTimes(2)
+    expect(state.attachTerminal.mock.calls.every(([descriptor]) => descriptor.sessionId === 'stalled-display')).toBe(true)
+    expect(state.storeTerminalCheckpoint).not.toHaveBeenCalled()
+    act(() => {
+      state.onMessage?.({ type: 'terminal.spawned', sessionId: 'stalled-display', pid: 123, restored: true })
+      state.onMessage?.({ type: 'terminal.data', data: new Uint8Array([66]), sequence: 2 })
+      state.onData?.('echo recovered\r')
+    })
+    expect(state.acknowledgeTerminal).toHaveBeenCalledWith('stalled-display', 2)
+    expect(state.sendTerminalInput).toHaveBeenCalledWith('stalled-display', 'echo recovered\r')
+  })
+
   it('focuses a newly mounted active terminal without an extra click', async () => {
     render(<TerminalSurface sessionId="session-1" active visible />)
 

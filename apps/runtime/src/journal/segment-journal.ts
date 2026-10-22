@@ -925,7 +925,10 @@ function decodeFrame(header: StoredHeader, data: Buffer): DecodedJournalFrame {
     case 'output': return {
       kind: 'output',
       sequence: header.sequence,
-      data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      // IPC clones the entire backing ArrayBuffer, including bytes outside a
+      // view. Give each frame its own exact-sized buffer so replay credit also
+      // bounds the memory retained by the receiver.
+      data: new Uint8Array(data)
     }
     case 'resize': return { kind: 'resize', sequence: header.sequence, cols: header.cols, rows: header.rows }
     case 'reset': return { kind: 'reset', sequence: header.sequence, screenEpoch: header.screenEpoch }

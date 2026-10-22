@@ -222,6 +222,40 @@ describe('ForkOperationCoordinator', () => {
     }])
   })
 
+  it('starts an immediate retry without waiting for the previous identity deadline', async () => {
+    const operation = await accept('Provider立即重试', 'provider-immediate-retry')
+    let authority: { operationId: string; runId: string; lease: Pick<ForkLease, 'token' | 'fence'> } | undefined
+    const startOrResume = vi.fn(async (_sessionId: string, value: NonNullable<typeof authority>) => {
+      authority = value
+    })
+    const coordinator = createCoordinator({
+      now: () => 10, startOrResume,
+      executeFork: async (_command, input) => {
+        const advanced = intents.advanceStage({
+          operationId: input.operationId, lease: input.lease,
+          stage: 'restoring-provider', now: 10
+        })
+        return { forkProgress: advanced.kind === 'applied' ? advanced.progress : undefined } as ForkWorkflowResult
+      }
+    })
+    coordinator.start()
+    await eventually(() => expect(startOrResume).toHaveBeenCalledTimes(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const firstAuthority = authority!
+    applied(intents.failOperation({
+      operationId: operation.operationId, lease: firstAuthority.lease,
+      error: 'provider exited before identity', now: 10
+    }))
+    intents.retry(operation.operationId, 10)
+    await coordinator.reconcile()
+    await eventually(() => expect(startOrResume).toHaveBeenCalledTimes(2))
+    expect(authority!.lease.fence).toBeGreaterThan(firstAuthority.lease.fence)
+    recordAuthoritativeIdentity(operation.sessionId, 'provider-retried', authority!)
+    await expect(coordinator.confirmAuthoritativeIdentity(
+      operation.sessionId, 'provider-retried', operation.operationId
+    )).resolves.toBe(true)
+  })
+
   it('ends provider identity waiting at a bounded deadline while preserving the Fork Session', async () => {
     const operation = await accept('Provider身份超时', 'provider-timeout-submission')
     const notifications: ForkOperationNotification[] = []

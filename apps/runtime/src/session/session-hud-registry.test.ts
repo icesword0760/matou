@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -306,4 +306,101 @@ describe('PRD 02 authoritative Session HUD state', () => {
     registry.updateEnvironment('shell-1', { cwd: '/tmp' })
     expect(registry.snapshot('shell-1')).not.toHaveProperty('gitBranch')
   })
+})
+
+describe('live HUD agents', () => {
+  it('shows PreToolUse immediately, preserves agents on Stop and clears on SessionEnd', () => {
+    const registry = new SessionHudRegistry(() => 1000)
+    registry.spawn({ sessionId: 'live', profile: 'claude-code' })
+    registry.ingestProvider('live', { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'tool-a', tool_input: { description: 'Review' } })
+    expect(registry.snapshot('live')?.agents).toEqual([{ id: 'tool-a', label: 'Review', source: 'claude', state: 'running', startedAt: 1000 }])
+    registry.ingestProvider('live', { hook_event_name: 'Stop' })
+    expect(registry.snapshot('live')?.subagentCount).toBe(1)
+    registry.ingestProvider('live', { hook_event_name: 'SessionEnd' })
+    expect(registry.snapshot('live')).toMatchObject({ agents: [], subagentCount: 0, subagents: [] })
+  })
+
+  it('merges external agents by severity then start time with missing times last', () => {
+    const registry = new SessionHudRegistry(() => 1000)
+    registry.spawn({ sessionId: 'live', profile: 'claude-code' })
+    registry.ingestProvider('live', { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'tool-a', tool_input: { description: 'Review' } })
+    registry.updateExternalAgents('live', [
+      { id: 'external:unknown', label: 'Unknown', source: 'external', state: 'running' },
+      { id: 'external:early', label: 'Early', source: 'external', state: 'running', startedAt: 100 },
+      { id: 'external:wait', label: 'Wait', source: 'external', state: 'waiting' },
+      { id: 'external:warn', label: 'Warn', source: 'external', state: 'warning' },
+      { id: 'external:error', label: 'Error', source: 'external', state: 'error' }
+    ])
+    expect(registry.snapshot('live')?.subagents).toEqual(['Error', 'Warn', 'Wait', 'Early', 'Review', 'Unknown'])
+    expect(registry.snapshot('live')?.subagentCount).toBe(6)
+  })
+
+  it('replaces optimistic entries with transcript truth and does not resurrect after SessionEnd', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-live-hud-'))
+    try {
+      const transcript = join(root, 'history.jsonl')
+      await writeFile(transcript, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'real', name: 'Agent', input: { description: 'Real' } }] } }) + '\n')
+      const registry = new SessionHudRegistry(() => 1000)
+      registry.spawn({ sessionId: 'live', profile: 'claude-code' })
+      registry.ingestProvider('live', { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'optimistic' })
+      await registry.refreshTranscript('live', transcript, { runId: 'run', currentRunId: () => 'run' })
+      expect(registry.snapshot('live')?.subagents).toEqual(['Real'])
+      registry.ingestProvider('live', { hook_event_name: 'SessionEnd' })
+      await registry.refreshTranscript('live', transcript, { runId: 'run', currentRunId: () => 'run' })
+      expect(registry.snapshot('live')?.agents).toEqual([])
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+})
+
+it('expires transcript errors without another event even while an optimistic agent is pending', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-error-expiry-'))
+  let now = Date.parse('2026-10-15T03:00:00Z')
+  try {
+    const transcript = join(root, 'history.jsonl')
+    await writeFile(transcript, [
+      { type: 'assistant', timestamp: new Date(now).toISOString(), message: { content: [{ type: 'tool_use', id: 'failed', name: 'Agent', input: {} }] } },
+      { type: 'user', timestamp: new Date(now).toISOString(), message: { content: [{ type: 'tool_result', tool_use_id: 'failed', is_error: true, content: 'failed' }] } }
+    ].map(row => JSON.stringify(row)).join('\n'))
+    const registry = new SessionHudRegistry(() => now)
+    registry.spawn({ sessionId: 'live', profile: 'claude-code' })
+    await registry.refreshTranscript('live', transcript, { runId: 'run', currentRunId: () => 'run' })
+    registry.ingestProvider('live', { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'pending', tool_input: { description: 'Pending' } })
+    expect(registry.snapshot('live')?.agents).toHaveLength(2)
+    now += 300_000
+    expect(registry.snapshot('live')?.subagents).toEqual(['Pending'])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+it('resumes live external status on SessionStart after SessionEnd', () => {
+  const registry = new SessionHudRegistry()
+  registry.spawn({ sessionId: 'live', profile: 'claude-code' })
+  registry.updateExternalAgents('live', [{ id: 'external:live', label: 'Live', source: 'external', state: 'running' }])
+  registry.ingestProvider('live', { hook_event_name: 'SessionEnd' })
+  expect(registry.snapshot('live')?.agents).toEqual([])
+  registry.ingestProvider('live', { hook_event_name: 'SessionStart' })
+  expect(registry.snapshot('live')?.subagents).toEqual(['Live'])
+})
+
+it('filters previous process agents while retaining new launches, revived agents and external tasks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-provider-boundary-'))
+  try {
+    const path = join(root, 'history.jsonl')
+    const use = (id: string, timestamp?: number) => ({ type: 'assistant', timestamp,
+      message: { content: [{ type: 'tool_use', id, name: 'Agent', input: { description: id } }] } })
+    await writeFile(path, [use('old', 100), use('revived', 100),
+      { type: 'user', timestamp: 101, toolUseResult: { isAsync: true, agentId: 'worker' },
+        message: { content: [{ type: 'tool_result', tool_use_id: 'revived' }] } },
+      use('new', 1100), use('unknown'),
+      { type: 'assistant', timestamp: 1200, message: { content: [{ type: 'tool_use', id: 'send', name: 'SendMessage', input: { to: 'worker' } }] } }
+    ].map(row => JSON.stringify(row)).join('\n'))
+    let now = 1000
+    const registry = new SessionHudRegistry(() => now)
+    registry.spawn({ sessionId: 'live', profile: 'claude-code', startedAt: 0 })
+    await registry.refreshTranscript('live', path, { runId: 'run', currentRunId: () => 'run' })
+    registry.updateExternalAgents('live', [{ id: 'external:old', label: 'External', source: 'external', state: 'running', startedAt: 1 }])
+    expect(registry.snapshot('live')?.subagents).toEqual(['External', 'new', 'revived', 'unknown'])
+    now = 2000
+    registry.providerStarted('live')
+    expect(registry.snapshot('live')?.subagents).toEqual(['External', 'unknown'])
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

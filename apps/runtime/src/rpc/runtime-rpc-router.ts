@@ -41,6 +41,7 @@ import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
+import { ClaudeSettings, isClaudeTimeZone } from '../session/claude-settings'
 
 export type RpcFaultCode =
   | 'INVALID_REQUEST'
@@ -155,6 +156,12 @@ export class RuntimeRpcRouter {
   }
 
   async #dispatch(method: RpcMethod, payload: unknown): Promise<unknown> {
+    if (method === 'claude-settings.get') return new ClaudeSettings(this.#database).snapshot()
+    if (method === 'claude-settings.set') {
+      const { timeZone } = record(payload)
+      if (!isClaudeTimeZone(timeZone)) throw new RpcFault('INVALID_REQUEST', 'Invalid Claude Code time zone')
+      return new ClaudeSettings(this.#database).set(timeZone)
+    }
     if (method === 'provider-config.models') return this.#providerConfigs.discoverModels(record(payload) as unknown as ProviderModelsInput)
     if (method === 'provider-config.snapshot') return this.#providerConfigs.snapshot()
     if (method === 'provider-config.upsert') {

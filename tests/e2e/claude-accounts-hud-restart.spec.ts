@@ -3,9 +3,9 @@ import { join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 import { launchMatou } from './matou-fixture'
 const evidence=process.env.MATOU_E2E_ACCOUNTS_EVIDENCE ?? resolve('docs/acceptance/evidence/claude-accounts-hud-restart')
-async function setup() {
+async function setup(scenario = 'usage-normal') {
   const root=await mkdtemp('/tmp/matou-accounts-hud-')
-  const f=await launchMatou({root,env:{MATOU_LOCALE:'',MATOU_E2E_DISPLAY:'primary',MATOU_E2E_ACCOUNTS_BRIDGE:resolve('tests/e2e/fixtures/claude-accounts-engine.py'),MATOU_E2E_ACCOUNTS_SCENARIO:'usage-normal',MATOU_CLAUDE_COMMAND:resolve('tests/e2e/fixtures/account-restart-provider.py'),MATOU_ACCOUNT_RESTART_FIXTURE:root,MATOU_CLAUDE_PROJECTS_ROOT:join(root,'projects'),CLAUDE_CONFIG_DIR:'',CLAUDE_SECURESTORAGE_CONFIG_DIR:'',ANTHROPIC_API_KEY:'',ANTHROPIC_AUTH_TOKEN:'',CLAUDE_CODE_OAUTH_TOKEN:''}})
+  const f=await launchMatou({root,env:{MATOU_LOCALE:'',MATOU_E2E_DISPLAY:'primary',MATOU_E2E_ACCOUNTS_BRIDGE:resolve('tests/e2e/fixtures/claude-accounts-engine.py'),MATOU_E2E_ACCOUNTS_SCENARIO:scenario,MATOU_CLAUDE_COMMAND:resolve('tests/e2e/fixtures/account-restart-provider.py'),MATOU_ACCOUNT_RESTART_FIXTURE:root,MATOU_CLAUDE_PROJECTS_ROOT:join(root,'projects'),CLAUDE_CONFIG_DIR:'',CLAUDE_SECURESTORAGE_CONFIG_DIR:'',ANTHROPIC_API_KEY:'',ANTHROPIC_AUTH_TOKEN:'',CLAUDE_CODE_OAUTH_TOKEN:''}})
   await f.page.evaluate(()=>window.matouDesktop.setLocalePreference('zh-CN'))
   await f.app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0]!.setSize(1400,850))
   await mkdir(evidence,{recursive:true})
@@ -27,6 +27,21 @@ async function switchAccount(f:Awaited<ReturnType<typeof setup>>) {
   await p.getByRole('button',{name:'立即切换',exact:true}).click()
   await expect(p.locator('.ca-switch-feedback')).toContainText('已切换账户，现有会话通常会在约 30 秒内使用新账户，或者选择立即重启并接续。')
 }
+test('cached quota has no separate last-known field in the desktop HUD', async () => {
+  const f = await setup()
+  try {
+    await startClaude(f)
+    const primary = f.page.locator('.status-info__primary')
+    await expect(primary).not.toContainText(/上次数据|待更新|待输入|使用后更新用量/)
+    await expect(f.page.locator('.status-usage').first()).toContainText(/5h 38% · (?:\d{4}\/)?10\/14 \d{2}:\d{2}/)
+    await expect(f.page.locator('.status-usage').first()).toHaveAttribute('title', /上次记录|重置时间/)
+    await f.page.screenshot({ path: join(evidence, 'hud-no-cache-field.png') })
+    await f.page.evaluate(() => window.matouDesktop.setLocalePreference('en'))
+    await expect(primary).not.toContainText(/Last known|Pending|Usage updates after use/)
+    await expect(f.page.locator('.status-usage').first()).toHaveAttribute('title', /Reset time reached/)
+    await expect(f.page.locator('.status-usage')).toContainText(['5h 38%', 'Weekly 62%'])
+  } finally { await f.close() }
+})
 test('switch synchronizes HUD without restarting, cancel is inert, confirm restarts all Claude not shells',async()=>{
   test.setTimeout(120_000)
   const f=await setup();const p=f.page
@@ -36,7 +51,10 @@ test('switch synchronizes HUD without restarting, cancel is inert, confirm resta
     await p.getByRole('button',{name:'横向新增 Shell',exact:true}).click()
     await expect(p.locator('.terminal-surface[data-pid]')).toHaveCount(3)
     const before=await p.locator('.terminal-surface').evaluateAll(nodes=>nodes.map(n=>({id:n.getAttribute('data-session-id'),pid:n.getAttribute('data-pid')})))
-    await p.locator('.terminal-surface .xterm-helper-textarea').nth(0).focus()
+    // Selecting an existing card needs a pointer event: its textarea can retain
+    // DOM focus while a newly created Shell is the active canvas session.
+    await p.locator('.terminal-surface .xterm-screen').nth(0).click()
+    await expect(p.locator('.status-info')).toHaveAttribute('data-session-id', before[0]!.id!)
     await expect(p.locator('.ca-trigger-label')).toHaveText('工作账户')
     // Both tasks are already working BEFORE the switch, not only before restart.
     await writeFile(join(f.rootDirectory,'busy'),'yes')
@@ -141,3 +159,19 @@ test('busy switching supports cancel, compact English confirmation, and remember
     expect((await readFile(join(f.rootDirectory,'runs.jsonl'),'utf8')).trim().split('\n')).toHaveLength(1)
   } finally { await f.close() }
 })
+
+for (const scenario of ['empty', 'usage-expired']) {
+  test(`${scenario}: HUD uses a dash while account panel retains guidance`, async () => {
+    const f = await setup(scenario)
+    try {
+      const input = f.page.locator('.terminal-surface .xterm-helper-textarea').last()
+      await input.focus(); await input.pressSequentially('claude'); await input.press('Enter')
+      await expect(f.page.locator('.status-info')).toHaveAttribute('data-hud-mode', 'agent')
+      await expect(f.page.locator('.status-usage')).toHaveText('—')
+      await expect(f.page.locator('.status-usage')).toHaveAttribute('title', scenario === 'empty' ? /添加账户后查看用量/ : /登录已失效/)
+      await f.page.getByRole('button', {name:'Claude 账户', exact:true}).click()
+      await expect(f.page.locator('.ca-panel')).toContainText(scenario === 'empty' ? '添加第一个账户' : '重新登录')
+      await f.page.screenshot({path:join(evidence, `hud-minimal-${scenario}.png`), animations:'disabled'})
+    } finally { await f.close() }
+  })
+}

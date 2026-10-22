@@ -5,6 +5,27 @@ import { describe, expect, it, vi } from 'vitest'
 import { AppFocusRestorer, restorableFocusTarget } from './focus-restoration'
 
 describe('AppFocusRestorer', () => {
+  it('calls native frame scheduling and cancellation with the window receiver', () => {
+    const request = vi.spyOn(window, 'requestAnimationFrame').mockImplementation(function (this: Window) {
+      expect(this).toBe(window)
+      return 123
+    })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(function (this: Window, id) {
+      expect(this).toBe(window)
+      expect(id).toBe(123)
+    })
+    try {
+      const restorer = new AppFocusRestorer()
+      restorer.scheduleRestore(vi.fn())
+      restorer.dispose()
+      expect(request).toHaveBeenCalledOnce()
+      expect(cancel).toHaveBeenCalledOnce()
+    } finally {
+      request.mockRestore()
+      cancel.mockRestore()
+    }
+  })
+
   it('returns to the exact input the user was editing', () => {
     const frames: FrameRequestCallback[] = []
     const fallback = vi.fn()

@@ -1,10 +1,11 @@
+import { ExternalAgentStatusMonitor } from './session/external-agent-status'
 import type { ClaudeAccountSession, ClaudeAccountRuntimeAction } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { watch, type FSWatcher } from 'node:fs'
+import { watch, mkdirSync, rmSync, type FSWatcher } from 'node:fs'
 import { readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
-import { basename, delimiter, join } from 'node:path'
+import { basename, delimiter, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
@@ -46,6 +47,7 @@ import {
 } from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { PtySession } from './session/pty-session'
+import { ClaudeSettings } from './session/claude-settings'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
 import { TerminalWorkStatusTracker } from './session/terminal-work-status-tracker'
@@ -155,7 +157,6 @@ const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
 const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
-const CLAUDE_FULL_RESUME_SELECTION = '\u001b[B\r'
 const CLAUDE_NEXT_OPTION = '\u001b[B'
 const CLAUDE_CONFIRM_OPTION = '\r'
 const CLAUDE_WORKSPACE_TRUST_SELECTION_DELAY_MS = 500
@@ -178,6 +179,7 @@ interface InteractiveClaudeLaunch {
 }
 
 interface ProviderRecoveryWaiter {
+  allowUnconfirmedOutput: boolean
   resolve(): void
   reject(error: Error): void
 }
@@ -264,7 +266,7 @@ export class RuntimeServer {
       // Explicit restart confirmation permits interrupting busy Claude sessions,
       // but preserves each session's provider, model, permission and saved binding.
       if (action === 'restart') {
-        const recovery = owner.#waitForProviderRecovery(target.sessionId)
+        const recovery = owner.#waitForProviderRecovery(target.sessionId, false)
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
           await owner.#respawnWithPermission(target.sessionId, mode)
@@ -288,6 +290,8 @@ export class RuntimeServer {
   readonly #sendToPort = (message: RuntimeMessage) => {
     if (!this.#portClosed) this.#port.postMessage(message)
   }
+  readonly #agentMonitors = new Map<string, ExternalAgentStatusMonitor>()
+  readonly #agentSnapshots = new Map<string, string>()
   readonly #dataRoot: string
   readonly #database: RuntimeDatabase
   readonly #router: RuntimeRpcRouter
@@ -799,6 +803,7 @@ export class RuntimeServer {
         )
         this.#sessions.get(message.sessionId)?.detach(this.#sendToPort)
         this.#attachedSessionIds.delete(message.sessionId)
+        this.#stopAgentMonitor(message.sessionId)
         this.#completedReplayThrough.delete(message.sessionId)
         this.#replays.delete(message.sessionId)
         break
@@ -1909,16 +1914,16 @@ export class RuntimeServer {
       // startup recovery queue has already settled. Scope this to any real
       // provider resume so the long-session choice behaves the same regardless
       // of whether the PTY was started eagerly or when its Canvas became visible.
-      const fullResumePromptMonitor = message.profile === 'claude-code' && resumeBinding
+      const fullResumePromptMonitor = message.profile === 'claude-code' && providerSessionId
         ? new ClaudeFullResumePromptMonitor()
         : undefined
-      const workspaceTrustPromptMonitor = message.profile === 'claude-code' && resumeBinding &&
+      const workspaceTrustPromptMonitor = message.profile === 'claude-code' && providerSessionId &&
         permissionMode === 'bypassPermissions'
         ? new ClaudeWorkspaceTrustPromptMonitor()
         : undefined
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
-      let pendingFullResumeSelection = false
+      let pendingFullResumeSelection: string | undefined
       let pendingWorkspaceTrustSelection = false
       const selectTrustedWorkspace = (session: PtySession): void => {
         setTimeout(() => {
@@ -1935,7 +1940,12 @@ export class RuntimeServer {
         }, CLAUDE_WORKSPACE_TRUST_SELECTION_DELAY_MS)
       }
       let emittedTerminalOutput = false
-      let controlEnvironment: Record<string, string> | undefined
+      const agentStatusDirectory = this.#agentStatusDirectory(message.sessionId)
+      let controlEnvironment: Record<string, string> = {}
+      try {
+        mkdirSync(agentStatusDirectory, { recursive: true })
+        controlEnvironment.MATOU_AGENT_STATUS_DIR = agentStatusDirectory
+      } catch { /* Status reporting must not prevent a terminal from starting. */ }
       if (this.#control) {
         const token = this.#control.tokens.issue(
           { runId, sessionId: message.sessionId },
@@ -1943,6 +1953,7 @@ export class RuntimeServer {
           Date.now() + 24 * 60 * 60 * 1000
         )
         controlEnvironment = {
+          ...controlEnvironment,
           MATOU_CONTROL_ENDPOINT: this.#control.endpoint,
           MATOU_CONTROL_TOKEN: token,
           MATOU_CONTROL_PROTOCOL: '1',
@@ -2080,6 +2091,7 @@ export class RuntimeServer {
       } else if (workStatusTracker) {
         this.#workStatusTrackers.set(message.sessionId, workStatusTracker)
       }
+      if (message.profile !== 'shell') this.#hud.providerStarted(message.sessionId)
       const session = await PtySession.create({
         sessionId: message.sessionId,
         executionContextId: message.executionContextId,
@@ -2102,15 +2114,16 @@ export class RuntimeServer {
         }),
         ...(providerLaunch.model === undefined ? {} : { model: providerLaunch.model }),
         ...(runId === undefined ? {} : { runId }),
-        ...((controlEnvironment === undefined && Object.keys(providerLaunch.env).length === 0) ? {} : {
-          env: { ...providerLaunch.env, ...controlEnvironment }
-        }),
+        env: {
+          ...providerLaunch.env, ...controlEnvironment,
+          ...new ClaudeSettings(this.#database).environment(message.profile)
+        },
         ...(attachView ? { send: this.#sendToPort } : {}),
         onOutput: (data) => {
           emittedTerminalOutput = true
           if (fullResumePromptMonitor?.ingest(data)) {
-            if (activeSession) activeSession.write(CLAUDE_FULL_RESUME_SELECTION)
-            else pendingFullResumeSelection = true
+            if (activeSession) activeSession.write(fullResumePromptMonitor.selection)
+            else pendingFullResumeSelection = fullResumePromptMonitor.selection
           }
           if (workspaceTrustPromptMonitor?.ingest(data)) {
             if (activeSession) selectTrustedWorkspace(activeSession)
@@ -2134,10 +2147,10 @@ export class RuntimeServer {
             }
           } else if (resumeMonitor?.isSettled || resumeMonitor?.hasVisibleOutput) {
             // A full provider screen is the fallback readiness signal when a
-            // Claude release delays or omits its statusline HTTP hook. Visible
-            // provider content can also be an interactive trust prompt, so the
-            // card must become operable before the user can answer it.
-            this.#settleProviderRecovery(message.sessionId)
+            // Claude release delays or omits its statusline HTTP hook.
+            // A short startup message alone can precede a failed process exit
+            // and must not report a successful account restart.
+            this.#settleProviderRecovery(message.sessionId, undefined, !resumeMonitor.isSettled)
           }
         },
         onExit: (exited, exitCode, signal, exitReason) => {
@@ -2316,8 +2329,8 @@ export class RuntimeServer {
       this.#spawnDescriptors.set(message.sessionId, message)
       activeSession = session
       if (pendingFullResumeSelection) {
-        session.write(CLAUDE_FULL_RESUME_SELECTION)
-        pendingFullResumeSelection = false
+        session.write(pendingFullResumeSelection)
+        pendingFullResumeSelection = undefined
       }
       if (pendingWorkspaceTrustSelection) {
         selectTrustedWorkspace(session)
@@ -2604,7 +2617,7 @@ export class RuntimeServer {
       if (!reason) {
         // The deadline only bounds the startup queue. Keep a silent PTY alive
         // and keep monitoring it for a definitive identity mismatch or exit.
-        this.#settleProviderRecovery(message.sessionId)
+        this.#settleProviderRecovery(message.sessionId, undefined, true)
         return
       }
       this.#parkResumeFailure(message, session, bindingId, reason)
@@ -2663,7 +2676,7 @@ export class RuntimeServer {
     }
   }
 
-  #waitForProviderRecovery(sessionId: string): {
+  #waitForProviderRecovery(sessionId: string, allowUnconfirmedOutput = true): {
     promise: Promise<void>
     cancel(): void
   } {
@@ -2671,6 +2684,7 @@ export class RuntimeServer {
     let settled = false
     const promise = new Promise<void>((resolve, reject) => {
       waiter = {
+        allowUnconfirmedOutput,
         resolve: () => {
           if (settled) return
           settled = true
@@ -2699,14 +2713,16 @@ export class RuntimeServer {
     }
   }
 
-  #settleProviderRecovery(sessionId: string, error?: Error): void {
+  #settleProviderRecovery(sessionId: string, error?: Error, unconfirmedOutput = false): void {
     const waiters = this.#providerRecoveryWaiters.get(sessionId)
     if (!waiters) return
-    this.#providerRecoveryWaiters.delete(sessionId)
     for (const waiter of waiters) {
+      if (!error && unconfirmedOutput && !waiter.allowUnconfirmedOutput) continue
+      waiters.delete(waiter)
       if (error) waiter.reject(error)
       else waiter.resolve()
     }
+    if (waiters.size === 0) this.#providerRecoveryWaiters.delete(sessionId)
   }
 
   #rejectAllProviderRecoveries(error: Error): void {
@@ -2895,6 +2911,8 @@ export class RuntimeServer {
     const cwdTimer = this.#cwdTimers.get(sessionId)
     if (cwdTimer) clearTimeout(cwdTimer)
     this.#cwdTimers.delete(sessionId)
+    this.#stopAgentMonitor(sessionId)
+    this.#removeAgentStatusDirectory(sessionId)
     const session = this.#sessions.get(sessionId)
     if (!session) return
     this.#control?.backend.unregister(sessionId, session)
@@ -3031,6 +3049,7 @@ export class RuntimeServer {
     this.#skipResumeSessionIds.delete(sessionId)
     this.#closeHudFileWatchers(sessionId)
     this.#hud.delete(sessionId)
+    this.#removeAgentStatusDirectory(sessionId)
     this.publishSessionHud(sessionId)
     this.#attachedSessionIds.delete(sessionId)
     if (session) session.detach(this.#sendToPort)
@@ -3139,9 +3158,45 @@ export class RuntimeServer {
         'CLAUDE_CONFIG_DIR', 'CLAUDE_SECURESTORAGE_CONFIG_DIR'].some(key => process.env[key])
   }
 
+  #removeAgentStatusDirectory(sessionId: string): void {
+    try { rmSync(this.#agentStatusDirectory(sessionId), { recursive: true, force: true }) }
+    catch { /* Status files must not prevent session cleanup. */ }
+  }
+
+  #agentStatusDirectory(sessionId: string): string {
+    return resolve(this.#dataRoot, 'agent-status', sessionId)
+  }
+
+  #stopAgentMonitor(sessionId: string): void {
+    this.#agentMonitors.get(sessionId)?.stop()
+    this.#agentMonitors.delete(sessionId)
+    this.#agentSnapshots.delete(sessionId)
+  }
+
+  #syncAgentMonitor(sessionId: string): void {
+    if (!this.#attachedSessionIds.has(sessionId) || this.#hud.snapshot(sessionId)?.mode !== 'agent') {
+      this.#stopAgentMonitor(sessionId)
+      return
+    }
+    if (this.#agentMonitors.has(sessionId)) return
+    let initializing = true
+    const monitor = new ExternalAgentStatusMonitor(this.#agentStatusDirectory(sessionId), agents => {
+      this.#hud.updateExternalAgents(sessionId, agents)
+    }, Date.now, () => {
+      const next = JSON.stringify(this.#hud.snapshot(sessionId)?.agents)
+      if (!initializing && next !== this.#agentSnapshots.get(sessionId)) this.publishSessionHud(sessionId)
+    })
+    this.#agentMonitors.set(sessionId, monitor)
+    monitor.start()
+    initializing = false
+  }
+
   publishSessionHud(sessionId: string): void {
-    if (this.#closed || this.#portClosed || !this.#attachedSessionIds.has(sessionId)) return
+    if (this.#closed || this.#portClosed) return
+    this.#syncAgentMonitor(sessionId)
+    if (!this.#attachedSessionIds.has(sessionId)) return
     const hud = this.#hud.snapshot(sessionId)
+    this.#agentSnapshots.set(sessionId, JSON.stringify(hud?.agents))
     this.#port.postMessage({
       type: 'terminal.hud', protocolVersion: PROTOCOL_VERSION,
       sessionId, hud: hud ? { ...hud, defaultAccountUsage: this.#usesDefaultClaudeLogin(sessionId) } : null
@@ -3271,6 +3326,7 @@ export class RuntimeServer {
   }
 
   #closeHudFileWatchers(sessionId: string): void {
+    this.#stopAgentMonitor(sessionId)
     const timer = this.#hudFileRefreshTimers.get(sessionId)
     if (timer) clearTimeout(timer)
     this.#hudFileRefreshTimers.delete(sessionId)
@@ -3279,6 +3335,7 @@ export class RuntimeServer {
   }
 
   #closeAllHudFileWatchers(): void {
+    for (const sessionId of this.#agentMonitors.keys()) this.#stopAgentMonitor(sessionId)
     for (const sessionId of new Set([
       ...this.#hudFileWatchers.keys(), ...this.#hudFileRefreshTimers.keys()
     ])) this.#closeHudFileWatchers(sessionId)

@@ -1,3 +1,5 @@
+import type { HudAgentActivity } from '@matou/contracts'
+import { sortAgents } from './external-agent-status'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
@@ -7,6 +9,7 @@ export interface ProviderTranscriptHudSnapshot {
   startedAt?: number
   permissionMode?: string
   model?: string
+  agents: HudAgentActivity[]
   subagentCount: number
   subagents: string[]
   runningTools: Array<{ name: string; target?: string }>
@@ -31,7 +34,10 @@ interface TranscriptState {
   completedTools: Set<string>
   completedToolCounts: Map<string, number>
   failedMcpServers: Set<string>
-  observedSubagents: Map<string, string>
+  observedSubagents: Map<string, HudAgentActivity>
+  agents: Map<string, HudAgentActivity>
+  agentIds: Map<string, string>
+  errorTimes: Map<string, number>
   lastTool?: { name: string; target?: string; status: 'completed' | 'error' }
   todos: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>
 }
@@ -39,6 +45,13 @@ interface TranscriptState {
 export class ProviderTranscriptHudReader {
   readonly #states = new Map<string, TranscriptState>()
   readonly #inFlight = new Map<string, Promise<ProviderTranscriptHudSnapshot | undefined>>()
+
+  constructor(readonly now: () => number = Date.now) {}
+
+  cached(path: string): ProviderTranscriptHudSnapshot | undefined {
+    const state = this.#states.get(path)
+    return state ? snapshot(state, this.now()) : undefined
+  }
 
   read(path: string): Promise<ProviderTranscriptHudSnapshot | undefined> {
     const current = this.#inFlight.get(path)
@@ -58,7 +71,7 @@ export class ProviderTranscriptHudReader {
     }
     if (file.size > state.offset) await appendTranscript(path, state)
     state.fileMtimeMs = file.mtimeMs
-    return snapshot(state)
+    return snapshot(state, this.now())
   }
 }
 
@@ -72,6 +85,9 @@ function emptyState(): TranscriptState {
     completedToolCounts: new Map(),
     failedMcpServers: new Set(),
     observedSubagents: new Map(),
+    agents: new Map(),
+    agentIds: new Map(),
+    errorTimes: new Map(),
     todos: []
   }
 }
@@ -114,6 +130,7 @@ function ingestLine(state: TranscriptState, line: string): void {
   } catch {
     return
   }
+  if (row.type === 'queue-operation') return
   const timestamp = timestampMs(row.timestamp)
   if (timestamp !== undefined) state.startedAt = Math.min(state.startedAt ?? timestamp, timestamp)
   const customTitle = text(row.customTitle)
@@ -136,15 +153,16 @@ function ingestLine(state: TranscriptState, line: string): void {
     const prompt = compactTitle(content)
     if (prompt) state.firstPrompt = prompt
   }
+  if (row.type === 'user' || message.role === 'user') ingestNotifications(state, content, timestamp)
   if (!Array.isArray(content)) return
   for (const item of content) {
     if (!isRecord(item)) continue
-    if (item.type === 'tool_use') ingestToolUse(state, item)
-    if (item.type === 'tool_result') ingestToolResult(state, item)
+    if (item.type === 'tool_use') ingestToolUse(state, item, timestamp)
+    if (item.type === 'tool_result') ingestToolResult(state, item, row, timestamp)
   }
 }
 
-function ingestToolUse(state: TranscriptState, item: Record<string, unknown>): void {
+function ingestToolUse(state: TranscriptState, item: Record<string, unknown>, timestamp?: number): void {
   const id = text(item.id)
   const name = text(item.name)
   if (!id || !name || state.completedTools.has(id)) return
@@ -154,17 +172,34 @@ function ingestToolUse(state: TranscriptState, item: Record<string, unknown>): v
   if (name === 'TodoWrite') state.todos = todosFromInput(input.todos)
   if (name === 'TaskCreate') state.todos = applyTaskCreate(state.todos, input)
   if (name === 'TaskUpdate') state.todos = applyTaskUpdate(state.todos, input)
+  if (name === 'SendMessage') {
+    const originalId = state.agentIds.get(text(input.to) ?? '')
+    const original = originalId && state.observedSubagents.get(originalId)
+    if (original) {
+      state.agents.set(original.id, { ...original, state: 'running', ...(timestamp === undefined ? {} : { startedAt: timestamp }) })
+      state.errorTimes.delete(original.id)
+    }
+  }
   if (name === 'Agent') {
-    state.observedSubagents.set(id, subagentLabel(input, state.observedSubagents.size + 1))
+    const agent: HudAgentActivity = { id, label: subagentLabel(input, state.observedSubagents.size + 1), source: 'claude', state: 'running', ...(timestamp === undefined ? {} : { startedAt: timestamp }) }
+    state.observedSubagents.set(id, agent)
+    state.agents.set(id, agent)
   }
 }
 
-function ingestToolResult(state: TranscriptState, item: Record<string, unknown>): void {
+function ingestToolResult(state: TranscriptState, item: Record<string, unknown>, row: Record<string, unknown>, timestamp?: number): void {
   const id = text(item.tool_use_id) ?? text(item.toolUseId)
   if (!id || state.completedTools.has(id)) return
   const tool = state.activeTools.get(id)
   if (!tool) return
   const status = item.is_error === true || item.isError === true ? 'error' : 'completed'
+  if (tool.name === 'Agent') {
+    const result = isRecord(row.toolUseResult) ? row.toolUseResult : {}
+    if (result.isAsync === true || result.status === 'async_launched') {
+      const agentId = text(result.agentId)
+      if (agentId) state.agentIds.set(agentId, id)
+    } else finishAgent(state, id, status, contentText(item.content), timestamp)
+  }
   state.completedTools.add(id)
   state.completedToolCounts.set(tool.name, (state.completedToolCounts.get(tool.name) ?? 0) + 1)
   state.lastTool = { ...tool, status }
@@ -176,15 +211,20 @@ function ingestToolResult(state: TranscriptState, item: Record<string, unknown>)
   state.activeTools.delete(id)
 }
 
-function snapshot(state: TranscriptState): ProviderTranscriptHudSnapshot {
+function snapshot(state: TranscriptState, now: number): ProviderTranscriptHudSnapshot {
+  const agents = sortAgents([...state.agents.values()].filter(agent => {
+    const failedAt = state.errorTimes.get(agent.id)
+    return failedAt === undefined || now - failedAt < 300_000
+  }))
   const sessionName = state.customTitle ?? state.autoTitle ?? state.slug ?? state.firstPrompt
   return {
     ...(sessionName ? { sessionName } : {}),
     ...(state.startedAt === undefined ? {} : { startedAt: state.startedAt }),
     ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
     ...(state.model ? { model: state.model } : {}),
-    subagentCount: state.observedSubagents.size,
-    subagents: [...state.observedSubagents.values()],
+    agents,
+    subagentCount: agents.length,
+    subagents: agents.map(agent => agent.label),
     runningTools: [...state.activeTools.values()],
     toolCounts: [...state.completedToolCounts.entries()].map(([name, count]) => ({ name, count })),
     ...(state.lastTool ? { lastTool: { ...state.lastTool } } : {}),
@@ -258,6 +298,7 @@ function compactTitle(value: string): string | undefined {
 }
 
 function timestampMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value !== 'string') return undefined
   const parsed = Date.parse(value)
   return Number.isFinite(parsed) ? parsed : undefined
@@ -271,4 +312,32 @@ function text(value: unknown): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content
+  return Array.isArray(content) ? content.flatMap(item =>
+    isRecord(item) && item.type === 'text' && typeof item.text === 'string' ? [item.text] : []
+  ).join('\n') : ''
+}
+
+function finishAgent(state: TranscriptState, id: string, status: string, detail: string, timestamp?: number): void {
+  const agent = state.agents.get(id) ?? state.observedSubagents.get(id)
+  if (!agent) return
+  if (status === 'error' || status === 'failed') {
+    state.agents.set(id, { ...agent, state: 'error', detail: detail.split(/\r?\n/)[0]!.slice(0, 120) })
+    state.errorTimes.set(id, timestamp ?? 0)
+  } else {
+    state.agents.delete(id)
+    state.errorTimes.delete(id)
+  }
+}
+
+function ingestNotifications(state: TranscriptState, content: unknown, timestamp?: number): void {
+  for (const match of contentText(content).matchAll(/<task-notification>([\s\S]*?)<\/task-notification>/g)) {
+    const body = match[1]!
+    const tag = (name: string) => new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(body)?.[1]?.trim()
+    const id = tag('tool-use-id')
+    if (id && state.observedSubagents.has(id)) finishAgent(state, id, tag('status') ?? '', tag('summary') ?? '', timestamp)
+  }
 }

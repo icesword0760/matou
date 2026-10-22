@@ -10,6 +10,7 @@ import {
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
 import { messages } from '../i18n/current'
 import { ProviderSetupDialog } from './ProviderSetupDialog'
+import { ClaudeTimeZoneSettings } from './ClaudeTimeZoneSettings'
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 
 export interface ProviderConfigClient {
@@ -17,7 +18,7 @@ export interface ProviderConfigClient {
 }
 
 /** The settings panel shows one pane per category; the nav column switches between them. */
-type SettingsCategory = 'model' | 'language'
+type SettingsCategory = 'model' | 'language' | 'claude'
 
 export function ModelSwitchSettings({ client, onClose }: {
   client: ProviderConfigClient | null
@@ -134,6 +135,10 @@ export function ModelSwitchSettings({ client, onClose }: {
           type="button" aria-current={category === 'model'} onClick={() => setCategory('model')}>
           <SlidersIcon /><span>{t('服务供应商', 'Service providers')}</span>
         </button>
+        <button className={`model-settings__nav-item${category === 'claude' ? ' is-active' : ''}`}
+          type="button" aria-current={category === 'claude'} disabled={Boolean(switching)} onClick={() => setCategory('claude')}>
+          <GlobeIcon /><span>Claude Code</span>
+        </button>
         <span className="model-settings__section-label">{language.general}</span>
         <button className={`model-settings__nav-item${category === 'language' ? ' is-active' : ''}`}
           type="button" aria-current={category === 'language'} disabled={Boolean(switching)} onClick={() => setCategory('language')}>
@@ -144,12 +149,13 @@ export function ModelSwitchSettings({ client, onClose }: {
       <main className="model-settings__main">
         <header className="model-settings__heading">
           <div>
-            <h1>{category === 'model' ? t('服务供应商', 'Service providers') : language.title}</h1>
-            <p>{category === 'model' ? m.heading : language.heading}</p>
+            <h1>{category === 'model' ? t('服务供应商', 'Service providers') : category === 'claude' ? 'Claude Code' : language.title}</h1>
+            <p>{category === 'model' ? m.heading : category === 'claude' ? t('管理码头中的 Claude Code 偏好设置', 'Manage Claude Code preferences in Matou') : language.heading}</p>
           </div>
           <button type="button" aria-label={m.close} disabled={Boolean(switching)} onClick={onClose}>×</button>
         </header>
         {category === 'language' && <LanguageSettings />}
+        {category === 'claude' && <ClaudeTimeZoneSettings client={client} />}
         {category === 'model' && <div className="model-settings__tabs" role="tablist" aria-label={m.cliType}>
           {([['claude-code', 'Claude Code'], ['codex', 'Codex']] as const).map(([id, label]) =>
             <button key={id} role="tab" aria-selected={cli === id} className={cli === id ? 'is-active' : ''}

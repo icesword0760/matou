@@ -176,6 +176,28 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
     await expect(mcpTooltip).toBeVisible()
     await fixture.page.mouse.move(900, 500)
 
+    await expect(hud.getByText('⚠ 4 Agents')).toBeVisible()
+    await expect(hud.getByText('⚠ 4 Agents')).toHaveCSS('color', 'rgb(207, 34, 46)')
+    const themeShortcut = process.platform === 'darwin' ? 'Meta+i' : 'Control+i'
+    await fixture.page.keyboard.press(themeShortcut)
+    await expect(fixture.page.locator('.hierarchy-shell')).toHaveAttribute('data-theme', 'dark')
+    await expect(hud.getByText('⚠ 4 Agents')).toHaveCSS('color', 'rgb(244, 112, 103)')
+    await hud.getByText('⚠ 4 Agents').hover()
+    const agentsTooltip = fixture.page.locator('.hud-agents-tooltip')
+    await expect(agentsTooltip).toBeVisible()
+    for (const state of ['running', 'waiting', 'warning', 'error']) {
+      await expect(agentsTooltip.locator(`.hud-agent-dot.state-${state}`)).toHaveCount(1)
+    }
+    await expect(agentsTooltip).toContainText('运行 python3 render.py')
+    await agentsTooltip.hover()
+    await expect(agentsTooltip).toHaveCSS('max-width', '360px')
+    await mkdir(evidenceDirectory, { recursive: true })
+    await agentsTooltip.screenshot({ path: join(evidenceDirectory, 'agents-live-tooltip.png') })
+    await fixture.page.mouse.move(900, 500)
+    await expect(agentsTooltip).toBeHidden()
+    await fixture.page.keyboard.press(themeShortcut)
+    await expect(fixture.page.locator('.hierarchy-shell')).toHaveAttribute('data-theme', 'light')
+
     await hud.getByRole('button', { name: '编辑 ClaudeMd' }).click()
     const instructionDialog = fixture.page.getByRole('dialog', { name: '编辑 ClaudeMd' })
     await expect(instructionDialog).toBeVisible()
@@ -204,6 +226,10 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
     const providerSettings = fixture.page.getByRole('region', { name: '模型切换设置' })
     await expect(providerSettings.getByRole('heading', { name: '服务供应商' })).toBeVisible()
     await expect(providerSettings).toContainText('Anthropic 官方')
+    // Measure after the settings entrance animation has settled.
+    await providerSettings.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished))
+    })
     const settingsBounds = await providerSettings.boundingBox()
     const frameBounds = await providerSettings.locator('.model-settings__frame').boundingBox()
     expect(settingsBounds).not.toBeNull()
@@ -230,7 +256,7 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
       frame: 'rgba(0, 0, 0, 0)',
       providerBorder: '1px',
       providerRadius: '10px',
-      rowRadius: '0px'
+      rowRadius: '11px'
     })
     await fixture.page.waitForTimeout(250)
     await fixture.page.locator('.hierarchy-shell').screenshot({
@@ -320,7 +346,15 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = '--settings' ]; then settings="$2"; shift 2; else shift; fi
 done
 python3 - "$settings" <<'PY'
-import json, os, sys, urllib.request
+import json, os, sys, time, urllib.request
+status_dir = os.environ['MATOU_AGENT_STATUS_DIR']
+for index, state in enumerate(['running', 'waiting', 'warning', 'error']):
+    value = {'version': 1, 'label': ['Codex：promo-04-main', '等待审核', '需确认输出', '任务失败'][index], 'state': state,
+             'detail': ['运行 python3 render.py', '等待输入', '输出需要检查', '执行失败，请检查日志'][index],
+             'startedAt': int(time.time() * 1000) - [372000, 12000, 3660000, 60000][index], 'updatedAt': int(time.time() * 1000)}
+    temporary = os.path.join(status_dir, str(index) + '.tmp')
+    with open(temporary, 'w') as output: json.dump(value, output)
+    os.replace(temporary, os.path.join(status_dir, str(index) + '.json'))
 settings=json.load(open(sys.argv[1]))
 url=settings['hooks']['UserPromptSubmit'][0]['hooks'][0]['url']
 def post(value):

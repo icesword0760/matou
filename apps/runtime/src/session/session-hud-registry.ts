@@ -1,3 +1,5 @@
+import type { HudAgentActivity } from '@matou/contracts'
+import { sortAgents } from './external-agent-status'
 import { AccountUsageTracker } from './account-usage-tracker'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -42,6 +44,7 @@ export interface SessionHudSnapshot {
   taskStatus?: 'idle' | 'running' | 'needs-input' | 'error'
   teamRole?: string
   teamStatus?: 'idle' | 'running' | 'needs-input' | 'error'
+  agents?: HudAgentActivity[]
   subagentCount?: number
   subagents?: string[]
   runningTools?: Array<{ name: string; target?: string }>
@@ -58,7 +61,12 @@ interface MutableHud extends SessionHudSnapshot {
   activeTools: Map<string, { name: string; target?: string }>
   completedToolCounts: Map<string, number>
   failedMcpServers: Set<string>
-  observedSubagents: Map<string, string>
+  observedSubagents: Map<string, HudAgentActivity>
+  providerStartedAt: number
+  optimisticAgents: Map<string, HudAgentActivity>
+  externalAgents: HudAgentActivity[]
+  transcriptPath?: string
+  sessionEnded?: boolean
   providerPermissionObserved: boolean
   pendingPermissionMode?: HudPermissionMode
   providerModelObserved: boolean
@@ -76,7 +84,7 @@ export class SessionHudRegistry {
   constructor(
     now: () => number = Date.now,
     configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'),
-    transcripts = new ProviderTranscriptHudReader()
+    transcripts = new ProviderTranscriptHudReader(now)
   ) {
     this.accountUsage = new AccountUsageTracker(now)
     this.#now = now
@@ -127,9 +135,20 @@ export class SessionHudRegistry {
       completedToolCounts: new Map(),
       failedMcpServers: new Set(),
       observedSubagents: new Map(),
+      providerStartedAt: this.#now(),
+      optimisticAgents: new Map(),
+      externalAgents: [],
       providerPermissionObserved: false,
       providerModelObserved: false
     })
+  }
+
+  providerStarted(sessionId: string): void {
+    const current = this.#states.get(sessionId)
+    if (current?.mode === 'agent') {
+      current.providerStartedAt = this.#now()
+      current.sessionEnded = false
+    }
   }
 
   exit(sessionId: string, options: { fallbackToShell?: boolean } = {}): void {
@@ -151,6 +170,9 @@ export class SessionHudRegistry {
       completedToolCounts: new Map(),
       failedMcpServers: new Set(),
       observedSubagents: new Map(),
+      providerStartedAt: this.#now(),
+      optimisticAgents: new Map(),
+      externalAgents: [],
       providerPermissionObserved: false,
       providerModelObserved: false
     })
@@ -262,6 +284,7 @@ export class SessionHudRegistry {
 
     const eventName = text(payload.hook_event_name) ?? text(payload.hookEventName)
     if (!eventName) return
+    if (eventName === 'SessionStart') current.sessionEnded = false
     const toolName = text(payload.tool_name) ?? text(payload.toolName)
     const toolId = text(payload.tool_use_id) ?? text(payload.toolUseId) ??
       `${toolName ?? 'tool'}:${this.#now()}`
@@ -277,6 +300,10 @@ export class SessionHudRegistry {
       current.taskStatus = 'idle'
       current.activeTools.clear()
     } else if (eventName === 'SessionEnd') {
+      current.sessionEnded = true
+      current.observedSubagents.clear()
+      current.optimisticAgents.clear()
+      delete current.transcriptPath
       current.taskStatus = 'idle'
       current.activeTools.clear()
     }
@@ -286,12 +313,10 @@ export class SessionHudRegistry {
       if (toolName === 'TaskCreate') current.todos = applyTaskCreate(current.todos ?? [], toolInput)
       if (toolName === 'TaskUpdate') current.todos = applyTaskUpdate(current.todos ?? [], toolInput)
       if (toolName === 'Agent') {
-        current.observedSubagents.set(
+        current.optimisticAgents.set(
           toolId,
-          subagentLabel(toolInput, current.observedSubagents.size + 1)
+          { id: toolId, label: subagentLabel(toolInput, current.observedSubagents.size + current.optimisticAgents.size + 1), source: 'claude', state: 'running', startedAt: this.#now() }
         )
-        current.subagentCount = current.observedSubagents.size
-        current.subagents = [...current.observedSubagents.values()]
       }
       current.activeTools.set(toolId, {
         name: toolName,
@@ -332,11 +357,11 @@ export class SessionHudRegistry {
     const permission = normalizePermission(history.permissionMode)
     if (permission && !current.providerPermissionObserved) current.permissionMode = permission
     if (history.model && !current.providerModelObserved) current.model = history.model
-    current.subagentCount = history.subagentCount
-    current.subagents = history.subagents
-    current.observedSubagents = new Map(
-      history.subagents.map((name, index) => [`transcript:${index}`, name])
-    )
+    if (!current.sessionEnded) {
+      current.optimisticAgents.clear()
+      current.transcriptPath = transcriptPath
+      current.observedSubagents = new Map(history.agents.map(agent => [agent.id, agent]))
+    }
     current.runningTools = history.runningTools
     current.toolCounts = history.toolCounts
     if (history.lastTool) current.lastTool = history.lastTool
@@ -367,11 +392,17 @@ export class SessionHudRegistry {
     return providerConfigWatchTargets(current.cwd, this.#configDir)
   }
 
+  updateExternalAgents(sessionId: string, agents: HudAgentActivity[]): void {
+    const current = this.#states.get(sessionId)
+    if (current?.mode === 'agent') current.externalAgents = agents
+  }
+
   snapshot(sessionId: string): SessionHudSnapshot | undefined {
     const state = this.#states.get(sessionId)
     if (!state) return undefined
     const {
       activeTools: _activeTools, observedSubagents: _observedSubagents,
+      providerStartedAt: _providerStartedAt, optimisticAgents: _optimisticAgents, externalAgents: _externalAgents, transcriptPath: _transcriptPath, sessionEnded: _sessionEnded,
       completedToolCounts: _completedToolCounts, failedMcpServers: _failedMcpServers,
       providerPermissionObserved: _providerPermissionObserved,
       pendingPermissionMode: _pendingPermissionMode,
@@ -379,6 +410,15 @@ export class SessionHudRegistry {
       configCheckedAt: _configCheckedAt, configCwd: _configCwd,
       ...snapshot
     } = state
+    if (state.mode === 'agent') {
+      const cached = state.transcriptPath && this.#transcripts.cached(state.transcriptPath)
+      const providerAgents = new Map([...(cached ? cached.agents : state.observedSubagents.values()), ...state.optimisticAgents.values()].map(agent => [agent.id, agent]))
+      const agents = state.sessionEnded ? [] : sortAgents([...providerAgents.values(), ...state.externalAgents].filter(agent =>
+        agent.source !== 'claude' || agent.startedAt === undefined || agent.startedAt >= state.providerStartedAt))
+      snapshot.agents = agents
+      snapshot.subagentCount = agents.length
+      snapshot.subagents = agents.map(agent => agent.label)
+    }
     return structuredClone(snapshot)
   }
 

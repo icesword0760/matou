@@ -261,9 +261,23 @@ describe('PRD 02 bottom HUD', () => {
 
   it.each([
     ['needs-input', '待输入'], ['error', '错误']
-  ] as const)('shows attention-worthy Agent task label for %s', (taskStatus, label) => {
-    render(<TerminalHud hud={agent({ taskStatus })} />)
-    expect(screen.getByText(label)).toBeTruthy()
+  ] as const)('omits the Agent task status field for %s while retaining quota and model', (taskStatus, label) => {
+    render(<TerminalHud hud={agent({ taskStatus,
+      usageWindows: [{ label: 'Weekly', percent: 21 }]
+    })} />)
+    expect(screen.queryByText(label)).toBeNull()
+    expect(screen.getByText('Opus 4.6')).toBeTruthy()
+    expect(screen.getByText('21%')).toBeTruthy()
+  })
+
+  it('does not leave a separator for the removed task status field', () => {
+    const { container } = render(<TerminalHud hud={{
+      sessionId: 'session-1', mode: 'agent', taskStatus: 'needs-input',
+      cwd: '/Users/demo/project', startedAt: Date.now()
+    }} />)
+    expect(screen.queryByText('待输入')).toBeNull()
+    expect(container.querySelector('.status-divider')).toBeNull()
+    expect(container.querySelector('.status-cwd')?.textContent).toBe('~/project')
   })
 
   it('closes the permission menu by Escape or outside click', async () => {
@@ -541,3 +555,74 @@ function environmentActions(): SessionEnvironmentActions {
     }))
   }
 }
+
+describe('live Agents details', () => {
+  it('uses agents for count and hides an empty list despite legacy counts', () => {
+    const { rerender } = render(<TerminalHud hud={agent({ agents: [], subagentCount: 9 })} />)
+    expect(screen.queryByText(/Agents/)).toBeNull()
+    rerender(<TerminalHud hud={agent({ agents: [{ id: 'a', label: 'Live', source: 'external', state: 'running' }], subagentCount: 9 })} />)
+    expect(screen.getByText('1 Agents')).toBeTruthy()
+  })
+  it.each(['error', 'warning'] as const)('shows %s warning text and color class', state => {
+    render(<TerminalHud hud={agent({ agents: [{ id: 'a', label: 'Live', source: 'external', state }] })} />)
+    expect(screen.getByText('⚠ 1 Agents').classList.contains(`status-agents-${state}`)).toBe(true)
+  })
+  it('renders all four dots, accessible states, details and Chinese duration tiers', () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000_000)
+    render(<TerminalHud hud={agent({ agents: [
+      { id: 'a', label: 'Running task', source: 'external', state: 'running', startedAt: Date.now() - 12000, detail: '运行任务' },
+      { id: 'b', label: 'Waiting task', source: 'external', state: 'waiting', startedAt: Date.now() - 372000 },
+      { id: 'c', label: 'Warning task', source: 'external', state: 'warning', startedAt: Date.now() - 3660000 },
+      { id: 'd', label: 'Error task', source: 'external', state: 'error', detail: '状态已停止更新' }
+    ] })} />)
+    const trigger = screen.getByText('⚠ 4 Agents')
+    expect(trigger.classList.contains('status-agents-error')).toBe(true)
+    fireEvent.focus(trigger)
+    for (const state of ['running', 'waiting', 'warning', 'error']) {
+      expect(document.querySelector(`.hud-agent-dot.state-${state}`)?.getAttribute('aria-hidden')).toBe('true')
+    }
+    for (const text of ['运行中', '等待中', '需注意', '出错', '12秒', '6分12秒', '1时01分', '状态已停止更新']) expect(screen.getByText(text)).toBeTruthy()
+    expect(screen.getByText('运行任务').className).toBe('hud-agent-detail')
+    expect(screen.getByText('Running task').parentElement?.querySelector('.hud-agent-duration')?.textContent).toBe('12秒')
+    expect(screen.getByText('Error task').parentElement?.querySelector('.hud-agent-duration')?.textContent).toBe('')
+  })
+  it('ticks only while open and preserves hover across the 140ms close delay', () => {
+    vi.useFakeTimers(); vi.setSystemTime(10000)
+    const interval = vi.spyOn(window, 'setInterval')
+    const clear = vi.spyOn(window, 'clearInterval')
+    render(<TerminalHud hud={agent({ agents: [{ id: 'a', label: 'Live', source: 'external', state: 'running', startedAt: 0 }] })} />)
+    expect(interval).not.toHaveBeenCalled()
+    const trigger = screen.getByText('1 Agents')
+    fireEvent.mouseEnter(trigger)
+    expect(screen.getByText('10秒')).toBeTruthy()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(screen.getByText('11秒')).toBeTruthy()
+    fireEvent.mouseLeave(trigger)
+    act(() => vi.advanceTimersByTime(139))
+    fireEvent.mouseEnter(screen.getByRole('tooltip'))
+    act(() => vi.advanceTimersByTime(1000))
+    expect(screen.getByRole('tooltip')).toBeTruthy()
+    fireEvent.mouseLeave(screen.getByRole('tooltip'))
+    act(() => vi.advanceTimersByTime(140))
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    expect(clear).toHaveBeenCalled()
+    const count = interval.mock.calls.length
+    act(() => vi.advanceTimersByTime(3000))
+    expect(interval).toHaveBeenCalledTimes(count)
+    interval.mockRestore(); clear.mockRestore()
+  })
+  it('falls back to legacy names when agents is absent', () => {
+    render(<TerminalHud hud={agent({ subagents: ['Legacy worker'] })} />)
+    fireEvent.focus(screen.getByText('1 Agents'))
+    expect(screen.getByText('Legacy worker')).toBeTruthy()
+  })
+})
+
+it('keeps hooks details in the original plain list shell', () => {
+  render(<TerminalHud hud={agent({ configCounts: { instructionFiles: 0, mcpServers: 0, hooks: 1, hookNames: ['Stop'] } })} />)
+  fireEvent.focus(screen.getByText('1 hooks'))
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip.textContent).toBe('HooksStop')
+  expect(tooltip.classList.contains('hud-agents-tooltip')).toBe(false)
+  expect(tooltip.querySelector('li')?.className).toBe('')
+})

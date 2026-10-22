@@ -14,8 +14,8 @@ export class AppFocusRestorer {
   readonly #hasWindowFocus: () => boolean
 
   constructor(
-    requestFrame: AnimationFrameScheduler = requestAnimationFrame,
-    cancelFrame: AnimationFrameCanceller = cancelAnimationFrame,
+    requestFrame: AnimationFrameScheduler = (callback) => window.requestAnimationFrame(callback),
+    cancelFrame: AnimationFrameCanceller = (handle) => window.cancelAnimationFrame(handle),
     hasWindowFocus: () => boolean = () => document.hasFocus()
   ) {
     this.#requestFrame = requestFrame

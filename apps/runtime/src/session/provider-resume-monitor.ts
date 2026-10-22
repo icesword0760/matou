@@ -26,15 +26,26 @@ const CLAUDE_WORKSPACE_TRUST_PROMPT_MARKERS = [
 export class ClaudeFullResumePromptMonitor {
   #recentOutput = ''
   #handled = false
+  #selection = '\u001b[B\r'
+
+  get selection(): string { return this.#selection }
 
   ingest(data: string): boolean {
     if (this.#handled) return false
-    this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
-      .toLowerCase()
-      .slice(-8_192)
-    if (!CLAUDE_FULL_RESUME_PROMPT_MARKERS.every((marker) => this.#recentOutput.includes(marker))) {
-      return false
-    }
+    // Keep raw bytes until matching so a split ANSI escape or word is not
+    // normalized into a different prompt between PTY chunks.
+    this.#recentOutput = `${this.#recentOutput}${data}`.slice(-16_384)
+    const output = normalizeProviderOutput(this.#recentOutput).toLowerCase()
+    const currentPrompt = [
+      'resume this conversation?', 'this conversation has been inactive for',
+      'tokens long.', '1. resume', '2. start a new conversation',
+      'enter to confirm', 'esc to resume'
+    ].every((marker) => output.includes(marker))
+    const legacyPrompt = CLAUDE_FULL_RESUME_PROMPT_MARKERS.every((marker) => output.includes(marker))
+    if (!currentPrompt && !legacyPrompt) return false
+    // The current dialog defaults to Resume. Down+Enter would instead start
+    // a different conversation and lose the requested resume/fork identity.
+    this.#selection = currentPrompt ? '\r' : '\u001b[B\r'
     this.#handled = true
     this.#recentOutput = ''
     return true

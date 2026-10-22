@@ -8,7 +8,8 @@ export function ForkProgressOverlay({ progress }: { progress: ForkProgress }) {
   const total = Math.max(1, progress.totalSteps)
   const percent = Math.round((completed / total) * 100)
   const stage = m.forkStage[progress.stage]
-  return <div className="fork-progress-overlay" role="status"
+  const interactive = progress.stage === 'restoring-provider' || progress.stage === 'starting-window'
+  return <div className={`fork-progress-overlay${interactive ? ' fork-progress-overlay--interactive' : ''}`} role="status"
     aria-label={m.fork.label(stage)}
     onPointerDown={(event) => event.stopPropagation()}>
     <div className="fork-progress-overlay__content">

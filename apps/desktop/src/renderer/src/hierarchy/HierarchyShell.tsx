@@ -1168,8 +1168,10 @@ function HierarchyProduct({
                       ? forkStateFromStage(graphNode.forkProgress.stage)
                       : graphNode.forkState,
                     ...(graphNode.forkProgress ? { forkProgress: graphNode.forkProgress } : {}),
-                    spawnRevision: (graphNode.forkProgress?.attempt ?? graphNode.forkAttempt ?? 0) +
-                      (graphNode.providerSpawnRevision ?? 0) +
+                    // Fork retries already launch through the runtime coordinator.
+                    // Treating its attempt number as a renderer restart request
+                    // kills the new provider as soon as its identity is confirmed.
+                    spawnRevision: (graphNode.providerSpawnRevision ?? 0) +
                       (environmentRestartBySession[session.id] ?? 0),
                     ...(graphNode.forkProgress?.error ?? graphNode.forkError
                       ? { forkError: (graphNode.forkProgress?.error ?? graphNode.forkError)! }
