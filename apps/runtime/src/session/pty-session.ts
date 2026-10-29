@@ -39,6 +39,8 @@ export interface PtySessionOptions {
   model?: string
   env?: Record<string, string>
   send?: (message: RuntimeMessage) => void
+  /** Runs immediately on process exit, independently of journal persistence. */
+  onProcessExit?: () => void
   onExit?: (
     session: PtySession,
     exitCode: number,
@@ -147,7 +149,10 @@ export class PtySession {
     this.#outputBatcher = new PtyOutputBatcher((data) => this.#enqueueOutputNow(data))
 
     terminal.onData((data) => this.#outputBatcher.offer(data))
-    terminal.onExit(({ exitCode, signal }) => this.#enqueueExit(exitCode, signal))
+    terminal.onExit(({ exitCode, signal }) => {
+      options.onProcessExit?.()
+      this.#enqueueExit(exitCode, signal)
+    })
   }
 
   static async create(options: PtySessionOptions): Promise<PtySession> {

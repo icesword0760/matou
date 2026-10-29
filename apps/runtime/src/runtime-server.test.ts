@@ -390,7 +390,7 @@ describe('RuntimeServer domain RPC', () => {
       const runId = registry.get('structure-removal-session')!.runId!
       const token = tokens.issue(
         { runId, sessionId: 'structure-removal-session' },
-        ['host.identify'], Date.now() + 1_000
+        ['host.identify'], Number.POSITIVE_INFINITY
       )
       expect(hud.snapshot('structure-removal-session')).toBeDefined()
 
@@ -400,7 +400,6 @@ describe('RuntimeServer domain RPC', () => {
 
       expect(registry.has('structure-removal-session')).toBe(false)
       expect(tokens.validate(token, 'host.identify')).toBeUndefined()
-      expect(revoked).toHaveBeenCalledTimes(1)
       expect(revoked).toHaveBeenCalledWith(runId)
       expect(hud.snapshot('structure-removal-session')).toBeUndefined()
       expect(recoveryStart).not.toHaveBeenCalled()
@@ -654,7 +653,124 @@ describe('RuntimeServer domain RPC', () => {
     }
   )
 
-  it('injects the frozen structural, navigation, and terminal scope set into every managed profile', async () => {
+  it('revokes an issued capability when PTY creation fails', async () => {
+    server.close()
+    const sessionId = 'control-start-failure'
+    registerSession(database, sessionId)
+    await mkdir(join(root, 'journal'), { recursive: true })
+    await writeFile(join(root, 'journal', sessionId), 'block journal directory creation')
+    const tokens = new CapabilityTokenService(database.runtimeGeneration)
+    const issued = vi.spyOn(tokens, 'issue')
+    const registry = createTestSessionRegistry()
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+    server = new RuntimeServer(
+      port, root, database, undefined,
+      { backend, tokens, endpoint: join(root, 'control.sock') }, registry
+    )
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'start-failure' })
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId, executionContextId: 'replay-context', profile: 'shell', cols: 80, rows: 24
+    })
+    await waitUntil(() => port.last('protocol.error') !== undefined)
+    expect(port.last('protocol.error')).toMatchObject({ code: 'INTERNAL_ERROR', sessionId })
+    const token = issued.mock.results[0]?.value as string
+    expect(token).toBeTypeOf('string')
+    expect(tokens.validate(token, 'host.identify')).toBeUndefined()
+    expect(registry.has(sessionId)).toBe(false)
+  })
+
+  it.each([false, true])(
+    'revokes the managed shell capability at process exit with journal fault = %s', async (faultJournal) => {
+      const profile = 'shell'
+      server.close()
+      const executable = join(root, 'control-exit-profile.sh')
+      const capture = join(root, 'control-exit-token')
+      await writeFile(executable, `#!/bin/sh
+[ -n "$MATOU_CONTROL_CALLER_SESSION" ] || exit 0
+printf '%s' "$MATOU_CONTROL_TOKEN" > '${capture}.tmp'
+mv '${capture}.tmp' '${capture}'
+printf 'ready\\n'
+read -r line
+exit 0
+`)
+      await chmod(executable, 0o755)
+      const previous = Object.fromEntries(
+        ['SHELL', 'MATOU_CLAUDE_COMMAND', 'MATOU_CODEX_COMMAND'].map((key) => [key, process.env[key]])
+      )
+      process.env.SHELL = executable
+      process.env.MATOU_CLAUDE_COMMAND = executable
+      process.env.MATOU_CODEX_COMMAND = executable
+      const sessionId = `control-exit-${profile}`
+      registerSession(database, sessionId, profile)
+      const registry = createTestSessionRegistry()
+      const tokens = new CapabilityTokenService(database.runtimeGeneration)
+      const backend = new RuntimeControlBackend(
+        database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+      )
+      const controlledPort = new MockPort()
+      let writable = true
+      const controlledServer = new RuntimeServer(
+        controlledPort, root, database, undefined,
+        { backend, tokens, endpoint: join(root, 'control.sock') }, registry,
+        undefined, undefined, {
+          journalOptionsForSession: () => ({
+            writeFrame: async (handle, encoded) => {
+              if (!writable) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' })
+              await handle.write(encoded)
+            }
+          })
+        }
+      )
+      try {
+        controlledPort.receive({
+          type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'control-exit-renderer'
+        })
+        controlledPort.receive({
+          type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+          sessionId, executionContextId: 'replay-context', profile, cols: 80, rows: 24
+        })
+        await waitUntilAsync(async () =>
+          registry.has(sessionId) && (await readFile(capture, 'utf8').catch(() => '')).length > 0,
+          10_000
+        )
+        const token = await readFile(capture, 'utf8')
+        const runId = registry.get(sessionId)!.runId!
+        expect(tokens.validate(token, 'host.identify')?.caller).toEqual({ runId, sessionId })
+
+        const active = registry.get(sessionId)!
+        if (faultJournal) {
+          writable = false
+          active.display('pause the journal before process exit')
+          await waitUntil(() => active.durabilityState === 'paused')
+          process.kill(active.pid, 'SIGKILL')
+          await active.whenClosed()
+          expect(tokens.validate(token, 'host.identify')).toBeUndefined()
+          expect(controlledPort.last('terminal.exited')).toBeUndefined()
+          expect(registry.get(sessionId)).toBe(active)
+          writable = true
+          await active.retryDurability()
+        } else {
+          active.write('\n')
+        }
+
+        await waitUntil(() => registry.get(sessionId)?.runId !== runId)
+        expect(tokens.validate(token, 'host.identify')).toBeUndefined()
+        expect(database.get<{ status: string }>(
+          'SELECT status FROM session_runs WHERE id = ?', runId
+        )?.status).toBe('exited')
+      } finally {
+        writable = true
+        controlledServer.close()
+        await registry.shutdownAll()
+        for (const [key, value] of Object.entries(previous)) restoreEnv(key, value)
+      }
+    }
+  )
+
+  it('keeps the frozen scope set usable beyond 24 hours in every managed profile until disposal', async () => {
     server.close()
     const executable = join(root, 'control-env-profile.sh')
     await writeFile(executable, `#!/bin/sh
@@ -768,6 +884,8 @@ sleep 30
         issuedCapabilities.push({ token, runId })
         for (const scope of EXPECTED_MANAGED_SESSION_CONTROL_SCOPES) {
           expect(tokens.validate(token, scope)?.caller).toEqual({ runId, sessionId })
+          expect(tokens.validate(token, scope, Date.now() + 7 * 24 * 60 * 60 * 1000)?.caller)
+            .toEqual({ runId, sessionId })
         }
         expect(tokens.validate(token, 'task.status.write')).toBeUndefined()
       }

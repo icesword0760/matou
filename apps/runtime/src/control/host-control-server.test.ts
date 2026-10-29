@@ -116,6 +116,28 @@ describe('HostControlServer', () => {
     expect(backend.identify).toHaveBeenCalledWith({ runId: 'run-caller', sessionId: 'session-2' })
   })
 
+  it('rejects a non-expiring capability after a new runtime generation starts', () => {
+    const token = tokenService.issue('run-before-restart', ['host.identify'], Number.POSITIVE_INFINITY)
+    const afterRestart = new CapabilityTokenService('generation-2')
+
+    expect(tokenService.validate(token, 'host.identify')).toBeDefined()
+    expect(afterRestart.validate(token, 'host.identify')).toBeUndefined()
+  })
+
+  it('still expires short-lived capabilities without expiring a run-bound capability', () => {
+    const now = Date.now()
+    const shortLived = tokenService.issue('short-run', ['host.identify'], now + 1_000)
+    const runBound = tokenService.issue('managed-run', ['host.identify'], Number.POSITIVE_INFINITY)
+
+    expect(tokenService.validate(shortLived, 'host.identify', now)).toBeDefined()
+    expect(tokenService.validate(shortLived, 'host.identify', now + 1_001)).toBeUndefined()
+    expect(tokenService.validate(runBound, 'host.identify', now + 7 * 24 * 60 * 60 * 1000))
+      .toBeDefined()
+    expect(tokenService.validate(runBound, 'terminal.send-text', now)).toBeUndefined()
+    tokenService.revokeRun('managed-run')
+    expect(tokenService.validate(runBound, 'host.identify', now)).toBeUndefined()
+  })
+
   it.each(HOST_ACTION_SCOPES)('authorizes %s independently before terminal target resolution', async (scope) => {
     const caller = { runId: `run-${scope}`, sessionId: 'session-2' }
     const token = tokenService.issue(caller, [scope], Date.now() + 1_000)

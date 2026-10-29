@@ -1950,7 +1950,7 @@ export class RuntimeServer {
         const token = this.#control.tokens.issue(
           { runId, sessionId: message.sessionId },
           MANAGED_SESSION_CONTROL_SCOPES,
-          Date.now() + 24 * 60 * 60 * 1000
+          Number.POSITIVE_INFINITY // Valid until this run is revoked; never persisted across runtimes.
         )
         controlEnvironment = {
           ...controlEnvironment,
@@ -2119,6 +2119,9 @@ export class RuntimeServer {
           ...new ClaudeSettings(this.#database).environment(message.profile)
         },
         ...(attachView ? { send: this.#sendToPort } : {}),
+        ...(this.#control === undefined ? {} : {
+          onProcessExit: () => this.#control?.tokens.revokeRun(runId)
+        }),
         onOutput: (data) => {
           emittedTerminalOutput = true
           if (fullResumePromptMonitor?.ingest(data)) {
@@ -2361,6 +2364,7 @@ export class RuntimeServer {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
     } catch (error) {
+      if (hookRunId) this.#control?.tokens.revokeRun(hookRunId)
       this.#rejectProviderDerivedOutput(message.sessionId)
       await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
       if (forkLaunch && !providerProcessStarted) {
