@@ -25,6 +25,7 @@ interface HookRegistrationRecord {
   model?: string
   acceptStatuslineIdentity: boolean
   expectedProviderSessionId?: string
+  confirmedProviderSessionId?: string
   identityRejected?: boolean
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
@@ -368,60 +369,72 @@ export class ProviderHookServer {
         const model = hookModel ?? (isKnownIdentity ? undefined : registration.model)
         const now = Date.now()
         const forkAuthority = registration.forkAuthority
-        try {
-          this.#sessions.recordResumableProviderIdentity({
-            commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
-            commandType: 'provider-hook.identity',
-            requestHash: `${registration.sessionId}:${providerSessionId}:${eventName}:${now}`
-          }, {
-            id: `provider-binding-${randomUUID()}`,
-            sessionId: registration.sessionId,
-            provider: registration.provider,
-            providerSessionId,
-            metadata: {
-              ...(registration.providerConfigId === undefined
+        const metadata = {
+          ...(registration.providerConfigId === undefined
+            ? {} : { providerConfigId: registration.providerConfigId }),
+          ...(model === undefined ? {} : { model }),
+          ...(permissionMode === undefined ? {} : { permissionMode }),
+          ...(cwd === undefined ? {} : { cwd }),
+          ...(registration.inheritedConversation ? { inheritedConversation: true, canFork: true } : {})
+        }
+        const previousMetadata = currentBinding?.metadata as Record<string, unknown> | undefined
+        // Statusline metrics refresh continuously, even for idle conversations.
+        // Confirm each new run once, then persist only identity/settings changes;
+        // HUD updates below still receive every payload and real hooks still run.
+        const needsIdentityUpdate = eventName !== 'unknown' ||
+          registration.confirmedProviderSessionId !== providerSessionId || !isKnownIdentity ||
+          currentBinding?.resumeState !== 'available' ||
+          (currentBinding.restoreState !== undefined && currentBinding.restoreState !== 'none') ||
+          Object.entries(metadata).some(([key, value]) => previousMetadata?.[key] !== value)
+        if (needsIdentityUpdate) {
+          try {
+            this.#sessions.recordResumableProviderIdentity({
+              commandId: `provider-hook-${registration.runId}-${randomUUID()}`,
+              commandType: 'provider-hook.identity',
+              requestHash: `${registration.sessionId}:${providerSessionId}:${eventName}:${now}`
+            }, {
+              id: `provider-binding-${randomUUID()}`,
+              sessionId: registration.sessionId,
+              provider: registration.provider,
+              providerSessionId,
+              metadata: {
+                ...metadata,
+                lastHookEvent: eventName
+              },
+              now,
+              ...(forkAuthority === undefined
                 ? {}
-                : { providerConfigId: registration.providerConfigId }),
-              ...(model === undefined ? {} : { model }),
-              ...(permissionMode === undefined ? {} : { permissionMode }),
-              ...(cwd === undefined ? {} : { cwd }),
-              lastHookEvent: eventName,
-              ...(registration.inheritedConversation
-                ? { inheritedConversation: true, canFork: true }
-                : {})
-            },
-            now,
-            ...(forkAuthority === undefined
-              ? {}
-              : { forkAuthority })
-          })
-          // The expected identity protects only the restore handshake. Once the
-          // requested conversation is confirmed, later intentional conversation
-          // changes from this same provider process follow the ordinary hook path.
-          delete registration.expectedProviderSessionId
-          // The first accepted provider identity atomically completes the
-          // durable Fork. Later lifecycle hooks belong to the now ordinary
-          // live Session and must not reuse the expired launch lease.
-          if (forkAuthority !== undefined) delete registration.forkAuthority
-          this.#onIdentityRecorded({
-            runId: registration.runId,
-            sessionId: registration.sessionId,
-            provider: registration.provider,
-            providerSessionId,
-            eventName,
-            ...(forkAuthority === undefined
-              ? {}
-              : { forkAuthority })
-          })
-        } catch (error) {
-          // An old provider process may report its identity after lease takeover.
-          // Acknowledge its endpoint, but revoke the complete hook stream: the
-          // old process no longer owns this Session's HUD, notifications or DAG.
-          if (!(error instanceof StaleForkProviderIdentityError)) throw error
-          registration.acceptIdentity = false
-          registration.identityRejected = true
-          sendJson(response, 200, {})
-          return
+                : { forkAuthority })
+            })
+            // The expected identity protects only the restore handshake. Once the
+            // requested conversation is confirmed, later intentional conversation
+            // changes from this same provider process follow the ordinary hook path.
+            delete registration.expectedProviderSessionId
+            // The first accepted provider identity atomically completes the
+            // durable Fork. Later lifecycle hooks belong to the now ordinary
+            // live Session and must not reuse the expired launch lease.
+            if (forkAuthority !== undefined) delete registration.forkAuthority
+            this.#onIdentityRecorded({
+              runId: registration.runId,
+              sessionId: registration.sessionId,
+              provider: registration.provider,
+              providerSessionId,
+              eventName,
+              ...(forkAuthority === undefined
+                ? {}
+                : { forkAuthority })
+            })
+            registration.confirmedProviderSessionId = providerSessionId
+          } catch (error) {
+            // An old provider process may report its identity after lease takeover.
+            // Acknowledge its endpoint, but revoke the complete hook stream: the
+            // old process no longer owns this Session's HUD, notifications or DAG.
+            if (!(error instanceof StaleForkProviderIdentityError)) throw error
+            registration.acceptIdentity = false
+            registration.identityRejected = true
+            sendJson(response, 200, {})
+            return
+          }
         }
       }
       if (registration.provider === 'codex') {

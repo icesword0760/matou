@@ -13,8 +13,14 @@ import { CALLER_SESSION_MARKERS } from './independent-session-environment'
 const roots: string[] = []
 
 describe('PtySession caller environment isolation', () => {
-  it.each(['shell', 'claude-code', 'codex'] as const)(
-    'starts independent %s cards even when Matou was launched by an agent', async (profile) => {
+  it.each([
+    { profile: 'shell', mode: 'new' },
+    { profile: 'claude-code', mode: 'new' },
+    { profile: 'claude-code', mode: 'resume' },
+    { profile: 'claude-code', mode: 'fork' },
+    { profile: 'codex', mode: 'resume' }
+  ] as const)(
+    'isolates caller identity for $profile $mode even with launch overrides', async ({ profile, mode }) => {
       const root = await mkdtemp(join(tmpdir(), 'matou-independent-session-'))
       roots.push(root)
       const executable = join(root, 'provider.cjs')
@@ -40,9 +46,12 @@ setInterval(() => {}, 1000);
         session = await PtySession.create({
           sessionId: `independent-${profile}`, executionContextId: 'local-default',
           cols: 100, rows: 24, cwd: root, dataRoot: root, profile,
-          ...(profile === 'shell' ? {} : { providerSessionId: 'fixture-resume' }),
+          ...(mode === 'new' ? {} : { providerSessionId: 'fixture-resume' }),
+          ...(mode === 'fork' ? { forkSession: true } : {}),
           env: { ANTHROPIC_API_KEY: 'fixture-key', MATOU_CONTROL_CALLER_SESSION: 'new-card',
-            CLAUDE_CODE_CHILD_SESSION: 'override-parent' },
+            CLAUDE_CODE_CHILD_SESSION: 'override-parent',
+            CLAUDE_CODE_SESSION_NAME: 'Unrelated launch override name',
+            CLAUDE_CODE_SESSION_KIND: 'bg' },
           onOutput: data => { output += data }
         })
         await waitUntil(() => output.includes('ISOLATION_RESULT='))
@@ -259,6 +268,47 @@ sleep 5
       restoreEnv('NO_COLOR', previousNoColor)
       restoreEnv('COLORTERM', previousColorTerm)
       restoreEnv('FORCE_COLOR', previousForceColor)
+    }
+  })
+})
+
+describe.skipIf(process.platform !== 'darwin')('PtySession Claude idle memory sweeping', () => {
+  it.each([
+    { profile: 'claude-code', overrides: {}, expected: '1000|unset' },
+    { profile: 'claude-code', overrides: { MIMALLOC_PURGE_HOLES_MIN_INTERVAL: '250' }, expected: '250|unset' },
+    { profile: 'claude-code', overrides: { mimalloc_purge_holes_min_interval: '500' }, expected: 'unset|500' },
+    { profile: 'shell', overrides: {}, expected: 'unset|unset' },
+    { profile: 'codex', overrides: {}, expected: 'unset|unset' }
+  ] as const)('keeps the $profile launch policy scoped and respects $expected', async ({ profile, overrides, expected }) => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-pty-idle-sweep-'))
+    roots.push(root)
+    const executable = join(root, 'provider.sh')
+    await writeFile(executable, `#!/bin/sh
+printf 'SWEEP=%s|%s\\n' "\${MIMALLOC_PURGE_HOLES_MIN_INTERVAL-unset}" "\${mimalloc_purge_holes_min_interval-unset}"
+sleep 5
+`)
+    await chmod(executable, 0o755)
+    const commandKey = profile === 'shell' ? 'SHELL'
+      : profile === 'claude-code' ? 'MATOU_CLAUDE_COMMAND' : 'MATOU_CODEX_COMMAND'
+    const keys = [commandKey, 'MIMALLOC_PURGE_HOLES_MIN_INTERVAL', 'mimalloc_purge_holes_min_interval']
+    const previous = new Map(keys.map(key => [key, process.env[key]]))
+    delete process.env.MIMALLOC_PURGE_HOLES_MIN_INTERVAL
+    delete process.env.mimalloc_purge_holes_min_interval
+    process.env[commandKey] = executable
+    let session: PtySession | undefined
+    let output = ''
+    try {
+      session = await PtySession.create({
+        sessionId: 'idle-sweep', executionContextId: 'local-default',
+        cols: 80, rows: 24, cwd: root, dataRoot: root, profile,
+        env: overrides, onOutput: data => { output += data }
+      })
+      await waitUntil(() => output.includes('SWEEP='))
+      expect(output).toContain(`SWEEP=${expected}`)
+      expect(process.env.MIMALLOC_PURGE_HOLES_MIN_INTERVAL).toBeUndefined()
+    } finally {
+      await session?.shutdownForRuntime({ gracePeriodMs: 100, hardKillWaitMs: 1000 })
+      for (const [key, value] of previous) restoreEnv(key, value)
     }
   })
 })

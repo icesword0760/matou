@@ -98,6 +98,12 @@ export class ProviderResumeMonitor {
     if (this.#failed || this.#settled) return undefined
     this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
       .slice(-8_192)
+    const shortId = this.#expectedProviderSessionId.slice(0, 8)
+    if (/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(this.#expectedProviderSessionId) &&
+      this.#recentOutput.toLowerCase().includes(`that session is running in the background (${shortId}).`)) {
+      this.#failed = true
+      return 'provider session running in background'
+    }
     if (matchesExpectedResumeFailure(this.#recentOutput, this.#expectedProviderSessionId)) {
       this.#failed = true
       return 'provider session not found'

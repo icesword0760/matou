@@ -2641,6 +2641,51 @@ sleep 30
     }
   })
 
+  it.each([
+    ['paints the live screen when', 'returns to a large backlog', 300 * 1024, true],
+    ['keeps incremental replay when', 'has a short backlog', 4 * 1024, false]
+  ] as const)('%s a retained agent card %s', async (_action, _backlogLabel, backlog, snapshot) => {
+    const executable = join(root, 'backlog-provider.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previous = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    registerSession(database, 'retained-backlog', 'claude-code')
+    try {
+      port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'retained-backlog', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24 })
+      await waitUntil(() => port.last('terminal.spawned') !== undefined)
+      const session = [...testSessionRegistries][0]!.get('retained-backlog')!
+      session.display('painted before leaving')
+      await session.replayMetadata()
+      const leftAt = session.lastSequence
+      const frame = `\r\u001b[2Kspinner ${'.'.repeat(1_000)}`
+      for (let written = 0; written < backlog; written += frame.length) session.display(frame)
+      await session.replayMetadata()
+
+      const requestedAt = port.sent.length
+      port.receive({ type: 'terminal.replay-request', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'retained-backlog', fromSequence: leftAt + 1, preserveExistingModel: true })
+      await waitUntil(() => port.last('terminal.replay-complete') !== undefined, 10_000)
+
+      const start = port.last('terminal.replay-start')!
+      const replayed = port.sent.slice(requestedAt).filter((message) =>
+        message.type === 'terminal.data' && message.sessionId === 'retained-backlog' &&
+        message.sequence > leftAt)
+      if (snapshot) {
+        expect(start).toMatchObject({ source: 'checkpoint', checkpointSequence: session.lastSequence })
+        expect(replayed).toEqual([])
+      } else {
+        expect(start).toMatchObject({ source: 'tail', fromSequence: leftAt + 1 })
+        expect(start).not.toHaveProperty('checkpoint')
+        expect(replayed.length).toBe(session.lastSequence - leftAt)
+      }
+    } finally {
+      restoreEnv('MATOU_CLAUDE_COMMAND', previous)
+    }
+  })
+
   it('advertises replay and replays durable output after a Runtime reconnect', async () => {
     const journal = await SegmentJournal.open(root, 'persisted-session')
     registerSession(database, 'persisted-session')

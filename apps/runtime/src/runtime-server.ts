@@ -66,7 +66,7 @@ import {
   type SessionExecutionDescriptor,
   type SessionExecutionResult
 } from './session/session-execution-service'
-import { SessionGitStateRepository } from './session/session-git-state-repository'
+import { isGitMetadataNoise, SessionGitStateRepository } from './session/session-git-state-repository'
 import type {
   ProviderHookRegistration,
   ProviderHookServer,
@@ -154,6 +154,9 @@ export interface RuntimeServerOptions {
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
 const REPLAY_LOW_WATERMARK_BYTES = 512 * 1024
+// Agent TUIs redraw constantly while offscreen. Past this backlog, painting the
+// live screen snapshot is faster than re-parsing every frame since the card left.
+const CATCH_UP_REPLAY_MAX_BYTES = 256 * 1024
 const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
@@ -814,6 +817,14 @@ export class RuntimeServer {
         )
         break
       case 'session.recovery-retry':
+        if (this.#recoveryCoordinator?.isDeferred(message.sessionId)) {
+          const now = Date.now()
+          this.#sessionInteractions.record({
+            commandId: `manual-recovery-${message.sessionId}-${randomUUID()}`,
+            commandType: 'session.user-interaction', requestHash: `${message.sessionId}:${now}`
+          }, { sessionId: message.sessionId, interactionKind: 'provider-action', deferOrdering: true, now })
+          this.flushSemanticEvents()
+        }
         this.#recoveryCoordinator?.retry(message.sessionId)
         break
       case 'terminal.user-interaction': {
@@ -1294,8 +1305,10 @@ export class RuntimeServer {
       detachedSession = activeSession
       // The live Runtime VT model has consumed every byte in order since this
       // PTY started. Prefer it over a renderer checkpoint or a mid-frame tail.
-      const liveScreen = activeSession && activeSession.profile !== 'shell' &&
-        !message.preserveExistingModel
+      const liveScreen = activeSession && activeSession.profile !== 'shell' && (
+        !message.preserveExistingModel ||
+        activeSession.outputBytesSince(message.fromSequence) > CATCH_UP_REPLAY_MAX_BYTES
+      )
         ? await activeSession.captureReplayScreen()
         : undefined
       const metadata = activeSession
@@ -1685,6 +1698,11 @@ export class RuntimeServer {
     executionMode?: 'attach-only',
     attachView = true
   ): Promise<void> {
+    // A view attaching or switching canvases must not bypass explicit recovery.
+    if (this.#recoveryCoordinator?.isDeferred(message.sessionId)) {
+      this.publishRecoverySnapshot(this.#recoveryCoordinator.snapshot())
+      return
+    }
     attachView = attachView && !this.#portClosed
     const persistentAuthority = this.#database.get<{
       execution_context_id: string
@@ -3296,7 +3314,10 @@ export class RuntimeServer {
       desired.set(key, () => watch(gitDirectory, {
         persistent: false,
         recursive: process.platform === 'darwin' || process.platform === 'win32'
-      }, () => this.#scheduleHudFileRefresh(sessionId)))
+      }, (_event, filename) => {
+        if (isGitMetadataNoise(filename?.toString())) return
+        this.#scheduleHudFileRefresh(sessionId)
+      }))
     }
 
     const current = this.#hudFileWatchers.get(sessionId) ?? new Map<string, FSWatcher>()

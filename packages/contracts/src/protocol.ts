@@ -350,7 +350,7 @@ export type SessionRecoveryStatusWire = {
       sessionId: string
       sceneId: string
       priority: 'active-session' | 'foreground-scene' | 'active-task' | 'active-workspace' | 'background'
-      state: 'queued' | 'restoring' | 'ready' | 'failed'
+      state: 'deferred' | 'queued' | 'restoring' | 'ready' | 'failed'
       error?: string
 }
 

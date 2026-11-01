@@ -1,4 +1,4 @@
-export type RecoveryState = 'queued' | 'restoring' | 'ready' | 'failed'
+export type RecoveryState = 'deferred' | 'queued' | 'restoring' | 'ready' | 'failed'
 export type RecoveryPriority =
   | 'active-session'
   | 'foreground-scene'
@@ -16,6 +16,10 @@ export interface RecoveryJob {
   executionContextId?: string
   profile?: 'shell' | 'claude-code' | 'codex'
   recoveryAuthority?: 'fork'
+  /** User interaction/creation time, never a provider heartbeat or restart time. */
+  lastUsedAt?: number
+  /** Explicitly ended or failed cards remain manual even when recently used. */
+  automatic?: boolean
 }
 
 export interface RecoveryJobSnapshot extends RecoveryJob {
@@ -60,7 +64,7 @@ export class RuntimeSessionRecoveryScheduler {
     let changed = false
     for (const job of jobs) {
       const current = this.#jobs.get(job.sessionId)
-      if (current && current.state !== 'failed') continue
+      if (current && current.state !== 'failed' && current.state !== 'deferred') continue
       this.#jobs.set(job.sessionId, {
         ...job,
         state: job.recoveryAuthority === 'fork' ? 'restoring' : 'queued',
@@ -70,6 +74,18 @@ export class RuntimeSessionRecoveryScheduler {
     }
     if (changed) this.#changed()
     this.#scheduleDrain()
+  }
+
+  defer(jobs: readonly RecoveryJob[]): void {
+    for (const job of jobs) {
+      if (this.#jobs.has(job.sessionId)) continue
+      this.#jobs.set(job.sessionId, { ...job, state: 'deferred', insertionOrder: this.#insertionOrder++ })
+    }
+    this.#changed()
+  }
+
+  isDeferred(sessionId: string): boolean {
+    return this.#jobs.get(sessionId)?.state === 'deferred'
   }
 
   prioritizeScene(

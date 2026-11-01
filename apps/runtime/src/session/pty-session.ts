@@ -17,6 +17,7 @@ import {
 } from './session-durability-gate'
 import { PtyExecutionPauser } from './pty-execution-pauser'
 import { PtyOutputBatcher } from './pty-output-batcher'
+import { OutputByteLedger } from './output-byte-ledger'
 import { resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
@@ -77,6 +78,8 @@ export class PtySession {
   readonly #encoder = new TextEncoder()
   readonly #outputBatcher: PtyOutputBatcher
   readonly #screen: TerminalScreenProjector
+  #lastOutputAt = 0
+  readonly #outputLedger = new OutputByteLedger()
 
   #sequence: number
   #writeChain = Promise.resolve()
@@ -148,7 +151,10 @@ export class PtySession {
     })
     this.#outputBatcher = new PtyOutputBatcher((data) => this.#enqueueOutputNow(data))
 
-    terminal.onData((data) => this.#outputBatcher.offer(data))
+    terminal.onData((data) => {
+      this.#lastOutputAt = Date.now()
+      this.#outputBatcher.offer(data)
+    })
     terminal.onExit(({ exitCode, signal }) => {
       options.onProcessExit?.()
       this.#enqueueExit(exitCode, signal)
@@ -198,6 +204,15 @@ export class PtySession {
       delete baseEnvironment.NO_COLOR
       baseEnvironment.COLORTERM = 'truecolor'
       baseEnvironment.FORCE_COLOR = '1'
+      // Native Claude's allocator sweeps parked heaps every 100 ms by default.
+      // On macOS this dominated measured idle CPU even outside Matou. Keep
+      // reclaiming free blocks, but avoid ten sweeps/second per open session.
+      // This does not suspend the provider or change JavaScript GC; retain an
+      // explicit user setting (including the allocator's lowercase spelling).
+      if (process.platform === 'darwin' &&
+        baseEnvironment.mimalloc_purge_holes_min_interval === undefined) {
+        baseEnvironment.MIMALLOC_PURGE_HOLES_MIN_INTERVAL ??= '1000'
+      }
     }
     const providerCommandEnvironment = profile === 'shell'
       ? {}
@@ -216,6 +231,11 @@ export class PtySession {
       })
     })
     return new PtySession(options, journal, terminal)
+  }
+
+  /** Wall-clock time of the latest process output; lets submitted input wait for its echo. */
+  get lastOutputAt(): number {
+    return this.#lastOutputAt
   }
 
   write(data: string): void {
@@ -274,6 +294,11 @@ export class PtySession {
   async replayMetadata(maxLines = 10_000) {
     await this.#writeChain
     return this.#journal.replayMetadata(maxLines)
+  }
+
+  /** Output bytes produced from `sequence` onward in this run; Infinity when unknown. */
+  outputBytesSince(sequence: number): number {
+    return this.#outputLedger.bytesSince(sequence)
   }
 
   captureReplayScreen() {
@@ -450,6 +475,7 @@ export class PtySession {
       return
     }
     this.#sequence = sequence
+    this.#outputLedger.record(sequence, bytes.byteLength)
     this.#trackWrite(operation)
   }
 

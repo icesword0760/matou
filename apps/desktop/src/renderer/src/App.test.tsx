@@ -23,6 +23,7 @@ vi.mock('./terminal/TerminalSurface', () => ({ TerminalSurface: () => <div /> })
 beforeEach(() => window.history.replaceState({}, '', '/'))
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   Reflect.deleteProperty(window, 'matouDesktop')
 })
 
@@ -42,6 +43,23 @@ describe('App database lifecycle gate', () => {
     expect(screen.queryByTestId('workspace')).toBeNull()
     expect(await screen.findByRole('heading', { name: '数据库需要恢复' })).toBeTruthy()
     expect(screen.queryByTestId('workspace')).toBeNull()
+  })
+
+  it('shows feedback for a slow startup and removes it when the workspace is ready', async () => {
+    vi.useFakeTimers()
+    const initial = readyState()
+    const api = installDynamicApi({
+      ...initial, snapshot: { ...initial.snapshot, stage: 'opening-database', completed: 0 }
+    })
+    render(<App />)
+    await act(async () => { await Promise.resolve() })
+    expect(screen.queryByRole('status')).toBeNull()
+    act(() => { vi.advanceTimersByTime(1_200) })
+    expect(screen.getByRole('status').textContent).toContain('正在打开工作区')
+    expect(screen.queryByTestId('workspace')).toBeNull()
+    act(() => { api.publish(initial) })
+    expect(screen.getByTestId('workspace')).toBeTruthy()
+    expect(screen.queryByRole('status')).toBeNull()
   })
 
   it('enters the ordinary workspace only after ready', async () => {

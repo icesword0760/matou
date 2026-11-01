@@ -13,6 +13,7 @@ import {
   withHostControlPostResponseEffect
 } from './host-control-post-response'
 import { SegmentJournal } from '../journal/segment-journal'
+import type { PtySession } from '../session/pty-session'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { HierarchyApplicationService } from '../hierarchy/hierarchy-application-service'
 import { NotificationProjection } from '../product/experience-foundation'
@@ -145,3 +146,70 @@ describe('RuntimeControlBackend Task information channel', () => {
 function command(commandId: string) {
   return { commandId, commandType: commandId, requestHash: `hash-${commandId}` }
 }
+
+describe('RuntimeControlBackend submitted terminal input', () => {
+  afterEach(() => vi.useRealTimers())
+
+  function fakeSession(): { session: PtySession; writes: Array<{ data: string; at: number }>; echo: () => void } {
+    const state = { lastOutputAt: 0 }
+    const writes: Array<{ data: string; at: number }> = []
+    const session = {
+      get lastOutputAt() { return state.lastOutputAt },
+      write: (data: string) => { writes.push({ data, at: Date.now() }) }
+    } as unknown as PtySession
+    return { session, writes, echo: () => { state.lastOutputAt = Date.now() } }
+  }
+
+  function backendWith(session: PtySession): RuntimeControlBackend {
+    const backend = new RuntimeControlBackend(
+      database, root, new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+    backend.register('session-1', session)
+    return backend
+  }
+
+  it('sends Enter separately after the target stops echoing so agent TUIs submit instead of pasting', async () => {
+    vi.useFakeTimers({ now: 1_000 })
+    const target = fakeSession()
+    const backend = backendWith(target.session)
+
+    const sent = backend.sendText('session-1', 'finish and report back', true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(target.writes.map(({ data }) => data)).toEqual(['finish and report back'])
+
+    target.echo()
+    await vi.advanceTimersByTimeAsync(200)
+    target.echo()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(target.writes).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(300)
+    await sent
+    expect(target.writes.map(({ data }) => data)).toEqual(['finish and report back', '\r'])
+    expect(target.writes[1]!.at - target.writes[0]!.at).toBeGreaterThanOrEqual(200 + 250)
+  })
+
+  it('submits after the bounded wait even when a busy target never goes quiet', async () => {
+    vi.useFakeTimers({ now: 1_000 })
+    const target = fakeSession()
+    const backend = backendWith(target.session)
+    const spinner = setInterval(target.echo, 20)
+
+    const sent = backend.sendText('session-1', 'queued follow-up', true)
+    await vi.advanceTimersByTimeAsync(5_100)
+    await sent
+    clearInterval(spinner)
+
+    expect(target.writes.map(({ data }) => data)).toEqual(['queued follow-up', '\r'])
+    expect(target.writes[1]!.at - target.writes[0]!.at).toBeLessThanOrEqual(5_100)
+  })
+
+  it('keeps fill-only input as a single write without Enter', async () => {
+    const target = fakeSession()
+    const backend = backendWith(target.session)
+
+    await backend.sendText('session-1', 'draft only')
+
+    expect(target.writes.map(({ data }) => data)).toEqual(['draft only'])
+  })
+})

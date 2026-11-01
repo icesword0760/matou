@@ -31,6 +31,8 @@ https://updates.example.com/matou/stable
 
 ## 版本与签名
 
+从 0.2.18 开始，`pnpm package:mac` 要求签名成功，发布使用同一 Developer ID 身份；不得用 `identity=-` 或关闭签名发现来替代正式发布签名。临时签名的指定要求随构建内容变化，会使 macOS 目录授权失效。安装替换前应退出旧应用；旧应用启动的长期后台服务仍可能持有旧身份，需要在确认用途后单独结束。备份包不作为日常启动入口。签名和公证分别验证，签名成功不能当作公证成功。
+
 每次发布前把 `apps/desktop/package.json` 的 `version` 提升为严格递增的 SemVer。macOS 自动安装要求 Developer ID Application 签名；发布机或 CI 配置：
 
 ```bash

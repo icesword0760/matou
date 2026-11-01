@@ -61,6 +61,7 @@ export interface ForkOperationCoordinatorDependencies {
   health?: Pick<WorktreeHealthService, 'check'>
   now?: () => number
   concurrency?: number
+  canStartSession?(sessionId: string): boolean
   heartbeatMs?: number
   leaseTtlMs?: number
   identityTimeoutMs?: number
@@ -129,7 +130,11 @@ export class ForkOperationCoordinator {
     await this.#settleWaitingOperations()
     const available = Math.max(0, this.#concurrency - this.#running.size)
     if (available === 0) return
-    const candidates = this.#intents.listClaimable(this.#now(), available)
+    const candidates = this.#dependencies.canStartSession
+      ? this.#intents.listClaimable(this.#now(), Number.MAX_SAFE_INTEGER)
+        .filter(operation => this.#dependencies.canStartSession!(operation.identity.sessionId))
+        .slice(0, available)
+      : this.#intents.listClaimable(this.#now(), available)
     for (const operation of candidates) this.#launch(operation)
   }
 

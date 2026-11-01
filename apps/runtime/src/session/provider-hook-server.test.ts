@@ -318,6 +318,43 @@ describe('ProviderHookServer', () => {
     }])
   })
 
+  it('keeps refreshing HUD metrics without appending identical statusline identities', async () => {
+    const registration = await hooks.registerClaudeSession({
+      runId: 'run-statusline', sessionId: 'session-1', acceptStatuslineIdentity: true
+    })
+    const payload = { session_id: 'provider-statusline', cwd: root, model: { id: 'claude-opus-4-6' } }
+    await postHook(registration.hookUrl, payload)
+    const eventCount = () => database.get<{ count: number }>('SELECT COUNT(*) AS count FROM domain_events')!.count
+    const commandCount = () => database.get<{ count: number }>('SELECT COUNT(*) AS count FROM command_deduplication')!.count
+    const before = [eventCount(), commandCount()]
+    for (let used = 1; used <= 20; used++) {
+      expect((await postHook(registration.hookUrl, {
+        ...payload, context_window: { used_percentage: used }
+      })).status).toBe(200)
+    }
+    expect([eventCount(), commandCount()]).toEqual(before)
+    expect(identityEvents).toHaveLength(1)
+    expect(hudEvents).toHaveLength(21)
+
+    // Real lifecycle events and provider setting/identity changes remain durable.
+    await postHook(registration.hookUrl, { ...payload, hook_event_name: 'UserPromptSubmit' })
+    await postHook(registration.hookUrl, payload)
+    expect(identityEvents).toHaveLength(2)
+    await postHook(registration.hookUrl, { ...payload, permission_mode: 'plan' })
+    expect(identityEvents).toHaveLength(3)
+    await postHook(registration.hookUrl, { ...payload, model: { id: 'claude-sonnet-4-6' } })
+    expect(identityEvents).toHaveLength(4)
+    await postHook(registration.hookUrl, { ...payload, session_id: 'provider-replacement' })
+    expect(identityEvents).toHaveLength(5)
+    await registration.dispose()
+
+    const resumed = await hooks.registerClaudeSession({
+      runId: 'run-statusline-restarted', sessionId: 'session-1', acceptStatuslineIdentity: true
+    })
+    await postHook(resumed.hookUrl, { ...payload, session_id: 'provider-replacement' })
+    expect(identityEvents).toHaveLength(6)
+  })
+
   it('rejects a different statusline identity while restoring one specific conversation', async () => {
     const mismatches: unknown[] = []
     const rejectedHudEvents: unknown[] = []

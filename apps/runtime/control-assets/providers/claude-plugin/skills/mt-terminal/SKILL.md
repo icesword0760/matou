@@ -48,6 +48,7 @@ description: Use when the user asks Claude Code running inside Matou to inspect 
 
 - 聚焦或切换目标唯一时直接执行；多个候选时按 CLI 返回的标题、工作空间、事项、画布、profile、cwd 和序号展示，让用户选择。
 - 输入前确认目标和内容，除非用户已经明确给出两者。成功后用一句自然语言说明最终标题或路径。
+- 给另一个 AI 会话传话或布置任务（包括“做完后通知我”）时一律加 `--enter`，否则消息只停在对方输入框；需要对方回报时，先用 `mt identify --json` 取得自己的标题，在消息里写明回报命令 `mt send "<我的标题>" "<回报内容>" --enter`。
 
 ## 渐进式参考
 

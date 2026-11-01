@@ -109,7 +109,7 @@ describe('RuntimeRecoveryService', () => {
 
     const jobs = new RuntimeRecoveryService(root, database).planSessionRecovery()
 
-    expect(jobs.map(({ sessionId, priority }) => [sessionId, priority])).toEqual([
+    expect(jobs.filter(job => job.automatic).map(({ sessionId, priority }) => [sessionId, priority])).toEqual([
       ['current', 'active-session'],
       ['foreground-offscreen', 'foreground-scene'],
       ['same-scene-other-level', 'active-task'],
@@ -124,7 +124,7 @@ describe('RuntimeRecoveryService', () => {
       (profile === 'shell' || profile === 'claude-code'))).toBe(true)
     expect(jobs.find(({ sessionId }) => sessionId === 'durable-fork'))
       .toMatchObject({ recoveryAuthority: 'fork' })
-    expect(jobs.some(({ sessionId }) => sessionId === 'explicitly-stopped')).toBe(false)
+    expect(jobs.find(({ sessionId }) => sessionId === 'explicitly-stopped')?.automatic).toBe(false)
     expect(jobs.some(({ sessionId }) => sessionId === 'deleted')).toBe(false)
   })
 
@@ -137,7 +137,7 @@ describe('RuntimeRecoveryService', () => {
     database.run("UPDATE sessions SET work_status = 'idle' WHERE id = 'durable-fork'")
 
     const service = new RuntimeRecoveryService(root, database)
-    expect(service.planSessionRecovery().some(({ sessionId }) => sessionId === 'durable-fork')).toBe(false)
+    expect(service.planSessionRecovery().find(({ sessionId }) => sessionId === 'durable-fork')?.automatic).toBe(true)
     expect(service.describeExternalForkRecovery('durable-fork')).toMatchObject({
       sessionId: 'durable-fork',
       sceneId: 'scene-active',
@@ -147,6 +147,22 @@ describe('RuntimeRecoveryService', () => {
       profile: 'claude-code',
       recoveryAuthority: 'fork'
     })
+  })
+
+  it('uses user interaction recency, including pending ordering, instead of restart timestamps', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'matou-recovery-recency-'))
+    const database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
+    databases.push(database)
+    await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
+    seedRecoveryHierarchy(database)
+    database.run(`INSERT OR REPLACE INTO session_canvas_memberships
+      (session_id, scene_id, sibling_created_seq, last_user_interaction_seq,
+       pending_user_interaction_seq, created_at, updated_at)
+      VALUES ('current', 'scene-active', 1, 0, 42, 1, 250)`)
+    database.run('UPDATE sessions SET last_activity_at = 999999, updated_at = 999999')
+    const jobs = new RuntimeRecoveryService(root, database).planSessionRecovery()
+    expect(jobs.find(job => job.sessionId === 'current')?.lastUsedAt).toBe(250)
+    expect(jobs.find(job => job.sessionId === 'background')?.lastUsedAt).toBeLessThan(250)
   })
 
 })

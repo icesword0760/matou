@@ -15,6 +15,13 @@ describe('independent session environment', () => {
     for (const key of CALLER_SESSION_MARKERS) expect(input[key]).toBe('parent')
   })
 
+  it('does not pass a background launcher name or transport to independent cards', () => {
+    expect(independentSessionEnvironment({
+      CLAUDE_CODE_SESSION_NAME: 'Caller conversation', CLAUDE_CODE_SESSION_KIND: 'bg',
+      CLAUDE_BG_RENDEZVOUS_SOCK: '/tmp/caller.sock', TERM: 'xterm-256color'
+    })).toEqual({ TERM: 'xterm-256color' })
+  })
+
   it('leaves normal GUI launches unchanged and is idempotent', () => {
     const input = { HOME: '/fixture/home', TERM: 'xterm-256color' }
     expect(independentSessionEnvironment(input)).toEqual(input)

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,6 +8,7 @@ import * as pty from 'node-pty'
 import { expect, it } from 'vitest'
 
 import { encodeClaudeProjectPath } from './claude-session-catalog'
+import { independentSessionEnvironment } from './independent-session-environment'
 
 // Opt-in native-provider compatibility gate: isolated HOME/config + local fake
 // model, no real credentials, user files or paid inference. Keep evidence in tmp.
@@ -45,7 +46,12 @@ it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('Claude 2.1.299+ preserves his
   rows.push({ ...base, type: 'user', uuid: latestUser, parentUuid: rows.at(-1)!.uuid,
     message: { role: 'user', content: 'LATEST USER AFTER OLD NOTICES' } })
   rows.push(response(randomUUID(), latestUser, 'LATEST ASSISTANT AFTER OLD NOTICES'))
-  const original = rows.map(row => JSON.stringify(row)).join('\n') + '\n'
+  const preservedTitle = 'PRESERVED_INDEPENDENT_SESSION_TITLE'
+  const callerTitle = 'UNRELATED_CALLER_SESSION_TITLE'
+  const original = [...rows,
+    { type: 'ai-title', sessionId, aiTitle: preservedTitle },
+    { type: 'agent-name', sessionId, agentName: preservedTitle }
+  ].map(row => JSON.stringify(row)).join('\n') + '\n'
   const transcript = join(project, `${sessionId}.jsonl`)
   await writeFile(transcript, original)
   const requests: string[] = []
@@ -74,13 +80,14 @@ it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('Claude 2.1.299+ preserves his
   const port = (server.address() as { port: number }).port
   const env = { PATH: process.env.PATH!, HOME: home, TERM: 'xterm-256color', LANG: 'en_US.UTF-8',
     CLAUDE_CONFIG_DIR: config, ANTHROPIC_API_KEY: 'fixture-not-a-key',
-    ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, DISABLE_AUTOUPDATER: '1' }
+    ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, DISABLE_AUTOUPDATER: '1',
+    CLAUDE_CODE_SESSION_NAME: callerTitle, CLAUDE_CODE_SESSION_KIND: 'bg' }
   let current: ReturnType<typeof launch> | undefined
   function launch() {
     const term = new Terminal({ cols: 150, rows: 70, allowProposedApi: true, scrollback: 5000 })
     const proc = pty.spawn(process.env.MATOU_TEST_CLAUDE_COMMAND!, [
       '--resume', sessionId, '--settings', JSON.stringify({ enabledPlugins: { 'agents-md@builtin': true } })
-    ], { cwd, env, cols: 150, rows: 70 })
+    ], { cwd, env: independentSessionEnvironment(env), cols: 150, rows: 70 })
     proc.onData(data => term.write(data))
     const closed = new Promise<void>(resolve => proc.onExit(() => resolve()))
     return { proc, term, close: async () => { proc.kill(); await closed; term.dispose() }, screen: () => {
@@ -90,11 +97,30 @@ it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('Claude 2.1.299+ preserves his
     } }
   }
   try {
+    // Already-persisted contamination survives environment isolation. Repair
+    // both metadata records by appending, preserving all historical bytes.
+    await appendFile(transcript, [
+      { type: 'ai-title', sessionId, aiTitle: callerTitle },
+      { type: 'agent-name', sessionId, agentName: callerTitle }
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+    current = launch()
+    await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain(callerTitle)
+    await current.close(); current = undefined
+    const contaminated = await readFile(transcript, 'utf8')
+    expect(contaminated.startsWith(original)).toBe(true)
+    await appendFile(transcript, [
+      { type: 'ai-title', sessionId, aiTitle: preservedTitle },
+      { type: 'agent-name', sessionId, agentName: preservedTitle }
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+    const repaired = await readFile(transcript, 'utf8')
+    expect(repaired.startsWith(contaminated)).toBe(true)
     const expected = 0
     for (let round = 0; round < 2; round++) {
       current = launch()
       await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain(
         round === 0 ? 'LATEST ASSISTANT AFTER OLD NOTICES' : 'LOCAL NATIVE RESUME REPLY')
+      await expect.poll(() => current!.screen(), { timeout: 25_000 }).toContain(preservedTitle)
+      expect(current.screen()).not.toContain(callerTitle)
       const prompt = 'Verify preserved context round ' + round
       current.proc.write(prompt + '\r')
       await expect.poll(() => requests.some(body => body.includes(prompt)), { timeout: 25_000 }).toBe(true)
@@ -105,8 +131,10 @@ it.skipIf(!process.env.MATOU_TEST_CLAUDE_COMMAND)('Claude 2.1.299+ preserves his
       await writeFile(join(root, 'screen-' + round + '.txt'), current.screen())
       await current.close(); current = undefined
       const content = await readFile(transcript, 'utf8')
-      expect(content.startsWith(original)).toBe(true)
-      const newRows = content.slice(original.length).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+      expect(content.startsWith(repaired)).toBe(true)
+      const newRows = content.slice(repaired.length).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+      expect(newRows.some(row => row.aiTitle === callerTitle || row.agentName === callerTitle ||
+        row.customTitle === callerTitle)).toBe(false)
       const notices = newRows.filter(row => typeof row.content === 'string' && row.content.startsWith('agents-md: no CLAUDE.md'))
       expect(notices.length).toBe(expected * (round + 1))
       console.log('round', round, 'new notices', notices.length, 'AGENTS in request', true, 'latest context preserved', true)

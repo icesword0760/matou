@@ -18,7 +18,7 @@ export function ForkProgressOverlay({ progress }: { progress: ForkProgress }) {
       <p>{m.forkStageDescription[progress.stage]}</p>
       <div className="fork-progress-overlay__bar" role="progressbar"
         aria-valuemin={0} aria-valuemax={total} aria-valuenow={completed}>
-        <span style={{ width: `${percent}%` }} />
+        <span style={{ transform: `scaleX(${percent / 100})` }} />
       </div>
       <small>{m.fork.stageCounter(completed + (completed < total ? 1 : 0), total)}</small>
     </div>

@@ -6,7 +6,22 @@ import type { SessionGitState } from '@matou/domain'
 
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
 
-const exec = promisify(execFile)
+const execFileAsync = promisify(execFile)
+
+/**
+ * Status probes run beside a recursive `.git` watcher, so they must not take the optional
+ * index lock: its create/delete events would wake the watcher and re-run the probe forever.
+ */
+function exec(file: string, args: string[]) {
+  return execFileAsync(file, args, { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } })
+}
+
+/** Lock files and object writes never change branch or dirty state on their own. */
+export function isGitMetadataNoise(filename: string | undefined): boolean {
+  if (!filename) return false
+  const path = filename.replaceAll('\\', '/')
+  return path.endsWith('.lock') || path === 'objects' || path.startsWith('objects/')
+}
 
 interface GitStateRow {
   execution_context_id: string

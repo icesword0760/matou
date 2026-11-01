@@ -16,6 +16,54 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 describe('RuntimeRecoveryCoordinator', () => {
+  it('restores only the latest 16 across canvases and requires an explicit click for the rest', async () => {
+    const started: string[] = []
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 4,
+      jobs: Array.from({ length: 20 }, (_, i) => ({
+        sessionId: `session-${i}`, sceneId: `scene-${i}`, enqueueSequence: i + 1,
+        priority: i === 0 ? 'active-session' as const : 'background' as const,
+        lastUsedAt: i + 1
+      })),
+      start: async job => { started.push(job.sessionId) }
+    })
+    coordinator.start()
+    await coordinator.whenIdle()
+    expect(started).toHaveLength(16)
+    expect(new Set(started)).toEqual(new Set(Array.from({ length: 16 }, (_, i) => `session-${i + 4}`)))
+    expect(coordinator.snapshot().filter(job => job.state === 'deferred')).toHaveLength(4)
+    coordinator.prioritizeScene('scene-0', 'session-0', ['session-0', 'session-1'])
+    await coordinator.whenIdle()
+    expect(started).toHaveLength(16)
+    coordinator.retry('session-0')
+    coordinator.retry('session-0')
+    await coordinator.whenIdle()
+    expect(started).toHaveLength(17)
+    expect(started.at(-1)).toBe('session-0')
+    expect(coordinator.isDeferred('session-1')).toBe(true)
+    coordinator.start()
+    await coordinator.whenIdle()
+    expect(started).toHaveLength(17)
+  })
+
+  it('keeps an explicitly ended recent card manual and does not spend an automatic slot on it', async () => {
+    const started: string[] = []
+    const coordinator = new RuntimeRecoveryCoordinator({
+      concurrency: 1, automaticLimit: 1,
+      jobs: [
+        { sessionId: 'ended', sceneId: 'scene', priority: 'active-session', enqueueSequence: 1,
+          lastUsedAt: 20, automatic: false },
+        { sessionId: 'open', sceneId: 'scene', priority: 'background', enqueueSequence: 2,
+          lastUsedAt: 10 }
+      ],
+      start: async job => { started.push(job.sessionId) }
+    })
+    coordinator.start()
+    await coordinator.whenIdle()
+    expect(started).toEqual(['open'])
+    expect(coordinator.isDeferred('ended')).toBe(true)
+  })
+
   it('publishes durable job identity and lets one failed card retry independently', async () => {
     const snapshots: Array<readonly RecoveryJobSnapshot[]> = []
     let attempts = 0

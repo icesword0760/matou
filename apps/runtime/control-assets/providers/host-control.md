@@ -35,6 +35,7 @@
 
 - `mt send` 前复述目标和将发送的文本；只有用户已明确表达目标与内容时才直接执行。
 - 需要提交命令时显式加 `--enter`；仅填入文本时省略。
+- 给另一个 AI 会话传话或布置任务（包括“做完后通知我”）时一律加 `--enter`，否则消息只停在对方输入框；需要对方回报时，先用 `mt identify --json` 取得自己的标题，在消息里写明回报命令 `mt send "<我的标题>" "<回报内容>" --enter`。
 - 控制键仅使用：Enter、Tab、Escape、Backspace、Delete、方向键、Home、End、PageUp、PageDown、CtrlC、CtrlD、CtrlL、CtrlU、CtrlZ。
 - 成功后说明已向哪个会话发送了什么；不要宣称界面已经切换或目标已经聚焦。
 

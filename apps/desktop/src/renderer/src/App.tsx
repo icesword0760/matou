@@ -55,7 +55,7 @@ export function App() {
           window.matouDesktop.startWithEmptyDatabase(expectedRecoveryId)
       }} />
     }
-    return <main className="hierarchy-loading" aria-busy="true" />
+    return <StartupLoading />
   }
 
   if (detached) return <DetachedTerminalApp runtimeMode={presentedLifecycle.snapshot.mode} />
@@ -74,6 +74,21 @@ export function App() {
       <output data-testid="replay-marker">{replayMarker}</output>
     </div>}
   </>
+}
+
+function StartupLoading() {
+  const m = useMessages().app
+  const [showStatus, setShowStatus] = useState(false)
+  useEffect(() => {
+    const timer = setTimeout(() => setShowStatus(true), 1_200)
+    return () => clearTimeout(timer)
+  }, [])
+  return <main className="hierarchy-loading" aria-busy="true">
+    {showStatus && <div className="startup-loading-status" role="status">
+      <p>{m.openingWorkspace}</p>
+      <p>{m.restoringWorkspace}</p>
+    </div>}
+  </main>
 }
 
 function RuntimeStartupFailurePage({ state, retry }: {

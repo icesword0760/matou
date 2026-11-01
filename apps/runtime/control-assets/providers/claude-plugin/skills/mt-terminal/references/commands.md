@@ -100,9 +100,12 @@ mt close canvas-commit CONFIRMATION_REF --json
 - “执行过哪些 Shell 命令” → `mt commands`
 - 只填入文本 → `mt send TARGET "text"`
 - 填入并提交 → `mt send TARGET "command" --enter`
+- 给另一个 AI 会话传话、布置任务或请它做完后回报 → 一律 `--enter`
 - 单键 → `mt key TARGET Enter`
 
 允许键：Enter、Tab、Escape、Backspace、Delete、ArrowUp、ArrowDown、ArrowLeft、ArrowRight、Home、End、PageUp、PageDown、CtrlC、CtrlD、CtrlL、CtrlU、CtrlZ。
+
+给另一个 AI 会话传话或布置任务（包括“做完后通知我”）时一律加 `--enter`，否则消息只停在对方输入框；需要对方回报时，先用 `mt identify --json` 取得自己的标题，在消息里写明回报命令 `mt send "<我的标题>" "<回报内容>" --enter`。
 
 发送前确认目标与内容。操作只写入目标 PTY，不切换焦点、不滚动画布、不激活窗口、不改变通知状态。
 

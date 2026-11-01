@@ -72,6 +72,22 @@ describe('Terminal pane', () => {
     expect(screen.queryByTestId('surface-session-1')).toBeNull()
   })
 
+  it('keeps a deferred card dormant until the user chooses restore', () => {
+    const restore = vi.fn()
+    const props = fixture()
+    const view = render(<TerminalPane {...props} recoveryState="deferred" onRetryRecovery={restore} />)
+    expect(screen.queryByTestId('surface-session-1')).toBeNull()
+    expect(screen.queryByTestId('session-recovery-water')).toBeNull()
+    expect(screen.getByText('会话尚未启动')).toBeTruthy()
+    view.rerender(<TerminalPane {...props} active recoveryState="deferred" onRetryRecovery={restore} />)
+    expect(restore).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '恢复会话：Claude 主会话' }))
+    expect(restore).toHaveBeenCalledExactlyOnceWith('session-1')
+    view.rerender(<TerminalPane {...props} recoveryState="queued" onRetryRecovery={restore} />)
+    expect(screen.queryByTestId('session-deferred-recovery')).toBeNull()
+    expect(screen.getByTestId('session-recovery-water')).toBeTruthy()
+  })
+
   it('keeps the recovery water visible until the restored terminal paints its first frame', () => {
     const props = fixture()
     const view = render(<TerminalPane {...props} recoveryState="restoring" />)

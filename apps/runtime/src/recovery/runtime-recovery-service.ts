@@ -46,6 +46,8 @@ interface RecoveryPlanRow {
   profile: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
   mount_created_at: number
   last_activity_at: number
+  last_used_at: number
+  automatic: number
   parent_session_id: string | null
   fork_stage: string | null
 }
@@ -136,7 +138,6 @@ export class RuntimeRecoveryService {
     const rows = this.#database.all<RecoveryPlanRow>(
       `${RECOVERY_PLAN_SELECT}
        WHERE sessions.archived_at IS NULL
-         AND sessions.work_status IN ('starting', 'running', 'needs-input', 'interrupted')
        ORDER BY sessions.last_activity_at DESC, session_mounts.created_at, sessions.id`
     )
 
@@ -151,6 +152,8 @@ export class RuntimeRecoveryService {
         workspaceId: row.workspace_id,
         executionContextId: row.execution_context_id,
         profile: row.profile,
+        lastUsedAt: row.last_used_at,
+        automatic: row.automatic === 1,
         ...(isNonTerminalForkStage(row.fork_stage) ? { recoveryAuthority: 'fork' as const } : {}),
         priority,
         enqueueSequence: 0,
@@ -239,9 +242,23 @@ const RECOVERY_PLAN_SELECT = `SELECT sessions.id AS session_id,
               sessions.kind AS profile,
               session_mounts.created_at AS mount_created_at,
               sessions.last_activity_at,
+              (sessions.work_status IN ('starting', 'running', 'needs-input', 'interrupted')
+                OR fork.stage NOT IN ('succeeded', 'failed')
+                OR EXISTS (
+                  SELECT 1 FROM domain_events AS shutdown
+                  WHERE shutdown.event_id = 'runtime-shutdown-' || (
+                    SELECT id FROM session_runs WHERE session_id = sessions.id
+                    ORDER BY ordinal DESC LIMIT 1
+                  )
+                )
+              ) AS automatic,
+              CASE WHEN max(COALESCE(membership.last_user_interaction_seq, 0),
+                            COALESCE(membership.pending_user_interaction_seq, 0)) > 0
+                   THEN membership.updated_at ELSE sessions.created_at END AS last_used_at,
               structural.to_session_id AS parent_session_id,
               fork.stage AS fork_stage
        FROM sessions
+       LEFT JOIN session_canvas_memberships AS membership ON membership.session_id = sessions.id
        JOIN tasks ON tasks.id = sessions.task_id AND tasks.archived_at IS NULL
        JOIN workspaces ON workspaces.id = tasks.workspace_id AND workspaces.archived_at IS NULL
        JOIN session_mounts ON session_mounts.session_id = sessions.id

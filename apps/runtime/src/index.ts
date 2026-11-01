@@ -330,7 +330,11 @@ async function initializeRuntime(): Promise<RuntimeState> {
     hud: sessionHuds,
     currentRunId: (sessionId) => sessions.get(sessionId)?.runId,
     publish: (sessionId) => {
-      for (const server of servers) void server.refreshSessionHud(sessionId)
+      // Statusline ticks already updated the in-memory metrics. Re-probing Git
+      // here launches subprocesses for every idle conversation on every tick.
+      // Identity/cwd changes, real hooks, file watches and explicit refreshes
+      // retain the full environment refresh path.
+      for (const server of servers) server.publishSessionHud(sessionId)
     },
     reportError: (error) => console.error(`[provider-hud-history] ${errorMessage(error)}`)
   })
@@ -529,6 +533,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     new SessionForkIntentRepository(database),
     {
       ownerId: `runtime-${database.runtimeGeneration}`,
+      canStartSession: sessionId => !recoveryCoordinator.isDeferred(sessionId),
       executeFork: (command, input) => forkWorkflow.executeFork(command, input),
       startOrResume: async (sessionId, authority) => {
         const descriptor = forkExecutionDescriptor(database, sessionId)

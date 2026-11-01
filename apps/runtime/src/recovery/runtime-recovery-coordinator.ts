@@ -8,14 +8,17 @@ export class RuntimeRecoveryCoordinator {
   readonly #jobs = new Map<string, RecoveryJob>()
   readonly #cancelledSessionIds = new Set<string>()
   readonly #scheduler: RuntimeSessionRecoveryScheduler
+  readonly #automaticLimit: number
   #started = false
 
   constructor(options: {
     concurrency: number
+    automaticLimit?: number
     jobs: readonly RecoveryJob[]
     start(job: RecoveryJob): Promise<void>
     publish?(snapshot: readonly RecoveryJobSnapshot[]): void
   }) {
+    this.#automaticLimit = options.automaticLimit ?? 16
     for (const job of options.jobs) this.#jobs.set(job.sessionId, job)
     this.#scheduler = new RuntimeSessionRecoveryScheduler({
       concurrency: options.concurrency,
@@ -27,7 +30,16 @@ export class RuntimeRecoveryCoordinator {
   start(): void {
     if (this.#started) return
     this.#started = true
-    this.#scheduler.enqueue([...this.#jobs.values()])
+    const recent = [...this.#jobs.values()].sort((a, b) =>
+      (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0) || a.enqueueSequence - b.enqueueSequence)
+    const automatic = recent.filter(job => job.automatic !== false).slice(0, this.#automaticLimit)
+    const selected = new Set(automatic.map(job => job.sessionId))
+    this.#scheduler.defer(recent.filter(job => !selected.has(job.sessionId)))
+    this.#scheduler.enqueue(automatic)
+  }
+
+  isDeferred(sessionId: string): boolean {
+    return this.#scheduler.isDeferred(sessionId)
   }
 
   prioritizeScene(

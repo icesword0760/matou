@@ -84,6 +84,14 @@ describe('ClaudeWorkspaceTrustPromptMonitor', () => {
 })
 
 describe('ProviderResumeMonitor', () => {
+  it('reports a background owner without confusing another conversation', () => {
+    const monitor = new ProviderResumeMonitor('9e0111a3-2473-42b3-908f-00ff34a8fa0e')
+    expect(monitor.ingest('That session is running in the background (aaaaaaaa).')).toBeUndefined()
+    expect(monitor.ingest('That\u001b[6Gsession is running in the back')).toBeUndefined()
+    expect(monitor.ingest('ground (9e0111a3).')).toBe('provider session running in background')
+    expect(monitor.isMonitoring).toBe(false)
+  })
+
   it('detects a missing provider session even when the failure spans output chunks', () => {
     const monitor = new ProviderResumeMonitor('provider-42')
 

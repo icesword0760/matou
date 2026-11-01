@@ -80,6 +80,21 @@ afterEach(async () => {
 })
 
 describe('ForkOperationCoordinator', () => {
+  it('leaves deferred startup forks unclaimed until manual recovery admits them', async () => {
+    const operation = await accept('手动恢复', 'manual-recovery-fork')
+    let admitted = false
+    const pending = new Promise<void>(resolve => { releases.push(resolve) })
+    const executeFork = vi.fn(async () => { await pending; return {} as ForkWorkflowResult })
+    const coordinator = createCoordinator({ canStartSession: () => admitted, executeFork })
+    coordinator.start()
+    await coordinator.reconcile()
+    expect(executeFork).not.toHaveBeenCalled()
+    expect(intents.progressByOperation(operation.operationId)?.stage).toBe('queued')
+    admitted = true
+    await coordinator.reconcile()
+    await eventually(() => expect(executeFork).toHaveBeenCalledTimes(1))
+  })
+
   it('runs at most two Git/setup operations and leaves the third queued until a slot opens', async () => {
     const operations = await Promise.all([
       accept('并发一', 'submission-1'),
@@ -403,6 +418,7 @@ function createCoordinator(overrides: Partial<{
   ownerId: string
   now: () => number
   identityTimeoutMs: number
+  canStartSession: (sessionId: string) => boolean
   executeFork: (command: DomainCommandMetadata, input: ExecuteForkInput) => Promise<ForkWorkflowResult>
   startOrResume: (sessionId: string, authority: ForkStartAuthority) => Promise<void>
   notify: (notification: ForkOperationNotification) => void
@@ -419,6 +435,7 @@ function createCoordinator(overrides: Partial<{
     now: overrides.now ?? (() => 10),
     heartbeatMs: 2_000,
     leaseTtlMs: 8_000,
+    ...(overrides.canStartSession ? { canStartSession: overrides.canStartSession } : {}),
     ...(overrides.identityTimeoutMs === undefined
       ? {}
       : { identityTimeoutMs: overrides.identityTimeoutMs }),

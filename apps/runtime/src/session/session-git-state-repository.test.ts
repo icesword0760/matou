@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { watch } from 'node:fs'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
-import { SessionGitStateRepository } from './session-git-state-repository'
+import { isGitMetadataNoise, SessionGitStateRepository } from './session-git-state-repository'
 
 const exec = promisify(execFile)
 
@@ -114,6 +115,34 @@ describe('SessionGitStateRepository', () => {
       git: { state: 'unavailable', dirty: false },
       error: 'path-missing', updatedAt: 30
     })
+  })
+  it('probes without touching the index lock the HUD watcher listens to', async () => {
+    const events: string[] = []
+    const watcher = watch(join(repositoryRoot, '.git'), { recursive: true }, (_event, filename) => {
+      if (filename) events.push(filename.toString())
+    })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      await states.refresh('local', 40)
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    } finally {
+      watcher.close()
+    }
+
+    expect(events.filter((name) => name.endsWith('index.lock'))).toEqual([])
+  })
+})
+
+describe('isGitMetadataNoise', () => {
+  it('ignores lock and object churn but keeps ref, HEAD and index changes', () => {
+    expect(isGitMetadataNoise('index.lock')).toBe(true)
+    expect(isGitMetadataNoise('refs/heads/main.lock')).toBe(true)
+    expect(isGitMetadataNoise('objects/ab/cdef')).toBe(true)
+    expect(isGitMetadataNoise('objects\\ab\\cdef')).toBe(true)
+    expect(isGitMetadataNoise('index')).toBe(false)
+    expect(isGitMetadataNoise('HEAD')).toBe(false)
+    expect(isGitMetadataNoise('refs/heads/main')).toBe(false)
+    expect(isGitMetadataNoise(undefined)).toBe(false)
   })
 })
 

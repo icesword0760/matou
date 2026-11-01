@@ -22,6 +22,15 @@ import { CONTROL_KEY_SEQUENCES, TerminalInputQueue } from './terminal-input-queu
 import { HostControlTargetNotReadyError } from './host-control-types'
 import { runtimeMessages } from '../i18n/messages'
 
+/**
+ * Agent TUIs treat a burst of input as a paste and fold a trailing Enter into it, so a
+ * submitted message is written first and Enter follows once the target's echo settles.
+ */
+const SUBMIT_MIN_DELAY_MS = 120
+const SUBMIT_QUIET_MS = 250
+const SUBMIT_MAX_DELAY_MS = 5_000
+const SUBMIT_POLL_MS = 50
+
 export type HostActionExecutor = (
   method: HostActionMethod,
   caller: HostCallerIdentity,
@@ -156,7 +165,24 @@ export class RuntimeControlBackend implements HostControlBackend {
   }
 
   async sendText(sessionId: string, text: string, submit = false): Promise<void> {
-    await this.#inputQueue.enqueue(sessionId, () => this.#writeInput(sessionId, text + (submit ? '\r' : '')))
+    await this.#inputQueue.enqueue(sessionId, async () => {
+      if (text) await this.#writeInput(sessionId, text)
+      if (!submit) return
+      if (text) await this.#waitForInputEcho(sessionId)
+      await this.#writeInput(sessionId, '\r')
+    })
+  }
+
+  async #waitForInputEcho(sessionId: string): Promise<void> {
+    const session = this.#requireActive(sessionId)
+    const startedAt = Date.now()
+    await sleep(SUBMIT_MIN_DELAY_MS)
+    while (
+      Date.now() - startedAt < SUBMIT_MAX_DELAY_MS &&
+      Date.now() - session.lastOutputAt < SUBMIT_QUIET_MS
+    ) {
+      await sleep(SUBMIT_POLL_MS)
+    }
   }
 
   async sendKey(sessionId: string, key: Parameters<HostControlBackend['sendKey']>[1]): Promise<void> {
@@ -299,4 +325,8 @@ async function replayTerminalScreen(
   } finally {
     screen.dispose()
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }

@@ -66,7 +66,7 @@ export function TerminalPane(props: {
   forkReady?: boolean
   providerRestoreState?: 'none' | 'restoring' | 'failed'
   restoreError?: string
-  recoveryState?: 'queued' | 'restoring' | 'ready' | 'failed'
+  recoveryState?: 'deferred' | 'queued' | 'restoring' | 'ready' | 'failed'
   recoveryError?: string
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   forkError?: string
@@ -279,7 +279,7 @@ export function TerminalPane(props: {
   const canForkSibling = onForkSibling !== undefined
   const canDetach = onDetach !== undefined
   const forkFailure = forkFailurePresentation(forkError, m)
-  const currentForkProgress = activeForkProgress(forkProgress)
+  const currentForkProgress = recoveryState === 'deferred' ? undefined : activeForkProgress(forkProgress)
   const loadingPresentation = terminalLoadingPresentation({
     visible, foreground, isTeamMember, pathValid, terminalVisualReady, activationLoading,
     ...(suppliedRecoveryState === undefined ? {} : { recoveryState: suppliedRecoveryState }),
@@ -403,13 +403,14 @@ export function TerminalPane(props: {
         }}>{m.pane.removeNodeAction}</button>}
       </div>
     </div>}
-    {effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && restoreNoticeVisible &&
+    {recoveryState !== 'deferred' && effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && restoreNoticeVisible &&
       <div className="provider-restore-banner" role="status">
       <div><strong>{restoreIdentityExpired && session.kind === 'shell'
         ? m.pane.parentConversationExpired : m.pane.claudeRestoreFailed}</strong>
         <span className="provider-restore-reason">{restoreIdentityExpired && session.kind === 'shell'
           ? m.pane.switchedToShell
-          : restoreError}</span>
+          : restoreError === 'provider session running in background'
+            ? m.pane.providerRunningInBackground : restoreError}</span>
       </div>
       {onRetryRestore && (!restoreIdentityExpired || session.kind === 'claude-code') && <button type="button"
         disabled={actionBlocked || restoreRetryPending} title={actionBlockedReason} onClick={(event) => {
@@ -427,7 +428,7 @@ export function TerminalPane(props: {
         }}
       >{m.pane.startFreshClaude}</button>}
     </div>}
-    {effectiveRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
+    {recoveryState !== 'deferred' && effectiveRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
       <strong>{m.pane.restoringClaudeSession}</strong>
     </div>}
     {runtimeStatus === 'error' && forkState !== 'failed' && effectiveRestoreState !== 'failed' && visible &&
@@ -509,6 +510,20 @@ export function TerminalPane(props: {
     {currentForkProgress && visible && <ForkProgressOverlay progress={currentForkProgress} />}
     {loadingPresentation && <SessionRecoveryWater sessionTitle={session.title}
       phase={loadingPresentation.phase} />}
+    {recoveryState === 'deferred' && !environmentUnavailable && visible &&
+      <div className="session-recovery-overlay state-deferred" data-testid="session-deferred-recovery"
+        role="status" aria-label={m.pane.manualRecoveryFor(session.title)}
+        onPointerDown={event => event.stopPropagation()}>
+        <div className="session-recovery-overlay__content">
+          <strong>{m.pane.recoveryDeferred}</strong>
+          <p>{m.pane.recoveryDeferredBody}</p>
+          {onRetryRecovery && <button type="button" disabled={readOnly || storageBlocked}
+            aria-label={m.pane.manualRecoveryFor(session.title)}
+            onClick={event => { event.stopPropagation(); void onRetryRecovery(session.id) }}>
+            {m.pane.manualRecovery}
+          </button>}
+        </div>
+      </div>}
     {recoveryState === 'failed' && forkState !== 'failed' && !storageFault &&
       !currentForkProgress && !environmentUnavailable &&
       <div className="session-recovery-overlay state-failed" data-testid="session-recovery-dialog"

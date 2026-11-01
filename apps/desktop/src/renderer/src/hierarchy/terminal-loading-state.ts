@@ -5,7 +5,7 @@ export interface TerminalLoadingState {
   pathValid: boolean
   terminalVisualReady: boolean
   activationLoading?: boolean
-  recoveryState?: 'queued' | 'restoring' | 'ready' | 'failed'
+  recoveryState?: 'deferred' | 'queued' | 'restoring' | 'ready' | 'failed'
   providerRestoreState: 'none' | 'restoring' | 'failed'
   forkState?: 'pending' | 'starting' | 'succeeded' | 'failed'
   hasForkProgress: boolean
@@ -32,7 +32,7 @@ export function terminalLoadingPresentation(
   const activationLoading = state.activationLoading === true
   if (
     !state.visible || !state.foreground || state.isTeamMember || !state.pathValid ||
-    state.recoveryState === 'failed' ||
+    state.recoveryState === 'failed' || state.recoveryState === 'deferred' ||
     state.providerRestoreState === 'failed' || state.forkState === 'failed' ||
     state.hasForkProgress || state.runtimeStatus === 'error' ||
     state.hasStorageFault ||
