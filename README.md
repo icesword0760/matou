@@ -183,6 +183,12 @@ The workspace board sorts tasks into **ready, active, blocked, done**. Drag a ca
 
 Matou persists tasks, tabs, splits, directories, focus, terminal output and hosted-agent identity. After the window is hidden, the app restarts or crashes, each session type is restored appropriately. A session can also pop out into its own window and return later; the main window and detached windows share the same runtime session.
 
+## Companion skill: Agent Foreman
+
+If you hand work from Claude Code to Codex, try [Agent Foreman](https://github.com/icesword0760/agent-foreman) (派活监工). It is a separate Claude Code skill: Claude writes a brief, dispatches the task to Codex CLI, watches live progress, answers Codex's questions and accepts the result by looking at real evidence. Inside Matou, each running task appears as a card in the bottom bar's "Agents" area, showing the agent, task name, model and reasoning level, and disappears when the task ends.
+
+It works in any terminal, so Matou is not required. Install it from [its own repository](https://github.com/icesword0760/agent-foreman#install).
+
 ## Roadmap
 
 **Natural-language structure creation.** Beyond reading and controlling other cards, a hosted agent can create structure directly: `mt create workspace|task|canvas|session`, `mt fork child|sibling|children`, and `mt remove preview|commit` for removal with a preview confirmation. You can tell the current session:

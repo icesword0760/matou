@@ -184,6 +184,12 @@ Matou 托管的会话内可使用 `mt identify`、`mt list`、`mt read`、`mt hi
 
 Matou 持久化事项、页签、分屏、目录、焦点、终端输出和托管 Agent 的身份。窗口隐藏、应用重启或异常退出后，按不同会话类型恢复现场。会话还可以脱出为独立窗口，再归还原画布；主窗口和独立窗口共享同一 Runtime 会话。
 
+## 配套技能：派活监工
+
+如果你会让 Claude Code 把活交给 Codex，可以试试 [派活监工（Agent Foreman）](https://github.com/icesword0760/agent-foreman/blob/main/README.zh-CN.md)。它是一个独立的 Claude Code 技能：Claude 写交代书、把任务派给 Codex CLI、实时盯进度、回答 Codex 的提问，最后看实物验收。在码头里，每个运行中的任务都会显示为底栏「Agents」里的一张卡片，写明 agent、任务名、模型和推理档位，任务结束后自动消失。
+
+它在任何终端里都能用，不依赖码头。安装方法见[它的仓库](https://github.com/icesword0760/agent-foreman/blob/main/README.zh-CN.md#安装)。
+
 ## 路线图
 
 **自然语言创建层级结构。** 除了读取和控制其他卡片，托管的 Agent 还可以直接创建结构：`mt create workspace|task|canvas|session`、`mt fork child|sibling|children`，以及 `mt remove preview|commit` 带预览确认的移除。你可以对当前会话说：
