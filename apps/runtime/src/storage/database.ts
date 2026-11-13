@@ -344,6 +344,23 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   )
 }
 
+/** Read a single row from an external read-only SQLite file via the builtin sqlite module. */
+export function queryExternalReadOnlyRow<Row>(
+  dbPath: string,
+  sql: string,
+  ...params: SQLInputValue[]
+): Row | undefined {
+  let connection: DatabaseSyncType | undefined
+  try {
+    connection = openReadOnlyConnection(dbPath)
+    return connection.prepare(sql).get(...params) as Row | undefined
+  } catch {
+    return undefined
+  } finally {
+    connection?.close()
+  }
+}
+
 function openReadOnlyConnection(path: string): DatabaseSyncType {
   const connection = new DatabaseSync(path, { readOnly: true })
   try {

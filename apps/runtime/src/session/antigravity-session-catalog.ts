@@ -1,8 +1,9 @@
 import { open, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
+
+import { queryExternalReadOnlyRow } from '../storage/database'
 
 import type {
   ClaudeSessionDetail,
@@ -106,22 +107,16 @@ function readTitleFromSummariesDb(
   dbPath: string,
   providerSessionId: string
 ): string | undefined {
-  let db: DatabaseSync | undefined
-  try {
-    db = new DatabaseSync(dbPath, { readOnly: true })
-    const row = db.prepare(
-      `SELECT title FROM conversation_summaries
-       WHERE conversation_id = ?
-         AND (app_data_dir = '' OR app_data_dir = 'antigravity-cli')
-       LIMIT 1`
-    ).get(providerSessionId) as { title?: unknown } | undefined
-    const title = typeof row?.title === 'string' ? row.title.trim() : ''
-    return title || undefined
-  } catch {
-    return undefined
-  } finally {
-    db?.close()
-  }
+  const row = queryExternalReadOnlyRow<{ title?: unknown }>(
+    dbPath,
+    `SELECT title FROM conversation_summaries
+     WHERE conversation_id = ?
+       AND (app_data_dir = '' OR app_data_dir = 'antigravity-cli')
+     LIMIT 1`,
+    providerSessionId
+  )
+  const title = typeof row?.title === 'string' ? row.title.trim() : ''
+  return title || undefined
 }
 
 export async function latestAntigravityAutoTitle(
