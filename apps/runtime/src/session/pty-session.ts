@@ -11,11 +11,12 @@ import { TerminalScreenProjector, type TerminalScreenSnapshot } from '../control
 import { SegmentJournal, type SegmentJournalOptions } from '../journal/segment-journal'
 import {
   SessionDurabilityGate,
+  type DurabilityExecutionPauser,
   type SessionDurabilityFaultEvent,
   type SessionDurabilityRecoveredEvent,
   type SessionDurabilityState
 } from './session-durability-gate'
-import { PtyExecutionPauser } from './pty-execution-pauser'
+import { PtyExecutionPauser, SharedExecutionPauser } from './pty-execution-pauser'
 import { PtyOutputBatcher } from './pty-output-batcher'
 import { OutputByteLedger } from './output-byte-ledger'
 import { resolveProviderCommandEnvironment } from './provider-command-environment'
@@ -55,6 +56,13 @@ export interface PtySessionOptions {
   runId?: string
 }
 
+export class SessionEgressFrozenError extends Error {
+  constructor(sessionId?: string) {
+    super(sessionId ? `session ${sessionId} is frozen due to network egress` : 'session egress is frozen')
+    this.name = 'SessionEgressFrozenError'
+  }
+}
+
 export class PtySession {
   readonly sessionId: string
   readonly pid: number
@@ -65,6 +73,8 @@ export class PtySession {
 
   readonly #pty: pty.IPty
   readonly #journal: SegmentJournal
+  readonly #sharedPauser: SharedExecutionPauser
+  readonly #egressPauser: DurabilityExecutionPauser
   readonly #durabilityGate: SessionDurabilityGate
   #send: ((message: RuntimeMessage) => void) | undefined
   #creditWindow: CreditWindow
@@ -100,6 +110,7 @@ export class PtySession {
   #resolveClosed: () => void = () => {}
 
   get lastSequence(): number { return this.#sequence }
+  get egressFrozen(): boolean { return this.#sharedPauser.isPausedFor('egress') }
   get durabilityState(): SessionDurabilityState { return this.#durabilityGate.state }
   get retainedDurabilityBytes(): number { return this.#durabilityGate.retainedBytes }
   get maximumUnackedBytes(): number { return this.#maximumUnackedBytes }
@@ -129,10 +140,12 @@ export class PtySession {
     this.#onOutput = options.onOutput
     this.#screen = new TerminalScreenProjector(options.cols, options.rows)
     this.#closed = new Promise<void>((resolve) => { this.#resolveClosed = resolve })
+    this.#sharedPauser = new SharedExecutionPauser(new PtyExecutionPauser(terminal))
+    this.#egressPauser = this.#sharedPauser.lease('egress')
     this.#durabilityGate = new SessionDurabilityGate({
       sessionId: options.sessionId,
       initialSequence: journal.lastSequence,
-      pauser: new PtyExecutionPauser(terminal),
+      pauser: this.#sharedPauser.lease('durability'),
       onFault: (event) => {
         this.#durabilityFault = event
         this.#sendDurabilityFault(event)
@@ -238,9 +251,24 @@ export class PtySession {
     return this.#lastOutputAt
   }
 
+  async setEgressFrozen(frozen: boolean): Promise<void> {
+    if (frozen) {
+      if (this.#disposed) return
+      await this.#egressPauser.pause()
+      if (this.#disposed) {
+        await this.#egressPauser.resume()
+      }
+      return
+    }
+    await this.#egressPauser.resume()
+  }
+
   write(data: string): void {
     if (this.#disposed) {
       throw new Error('session is disposed')
+    }
+    if (this.egressFrozen) {
+      throw new SessionEgressFrozenError(this.sessionId)
     }
     if (this.#durabilityGate.state !== 'healthy') {
       throw new Error('session storage is paused')
@@ -344,6 +372,8 @@ export class PtySession {
   } = {}): Promise<void> {
     this.#notifyExit = false
     this.#exitReason = 'runtime-shutdown'
+    // Thaw before termination so SIGSTOPed process groups can receive SIGHUP/SIGTERM.
+    await this.setEgressFrozen(false)
     if (this.#durabilityGate.state !== 'healthy') {
       await this.endDurability()
       return
@@ -431,6 +461,23 @@ export class PtySession {
     this.#outputBatcher.flush()
     if (this.#durabilityGate.state !== 'healthy') {
       void this.endDurability()
+      return
+    }
+    if (this.egressFrozen) {
+      // Defer kill until the async resume completes so SIGCONT precedes SIGHUP.
+      void this.setEgressFrozen(false)
+        .catch(() => undefined)
+        .finally(() => {
+          if (this.#durabilityGate.state !== 'healthy') {
+            void this.endDurability()
+            return
+          }
+          try {
+            this.#pty.kill()
+          } catch {
+            // The PTY may have exited while unfreezing.
+          }
+        })
       return
     }
     this.#pty.kill()
@@ -542,6 +589,11 @@ export class PtySession {
   async #endDurability(): Promise<void> {
     this.#disposed = true
     this.#forceFinalized = true
+    try {
+      await this.setEgressFrozen(false)
+    } catch {
+      // Ending remains authoritative even if a dead process group rejects resume.
+    }
     try {
       await this.#durabilityGate.end()
     } catch {
