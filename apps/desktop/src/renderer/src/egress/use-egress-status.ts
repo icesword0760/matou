@@ -313,16 +313,22 @@ export function useEgressSelector<T>(
   }, [activeClient])
 
   const prevStatusRef = useRef<EgressStatusWire | undefined>(undefined)
+  const prevSelectorRef = useRef(selector)
   const hasSelectionRef = useRef(false)
   const prevSelectionRef = useRef<T>(undefined as T)
 
   const getSelectedSnapshot = useCallback(() => {
     const status = storeBinding.getRawSnapshot()
-    if (hasSelectionRef.current && Object.is(prevStatusRef.current, status)) {
+    if (
+      hasSelectionRef.current &&
+      Object.is(prevStatusRef.current, status) &&
+      Object.is(prevSelectorRef.current, selector)
+    ) {
       return prevSelectionRef.current
     }
     const nextSelection = selector(status)
     prevStatusRef.current = status
+    prevSelectorRef.current = selector
     if (hasSelectionRef.current && isEqual(prevSelectionRef.current, nextSelection)) {
       return prevSelectionRef.current
     }

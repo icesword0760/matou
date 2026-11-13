@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { createElement, Fragment } from 'react'
+import { createElement, Fragment, useCallback } from 'react'
 import { act, cleanup, render, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PROTOCOL_VERSION, type EgressStatusWire } from '@matou/contracts'
 import { RuntimeClient, type RuntimeClientPort } from '../runtime/RuntimeClient'
-import { useEgressStatus } from './use-egress-status'
+import { chipCopy } from './egress-copy'
+import { findEgressFamily, sessionEgressFamily, useEgressSelector, useEgressStatus } from './use-egress-status'
 
 afterEach(cleanup)
 
@@ -158,5 +159,45 @@ describe('useEgressStatus', () => {
       expect(request).toHaveBeenCalledWith('egress.status', undefined)
     })
     expect(result.current.status).toBeUndefined()
+  })
+
+  it('recomputes selection immediately when selector changes for the same status object reference', () => {
+    const port = new MockPort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-test' })
+    const status = makeStatus({ sessionFamilies: { 'session-claude': 'anthropic' } })
+    client.updateEgressStatus(status)
+
+    const { result, rerender } = renderHook(
+      ({ sessionId }: { sessionId: string }) => {
+        const selector = useCallback(
+          (current: EgressStatusWire | undefined) => {
+            if (!current) return null
+            const family = sessionEgressFamily(current, sessionId)
+            if (!family) return null
+            return chipCopy(
+              current.state,
+              family,
+              findEgressFamily(current, family),
+              current.checks,
+              current.checkedAt,
+              true
+            )
+          },
+          [sessionId]
+        )
+        return useEgressSelector(selector, Object.is, client)
+      },
+      { initialProps: { sessionId: 'session-claude' } }
+    )
+
+    expect(result.current?.label).toBe('🇺🇸 美国 · 出口正常')
+
+    rerender({ sessionId: 'session-shell' })
+    expect(result.current).toBeNull()
+
+    rerender({ sessionId: 'session-claude' })
+    expect(result.current?.label).toBe('🇺🇸 美国 · 出口正常')
+
+    client.dispose()
   })
 })
