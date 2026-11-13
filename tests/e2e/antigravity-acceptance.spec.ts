@@ -18,6 +18,7 @@ const PACKAGED_EXECUTABLE = resolve(
 const EVIDENCE_DIR = resolve(import.meta.dirname, '../../docs/acceptance/evidence/antigravity')
 const RESULTS_DIR = join(EVIDENCE_DIR, 'results')
 const GEMINI_CONVERSATIONS_ROOT = join(process.env.HOME ?? '/Users/icesword', '.gemini/antigravity-cli/conversations')
+const GEMINI_BRAIN_ROOT = join(process.env.HOME ?? '/Users/icesword', '.gemini/antigravity-cli/brain')
 
 interface PackagedHarness {
   rootDir: string
@@ -188,6 +189,7 @@ async function positivePid(surface: Locator): Promise<number> {
 async function sendTerminalLine(surface: Locator, line: string): Promise<void> {
   const textarea = surface.locator('.xterm-helper-textarea')
   await textarea.focus()
+  await expect(textarea).toBeFocused()
   await textarea.pressSequentially(line, { delay: 10 })
   await textarea.press('Enter')
 }
@@ -195,6 +197,7 @@ async function sendTerminalLine(surface: Locator, line: string): Promise<void> {
 async function sendTerminalRawKey(surface: Locator, key: string): Promise<void> {
   const textarea = surface.locator('.xterm-helper-textarea')
   await textarea.focus()
+  await expect(textarea).toBeFocused()
   await textarea.press(key)
 }
 
@@ -348,10 +351,15 @@ async function launchAgyInFreshRepo(harness: PackagedHarness): Promise<{
   const sessionId = (await surface.getAttribute('data-session-id')) ?? ''
   expect(sessionId).toBeTruthy()
   await positivePid(surface)
-  await expect(surface.locator('.xterm-rows')).toContainText(/repo|%|#|\$/, { timeout: 15_000 })
+  await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
 
   const dagPage = await openDagWindow(harness)
   await installDagStatusObserver(dagPage, sessionId)
+  await harness.page.bringToFront()
+
+  const promptRows = await surface.locator('.xterm-rows').innerText()
+  const afterPrompt = promptRows.split('git:(main)').at(-1)?.trim() ?? ''
+  expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
 
   await sendTerminalLine(surface, 'agy')
 
@@ -400,7 +408,7 @@ async function createSiblingShellAndFocus(page: Page, previousSessionId: string)
   }, { timeout: 15_000 }).toBeTruthy()
   const surface = visibleFocusedSurface(page)
   await positivePid(surface)
-  await expect(surface.locator('.xterm-rows')).toContainText(/repo|%|#|\$/, { timeout: 15_000 })
+  await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
   return { sessionId: nextId, surface }
 }
 
@@ -524,11 +532,14 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await harness.page.getByRole('menu', { name: '权限模式' }).getByRole('menuitem', { name: 'Plan Mode' }).click()
       await expect(permBadge).toHaveText('PM', { timeout: 15_000 })
       await expect(surface.locator('.xterm-rows')).toContainText(/Plan mode|\bplan\s*·/i, { timeout: 15_000 })
+      await harness.page.waitForTimeout(2_500)
       expect(await positivePid(surface)).toBe(initialPid)
 
-      // Shift+Tab once from Plan Mode moves real agy into Ask Mode (cycle_mode: null),
-      // so running a shell tool triggers tool_use approval (needs-input) + non-focused notification (#5).
+      // Shift+Tab once from Plan Mode moves real agy into Ask Mode (cycle_mode omitted/null),
+      // so HUD badge shows AK ('逐项确认') and running a shell tool triggers tool_use approval + non-focused notification (#5).
       await sendTerminalRawKey(surface, 'Shift+Tab')
+      await expect(permBadge).toHaveText('AK', { timeout: 15_000 })
+      await expect(permBadge).toHaveAttribute('title', /逐项确认/)
       await expect(surface.locator('.xterm-rows')).not.toContainText(/\bplan\s*·/i, { timeout: 10_000 })
 
       // Open a second card and focus it so the Antigravity card becomes non-focused for notification test
@@ -576,12 +587,26 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       }
       await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 60_000)
 
-      // Test Shift+Tab round-trip back to Accept Edits & Default (HUD badge sync)
+      // Test Shift+Tab round-trip out of Ask back to Accept Edits & Default, and menu switch from Ask -> Default
       await agyCard.click()
       await sendTerminalRawKey(surface, 'Shift+Tab')
       await expect(permBadge).toHaveText('AE', { timeout: 15_000 })
       await sendTerminalRawKey(surface, 'Shift+Tab')
       await expect(permBadge).toHaveText('D', { timeout: 15_000 })
+
+      // Re-enter Ask via Plan -> Shift+Tab and verify menu selection switches out of Ask cleanly without respawn
+      await permBadge.click()
+      await harness.page.getByRole('menu', { name: '权限模式' }).getByRole('menuitem', { name: 'Plan Mode' }).click()
+      await expect(permBadge).toHaveText('PM', { timeout: 15_000 })
+      await expect(surface.locator('.xterm-rows')).toContainText(/Plan mode|\bplan\s*·/i, { timeout: 15_000 })
+      await harness.page.waitForTimeout(1_000)
+      await sendTerminalRawKey(surface, 'Shift+Tab')
+      await expect(permBadge).toHaveText('AK', { timeout: 15_000 })
+      await permBadge.click()
+      await expect(harness.page.getByRole('menu', { name: '权限模式' }).locator('[role="menuitem"]')).toHaveCount(4)
+      await harness.page.getByRole('menu', { name: '权限模式' }).getByRole('menuitem', { name: 'Default' }).click()
+      await expect(permBadge).toHaveText('D', { timeout: 15_000 })
+      expect(await positivePid(surface)).toBe(initialPid)
 
       // Switch INTO Bypass Permissions (requires confirmation + restarts with --dangerously-skip-permissions)
       await permBadge.click()
@@ -755,14 +780,20 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await harness.page.getByRole('button', { name: '返回父会话' }).click()
       await expect(parentPane.locator('.child-session-badge')).toContainText('2', { timeout: 15_000 })
       await harness.page.locator(`[data-session-card="${parentId}"]`).click()
-      const parentTranscriptPath = join(GEMINI_CONVERSATIONS_ROOT, parentProviderId, 'transcript.jsonl')
+      const parentTranscriptPath = join(
+        GEMINI_BRAIN_ROOT,
+        parentProviderId,
+        '.system_generated',
+        'logs',
+        'transcript.jsonl'
+      )
       const parentDbPath = join(GEMINI_CONVERSATIONS_ROOT, `${parentProviderId}.db`)
       const parentTranscriptBefore = await readFile(parentTranscriptPath, 'utf8')
       const parentLineCountBefore = parentTranscriptBefore.split('\n').filter(Boolean).length
 
       await sendTerminalLine(
         parentSurface,
-        'Run `python3 -c "import time; time.sleep(6); print(\'PARENT_DONE_99\')"` and then summarize the README in 2 short sentences.'
+        'Write 25 numbered short sentences (each about 15 words) explaining deterministic state machines. Do not use any tools or edit any files.'
       )
       await waitForDagNodeStatus(dagPage, parentId, 'status-running', 30_000)
 
@@ -831,6 +862,10 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await saveScreenshot(harness.page, '08-session-loader.png')
 
       await loaderDialog.getByRole('button', { name: '载入到当前卡片' }).click()
+      const duplicateConfirm = loaderDialog.getByRole('button', { name: '仍然载入' })
+      if (await duplicateConfirm.isVisible({ timeout: 2_000 }).catch(() => false)) {
+        await duplicateConfirm.click()
+      }
       await expect(loaderDialog).toHaveCount(0, { timeout: 20_000 })
       await expect(hudForSession(harness.page, freshShellId)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 30_000 })
 
@@ -871,6 +906,7 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       // Focus Card 1 & promote to agy
       await harness.page.locator(`[data-session-card="${card1Id}"]`).click()
       const dagPage = await openDagWindow(harness)
+      await harness.page.bringToFront()
       await sendTerminalLine(card1Surface, 'agy')
       await expect(card1Surface.locator('.xterm-rows')).toContainText(/Do you trust/i, { timeout: 30_000 })
       await sendTerminalRawKey(card1Surface, 'Enter')
@@ -921,7 +957,10 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const surface = visibleFocusedSurface(missingHarness.page)
       const shellId = (await surface.getAttribute('data-session-id')) ?? ''
       await positivePid(surface)
-      await expect(surface.locator('.xterm-rows')).toContainText(/repo|%|#|\$/, { timeout: 15_000 })
+      await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
+      const promptRows = await surface.locator('.xterm-rows').innerText()
+      const afterPrompt = promptRows.split('git:(main)').at(-1)?.trim() ?? ''
+      expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
       // Create an Antigravity card directly via mt CLI and focus it (since shell-promote rolls back on spawn failure)
       await sendTerminalLine(surface, 'mt create session --canvas current --profile antigravity --enter && mt focus right')
       const antigravityCard = missingHarness.page.locator('[data-session-card]').nth(1)
@@ -984,7 +1023,12 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const surface = visibleFocusedSurface(stubHarness.page)
       const sessionId = (await surface.getAttribute('data-session-id')) ?? ''
       await positivePid(surface)
+      await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
       const dagPage = await openDagWindow(stubHarness)
+      await stubHarness.page.bringToFront()
+      const promptRows = await surface.locator('.xterm-rows').innerText()
+      const afterPrompt = promptRows.split('git:(main)').at(-1)?.trim() ?? ''
+      expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
 
       await sendTerminalLine(surface, 'agy')
       await expect(surface.locator('.xterm-rows')).toContainText('You are currently not signed in', { timeout: 20_000 })
