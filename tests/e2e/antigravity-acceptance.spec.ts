@@ -793,7 +793,10 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
 
       // #7 Auto Title, Manual Rename Lock, and Restore Auto Title
       const pane = paneForSession(harness.page, sessionId)
-      await expect.poll(async () => await pane.locator('.pane-title').innerText(), { timeout: 30_000 }).not.toBe('Shell')
+      await expect.poll(async () => {
+        const title = (await pane.locator('.pane-title').innerText()).trim()
+        return title && title !== 'Shell' && title !== 'Antigravity' ? title : ''
+      }, { timeout: 30_000 }).toBeTruthy()
       const initialPaneTitle = await pane.locator('.pane-title').innerText()
 
       await openPaneMenu(pane)
