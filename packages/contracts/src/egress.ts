@@ -1,4 +1,5 @@
-export type EgressFamily = 'anthropic' | 'openai'
+export const EGRESS_FAMILIES = ['anthropic', 'openai', 'chatgpt-subscription'] as const
+export type EgressFamily = (typeof EGRESS_FAMILIES)[number]
 export type EgressCheckId =
   | 'mainland'
   | 'exit-rule'
@@ -61,5 +62,5 @@ export interface EgressStatusWire {
 }
 
 export function isEgressFamily(value: unknown): value is EgressFamily {
-  return value === 'anthropic' || value === 'openai'
+  return typeof value === 'string' && (EGRESS_FAMILIES as readonly string[]).includes(value)
 }

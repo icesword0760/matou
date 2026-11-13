@@ -1,9 +1,10 @@
-import type {
-  EgressCheckWire,
-  EgressExit,
-  EgressFamily,
-  EgressFamilyWire,
-  EgressStatusWire
+import {
+  EGRESS_FAMILIES,
+  type EgressCheckWire,
+  type EgressExit,
+  type EgressFamily,
+  type EgressFamilyWire,
+  type EgressStatusWire
 } from '@matou/contracts'
 
 export type ChipTone = 'neutral' | 'ok' | 'warn' | 'danger' | 'danger-outline'
@@ -258,6 +259,18 @@ export function maskIp(ip: string | undefined): string {
   return redactIpsInText(ip)
 }
 
+/** Localized section heading for a provider egress family. */
+export function familyHeading(family: EgressFamily, zh: boolean): string {
+  switch (family) {
+    case 'anthropic':
+      return zh ? 'Claude（Anthropic）' : 'Claude (Anthropic)'
+    case 'openai':
+      return zh ? 'Codex（OpenAI）' : 'Codex (OpenAI)'
+    case 'chatgpt-subscription':
+      return zh ? 'Claude（ChatGPT 订阅）' : 'Claude (ChatGPT subscription)'
+  }
+}
+
 /** Build a diagnostic report with all IPs masked to first two octets and zero session IDs. */
 export function buildEgressReport(status: EgressStatusWire, zh: boolean): string {
   const lines: string[] = []
@@ -273,13 +286,10 @@ export function buildEgressReport(status: EgressStatusWire, zh: boolean): string
     `${zh ? '出口保护' : 'Exit protection'}: ${status.protectionEnabled ? (zh ? '已开启' : 'On') : (zh ? '已关闭' : 'Off')}`
   )
 
-  for (const family of ['anthropic', 'openai'] as const) {
+  for (const family of EGRESS_FAMILIES) {
     const entry = status.families.find((item) => item.family === family)
     if (!entry) continue
-    const heading =
-      family === 'anthropic'
-        ? zh ? 'Claude（Anthropic）' : 'Claude (Anthropic)'
-        : zh ? 'Codex（OpenAI）' : 'Codex (OpenAI)'
+    const heading = familyHeading(family, zh)
     const exitSummary = entry.exit
       ? ` — ${countryName(entry.exit.country, zh)} · ${maskIp(entry.exit.ip)}`
       : ''

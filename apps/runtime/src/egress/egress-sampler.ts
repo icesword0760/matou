@@ -12,6 +12,7 @@ import {
   readSystemProxy,
   type Interfaces
 } from './local-network'
+import { resolveRouterProxy } from '../model-router/network-proxy'
 import { hasProxyEnvironment, resolveProxyForUrl, type Environment } from './proxy-route'
 import { probeTrace } from './trace-probe'
 
@@ -32,6 +33,8 @@ export interface EgressSamplerInput {
   baseEnv: Environment
   claudeUserSettingsPath?: string
   agentTimeZoneMainland(): boolean
+  routerFamilyEnabled?(): Promise<boolean>
+  resolveRouterProxy?: typeof resolveRouterProxy
   probeTrace?: typeof probeTrace
   readSystemProxy?: typeof readSystemProxy
   networkInterfaces?: () => Interfaces
@@ -92,6 +95,10 @@ async function sampleFullFromFixture(
   ])
   const anthropicRaw = fixture && isPlainObject(fixture.anthropic) ? fixture.anthropic : undefined
   const openaiRaw = fixture && isPlainObject(fixture.openai) ? fixture.openai : undefined
+  const chatgptRaw =
+    fixture && isPlainObject(fixture['chatgpt-subscription'])
+      ? fixture['chatgpt-subscription']
+      : undefined
   const browserLogin =
     fixture && fixture.browserLogin !== null && fixture.browserLogin !== undefined
       ? parseFixtureHostSample(EGRESS_HOSTS.anthropic.login, fixture.browserLogin)
@@ -106,7 +113,18 @@ async function sampleFullFromFixture(
       openai: {
         api: parseFixtureHostSample(EGRESS_HOSTS.openai.api, openaiRaw?.api),
         login: parseFixtureHostSample(EGRESS_HOSTS.openai.login, openaiRaw?.login)
-      }
+      },
+      ...(chatgptRaw
+        ? {
+            'chatgpt-subscription': {
+              api: parseFixtureHostSample(EGRESS_HOSTS['chatgpt-subscription'].api, chatgptRaw.api),
+              login: parseFixtureHostSample(
+                EGRESS_HOSTS['chatgpt-subscription'].login,
+                chatgptRaw.login
+              )
+            }
+          }
+        : {})
     },
     ...(browserLogin ? { browserLogin } : {}),
     agentHasProxyEnv: hasProxyEnvironment(anthropicEnv),
@@ -166,6 +184,8 @@ export async function agentProxyEnvironment(
 /** Creates the full and light egress samplers used by EgressMonitor. */
 export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
   const settingsPath = input.claudeUserSettingsPath ?? DEFAULT_CLAUDE_USER_SETTINGS_PATH
+  const isRouterFamilyEnabled = input.routerFamilyEnabled ?? (async () => false)
+  const getRouterProxy = input.resolveRouterProxy ?? resolveRouterProxy
   const probe = input.probeTrace ?? probeTrace
   const readSysProxy = input.readSystemProxy ?? readSystemProxy
   const getInterfaces = input.networkInterfaces ?? os.networkInterfaces
@@ -187,19 +207,43 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         ? checkIpv6Directly()
         : Promise.resolve(false)
 
-      const [anthropicEnv, openaiEnv] = await Promise.all([
+      const [anthropicEnv, openaiEnv, routerEnabled] = await Promise.all([
         agentProxyEnvironment('anthropic', input.baseEnv, settingsPath),
-        agentProxyEnvironment('openai', input.baseEnv, settingsPath)
+        agentProxyEnvironment('openai', input.baseEnv, settingsPath),
+        isRouterFamilyEnabled()
       ])
 
       const probeHost = (host: string, env: Environment) =>
         probe(host, resolveProxyForUrl(env, `https://${host}/cdn-cgi/trace`))
+
+      const chatgptPromise: Promise<
+        { api: EgressHostSample; login: EgressHostSample } | undefined
+      > = routerEnabled
+        ? (async () => {
+            let proxyUrl: string | undefined
+            try {
+              const resolution = await getRouterProxy(input.baseEnv)
+              proxyUrl = resolution.source === 'direct' ? undefined : resolution.proxyUrl
+            } catch {
+              return {
+                api: { host: EGRESS_HOSTS['chatgpt-subscription'].api, error: 'invalid' },
+                login: { host: EGRESS_HOSTS['chatgpt-subscription'].login, error: 'invalid' }
+              }
+            }
+            const [api, login] = await Promise.all([
+              probe(EGRESS_HOSTS['chatgpt-subscription'].api, proxyUrl),
+              probe(EGRESS_HOSTS['chatgpt-subscription'].login, proxyUrl)
+            ])
+            return { api, login }
+          })()
+        : Promise.resolve(undefined)
 
       const [
         anthropicApi,
         anthropicLogin,
         openaiApi,
         openaiLogin,
+        chatgptPair,
         browserResult,
         ipv6Bypass
       ] = await Promise.all([
@@ -207,6 +251,7 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
         probeHost(EGRESS_HOSTS.anthropic.login, anthropicEnv),
         probeHost(EGRESS_HOSTS.openai.api, openaiEnv),
         probeHost(EGRESS_HOSTS.openai.login, openaiEnv),
+        chatgptPromise,
         readSysProxy().then(async (systemProxy) => ({
           systemProxy,
           browserLogin: systemProxy
@@ -219,7 +264,8 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
       return {
         hosts: {
           anthropic: { api: anthropicApi, login: anthropicLogin },
-          openai: { api: openaiApi, login: openaiLogin }
+          openai: { api: openaiApi, login: openaiLogin },
+          ...(chatgptPair ? { 'chatgpt-subscription': chatgptPair } : {})
         },
         ...(browserResult.browserLogin ? { browserLogin: browserResult.browserLogin } : {}),
         agentHasProxyEnv: hasProxyEnvironment(anthropicEnv),
@@ -231,8 +277,20 @@ export function createEgressSampler(input: EgressSamplerInput): EgressSampler {
     },
 
     async sampleLight(family: EgressFamily): Promise<EgressHostSample> {
-      const env = await agentProxyEnvironment(family, input.baseEnv, settingsPath)
       const host = EGRESS_HOSTS[family].api
+      if (family === 'chatgpt-subscription') {
+        if (!(await isRouterFamilyEnabled())) {
+          return { host, error: 'unreachable' }
+        }
+        try {
+          const resolution = await getRouterProxy(input.baseEnv)
+          const proxyUrl = resolution.source === 'direct' ? undefined : resolution.proxyUrl
+          return probe(host, proxyUrl)
+        } catch {
+          return { host, error: 'invalid' }
+        }
+      }
+      const env = await agentProxyEnvironment(family, input.baseEnv, settingsPath)
       const proxyUrl = resolveProxyForUrl(env, `https://${host}/cdn-cgi/trace`)
       return probe(host, proxyUrl)
     }

@@ -191,3 +191,14 @@ Antigravity 的服务商域名（Google）没有 trace 入口，接入后按通�
 - Windows 上的冻结方案。
 - 系统浏览器隐私窗口能否使用新加坡时区（Chrome、Safari 分别实测）。
 - **Antigravity 接入后补一个任务（不自动生效）：** 新增 `google` 服务商类别。Google 没有 trace 入口，改为经 agy 的同一路径探测通用出口（Cloudflare trace），面板注明「无法直接确认 Google 看到的出口，Clash 若把 Google 域名单独分流，可能检测不到」。同时实测 agy 及其子进程是否遵守代理变量和 `TZ`。
+
+## 9. 订阅账号会话（2026-11-13 用户决定：方案 B）
+
+「订阅账号接入 Claude Code」让 Claude Code 通过本机模型路由使用 ChatGPT 或 Antigravity 订阅。这类会话的请求由路由转发给 ChatGPT 或 Google，封号风险落在这些账号上；Claude Code 写进请求内容的本地时区也会被转发过去。
+
+- **ChatGPT 订阅会话：** 归入新的服务商类别「ChatGPT 订阅」。探测 `chatgpt.com`（API）和 `auth.openai.com`（登录），已实测这两处都返回 trace。探测走**路由实际使用的代理**：路由按登录 shell 代理 → macOS 系统代理 → 直连的顺序选择，与 agent 会话的环境变量可能不同，所以不能复用 Codex 的「OpenAI」类别。冻结、自动恢复、越过、出口规则的行为与其他类别相同。
+- **Antigravity 订阅会话：** 只隐藏大陆时区，不冻结。Google 没有 trace 入口，等 Google 类别接入（第 8 节）后再加。
+- **时区：** 两种订阅会话都按「官方会话」处理（自动隐藏大陆时区）。ChatGPT 订阅会话按该类别的出口国家选择东八区时区，Antigravity 订阅会话默认新加坡。
+- **不打扰未使用者：** 只有配置了 ChatGPT 订阅时才探测和显示「ChatGPT 订阅」这一组；未配置时不发请求、不出现在面板、不影响整体状态。
+- **修正：** 合入前，订阅会话在判定服务商时还没注入路由地址，被误判为 Anthropic 官方会话（会跟着 Anthropic 线路冻结）。本节实现后改为按订阅类型归类。
+- **界面文案：** 面板分组标题 `Claude（ChatGPT 订阅）` / `Claude (ChatGPT subscription)`；HUD 标签、横幅、通知沿用现有文案。

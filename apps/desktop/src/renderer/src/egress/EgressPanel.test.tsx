@@ -106,6 +106,7 @@ describe('EgressPanel', () => {
     expect(screen.getByText('检测于 09:05')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Claude（Anthropic）' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Codex（OpenAI）' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Claude（ChatGPT 订阅）' })).toBeNull()
     const thisMacSection = screen.getByRole('region', { name: '本机' })
     expect(thisMacSection).toBeTruthy()
     expect(thisMacSection.textContent).toContain(
@@ -227,5 +228,71 @@ describe('EgressPanel', () => {
         'Checks are sampled every minute and cannot guarantee every connection uses the same exit.'
       )
     ).toBeTruthy()
+  })
+
+  it('shows the ChatGPT subscription group in panel and copied report only when present in status', async () => {
+    const writeClipboardText = vi.fn().mockResolvedValue(undefined)
+    ;(window as unknown as { matouDesktop?: unknown }).matouDesktop = {
+      writeClipboardText
+    }
+
+    const withSubscription = buildSampleStatus({
+      families: [
+        ...buildSampleStatus().families,
+        {
+          family: 'chatgpt-subscription',
+          state: 'ok',
+          exit: { ip: '203.0.113.88', country: 'SG' },
+          hosts: [],
+          overridden: false,
+          frozenSessionIds: [],
+          recovering: false
+        }
+      ],
+      checks: [
+        ...buildSampleStatus().checks,
+        { id: 'mainland', family: 'chatgpt-subscription', result: 'pass' }
+      ]
+    })
+
+    render(
+      <LocaleProvider initialLocale="zh-CN">
+        <EgressPanel
+          status={withSubscription}
+          onClose={vi.fn()}
+          onRecheck={vi.fn()}
+          onSetRule={vi.fn()}
+          onAcceptCurrent={vi.fn()}
+          onSetProtection={vi.fn()}
+        />
+      </LocaleProvider>
+    )
+
+    expect(screen.getByRole('heading', { name: 'Claude（ChatGPT 订阅）' })).toBeTruthy()
+    expect(screen.getByText('新加坡 · 203.0.113.88')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '复制报告' }))
+    await waitFor(() => {
+      expect(writeClipboardText).toHaveBeenCalledTimes(1)
+    })
+    const copiedReport = writeClipboardText.mock.calls[0]![0] as string
+    expect(copiedReport).toContain('[Claude（ChatGPT 订阅）]')
+    expect(copiedReport).toContain('203.0.x.x')
+    expect(copiedReport).not.toContain('203.0.113.88')
+
+    cleanup()
+    render(
+      <LocaleProvider initialLocale="en">
+        <EgressPanel
+          status={withSubscription}
+          onClose={vi.fn()}
+          onRecheck={vi.fn()}
+          onSetRule={vi.fn()}
+          onAcceptCurrent={vi.fn()}
+          onSetProtection={vi.fn()}
+        />
+      </LocaleProvider>
+    )
+    expect(screen.getByRole('heading', { name: 'Claude (ChatGPT subscription)' })).toBeTruthy()
   })
 })

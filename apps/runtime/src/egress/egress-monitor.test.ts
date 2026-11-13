@@ -14,7 +14,8 @@ import {
   EGRESS_RECOVERY_CONFIRM_DELAY_MS,
   EGRESS_WAKE_DRIFT_THRESHOLD_MS,
   EgressMonitor,
-  egressFamilyForLaunch
+  egressFamilyForLaunch,
+  egressPlanForLaunch
 } from './egress-monitor'
 import { EgressSettings } from './egress-settings'
 
@@ -82,6 +83,8 @@ function makeSample(options?: {
   anthropicLogin?: Partial<EgressHostSample>
   openaiApi?: Partial<EgressHostSample>
   openaiLogin?: Partial<EgressHostSample>
+  chatgptSubscriptionApi?: Partial<EgressHostSample>
+  chatgptSubscriptionLogin?: Partial<EgressHostSample>
 }): EgressSample {
   return {
     hosts: {
@@ -112,7 +115,25 @@ function makeSample(options?: {
           country: 'US',
           ...options?.openaiLogin
         }
-      }
+      },
+      ...(options?.chatgptSubscriptionApi || options?.chatgptSubscriptionLogin
+        ? {
+            'chatgpt-subscription': {
+              api: {
+                host: EGRESS_HOSTS['chatgpt-subscription'].api,
+                ip: '203.0.113.50',
+                country: 'US',
+                ...options?.chatgptSubscriptionApi
+              },
+              login: {
+                host: EGRESS_HOSTS['chatgpt-subscription'].login,
+                ip: '203.0.113.50',
+                country: 'US',
+                ...options?.chatgptSubscriptionLogin
+              }
+            }
+          }
+        : {})
     },
     agentHasProxyEnv: true,
     systemProxyEnabled: false,
@@ -176,6 +197,11 @@ function createHarness(overrides?: {
     openai: {
       host: EGRESS_HOSTS.openai.api,
       ip: '198.51.100.1',
+      country: 'US'
+    },
+    'chatgpt-subscription': {
+      host: EGRESS_HOSTS['chatgpt-subscription'].api,
+      ip: '203.0.113.50',
       country: 'US'
     }
   }
@@ -856,6 +882,73 @@ describe('EgressMonitor', () => {
 
     expect(harness.publishSpy).toHaveBeenCalledTimes(publishedBeforeStop)
   })
+
+  it('omits chatgpt-subscription from checking and evaluated status when disabled', async () => {
+    const harness = createHarness()
+    expect(harness.monitor.status().state).toBe('checking')
+    expect(harness.monitor.status().families.map((f) => f.family)).toEqual(['anthropic', 'openai'])
+
+    harness.monitor.start()
+    await harness.clock.flushMicrotasks()
+
+    const status = harness.monitor.status()
+    expect(status.state).toBe('ok')
+    expect(status.families.map((f) => f.family)).toEqual(['anthropic', 'openai'])
+    expect(status.checks.some((c) => c.family === 'chatgpt-subscription')).toBe(false)
+
+    harness.monitor.stop()
+  })
+
+  it('freezes only chatgpt-subscription sessions when chatgpt-subscription is CN and recovers independently', async () => {
+    const harness = createHarness()
+    harness.setFullSample(
+      makeSample({
+        chatgptSubscriptionApi: { ip: '220.181.1.1', country: 'CN' },
+        chatgptSubscriptionLogin: { ip: '220.181.1.1', country: 'CN' }
+      })
+    )
+
+    harness.monitor.registerSession('claude-official', 'anthropic')
+    harness.monitor.registerSession('codex-official', 'openai')
+    harness.monitor.registerSession('claude-chatgpt', 'chatgpt-subscription')
+
+    harness.monitor.start()
+    await harness.clock.flushMicrotasks()
+
+    expect(harness.frozenCalls).toEqual(['claude-chatgpt'])
+    const status = harness.monitor.status()
+    expect(status.state).toBe('abnormal')
+    expect(status.families.map((f) => f.family)).toEqual([
+      'anthropic',
+      'openai',
+      'chatgpt-subscription'
+    ])
+    expect(status.families.find((f) => f.family === 'anthropic')).toMatchObject({
+      state: 'ok',
+      frozenSessionIds: []
+    })
+    expect(status.families.find((f) => f.family === 'chatgpt-subscription')).toMatchObject({
+      state: 'abnormal',
+      violation: 'mainland',
+      frozenSessionIds: ['claude-chatgpt'],
+      recovering: true
+    })
+
+    // Recover chatgpt-subscription -> 15s recheck + 5s confirm -> thaws
+    harness.setFullSample(
+      makeSample({
+        chatgptSubscriptionApi: { ip: '203.0.113.50', country: 'US' },
+        chatgptSubscriptionLogin: { ip: '203.0.113.50', country: 'US' }
+      })
+    )
+    await harness.clock.advanceBy(15_000)
+    expect(harness.thawedCalls).toEqual([])
+    await harness.clock.advanceBy(5_000)
+    expect(harness.thawedCalls).toEqual(['claude-chatgpt'])
+    expect(harness.monitor.status().state).toBe('ok')
+
+    harness.monitor.stop()
+  })
 })
 
 describe('egressFamilyForLaunch', () => {
@@ -883,5 +976,47 @@ describe('egressFamilyForLaunch', () => {
     ).toBeUndefined()
 
     expect(egressFamilyForLaunch('shell', {})).toBeUndefined()
+  })
+})
+
+describe('egressPlanForLaunch', () => {
+  it('classifies subscription, official, third-party, and shell launches accurately', () => {
+    expect(egressPlanForLaunch('claude-code', {}, 'codex')).toEqual({
+      family: 'chatgpt-subscription',
+      hideTimeZone: true,
+      exitFamily: 'chatgpt-subscription'
+    })
+
+    expect(egressPlanForLaunch('claude-code', {}, 'antigravity')).toEqual({
+      hideTimeZone: true
+    })
+
+    expect(
+      egressPlanForLaunch('claude-code', { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' })
+    ).toEqual({
+      hideTimeZone: false
+    })
+
+    expect(egressPlanForLaunch('claude-code', {})).toEqual({
+      family: 'anthropic',
+      hideTimeZone: true,
+      exitFamily: 'anthropic'
+    })
+
+    expect(egressPlanForLaunch('codex', {})).toEqual({
+      family: 'openai',
+      hideTimeZone: true,
+      exitFamily: 'openai'
+    })
+
+    expect(
+      egressPlanForLaunch('codex', { OPENAI_BASE_URL: 'https://openrouter.ai/api/v1' })
+    ).toEqual({
+      hideTimeZone: false
+    })
+
+    expect(egressPlanForLaunch('shell', {})).toEqual({
+      hideTimeZone: false
+    })
   })
 })

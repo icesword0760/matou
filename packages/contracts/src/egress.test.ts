@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { isEgressFamily } from './egress'
+import { EGRESS_FAMILIES, isEgressFamily } from './egress'
 import { PROTOCOL_VERSION, RPC_METHODS, type RuntimeMessage } from './protocol'
 
 describe('egress contracts', () => {
   it('validates supported egress families with isEgressFamily', () => {
+    expect(EGRESS_FAMILIES).toEqual(['anthropic', 'openai', 'chatgpt-subscription'])
     expect(isEgressFamily('anthropic')).toBe(true)
     expect(isEgressFamily('openai')).toBe(true)
+    expect(isEgressFamily('chatgpt-subscription')).toBe(true)
     expect(isEgressFamily('google')).toBe(false)
     expect(isEgressFamily(undefined)).toBe(false)
   })

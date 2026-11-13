@@ -264,6 +264,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
         new ClaudeSettings(database).environment('claude-code', { official: true }).TZ ??
         Intl.DateTimeFormat().resolvedOptions().timeZone
       return isMainlandTimeZone(tz)
+    },
+    routerFamilyEnabled: async () => {
+      const subscriptions = await providerConfigs.subscriptions()
+      return subscriptions.some((entry) => entry.subscription.provider === 'codex')
     }
   })
   const egress = new EgressMonitor({
