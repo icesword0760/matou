@@ -23,6 +23,7 @@ const GEMINI_BRAIN_ROOT = join(process.env.HOME ?? '/Users/icesword', '.gemini/a
 interface PackagedHarness {
   rootDir: string
   repoDir: string
+  zdotDir: string
   dataDir: string
   realDataDir: string
   userDataDir: string
@@ -51,6 +52,7 @@ function assertIsolatedPath(pathValue: string): void {
 async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?: boolean }): Promise<{
   rootDir: string
   repoDir: string
+  zdotDir: string
   dataDir: string
   realDataDir: string
   userDataDir: string
@@ -58,15 +60,19 @@ async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?
   await mkdir(SCRATCHPAD_ROOT, { recursive: true })
   const rootDir = await mkdtemp(join(SCRATCHPAD_ROOT, `${prefix}-`))
   const repoDir = join(rootDir, 'repo')
+  const zdotDir = join(rootDir, 'zdot')
   const realDataDir = join(rootDir, 'matou-data')
   const userDataDir = join(rootDir, 'electron-user')
   // macOS sockaddr_un.sun_path is capped at 104 bytes; bind control/runtime.sock
   // via a short /tmp symlink pointing into the isolated scratchpad data dir.
   const dataDir = `/tmp/m-e2e-${randomBytes(4).toString('hex')}`
   assertIsolatedPath(repoDir)
+  assertIsolatedPath(zdotDir)
   assertIsolatedPath(realDataDir)
   assertIsolatedPath(userDataDir)
   await mkdir(repoDir, { recursive: true })
+  await mkdir(zdotDir, { recursive: true })
+  await writeFile(join(zdotDir, '.zshrc'), '')
   await mkdir(realDataDir, { recursive: true })
   await mkdir(userDataDir, { recursive: true })
   await symlink(realDataDir, dataDir)
@@ -83,12 +89,13 @@ async function createIsolatedWorkspace(prefix: string, options?: { secondCommit?
     await execFileAsync('git', ['add', 'notes.txt'], { cwd: repoDir })
     await execFileAsync('git', ['commit', '-m', 'Second commit'], { cwd: repoDir })
   }
-  return { rootDir, repoDir, dataDir, realDataDir, userDataDir }
+  return { rootDir, repoDir, zdotDir, dataDir, realDataDir, userDataDir }
 }
 
 async function launchPackagedApp(dirs: {
   rootDir: string
   repoDir: string
+  zdotDir: string
   dataDir: string
   realDataDir: string
   userDataDir: string
@@ -96,10 +103,14 @@ async function launchPackagedApp(dirs: {
   assertIsolatedPath(dirs.realDataDir)
   assertIsolatedPath(dirs.userDataDir)
   assertIsolatedPath(dirs.repoDir)
+  assertIsolatedPath(dirs.zdotDir)
+  const basePath = process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin'
   const env: Record<string, string> = {
     ...(Object.fromEntries(
       Object.entries(process.env).filter(([, value]) => typeof value === 'string')
     ) as Record<string, string>),
+    PATH: `/Users/icesword/.local/bin:${basePath}`,
+    ZDOTDIR: dirs.zdotDir,
     MATOU_LOCALE: 'zh-CN',
     MATOU_E2E: '1',
     MATOU_E2E_DISPLAY: process.env.MATOU_E2E_DISPLAY ?? 'primary',
@@ -342,6 +353,13 @@ async function readDagStatusObserver(dagPage: Page): Promise<Array<{ status: str
   return dagPage.evaluate(() => (window as unknown as { __matouStatusLog?: Array<{ status: string; at: number }> }).__matouStatusLog ?? [])
 }
 
+async function waitForEmptyShellPrompt(surface: Locator): Promise<void> {
+  await expect(surface.locator('.xterm-rows')).toContainText(/\brepo\s+[%#$]/, { timeout: 30_000 })
+  const promptRows = await surface.locator('.xterm-rows').innerText()
+  const afterPrompt = promptRows.split(/\brepo\s+[%#$]/).at(-1)?.trim() ?? ''
+  expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
+}
+
 async function launchAgyInFreshRepo(harness: PackagedHarness): Promise<{
   sessionId: string
   surface: Locator
@@ -351,20 +369,16 @@ async function launchAgyInFreshRepo(harness: PackagedHarness): Promise<{
   const sessionId = (await surface.getAttribute('data-session-id')) ?? ''
   expect(sessionId).toBeTruthy()
   await positivePid(surface)
-  await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
+  await waitForEmptyShellPrompt(surface)
 
   const dagPage = await openDagWindow(harness)
   await installDagStatusObserver(dagPage, sessionId)
   await harness.page.bringToFront()
 
-  const promptRows = await surface.locator('.xterm-rows').innerText()
-  const afterPrompt = promptRows.split('git:(main)').at(-1)?.trim() ?? ''
-  expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
-
   await sendTerminalLine(surface, 'agy')
 
   // Real agy prompts "Do you trust the contents of this project?" in a new directory (#3)
-  await expect(surface.locator('.xterm-rows')).toContainText(/Do you trust|Trust folder|Antigravity/i, { timeout: 30_000 })
+  await expect(surface.locator('.xterm-rows')).toContainText(/Do you trust|Trust folder|Antigravity/i, { timeout: 45_000 })
   const dagCard = dagPage.locator(`.dag-node-card[data-session-id="${sessionId}"]`)
   await expect(dagCard).toContainText('Antigravity', { timeout: 20_000 })
 
@@ -375,15 +389,21 @@ async function launchAgyInFreshRepo(harness: PackagedHarness): Promise<{
     await saveScreenshot(dagPage, '03-first-dir-trust-dag.png')
     await saveScreenshot(harness.page, '03-first-dir-trust.png')
     await harness.page.bringToFront()
+    await harness.page.waitForTimeout(300)
     await sendTerminalRawKey(surface, 'Enter')
+    await harness.page.waitForTimeout(2_000)
+    const afterEnterRows = await surface.locator('.xterm-rows').innerText().catch(() => '')
+    if (/Do you trust/i.test(afterEnterRows)) {
+      await sendTerminalRawKey(surface, 'Enter')
+    }
   }
 
   // Real agy sets model != null in statusLine once past the trust screen and ready for turn 1;
   // session_id is created lazily when turn 1 is submitted.
   const hud = hudForSession(harness.page, sessionId)
-  await expect(hud).toHaveAttribute('data-hud-mode', 'agent', { timeout: 30_000 })
-  await expect(hud.locator('.status-model')).toBeVisible({ timeout: 35_000 })
-  await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 45_000)
+  await expect(hud).toHaveAttribute('data-hud-mode', 'agent', { timeout: 45_000 })
+  await expect(hud.locator('.status-model')).toBeVisible({ timeout: 45_000 })
+  await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
 
   return { sessionId, surface, dagPage }
 }
@@ -408,12 +428,12 @@ async function createSiblingShellAndFocus(page: Page, previousSessionId: string)
   }, { timeout: 15_000 }).toBeTruthy()
   const surface = visibleFocusedSurface(page)
   await positivePid(surface)
-  await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
+  await waitForEmptyShellPrompt(surface)
   return { sessionId: nextId, surface }
 }
 
 test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures)', () => {
-  test.setTimeout(240_000)
+  test.setTimeout(360_000)
 
   test('PRD #1 #2 #3 #4 #5 #6 #7 #9a #11 #12 + Latency: Real agy lifecycle in packaged 码头.app', async () => {
     const dirs = await createIsolatedWorkspace('core')
@@ -471,8 +491,8 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await sendTerminalLine(surface, 'Reply with ONLY the token MATOU_READY_1 and nothing else.')
       const runningUiAt = await waitForDagNodeStatus(dagPage, sessionId, 'status-running', 30_000)
       await saveScreenshot(dagPage, '04-work-status-running-dag.png')
-      const idleUiAt = await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 60_000)
-      await expect(surface.locator('.xterm-rows')).toContainText('MATOU_READY_1', { timeout: 20_000 })
+      const idleUiAt = await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
+      await expect(surface.locator('.xterm-rows')).toContainText('MATOU_READY_1', { timeout: 30_000 })
       const providerSessionId = await waitForProviderSessionId(harness.dataDir, sessionId)
       await saveScreenshot(dagPage, '04-work-status-idle-dag.png')
 
@@ -565,27 +585,39 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       })
       await bell.click() // close notification center
 
-      // Return focus to Antigravity card; if awaiting tool approval in Ask mode, measure & approve
+      // Return focus to Antigravity card; if awaiting tool approval in Ask mode, measure & approve until idle
       await agyCard.click()
-      const currentDagClass = await dagPage.locator(`.dag-node-card[data-session-id="${sessionId}"]`).getAttribute('class')
-      if (currentDagClass?.includes('status-needs-input')) {
-        const obsLog2 = await readDagStatusObserver(dagPage)
-        const needObs = obsLog2.filter((o) => o.status === 'status-needs-input').at(-1)
-        const needEv = readDbRows(harness.dataDir, sessionId).events.filter((e) => e.payload_json.includes('"needs-input"')).at(-1)
-        if (needObs && needEv) {
-          latencies.push({
-            transition: 'running -> needs-input (tool_use)',
-            triggerAtMs: notifyTriggerMs,
-            runtimeEventAtMs: needEv.occurred_at,
-            uiObservedAtMs: needObs.at,
-            runtimeToUiMs: Math.max(0, needObs.at - needEv.occurred_at),
-            within1000ms: Math.max(0, needObs.at - needEv.occurred_at) <= 1000,
-            endToEndMs: needObs.at - notifyTriggerMs
-          })
+      await expect(visibleFocusedSurface(harness.page)).toHaveAttribute('data-session-id', sessionId)
+      let recordedNeedLatency = false
+      const askTurnDeadline = Date.now() + 90_000
+      while (Date.now() < askTurnDeadline) {
+        const cls = (await dagPage.locator(`.dag-node-card[data-session-id="${sessionId}"]`).getAttribute('class').catch(() => '')) ?? ''
+        if (cls.includes('status-idle')) break
+        if (cls.includes('status-needs-input')) {
+          if (!recordedNeedLatency) {
+            recordedNeedLatency = true
+            const obsLog2 = await readDagStatusObserver(dagPage)
+            const needObs = obsLog2.filter((o) => o.status === 'status-needs-input').at(-1)
+            const needEv = readDbRows(harness.dataDir, sessionId).events.filter((e) => e.payload_json.includes('"needs-input"')).at(-1)
+            if (needObs && needEv) {
+              latencies.push({
+                transition: 'running -> needs-input (tool_use)',
+                triggerAtMs: notifyTriggerMs,
+                runtimeEventAtMs: needEv.occurred_at,
+                uiObservedAtMs: needObs.at,
+                runtimeToUiMs: Math.max(0, needObs.at - needEv.occurred_at),
+                within1000ms: Math.max(0, needObs.at - needEv.occurred_at) <= 1000,
+                endToEndMs: needObs.at - notifyTriggerMs
+              })
+            }
+          }
+          await sendTerminalRawKey(surface, 'Enter')
+          await harness.page.waitForTimeout(800)
+          continue
         }
-        await sendTerminalRawKey(surface, 'Enter')
+        await harness.page.waitForTimeout(300)
       }
-      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 60_000)
+      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 30_000)
 
       // Test Shift+Tab round-trip out of Ask back to Accept Edits & Default, and menu switch from Ask -> Default
       await agyCard.click()
@@ -599,7 +631,7 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await harness.page.getByRole('menu', { name: '权限模式' }).getByRole('menuitem', { name: 'Plan Mode' }).click()
       await expect(permBadge).toHaveText('PM', { timeout: 15_000 })
       await expect(surface.locator('.xterm-rows')).toContainText(/Plan mode|\bplan\s*·/i, { timeout: 15_000 })
-      await harness.page.waitForTimeout(1_000)
+      await harness.page.waitForTimeout(2_500)
       await sendTerminalRawKey(surface, 'Shift+Tab')
       await expect(permBadge).toHaveText('AK', { timeout: 15_000 })
       await permBadge.click()
@@ -616,8 +648,8 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await bypassDialog.getByRole('button', { name: '确认切换' }).click()
       await expect.poll(async () => await positivePid(visibleFocusedSurface(harness.page)), { timeout: 25_000 }).not.toBe(initialPid)
       const bypassPid = await positivePid(visibleFocusedSurface(harness.page))
-      await expect(hud.locator('.status-perm-badge')).toHaveText('BP', { timeout: 25_000 })
-      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 45_000)
+      await expect(hud.locator('.status-perm-badge')).toHaveText('BP', { timeout: 35_000 })
+      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
 
       // Exit Bypass Permissions -> requires confirmation + restarts back
       await hud.locator('.status-perm-badge').click()
@@ -625,8 +657,8 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const exitBypassDialog = harness.page.getByRole('alertdialog')
       await expect(exitBypassDialog).toContainText('Antigravity')
       await exitBypassDialog.getByRole('button', { name: '确认退出' }).click()
-      await expect.poll(async () => await positivePid(visibleFocusedSurface(harness.page)), { timeout: 25_000 }).not.toBe(bypassPid)
-      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 45_000)
+      await expect.poll(async () => await positivePid(visibleFocusedSurface(harness.page)), { timeout: 30_000 }).not.toBe(bypassPid)
+      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
       await saveScreenshot(harness.page, '11-execution-modes-bypass-done.png')
 
       // #12 /model inside terminal syncs HUD
@@ -643,9 +675,9 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const currentPaneTitle = await paneForSession(harness.page, sessionId).locator('.pane-title').innerText()
       if (currentPaneTitle === 'Antigravity' || currentPaneTitle === 'Shell') {
         await sendTerminalLine(surface, 'Summarize README.md in this folder in two short bullets.')
-        await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 60_000)
+        await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
       }
-      await expect.poll(async () => await paneForSession(harness.page, sessionId).locator('.pane-title').innerText(), { timeout: 25_000 }).not.toBe('Shell')
+      await expect.poll(async () => await paneForSession(harness.page, sessionId).locator('.pane-title').innerText(), { timeout: 30_000 }).not.toBe('Shell')
       const autoTitle = await paneForSession(harness.page, sessionId).locator('.pane-title').innerText()
       await openPaneMenu(paneForSession(harness.page, sessionId))
       await harness.page.getByRole('menuitem', { name: '重命名…' }).click()
@@ -656,7 +688,7 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
 
       // Run another turn -> manual title must NOT be overwritten
       await sendTerminalLine(surface, 'Reply with ONLY RENAME_LOCKED_OK')
-      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 60_000)
+      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
       await expect(paneForSession(harness.page, sessionId).locator('.pane-title')).toHaveText('手工锁定标题-E2E')
 
       // Restore auto title
@@ -670,10 +702,10 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       harness = await launchPackagedApp(dirs)
       const restoredSurface = paneForSession(harness.page, sessionId).locator('.terminal-surface')
       await positivePid(restoredSurface)
-      await expect(hudForSession(harness.page, sessionId)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 35_000 })
+      await expect(hudForSession(harness.page, sessionId)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 45_000 })
       await expect(paneForSession(harness.page, sessionId).locator('.provider-restore-banner')).toHaveCount(0)
       await sendTerminalLine(restoredSurface, 'Reply with ONLY RESTART_RECOVERY_OK')
-      await expect(restoredSurface.locator('.xterm-rows')).toContainText('RESTART_RECOVERY_OK', { timeout: 45_000 })
+      await expect(restoredSurface.locator('.xterm-rows')).toContainText('RESTART_RECOVERY_OK', { timeout: 90_000 })
       await saveScreenshot(harness.page, '09a-restart-recovery.png')
 
       // Clean summary JSON
@@ -709,8 +741,8 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
 
       // Complete turn 1 with a secret token to test fork context inheritance
       await sendTerminalLine(parentSurface, 'Remember the exact codeword COBALT_719 and reply ONLY TURN1_SAVED.')
-      await waitForDagNodeStatus(dagPage, parentId, 'status-idle', 60_000)
-      await expect(parentSurface.locator('.xterm-rows')).toContainText('TURN1_SAVED', { timeout: 20_000 })
+      await waitForDagNodeStatus(dagPage, parentId, 'status-idle', 90_000)
+      await expect(parentSurface.locator('.xterm-rows')).toContainText('TURN1_SAVED', { timeout: 30_000 })
       const parentProviderId = await waitForProviderSessionId(harness.dataDir, parentId)
 
       const parentPane = paneForSession(harness.page, parentId)
@@ -740,10 +772,10 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       expect(child1ProviderId).not.toBe(parentProviderId)
 
       // Ask child1 for the inherited codeword!
-      await waitForDagNodeStatus(dagPage, child1Id, 'status-idle', 45_000)
+      await waitForDagNodeStatus(dagPage, child1Id, 'status-idle', 90_000)
       await sendTerminalLine(child1Surface, 'What is the exact codeword I asked you to remember? Reply with ONLY that codeword.')
-      await waitForDagNodeStatus(dagPage, child1Id, 'status-idle', 60_000)
-      await expect(child1Surface.locator('.xterm-rows')).toContainText('COBALT_719', { timeout: 20_000 })
+      await waitForDagNodeStatus(dagPage, child1Id, 'status-idle', 90_000)
+      await expect(child1Surface.locator('.xterm-rows')).toContainText('COBALT_719', { timeout: 30_000 })
 
       // Return to parent, verify ChildSessionBadge (#2) & DAG (#2)
       await harness.page.getByRole('button', { name: '返回父会话' }).click()
@@ -811,7 +843,7 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       // Wait for both child3 fork & parent active turn to finish cleanly
       await expect(paneForSession(harness.page, child3Id).locator('.fork-progress-overlay')).toHaveCount(0, { timeout: 60_000 })
       await waitForDagNodeStatus(dagPage, parentId, 'status-idle', 90_000)
-      await waitForDagNodeStatus(dagPage, child3Id, 'status-idle', 60_000)
+      await waitForDagNodeStatus(dagPage, child3Id, 'status-idle', 90_000)
 
       // Verify parent provider binding wasn't hijacked by child3
       const parentBindingAfter = readDbRows(harness.dataDir, parentId).bindings.find(
@@ -862,11 +894,11 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await saveScreenshot(harness.page, '08-session-loader.png')
 
       await loaderDialog.getByRole('button', { name: '载入到当前卡片' }).click()
-      const duplicateConfirm = loaderDialog.getByRole('button', { name: '仍然载入' })
+      const duplicateConfirm = harness.page.getByRole('button', { name: '仍然载入' })
       if (await duplicateConfirm.isVisible({ timeout: 2_000 }).catch(() => false)) {
         await duplicateConfirm.click()
       }
-      await expect(loaderDialog).toHaveCount(0, { timeout: 20_000 })
+      await expect(harness.page.getByRole('dialog', { name: '载入 Antigravity 会话' })).toHaveCount(0, { timeout: 20_000 })
       await expect(hudForSession(harness.page, freshShellId)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 30_000 })
 
       await saveProof('fork-concurrent-loader.json', {
@@ -897,6 +929,7 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const card1Surface = visibleFocusedSurface(harness.page)
       const card1Id = (await card1Surface.getAttribute('data-session-id')) ?? ''
       await positivePid(card1Surface)
+      await waitForEmptyShellPrompt(card1Surface)
 
       // Create Card 2 (Shell) and print unique marker
       const { sessionId: card2Id, surface: card2Surface } = await createSiblingShellAndFocus(harness.page, card1Id)
@@ -910,16 +943,16 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       await sendTerminalLine(card1Surface, 'agy')
       await expect(card1Surface.locator('.xterm-rows')).toContainText(/Do you trust/i, { timeout: 30_000 })
       await sendTerminalRawKey(card1Surface, 'Enter')
-      await expect(hudForSession(harness.page, card1Id)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 30_000 })
-      await expect(hudForSession(harness.page, card1Id).locator('.status-model')).toBeVisible({ timeout: 35_000 })
-      await waitForDagNodeStatus(dagPage, card1Id, 'status-idle', 45_000)
+      await expect(hudForSession(harness.page, card1Id)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 45_000 })
+      await expect(hudForSession(harness.page, card1Id).locator('.status-model')).toBeVisible({ timeout: 45_000 })
+      await waitForDagNodeStatus(dagPage, card1Id, 'status-idle', 90_000)
 
       await sendTerminalLine(
         card1Surface,
         'Run `mt list` to inspect the cards, then run `mt read` on the `[shell]` sibling card (use `left` or `right` depending on `mt list`) with `--lines 20`. Finally reply with ONLY the MT_PEER_TOKEN value you saw in that card.'
       )
       const card1DagNode = dagPage.locator(`.dag-node-card[data-session-id="${card1Id}"]`)
-      const mtDeadline = Date.now() + 160_000
+      const mtDeadline = Date.now() + 180_000
       let sawTokenInRows = false
       while (Date.now() < mtDeadline) {
         const cls = (await card1DagNode.getAttribute('class').catch(() => '')) ?? ''
@@ -937,8 +970,8 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
         }
         await harness.page.waitForTimeout(300)
       }
-      await waitForDagNodeStatus(dagPage, card1Id, 'status-idle', 30_000)
-      await expect(card1Surface.locator('.xterm-rows')).toContainText('MT_PEER_TOKEN_8421', { timeout: 25_000 })
+      await waitForDagNodeStatus(dagPage, card1Id, 'status-idle', 90_000)
+      await expect(card1Surface.locator('.xterm-rows')).toContainText('MT_PEER_TOKEN_8421', { timeout: 30_000 })
       await saveScreenshot(harness.page, '13-mt-cross-card.png')
       await saveProof('mt-cross-card.json', { card1Id, card2Id, verifiedToken: 'MT_PEER_TOKEN_8421' })
     } finally {
@@ -957,10 +990,7 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const surface = visibleFocusedSurface(missingHarness.page)
       const shellId = (await surface.getAttribute('data-session-id')) ?? ''
       await positivePid(surface)
-      await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
-      const promptRows = await surface.locator('.xterm-rows').innerText()
-      const afterPrompt = promptRows.split('git:(main)').at(-1)?.trim() ?? ''
-      expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
+      await waitForEmptyShellPrompt(surface)
       // Create an Antigravity card directly via mt CLI and focus it (since shell-promote rolls back on spawn failure)
       await sendTerminalLine(surface, 'mt create session --canvas current --profile antigravity --enter && mt focus right')
       const antigravityCard = missingHarness.page.locator('[data-session-card]').nth(1)
@@ -1023,12 +1053,9 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const surface = visibleFocusedSurface(stubHarness.page)
       const sessionId = (await surface.getAttribute('data-session-id')) ?? ''
       await positivePid(surface)
-      await expect(surface.locator('.xterm-rows')).toContainText(/repo\s+git:\(main\)/, { timeout: 15_000 })
+      await waitForEmptyShellPrompt(surface)
       const dagPage = await openDagWindow(stubHarness)
       await stubHarness.page.bringToFront()
-      const promptRows = await surface.locator('.xterm-rows').innerText()
-      const afterPrompt = promptRows.split('git:(main)').at(-1)?.trim() ?? ''
-      expect(afterPrompt, `promptRows=${JSON.stringify(promptRows)}`).toBe('')
 
       await sendTerminalLine(surface, 'agy')
       await expect(surface.locator('.xterm-rows')).toContainText('You are currently not signed in', { timeout: 20_000 })

@@ -1,0 +1,14 @@
+{
+  "parentId": "9f252afb-3c22-4cbd-a3d5-83c142e5f888",
+  "parentProviderId": "5112173e-4cc2-4280-8b09-289e76702648",
+  "child1Id": "84780163-71ae-41a3-bacc-b8decb207e99",
+  "child1ProviderId": "b250f092-741c-45c1-8cf6-4ca656f67586",
+  "child2Id": "d94a5946-d7c9-4f38-81d0-532102755543",
+  "child2ProviderId": "83779331-af5c-4378-a48c-6d6dace77a23",
+  "child3Id": "04caebf7-a7ba-4a24-a229-61eacc585b85",
+  "child3ProviderId": "0d2fd5ea-d053-433c-aab9-2556def313d7",
+  "parentLinesBefore": 3,
+  "parentLinesAfter": 5,
+  "parentDbExists": true,
+  "parentDbIntegrity": "ok"
+}
