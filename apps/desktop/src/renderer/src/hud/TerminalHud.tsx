@@ -42,17 +42,17 @@ export function TerminalHud(props: {
   const { hud } = props
   const m = useMessages().hud
   const manifest = getAgentManifest(hud?.provider ?? 'claude-code')
-  const accountSwitchingEnabled = manifest?.capabilities.accountSwitching ?? true
+  const showAccountControl = manifest?.hud.showAccountControl ?? true
   const instructionButtonLabel = manifest?.instructionFiles.buttonLabel
   const allowedPermissionModes = manifest?.capabilities.permissionModes ?? [
     'default', 'acceptEdits', 'plan', 'bypassPermissions'
   ]
   const accountState = useAccountUsage(
-    accountSwitchingEnabled && hud?.mode === 'agent' && hud.defaultAccountUsage === true
+    showAccountControl && hud?.mode === 'agent' && hud.defaultAccountUsage === true
   )
   const account = accountState?.accounts.find(a => a.id === accountState.currentId) ??
     accountState?.detected
-  const useDeviceQuota = accountSwitchingEnabled && hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
+  const useDeviceQuota = showAccountControl && hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
   const deviceWindows = account?.needsLogin ? [] : ([['5h', account?.usage?.fiveHour], ['Weekly', account?.usage?.weekly]] as const)
     .flatMap(([label, value]) => value && Number.isFinite(value.used) ? [{ label, percent: Math.round(value.used), resetsAt: Date.parse(value.resetsAt) }] : [])
   const zh = useLocale() === 'zh-CN'
@@ -190,7 +190,7 @@ export function TerminalHud(props: {
       disabled={!props.environmentActions} onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
       }} />}
-    {accountSwitchingEnabled && <ClaudeAccountsControl sessionId={sessionId} />}
+    {showAccountControl && <ClaudeAccountsControl sessionId={sessionId} />}
     </div>
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)

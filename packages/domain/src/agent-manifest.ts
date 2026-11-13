@@ -57,6 +57,7 @@ export interface AgentManifest {
   }
   hud: {
     stripClaudeModelPrefix: boolean
+    showAccountControl: boolean
     hideEmptyQuotaPlaceholder: boolean
     supportsTodos: boolean
     supportsAgentsCount: boolean
@@ -96,6 +97,7 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       modelFlag: '--model',
       permissionFlags: {
         default: [],
+        auto: ['--permission-mode', 'auto'],
         acceptEdits: ['--permission-mode', 'acceptEdits'],
         plan: ['--permission-mode', 'plan'],
         bypassPermissions: ['--dangerously-skip-permissions']
@@ -117,6 +119,7 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
     },
     hud: {
       stripClaudeModelPrefix: true,
+      showAccountControl: true,
       hideEmptyQuotaPlaceholder: false,
       supportsTodos: true,
       supportsAgentsCount: true,
@@ -169,10 +172,12 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       assetRelativePath: 'providers/codex-developer-instructions.md'
     },
     instructionFiles: {
-      candidates: []
+      candidates: ['CLAUDE.md'],
+      buttonLabel: 'ClaudeMd'
     },
     hud: {
-      stripClaudeModelPrefix: false,
+      stripClaudeModelPrefix: true,
+      showAccountControl: true,
       hideEmptyQuotaPlaceholder: false,
       supportsTodos: true,
       supportsAgentsCount: true,
@@ -184,7 +189,7 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
       fork: false,
       sessionLoader: false,
       autoTitle: false,
-      permissionModes: ['default', 'bypassPermissions'],
+      permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions'],
       permissionSwitchMode: 'respawn-only',
       providerConfig: true,
       accountSwitching: false,
@@ -232,6 +237,7 @@ export const AGENT_MANIFESTS: Record<AgentProfileId, AgentManifest> = {
     },
     hud: {
       stripClaudeModelPrefix: false,
+      showAccountControl: false,
       hideEmptyQuotaPlaceholder: true,
       supportsTodos: false,
       supportsAgentsCount: false,
@@ -277,6 +283,10 @@ export function getAgentManifest(value: unknown): AgentManifest | undefined {
 
 export function listAgentManifests(): readonly AgentManifest[] {
   return LAUNCHABLE_AGENT_PROFILES.map((id) => AGENT_MANIFESTS[id])
+}
+
+export function listAutoRestoreAgentIds(): readonly AgentProfileId[] {
+  return LAUNCHABLE_AGENT_PROFILES.filter((id) => AGENT_MANIFESTS[id].capabilities.autoRestore)
 }
 
 export function getAgentDisplayName(kind: unknown, fallback = 'Shell'): string {

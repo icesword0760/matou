@@ -626,3 +626,69 @@ it('keeps hooks details in the original plain list shell', () => {
   expect(tooltip.classList.contains('hud-agents-tooltip')).toBe(false)
   expect(tooltip.querySelector('li')?.className).toBe('')
 })
+
+describe('main parity for Codex HUD controls', () => {
+  it('renders ClaudeAccountsControl, empty quota placeholder, ClaudeMd button, and all 4 permission options on Codex cards', async () => {
+    const user = userEvent.setup()
+    const win = window as unknown as { matouDesktop: Record<string, unknown> | undefined }
+    const previousBridge = win.matouDesktop
+    win.matouDesktop = {
+      getClaudeAccounts: vi.fn(async () => ({
+        revision: 1, accounts: [], sessions: [], pendingSessionIds: [],
+        operation: 'idle', rememberScope: false
+      })),
+      onClaudeAccountsChange: vi.fn(() => () => {})
+    }
+    try {
+      render(
+        <TerminalHud
+          hud={agent({
+            provider: 'codex',
+            permissionMode: 'default',
+            usageWindows: [],
+            configCounts: { instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 0, hooks: 0 }
+          })}
+          onPermissionMode={vi.fn()}
+        />
+      )
+      expect(screen.getByRole('button', { name: 'Claude 账户' })).toBeTruthy()
+      expect(screen.getByRole('status').textContent).toBe('—')
+      expect(screen.getByRole('button', { name: '编辑 ClaudeMd' }).textContent).toBe('ClaudeMd')
+
+      await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
+      expect(screen.getByRole('menuitem', { name: /^Default/ })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'Accept Edits' })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'Plan Mode' })).toBeTruthy()
+      expect(screen.getByRole('menuitem', { name: 'Bypass Permissions' })).toBeTruthy()
+    } finally {
+      win.matouDesktop = previousBridge
+    }
+  })
+
+  it('hides ClaudeAccountsControl on Antigravity cards', () => {
+    const win = window as unknown as { matouDesktop: Record<string, unknown> | undefined }
+    const previousBridge = win.matouDesktop
+    win.matouDesktop = {
+      getClaudeAccounts: vi.fn(async () => ({
+        revision: 1, accounts: [], sessions: [], pendingSessionIds: [],
+        operation: 'idle', rememberScope: false
+      })),
+      onClaudeAccountsChange: vi.fn(() => () => {})
+    }
+    try {
+      render(
+        <TerminalHud
+          hud={agent({
+            provider: 'antigravity',
+            permissionMode: 'default',
+            usageWindows: []
+          })}
+        />
+      )
+      expect(screen.queryByRole('button', { name: 'Claude 账户' })).toBeNull()
+      expect(screen.queryByText('—')).toBeNull()
+    } finally {
+      win.matouDesktop = previousBridge
+    }
+  })
+})

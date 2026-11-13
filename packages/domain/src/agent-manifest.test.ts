@@ -10,7 +10,8 @@ import {
   isAgentProviderId,
   isSessionKind,
   isSessionRunProfile,
-  listAgentManifests
+  listAgentManifests,
+  listAutoRestoreAgentIds
 } from './agent-manifest'
 
 describe('agent-manifest', () => {
@@ -53,6 +54,15 @@ describe('agent-manifest', () => {
       permissionSwitchMode: 'shift-tab-hybrid'
     })
 
+    expect(claude.launch.permissionFlags).toEqual({
+      default: [],
+      auto: ['--permission-mode', 'auto'],
+      acceptEdits: ['--permission-mode', 'acceptEdits'],
+      plan: ['--permission-mode', 'plan'],
+      bypassPermissions: ['--dangerously-skip-permissions']
+    })
+    expect(claude.hud.showAccountControl).toBe(true)
+
     const codex = AGENT_MANIFESTS.codex
     expect(codex.displayName).toBe('Codex')
     expect(codex.shortName).toBe('Codex')
@@ -65,8 +75,18 @@ describe('agent-manifest', () => {
       agentTeam: false,
       claudeTimeZone: false,
       autoRestore: false,
-      permissionSwitchMode: 'respawn-only'
+      permissionSwitchMode: 'respawn-only',
+      permissionModes: ['default', 'acceptEdits', 'plan', 'bypassPermissions']
     })
+    expect(codex.hud.showAccountControl).toBe(true)
+    expect(codex.instructionFiles).toEqual({
+      candidates: ['CLAUDE.md'],
+      buttonLabel: 'ClaudeMd'
+    })
+  })
+
+  it('lists only auto-restore providers cleanly without codex', () => {
+    expect(listAutoRestoreAgentIds()).toEqual(['claude-code', 'antigravity'])
   })
 
   it('declares antigravity manifest according to finalized product decisions', () => {
@@ -90,6 +110,7 @@ describe('agent-manifest', () => {
     expect(agy.capabilities.accountSwitching).toBe(false)
     expect(agy.capabilities.agentTeam).toBe(false)
     expect(agy.capabilities.claudeTimeZone).toBe(false)
+    expect(agy.hud.showAccountControl).toBe(false)
     expect('modelSwitch' in agy.capabilities).toBe(false)
     expect(agy.events.transcriptPathSource).toBe('hook')
     expect(agy.mtInjection.mode).toBe('session-start-system-message')

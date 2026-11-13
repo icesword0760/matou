@@ -407,6 +407,29 @@ describe('ProviderModeService', () => {
       initial.parentSessionId
     )?.count).toBe(1)
   })
+
+  it('ignores non-auto-restore Codex bindings in latestBinding like main', () => {
+    const initial = hierarchy.bootstrapWindow(command('codex-bootstrap'), {
+      windowId: 'window-1', defaultRootDirectory: workspaceRoot,
+      defaultName: 'workspace', now: 10
+    })
+    database.run(`UPDATE sessions SET kind = 'codex', title = 'Codex' WHERE id = ?`, initial.session!.id)
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state,
+         metadata_json, created_at, updated_at, validated_at
+       ) VALUES ('binding-codex', ?, 'codex', 'codex-thread-1', 'available', 'none', '{}', 20, 20, 20)`,
+      initial.session!.id
+    )
+
+    expect(() => providerModes.markUserExited(command('codex-exit'), {
+      sessionId: initial.session!.id, now: 30
+    })).toThrow('ProviderBinding does not exist')
+
+    expect(database.get<{ resume_state: string }>(
+      `SELECT resume_state FROM provider_bindings WHERE id = 'binding-codex'`
+    )?.resume_state).toBe('available')
+  })
 })
 
 function bootstrapClaudeTree(options: { canFork?: boolean } = {}) {

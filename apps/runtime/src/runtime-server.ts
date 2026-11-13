@@ -11,9 +11,15 @@ import { promisify } from 'node:util'
 import {
   getAgentManifest,
   isAgentProfileId,
+  listAutoRestoreAgentIds,
+  type AgentProfileId,
   type SessionKind,
   type SessionRunProfile
 } from '@matou/domain'
+
+const AUTO_RESTORE_PROVIDER_SQL_LIST = listAutoRestoreAgentIds()
+  .map((id) => `'${id}'`)
+  .join(', ')
 import {
   PROTOCOL_VERSION,
   parseRendererMessage,
@@ -515,9 +521,8 @@ export class RuntimeServer {
     if (!job.executionContextId || !job.profile) {
       throw new Error(`Session ${job.sessionId} is missing a recovery launch descriptor`)
     }
-    const providerRecovery = job.profile !== 'shell' &&
-      getAgentManifest(job.profile)?.capabilities.autoRestore === true &&
-      this.#sessionRepository.getResumeBinding(job.sessionId, job.profile)
+    const providerRecovery = getAgentManifest(job.profile)?.capabilities.autoRestore === true &&
+      this.#sessionRepository.getResumeBinding(job.sessionId, job.profile as AgentProfileId)
       ? this.#waitForProviderRecovery(job.sessionId)
       : undefined
     try {
@@ -573,7 +578,7 @@ export class RuntimeServer {
     this.#providerIdentityMismatches.delete(sessionId)
     const restoring = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
-       WHERE session_id = ? AND provider <> 'generic' AND restore_state = 'restoring'
+       WHERE session_id = ? AND provider IN (${AUTO_RESTORE_PROVIDER_SQL_LIST}) AND restore_state = 'restoring'
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
       sessionId
     )
@@ -1148,7 +1153,8 @@ export class RuntimeServer {
         ? undefined : this.#sessions.get(permissionSessionId)
       const ephemeralPermission = permissionSessionId !== undefined && permissionSession !== undefined &&
         permissionSession.profile !== 'shell' &&
-        this.#sessionRepository.getResumeBinding(permissionSessionId, permissionSession.profile) === undefined
+        (getAgentManifest(permissionSession.profile)?.capabilities.autoRestore !== true ||
+          this.#sessionRepository.getResumeBinding(permissionSessionId, permissionSession.profile) === undefined)
       this.#accessPolicy.assertRpcAllowed(message.method)
       if (providerMutationSessionId !== undefined) {
         this.#assertProviderMutationAllowed(providerMutationSessionId)
@@ -1872,7 +1878,7 @@ export class RuntimeServer {
       providerSettingsBinding?.metadata
     )
     const providerSessionId = forkLaunch?.sourceProviderSessionId ?? resumeBinding?.providerSessionId
-    const supersedesRestoreFailure = isAgentProfileId(message.profile) &&
+    const supersedesRestoreFailure = getAgentManifest(message.profile)?.capabilities.autoRestore === true &&
       providerSessionId === undefined && Boolean(this.#database.get(
         `SELECT 1 FROM provider_bindings
          WHERE session_id = ? AND provider = ?
@@ -2913,7 +2919,7 @@ export class RuntimeServer {
   #hasParkedProviderRestoreFailure(sessionId: string): boolean {
     return this.#database.get<{ restore_state: string }>(
       `SELECT restore_state FROM provider_bindings
-       WHERE session_id = ? AND provider <> 'generic'
+       WHERE session_id = ? AND provider IN (${AUTO_RESTORE_PROVIDER_SQL_LIST})
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
       sessionId
     )?.restore_state === 'failed'

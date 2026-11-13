@@ -6,6 +6,7 @@ import {
   getAgentShortName,
   isAgentProfileId,
   listAgentManifests,
+  listAutoRestoreAgentIds,
   type AgentProfileId,
   type DomainCommandMetadata,
   type ProviderBinding,
@@ -18,6 +19,10 @@ import {
 
 const AGENT_SHORT_NAME_SQL_LIST = listAgentManifests()
   .map((manifest) => `'${manifest.shortName}'`)
+  .join(', ')
+
+const AUTO_RESTORE_PROVIDER_SQL_LIST = listAutoRestoreAgentIds()
+  .map((id) => `'${id}'`)
   .join(', ')
 
 function bindingProvider(binding: { provider: string }): AgentProfileId {
@@ -590,7 +595,7 @@ function latestBinding(
 ): BindingRow {
   return requireRow(tx.get<BindingRow>(
     `SELECT * FROM provider_bindings
-     WHERE session_id = ? AND provider <> 'generic'
+     WHERE session_id = ? AND provider IN (${AUTO_RESTORE_PROVIDER_SQL_LIST})
      ORDER BY updated_at DESC, id DESC LIMIT 1`,
     sessionId
   ), 'ProviderBinding')

@@ -7859,3 +7859,103 @@ it('continues structural disposal when status directory deletion fails', async (
     expect([...testSessionRegistries].some(registry => registry.has('status-delete-failure'))).toBe(false)
   } finally { await chmod(directory, 0o700) }
 })
+
+it('treats Codex session.set-permission-mode as ephemeral like main even when a codex binding exists', async () => {
+  const executable = join(root, 'codex-ephemeral-perm.sh')
+  await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+  await chmod(executable, 0o755)
+  const previousCommand = process.env.MATOU_CODEX_COMMAND
+  process.env.MATOU_CODEX_COMMAND = executable
+  const sessions = createTestSessionRegistry()
+  const testPort = new MockPort()
+  const testServer = new RuntimeServer(testPort, root, database, undefined, undefined, sessions)
+  try {
+    registerSession(database, 'codex-ephemeral-session', 'codex')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'codex', ?, 'available', 'none', '{}', 1, 1, 1)`,
+      'binding-codex-ephemeral', 'codex-ephemeral-session', 'codex-thread-99'
+    )
+    testPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'codex-perm-client' })
+    testPort.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'codex-ephemeral-session', executionContextId: 'replay-context',
+      profile: 'codex', cols: 80, rows: 24
+    })
+    await waitUntil(() => testPort.last('terminal.spawned')?.sessionId === 'codex-ephemeral-session')
+    const runId = sessions.get('codex-ephemeral-session')?.runId ?? 'codex-ephemeral-run'
+    testServer.providerIdentityRecorded('codex-ephemeral-session', runId)
+
+    testPort.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+      requestId: 'codex-perm-1', method: 'session.set-permission-mode',
+      capability: 'renderer', deadlineAt: Date.now() + 1000,
+      payload: {
+        command: {
+          commandId: 'codex-perm-1', commandType: 'session.set-permission-mode',
+          requestHash: 'hash-codex-perm-1'
+        },
+        input: {
+          sessionId: 'codex-ephemeral-session', provider: 'claude-code',
+          permissionMode: 'bypassPermissions', now: 2
+        }
+      }
+    })
+    await waitUntil(() => testPort.findRpcResponse('codex-perm-1') !== undefined)
+    expect(testPort.findRpcResponse('codex-perm-1')).toMatchObject({
+      requestId: 'codex-perm-1',
+      result: {
+        sessionId: 'codex-ephemeral-session',
+        permissionMode: 'bypassPermissions',
+        persisted: false
+      }
+    })
+    expect(JSON.parse(database.get<{ metadata_json: string }>(
+      `SELECT metadata_json FROM provider_bindings WHERE id = 'binding-codex-ephemeral'`
+    )?.metadata_json ?? '{}')).toMatchObject({ permissionMode: 'default' })
+  } finally {
+    testServer.close()
+    restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+  }
+})
+
+it('does not wait for provider recovery or block on failed bindings during Codex ensureSessionRunning', async () => {
+  const executable = join(root, 'codex-recovery-parity.sh')
+  await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+  await chmod(executable, 0o755)
+  const previousCommand = process.env.MATOU_CODEX_COMMAND
+  process.env.MATOU_CODEX_COMMAND = executable
+  const sessions = createTestSessionRegistry()
+  const testPort = new MockPort()
+  const testServer = new RuntimeServer(testPort, root, database, undefined, undefined, sessions)
+  try {
+    registerSession(database, 'codex-recover-session', 'codex')
+    database.run(
+      `INSERT INTO provider_bindings (
+         id, session_id, provider, provider_session_id, resume_state, restore_state, metadata_json,
+         created_at, updated_at, validated_at
+       ) VALUES (?, ?, 'codex', ?, 'available', 'none', '{}', 1, 1, 1)`,
+      'binding-codex-recover', 'codex-recover-session', 'codex-thread-recover'
+    )
+
+    await expect(testServer.ensureSessionRunning({
+      sessionId: 'codex-recover-session',
+      executionContextId: 'replay-context',
+      profile: 'codex',
+      sceneId: 'scene-1',
+      priority: 'active-session',
+      enqueueSequence: 1
+    })).resolves.toBeUndefined()
+
+    expect(sessions.has('codex-recover-session')).toBe(true)
+    testServer.providerIdentityRecorded('codex-recover-session', 'run-1')
+    expect(database.get<{ restore_state: string }>(
+      `SELECT restore_state FROM provider_bindings WHERE id = 'binding-codex-recover'`
+    )?.restore_state).toBe('none')
+  } finally {
+    testServer.close()
+    restoreEnv('MATOU_CODEX_COMMAND', previousCommand)
+  }
+})

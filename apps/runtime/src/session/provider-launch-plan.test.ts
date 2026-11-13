@@ -134,4 +134,90 @@ describe('PRD 04 provider launch plan', () => {
       resuming: false
     })
   })
+
+  it('produces byte-identical args to main for Claude and Codex across all permission modes and launch kinds', () => {
+    const modes = [
+      undefined,
+      'default',
+      'auto',
+      'acceptEdits',
+      'plan',
+      'bypassPermissions'
+    ] as const
+    const launchKinds = [
+      { kind: 'new', providerSessionId: undefined, forkSession: false },
+      { kind: 'resume', providerSessionId: 'session-123', forkSession: false },
+      { kind: 'fork', providerSessionId: 'session-123', forkSession: true }
+    ] as const
+
+    function mainClaudeArgs(
+      permissionMode: string | undefined,
+      providerSessionId: string | undefined,
+      forkSession: boolean
+    ) {
+      const args = [
+        '--settings', '/private/matou/settings.json',
+        '--plugin-dir', '/private/matou/assets/providers/claude-plugin',
+        '--model', 'model-x'
+      ]
+      if (providerSessionId) args.push('--resume', providerSessionId)
+      if (providerSessionId && forkSession) args.push('--fork-session')
+      if (permissionMode === 'bypassPermissions') {
+        args.push('--dangerously-skip-permissions')
+      } else if (
+        permissionMode === 'auto' ||
+        permissionMode === 'acceptEdits' ||
+        permissionMode === 'plan'
+      ) {
+        args.push('--permission-mode', permissionMode)
+      }
+      return { file: '/fixture/claude', args, resuming: Boolean(providerSessionId) }
+    }
+
+    function mainCodexArgs(
+      permissionMode: string | undefined,
+      providerSessionId: string | undefined,
+      forkSession: boolean
+    ) {
+      const args = [
+        '-c', 'hooks={}',
+        '--dangerously-bypass-hook-trust',
+        '-c', 'developer_instructions="Use mt."',
+        '--model', 'gpt-x'
+      ]
+      if (permissionMode === 'bypassPermissions') {
+        args.push('--dangerously-bypass-approvals-and-sandbox')
+      }
+      if (providerSessionId) args.push(forkSession ? 'fork' : 'resume', providerSessionId)
+      return { file: '/fixture/codex', args, resuming: Boolean(providerSessionId) }
+    }
+
+    for (const permissionMode of modes) {
+      for (const { providerSessionId, forkSession } of launchKinds) {
+        const optional = {
+          ...(providerSessionId === undefined ? {} : { providerSessionId }),
+          ...(permissionMode === undefined ? {} : { permissionMode })
+        }
+        expect(resolvePtyCommand({
+          profile: 'claude-code',
+          executable: '/fixture/claude',
+          settingsPath: '/private/matou/settings.json',
+          controlAssetRoot: '/private/matou/assets',
+          model: 'model-x',
+          forkSession,
+          ...optional
+        })).toEqual(mainClaudeArgs(permissionMode, providerSessionId, forkSession))
+
+        expect(resolvePtyCommand({
+          profile: 'codex',
+          executable: '/fixture/codex',
+          codexHooksConfig: '{}',
+          codexDeveloperInstructions: 'Use mt.',
+          model: 'gpt-x',
+          forkSession,
+          ...optional
+        })).toEqual(mainCodexArgs(permissionMode, providerSessionId, forkSession))
+      }
+    }
+  })
 })
