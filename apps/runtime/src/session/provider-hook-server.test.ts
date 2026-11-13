@@ -775,6 +775,98 @@ describe('ProviderHookServer', () => {
     expect(identityEvents).toEqual([])
     expect(notificationEvents).toHaveLength(1)
   })
+
+  it('registers Antigravity statusLine settings, passes through user statusLine stdout, discards broken statusline transcript_path, and maps work statuses', async () => {
+    const userSettingsPath = join(root, 'user-agy-settings.json')
+    await writeFile(userSettingsPath, JSON.stringify({
+      statusLine: { type: 'command', command: "printf 'CUSTOM_BAR\n'" }
+    }), 'utf8')
+
+    const workStatuses: unknown[] = []
+    const agyNotifications: unknown[] = []
+    const agyHooks = new ProviderHookServer(root, sessions, {
+      antigravitySettingsPath: userSettingsPath,
+      onWorkStatus: (event) => { workStatuses.push(event) },
+      onNotification: (event) => { agyNotifications.push(event) }
+    })
+    await agyHooks.start()
+    try {
+      const registration = await agyHooks.registerAntigravitySession({
+        runId: 'run-agy-1', sessionId: 'session-1',
+        systemMessageMarkdown: 'Antigravity host instructions'
+      })
+
+      const settings = JSON.parse(await readFile(registration.settingsPath, 'utf8'))
+      expect(settings).toEqual({
+        statusLine: {
+          type: 'command',
+          command: expect.stringContaining('.statusline.sh'),
+          stack_with_default: true
+        }
+      })
+      expect(settings.notifications).toBeUndefined()
+      expect(JSON.parse(await readFile(registration.systemMessagePath!, 'utf8'))).toEqual({
+        injectSteps: [{ systemMessage: { systemMessage: 'Antigravity host instructions' } }]
+      })
+
+      // Execute generated .statusline.sh and confirm background POST + user stdout passthrough.
+      const { spawn } = await import('node:child_process')
+      const statuslineOut = await new Promise<string>((resolve, reject) => {
+        const child = spawn(settings.statusLine.command, [], { env: { PATH: process.env.PATH } })
+        const out: Buffer[] = []
+        child.stdout.on('data', (chunk) => out.push(Buffer.from(chunk)))
+        child.on('error', reject)
+        child.on('close', (code) => {
+          expect(code).toBe(0)
+          resolve(Buffer.concat(out).toString('utf8'))
+        })
+        child.stdin.end(JSON.stringify({
+          conversation_id: 'agy-conv-1',
+          transcript_path: '/Users/demo/.gemini/antigravity/brain/broken',
+          agent_state: 'initializing',
+          cycle_mode: 'auto'
+        }))
+      })
+      expect(statuslineOut).toBe('CUSTOM_BAR\n')
+      await waitFor(() => sessions.getResumeBinding('session-1', 'antigravity')?.providerSessionId === 'agy-conv-1', 2_000)
+
+      // Statusline transitions: working -> tool_use (deduped) -> idle, plus Stop ERROR.
+      await postHook(`${registration.hookUrl}?kind=statusline`, {
+        conversation_id: 'agy-conv-1', agent_state: 'working', cycle_mode: 'auto'
+      })
+      await postHook(`${registration.hookUrl}?kind=statusline`, {
+        conversation_id: 'agy-conv-1', agent_state: 'tool_use', cycle_mode: 'auto'
+      })
+      await postHook(`${registration.hookUrl}?kind=statusline`, {
+        conversation_id: 'agy-conv-1', agent_state: 'tool_use', cycle_mode: 'auto'
+      })
+      await postHook(registration.hookUrl, {
+        hookEventName: 'Stop',
+        conversationId: 'agy-conv-1',
+        terminationReason: 'ERROR',
+        error: 'upstream timeout'
+      })
+      // Error stays latched even if a trailing idle statusline tick arrives.
+      await postHook(`${registration.hookUrl}?kind=statusline`, {
+        conversation_id: 'agy-conv-1', agent_state: 'idle', cycle_mode: 'auto'
+      })
+
+      expect(workStatuses.map((item) => (item as { workStatus: string }).workStatus)).toEqual([
+        'starting', 'running', 'needs-input', 'error'
+      ])
+      expect(agyNotifications).toHaveLength(2)
+      expect(agyNotifications[0]).toMatchObject({
+        provider: 'antigravity',
+        event: { eventType: 'permission', title: 'Antigravity' }
+      })
+      expect(agyNotifications[1]).toMatchObject({
+        provider: 'antigravity',
+        event: { eventType: 'error', title: 'Antigravity', body: 'upstream timeout' }
+      })
+    } finally {
+      await agyHooks.stop()
+    }
+  })
 })
 
 function command(commandId: string) {

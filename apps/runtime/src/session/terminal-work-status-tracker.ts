@@ -40,9 +40,19 @@ export class TerminalWorkStatusTracker {
     const lastLifecycleStatus = statuses.at(-1)
     const completed = lastLifecycleStatus === 'idle' ||
       lastLifecycleStatus === 'error' || lastLifecycleStatus === 'interrupted'
-    if (!completed && isExplicitBlockingPrompt(this.#buffer)) statuses.push('needs-input')
+    if (!completed && isProviderOrBlockingPrompt(this.#buffer, this.#provider)) {
+      statuses.push('needs-input')
+    }
     return statuses
   }
+}
+
+function isProviderOrBlockingPrompt(raw: string, provider: AgentProfileId | undefined): boolean {
+  if (isExplicitBlockingPrompt(raw)) return true
+  if (provider !== 'antigravity') return false
+  const tail = visibleTerminalText(raw).slice(-1200)
+  return /Do you trust the contents of this project\?/i.test(tail) ||
+    /You are currently not signed in/i.test(tail)
 }
 
 function visibleTerminalText(raw: string): string {

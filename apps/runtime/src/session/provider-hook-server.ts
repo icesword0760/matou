@@ -1,9 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { watch, type FSWatcher } from 'node:fs'
-import { chmod, mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
-import type { AgentProfileId } from '@matou/domain'
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import type { AgentProfileId, SessionWorkStatus } from '@matou/domain'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { runtimeMessages } from '../i18n/messages'
@@ -34,6 +35,9 @@ interface HookRegistrationRecord {
   acceptSideEffects: boolean
   settingsPath: string
   statusScriptPath: string
+  systemMessagePath?: string
+  lastAgentState?: string
+  errorLatched?: boolean
   retirementTimer?: ReturnType<typeof setTimeout>
   observedTitle?: string
   titleWatch?: {
@@ -73,13 +77,21 @@ export interface AgentTeamObservation {
 }
 
 export interface ProviderHookServerOptions {
+  antigravitySettingsPath?: string
   currentRunId?: (sessionId: string) => string | undefined
   onNotification?: (notification: ProviderHookNotification) => void
+  onWorkStatus?: (event: {
+    runId: string
+    sessionId: string
+    provider: AgentProfileId
+    workStatus: SessionWorkStatus
+  }) => void
   onHudPayload?: (event: {
     runId: string
     sessionId: string
     provider: AgentProfileId
     payload: Record<string, unknown>
+    isStatusline?: boolean
   }) => void
   onIdentityRecorded?: (event: {
     runId: string
@@ -104,6 +116,8 @@ export interface ProviderHookRegistration {
   settingsPath: string
   codexHooksConfig?: string
   hookUrl: string
+  hookToken: string
+  systemMessagePath?: string
   retire(graceMs?: number, options?: { suppressSideEffects?: boolean }): void
   dispose(): Promise<void>
 }
@@ -115,9 +129,11 @@ const TITLE_WATCH_DEBOUNCE_MS = 25
 export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
+  readonly #antigravitySettingsPath: string
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
+  readonly #onWorkStatus: NonNullable<ProviderHookServerOptions['onWorkStatus']>
   readonly #onHudPayload: NonNullable<ProviderHookServerOptions['onHudPayload']>
   readonly #onIdentityRecorded: NonNullable<ProviderHookServerOptions['onIdentityRecorded']>
   readonly #onTitleObserved: NonNullable<ProviderHookServerOptions['onTitleObserved']>
@@ -129,8 +145,11 @@ export class ProviderHookServer {
   constructor(dataRoot: string, sessions: SessionRepository, options: ProviderHookServerOptions = {}) {
     this.#dataRoot = dataRoot
     this.#sessions = sessions
+    this.#antigravitySettingsPath = options.antigravitySettingsPath ??
+      join(homedir(), '.gemini', 'antigravity-cli', 'settings.json')
     this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
+    this.#onWorkStatus = options.onWorkStatus ?? (() => {})
     this.#onHudPayload = options.onHudPayload ?? (() => {})
     this.#onIdentityRecorded = options.onIdentityRecorded ?? (() => {})
     this.#onTitleObserved = options.onTitleObserved ?? (() => {})
@@ -164,8 +183,10 @@ export class ProviderHookServer {
       clearTimeout(record.retirementTimer)
       this.#stopTitleWatch(record)
     }
-    await Promise.all(records.flatMap(({ settingsPath, statusScriptPath }) => [
-      rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+    await Promise.all(records.flatMap(({ settingsPath, statusScriptPath, systemMessagePath }) => [
+      rm(settingsPath, { force: true }),
+      rm(statusScriptPath, { force: true }),
+      ...(systemMessagePath ? [rm(systemMessagePath, { force: true })] : [])
     ]))
     if (!server) return
     server.closeAllConnections()
@@ -184,6 +205,7 @@ export class ProviderHookServer {
       expectedProviderSessionId?: string
       inheritedConversation?: boolean
       forkAuthority?: ProviderIdentityForkAuthority
+      systemMessageMarkdown?: string
     }
   ): Promise<ProviderHookRegistration> {
     return this.#registerProviderSession(provider, input)
@@ -216,6 +238,21 @@ export class ProviderHookServer {
     return this.#registerProviderSession('codex', input)
   }
 
+  async registerAntigravitySession(input: {
+    runId: string
+    sessionId: string
+    permissionMode?: string
+    providerConfigId?: string
+    model?: string
+    acceptStatuslineIdentity?: boolean
+    expectedProviderSessionId?: string
+    inheritedConversation?: boolean
+    forkAuthority?: ProviderIdentityForkAuthority
+    systemMessageMarkdown?: string
+  }): Promise<ProviderHookRegistration> {
+    return this.#registerProviderSession('antigravity', input)
+  }
+
   async #registerProviderSession(
     provider: AgentProfileId,
     input: {
@@ -228,6 +265,7 @@ export class ProviderHookServer {
       expectedProviderSessionId?: string
       inheritedConversation?: boolean
       forkAuthority?: ProviderIdentityForkAuthority
+      systemMessageMarkdown?: string
     }
   ): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
@@ -241,12 +279,30 @@ export class ProviderHookServer {
     await chmod(directory, 0o700)
     const settingsPath = join(directory, `${token}.${provider === 'codex' ? 'hooks' : 'settings'}.json`)
     const statusScriptPath = join(directory, `${token}.statusline.sh`)
+    const systemMessagePath = provider === 'antigravity' && input.systemMessageMarkdown?.trim()
+      ? join(directory, `${token}.system-message.json`)
+      : undefined
     const temporaryPath = `${settingsPath}.tmp`
-    await writeFile(statusScriptPath, statusLineScript(hookUrl), { encoding: 'utf8', mode: 0o700 })
+    const userAntigravityStatusCommand = provider === 'antigravity'
+      ? await readUserAntigravityStatusCommand(this.#antigravitySettingsPath)
+      : undefined
+    const scriptContent = provider === 'antigravity'
+      ? antigravityStatusLineScript(`${hookUrl}?kind=statusline`, userAntigravityStatusCommand)
+      : statusLineScript(hookUrl)
+    await writeFile(statusScriptPath, scriptContent, { encoding: 'utf8', mode: 0o700 })
     await chmod(statusScriptPath, 0o700)
+    if (systemMessagePath && input.systemMessageMarkdown?.trim()) {
+      const systemMessagePayload = JSON.stringify({
+        injectSteps: [{ systemMessage: { systemMessage: input.systemMessageMarkdown.trim() } }]
+      })
+      await writeFile(systemMessagePath, systemMessagePayload, { encoding: 'utf8', mode: 0o600 })
+      await chmod(systemMessagePath, 0o600)
+    }
     const settings = provider === 'claude-code'
       ? claudeHookSettings(hookUrl, statusScriptPath)
-      : codexHookSettings(statusScriptPath)
+      : provider === 'antigravity'
+        ? antigravityHookSettings(statusScriptPath)
+        : codexHookSettings(statusScriptPath)
     await writeFile(temporaryPath, JSON.stringify(settings, null, 2), {
       encoding: 'utf8', mode: 0o600
     })
@@ -261,7 +317,7 @@ export class ProviderHookServer {
         ? {}
         : { providerConfigId: input.providerConfigId }),
       ...(input.model === undefined ? {} : { model: input.model }),
-      acceptStatuslineIdentity: provider === 'codex' || input.acceptStatuslineIdentity === true,
+      acceptStatuslineIdentity: provider === 'codex' || provider === 'antigravity' || input.acceptStatuslineIdentity === true,
       ...(input.expectedProviderSessionId === undefined
         ? {}
         : { expectedProviderSessionId: input.expectedProviderSessionId }),
@@ -270,7 +326,8 @@ export class ProviderHookServer {
       acceptIdentity: true,
       acceptSideEffects: true,
       settingsPath,
-      statusScriptPath
+      statusScriptPath,
+      ...(systemMessagePath === undefined ? {} : { systemMessagePath })
     }
     this.#registrations.set(token, record)
     let disposePromise: Promise<void> | undefined
@@ -280,7 +337,9 @@ export class ProviderHookServer {
         this.#stopTitleWatch(record)
         this.#registrations.delete(token)
         await Promise.all([
-          rm(settingsPath, { force: true }), rm(statusScriptPath, { force: true })
+          rm(settingsPath, { force: true }),
+          rm(statusScriptPath, { force: true }),
+          ...(systemMessagePath ? [rm(systemMessagePath, { force: true })] : [])
         ])
       })()
       return disposePromise
@@ -289,6 +348,8 @@ export class ProviderHookServer {
       settingsPath,
       ...(provider === 'codex' ? { codexHooksConfig: codexInlineHookConfig(statusScriptPath) } : {}),
       hookUrl,
+      hookToken: token,
+      ...(systemMessagePath === undefined ? {} : { systemMessagePath }),
       retire: (graceMs = DEFAULT_RETIREMENT_GRACE_MS, options = {}) => {
         if (options.suppressSideEffects) record.acceptSideEffects = false
         if (disposePromise || record.retirementTimer) return
@@ -308,7 +369,8 @@ export class ProviderHookServer {
       sendJson(response, 405, { error: 'Method not allowed' })
       return
     }
-    const token = tokenFromUrl(request.url)
+    const parsedUrl = parseHookUrl(request.url)
+    const token = parsedUrl?.token
     const registration = token === undefined ? undefined : this.#registrations.get(token)
     if (!registration) {
       sendJson(response, 404, { error: 'Unknown provider run' })
@@ -328,8 +390,11 @@ export class ProviderHookServer {
         sendJson(response, 200, {})
         return
       }
-      const providerSessionId = providerSessionIdentity(payload)
-      const eventName = nonEmptyText(payload.hook_event_name) ?? 'unknown'
+      const providerSessionId = providerSessionIdentity(payload, registration.provider)
+      const eventName = nonEmptyText(payload.hook_event_name) ??
+        nonEmptyText(payload.hookEventName) ??
+        'unknown'
+      const isStatusline = parsedUrl?.isStatusline === true || eventName === 'unknown'
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
@@ -368,8 +433,9 @@ export class ProviderHookServer {
       }
       if (providerSessionId && confirmsConversation && registration.acceptIdentity) {
         const cwd = nonEmptyText(payload.cwd)
-        const hookPermissionMode = nonEmptyText(payload.permission_mode) ??
-          nonEmptyText(payload.permissionMode)
+        const hookPermissionMode = registration.provider === 'antigravity'
+          ? antigravityPermissionModeFromPayload(payload)
+          : (nonEmptyText(payload.permission_mode) ?? nonEmptyText(payload.permissionMode))
         const currentBinding = this.#sessions.getResumeBinding(
           registration.sessionId,
           registration.provider
@@ -468,10 +534,11 @@ export class ProviderHookServer {
         runId: registration.runId,
         sessionId: registration.sessionId,
         provider: registration.provider,
-        payload
+        payload,
+        isStatusline
       })
-      const transcriptPath = providerTranscriptPath(payload)
-      if (transcriptPath && nonEmptyText(payload.hook_event_name)) {
+      const transcriptPath = providerTranscriptPath(payload, registration.provider, isStatusline)
+      if (transcriptPath && registration.provider === 'claude-code' && nonEmptyText(payload.hook_event_name)) {
         if (providerSessionId && eventName !== 'unknown') {
           const titleObserved = await this.#observeTitle(
             registration, providerSessionId, transcriptPath
@@ -496,13 +563,33 @@ export class ProviderHookServer {
         sendJson(response, 200, {})
         return
       }
-      const notificationEvent = toProviderNotificationEvent(payload, registration.provider)
+      const previousAgentState = registration.lastAgentState
+      const antigravityWorkStatus = registration.provider === 'antigravity'
+        ? resolveAntigravityWorkStatus(registration, payload, eventName, isStatusline)
+        : undefined
+      if (isStatusline) {
+        const nextState = nonEmptyText(payload.agent_state)
+        if (nextState) registration.lastAgentState = nextState
+      }
+      const notificationEvent = toProviderNotificationEvent(
+        payload,
+        registration.provider,
+        { ...(previousAgentState === undefined ? {} : { previousAgentState }) }
+      )
       if (notificationEvent) {
         this.#onNotification({
           runId: registration.runId,
           sessionId: registration.sessionId,
           provider: registration.provider,
           event: notificationEvent
+        })
+      }
+      if (antigravityWorkStatus) {
+        this.#onWorkStatus({
+          runId: registration.runId,
+          sessionId: registration.sessionId,
+          provider: registration.provider,
+          workStatus: antigravityWorkStatus
         })
       }
       sendJson(response, 200, {})
@@ -652,14 +739,110 @@ function shellCommandPath(path: string): string {
   return `'${path.replaceAll("'", `'\\''`)}'`
 }
 
+function antigravityHookSettings(statusScriptPath: string): unknown {
+  return {
+    statusLine: {
+      type: 'command',
+      command: statusScriptPath,
+      stack_with_default: true
+    }
+  }
+}
+
 function statusLineScript(hookUrl: string): string {
   return `#!/bin/sh\n/usr/bin/curl --silent --show-error --max-time 2 --request POST --header 'content-type: application/json' --data-binary @- '${hookUrl}' >/dev/null 2>&1 || true\n`
 }
 
-function tokenFromUrl(url: string | undefined): string | undefined {
+function antigravityStatusLineScript(hookUrl: string, userCommand: string | undefined): string {
+  const safeHookUrl = shellSingleQuote(hookUrl)
+  const forwardUserCommand = userCommand
+    ? `printf '%s' "$payload" | /bin/sh -c ${shellSingleQuote(userCommand)}\nexit $?\n`
+    : 'exit 0\n'
+  return `#!/bin/sh
+payload=$(cat)
+(
+  printf '%s' "$payload" | /usr/bin/curl --silent --show-error --max-time 2 \\
+    --request POST --header 'content-type: application/json' \\
+    --data-binary @- ${safeHookUrl} >/dev/null 2>&1
+) </dev/null >/dev/null 2>&1 &
+${forwardUserCommand}`
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+async function readUserAntigravityStatusCommand(settingsPath: string): Promise<string | undefined> {
+  try {
+    const raw = await readFile(settingsPath, 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    const obj = record(parsed)
+    const statusLine = record(obj?.statusLine)
+    const command = nonEmptyText(statusLine?.command) ?? nonEmptyText(obj?.statusLine)
+    return command
+  } catch {
+    return undefined
+  }
+}
+
+function parseHookUrl(url: string | undefined): { token: string; isStatusline: boolean } | undefined {
   if (!url) return undefined
-  const match = /^\/hooks\/([A-Za-z0-9_-]+)$/.exec(url)
-  return match?.[1]
+  const match = /^\/hooks\/([A-Za-z0-9_-]+)(?:\?(.*))?$/.exec(url)
+  if (!match) return undefined
+  const query = match[2] ?? ''
+  const isStatusline = query.split('&').includes('kind=statusline')
+  return { token: match[1]!, isStatusline }
+}
+
+export function antigravityPermissionModeFromPayload(payload: Record<string, unknown>): string | undefined {
+  const cycleMode = nonEmptyText(payload.cycle_mode)
+  if (cycleMode === 'auto') return 'default'
+  if (cycleMode === 'accept-edits') return 'acceptEdits'
+  if (cycleMode === 'plan') return 'plan'
+  return undefined
+}
+
+function resolveAntigravityWorkStatus(
+  registration: HookRegistrationRecord,
+  payload: Record<string, unknown>,
+  eventName: string,
+  isStatusline: boolean
+): SessionWorkStatus | undefined {
+  if (!isStatusline) {
+    if (eventName === 'PreInvocation' || eventName === 'PreToolUse') {
+      registration.errorLatched = false
+      return 'running'
+    }
+    if (eventName === 'Stop') {
+      const terminationReason = nonEmptyText(payload.terminationReason)
+      const error = nonEmptyText(payload.error)
+      if (terminationReason === 'ERROR' || error) {
+        registration.errorLatched = true
+        return 'error'
+      }
+      registration.errorLatched = false
+      return 'idle'
+    }
+    return undefined
+  }
+  const agentState = nonEmptyText(payload.agent_state)
+  if (!agentState) return undefined
+  if (agentState === registration.lastAgentState) return undefined
+  if (agentState === 'initializing' || agentState === 'authenticating') {
+    return registration.lastAgentState === undefined ? 'starting' : undefined
+  }
+  if (agentState === 'working') {
+    registration.errorLatched = false
+    return 'running'
+  }
+  if (agentState === 'tool_use') {
+    return 'needs-input'
+  }
+  if (agentState === 'idle') {
+    if (registration.errorLatched) return undefined
+    return 'idle'
+  }
+  return undefined
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -678,9 +861,16 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
   return parsed as Record<string, unknown>
 }
 
-export function providerSessionIdentity(payload: Record<string, unknown>): string | undefined {
-  const direct = nonEmptyText(payload.session_id) ?? nonEmptyText(payload.sessionId)
+export function providerSessionIdentity(
+  payload: Record<string, unknown>,
+  provider?: AgentProfileId
+): string | undefined {
+  const direct = nonEmptyText(payload.session_id) ??
+    nonEmptyText(payload.sessionId) ??
+    nonEmptyText(payload.conversationId) ??
+    nonEmptyText(payload.conversation_id)
   if (direct) return direct
+  if (provider === 'antigravity') return undefined
   const transcriptPath = nonEmptyText(payload.transcript_path) ??
     nonEmptyText(payload.transcriptPath) ??
     nonEmptyText(payload.agent_transcript_path)
@@ -689,7 +879,15 @@ export function providerSessionIdentity(payload: Record<string, unknown>): strin
   )?.[1]
 }
 
-export function providerTranscriptPath(payload: Record<string, unknown>): string | undefined {
+export function providerTranscriptPath(
+  payload: Record<string, unknown>,
+  provider?: AgentProfileId,
+  isStatusline = false
+): string | undefined {
+  if (provider === 'antigravity') {
+    if (isStatusline) return undefined
+    return nonEmptyText(payload.transcriptPath)
+  }
   return nonEmptyText(payload.transcript_path) ??
     nonEmptyText(payload.transcriptPath) ??
     nonEmptyText(payload.agent_transcript_path)

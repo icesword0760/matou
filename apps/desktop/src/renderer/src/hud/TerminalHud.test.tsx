@@ -515,6 +515,42 @@ describe('PRD 02 bottom HUD', () => {
     expect(git.className).not.toMatch(/status-priority-/)
     expect(container.querySelector('.status-git')).toBe(git)
   })
+
+  it('renders Antigravity HUD model, quota, AGENTS.md dialog without todos, account control, or empty quota placeholder', async () => {
+    const request = vi.fn(async (_method: RpcMethod, _payload: unknown, _options?: { timeoutMs?: number }) => ({ path: '/repo/AGENTS.md', content: '# Agents', exists: true }))
+    const runtimeClient: GitRequestClient = {
+      request: async function<T>(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<T> {
+        return await request(method, payload, options) as T
+      }
+    }
+    const agyHud: SessionHudView = {
+      sessionId: 'session-1',
+      mode: 'agent',
+      provider: 'antigravity',
+      permissionMode: 'default',
+      startedAt: Date.now(),
+      model: 'Claude Sonnet 4.6 (high)',
+      contextPercent: 18,
+      instructionFileLabel: 'AGENTS.md',
+      usageWindows: [],
+      todos: [{ content: 'Should hide', status: 'in_progress' }],
+      configCounts: {
+        instructionFiles: 1, projectInstructionFileExists: true,
+        mcpServers: 0, hooks: 0
+      }
+    }
+    const { container } = render(<TerminalHud hud={agyHud} runtimeClient={runtimeClient} onPermissionMode={vi.fn()} />)
+
+    expect(screen.getByText('Claude Sonnet 4.6 (high)')).toBeTruthy()
+    expect(screen.getByText('18%')).toBeTruthy()
+    expect(screen.queryByText('—')).toBeNull()
+    expect(screen.queryByText('Should hide')).toBeNull()
+    expect(container.querySelector('.claude-accounts')).toBeNull()
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'AGENTS.md' }))
+    const dialog = await screen.findByRole('dialog', { name: 'AGENTS.md' })
+    expect(dialog.querySelector('h2')?.textContent).toBe('AGENTS.md')
+  })
 })
 
 function agent(patch: Partial<SessionHudView> = {}): SessionHudView {

@@ -62,4 +62,52 @@ describe('toProviderNotificationEvent', () => {
     expect(body).toHaveLength(180)
     expect(body?.endsWith('…')).toBe(true)
   })
+
+  it('maps Antigravity Stop, ERROR, USER_CANCELED, and tool_use transitions with Antigravity title', () => {
+    expect(toProviderNotificationEvent({
+      hookEventName: 'Stop',
+      cwd: '/Users/demo/projects/matou',
+      terminationReason: 'NO_TOOL_CALL',
+      error: ''
+    }, 'antigravity')).toEqual({
+      eventType: 'completed',
+      title: 'Antigravity',
+      subtitle: 'Completed in matou',
+      body: 'Antigravity session completed in matou',
+      sound: true,
+      cooldownKey: 'Stop'
+    })
+
+    expect(toProviderNotificationEvent({
+      hookEventName: 'Stop',
+      cwd: '/Users/demo/projects/matou',
+      terminationReason: 'ERROR',
+      error: 'API request failed'
+    }, 'antigravity')).toEqual({
+      eventType: 'error',
+      title: 'Antigravity',
+      subtitle: 'Error in matou',
+      body: 'API request failed',
+      sound: true,
+      cooldownKey: 'Stop'
+    })
+
+    expect(toProviderNotificationEvent({
+      hookEventName: 'Stop',
+      terminationReason: 'USER_CANCELED',
+      error: ''
+    }, 'antigravity')).toBeNull()
+
+    expect(toProviderNotificationEvent({
+      agent_state: 'tool_use'
+    }, 'antigravity', { previousAgentState: 'working' })).toMatchObject({
+      eventType: 'permission',
+      title: 'Antigravity',
+      subtitle: 'Permission'
+    })
+
+    expect(toProviderNotificationEvent({
+      agent_state: 'tool_use'
+    }, 'antigravity', { previousAgentState: 'tool_use' })).toBeNull()
+  })
 })

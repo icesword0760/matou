@@ -156,6 +156,88 @@ export class CodexAdapter {
   }
 }
 
+export class AntigravityAdapter {
+  normalize(sessionId: string, raw: unknown): AdapterResult {
+    const envelope = asRecord(raw)
+    if (!envelope) return malformed('Antigravity hook payload must be an object')
+    const data = asRecord(envelope.data) ?? envelope
+    const eventName = stringValue(envelope.event) ?? stringValue(data.hookEventName)
+    const occurredAt = numberValue(envelope.timestamp) ?? numberValue(data.timestamp) ?? Date.now()
+    if (!eventName) {
+      return malformed('Antigravity hookEventName is required')
+    }
+
+    if (eventName === 'PreToolUse' || eventName === 'PostToolUse') {
+      const toolCall = asRecord(data.toolCall)
+      const toolUseId = stringValue(toolCall?.id) ?? stringValue(data.toolUseId)
+      const toolName = stringValue(toolCall?.name) ?? stringValue(data.toolName)
+      if (!toolUseId || !toolName) {
+        return malformed(`${eventName} requires toolCall.id and toolCall.name`)
+      }
+      const toolArgs = asRecord(toolCall?.args) ?? asRecord(data.toolInput) ?? {}
+      const events: AgentSemanticEvent[] = [
+        semanticEvent({
+          provider: 'antigravity',
+          sessionId,
+          providerEventId: toolUseId,
+          source: 'structured',
+          confidence: 'high',
+          kind: eventName === 'PreToolUse' ? 'agent.tool-started' : 'agent.tool-finished',
+          payload: {
+            toolName,
+            input: toolArgs,
+            ...(eventName === 'PostToolUse' && data.error !== undefined ? { error: data.error } : {})
+          },
+          occurredAt
+        })
+      ]
+      if (eventName === 'PostToolUse' && ['write_file', 'edit_file', 'replace_file_content', 'multi_replace_file_content'].includes(toolName)) {
+        const path = stringValue(toolArgs.Path) ?? stringValue(toolArgs.TargetFile) ??
+          stringValue(toolArgs.file_path) ?? stringValue(toolArgs.path)
+        if (path) {
+          events.push(
+            semanticEvent({
+              provider: 'antigravity',
+              sessionId,
+              providerEventId: `${toolUseId}:file:${path}`,
+              source: 'structured',
+              confidence: 'high',
+              kind: 'file.changed',
+              payload: { path, toolName },
+              occurredAt
+            })
+          )
+        }
+      }
+      return { events, diagnostics: [] }
+    }
+
+    if (eventName === 'Stop') {
+      const id = stringValue(data.conversationId) ?? fallbackProviderId(data)
+      const terminationReason = stringValue(data.terminationReason)
+      const error = stringValue(data.error)
+      return success(
+        semanticEvent({
+          provider: 'antigravity',
+          sessionId,
+          providerEventId: `stop:${id}`,
+          source: 'structured',
+          confidence: 'high',
+          kind: 'agent.message',
+          payload: {
+            terminalState: terminationReason === 'ERROR' || error ? 'error' : 'waiting',
+            ...(terminationReason ? { terminationReason } : {}),
+            ...(error ? { error } : {})
+          },
+          occurredAt
+        })
+      )
+    }
+
+    return unsupported(`Antigravity hook event ${eventName} has no semantic mapping`)
+  }
+}
+
 export class GenericShellAdapter {
   normalizeMarker(sessionId: string, raw: unknown): AdapterResult {
     const marker = asRecord(raw)

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -7,6 +8,7 @@ import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
 import type { ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
 import {
   AGENT_PERMISSION_MODES,
+  getAgentManifest,
   LAUNCHABLE_AGENT_PROFILES,
   SESSION_KINDS,
   type DomainCommandMetadata,
@@ -189,7 +191,7 @@ export class RuntimeRpcRouter {
     if (method === 'projection.snapshot') return this.#snapshot(payload)
     if (method === 'session.instructions-read') {
       const input = record(payload)
-      const path = join(this.#sessionCwd(text(input.sessionId, 'sessionId')), 'CLAUDE.md')
+      const { path } = this.#sessionInstructionsTarget(text(input.sessionId, 'sessionId'))
       try {
         const content = await readFile(path, 'utf8')
         if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) {
@@ -209,8 +211,7 @@ export class RuntimeRpcRouter {
       if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) {
         throw new RpcFault('INVALID_REQUEST', 'instruction file exceeds the 2 MB editor limit')
       }
-      const directory = this.#sessionCwd(text(input.sessionId, 'sessionId'))
-      const path = join(directory, 'CLAUDE.md')
+      const { directory, path } = this.#sessionInstructionsTarget(text(input.sessionId, 'sessionId'))
       const temporaryPath = join(directory, `.matou-instructions-${randomUUID()}.tmp`)
       try {
         await writeFile(temporaryPath, content, { encoding: 'utf8', mode: 0o644 })
@@ -974,14 +975,23 @@ export class RuntimeRpcRouter {
   }
 
   #sessionCwd(sessionId: string): string {
-    const row = this.#database.get<{ cwd: string }>(
-      `SELECT COALESCE(context.cwd, sessions.cwd) AS cwd
+    return this.#sessionInstructionsTarget(sessionId).directory
+  }
+
+  #sessionInstructionsTarget(sessionId: string): { directory: string; path: string } {
+    const row = this.#database.get<{ cwd: string; kind: SessionKind }>(
+      `SELECT COALESCE(context.cwd, sessions.cwd) AS cwd, sessions.kind
        FROM sessions
        LEFT JOIN execution_contexts AS context ON context.id = sessions.execution_context_id
        WHERE sessions.id = ? AND sessions.archived_at IS NULL`, sessionId
     )
     if (!row) throw new RpcFault('NOT_FOUND', 'Session does not exist')
-    return row.cwd
+    const candidates = getAgentManifest(row.kind)?.instructionFiles.candidates ?? ['CLAUDE.md']
+    const existing = candidates.map((name) => join(row.cwd, name)).find((candidate) => existsSync(candidate))
+    return {
+      directory: row.cwd,
+      path: existing ?? join(row.cwd, candidates[0] ?? 'CLAUDE.md')
+    }
   }
 
   #providerConversationUsage(providerSessionId: string, targetSessionId: string): {

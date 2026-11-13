@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { ClaudeCodeAdapter, CodexAdapter, GenericShellAdapter } from './agent-adapters'
+import {
+  AntigravityAdapter,
+  ClaudeCodeAdapter,
+  CodexAdapter,
+  GenericShellAdapter
+} from './agent-adapters'
 
 describe('ClaudeCodeAdapter', () => {
   const adapter = new ClaudeCodeAdapter()
@@ -95,6 +100,40 @@ describe('GenericShellAdapter', () => {
 
     expect(adapter.normalizeParsedText('session-1', '✓ tests passed', 301).events[0]).toMatchObject({
       kind: 'validation.status-changed', confidence: 'low', sourceRef: { source: 'terminal-parse' }
+    })
+  })
+})
+
+describe('AntigravityAdapter', () => {
+  it('normalizes toolCall events, file changes, and Stop termination reasons', () => {
+    const adapter = new AntigravityAdapter()
+    const postWrite = adapter.normalize('session-1', {
+      hookEventName: 'PostToolUse',
+      conversationId: 'conv-1',
+      toolCall: { id: 'call_1', name: 'write_file', args: { Path: '/tmp/out.txt', Content: 'hi' } },
+      timestamp: 400
+    })
+    expect(postWrite.diagnostics).toEqual([])
+    expect(postWrite.events.map((event) => event.kind)).toEqual([
+      'agent.tool-finished',
+      'file.changed'
+    ])
+    expect(postWrite.events[0]).toMatchObject({
+      provider: 'antigravity',
+      sourceRef: { providerEventId: 'call_1', source: 'structured' }
+    })
+
+    const stopError = adapter.normalize('session-1', {
+      hookEventName: 'Stop',
+      conversationId: 'conv-1',
+      terminationReason: 'ERROR',
+      error: 'rate limit',
+      timestamp: 401
+    })
+    expect(stopError.events[0]).toMatchObject({
+      kind: 'agent.message',
+      provider: 'antigravity',
+      payload: { terminalState: 'error', terminationReason: 'ERROR', error: 'rate limit' }
     })
   })
 })

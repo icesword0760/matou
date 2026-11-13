@@ -404,3 +404,70 @@ it('filters previous process agents while retaining new launches, revived agents
     expect(registry.snapshot('live')?.subagents).toEqual(['External', 'unknown'])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
+
+it('tracks Antigravity model+effort, context, quota, cycle_mode, toolCall, and AGENTS.md without opusplan fallback', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'matou-agy-hud-'))
+  try {
+    await writeFile(join(root, 'AGENTS.md'), '# Repo Rules\n')
+    const registry = new SessionHudRegistry(() => 1_000, join(root, '.claude'))
+    registry.spawn({ sessionId: 'agy-1', profile: 'antigravity', cwd: root })
+
+    const initial = registry.snapshot('agy-1')
+    expect(initial?.modelStrategy).toBeUndefined()
+    expect(initial?.instructionFileLabel).toBe('AGENTS.md')
+    expect(initial?.configCounts?.projectInstructionFileExists).toBe(true)
+
+    const observedCycles: Array<string | null> = []
+    registry.onAntigravityCycleMode('agy-1', (mode) => observedCycles.push(mode))
+
+    registry.ingestProvider('agy-1', {
+      cwd: root,
+      agent_state: 'working',
+      cycle_mode: 'accept-edits',
+      model: { id: 'Claude Sonnet 4.6', display_name: 'Claude Sonnet 4.6', effort: 'high' },
+      context_window: { context_window_size: 1_048_576, used_percentage: 24.6 },
+      quota: {
+        'gemini-5h': { remaining_fraction: 0.75, reset_time: '2026-11-13T11:14:59Z' },
+        '3p-weekly': { remaining_fraction: 0.9, reset_time: '2026-11-20T00:00:00Z' }
+      }
+    })
+    registry.ingestProvider('agy-1', {
+      hookEventName: 'PreToolUse',
+      toolCall: { id: 'call_1', name: 'run_command', args: { CommandLine: 'pnpm test' } }
+    })
+
+    const running = registry.snapshot('agy-1')
+    expect(running?.permissionMode).toBe('acceptEdits')
+    expect(running?.model).toBe('Claude Sonnet 4.6 (high)')
+    expect(running?.contextPercent).toBe(25)
+    expect(running?.contextWindowSize).toBe(1_048_576)
+    expect(running?.usageWindows).toEqual([
+      { label: 'Gemini 5h', percent: 25, resetsAt: Date.parse('2026-11-13T11:14:59Z') },
+      { label: '3P Weekly', percent: 10, resetsAt: Date.parse('2026-11-20T00:00:00Z') }
+    ])
+    expect(running?.runningTools).toEqual([{ name: 'run_command', target: 'pnpm test' }])
+    expect(running?.taskStatus).toBe('running')
+
+    registry.ingestProvider('agy-1', {
+      hookEventName: 'PostToolUse',
+      toolCall: { id: 'call_1', name: 'run_command', args: { CommandLine: 'pnpm test' } },
+      error: ''
+    })
+    registry.ingestProvider('agy-1', {
+      hookEventName: 'Stop',
+      terminationReason: 'NO_TOOL_CALL',
+      error: ''
+    })
+    registry.ingestProvider('agy-1', { cycle_mode: null })
+
+    const settled = registry.snapshot('agy-1')
+    expect(settled?.runningTools).toEqual([])
+    expect(settled?.toolCounts).toEqual([{ name: 'run_command', count: 1 }])
+    expect(settled?.lastTool).toEqual({ name: 'run_command', target: 'pnpm test', status: 'completed' })
+    expect(settled?.taskStatus).toBe('idle')
+    expect(settled?.permissionMode).toBe('acceptEdits')
+    expect(observedCycles).toEqual(['accept-edits', null])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

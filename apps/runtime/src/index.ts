@@ -59,6 +59,7 @@ import { HierarchyApplicationService } from './hierarchy/hierarchy-application-s
 import { DomainTransactionManager } from './storage/domain-transaction'
 import { RuntimeAccessPolicy } from './storage/runtime-access-policy'
 import { NotificationProjection } from './product/experience-foundation'
+import { AntigravityPluginInstaller } from './agents/antigravity-plugin-installer'
 import { RuntimeRpcRouter } from './rpc/runtime-rpc-router'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
@@ -107,6 +108,7 @@ const scaleEventLoopDelay = process.env.MATOU_E2E_SCALE === '1'
   : undefined
 scaleEventLoopDelay?.enable()
 const sessionHuds = new SessionHudRegistry()
+const antigravityPluginInstaller = new AntigravityPluginInstaller()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
 const e2eJournalOptionsForSession = createE2eJournalOptionsProvider(process.env)
 const e2eForkCrashObserver = createE2eForkCrashObserver(process.env)
@@ -342,8 +344,28 @@ async function initializeRuntime(): Promise<RuntimeState> {
     },
     reportError: (error) => console.error(`[provider-hud-history] ${errorMessage(error)}`)
   })
+  if (!database.readOnly) {
+    void antigravityPluginInstaller.ensureInstalled().catch((error) => {
+      console.error(`[antigravity-plugin] ${errorMessage(error)}`)
+    })
+  }
   const providerHooks = new ProviderHookServer(runtimeDataRoot, sessionRepository, {
     currentRunId: (sessionId) => sessions.get(sessionId)?.runId,
+    onWorkStatus: ({ runId, sessionId, workStatus }) => {
+      try {
+        const currentWorkStatus = workStatuses.get(sessionId)
+        if (currentWorkStatus === workStatus) return
+        const now = Date.now()
+        workStatuses.set({
+          commandId: `provider-work-status-${runId}-${randomUUID()}`,
+          commandType: 'session.provider-work-status',
+          requestHash: `${sessionId}:${workStatus}:${now}`
+        }, { sessionId, workStatus, now })
+        for (const server of servers) server.flushSemanticEvents()
+      } catch (error) {
+        console.error(`[provider-work-status] ${errorMessage(error)}`)
+      }
+    },
     onNotification: (notification) => {
       const now = Date.now()
       const eventId = `agent-notification-${randomUUID()}`
@@ -477,6 +499,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     undefined,
     {
       hudRegistry: sessionHuds,
+      antigravityPluginInstaller,
       accessPolicy,
       providerConfigs,
       ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
@@ -740,6 +763,7 @@ parentPort.on('message', async (event) => {
       undefined,
       {
         hudRegistry: sessionHuds,
+        antigravityPluginInstaller,
         accessPolicy: state.accessPolicy,
         providerConfigs: state.providerConfigs,
         ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {

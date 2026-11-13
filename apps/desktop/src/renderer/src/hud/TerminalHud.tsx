@@ -43,7 +43,7 @@ export function TerminalHud(props: {
   const m = useMessages().hud
   const manifest = getAgentManifest(hud?.provider ?? 'claude-code')
   const showAccountControl = manifest?.hud.showAccountControl ?? true
-  const instructionButtonLabel = manifest?.instructionFiles.buttonLabel
+  const instructionButtonLabel = manifest?.instructionFiles.buttonLabel ?? hud?.instructionFileLabel
   const allowedPermissionModes = manifest?.capabilities.permissionModes ?? [
     'default', 'acceptEdits', 'plan', 'bypassPermissions'
   ]
@@ -147,19 +147,19 @@ export function TerminalHud(props: {
       {modelLabel(hud, m) && <span className="status-field status-model status-priority-8"
         title={m.modelTitle(modelLabel(hud, m))}>{modelLabel(hud, m)}</span>}
       {hud.contextPercent !== undefined && <ContextRing percent={hud.contextPercent} />}
-      {hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
+      {manifest?.hud.supportsMcpSummary !== false && hud.configCounts && hud.configCounts.mcpServers > 0 && <HudDetail
         label={`${hud.configCounts.mcpServers} MCPs`} title={m.mcpServers}
         items={(hud.configCounts.mcpServerNames ?? []).map((name) => name)} />}
       {toolTotal(hud) > 0 && <HudDetail label={`${toolTotal(hud)} Tools`} title={m.toolCalls}
         items={toolDetails(hud, m)} />}
-      {agents.count > 0 && <HudDetail
+      {manifest?.hud.supportsAgentsCount !== false && agents.count > 0 && <HudDetail
         label={`${agents.items.some(a => a.state === 'error' || a.state === 'warning') ? '⚠ ' : ''}${agents.count} Agents`}
         title={m.subagents} items={[]}
         className={agents.items.some(a => a.state === 'error') ? 'status-agents-error' : agents.items.some(a => a.state === 'warning') ? 'status-agents-warning' : ''}
         tooltipClassName="hud-agents-tooltip">
         <AgentDetails agents={agents.items} />
       </HudDetail>}
-      {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
+      {manifest?.hud.supportsHooksCount !== false && hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
       {usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
@@ -171,7 +171,7 @@ export function TerminalHud(props: {
       </span>)}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
-      {todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
+      {manifest?.hud.supportsTodos !== false && todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
         <span className={`tool-icon ${todoDisplay(hud)!.done ? 'tool-icon-done' : 'tool-icon-running'}`}>{todoDisplay(hud)!.icon}</span>
         <span>{todoDisplay(hud)!.text}</span><span className="tool-count">{todoDisplay(hud)!.progress}</span>
       </span>}
@@ -243,7 +243,7 @@ export function TerminalHud(props: {
       dialogLabel={m.gitMenu} branchRowsAsButtons
       onClose={() => setGitOpen(false)} />, document.body)}
     {instructionsOpen && gitClient && createPortal(<InstructionFileDialog client={gitClient}
-      sessionId={sessionId} readOnly={disabled} onClose={() => setInstructionsOpen(false)} />, document.body)}
+      sessionId={sessionId} label={instructionButtonLabel ?? 'ClaudeMd'} readOnly={disabled} onClose={() => setInstructionsOpen(false)} />, document.body)}
   </div>
 }
 
@@ -301,6 +301,7 @@ function HudDetail(props: { label: string; title: string; items: string[]; child
 function InstructionFileDialog(props: {
   client: GitRequestClient
   sessionId: string
+  label: string
   readOnly: boolean
   onClose(): void
 }) {
@@ -357,8 +358,9 @@ function InstructionFileDialog(props: {
 
   return <div className="instruction-file-overlay" onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onClose()
-  }}><section className="instruction-file-dialog" role="dialog" aria-modal="true" aria-label={m.editClaudeMd}>
-    <header><div><h2>ClaudeMd</h2><p>{path || m.instructionsFallbackPath}</p></div>
+  }}><section className="instruction-file-dialog" role="dialog" aria-modal="true"
+    aria-label={props.label === 'ClaudeMd' ? m.editClaudeMd : props.label}>
+    <header><div><h2>{props.label}</h2><p>{path || m.instructionsFallbackPath}</p></div>
       <button type="button" aria-label={m.instructionsClose} onClick={props.onClose}>×</button></header>
     {loading ? <div className="instruction-file-state">{m.instructionsReading}</div> : <textarea
       aria-label={m.instructionsContent} value={content} readOnly={props.readOnly}
@@ -479,7 +481,7 @@ function todoDisplay(hud: SessionHudView): { icon: string; text: string; progres
     : null
 }
 function hasAgentInfo(hud: SessionHudView): boolean {
-  return Boolean(hud.modelStrategy || hud.contextPercent !== undefined ||
+  return Boolean(hud.model || hud.modelStrategy || hud.contextPercent !== undefined ||
     (hud.usageWindows?.length ?? 0) > 0 || hud.configCounts || (hud.mcpErrors?.length ?? 0) > 0 ||
     agentDisplay(hud).count > 0 || hud.teamRole || todoDisplay(hud))
 }

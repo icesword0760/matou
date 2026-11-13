@@ -358,7 +358,9 @@ export class ProviderModeService {
       const wasRecovering = binding.restore_state !== 'none' ||
         binding.restore_error !== null || staleRestoreFailure !== undefined
       const metadata = asMetadata(binding.metadata_json)
-      if (input.eventName === 'UserPromptSubmit') metadata.observedUserPrompt = true
+      if (input.eventName === 'UserPromptSubmit' || input.eventName === 'PreInvocation') {
+        metadata.observedUserPrompt = true
+      }
       if (input.eventName === 'Stop') metadata.observedNormalStop = true
       // A statusline payload confirms that a resumed conversation is live, but
       // it does not represent a new prompt/Stop cycle. Preserve the previously
@@ -493,7 +495,9 @@ function emitRecoveryNotificationFailure(
 }
 
 function providerWorkStatus(eventName: string, current: SessionWorkStatus): SessionWorkStatus {
-  if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse') return 'running'
+  if (eventName === 'UserPromptSubmit' || eventName === 'PreInvocation' || eventName === 'PreToolUse') {
+    return 'running'
+  }
   if (eventName === 'PermissionRequest' || eventName === 'Notification') return 'needs-input'
   if (eventName === 'Stop') return 'idle'
   // Statusline identity is accepted only for resume/Fork launches. Its arrival

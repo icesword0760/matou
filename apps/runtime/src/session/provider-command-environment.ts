@@ -65,7 +65,7 @@ export async function readLoginShellPath(
   }
 }
 
-async function executableExists(command: string, path: string | undefined): Promise<boolean> {
+export async function executableExists(command: string, path: string | undefined): Promise<boolean> {
   if (isAbsolute(command) || command.includes('/')) return canExecute(command)
   for (const directory of (path ?? '').split(delimiter)) {
     if (directory && await canExecute(join(directory, command))) return true

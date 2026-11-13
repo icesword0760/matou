@@ -28,6 +28,8 @@ export const serverZhCN = {
   signal: (signal: number | string) => `信号 ${signal}`,
   shellStartFailed: (executable: string, termination: string) =>
     `Shell 进程启动失败：${executable} 未产生可用输出并退出（${termination}）`,
+  providerCommandNotFound: (displayName: string, command: string) =>
+    `未检测到 ${displayName}（命令：${command}）。请先安装并确保 \`${command}\` 在 PATH 中，再重试。`,
   providerIdentityMismatch: 'AI 会话返回的上下文与待恢复会话不一致，请重试恢复',
   forkIdentityTimeout: 'Fork 会话身份确认超时，请重试',
   environmentRecovering: '该会话的运行目录正在恢复或需要重新定位，请先处理运行环境后继续',
@@ -58,6 +60,8 @@ export const serverEn: CatalogShape<typeof serverZhCN> = {
   signal: (signal) => `signal ${signal}`,
   shellStartFailed: (executable, termination) =>
     `Shell process failed to start: ${executable} produced no usable output and exited (${termination})`,
+  providerCommandNotFound: (displayName, command) =>
+    `${displayName} CLI (${command}) was not found. Install it and ensure \`${command}\` is on PATH, then try again.`,
   providerIdentityMismatch:
     'The context returned by the AI session does not match the session being restored; try restoring again',
   forkIdentityTimeout: 'Fork session identity confirmation timed out; try again',

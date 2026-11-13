@@ -19,7 +19,7 @@ import {
 import { PtyExecutionPauser } from './pty-execution-pauser'
 import { PtyOutputBatcher } from './pty-output-batcher'
 import { OutputByteLedger } from './output-byte-ledger'
-import { resolveProviderCommandEnvironment } from './provider-command-environment'
+import { executableExists, resolveProviderCommandEnvironment } from './provider-command-environment'
 import { resolvePtyCommand } from './provider-launch-plan'
 import { shellIntegrationEnvironment } from './shell-integration'
 import { independentSessionEnvironment } from './independent-session-environment'
@@ -195,6 +195,9 @@ export class PtySession {
       : {}
     const inheritedEnvironment = { ...process.env }
     delete inheritedEnvironment.MATOU_AGENT_STATUS_DIR
+    delete inheritedEnvironment.MATOU_PROVIDER_HOOK_URL
+    delete inheritedEnvironment.MATOU_PROVIDER_HOOK_TOKEN
+    delete inheritedEnvironment.MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE
     const baseEnvironment: NodeJS.ProcessEnv = {
       ...inheritedEnvironment,
       ...integrationEnvironment,
@@ -218,6 +221,12 @@ export class PtySession {
     const providerCommandEnvironment = profile === 'shell'
       ? {}
       : await resolveProviderCommandEnvironment(command.file, baseEnvironment)
+    if (profile === 'antigravity' && process.platform !== 'win32') {
+      const resolvedPath = providerCommandEnvironment.PATH ?? baseEnvironment.PATH
+      if (!(await executableExists(command.file, resolvedPath))) {
+        throw Object.assign(new Error(`spawn ${command.file} ENOENT`), { code: 'ENOENT' })
+      }
+    }
     const terminal = pty.spawn(command.file, command.args, {
       name: 'xterm-256color',
       cols: options.cols,

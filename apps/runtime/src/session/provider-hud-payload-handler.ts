@@ -8,6 +8,7 @@ export interface ProviderHudPayloadEvent {
   sessionId: string
   provider: AgentProfileId
   payload: Record<string, unknown>
+  isStatusline?: boolean
 }
 
 export function createProviderHudPayloadHandler(options: {
@@ -16,12 +17,12 @@ export function createProviderHudPayloadHandler(options: {
   publish(sessionId: string): void
   reportError(error: unknown): void
 }): (event: ProviderHudPayloadEvent) => void {
-  return ({ runId, sessionId, payload }) => {
+  return ({ runId, sessionId, provider, payload, isStatusline }) => {
     const ownsRun = () => options.currentRunId(sessionId) === runId
     if (!ownsRun()) return
     options.hud.ingestProvider(sessionId, payload)
     options.publish(sessionId)
-    const transcriptPath = providerTranscriptPath(payload)
+    const transcriptPath = providerTranscriptPath(payload, provider, isStatusline === true)
     if (!transcriptPath) return
     void options.hud.refreshTranscript(sessionId, transcriptPath, {
       runId,

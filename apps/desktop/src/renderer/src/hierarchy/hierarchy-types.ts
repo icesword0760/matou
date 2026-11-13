@@ -117,6 +117,7 @@ export interface SessionHudView {
   defaultAccountUsage?: boolean
   usageWindows?: HudUsageWindow[]
   configCounts?: HudConfigCounts
+  instructionFileLabel?: string
   mcpErrors?: string[]
   todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>
   resumable?: boolean

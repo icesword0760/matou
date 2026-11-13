@@ -1,9 +1,10 @@
 import { ExternalAgentStatusMonitor } from './session/external-agent-status'
+import { AntigravityPluginInstaller } from './agents/antigravity-plugin-installer'
 import type { ClaudeAccountSession, ClaudeAccountRuntimeAction } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { watch, mkdirSync, rmSync, type FSWatcher } from 'node:fs'
-import { readlink, stat } from 'node:fs/promises'
+import { constants, watch, mkdirSync, rmSync, type FSWatcher } from 'node:fs'
+import { access, readFile, readlink, stat } from 'node:fs/promises'
 import os from 'node:os'
 import { basename, delimiter, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -154,6 +155,8 @@ type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
   forkProviderIdentityTimeoutMs?: number
+  antigravityPermissionSwitchTimeoutMs?: number
+  antigravityPluginInstaller?: AntigravityPluginInstaller
   hudRegistry?: SessionHudRegistry
   accessPolicy?: RuntimeAccessPolicy
   journalOptionsForSession?(sessionId: string): SegmentJournalOptions | undefined
@@ -189,7 +192,8 @@ export const MANAGED_SESSION_CONTROL_SCOPES: readonly HostControlScope[] = Objec
   'navigation.switch.task', 'navigation.switch.canvas'
 ])
 
-interface InteractiveClaudeLaunch {
+interface InteractiveAgentLaunch {
+  profile: AgentProfileId
   permissionMode: HudPermissionMode
 }
 
@@ -214,7 +218,7 @@ const PROVIDER_HOOK_REGISTRATIONS = new WeakMap<
 // a costly zsh configuration. Start it with the Runtime instead of making the
 // first Enter on `cc` pay that startup cost. The environment key keeps tests,
 // alternate shells and ZDOTDIR-based configurations isolated from each other.
-const configuredCcLaunches = new Map<string, Promise<InteractiveClaudeLaunch | undefined>>()
+const configuredCcLaunches = new Map<string, Promise<InteractiveAgentLaunch | undefined>>()
 
 export class RuntimeServer {
   static #accountBarrier: Promise<void> | undefined
@@ -357,6 +361,8 @@ export class RuntimeServer {
   >
   readonly #providerResumeTimeoutMs: number
   readonly #forkProviderIdentityTimeoutMs: number
+  readonly #antigravityPermissionSwitchTimeoutMs: number
+  readonly #antigravityPluginInstaller: AntigravityPluginInstaller
   #portClosed = false
   readonly #hud: SessionHudRegistry
   readonly #control:
@@ -485,6 +491,12 @@ export class RuntimeServer {
       options.forkProviderIdentityTimeoutMs,
       DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS
     )
+    this.#antigravityPermissionSwitchTimeoutMs = positiveTimeout(
+      options.antigravityPermissionSwitchTimeoutMs,
+      3_000
+    )
+    this.#antigravityPluginInstaller = options.antigravityPluginInstaller ??
+      new AntigravityPluginInstaller()
     this.#workspacePaths = workspacePaths
     RuntimeServer.#instances.add(this)
     if (this.#accessPolicy.startBackgroundServices) {
@@ -1903,11 +1915,11 @@ export class RuntimeServer {
         ? new ShellCommandBlockCollector()
         : undefined
       const cwdTracker = new TerminalCwdTracker()
-      const workStatusTracker = message.profile === 'shell' || message.profile === 'claude-code'
-        ? new TerminalWorkStatusTracker(
-            message.profile === 'claude-code' ? { provider: 'claude-code' } : {}
-          )
-        : undefined
+      const workStatusTracker = message.profile === 'shell'
+        ? new TerminalWorkStatusTracker()
+        : message.profile === 'claude-code' || message.profile === 'antigravity'
+          ? new TerminalWorkStatusTracker({ provider: message.profile })
+          : undefined
       const permissionModeTracker = message.profile === 'claude-code'
         ? new ClaudePermissionModeTracker() : undefined
       if (permissionModeTracker) this.#permissionModeTrackers.set(message.sessionId, permissionModeTracker)
@@ -2016,6 +2028,9 @@ export class RuntimeServer {
           now: Date.now()
         })
       }
+      if (message.profile === 'antigravity') {
+        await this.#antigravityPluginInstaller.ensureInstalled()
+      }
       if (message.profile !== 'shell' && runId && this.#providerHooks) {
         const providerHookInput = {
           runId,
@@ -2031,6 +2046,12 @@ export class RuntimeServer {
             model: providerModel ?? ''
           })
         }
+        const antigravityAssetPath = message.profile === 'antigravity' && this.#controlAssetRoot
+          ? getAgentManifest('antigravity')?.mtInjection?.assetRelativePath
+          : undefined
+        const antigravitySystemMessage = antigravityAssetPath && this.#controlAssetRoot
+          ? await readFile(join(this.#controlAssetRoot, antigravityAssetPath), 'utf8').catch(() => undefined)
+          : undefined
         hookRegistration = message.profile === 'claude-code'
           ? await this.#providerHooks.registerClaudeSession({
               ...providerHookInput,
@@ -2040,7 +2061,13 @@ export class RuntimeServer {
             })
           : message.profile === 'codex'
             ? await this.#providerHooks.registerCodexSession(providerHookInput)
-            : undefined
+            : message.profile === 'antigravity'
+              ? await this.#providerHooks.registerAntigravitySession({
+                  ...providerHookInput,
+                  acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
+                  ...(antigravitySystemMessage ? { systemMessageMarkdown: antigravitySystemMessage } : {})
+                })
+              : undefined
         if (hookRegistration) {
           this.#trackProviderHook(message.sessionId, runId, hookRegistration)
         }
@@ -2142,9 +2169,9 @@ export class RuntimeServer {
         ...(forkLaunch === undefined ? {} : { forkSession: true }),
         ...(permissionMode === undefined ? {} : { permissionMode }),
         ...(hookRegistration === undefined ? {} : {
-          ...(message.profile === 'claude-code'
-            ? { settingsPath: hookRegistration.settingsPath }
-            : { codexHooksConfig: hookRegistration.codexHooksConfig! })
+          ...(message.profile === 'codex'
+            ? { codexHooksConfig: hookRegistration.codexHooksConfig! }
+            : { settingsPath: hookRegistration.settingsPath })
         }),
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
@@ -2152,8 +2179,16 @@ export class RuntimeServer {
         ...(providerLaunch.model === undefined ? {} : { model: providerLaunch.model }),
         ...(runId === undefined ? {} : { runId }),
         env: {
-          ...providerLaunch.env, ...controlEnvironment,
-          ...new ClaudeSettings(this.#database).environment(message.profile)
+          ...providerLaunch.env,
+          ...controlEnvironment,
+          ...new ClaudeSettings(this.#database).environment(message.profile),
+          ...(message.profile === 'antigravity' && hookRegistration ? {
+            MATOU_PROVIDER_HOOK_URL: hookRegistration.hookUrl,
+            MATOU_PROVIDER_HOOK_TOKEN: hookRegistration.hookToken,
+            ...(hookRegistration.systemMessagePath
+              ? { MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE: hookRegistration.systemMessagePath }
+              : {})
+          } : {})
         },
         ...(attachView ? { send: this.#sendToPort } : {}),
         ...(this.#control === undefined ? {} : {
@@ -2404,8 +2439,11 @@ export class RuntimeServer {
       if (hookRunId) this.#control?.tokens.revokeRun(hookRunId)
       this.#rejectProviderDerivedOutput(message.sessionId)
       await this.#disposeProviderHook(message.sessionId, hookRunId, hookRegistration)
+      const friendlyError = !providerProcessStarted
+        ? await formatProviderStartFailure(error, message.profile)
+        : errorMessage(error)
       if (forkLaunch && !providerProcessStarted) {
-        const reason = runtimeMessages().server.forkProcessStartFailed(errorMessage(error))
+        const reason = runtimeMessages().server.forkProcessStartFailed(friendlyError)
         await this.#presentForkFailure(message, reason, forkAuthority, attachView)
         return
       }
@@ -2413,13 +2451,13 @@ export class RuntimeServer {
         if (this.#markResumeFailed(
           message.sessionId,
           resumeBinding.id,
-          `provider process could not start: ${errorMessage(error)}`
+          `provider process could not start: ${friendlyError}`
         )) {
-          this.#settleProviderRecovery(message.sessionId, new Error(errorMessage(error)))
+          this.#settleProviderRecovery(message.sessionId, new Error(friendlyError))
           return
         }
       }
-      this.#sendError('INTERNAL_ERROR', errorMessage(error), message.sessionId)
+      this.#sendError('INTERNAL_ERROR', friendlyError, message.sessionId)
     }
   }
 
@@ -3448,6 +3486,15 @@ export class RuntimeServer {
     const respawn = input.respawn === true
     if (respawn) {
       await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
+    } else if (session?.profile === 'antigravity') {
+      const switched = await this.#switchAntigravityModeHybrid(
+        sessionId,
+        session,
+        target as HudPermissionMode
+      )
+      if (!switched) {
+        await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
+      }
     } else if (session) {
       const order: HudPermissionMode[] = ['default', 'acceptEdits', 'plan']
       const from = order.indexOf(previousPermissionMode ?? 'default')
@@ -3459,6 +3506,77 @@ export class RuntimeServer {
     }
     this.#hud.updatePermission(sessionId, target)
     this.publishSessionHud(sessionId)
+  }
+
+  async #switchAntigravityModeHybrid(
+    sessionId: string,
+    session: PtySession,
+    target: HudPermissionMode
+  ): Promise<boolean> {
+    const targetCycleMode = target === 'default'
+      ? 'auto'
+      : target === 'acceptEdits'
+        ? 'accept-edits'
+        : target === 'plan'
+          ? 'plan'
+          : undefined
+    if (!targetCycleMode) return false
+
+    const maxPresses = 4
+    const totalTimeoutMs = this.#antigravityPermissionSwitchTimeoutMs
+    const deadline = Date.now() + totalTimeoutMs
+    const events: Array<string | null> = []
+    let notify: (() => void) | undefined
+    const unsubscribe = this.#hud.onAntigravityCycleMode(sessionId, (cycleMode) => {
+      events.push(cycleMode)
+      notify?.()
+      notify = undefined
+    })
+
+    try {
+      for (let press = 0; press < maxPresses; press += 1) {
+        const remainingMs = deadline - Date.now()
+        if (remainingMs <= 0) return false
+        events.length = 0
+        try {
+          session.write('\u001b[Z')
+        } catch {
+          return false
+        }
+        const matchedOrMoved = await new Promise<'matched' | 'moved' | 'timeout'>((resolve) => {
+          const consume = (): boolean => {
+            while (events.length > 0) {
+              const observed = events.shift()
+              if (observed === targetCycleMode) {
+                clearTimeout(timer)
+                resolve('matched')
+                return true
+              }
+              if (events.length === 0) {
+                clearTimeout(timer)
+                resolve('moved')
+                return true
+              }
+            }
+            return false
+          }
+          const stepBudgetMs = Math.max(1, remainingMs)
+          const timer = setTimeout(() => {
+            notify = undefined
+            resolve('timeout')
+          }, stepBudgetMs)
+          timer.unref?.()
+          if (consume()) return
+          notify = () => { void consume() }
+        })
+        if (matchedOrMoved === 'matched') return true
+        if (matchedOrMoved === 'timeout') return false
+      }
+      return false
+    } finally {
+      notify = undefined
+      unsubscribe()
+    }
   }
 
   #assertProviderMutationAllowed(sessionId: string): void {
@@ -3715,7 +3833,7 @@ export class RuntimeServer {
     this.#shellInputBuffers.set(session.sessionId, next.buffer)
     if (!next.submitted) return false
     this.#shellInputBuffers.delete(session.sessionId)
-    const launch = await resolveInteractiveClaudeLaunch(next.command)
+    const launch = await resolveInteractiveAgentLaunch(next.command)
     if (!launch) return false
     return this.#sessions.runExclusive(session.sessionId, async () => {
       const descriptor = this.#spawnDescriptors.get(session.sessionId)
@@ -3732,24 +3850,24 @@ export class RuntimeServer {
           commandId: `runtime-shell-promote-agent-${session.sessionId}-${now}-${randomUUID()}`,
           commandType: 'session.shell-promote-agent',
           requestHash: `shell-promote-agent:${session.sessionId}:${now}`
-        }, session.sessionId, 'claude-code', now)
+        }, session.sessionId, launch.profile, now)
         const before = this.#hud.snapshot(session.sessionId)
         this.#permissionOverrides.set(session.sessionId, launch.permissionMode)
         this.#hud.spawn({
           sessionId: session.sessionId,
-          profile: 'claude-code',
+          profile: launch.profile,
           ...(before?.cwd ? { cwd: before.cwd } : {}),
           startedAt: before?.startedAt ?? now,
           permissionMode: launch.permissionMode,
-          modelStrategy: 'opusplan'
+          ...(launch.profile === 'claude-code' ? { modelStrategy: 'opusplan' } : {})
         })
         this.publishSessionHud(session.sessionId)
         this.#skipResumeSessionIds.add(session.sessionId)
         const latestDescriptor = this.#spawnDescriptors.get(session.sessionId) ?? descriptor
-        await this.#spawn({ ...latestDescriptor, profile: 'claude-code' })
+        await this.#spawn({ ...latestDescriptor, profile: launch.profile })
         const replacement = this.#sessions.get(session.sessionId)
-        if (!replacement || replacement.profile !== 'claude-code') {
-          throw new Error('Claude process did not start')
+        if (!replacement || replacement.profile !== launch.profile) {
+          throw new Error(`${launch.profile} process did not start`)
         }
         return true
       } catch (error) {
@@ -4144,33 +4262,101 @@ function updateShellInputBuffer(previous: string, data: string): {
   return { buffer, submitted, command }
 }
 
-async function resolveInteractiveClaudeLaunch(
+async function resolveInteractiveAgentLaunch(
   command: string
-): Promise<InteractiveClaudeLaunch | undefined> {
+): Promise<InteractiveAgentLaunch | undefined> {
   const normalized = command.trim().replace(/\s+/g, ' ')
-  if (normalized === 'claude') return { permissionMode: 'default' }
+  if (normalized === 'claude') return { profile: 'claude-code', permissionMode: 'default' }
   if (normalized === 'claude --dangerously-skip-permissions') {
-    return { permissionMode: 'bypassPermissions' }
+    return { profile: 'claude-code', permissionMode: 'bypassPermissions' }
   }
-  if (normalized !== 'cc') return undefined
-  return configuredCcLaunch()
+  if (normalized === 'cc') return configuredCcLaunch()
+
+  const tokens = normalized.split(' ').filter(Boolean)
+  if (tokens[0] === 'agy') {
+    let permissionMode: HudPermissionMode = 'default'
+    for (let index = 1; index < tokens.length; index += 1) {
+      const token = tokens[index]!
+      if (token === '--dangerously-skip-permissions') {
+        permissionMode = 'bypassPermissions'
+        continue
+      }
+      if (token === '--mode' || token.startsWith('--mode=')) {
+        const value = token === '--mode' ? tokens[++index] : token.slice('--mode='.length)
+        const mapped = mapAntigravityLaunchMode(value)
+        if (!mapped) return undefined
+        permissionMode = mapped
+        continue
+      }
+      return undefined
+    }
+    return { profile: 'antigravity', permissionMode }
+  }
+  return undefined
 }
 
-function configuredCcLaunch(): Promise<InteractiveClaudeLaunch | undefined> {
+function mapAntigravityLaunchMode(value: string | undefined): HudPermissionMode | undefined {
+  if (value === 'auto') return 'default'
+  if (value === 'accept-edits') return 'acceptEdits'
+  if (value === 'plan') return 'plan'
+  return undefined
+}
+
+function configuredCcLaunch(): Promise<InteractiveAgentLaunch | undefined> {
   const key = [
     process.env.SHELL ?? '', process.env.HOME ?? '', process.env.ZDOTDIR ?? ''
   ].join('\u0000')
   const existing = configuredCcLaunches.get(key)
   if (existing) return existing
   const pending = configuredShellAlias('cc').then((alias) => {
-    if (alias === 'claude') return { permissionMode: 'default' as const }
+    if (alias === 'claude') return { profile: 'claude-code' as const, permissionMode: 'default' as const }
     if (alias === 'claude --dangerously-skip-permissions') {
-      return { permissionMode: 'bypassPermissions' as const }
+      return { profile: 'claude-code' as const, permissionMode: 'bypassPermissions' as const }
     }
     return undefined
   })
   configuredCcLaunches.set(key, pending)
   return pending
+}
+
+async function formatProviderStartFailure(
+  error: unknown,
+  profile: SessionRunProfile
+): Promise<string> {
+  const manifest = getAgentManifest(profile)
+  if (!manifest) return errorMessage(error)
+  const raw = errorMessage(error)
+  const code = (error as NodeJS.ErrnoException | undefined)?.code
+  const command = process.env[manifest.executable.envVar] ?? manifest.executable.defaultCommand
+  if (
+    code === 'ENOENT' ||
+    /posix_spawnp failed/i.test(raw) ||
+    /not found/i.test(raw)
+  ) {
+    if (!(await commandExecutableExists(command, process.env.PATH))) {
+      return runtimeMessages().server.providerCommandNotFound(manifest.displayName, command)
+    }
+  }
+  return raw
+}
+
+async function commandExecutableExists(command: string, pathEnv: string | undefined): Promise<boolean> {
+  if (command.startsWith('/') || command.includes('/')) {
+    return canExecuteFile(command)
+  }
+  for (const directory of (pathEnv ?? '').split(delimiter)) {
+    if (directory && await canExecuteFile(join(directory, command))) return true
+  }
+  return false
+}
+
+async function canExecuteFile(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function configuredShellAlias(name: string): Promise<string | undefined> {

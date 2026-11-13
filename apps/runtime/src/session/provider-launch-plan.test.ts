@@ -220,4 +220,50 @@ describe('PRD 04 provider launch plan', () => {
       }
     }
   })
+
+  it('builds Antigravity launch and resume commands across permission modes without injecting --model on fresh launch', () => {
+    expect(resolvePtyCommand({
+      profile: 'antigravity',
+      executable: 'agy',
+      settingsPath: '/tmp/agy.settings.json',
+      permissionMode: 'default'
+    })).toEqual({
+      file: 'agy',
+      args: ['--settings', '/tmp/agy.settings.json'],
+      resuming: false
+    })
+
+    expect(resolvePtyCommand({
+      profile: 'antigravity',
+      executable: 'agy',
+      settingsPath: '/tmp/agy.settings.json',
+      permissionMode: 'acceptEdits'
+    })).toEqual({
+      file: 'agy',
+      args: ['--settings', '/tmp/agy.settings.json', '--mode', 'accept-edits'],
+      resuming: false
+    })
+
+    expect(resolvePtyCommand({
+      profile: 'antigravity',
+      executable: 'agy',
+      permissionMode: 'plan'
+    })).toEqual({
+      file: 'agy',
+      args: ['--mode', 'plan'],
+      resuming: false
+    })
+
+    expect(resolvePtyCommand({
+      profile: 'antigravity',
+      executable: 'agy',
+      permissionMode: 'bypassPermissions',
+      providerSessionId: 'conv-123',
+      model: 'Gemini 4 Carbon (Medium)'
+    })).toEqual({
+      file: 'agy',
+      args: ['--model', 'Gemini 4 Carbon (Medium)', '--conversation', 'conv-123', '--dangerously-skip-permissions'],
+      resuming: true
+    })
+  })
 })

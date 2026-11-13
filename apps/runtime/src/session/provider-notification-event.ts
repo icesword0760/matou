@@ -16,15 +16,56 @@ export interface ProviderNotificationEvent {
 
 export function toProviderNotificationEvent(
   payload: Record<string, unknown>,
-  provider: AgentProfileId = 'claude-code'
+  provider: AgentProfileId = 'claude-code',
+  options: { previousAgentState?: string } = {}
 ): ProviderNotificationEvent | null {
   const title = getAgentDisplayName(provider, 'Claude Code')
   const shortName = getAgentShortName(provider, 'Claude')
   const hookEvent = text(payload.hook_event_name) ?? text(payload.hookEventName)
-  if (hookEvent === 'Stop') return stopNotification(payload, title, shortName)
+  if (hookEvent === 'Stop') {
+    if (provider === 'antigravity') return antigravityStopNotification(payload, title, shortName)
+    return stopNotification(payload, title, shortName)
+  }
   if (hookEvent === 'PermissionRequest') return permissionRequestNotification(payload, title)
   if (hookEvent === 'Notification') return hookNotification(payload, title, shortName)
+  if (provider === 'antigravity' && !hookEvent) {
+    const agentState = text(payload.agent_state) ?? text(payload.agentState)
+    if (agentState === 'tool_use' && options.previousAgentState !== 'tool_use') {
+      return {
+        eventType: 'permission',
+        title,
+        subtitle: 'Permission',
+        body: `${shortName} requires approval`,
+        sound: true,
+        cooldownKey: 'Notification'
+      }
+    }
+  }
   return null
+}
+
+function antigravityStopNotification(
+  payload: Record<string, unknown>,
+  title: string,
+  shortName: string
+): ProviderNotificationEvent | null {
+  const terminationReason = text(payload.terminationReason)
+  const error = text(payload.error)
+  if (terminationReason === 'ERROR' || error) {
+    const projectName = tailName(text(payload.cwd))
+    return {
+      eventType: 'error',
+      title,
+      subtitle: projectName ? `Error in ${projectName}` : 'Error',
+      body: compact(error ?? `${shortName} session encountered an error`, 200),
+      sound: true,
+      cooldownKey: 'Stop'
+    }
+  }
+  if (terminationReason === 'USER_CANCELED') {
+    return null
+  }
+  return stopNotification(payload, title, shortName)
 }
 
 function permissionRequestNotification(

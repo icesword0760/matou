@@ -1,4 +1,4 @@
-import type { SessionRunProfile } from '@matou/domain'
+import { getAgentManifest, type SessionRunProfile } from '@matou/domain'
 import { join } from 'node:path'
 
 export interface PtyCommandInput {
@@ -62,6 +62,21 @@ export function resolvePtyCommand(input: PtyCommandInput): PtyCommand {
       args.push('--dangerously-bypass-approvals-and-sandbox')
     }
     if (identity) args.push(input.forkSession ? 'fork' : 'resume', identity)
+    return { file: input.executable, args, resuming: Boolean(identity) }
+  }
+  if (input.profile === 'antigravity') {
+    const manifest = getAgentManifest('antigravity')!
+    const args: string[] = []
+    const settingsPath = input.settingsPath?.trim()
+    if (settingsPath) args.push('--settings', settingsPath)
+    if (input.model?.trim() && manifest.launch.modelFlag) {
+      args.push(manifest.launch.modelFlag, input.model.trim())
+    }
+    if (identity && manifest.launch.resumeFlag) args.push(manifest.launch.resumeFlag, identity)
+    const permissionFlags = manifest.launch.permissionFlags[
+      input.permissionMode as keyof typeof manifest.launch.permissionFlags
+    ]
+    if (permissionFlags) args.push(...permissionFlags)
     return { file: input.executable, args, resuming: Boolean(identity) }
   }
   return {

@@ -44,6 +44,7 @@ export interface SessionHudSnapshot {
   permissionMode?: HudPermissionMode
   modelStrategy?: HudModelStrategy
   model?: string
+  effort?: string
   sessionName?: string
   contextPercent?: number
   contextWindowSize?: number
@@ -58,6 +59,7 @@ export interface SessionHudSnapshot {
   lastTool?: HudToolActivity
   usageWindows?: HudUsageWindow[]
   configCounts?: HudConfigCounts
+  instructionFileLabel?: string
   mcpErrors?: string[]
   todos?: Array<{ content: string; status: HudTodoStatus }>
   resumable?: boolean
@@ -83,6 +85,7 @@ interface MutableHud extends SessionHudSnapshot {
 export class SessionHudRegistry {
   readonly accountUsage: AccountUsageTracker
   readonly #states = new Map<string, MutableHud>()
+  readonly #cycleModeListeners = new Map<string, Set<(cycleMode: string | null) => void>>()
   readonly #now: () => number
   readonly #configDir: string
   readonly #transcripts: ProviderTranscriptHudReader
@@ -127,7 +130,14 @@ export class SessionHudRegistry {
       startedAt: previous?.startedAt ?? input.startedAt ?? this.#now(),
       ...(mode === 'agent' ? {
         permissionMode: permissionMode ?? 'default',
-        modelStrategy: modelStrategy ?? 'opusplan',
+        ...(provider !== 'antigravity'
+          ? { modelStrategy: modelStrategy ?? 'opusplan' }
+          : modelStrategy
+            ? { modelStrategy }
+            : {}),
+        ...(provider === 'antigravity' && getAgentManifest(provider)?.instructionFiles.buttonLabel
+          ? { instructionFileLabel: getAgentManifest(provider)!.instructionFiles.buttonLabel! }
+          : {}),
         ...(input.model ? { model: input.model } : {}),
         taskStatus: 'idle' as const,
         subagentCount: 0,
@@ -248,6 +258,19 @@ export class SessionHudRegistry {
     if (current?.mode === 'agent') current.resumable = true
   }
 
+  onAntigravityCycleMode(
+    sessionId: string,
+    listener: (cycleMode: string | null) => void
+  ): () => void {
+    const listeners = this.#cycleModeListeners.get(sessionId) ?? new Set()
+    listeners.add(listener)
+    this.#cycleModeListeners.set(sessionId, listeners)
+    return () => {
+      listeners.delete(listener)
+      if (listeners.size === 0) this.#cycleModeListeners.delete(sessionId)
+    }
+  }
+
   ingestProvider(sessionId: string, payload: Record<string, unknown>): void {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent') return
@@ -267,17 +290,31 @@ export class SessionHudRegistry {
       current.configCwd = configCwd
       current.configCheckedAt = this.#now()
     }
-    const permission = normalizePermission(text(payload.permission_mode) ?? text(payload.permissionMode))
+    const rawPermission = current.provider === 'antigravity'
+      ? (text(payload.cycle_mode) === 'auto' ? 'default' : text(payload.cycle_mode))
+      : (text(payload.permission_mode) ?? text(payload.permissionMode))
+    const permission = normalizePermission(rawPermission)
     if (permission && (!current.pendingPermissionMode || permission === current.pendingPermissionMode)) {
       current.permissionMode = permission
       current.providerPermissionObserved = true
       delete current.pendingPermissionMode
     }
+    if (current.provider === 'antigravity' && 'cycle_mode' in payload) {
+      const observedCycleMode = text(payload.cycle_mode) ?? null
+      for (const listener of this.#cycleModeListeners.get(sessionId) ?? []) {
+        listener(observedCycleMode)
+      }
+    }
 
-    const model = nestedText(payload.model, 'display_name') ?? nestedText(payload.model, 'displayName') ??
+    const baseModel = nestedText(payload.model, 'display_name') ??
+      nestedText(payload.model, 'displayName') ??
       nestedText(payload.model, 'id')
-    if (model) {
-      current.model = model
+    if (baseModel) {
+      const effort = current.provider === 'antigravity' ? nestedText(payload.model, 'effort') : undefined
+      current.model = effort && !baseModel.toLowerCase().includes(effort.toLowerCase())
+        ? `${baseModel} (${effort})`
+        : baseModel
+      if (effort) current.effort = effort
       current.providerModelObserved = true
     }
     const contextPercent = numeric(nested(payload.context_window, 'used_percentage')) ??
@@ -296,21 +333,38 @@ export class SessionHudRegistry {
     this.accountUsage.observe(sessionId, payload, usageWindows)
 
     const eventName = text(payload.hook_event_name) ?? text(payload.hookEventName)
-    if (!eventName) return
+    if (!eventName) {
+      if (current.provider === 'antigravity') {
+        const agentState = text(payload.agent_state)
+        if (agentState === 'working') current.taskStatus = 'running'
+        else if (agentState === 'tool_use') current.taskStatus = 'needs-input'
+        else if (agentState === 'idle') {
+          if (current.taskStatus !== 'error') current.taskStatus = 'idle'
+          current.activeTools.clear()
+        }
+        current.runningTools = [...current.activeTools.values()]
+      }
+      return
+    }
     if (eventName === 'SessionStart') current.sessionEnded = false
-    const toolName = text(payload.tool_name) ?? text(payload.toolName)
-    const toolId = text(payload.tool_use_id) ?? text(payload.toolUseId) ??
+    const toolCall = object(payload.toolCall)
+    const toolName = text(payload.tool_name) ?? text(payload.toolName) ?? text(toolCall?.name)
+    const toolId = text(payload.tool_use_id) ?? text(payload.toolUseId) ?? text(toolCall?.id) ??
       `${toolName ?? 'tool'}:${this.#now()}`
-    const toolInput = object(payload.tool_input) ?? object(payload.toolInput) ?? {}
+    const toolInput = object(payload.tool_input) ?? object(payload.toolInput) ??
+      object(toolCall?.args) ?? {}
 
-    if (eventName === 'UserPromptSubmit' || eventName === 'PreToolUse') {
+    if (eventName === 'UserPromptSubmit' || eventName === 'PreInvocation' || eventName === 'PreToolUse') {
       current.taskStatus = 'running'
     } else if (eventName === 'PermissionRequest') {
       current.taskStatus = 'needs-input'
     } else if (eventName === 'Notification') {
       current.taskStatus = notificationStatus(payload)
     } else if (eventName === 'Stop') {
-      current.taskStatus = 'idle'
+      const isAntigravityError = current.provider === 'antigravity' && (
+        text(payload.terminationReason) === 'ERROR' || Boolean(text(payload.error))
+      )
+      current.taskStatus = isAntigravityError ? 'error' : 'idle'
       current.activeTools.clear()
     } else if (eventName === 'SessionEnd') {
       current.sessionEnded = true
@@ -339,7 +393,7 @@ export class SessionHudRegistry {
     }
     if ((eventName === 'PostToolUse' || eventName === 'PostToolUseFailure') && toolName) {
       const active = current.activeTools.get(toolId)
-      const status = eventName === 'PostToolUseFailure' ? 'error' : 'completed'
+      const status = eventName === 'PostToolUseFailure' || Boolean(text(payload.error)) ? 'error' : 'completed'
       current.completedToolCounts.set(toolName, (current.completedToolCounts.get(toolName) ?? 0) + 1)
       current.lastTool = { name: toolName, ...(active?.target ? { target: active.target } : {}), status }
       const mcpServer = mcpServerName(toolName)
@@ -406,7 +460,11 @@ export class SessionHudRegistry {
   configWatchTargets(sessionId: string): HudConfigWatchTarget[] {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent' || !current.cwd) return []
-    return providerConfigWatchTargets(current.cwd, this.#configDir)
+    return providerConfigWatchTargets(
+      current.cwd,
+      this.#configDir,
+      getAgentManifest(current.provider)?.instructionFiles.candidates
+    )
   }
 
   updateExternalAgents(sessionId: string, agents: HudAgentActivity[]): void {
@@ -504,7 +562,11 @@ export function inspectProviderConfig(
   }
 }
 
-export function providerConfigWatchTargets(cwd: string, configDir: string): HudConfigWatchTarget[] {
+export function providerConfigWatchTargets(
+  cwd: string,
+  configDir: string,
+  instructionCandidates: readonly string[] = []
+): HudConfigWatchTarget[] {
   const targets = new Map<string, Set<string>>()
   const append = (directory: string, names: string[]) => {
     const current = targets.get(directory) ?? new Set<string>()
@@ -513,7 +575,7 @@ export function providerConfigWatchTargets(cwd: string, configDir: string): HudC
   }
   append(dirname(configDir), ['.claude.json', basename(configDir)])
   append(configDir, ['CLAUDE.md', 'settings.json', 'settings.local.json'])
-  append(cwd, ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json', '.claude'])
+  append(cwd, ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json', '.claude', ...instructionCandidates])
   append(join(cwd, '.claude'), [
     'CLAUDE.md', 'CLAUDE.local.md', 'settings.json', 'settings.local.json'
   ])
@@ -587,22 +649,52 @@ function derivedContextPercent(payload: Record<string, unknown>): number | undef
 
 function usageWindowsFromPayload(payload: Record<string, unknown>): HudUsageWindow[] | undefined {
   const limits = object(payload.rate_limits) ?? object(payload.rateLimits)
-  if (!limits) return undefined
-  const windows: HudUsageWindow[] = []
-  appendUsageWindow(windows, '5h', object(limits.five_hour) ?? object(limits.fiveHour))
-  appendUsageWindow(windows, 'Weekly', object(limits.seven_day) ?? object(limits.sevenDay))
-  const scoped = limits.model_scoped ?? limits.modelScoped
-  if (Array.isArray(scoped)) {
-    for (const item of scoped.slice(0, 8)) {
-      const window = object(item)
-      const label = text(window?.display_name) ?? text(window?.displayName)
-      const percent = numeric(window?.utilization)
-      if (!label || percent === undefined) continue
-      const resetsAt = timestampMilliseconds(window?.resets_at ?? window?.resetsAt)
-      windows.push({ label: label.slice(0, 64), percent: clampPercent(percent), ...(resetsAt ? { resetsAt } : {}) })
+  if (limits) {
+    const windows: HudUsageWindow[] = []
+    appendUsageWindow(windows, '5h', object(limits.five_hour) ?? object(limits.fiveHour))
+    appendUsageWindow(windows, 'Weekly', object(limits.seven_day) ?? object(limits.sevenDay))
+    const scoped = limits.model_scoped ?? limits.modelScoped
+    if (Array.isArray(scoped)) {
+      for (const item of scoped.slice(0, 8)) {
+        const window = object(item)
+        const label = text(window?.display_name) ?? text(window?.displayName)
+        const percent = numeric(window?.utilization)
+        if (!label || percent === undefined) continue
+        const resetsAt = timestampMilliseconds(window?.resets_at ?? window?.resetsAt)
+        windows.push({ label: label.slice(0, 64), percent: clampPercent(percent), ...(resetsAt ? { resetsAt } : {}) })
+      }
     }
+    return windows
+  }
+  const quota = object(payload.quota)
+  if (!quota) return undefined
+  const preferredOrder = ['gemini-5h', 'gemini-weekly', '3p-5h', '3p-weekly']
+  const keys = [
+    ...preferredOrder.filter((key) => key in quota),
+    ...Object.keys(quota).filter((key) => !preferredOrder.includes(key))
+  ].slice(0, 8)
+  const windows: HudUsageWindow[] = []
+  for (const key of keys) {
+    const entry = object(quota[key])
+    const remainingFraction = numeric(entry?.remaining_fraction ?? entry?.remainingFraction)
+    if (remainingFraction === undefined) continue
+    const usedPercent = clampPercent((1 - Math.max(0, Math.min(1, remainingFraction))) * 100)
+    const resetsAt = timestampMilliseconds(entry?.reset_time ?? entry?.resetTime)
+    windows.push({
+      label: formatAntigravityQuotaLabel(key),
+      percent: usedPercent,
+      ...(resetsAt ? { resetsAt } : {})
+    })
   }
   return windows
+}
+
+function formatAntigravityQuotaLabel(key: string): string {
+  if (key === 'gemini-5h') return 'Gemini 5h'
+  if (key === 'gemini-weekly') return 'Gemini Weekly'
+  if (key === '3p-5h') return '3P 5h'
+  if (key === '3p-weekly') return '3P Weekly'
+  return key.slice(0, 64)
 }
 
 function appendUsageWindow(
@@ -679,12 +771,17 @@ function normalizeTodoStatus(value: unknown): HudTodoStatus {
 
 function targetForTool(name: string, input: Record<string, unknown>): { target?: string } {
   let target: string | undefined
-  if (['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) {
-    target = text(input.file_path) ?? text(input.path)
-  } else if (name === 'Glob' || name === 'Grep') {
-    target = text(input.pattern)
-  } else if (name === 'Bash') {
-    const command = text(input.command)
+  if ([
+    'Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+    'read_file', 'write_file', 'edit_file', 'view_file',
+    'replace_file_content', 'multi_replace_file_content'
+  ].includes(name)) {
+    target = text(input.file_path) ?? text(input.path) ??
+      text(input.Path) ?? text(input.TargetFile) ?? text(input.AbsolutePath)
+  } else if (name === 'Glob' || name === 'Grep' || name === 'find_by_name' || name === 'grep_search') {
+    target = text(input.pattern) ?? text(input.Pattern) ?? text(input.Query)
+  } else if (name === 'Bash' || name === 'run_command') {
+    const command = text(input.command) ?? text(input.CommandLine)
     target = command && command.length > 30 ? `${command.slice(0, 27)}...` : command
   }
   return target ? { target } : {}

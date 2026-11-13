@@ -49,6 +49,28 @@ describe('RuntimeRpcRouter', () => {
     expect(await readFile(join(workspaceRoot, 'CLAUDE.md'), 'utf8')).toBe('# Project instructions\n')
   })
 
+  it('reads and writes AGENTS.md / GEMINI.md for Antigravity sessions', async () => {
+    const agyWorkspace = join(testRoot, 'agy-instructions')
+    await mkdir(agyWorkspace)
+    await writeFile(join(agyWorkspace, 'GEMINI.md'), '# Gemini instructions\n')
+    const agyCreated = await router.handle('hierarchy.bootstrap-window', payload('agy-bootstrap', {
+      windowId: 'window-agy', defaultRootDirectory: agyWorkspace,
+      defaultName: 'agy-instructions', now: 2
+    })) as { session: { id: string } }
+    database.run(`UPDATE sessions SET kind = 'antigravity' WHERE id = ?`, agyCreated.session.id)
+
+    await expect(router.handle('session.instructions-read', {
+      sessionId: agyCreated.session.id
+    })).resolves.toEqual({
+      path: join(agyWorkspace, 'GEMINI.md'), content: '# Gemini instructions\n', exists: true
+    })
+    await expect(router.handle('session.instructions-write', {
+      sessionId: agyCreated.session.id, content: '# Updated Gemini instructions\n'
+    })).resolves.toEqual({
+      path: join(agyWorkspace, 'GEMINI.md'), content: '# Updated Gemini instructions\n', exists: true
+    })
+  })
+
   it('persists and activates provider configurations through explicit RPC methods', async () => {
     const created = await router.handle('provider-config.upsert', {
       provider: {

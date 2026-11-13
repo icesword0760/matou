@@ -97,4 +97,17 @@ describe('TerminalWorkStatusTracker', () => {
     )).toEqual([])
     expect(tracker.ingest('\u001b]133;D;0\u0007')).toEqual([])
   })
+
+  it('detects Antigravity workspace trust and sign-in prompts as needs-input while suppressing OSC 133', () => {
+    const trustTracker = new TerminalWorkStatusTracker({ provider: 'antigravity' })
+    expect(trustTracker.ingest('\u001b]133;C\u0007')).toEqual([])
+    expect(trustTracker.ingest(
+      'Do you trust the contents of this project?\r\n  > Yes, I trust this folder\r\n  ↑/↓ Navigate · enter Confirm'
+    )).toEqual(['needs-input'])
+
+    const authTracker = new TerminalWorkStatusTracker({ provider: 'antigravity' })
+    expect(authTracker.ingest('Welcome to the Antigravity CLI. You are currently not signed in.\r\nSigning in...')).toEqual([
+      'needs-input'
+    ])
+  })
 })
