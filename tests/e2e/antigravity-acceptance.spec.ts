@@ -435,9 +435,9 @@ async function createSiblingShellAndFocus(page: Page, previousSessionId: string)
 test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error Fixtures)', () => {
   test.setTimeout(360_000)
 
-  test('PRD #1 #2 #3 #4 #5 #6 #7 #9a #11 #12 + Latency: Real agy lifecycle in packaged 码头.app', async () => {
+  test('PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app', async () => {
     const dirs = await createIsolatedWorkspace('core')
-    let harness = await launchPackagedApp(dirs)
+    const harness = await launchPackagedApp(dirs)
     const latencies: LatencyRecord[] = []
 
     try {
@@ -670,62 +670,183 @@ test.describe('Antigravity Packaged App Acceptance (Real agy + Controlled Error 
       const modelAfter = await modelBadge.innerText()
       await saveScreenshot(hud, '12-model-readonly-sync.png')
 
-      // #7 Auto Title, Manual Rename, and Restore Auto Title
-      // Trigger a substantive prompt if title hasn't updated from default yet
-      const currentPaneTitle = await paneForSession(harness.page, sessionId).locator('.pane-title').innerText()
-      if (currentPaneTitle === 'Antigravity' || currentPaneTitle === 'Shell') {
-        await sendTerminalLine(surface, 'Summarize README.md in this folder in two short bullets.')
-        await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
-      }
-      await expect.poll(async () => await paneForSession(harness.page, sessionId).locator('.pane-title').innerText(), { timeout: 30_000 }).not.toBe('Shell')
-      const autoTitle = await paneForSession(harness.page, sessionId).locator('.pane-title').innerText()
-      await openPaneMenu(paneForSession(harness.page, sessionId))
-      await harness.page.getByRole('menuitem', { name: '重命名…' }).click()
-      const renameInput = harness.page.getByRole('dialog').locator('input').first()
-      await renameInput.fill('手工锁定标题-E2E')
-      await renameInput.press('Enter')
-      await expect(paneForSession(harness.page, sessionId).locator('.pane-title')).toHaveText('手工锁定标题-E2E')
-
-      // Run another turn -> manual title must NOT be overwritten
-      await sendTerminalLine(surface, 'Reply with ONLY RENAME_LOCKED_OK')
-      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
-      await expect(paneForSession(harness.page, sessionId).locator('.pane-title')).toHaveText('手工锁定标题-E2E')
-
-      // Restore auto title
-      await openPaneMenu(paneForSession(harness.page, sessionId))
-      await harness.page.getByRole('menuitem', { name: '恢复 Antigravity 自动标题' }).click()
-      await expect(paneForSession(harness.page, sessionId).locator('.pane-title')).toHaveText(autoTitle, { timeout: 15_000 })
-      await saveScreenshot(harness.page, '07-auto-title.png')
-
-      // #9a App Restart Recovery
-      await harness.close()
-      harness = await launchPackagedApp(dirs)
-      const restoredSurface = paneForSession(harness.page, sessionId).locator('.terminal-surface')
-      await positivePid(restoredSurface)
-      await expect(hudForSession(harness.page, sessionId)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 45_000 })
-      await expect(paneForSession(harness.page, sessionId).locator('.provider-restore-banner')).toHaveCount(0)
-      await sendTerminalLine(restoredSurface, 'Reply with ONLY RESTART_RECOVERY_OK')
-      await expect(restoredSurface.locator('.xterm-rows')).toContainText('RESTART_RECOVERY_OK', { timeout: 90_000 })
-      await saveScreenshot(harness.page, '09a-restart-recovery.png')
-
-      // Clean summary JSON
-      await saveProof('core-and-latency.json', {
+      await saveProof('core-lifecycle.json', {
         sessionId,
         providerSessionId,
         modelBefore,
         modelAfter,
-        autoTitle,
-        runningUiAt,
-        idleUiAt,
         latencies,
         dbBindingsAfter: readDbRows(harness.dataDir, sessionId).bindings
       })
+    } finally {
+      await harness.close().catch(() => {})
+      await cleanupWorkspaceLinks(dirs)
+    }
+  })
 
-      for (const item of latencies) {
-        if (item.within1000ms !== undefined) {
-          expect(item.within1000ms).toBe(true)
+  test('PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency', async () => {
+    const dirs = await createIsolatedWorkspace('title-restart')
+    let harness = await launchPackagedApp(dirs)
+
+    try {
+      const { sessionId, surface, dagPage } = await launchAgyInFreshRepo(harness)
+      const prompts = [
+        { prompt: 'Remember codeword TITAN_904 and reply with only LATENCY_OK_1', token: 'LATENCY_OK_1' },
+        { prompt: 'Reply with only LATENCY_OK_2', token: 'LATENCY_OK_2' },
+        { prompt: 'Reply with only LATENCY_OK_3', token: 'LATENCY_OK_3' }
+      ]
+
+      const runningSamples: Array<{
+        round: number
+        triggerAtMs: number
+        runtimeEventAtMs?: number
+        uiObservedAtMs: number
+        runtimeToUiMs?: number
+        triggerToUiMs: number
+        within1000ms?: boolean
+      }> = []
+      const idleSamples: Array<{
+        round: number
+        triggerAtMs: number
+        runtimeEventAtMs?: number
+        uiObservedAtMs: number
+        runtimeToUiMs?: number
+        within1000ms?: boolean
+      }> = []
+
+      for (let idx = 0; idx < prompts.length; idx += 1) {
+        const round = idx + 1
+        const item = prompts[idx]!
+        await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
+        const prevMaxSeq = readDbRows(harness.dataDir, sessionId).events.at(-1)?.seq ?? 0
+        const prevObsLen = (await readDagStatusObserver(dagPage)).length
+        const triggerAtMs = Date.now()
+
+        await sendTerminalLine(surface, item.prompt)
+        await waitForDagNodeStatus(dagPage, sessionId, 'status-running', 30_000)
+        await expect(surface.locator('.xterm-rows')).toContainText(item.token, { timeout: 90_000 })
+        await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
+        await harness.page.waitForTimeout(300)
+
+        const afterObs = (await readDagStatusObserver(dagPage)).slice(prevObsLen)
+        const afterEvents = readDbRows(harness.dataDir, sessionId).events.filter((e) => e.seq > prevMaxSeq)
+        const runningObs = afterObs.find((o) => o.status === 'status-running')
+        const idleObs = afterObs.findLast((o) => o.status === 'status-idle')
+        const runningEv = afterEvents.find((e) => e.payload_json.includes('"running"'))
+        const idleEv = afterEvents.findLast((e) => e.payload_json.includes('"idle"'))
+
+        expect(runningObs, `round ${round} missing running observer entry`).toBeTruthy()
+        expect(idleObs, `round ${round} missing idle observer entry`).toBeTruthy()
+
+        if (runningObs) {
+          const rtToUi = runningEv ? Math.max(0, runningObs.at - runningEv.occurred_at) : undefined
+          runningSamples.push({
+            round,
+            triggerAtMs,
+            ...(runningEv ? { runtimeEventAtMs: runningEv.occurred_at } : {}),
+            uiObservedAtMs: runningObs.at,
+            ...(rtToUi !== undefined ? { runtimeToUiMs: rtToUi, within1000ms: rtToUi <= 1000 } : {}),
+            triggerToUiMs: runningObs.at - triggerAtMs
+          })
+        }
+        if (idleObs) {
+          const rtToUi = idleEv ? Math.max(0, idleObs.at - idleEv.occurred_at) : undefined
+          idleSamples.push({
+            round,
+            triggerAtMs,
+            ...(idleEv ? { runtimeEventAtMs: idleEv.occurred_at } : {}),
+            uiObservedAtMs: idleObs.at,
+            ...(rtToUi !== undefined ? { runtimeToUiMs: rtToUi, within1000ms: rtToUi <= 1000 } : {})
+          })
         }
       }
+
+      const providerSessionId = await waitForProviderSessionId(harness.dataDir, sessionId)
+      expect(runningSamples.length).toBe(3)
+      expect(idleSamples.length).toBe(3)
+      for (const s of [...runningSamples, ...idleSamples]) {
+        if (s.within1000ms !== undefined) {
+          expect(s.within1000ms).toBe(true)
+        }
+      }
+
+      const runningRtMs = runningSamples.map((s) => s.runtimeToUiMs).filter((n): n is number => typeof n === 'number')
+      const idleRtMs = idleSamples.map((s) => s.runtimeToUiMs).filter((n): n is number => typeof n === 'number')
+      const avg = (arr: number[]) => (arr.length > 0 ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : null)
+      const latencySummary = {
+        runningCount: runningSamples.length,
+        runningAvgMs: avg(runningRtMs),
+        runningMaxMs: runningRtMs.length > 0 ? Math.max(...runningRtMs) : null,
+        runningTriggerAvgMs: avg(runningSamples.map((s) => s.triggerToUiMs)),
+        idleCount: idleSamples.length,
+        idleAvgMs: avg(idleRtMs),
+        idleMaxMs: idleRtMs.length > 0 ? Math.max(...idleRtMs) : null
+      }
+
+      await saveProof('core-and-latency.json', {
+        sessionId,
+        providerSessionId,
+        runningSamples,
+        idleSamples,
+        summary: latencySummary
+      })
+
+      // #7 Auto Title, Manual Rename Lock, and Restore Auto Title
+      const pane = paneForSession(harness.page, sessionId)
+      await expect.poll(async () => await pane.locator('.pane-title').innerText(), { timeout: 30_000 }).not.toBe('Shell')
+      const initialPaneTitle = await pane.locator('.pane-title').innerText()
+
+      await openPaneMenu(pane)
+      await harness.page.getByRole('menuitem', { name: '重命名…' }).click()
+      const renameInput = harness.page.getByRole('dialog').locator('input').first()
+      await renameInput.fill('手工锁定标题-E2E')
+      await renameInput.press('Enter')
+      await expect(harness.page.getByRole('dialog')).toHaveCount(0, { timeout: 10_000 })
+      await expect(pane.locator('.pane-title')).toHaveText('手工锁定标题-E2E')
+
+      // Run a short no-tool turn -> manual title must NOT be overwritten
+      await sendTerminalLine(surface, 'Reply with only RENAME_LOCKED_OK')
+      await expect(surface.locator('.xterm-rows')).toContainText('RENAME_LOCKED_OK', { timeout: 90_000 })
+      await waitForDagNodeStatus(dagPage, sessionId, 'status-idle', 90_000)
+      await expect(pane.locator('.pane-title')).toHaveText('手工锁定标题-E2E')
+
+      // Restore auto title
+      await openPaneMenu(pane)
+      await harness.page.getByRole('menuitem', { name: '恢复 Antigravity 自动标题' }).click()
+      await expect(pane.locator('.pane-title')).not.toHaveText('手工锁定标题-E2E', { timeout: 15_000 })
+      await expect(pane.locator('.pane-title')).not.toHaveText('Shell')
+      const restoredAutoTitle = await pane.locator('.pane-title').innerText()
+      await saveScreenshot(harness.page, '07-auto-title.png')
+
+      // #9a Real App Restart Recovery (--conversation resumes original conversation)
+      await harness.close()
+      await new Promise((r) => setTimeout(r, 500))
+      harness = await launchPackagedApp(dirs)
+      const restoredPane = paneForSession(harness.page, sessionId)
+      const restoredSurface = restoredPane.locator('.terminal-surface')
+      await positivePid(restoredSurface)
+      await expect(hudForSession(harness.page, sessionId)).toHaveAttribute('data-hud-mode', 'agent', { timeout: 45_000 })
+      await expect(hudForSession(harness.page, sessionId).locator('.status-model')).toBeVisible({ timeout: 45_000 })
+      await expect(restoredPane.locator('.provider-restore-banner')).toHaveCount(0)
+      await expect(restoredPane.locator('.pane-title')).not.toHaveText('手工锁定标题-E2E', { timeout: 15_000 })
+      await expect(restoredPane.locator('.pane-title')).not.toHaveText('Shell')
+      await harness.page.waitForTimeout(800)
+
+      await sendTerminalLine(restoredSurface, 'What codeword did I ask you to remember earlier? Reply with only the codeword and RESTART_OK.')
+      await expect(restoredSurface.locator('.xterm-rows')).toContainText('TITAN_904', { timeout: 90_000 })
+      await expect(restoredPane.locator('.provider-restore-banner')).toHaveCount(0)
+      await saveScreenshot(harness.page, '09a-restart-recovery.png')
+
+      await saveProof('core-and-latency.json', {
+        sessionId,
+        providerSessionId,
+        initialPaneTitle,
+        restoredAutoTitle,
+        runningSamples,
+        idleSamples,
+        summary: latencySummary,
+        dbBindingsAfter: readDbRows(harness.dataDir, sessionId).bindings
+      })
     } finally {
       await harness.close().catch(() => {})
       await cleanupWorkspaceLinks(dirs)

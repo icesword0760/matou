@@ -1,0 +1,68 @@
+{
+  "sessionId": "7fc2512a-b7ad-447d-aad9-f97aeb2c64f4",
+  "providerSessionId": "61336121-56f3-49cd-997b-475d10ddfaa4",
+  "runningSamples": [
+    {
+      "round": 1,
+      "triggerAtMs": 1794589776221,
+      "runtimeEventAtMs": 1794589776966,
+      "uiObservedAtMs": 1794589776968,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "triggerToUiMs": 747
+    },
+    {
+      "round": 2,
+      "triggerAtMs": 1794589783672,
+      "runtimeEventAtMs": 1794589784026,
+      "uiObservedAtMs": 1794589784028,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "triggerToUiMs": 356
+    },
+    {
+      "round": 3,
+      "triggerAtMs": 1794589789652,
+      "runtimeEventAtMs": 1794589790004,
+      "uiObservedAtMs": 1794589790005,
+      "runtimeToUiMs": 1,
+      "within1000ms": true,
+      "triggerToUiMs": 353
+    }
+  ],
+  "idleSamples": [
+    {
+      "round": 1,
+      "triggerAtMs": 1794589776221,
+      "runtimeEventAtMs": 1794589783093,
+      "uiObservedAtMs": 1794589783094,
+      "runtimeToUiMs": 1,
+      "within1000ms": true
+    },
+    {
+      "round": 2,
+      "triggerAtMs": 1794589783672,
+      "runtimeEventAtMs": 1794589789079,
+      "uiObservedAtMs": 1794589789085,
+      "runtimeToUiMs": 6,
+      "within1000ms": true
+    },
+    {
+      "round": 3,
+      "triggerAtMs": 1794589789652,
+      "runtimeEventAtMs": 1794589795655,
+      "uiObservedAtMs": 1794589795660,
+      "runtimeToUiMs": 5,
+      "within1000ms": true
+    }
+  ],
+  "summary": {
+    "runningCount": 3,
+    "runningAvgMs": 1.7,
+    "runningMaxMs": 2,
+    "runningTriggerAvgMs": 485.3,
+    "idleCount": 3,
+    "idleAvgMs": 4,
+    "idleMaxMs": 6
+  }
+}
