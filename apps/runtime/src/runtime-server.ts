@@ -10,7 +10,9 @@ import { promisify } from 'node:util'
 
 import {
   PROTOCOL_VERSION,
+  isEgressFamily,
   parseRendererMessage,
+  type EgressStatusWire,
   type RendererMessage,
   type RpcMethod,
   type RuntimeMessage,
@@ -46,7 +48,8 @@ import {
   type HostNavigationRegistration
 } from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
-import { PtySession } from './session/pty-session'
+import { egressFamilyForLaunch, type EgressMonitor } from './egress/egress-monitor'
+import { PtySession, SessionEgressFrozenError } from './session/pty-session'
 import { ClaudeSettings } from './session/claude-settings'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
 import { TerminalCwdTracker } from './session/terminal-cwd-tracker'
@@ -150,6 +153,7 @@ export interface RuntimeServerOptions {
   controlNodeExecutable?: string
   providerConfigs?: ProviderConfigStore
   navigationBroker?: HostNavigationBroker
+  egress?: EgressMonitor
 }
 
 const REPLAY_HIGH_WATERMARK_BYTES = 1024 * 1024
@@ -356,6 +360,7 @@ export class RuntimeServer {
   readonly #controlAssetRoot: string | undefined
   readonly #controlNodeExecutable: string
   readonly #navigationBroker: HostNavigationBroker | undefined
+  readonly #egress: EgressMonitor | undefined
   #navigationRegistration: HostNavigationRegistration | undefined
   #handshakeComplete = false
   #closed = false
@@ -464,6 +469,7 @@ export class RuntimeServer {
     this.#controlNodeExecutable = options.controlNodeExecutable ??
       process.env.MATOU_CONTROL_NODE_EXECUTABLE ?? process.execPath
     this.#navigationBroker = options.navigationBroker
+    this.#egress = options.egress
     this.#hud = options.hudRegistry ?? new SessionHudRegistry()
     this.#providerResumeTimeoutMs = positiveTimeout(
       options.providerResumeTimeoutMs,
@@ -483,7 +489,7 @@ export class RuntimeServer {
         )
         if (authority?.archived_at !== null && authority?.archived_at !== undefined) {
           session.dispose()
-          this.#sessions.delete(session.sessionId, session)
+          this.#unregisterSession(session.sessionId, session)
         }
       }
       this.#workspacePaths.startPolling()
@@ -530,6 +536,23 @@ export class RuntimeServer {
     } finally {
       providerRecovery?.cancel()
     }
+  }
+
+  publishEgress(status: EgressStatusWire): void {
+    if (this.#closed || !this.#handshakeComplete) return
+    this.#port.postMessage({
+      type: 'egress.status',
+      protocolVersion: PROTOCOL_VERSION,
+      status
+    })
+  }
+
+  #unregisterSession(sessionId: string, expected: PtySession): boolean {
+    const removed = this.#sessions.delete(sessionId, expected)
+    if (removed) {
+      this.#egress?.unregisterSession(sessionId)
+    }
+    return removed
   }
 
   publishRecovery(snapshot: readonly RecoveryJobSnapshot[]): void {
@@ -654,7 +677,7 @@ export class RuntimeServer {
         for (const peer of peers) peer.#clearStructurallyRemovedSession(sessionId, session)
         if (session) {
           for (const backend of backends) backend.unregister(sessionId, session)
-          this.#sessions.delete(sessionId, session)
+          this.#unregisterSession(sessionId, session)
         }
         for (const runId of runIds) {
           for (const tokens of tokenServices) tokens.revokeRun(runId)
@@ -865,6 +888,7 @@ export class RuntimeServer {
           break
         }
         this.#assertSessionDurabilityHealthy(message.sessionId)
+        if (session.egressFrozen) break
         const now = Date.now()
         this.#sessionInteractions.record({
           commandId: `terminal-retry-${message.sessionId}-${randomUUID()}`,
@@ -877,7 +901,7 @@ export class RuntimeServer {
         })
         this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
         this.#setWorkStatus(message.sessionId, 'running')
-        session.write(`${lastInput}\r`)
+        writeIgnoringEgressFrozen(session, `${lastInput}\r`)
         this.flushSemanticEvents()
         break
       }
@@ -999,7 +1023,7 @@ export class RuntimeServer {
         // later keystrokes are already queued for the same logical Session.
         // Resolve the live instance at execution time so those bytes reach the
         // replacement instead of being silently dropped with the old object.
-        if (!session || session.durabilityState !== 'healthy') return
+        if (!session || session.durabilityState !== 'healthy' || session.egressFrozen) return
         if (session && /[\r\n]/.test(message.data)) {
           this.#workStatusTrackers.get(message.sessionId)?.beginAttempt()
           this.#setWorkStatus(message.sessionId, 'running')
@@ -1010,11 +1034,12 @@ export class RuntimeServer {
         const promoted = session?.profile === 'shell'
           ? await this.#maybePromoteShellAgent(session, message.data)
           : false
-        if (!promoted) session?.write(message.data)
+        if (!promoted && session) writeIgnoringEgressFrozen(session, message.data)
         if (session?.profile === 'shell' && /[\r\n]/.test(message.data)) {
           this.#scheduleCwdCapture(session)
         }
       } catch (error) {
+        if (error instanceof SessionEgressFrozenError) return
         if (error instanceof WorkspacePathInvalidError) {
           this.#sendError(error.code, error.message, message.sessionId)
           return
@@ -1156,7 +1181,9 @@ export class RuntimeServer {
           ? await this.#handleSessionEnvironmentRpc(message.method, message.payload)
           : isTerminalHistoryRpc(message.method)
             ? await this.#handleTerminalHistoryRpc(message.method, message.payload)
-            : await this.#router.handle(message.method, message.payload)
+            : isEgressRpc(message.method)
+              ? await this.#handleEgressRpc(message.method, message.payload)
+              : await this.#router.handle(message.method, message.payload)
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
         const cli = input?.cli === 'claude-code' || input?.cli === 'codex' ? input.cli : undefined
@@ -1209,6 +1236,60 @@ export class RuntimeServer {
         this.#sendRpcError(message.requestId, error.code, error.message, error.retryable)
       } else {
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', errorMessage(error), false)
+      }
+    }
+  }
+
+  async #handleEgressRpc(
+    method: EgressRpcMethod,
+    payload: unknown
+  ): Promise<unknown> {
+    const monitor = this.#egress
+    if (!monitor) {
+      throw new RpcFault('NOT_FOUND', 'egress monitor unavailable')
+    }
+    const raw = isRecord(payload) ? payload : {}
+    const input = isRecord(raw.input) ? raw.input : raw
+    switch (method) {
+      case 'egress.status':
+        return monitor.status()
+      case 'egress.recheck':
+        return await monitor.recheck()
+      case 'egress.set-rule': {
+        const mode = input.mode
+        if (mode !== 'country' && mode !== 'ip') {
+          throw new RpcFault('INVALID_REQUEST', 'egress rule mode must be "country" or "ip"')
+        }
+        return await monitor.setRuleMode(mode)
+      }
+      case 'egress.accept-current': {
+        const family = input.family
+        if (!isEgressFamily(family)) {
+          throw new RpcFault('INVALID_REQUEST', 'egress family must be "anthropic" or "openai"')
+        }
+        try {
+          return await monitor.acceptCurrent(family)
+        } catch (error) {
+          throw new RpcFault('CONFLICT', errorMessage(error))
+        }
+      }
+      case 'egress.set-protection': {
+        const enabled = input.enabled
+        if (typeof enabled !== 'boolean') {
+          throw new RpcFault('INVALID_REQUEST', 'egress protection enabled must be boolean')
+        }
+        return await monitor.setProtection(enabled)
+      }
+      case 'egress.override': {
+        const family = input.family
+        if (!isEgressFamily(family)) {
+          throw new RpcFault('INVALID_REQUEST', 'egress family must be "anthropic" or "openai"')
+        }
+        try {
+          return await monitor.override(family)
+        } catch (error) {
+          throw new RpcFault('CONFLICT', errorMessage(error))
+        }
       }
     }
   }
@@ -1746,7 +1827,7 @@ export class RuntimeServer {
           return
         }
         this.#clearProviderResumeTimer(message.sessionId)
-        this.#sessions.delete(message.sessionId, existing)
+        this.#unregisterSession(message.sessionId, existing)
         this.#control?.backend.unregister(message.sessionId, existing)
         this.#control?.tokens.revokeRun(existing.runId ?? message.sessionId)
         if (existing.profile !== message.profile) {
@@ -1913,6 +1994,8 @@ export class RuntimeServer {
             ...(providerModel ? { model: providerModel } : {}),
             env: providerSelection.env
           }
+      const egressFamily = egressFamilyForLaunch(message.profile, providerLaunch.env)
+      const egressCountry = egressFamily ? this.#egress?.exitCountry(egressFamily) : undefined
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -1949,10 +2032,10 @@ export class RuntimeServer {
           // The provider redraws this startup screen once after first paint and
           // resets the highlighted row. Select only after that redraw, then
           // give the TUI one frame to apply the choice before confirming it.
-          session.write(CLAUDE_NEXT_OPTION)
+          if (!writeIgnoringEgressFrozen(session, CLAUDE_NEXT_OPTION)) return
           setTimeout(() => {
             if (this.#sessions.get(message.sessionId) === session) {
-              session.write(CLAUDE_CONFIRM_OPTION)
+              writeIgnoringEgressFrozen(session, CLAUDE_CONFIRM_OPTION)
             }
           }, CLAUDE_WORKSPACE_TRUST_CONFIRM_DELAY_MS)
         }, CLAUDE_WORKSPACE_TRUST_SELECTION_DELAY_MS)
@@ -2134,7 +2217,10 @@ export class RuntimeServer {
         ...(runId === undefined ? {} : { runId }),
         env: {
           ...providerLaunch.env, ...controlEnvironment,
-          ...new ClaudeSettings(this.#database).environment(message.profile)
+          ...new ClaudeSettings(this.#database).environment(message.profile, {
+            ...(egressCountry === undefined ? {} : { exitCountry: egressCountry }),
+            official: egressFamily !== undefined
+          })
         },
         ...(attachView ? { send: this.#sendToPort } : {}),
         ...(this.#control === undefined ? {} : {
@@ -2143,7 +2229,7 @@ export class RuntimeServer {
         onOutput: (data) => {
           emittedTerminalOutput = true
           if (fullResumePromptMonitor?.ingest(data)) {
-            if (activeSession) activeSession.write(fullResumePromptMonitor.selection)
+            if (activeSession) writeIgnoringEgressFrozen(activeSession, fullResumePromptMonitor.selection)
             else pendingFullResumeSelection = fullResumePromptMonitor.selection
           }
           if (workspaceTrustPromptMonitor?.ingest(data)) {
@@ -2189,7 +2275,7 @@ export class RuntimeServer {
             exitReason === 'runtime-shutdown' ||
             exitReason === 'environment-transition'
           ) {
-            this.#sessions.delete(message.sessionId, exited)
+            this.#unregisterSession(message.sessionId, exited)
             this.#control?.backend.unregister(message.sessionId, exited)
             this.#control?.tokens.revokeRun(exited.runId ?? message.sessionId)
             if (exitReason === 'environment-transition') return false
@@ -2227,7 +2313,7 @@ export class RuntimeServer {
               `provider resume exited with code ${exitCode}`
             )
           )
-          const wasCurrent = this.#sessions.delete(message.sessionId, exited)
+          const wasCurrent = this.#unregisterSession(message.sessionId, exited)
           const forkState = forkLaunch ? this.#forkIntents.state(message.sessionId) : undefined
           const forkIncomplete = Boolean(forkLaunch && forkState && forkState !== 'succeeded')
           let forkFailure = Boolean(forkIncomplete && (!wasCurrent || forkState === 'failed'))
@@ -2346,11 +2432,17 @@ export class RuntimeServer {
         }
       }
       this.#sessions.set(session)
+      if (egressFamily && this.#egress) {
+        const { bornFrozen } = this.#egress.registerSession(message.sessionId, egressFamily)
+        if (bornFrozen) {
+          await session.setEgressFrozen(true)
+        }
+      }
       this.#permissionOverrides.delete(message.sessionId)
       this.#spawnDescriptors.set(message.sessionId, message)
       activeSession = session
       if (pendingFullResumeSelection) {
-        session.write(pendingFullResumeSelection)
+        writeIgnoringEgressFrozen(session, pendingFullResumeSelection)
         pendingFullResumeSelection = undefined
       }
       if (pendingWorkspaceTrustSelection) {
@@ -2414,14 +2506,14 @@ export class RuntimeServer {
     this.#rejectProviderDerivedOutput(message.sessionId, session.runId)
     this.#clearProviderResumeTimer(message.sessionId)
     if (!this.#failFork(message.sessionId, reason, authority)) {
-      this.#sessions.delete(message.sessionId, session)
+      this.#unregisterSession(message.sessionId, session)
       this.#control?.backend.unregister(message.sessionId, session)
       this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
       session.dispose({ notifyExit: false })
       return
     }
     session.display(`\r\n\u001b[33m${runtimeMessages().server.forkIncompleteBanner}\u001b[0m\r\n`)
-    this.#sessions.delete(message.sessionId, session)
+    this.#unregisterSession(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
     session.dispose({ notifyExit: false })
@@ -2584,7 +2676,7 @@ export class RuntimeServer {
     this.#clearProviderResumeTimer(message.sessionId)
     this.#settleProviderRecovery(message.sessionId, new Error(reason))
     if (!this.#markResumeFailed(message.sessionId, bindingId, reason)) return
-    this.#sessions.delete(message.sessionId, session)
+    this.#unregisterSession(message.sessionId, session)
     this.#control?.backend.unregister(message.sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? message.sessionId)
     this.#attachedSessionIds.delete(message.sessionId)
@@ -2939,7 +3031,7 @@ export class RuntimeServer {
     if (!session) return
     this.#control?.backend.unregister(sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? sessionId)
-    this.#sessions.delete(sessionId, session)
+    this.#unregisterSession(sessionId, session)
     this.#endedSessionIds.delete(sessionId)
     this.#completedReplayThrough.delete(sessionId)
     this.#spawnDescriptors.delete(sessionId)
@@ -3101,7 +3193,7 @@ export class RuntimeServer {
       }
     }
 
-    this.#sessions.delete(sessionId, session)
+    this.#unregisterSession(sessionId, session)
     this.#control?.backend.unregister(sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? sessionId)
     session.dispose({ notifyExit: false, reason: 'environment-transition' })
@@ -3396,7 +3488,7 @@ export class RuntimeServer {
         if (this.#sessions.get(sessionId) !== active) {
           throw new RpcFault('CONFLICT', 'AI Session changed before model update')
         }
-        active.write(`/model ${strategy}\r`)
+        if (!writeIgnoringEgressFrozen(active, `/model ${strategy}\r`)) return
         if (binding) {
           try {
             this.#sessionRepository.updateProviderLaunchSettings({
@@ -3433,7 +3525,9 @@ export class RuntimeServer {
       const to = order.indexOf(target as HudPermissionMode)
       if (from >= 0 && to >= 0) {
         const steps = (to - from + order.length) % order.length
-        for (let index = 0; index < steps; index += 1) session.write('\u001b[Z')
+        for (let index = 0; index < steps; index += 1) {
+          if (!writeIgnoringEgressFrozen(session, '\u001b[Z')) return
+        }
       }
     }
     this.#hud.updatePermission(sessionId, target)
@@ -3482,7 +3576,7 @@ export class RuntimeServer {
       }
     }
     this.#clearProviderResumeTimer(sessionId)
-    this.#sessions.delete(sessionId, session)
+    this.#unregisterSession(sessionId, session)
     this.#control?.backend.unregister(sessionId, session)
     this.#control?.tokens.revokeRun(session.runId ?? sessionId)
     session.dispose({ notifyExit: false })
@@ -3618,7 +3712,7 @@ export class RuntimeServer {
           peer.#workStatusTrackers.delete(sessionId)
           peer.#permissionModeTrackers.delete(sessionId)
         }
-        this.#sessions.delete(sessionId, active)
+        this.#unregisterSession(sessionId, active)
         active.dispose({ notifyExit: false })
         await active.whenClosed()
 
@@ -3699,8 +3793,8 @@ export class RuntimeServer {
     return this.#sessions.runExclusive(session.sessionId, async () => {
       const descriptor = this.#spawnDescriptors.get(session.sessionId)
       if (!descriptor || this.#sessions.get(session.sessionId) !== session) return false
-      session.write('\u0015')
-      this.#sessions.delete(session.sessionId, session)
+      writeIgnoringEgressFrozen(session, '\u0015')
+      this.#unregisterSession(session.sessionId, session)
       this.#control?.backend.unregister(session.sessionId, session)
       this.#control?.tokens.revokeRun(session.runId ?? session.sessionId)
       session.dispose({ notifyExit: false })
@@ -3996,6 +4090,35 @@ function isSessionEnvironmentRpc(method: RpcMethod): boolean {
     method === 'session.environment-restore' ||
     method === 'session.environment-locate' ||
     method === 'session.environment-handoff'
+}
+
+type EgressRpcMethod = Extract<
+  RpcMethod,
+  | 'egress.status'
+  | 'egress.recheck'
+  | 'egress.set-rule'
+  | 'egress.accept-current'
+  | 'egress.set-protection'
+  | 'egress.override'
+>
+
+function isEgressRpc(method: RpcMethod): method is EgressRpcMethod {
+  return method === 'egress.status' ||
+    method === 'egress.recheck' ||
+    method === 'egress.set-rule' ||
+    method === 'egress.accept-current' ||
+    method === 'egress.set-protection' ||
+    method === 'egress.override'
+}
+
+function writeIgnoringEgressFrozen(session: PtySession, data: string): boolean {
+  try {
+    session.write(data)
+    return true
+  } catch (error) {
+    if (error instanceof SessionEgressFrozenError) return false
+    throw error
+  }
 }
 
 function isTerminalHistoryRpc(

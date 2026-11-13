@@ -9,10 +9,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   PROTOCOL_VERSION,
+  type EgressFamily,
+  type EgressStatusWire,
   type HostNavigationRequestWire,
   type RpcMethod,
   type RuntimeMessage
 } from '@matou/contracts'
+import { EgressMonitor } from './egress/egress-monitor'
+import type { EgressSample } from './egress/egress-evaluator'
+import { EgressSettings } from './egress/egress-settings'
+import { SessionEgressFrozenError } from './session/pty-session'
 
 import { TerminalScreenProjector } from './control/terminal-screen-projector'
 import { SegmentJournal, readSegmentFrames, readSessionFrames } from './journal/segment-journal'
@@ -7589,6 +7595,359 @@ describe('RuntimeServer session-scoped journal recovery', () => {
     } finally {
       if (previousShell === undefined) delete process.env.SHELL
       else process.env.SHELL = previousShell
+    }
+  })
+})
+
+describe('RuntimeServer egress monitoring', () => {
+  function okSample(
+    anthropicCountry = 'US',
+    anthropicIp = '203.0.113.10'
+  ): EgressSample {
+    return {
+      hosts: {
+        anthropic: {
+          api: { host: 'api.anthropic.com', ip: anthropicIp, country: anthropicCountry },
+          login: { host: 'claude.ai', ip: anthropicIp, country: anthropicCountry }
+        },
+        openai: {
+          api: { host: 'api.openai.com', ip: '198.51.100.20', country: 'US' },
+          login: { host: 'chatgpt.com', ip: '198.51.100.20', country: 'US' }
+        }
+      },
+      agentHasProxyEnv: true,
+      systemProxyEnabled: false,
+      tunDetected: false,
+      ipv6Bypass: false,
+      agentTimeZoneMainland: false
+    }
+  }
+
+  function createHarness(initialSample: EgressSample) {
+    let currentSample = initialSample
+    const sessions = createTestSessionRegistry()
+    const egressServers = new Set<RuntimeServer>()
+    const monitor = new EgressMonitor({
+      now: Date.now,
+      setTimer: () => () => {},
+      sampleFull: async () => currentSample,
+      sampleLight: async (family: EgressFamily) => currentSample.hosts[family].api,
+      networkSignature: () => 'sig-1',
+      settings: new EgressSettings(database),
+      freeze: async (sessionId) => {
+        await sessions.get(sessionId)?.setEgressFrozen(true)
+      },
+      thaw: async (sessionId) => {
+        await sessions.get(sessionId)?.setEgressFrozen(false)
+      },
+      publish: (status: EgressStatusWire) => {
+        for (const candidate of egressServers) {
+          candidate.publishEgress(status)
+        }
+      }
+    })
+    const testPort = new MockPort()
+    const egressServer = new RuntimeServer(testPort, root, database, undefined, undefined, sessions, undefined, undefined, {
+      egress: monitor
+    })
+    egressServers.add(egressServer)
+    testPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'egress-client' })
+    return {
+      sessions,
+      monitor,
+      testPort,
+      egressServer,
+      setSample: (next: EgressSample) => { currentSample = next },
+      cleanup: () => {
+        monitor.stop()
+        egressServer.close()
+      }
+    }
+  }
+
+  it('registers official claude-code sessions with exitCountry TZ and unregisters on exit', async () => {
+    const harness = createHarness(okSample('TW', '203.0.113.55'))
+    await harness.monitor.recheck()
+    const registerSpy = vi.spyOn(harness.monitor, 'registerSession')
+    const unregisterSpy = vi.spyOn(harness.monitor, 'unregisterSession')
+
+    const tzFile = join(root, 'claude-tz.txt')
+    const executable = join(root, 'claude-tz-stub.sh')
+    await writeFile(executable, `#!/bin/sh\nprintf "%s" "$TZ" > '${tzFile}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    const previousTz = process.env.TZ
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.TZ = 'Asia/Shanghai'
+
+    try {
+      registerCanvasSession(database, 'egress-official-claude', 'claude-code')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-official-claude', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-official-claude')
+      await waitUntilAsync(async () => (await readFile(tzFile, 'utf8').catch(() => '')) === 'Asia/Taipei')
+
+      expect(registerSpy).toHaveBeenCalledWith('egress-official-claude', 'anthropic')
+      expect(harness.monitor.status().sessionFamilies['egress-official-claude']).toBe('anthropic')
+
+      harness.testPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-official-claude'
+      })
+      await waitUntil(() => !harness.sessions.has('egress-official-claude'))
+      expect(unregisterSpy).toHaveBeenCalledWith('egress-official-claude')
+      expect(harness.monitor.status().sessionFamilies['egress-official-claude']).toBeUndefined()
+    } finally {
+      harness.cleanup()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+      restoreEnv('TZ', previousTz)
+    }
+  })
+
+  it('freezes bornFrozen sessions immediately before output and silently drops terminal input', async () => {
+    const harness = createHarness(okSample('CN', '223.5.5.5'))
+    await harness.monitor.recheck()
+
+    const inputFile = join(root, 'frozen-input.txt')
+    const executable = join(root, 'claude-frozen-stub.sh')
+    await writeFile(executable, [
+      '#!/bin/sh',
+      'printf "READY\\n"',
+      `while IFS= read -r line; do printf "%s\\n" "$line" >> '${inputFile}'; done`
+    ].join('\n'))
+    await chmod(executable, 0o755)
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+
+    try {
+      registerCanvasSession(database, 'egress-born-frozen', 'claude-code')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-born-frozen', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-born-frozen')
+
+      const live = harness.sessions.get('egress-born-frozen')!
+      expect(live.egressFrozen).toBe(true)
+      expect(() => live.write('direct')).toThrow(SessionEgressFrozenError)
+
+      const errorsBefore = harness.testPort.sent.filter((m) => m.type === 'protocol.error').length
+      harness.testPort.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-born-frozen', data: 'should-drop\r'
+      })
+      await settle()
+      expect(harness.testPort.sent.filter((m) => m.type === 'protocol.error')).toHaveLength(errorsBefore)
+      expect(await readFile(inputFile, 'utf8').catch(() => '')).toBe('')
+
+      // Auto-recovery selection and model/permission writes while frozen must not error or crash.
+      harness.testPort.receive({
+        type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+        requestId: 'frozen-set-model', method: 'session.set-model',
+        capability: 'renderer', deadlineAt: Date.now() + 2_000,
+        payload: {
+          command: { commandId: 'frozen-set-model', commandType: 'session.set-model', requestHash: 'h-model' },
+          input: { sessionId: 'egress-born-frozen', modelStrategy: 'claude-sonnet-4-6' }
+        }
+      })
+      await waitUntil(() => harness.testPort.findRpcResponse('frozen-set-model') !== undefined)
+      expect(harness.testPort.findRpcError('frozen-set-model')).toBeUndefined()
+
+      // Thaw via monitor recovery and verify input works afterwards.
+      harness.setSample(okSample('US', '203.0.113.10'))
+      await harness.monitor.recheck()
+      await harness.monitor.recheck()
+      await waitUntil(() => !live.egressFrozen)
+
+      harness.testPort.receive({
+        type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-born-frozen', data: 'after-thaw\r'
+      })
+      await waitUntilAsync(async () => (await readFile(inputFile, 'utf8').catch(() => '')).includes('after-thaw'))
+
+      harness.testPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-born-frozen'
+      })
+      await waitUntil(() => !harness.sessions.has('egress-born-frozen'))
+    } finally {
+      harness.cleanup()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+    }
+  })
+
+  it('does not register or override timezone for third-party provider sessions', async () => {
+    const harness = createHarness(okSample('CN', '223.5.5.5'))
+    await harness.monitor.recheck()
+    const registerSpy = vi.spyOn(harness.monitor, 'registerSession')
+
+    const store = new ProviderConfigStore(root)
+    const thirdParty = await store.upsert({
+      cli: 'claude-code',
+      name: 'DeepSeek',
+      endpoint: 'https://api.deepseek.com/anthropic',
+      model: 'deepseek-chat',
+      apiKey: 'sk-test'
+    })
+    await store.activate('claude-code', thirdParty.id)
+
+    const tzFile = join(root, 'third-party-tz.txt')
+    const executable = join(root, 'claude-third-party-stub.sh')
+    await writeFile(executable, `#!/bin/sh\nprintf "%s" "$TZ" > '${tzFile}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    const previousTz = process.env.TZ
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.TZ = 'Asia/Shanghai'
+
+    try {
+      registerCanvasSession(database, 'egress-third-party', 'claude-code')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-third-party', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-third-party')
+      await waitUntilAsync(async () => Boolean(await stat(tzFile).catch(() => undefined)))
+
+      expect(registerSpy).not.toHaveBeenCalled()
+      expect(harness.sessions.get('egress-third-party')?.egressFrozen).toBe(false)
+      expect(await readFile(tzFile, 'utf8')).toBe('Asia/Shanghai')
+
+      harness.testPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-third-party'
+      })
+      await waitUntil(() => !harness.sessions.has('egress-third-party'))
+    } finally {
+      harness.cleanup()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+      restoreEnv('TZ', previousTz)
+    }
+  })
+
+  it('guards against restart exit race so old process exit does not unregister replacement session', async () => {
+    const harness = createHarness(okSample('US', '203.0.113.10'))
+    await harness.monitor.recheck()
+
+    const executable = join(root, 'claude-restart-race.sh')
+    await writeFile(executable, '#!/bin/sh\nsleep 30\n')
+    await chmod(executable, 0o755)
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    process.env.MATOU_CLAUDE_COMMAND = executable
+
+    try {
+      registerCanvasSession(database, 'egress-restart-race', 'claude-code')
+      const spawnMsg = {
+        type: 'terminal.spawn' as const,
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-restart-race',
+        executionContextId: 'replay-context',
+        profile: 'claude-code' as const,
+        cols: 80,
+        rows: 24,
+        spawnRevision: 1
+      }
+      harness.testPort.receive(spawnMsg)
+      await waitUntil(() => harness.testPort.sent.filter((m) => m.type === 'terminal.spawned').length === 1)
+      const firstPid = harness.sessions.get('egress-restart-race')!.pid
+
+      harness.testPort.receive({ ...spawnMsg, spawnRevision: 2 })
+      await waitUntil(() => harness.testPort.sent.filter((m) => m.type === 'terminal.spawned').length === 2)
+      const secondPid = harness.sessions.get('egress-restart-race')!.pid
+
+      expect(secondPid).not.toBe(firstPid)
+      expect(harness.monitor.status().sessionFamilies['egress-restart-race']).toBe('anthropic')
+
+      harness.testPort.receive({
+        type: 'terminal.dispose', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-restart-race'
+      })
+      await waitUntil(() => !harness.sessions.has('egress-restart-race'))
+    } finally {
+      harness.cleanup()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+    }
+  })
+
+  it('routes all six egress RPC methods, validates inputs, maps conflicts, and pushes status', async () => {
+    const harness = createHarness(okSample('US', '203.0.113.10'))
+    const sendRpc = (targetPort: MockPort, requestId: string, method: RpcMethod, payload: unknown = {}) => {
+      targetPort.receive({
+        type: 'rpc.request',
+        protocolVersion: PROTOCOL_VERSION,
+        requestId,
+        method,
+        capability: 'renderer',
+        deadlineAt: Date.now() + 2_000,
+        payload
+      })
+    }
+
+    try {
+      // Unconfigured server returns NOT_FOUND
+      sendRpc(port, 'no-egress-1', 'egress.status', {})
+      await waitUntil(() => port.findRpcError('no-egress-1') !== undefined)
+      expect(port.findRpcError('no-egress-1')).toMatchObject({
+        code: 'NOT_FOUND',
+        message: 'egress monitor unavailable'
+      })
+
+      // Invalid params -> INVALID_REQUEST
+      sendRpc(harness.testPort, 'bad-rule', 'egress.set-rule', { mode: 'asn' })
+      sendRpc(harness.testPort, 'bad-family', 'egress.accept-current', { family: 'google' })
+      sendRpc(harness.testPort, 'bad-override', 'egress.override', { family: 123 })
+      sendRpc(harness.testPort, 'bad-prot', 'egress.set-protection', { enabled: 'yes' })
+      await waitUntil(() => harness.testPort.findRpcError('bad-prot') !== undefined)
+      for (const id of ['bad-rule', 'bad-family', 'bad-override', 'bad-prot']) {
+        expect(harness.testPort.findRpcError(id)?.code).toBe('INVALID_REQUEST')
+      }
+
+      // Override before resolved exit IP -> CONFLICT
+      sendRpc(harness.testPort, 'override-conflict', 'egress.override', { family: 'anthropic' })
+      await waitUntil(() => harness.testPort.findRpcError('override-conflict') !== undefined)
+      expect(harness.testPort.findRpcError('override-conflict')?.code).toBe('CONFLICT')
+
+      // Valid RPCs and push
+      sendRpc(harness.testPort, 'status-1', 'egress.status', {})
+      await waitUntil(() => harness.testPort.findRpcResponse('status-1') !== undefined)
+      expect(harness.testPort.findRpcResponse('status-1')?.result).toMatchObject({ state: 'checking' })
+
+      sendRpc(harness.testPort, 'recheck-1', 'egress.recheck', {})
+      await waitUntil(() => harness.testPort.findRpcResponse('recheck-1') !== undefined)
+      expect(harness.testPort.findRpcResponse('recheck-1')?.result).toMatchObject({ state: 'ok' })
+      expect(harness.testPort.last('egress.status')?.status).toMatchObject({ state: 'ok' })
+
+      sendRpc(harness.testPort, 'rule-1', 'egress.set-rule', { mode: 'ip' })
+      await waitUntil(() => harness.testPort.findRpcResponse('rule-1') !== undefined)
+      expect(harness.testPort.findRpcResponse('rule-1')?.result).toMatchObject({ ruleMode: 'ip' })
+
+      sendRpc(harness.testPort, 'prot-1', 'egress.set-protection', { enabled: false })
+      await waitUntil(() => harness.testPort.findRpcResponse('prot-1') !== undefined)
+      expect(harness.testPort.findRpcResponse('prot-1')?.result).toMatchObject({ protectionEnabled: false })
+
+      sendRpc(harness.testPort, 'accept-1', 'egress.accept-current', { family: 'anthropic' })
+      await waitUntil(() => harness.testPort.findRpcResponse('accept-1') !== undefined)
+      expect(harness.testPort.findRpcResponse('accept-1')?.result).toMatchObject({ state: 'ok' })
+
+      harness.setSample(okSample('CN', '223.5.5.5'))
+      await harness.monitor.recheck()
+      sendRpc(harness.testPort, 'accept-cn-conflict', 'egress.accept-current', { family: 'anthropic' })
+      await waitUntil(() => harness.testPort.findRpcError('accept-cn-conflict') !== undefined)
+      expect(harness.testPort.findRpcError('accept-cn-conflict')?.code).toBe('CONFLICT')
+
+      sendRpc(harness.testPort, 'override-1', 'egress.override', { family: 'anthropic' })
+      await waitUntil(() => harness.testPort.findRpcResponse('override-1') !== undefined)
+      expect(
+        (harness.testPort.findRpcResponse('override-1')?.result as EgressStatusWire).families
+          .find((f) => f.family === 'anthropic')?.overridden
+      ).toBe(true)
+    } finally {
+      harness.cleanup()
     }
   })
 })
