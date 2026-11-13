@@ -190,7 +190,7 @@ test('moves from Shell to the full Agent HUD with switchable permissions and a r
     }
     await expect(agentsTooltip).toContainText('运行 python3 render.py')
     await agentsTooltip.hover()
-    await expect(agentsTooltip).toHaveCSS('max-width', '360px')
+    await expect(agentsTooltip).toHaveCSS('max-width', '440px')
     await mkdir(evidenceDirectory, { recursive: true })
     await agentsTooltip.screenshot({ path: join(evidenceDirectory, 'agents-live-tooltip.png') })
     await fixture.page.mouse.move(900, 500)

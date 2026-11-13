@@ -1,7 +1,7 @@
 import type { HudAgentActivity } from '@matou/contracts'
 import { useAccountUsage } from '../claude-accounts/use-account-usage'
 import { ClaudeAccountsControl } from '../claude-accounts/ClaudeAccountsControl'
-import { useEffect, useRef, useState, type ReactNode, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
@@ -260,7 +260,31 @@ function HudDetail(props: { label: string; title: string; items: string[]; child
   const m = useMessages().hud
   const [open, setOpen] = useState(false)
   const [style, setStyle] = useState<CSSProperties>({})
+  const tooltipRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLElement | null>(null)
   const closeTimer = useRef<number | undefined>(undefined)
+  useLayoutEffect(() => {
+    if (!open || props.tooltipClassName !== 'hud-agents-tooltip') return
+    const tooltip = tooltipRef.current
+    const trigger = triggerRef.current
+    if (!tooltip || !trigger) return
+    const position = () => {
+      const rect = trigger.getBoundingClientRect()
+      const halfWidth = tooltip.getBoundingClientRect().width / 2
+      const center = Math.max(12 + halfWidth, Math.min(window.innerWidth - 12 - halfWidth, rect.left + rect.width / 2))
+      tooltip.style.left = `${center}px`
+      tooltip.style.top = `${rect.top - 8}px`
+    }
+    // Measure the portal before its first paint so edge correction never flashes.
+    position()
+    window.addEventListener('resize', position)
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(position)
+    observer?.observe(tooltip)
+    return () => {
+      window.removeEventListener('resize', position)
+      observer?.disconnect()
+    }
+  }, [open, props.tooltipClassName, style])
   useEffect(() => () => window.clearTimeout(closeTimer.current), [])
   const cancelClose = () => {
     window.clearTimeout(closeTimer.current)
@@ -271,6 +295,7 @@ function HudDetail(props: { label: string; title: string; items: string[]; child
     closeTimer.current = window.setTimeout(() => setOpen(false), 140)
   }
   const show = (target: HTMLElement) => {
+    triggerRef.current = target
     cancelClose()
     const rect = target.getBoundingClientRect()
     setStyle({ left: rect.left + rect.width / 2, top: rect.top - 8 })
@@ -281,7 +306,7 @@ function HudDetail(props: { label: string; title: string; items: string[]; child
       aria-label={m.detailList(props.title)}
       onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={scheduleClose}
       onFocus={(event) => show(event.currentTarget)} onBlur={scheduleClose}>{props.label}</span>
-    {open && createPortal(<div className={`hud-detail-tooltip ${props.tooltipClassName ?? ''}`} role="tooltip" style={style}
+    {open && createPortal(<div ref={tooltipRef} className={`hud-detail-tooltip ${props.tooltipClassName ?? ''}`} role="tooltip" style={style}
       onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
       <strong>{props.title}</strong>
       {props.children ?? <ul>{(props.items.length > 0 ? props.items : [m.detailPending]).map((item, index) =>
@@ -498,7 +523,7 @@ function AgentDetails({ agents }: { agents: HudAgentActivity[] }) {
   }, [])
   return <ul className="hud-agent-list">{agents.map(agent => <li className={`hud-agent state-${agent.state}`} key={agent.id}>
     <span className={`hud-agent-dot state-${agent.state}`} aria-hidden="true" />
-    <span className="hud-agent-label">{agent.label}</span>
+    <span className="hud-agent-label" title={agent.label}>{agent.label}</span>
     <span className="hud-agent-duration">{agent.startedAt === undefined ? '' : agentDuration(now - agent.startedAt, zh)}</span>
     <span className="hud-agent-sr-only">{m.agentState[agent.state]}</span>
     {agent.detail && <span className="hud-agent-detail">{agent.detail === '状态已停止更新' ? m.agentStale : agent.detail}</span>}
