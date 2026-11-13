@@ -310,27 +310,33 @@ describe('RuntimeServer host navigation registration', () => {
 })
 
 describe('RuntimeServer domain RPC', () => {
-  it('applies saved time zones to actual Claude launches without changing live sessions, Shell or Codex', async () => {
+  it('applies automatic non-mainland and explicit time zones to agent launches without changing Shell', async () => {
     const executable = join(root, 'time-zone-probe.sh')
     const capture = join(root, 'time-zones.txt')
     await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$TZ" >> '${capture}'\nsleep 30\n`)
     await chmod(executable, 0o755)
     const previous = Object.fromEntries(['TZ', 'SHELL', 'MATOU_CLAUDE_COMMAND', 'MATOU_CODEX_COMMAND'].map(key => [key, process.env[key]]))
-    process.env.TZ = 'Asia/Tokyo'
+    process.env.TZ = 'Asia/Shanghai'
     process.env.SHELL = executable
     process.env.MATOU_CLAUDE_COMMAND = executable
     process.env.MATOU_CODEX_COMMAND = executable
     const settings = new RuntimeRpcRouter(database)
     try {
-      await settings.handle('claude-settings.set', { timeZone: 'UTC' })
       const expected: string[] = []
       for (const [index, profile, zone] of [
-        [0, 'claude-code', 'UTC'], [1, 'shell', 'Asia/Tokyo'],
-        [2, 'codex', 'Asia/Tokyo'], [3, 'claude-code', 'America/Los_Angeles'],
-        [4, 'claude-code', 'Asia/Tokyo']
+        [0, 'claude-code', 'Asia/Singapore'], [1, 'shell', 'Asia/Shanghai'],
+        [2, 'codex', 'Asia/Singapore'], [3, 'claude-code', 'UTC'],
+        [4, 'codex', 'Asia/Singapore'], [5, 'claude-code', 'America/Los_Angeles'],
+        [6, 'claude-code', 'Asia/Shanghai'], [7, 'claude-code', 'Asia/Tokyo'],
+        [8, 'codex', 'Asia/Tokyo']
       ] as const) {
-        if (index === 3) await settings.handle('claude-settings.set', { timeZone: zone })
-        if (index === 4) await settings.handle('claude-settings.set', { timeZone: 'system' })
+        if (index === 3) await settings.handle('claude-settings.set', { timeZone: 'UTC' })
+        if (index === 5) await settings.handle('claude-settings.set', { timeZone: 'America/Los_Angeles' })
+        if (index === 6) await settings.handle('claude-settings.set', { timeZone: 'system' })
+        if (index === 7) {
+          await settings.handle('claude-settings.set', { timeZone: 'auto' })
+          process.env.TZ = 'Asia/Tokyo'
+        }
         const sessionId = `time-zone-${index}`
         registerSession(database, sessionId, profile)
         port.receive({ type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
