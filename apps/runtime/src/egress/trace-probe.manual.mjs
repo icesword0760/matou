@@ -32,12 +32,15 @@ const { hasProxyEnvironment, resolveProxyForUrl } = await import(
 const { probeTrace } = await import(
   pathToFileURL(fileURLToPath(new URL('./trace-probe.ts', import.meta.url))).href
 )
+const { EGRESS_HOSTS } = await import(
+  pathToFileURL(fileURLToPath(new URL('./egress-evaluator.ts', import.meta.url))).href
+)
 
 const HOSTS = [
-  { family: 'anthropic', role: 'api', host: 'api.anthropic.com' },
-  { family: 'anthropic', role: 'login', host: 'claude.ai' },
-  { family: 'openai', role: 'api', host: 'api.openai.com' },
-  { family: 'openai', role: 'login', host: 'chatgpt.com' }
+  { family: 'anthropic', role: 'api', host: EGRESS_HOSTS.anthropic.api },
+  { family: 'anthropic', role: 'login', host: EGRESS_HOSTS.anthropic.login },
+  { family: 'openai', role: 'api', host: EGRESS_HOSTS.openai.api },
+  { family: 'openai', role: 'login', host: EGRESS_HOSTS.openai.login }
 ]
 
 console.log(`hasProxyEnvironment: ${hasProxyEnvironment(process.env)}`)
