@@ -205,7 +205,8 @@ export const sessionCanvasZhCN = {
       auto: '自动模式',
       acceptEdits: '自动接受编辑',
       plan: '计划模式',
-      bypassPermissions: '开放所有权限'
+      bypassPermissions: '开放所有权限',
+      ask: '逐项确认'
     },
     timeUnknown: '时间未知',
     justNow: '刚刚',
