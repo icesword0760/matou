@@ -76,3 +76,12 @@ main 在验收期间合入了「订阅账号接入 Claude Code」（`e731b50`）
 - `network-egress`、`claude-time-zone`、`prd-02-bottom-hud`、`provider-onboarding` e2e：首轮 `network-egress` 失败 1 次，随后单独运行 1 次、连同 provider-onboarding 连续运行 3 次，均通过。属于本机前台窗口抢焦点导致的偶发失败。
 - 订阅账号的模型路由只把登录 shell 里的代理变量用于路由自身的出站流量，agent 会话的环境不变，因此「探测走 agent 同一路径」仍然成立。
 - 已知缺口：订阅账号驱动的 Claude 会话（`ANTHROPIC_BASE_URL` 指向本机路由）目前按第三方服务商处理，不检测、不冻结、不换时区。是否纳入保护待产品决定。
+
+## 订阅账号会话（PRD 第 9 节，方案 B）
+
+- **归类修正**：订阅会话不再被误判为 Anthropic 官方会话。ChatGPT 订阅 → `chatgpt-subscription` 类别，并隐藏时区；Antigravity 订阅 → 只隐藏时区，不冻结；第三方 API 服务商和官方会话的行为不变。由 `egressPlanForLaunch` 单测与 runtime-server 单测覆盖。
+- **探测线路**：`chatgpt.com` / `auth.openai.com` 按 `resolveRouterProxy` 的结果选路（登录 shell 代理 → 系统代理 → 直连），与路由的真实出站路径一致。未配置 ChatGPT 订阅时不探测、不显示该分组、不影响整体状态。
+- **时区**：订阅路由的 `clearEnv` 不包含 `TZ`，注入的东八区时区会保留。
+- **结果**：typecheck、build 通过；desktop 944、runtime 主体 1429 项单测通过；`network-egress.spec.ts` 回归连续 2 次通过。
+- **runtime-server.test.ts**：本分支每次运行有 1–2 项随机失败，且每次失败的测试不同（Shell 命令与工作目录时序类）。同时段在 `main`（`6132501`）上运行 2 次，分别有 7 项和 6 项随机失败。判定为本机负载下的既有时序不稳定，不是本次改动引入。
+- **e2e 中的单字符混入**：执行者首两次运行时，Claude 终端出现单个 `1` 或 `(`。冻结期间测试敲入的是整串 `FROZEN_SHOULD_NOT_ECHO`，从未泄漏。单字符来自测试窗口在主屏抢焦点时的外部键盘输入，不是缺陷。
