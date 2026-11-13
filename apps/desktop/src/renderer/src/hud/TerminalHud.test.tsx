@@ -805,4 +805,29 @@ describe('Antigravity agent-aware HUD copy', () => {
     expect(tooltip.textContent).toContain('3P 5h 30%')
     expect(tooltip.textContent).toContain('3P Weekly 60%')
   })
+
+  it('renders Ask mode badge AK with localized tooltip while keeping 4-item permission menu', async () => {
+    const user = userEvent.setup()
+    const onPermissionMode = vi.fn()
+    render(
+      <TerminalHud
+        hud={agent({
+          provider: 'antigravity',
+          permissionMode: 'ask',
+          usageWindows: []
+        })}
+        onPermissionMode={onPermissionMode}
+      />
+    )
+
+    const permButton = screen.getByRole('button', { name: '当前权限模式：逐项确认，点击切换' })
+    expect(permButton.textContent).toBe('AK')
+
+    await user.click(permButton)
+    const menuItems = screen.getAllByRole('menuitem').map((item) => item.textContent?.trim())
+    expect(menuItems).toEqual(['Default', 'Accept Edits', 'Plan Mode', 'Bypass Permissions'])
+
+    await user.click(screen.getByRole('menuitem', { name: 'Default' }))
+    expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'default', false, 'antigravity')
+  })
 })

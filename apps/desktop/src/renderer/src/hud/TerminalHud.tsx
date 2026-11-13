@@ -30,6 +30,7 @@ const PERMISSION_MODES: Array<{ value: HudPermissionMode; abbreviation: string }
   { value: 'auto', abbreviation: 'A' },
   { value: 'acceptEdits', abbreviation: 'AE' },
   { value: 'plan', abbreviation: 'PM' },
+  { value: 'ask', abbreviation: 'AK' },
   { value: 'bypassPermissions', abbreviation: 'BP' }
 ]
 export function TerminalHud(props: {
@@ -209,7 +210,7 @@ export function TerminalHud(props: {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label={m.permissionMenu}>
       <div className="perm-menu__title">{m.permissionMenu}</div>
-      {PERMISSION_MODES.filter(({ value }) => allowedPermissionModes.includes(value)).map((option) => <button type="button" role="menuitem"
+      {PERMISSION_MODES.filter(({ value }) => (allowedPermissionModes as readonly string[]).includes(value)).map((option) => <button type="button" role="menuitem"
         className={`perm-menu__item${permissionMode === option.value ? ' is-active' : ''}`} key={option.value}
         onClick={() => {
           setMenu(null)

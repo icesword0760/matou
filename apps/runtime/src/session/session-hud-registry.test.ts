@@ -468,7 +468,7 @@ it('tracks Antigravity model+effort, context, quota, cycle_mode, toolCall, and A
     expect(settled?.toolCounts).toEqual([{ name: 'run_command', count: 1 }])
     expect(settled?.lastTool).toEqual({ name: 'run_command', target: 'pnpm test', status: 'completed' })
     expect(settled?.taskStatus).toBe('idle')
-    expect(settled?.permissionMode).toBe('acceptEdits')
+    expect(settled?.permissionMode).toBe('ask')
     expect(observedCycles).toEqual(['accept-edits', null])
     expect(registry.antigravityCycleMode('agy-1')).toBeNull()
   } finally {
@@ -565,23 +565,33 @@ it('treats Antigravity status ticks without cycle_mode as Ask mode (null) while 
     cycle_mode: 'auto',
     model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' }
   })
+  expect(registry.snapshot('agy-ask')?.permissionMode).toBe('default')
   // Hook event without cycle_mode must NOT clear cycle_mode
   registry.ingestProvider('agy-ask', {
     hook_event_name: 'Stop',
     agent_state: 'idle'
   })
-  // Ask mode omits cycle_mode from statusLine JSON completely
+  // Ask mode omits cycle_mode from statusLine JSON completely -> HUD reflects Ask ('ask')
   registry.ingestProvider('agy-ask', {
     agent_state: 'idle',
     model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' },
     context_window: { used_percentage: 2, context_window_size: 1048576 }
   })
+  expect(registry.snapshot('agy-ask')?.permissionMode).toBe('ask')
+  // Pending HUD switch to acceptEdits is not clobbered by an intermediate Ask tick
+  registry.updatePermission('agy-ask', 'acceptEdits')
+  registry.ingestProvider('agy-ask', {
+    agent_state: 'idle',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' }
+  })
+  expect(registry.snapshot('agy-ask')?.permissionMode).toBe('acceptEdits')
   registry.ingestProvider('agy-ask', {
     agent_state: 'idle',
     cycle_mode: 'accept-edits',
     model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' }
   })
 
-  expect(observed).toEqual(['auto', null, 'accept-edits'])
+  expect(observed).toEqual(['auto', null, null, 'accept-edits'])
   expect(registry.antigravityCycleMode('agy-ask')).toBe('accept-edits')
+  expect(registry.snapshot('agy-ask')?.permissionMode).toBe('acceptEdits')
 })

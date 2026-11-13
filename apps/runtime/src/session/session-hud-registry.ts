@@ -12,7 +12,7 @@ import { basename, dirname, join } from 'node:path'
 
 import { ProviderTranscriptHudReader } from './provider-transcript-hud'
 
-export type HudPermissionMode = 'default' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+export type HudPermissionMode = import('@matou/contracts').HudPermissionMode
 export type HudModelStrategy = 'opusplan' | 'claude-opus-4-6' | 'claude-sonnet-4-6'
 export type HudTodoStatus = 'pending' | 'in_progress' | 'completed'
 export interface HudUsageWindow { label: string; percent: number; resetsAt?: number }
@@ -224,12 +224,20 @@ export class SessionHudRegistry {
     }
   }
 
-  updatePermission(sessionId: string, permissionMode: string): void {
+  updatePermission(
+    sessionId: string,
+    permissionMode: string,
+    options?: { pending?: boolean }
+  ): void {
     const current = this.#states.get(sessionId)
     const normalized = normalizePermission(permissionMode)
     if (current?.mode === 'agent' && normalized) {
       current.permissionMode = normalized
-      current.pendingPermissionMode = normalized
+      if (options?.pending === false) {
+        delete current.pendingPermissionMode
+      } else {
+        current.pendingPermissionMode = normalized
+      }
     }
   }
 
@@ -302,15 +310,6 @@ export class SessionHudRegistry {
       current.configCwd = configCwd
       current.configCheckedAt = this.#now()
     }
-    const rawPermission = current.provider === 'antigravity'
-      ? (text(payload.cycle_mode) === 'auto' ? 'default' : text(payload.cycle_mode))
-      : (text(payload.permission_mode) ?? text(payload.permissionMode))
-    const permission = normalizePermission(rawPermission)
-    if (permission && (!current.pendingPermissionMode || permission === current.pendingPermissionMode)) {
-      current.permissionMode = permission
-      current.providerPermissionObserved = true
-      delete current.pendingPermissionMode
-    }
     const isAntigravityStatusTick =
       current.provider === 'antigravity' &&
       !text(payload.hook_event_name) &&
@@ -319,11 +318,22 @@ export class SessionHudRegistry {
       ('cycle_mode' in payload ||
         current.antigravityCycleMode !== undefined ||
         Boolean(nestedText(payload.model, 'id') ?? nestedText(payload.model, 'display_name')))
+    const observedCycleMode = isAntigravityStatusTick ? (text(payload.cycle_mode) ?? null) : undefined
+    const rawPermission = current.provider === 'antigravity'
+      ? (text(payload.cycle_mode) === 'auto' ? 'default' : text(payload.cycle_mode))
+      : (text(payload.permission_mode) ?? text(payload.permissionMode))
+    const permission = normalizePermission(rawPermission)
+      ?? (isAntigravityStatusTick && observedCycleMode === null ? 'ask' : undefined)
+    if (permission && (!current.pendingPermissionMode || permission === current.pendingPermissionMode)) {
+      current.permissionMode = permission
+      current.providerPermissionObserved = true
+      delete current.pendingPermissionMode
+    }
     if (isAntigravityStatusTick) {
-      const observedCycleMode = text(payload.cycle_mode) ?? null
-      current.antigravityCycleMode = observedCycleMode
+      const cycleMode = observedCycleMode ?? null
+      current.antigravityCycleMode = cycleMode
       for (const listener of this.#cycleModeListeners.get(sessionId) ?? []) {
-        listener(observedCycleMode)
+        listener(cycleMode)
       }
     }
 
@@ -650,6 +660,7 @@ function normalizePermission(value: unknown): HudPermissionMode | undefined {
   if (normalized === 'auto') return 'auto'
   if (normalized === 'acceptedits') return 'acceptEdits'
   if (normalized === 'plan' || normalized === 'planmode') return 'plan'
+  if (normalized === 'ask') return 'ask'
   if (normalized === 'bypasspermissions' || normalized === 'bypass') return 'bypassPermissions'
   return undefined
 }

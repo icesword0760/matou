@@ -75,6 +75,18 @@ describe('TerminalHud in English', () => {
     expect(screen.queryByText('Error')).toBeNull()
     expect(screen.getByText('Opus Plan')).toBeTruthy()
   })
+
+  it('names Ask mode truthfully in English while keeping 4 menu items', async () => {
+    const user = userEvent.setup()
+    render(<LocaleProvider initialLocale="en"><TerminalHud hud={{
+      sessionId: 'session-1', mode: 'agent', provider: 'antigravity', permissionMode: 'ask', startedAt: Date.now()
+    }} onPermissionMode={vi.fn()} /></LocaleProvider>)
+
+    const button = screen.getByRole('button', { name: 'Permission mode: Ask every step — click to switch' })
+    expect(button.textContent).toBe('AK')
+    await user.click(button)
+    expect(screen.getAllByRole('menuitem')).toHaveLength(4)
+  })
 })
 
 function localEnvironment(): SessionEnvironment {

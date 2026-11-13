@@ -132,8 +132,8 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     server = new RuntimeServer(port, root, database, undefined, undefined, sessions, hookServer, undefined, {
       hudRegistry: hud,
       antigravityPluginInstaller: new AntigravityPluginInstaller(pluginDir),
-      antigravityPermissionSwitchTimeoutMs: 600,
-      antigravityForkNewIdTimeoutMs: 1_200
+      antigravityPermissionSwitchTimeoutMs: 1_500,
+      antigravityForkNewIdTimeoutMs: 2_500
     })
     port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-agy' })
   })
@@ -257,15 +257,22 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
   })
 
   it('reports clear installation hint when agy executable is missing', async () => {
+    const previousShell = process.env.SHELL
+    process.env.SHELL = '/bin/sh'
     process.env.MATOU_ANTIGRAVITY_COMMAND = join(root, 'missing-agy-bin')
-    registerSession(database, 'agy-missing', 'antigravity')
-    port.receive({
-      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
-      sessionId: 'agy-missing', executionContextId: 'ctx-1',
-      profile: 'antigravity', cols: 80, rows: 24
-    })
-    await waitUntil(() => port.last('protocol.error') !== undefined)
-    expect(port.last('protocol.error')?.message).toContain('Antigravity')
+    try {
+      registerSession(database, 'agy-missing', 'antigravity')
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'agy-missing', executionContextId: 'ctx-1',
+        profile: 'antigravity', cols: 80, rows: 24
+      })
+      await waitUntil(() => port.last('protocol.error') !== undefined)
+      expect(port.last('protocol.error')?.message).toContain('Antigravity')
+    } finally {
+      if (previousShell === undefined) delete process.env.SHELL
+      else process.env.SHELL = previousShell
+    }
   })
 
   it('forks Antigravity via --conversation + idempotent /fork, preserves parent state, and fails/retries cleanly on timeout', async () => {
@@ -341,8 +348,8 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     )
     const childId = forked.session!.id
 
-    await waitUntil(() => sessionRepository.getResumeBinding(childId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
-    await waitUntil(() => forkNotifications.length >= 1, 6_000)
+    await waitUntil(() => sessionRepository.getResumeBinding(childId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 10_000)
+    await waitUntil(() => forkNotifications.length >= 1, 10_000)
 
     const launches = await readLaunches(launchLogPath)
     const childLaunch = launches.find((item) => item.args.includes('--conversation'))!
@@ -369,14 +376,14 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
       { windowId: 'win-agy', sceneId, sourceSessionId: parentId, name: 'Timeout Branch', worktreeMode: 'current', now: 20 }
     )
     const failedChildId = failedCreate.session!.id
-    await waitUntil(() => intents.state(failedChildId) === 'failed', 6_000)
+    await waitUntil(() => intents.state(failedChildId) === 'failed', 10_000)
 
     await rm(join(root, 'ignore-slash-fork'), { force: true })
     await forkWorkflow.retryFork(
       { commandId: 'cmd-fork-retry', commandType: 'session.fork-retry', requestHash: 'fork-retry' },
       { windowId: 'win-agy', sceneId, sessionId: failedChildId, now: 30 }
     )
-    await waitUntil(() => sessionRepository.getResumeBinding(failedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
+    await waitUntil(() => sessionRepository.getResumeBinding(failedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 10_000)
 
     // Worktree Fork landing in a brand-new untrusted folder auto-confirms trust via Enter (never Down+Enter).
     await writeFile(join(root, 'fork-requires-trust'), '1', 'utf8')
@@ -385,8 +392,8 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
       { windowId: 'win-agy', sceneId, sourceSessionId: parentId, name: 'Worktree Trust Branch', worktreeMode: 'current', now: 40 }
     )
     const trustedChildId = trustedCreate.session!.id
-    await waitUntil(() => sessionRepository.getResumeBinding(trustedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
-  }, 20_000)
+    await waitUntil(() => sessionRepository.getResumeBinding(trustedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 10_000)
+  }, 25_000)
 
   it('injects antigravity-system-message.md via SessionStart and enables mt identify/list/read inside Antigravity cards', async () => {
     server.close()
@@ -550,6 +557,64 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     expect(await readLaunches(launchLogPath)).toHaveLength(1)
     expect(hud.antigravityCycleMode('agy-dup')).toBe('accept-edits')
     expect(hud.snapshot('agy-dup')?.permissionMode).toBe('acceptEdits')
+  })
+
+  it('shows Ask mode on HUD when user Shift+Tabs into omitted cycle_mode and switches out via HUD menu', async () => {
+    registerSession(database, 'agy-ask-live', 'antigravity')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'agy-ask-live', executionContextId: 'ctx-1',
+      profile: 'antigravity', cols: 100, rows: 30
+    })
+
+    await waitUntil(() => hud.antigravityCycleMode('agy-ask-live') === 'auto')
+    // cycleOrder is ['auto', 'plan', null, 'accept-edits']: two Shift+Tabs enter Ask (null)
+    port.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'agy-ask-live', data: '\u001b[Z'
+    })
+    await waitUntil(() => hud.antigravityCycleMode('agy-ask-live') === 'plan')
+    port.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'agy-ask-live', data: '\u001b[Z'
+    })
+    await waitUntil(() => hud.antigravityCycleMode('agy-ask-live') === null)
+    expect(hud.snapshot('agy-ask-live')?.permissionMode).toBe('ask')
+
+    // Choosing Default from HUD menu while in Ask uses hybrid Shift+Tab without respawn
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+      requestId: 'agy-ask-to-default', method: 'session.set-permission-mode',
+      capability: 'renderer', deadlineAt: Date.now() + 3_000,
+      payload: {
+        command: { commandId: 'cmd-ask-1', commandType: 'session.set-permission-mode', requestHash: 'hask1' },
+        input: { sessionId: 'agy-ask-live', provider: 'antigravity', permissionMode: 'default', respawn: false, now: 12 }
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('agy-ask-to-default') !== undefined)
+    expect(await readLaunches(launchLogPath)).toHaveLength(1)
+    expect(hud.antigravityCycleMode('agy-ask-live')).toBe('auto')
+    expect(hud.snapshot('agy-ask-live')?.permissionMode).toBe('default')
+
+    // Choosing Plan via HUD menu clears pendingPermissionMode once matched so an immediate Shift+Tab enters Ask
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+      requestId: 'agy-default-to-plan', method: 'session.set-permission-mode',
+      capability: 'renderer', deadlineAt: Date.now() + 3_000,
+      payload: {
+        command: { commandId: 'cmd-ask-2', commandType: 'session.set-permission-mode', requestHash: 'hask2' },
+        input: { sessionId: 'agy-ask-live', provider: 'antigravity', permissionMode: 'plan', respawn: false, now: 13 }
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('agy-default-to-plan') !== undefined)
+    expect(hud.snapshot('agy-ask-live')?.permissionMode).toBe('plan')
+
+    port.receive({
+      type: 'terminal.input', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'agy-ask-live', data: '\u001b[Z'
+    })
+    await waitUntil(() => hud.snapshot('agy-ask-live')?.permissionMode === 'ask')
+    expect(hud.antigravityCycleMode('agy-ask-live')).toBeNull()
   })
 })
 

@@ -85,7 +85,7 @@ import type {
   ProviderHookServer,
   ProviderIdentityMismatch
 } from './session/provider-hook-server'
-import { SessionRepository } from './domain/session-repository'
+import { SessionRepository, type ProviderPermissionMode } from './domain/session-repository'
 import { SessionEnvironmentRepository } from './session/session-environment-repository'
 import { SessionEnvironmentService } from './session/session-environment-service'
 import { DomainTransactionManager } from './storage/domain-transaction'
@@ -2067,7 +2067,7 @@ export class RuntimeServer {
           bindingId: providerSettingsBinding.id,
           providerConfigId: providerSelection.providerConfigId,
           model: providerModel ?? '',
-          permissionMode: permissionMode ?? 'default',
+          permissionMode: permissionMode && permissionMode !== 'ask' ? permissionMode : 'default',
           now: Date.now()
         })
       }
@@ -3561,6 +3561,8 @@ export class RuntimeServer {
     if (respawn) {
       await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
     } else if (session?.profile === 'antigravity') {
+      this.#hud.updatePermission(sessionId, target)
+      this.publishSessionHud(sessionId)
       const switched = await this.#switchAntigravityModeHybrid(
         sessionId,
         session,
@@ -3568,7 +3570,14 @@ export class RuntimeServer {
       )
       if (!switched) {
         await this.#respawnWithPermission(sessionId, target as HudPermissionMode)
+        this.#hud.updatePermission(sessionId, target)
+      } else {
+        // Hybrid switch already observed the target cycle_mode; clear pendingPermissionMode
+        // so immediate user Shift+Tab transitions (e.g. Plan -> Ask) are never masked.
+        this.#hud.updatePermission(sessionId, target, { pending: false })
       }
+      this.publishSessionHud(sessionId)
+      return
     } else if (session) {
       const order: HudPermissionMode[] = ['default', 'acceptEdits', 'plan']
       const from = order.indexOf(previousPermissionMode ?? 'default')
@@ -4028,7 +4037,7 @@ function prependedPathEnvironment(
   return { [pathKey]: inherited ? `${entry}${delimiter}${inherited}` : entry }
 }
 
-function permissionModeFromMetadata(metadata: unknown): HudPermissionMode | undefined {
+function permissionModeFromMetadata(metadata: unknown): ProviderPermissionMode | undefined {
   if (typeof metadata !== 'object' || metadata === null || !('permissionMode' in metadata)) {
     return undefined
   }

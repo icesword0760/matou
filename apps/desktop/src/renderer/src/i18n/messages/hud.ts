@@ -10,6 +10,7 @@ export const hudZhCN = {
     auto: 'Auto',
     acceptEdits: 'Accept Edits',
     plan: 'Plan Mode',
+    ask: '逐项确认',
     bypassPermissions: 'Bypass Permissions'
   },
   permissionMenu: '权限模式',
@@ -185,6 +186,7 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
     auto: 'Auto',
     acceptEdits: 'Accept Edits',
     plan: 'Plan Mode',
+    ask: 'Ask every step',
     bypassPermissions: 'Bypass Permissions'
   },
   permissionMenu: 'Permission mode',

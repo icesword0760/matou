@@ -10,7 +10,7 @@ export interface HudAgentActivity {
   startedAt?: number
 }
 
-export type HudPermissionMode = 'default' | 'auto' | 'acceptEdits' | 'plan' | 'bypassPermissions'
+export type HudPermissionMode = 'default' | 'auto' | 'acceptEdits' | 'plan' | 'ask' | 'bypassPermissions'
 export type HudModelStrategy = 'opusplan' | 'claude-opus-4-6' | 'claude-sonnet-4-6'
 export interface HudUsageWindow { label: string; percent: number; resetsAt?: number }
 export interface HudToolCount { name: string; count: number }

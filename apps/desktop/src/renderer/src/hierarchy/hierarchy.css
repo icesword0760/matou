@@ -345,6 +345,7 @@ button { -webkit-app-region: no-drag; }
 .status-perm-badge.perm-auto { color: #7ee787; }
 .status-perm-badge.perm-acceptEdits { color: #d29922; }
 .status-perm-badge.perm-plan { color: #58a6ff; }
+.status-perm-badge.perm-ask { color: #a371f7; }
 .status-perm-badge.perm-bypassPermissions { color: #ff6b35; }
 .perm-menu-overlay { position: fixed; z-index: 9999; inset: 0; pointer-events: auto; }
 .perm-menu { position: fixed; min-width: 180px; padding: 6px; border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; background: #1c2128; box-shadow: 0 8px 24px rgba(0,0,0,.5); font-size: 12px; }
