@@ -198,4 +198,27 @@ describe('evaluateEgress', () => {
     expect(result.checks.find((c) => c.id === 'browser-path')?.result).toBe('warn')
     expect(result.checks.find((c) => c.id === 'ipv6')?.result).toBe('warn')
   })
+
+  it('ignores unknown login-api-match in family and overall state while preserving the unknown check', () => {
+    const sample = makeBaseSample()
+    sample.hosts.openai.login = { host: 'chatgpt.com', error: 'invalid' }
+
+    const result = evaluateEgress(sample, {
+      mode: 'country',
+      baselines: {
+        anthropic: { ip: '169.128.1.1', country: 'US' },
+        openai: { ip: '169.128.1.1', country: 'US' }
+      }
+    })
+
+    expect(result.state).toBe('ok')
+    expect(result.families.find((f) => f.family === 'openai')?.state).toBe('ok')
+    expect(
+      result.checks.find((c) => c.id === 'login-api-match' && c.family === 'openai')
+    ).toEqual({
+      id: 'login-api-match',
+      family: 'openai',
+      result: 'unknown'
+    })
+  })
 })

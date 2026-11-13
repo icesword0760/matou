@@ -65,7 +65,9 @@ export function evaluateEgress(sample: EgressSample, rule: EgressRule): EgressEv
   const state: EgressEvaluation['state'] = families.some((f) => f.state === 'abnormal')
     ? 'abnormal'
     : families.some((f) => f.state === 'warning' || f.state === 'unknown') ||
-        checks.some((c) => c.result === 'warn' || c.result === 'unknown')
+        checks.some(
+          (c) => c.result === 'warn' || (c.result === 'unknown' && c.id !== 'login-api-match')
+        )
       ? 'warning'
       : 'ok'
 
