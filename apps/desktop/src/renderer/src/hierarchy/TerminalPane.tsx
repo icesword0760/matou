@@ -18,6 +18,8 @@ import type { SessionEnvironment, SessionGitState } from '@matou/domain'
 import type { SessionEnvironmentTarget } from '@matou/contracts'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { StorageFaultOverlay } from './StorageFaultOverlay'
+import { EgressFreezeBanner } from '../egress/EgressFreezeBanner'
+import { isSessionEgressFrozen, useEgressStatus } from '../egress/use-egress-status'
 import {
   activeForkProgress,
   ForkProgressOverlay
@@ -198,6 +200,8 @@ export function TerminalPane(props: {
     if (recoveryBusy) setTerminalVisualReady(false)
   }, [recoveryBusy])
   const storageBlocked = storageFault !== null
+  const { status: egressStatus, recheck: recheckEgress, override: overrideEgress } = useEgressStatus()
+  const egressFrozen = isSessionEgressFrozen(egressStatus, session.id)
   const actionBlocked = readOnly || storageBlocked || environmentUnavailable || recoveryBlocking
   const forkRepairBlocked = readOnly || storageBlocked || environmentUnavailable
   const freshStartBlocked = readOnly || storageBlocked || environmentUnavailable
@@ -452,6 +456,11 @@ export function TerminalPane(props: {
           }}>{m.pane.removeNodeAction}</button>}
         </div>
       </div>}
+    {!isTeamMember && <EgressFreezeBanner
+      sessionId={session.id}
+      status={egressStatus}
+      onRecheck={recheckEgress}
+      onOverride={overrideEgress} />}
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
       workStatus={workStatus} latestLines={latestLines} />}
     {!isTeamMember && forkState !== 'failed' &&
@@ -460,7 +469,7 @@ export function TerminalPane(props: {
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}
       viewportMoving={viewportMoving}
-      inputDisabled={actionBlocked || !pathValid || storageFault !== null}
+      inputDisabled={actionBlocked || !pathValid || storageFault !== null || egressFrozen}
       readOnly={actionBlocked}
       themeKey={themeKey} fontSize={fontSize}
       {...(onFontSizeChange ? { onFontSizeChange } : {})}

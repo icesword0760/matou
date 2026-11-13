@@ -434,6 +434,8 @@
 }
 
 /* Freeze / resume banner at top of terminal pane */
+.terminal-pane > .egress-freeze-banner[role="status"],
+.detached-terminal-app > .egress-freeze-banner[role="status"],
 .egress-freeze-banner {
   display: flex;
   align-items: center;
@@ -475,13 +477,17 @@
   background: rgba(228, 93, 85, .2);
 }
 
+.terminal-pane > .egress-freeze-banner[role="status"].is-resumed,
+.detached-terminal-app > .egress-freeze-banner[role="status"].is-resumed,
 .egress-freeze-banner.is-resumed {
   border-color: rgba(63, 185, 80, .3);
   color: #9be9a8;
   background: #14261a;
 }
 
+.hierarchy-shell[data-theme="light"] .terminal-pane > .egress-freeze-banner,
 .hierarchy-shell[data-theme="light"] .egress-freeze-banner,
+.detached-terminal-app[data-theme="light"] > .egress-freeze-banner,
 .detached-terminal-app[data-theme="light"] .egress-freeze-banner {
   border-color: #edc2bf;
   color: #9b2f2a;
@@ -495,7 +501,9 @@
   background: #fff;
 }
 
+.hierarchy-shell[data-theme="light"] .terminal-pane > .egress-freeze-banner.is-resumed,
 .hierarchy-shell[data-theme="light"] .egress-freeze-banner.is-resumed,
+.detached-terminal-app[data-theme="light"] > .egress-freeze-banner.is-resumed,
 .detached-terminal-app[data-theme="light"] .egress-freeze-banner.is-resumed {
   border-color: #bfe6c7;
   color: #1f6f34;

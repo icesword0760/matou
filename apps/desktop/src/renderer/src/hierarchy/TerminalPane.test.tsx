@@ -2,7 +2,15 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { EgressStatusWire } from '@matou/contracts'
 import type { SessionEnvironment } from '@matou/domain'
+import type { RuntimeClient } from '../runtime/RuntimeClient'
+
+let mockEgressRuntimeClient: RuntimeClient | null = null
+
+vi.mock('../runtime/RuntimeProvider', () => ({
+  useRuntimeClient: () => mockEgressRuntimeClient
+}))
 
 import { TerminalPane } from './TerminalPane'
 import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
@@ -39,6 +47,7 @@ vi.mock('../terminal/TerminalSurface', () => ({
 afterEach(() => {
   cleanup()
   foregroundTerminalModels.clear()
+  mockEgressRuntimeClient = null
 })
 
 describe('Terminal pane', () => {
@@ -793,6 +802,84 @@ describe('Terminal pane', () => {
       environment={worktreeEnvironment('ready')} />)
     expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
     expect(onRemoveBranch).not.toHaveBeenCalled()
+  })
+
+  it('shows egress freeze banner above terminal and disables input while frozen without disabling shell cards', async () => {
+    const frozenStatus: EgressStatusWire = {
+      state: 'abnormal',
+      protectionEnabled: true,
+      ruleMode: 'country',
+      checkedAt: 1_700_000_000_000,
+      families: [
+        {
+          family: 'anthropic',
+          state: 'abnormal',
+          violation: 'mainland',
+          hosts: [],
+          overridden: false,
+          frozenSessionIds: ['session-1'],
+          recovering: false
+        }
+      ],
+      checks: [],
+      sessionFamilies: { 'session-1': 'anthropic' }
+    }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'egress.override') {
+        return {
+          ...frozenStatus,
+          families: [
+            {
+              ...frozenStatus.families[0]!,
+              overridden: true,
+              frozenSessionIds: []
+            }
+          ]
+        }
+      }
+      return frozenStatus
+    })
+    mockEgressRuntimeClient = {
+      request,
+      subscribeEgressStatus: vi.fn(() => () => {})
+    } as unknown as RuntimeClient
+
+    render(<TerminalPane {...fixture()} foreground visible />)
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('出口异常（检测到中国大陆 IP），已暂停。网络恢复后自动继续。')
+      ).toBeTruthy()
+    })
+    const surface = screen.getByTestId('surface-session-1')
+    expect(surface.dataset.inputDisabled).toBe('true')
+    expect(surface.dataset.readOnly).toBe('false')
+
+    // Overriding unlocks input cleanly.
+    fireEvent.click(screen.getByRole('button', { name: '仍要继续' }))
+    fireEvent.click(screen.getByRole('button', { name: '继续' }))
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('egress.override', { family: 'anthropic' })
+      expect(screen.getByTestId('surface-session-1').dataset.inputDisabled).toBe('false')
+    })
+
+    // Shell session stays unblocked and renders no banner.
+    cleanup()
+    const shellProps = fixture()
+    render(
+      <TerminalPane
+        {...shellProps}
+        session={{ ...shellProps.session, id: 'session-shell', kind: 'shell', title: 'Shell' }}
+        foreground
+        visible
+      />
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId('surface-session-shell').dataset.inputDisabled).toBe('false')
+    })
+    expect(
+      screen.queryByText('出口异常（检测到中国大陆 IP），已暂停。网络恢复后自动继续。')
+    ).toBeNull()
   })
 })
 

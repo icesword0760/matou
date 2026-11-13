@@ -17,18 +17,29 @@ export interface UseEgressStatusResult {
   override: (family: EgressFamily) => Promise<void>
 }
 
+function isEgressStatusWire(value: unknown): value is EgressStatusWire {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    Array.isArray(record.families) &&
+    Array.isArray(record.checks) &&
+    Boolean(record.sessionFamilies) &&
+    typeof record.sessionFamilies === 'object'
+  )
+}
+
 export function sessionEgressFamily(
   status: EgressStatusWire | undefined,
   sessionId: string
 ): EgressFamily | undefined {
-  return status?.sessionFamilies[sessionId]
+  return status?.sessionFamilies?.[sessionId]
 }
 
 export function findEgressFamily(
   status: EgressStatusWire | undefined,
   family: EgressFamily | undefined
 ): EgressFamilyWire | undefined {
-  if (!status || !family) return undefined
+  if (!status || !family || !Array.isArray(status.families)) return undefined
   return status.families.find((entry) => entry.family === family)
 }
 
@@ -52,7 +63,7 @@ export function useEgressStatus(
   const generationRef = useRef(0)
 
   useEffect(() => {
-    if (!client) {
+    if (!client || typeof client.subscribeEgressStatus !== 'function') {
       setStatus(undefined)
       return
     }
@@ -62,7 +73,7 @@ export function useEgressStatus(
       const generation = generationRef.current
       try {
         const next = await client.request<EgressStatusWire>('egress.status', undefined)
-        if (!cancelled && generationRef.current === generation) {
+        if (!cancelled && generationRef.current === generation && isEgressStatusWire(next)) {
           setStatus(next)
         }
       } catch {
@@ -70,9 +81,9 @@ export function useEgressStatus(
       }
     }
 
-    const unsubscribe = client.subscribeEgressStatus?.(
+    const unsubscribe = client.subscribeEgressStatus(
       (pushed) => {
-        if (cancelled) return
+        if (cancelled || !isEgressStatusWire(pushed)) return
         generationRef.current += 1
         setStatus(pushed)
       },
@@ -87,7 +98,7 @@ export function useEgressStatus(
 
     return () => {
       cancelled = true
-      unsubscribe?.()
+      unsubscribe()
     }
   }, [client])
 
