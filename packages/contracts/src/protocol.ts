@@ -217,6 +217,12 @@ export const RPC_METHODS = [
   'provider-config.activate',
   'claude-settings.get',
   'claude-settings.set',
+  'egress.status',
+  'egress.recheck',
+  'egress.set-rule',
+  'egress.accept-current',
+  'egress.set-protection',
+  'egress.override',
   'workspace.create',
   'workspace.update',
   'workspace.archive',
@@ -532,6 +538,11 @@ export type RuntimeMessage =
       runtimeGeneration: string
       events: import('./domain-events').DomainEventWireEnvelope[]
       throughSequence: number
+    }
+  | {
+      type: 'egress.status'
+      protocolVersion: typeof PROTOCOL_VERSION
+      status: import('./egress').EgressStatusWire
     }
 
 export interface RuntimeConnectRequest {
