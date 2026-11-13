@@ -75,15 +75,30 @@ describe('AntigravityPluginInstaller', () => {
     const externalResult = await runScriptWithStdin(hookPath, '{"hookEventName":"PreToolUse"}', cleanEnv)
     expect(externalResult).toEqual({ code: 0, stdout: '', stderr: '' })
 
-    // 2. Managed agy PreToolUse: 0 bytes stdout/stderr, background POST delivered.
-    const received: string[] = []
+    // 2. Managed agy non-PreToolUse: 0 bytes stdout/stderr, background POST delivered.
+    const received: Array<{ url: string; body: string }> = []
     let notifyReceived: (() => void) | undefined
     const receivedPromise = new Promise<void>((resolve) => { notifyReceived = resolve })
+    let preToolResponseStatus = 204
+    let preToolResponseBody = ''
+    let preToolDelayMs = 0
     const server = createServer((req, res) => {
       const chunks: Buffer[] = []
       req.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
       req.on('end', () => {
-        received.push(Buffer.concat(chunks).toString('utf8'))
+        received.push({
+          url: req.url ?? '',
+          body: Buffer.concat(chunks).toString('utf8')
+        })
+        if ((req.url ?? '').includes('kind=pre-tool-use')) {
+          setTimeout(() => {
+            if (res.destroyed) return
+            res.writeHead(preToolResponseStatus, preToolResponseBody ? { 'content-type': 'application/json' } : undefined)
+            res.end(preToolResponseBody)
+            notifyReceived?.()
+          }, preToolDelayMs)
+          return
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end('{}')
         notifyReceived?.()
@@ -99,13 +114,45 @@ describe('AntigravityPluginInstaller', () => {
       MATOU_PROVIDER_HOOK_URL: hookUrl,
       MATOU_PROVIDER_HOOK_TOKEN: 'tok-test'
     }
-    const preToolPayload = '{"hookEventName":"PreToolUse","conversationId":"c1","toolCall":{"id":"t1","name":"run_command"}}'
-    const preToolResult = await runScriptWithStdin(hookPath, preToolPayload, managedEnv)
-    expect(preToolResult).toEqual({ code: 0, stdout: '', stderr: '' })
+    const postToolPayload = '{"hookEventName":"PostToolUse","conversationId":"c1","toolCall":{"id":"t1","name":"run_command"}}'
+    const postToolResult = await runScriptWithStdin(hookPath, postToolPayload, managedEnv)
+    expect(postToolResult).toEqual({ code: 0, stdout: '', stderr: '' })
     await receivedPromise
-    expect(received[0]).toBe(preToolPayload)
+    expect(received[0]).toEqual({ url: '/hooks/tok-test', body: postToolPayload })
 
-    // 3. SessionStart: cats pre-generated JSON file only when env var points to readable file.
+    // 3. Managed agy PreToolUse: sync POST to ?kind=pre-tool-use, forwards decision JSON verbatim when present.
+    const decisionJson = '{"decision":"allow","overwrite":{"BypassSandbox":true}}'
+    preToolResponseStatus = 200
+    preToolResponseBody = decisionJson
+    const preToolMtPayload = '{"hookEventName":"PreToolUse","conversationId":"c1","toolCall":{"id":"t2","name":"run_command","args":{"CommandLine":"mt list --json"}}}'
+    const preToolAllowResult = await runScriptWithStdin(hookPath, preToolMtPayload, managedEnv)
+    expect(preToolAllowResult).toEqual({ code: 0, stdout: decisionJson, stderr: '' })
+    expect(received.at(-1)).toEqual({ url: '/hooks/tok-test?kind=pre-tool-use', body: preToolMtPayload })
+
+    // 4. Managed agy PreToolUse with empty runtime response: 0 bytes stdout/stderr.
+    preToolResponseStatus = 204
+    preToolResponseBody = ''
+    const preToolEmptyResult = await runScriptWithStdin(hookPath, preToolMtPayload, managedEnv)
+    expect(preToolEmptyResult).toEqual({ code: 0, stdout: '', stderr: '' })
+
+    // 5. Managed agy PreToolUse when runtime times out (>1s): 0 bytes stdout/stderr, exit 0.
+    preToolResponseStatus = 200
+    preToolResponseBody = decisionJson
+    preToolDelayMs = 1_300
+    const preToolTimeoutResult = await runScriptWithStdin(hookPath, preToolMtPayload, managedEnv)
+    expect(preToolTimeoutResult).toEqual({ code: 0, stdout: '', stderr: '' })
+    preToolDelayMs = 0
+
+    // 6. Managed agy PreToolUse when runtime is unreachable: 0 bytes stdout/stderr, exit 0.
+    const deadEnv: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      MATOU_PROVIDER_HOOK_URL: 'http://127.0.0.1:1/hooks/tok-dead',
+      MATOU_PROVIDER_HOOK_TOKEN: 'tok-dead'
+    }
+    const deadResult = await runScriptWithStdin(hookPath, preToolMtPayload, deadEnv)
+    expect(deadResult).toEqual({ code: 0, stdout: '', stderr: '' })
+
+    // 7. SessionStart: cats pre-generated JSON file only when env var points to readable file.
     const sysMsgFile = join(root, 'system-message.json')
     const sysMsgJson = JSON.stringify({ injectSteps: [{ systemMessage: { systemMessage: 'Hello Matou' } }] })
     await writeFile(sysMsgFile, sysMsgJson, 'utf8')

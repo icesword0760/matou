@@ -42,6 +42,7 @@ interface HookRegistrationRecord {
   settingsPath: string
   statusScriptPath: string
   systemMessagePath?: string
+  mtExecutablePath?: string
   lastAgentState?: string
   errorLatched?: boolean
   retirementTimer?: ReturnType<typeof setTimeout>
@@ -85,6 +86,7 @@ export interface AgentTeamObservation {
 export interface ProviderHookServerOptions {
   antigravitySettingsPath?: string
   antigravityRoot?: string
+  controlAssetRoot?: string
   currentRunId?: (sessionId: string) => string | undefined
   onNotification?: (notification: ProviderHookNotification) => void
   onWorkStatus?: (event: {
@@ -145,6 +147,7 @@ export class ProviderHookServer {
   readonly #sessions: SessionRepository
   readonly #antigravitySettingsPath: string
   readonly #antigravityRoot: string
+  readonly #defaultMtExecutablePath: string | undefined
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
@@ -165,6 +168,9 @@ export class ProviderHookServer {
       join(homedir(), '.gemini', 'antigravity-cli', 'settings.json')
     this.#antigravityRoot = options.antigravityRoot ??
       (options.antigravitySettingsPath ? dirname(options.antigravitySettingsPath) : defaultAntigravityRoot())
+    this.#defaultMtExecutablePath = options.controlAssetRoot
+      ? join(options.controlAssetRoot, 'bin', 'mt')
+      : undefined
     this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onWorkStatus = options.onWorkStatus ?? (() => {})
@@ -226,6 +232,7 @@ export class ProviderHookServer {
       forkAuthority?: ProviderIdentityForkAuthority
       forkSourceProviderSessionId?: string
       systemMessageMarkdown?: string
+      mtExecutablePath?: string
     }
   ): Promise<ProviderHookRegistration> {
     return this.#registerProviderSession(provider, input)
@@ -270,6 +277,7 @@ export class ProviderHookServer {
     forkAuthority?: ProviderIdentityForkAuthority
     forkSourceProviderSessionId?: string
     systemMessageMarkdown?: string
+    mtExecutablePath?: string
   }): Promise<ProviderHookRegistration> {
     return this.#registerProviderSession('antigravity', input)
   }
@@ -288,6 +296,7 @@ export class ProviderHookServer {
       forkAuthority?: ProviderIdentityForkAuthority
       forkSourceProviderSessionId?: string
       systemMessageMarkdown?: string
+      mtExecutablePath?: string
     }
   ): Promise<ProviderHookRegistration> {
     if (this.#port === undefined) throw new Error('Provider hook server is not started')
@@ -330,6 +339,8 @@ export class ProviderHookServer {
     })
     await rename(temporaryPath, settingsPath)
     await chmod(settingsPath, 0o600)
+    const resolvedMtExecutablePath = nonEmptyText(input.mtExecutablePath) ??
+      (provider === 'antigravity' ? this.#defaultMtExecutablePath : undefined)
     const record: HookRegistrationRecord = {
       runId: input.runId,
       sessionId: input.sessionId,
@@ -352,7 +363,8 @@ export class ProviderHookServer {
       acceptSideEffects: true,
       settingsPath,
       statusScriptPath,
-      ...(systemMessagePath === undefined ? {} : { systemMessagePath })
+      ...(systemMessagePath === undefined ? {} : { systemMessagePath }),
+      ...(resolvedMtExecutablePath === undefined ? {} : { mtExecutablePath: resolvedMtExecutablePath })
     }
     this.#registrations.set(token, record)
     let disposePromise: Promise<void> | undefined
@@ -396,6 +408,11 @@ export class ProviderHookServer {
     }
     const parsedUrl = parseHookUrl(request.url)
     const token = parsedUrl?.token
+    const isPreToolUseRequest = parsedUrl?.kind === 'pre-tool-use'
+    const replyNoIntervention = () => {
+      if (isPreToolUseRequest) sendEmpty(response)
+      else sendJson(response, 200, {})
+    }
     const registration = token === undefined ? undefined : this.#registrations.get(token)
     if (!registration) {
       sendJson(response, 404, { error: 'Unknown provider run' })
@@ -407,25 +424,32 @@ export class ProviderHookServer {
       // Session. Acknowledge later hooks so the provider is not stalled, but do
       // not let them mutate the original card's HUD, notifications or DAG.
       if (registration.identityRejected) {
-        sendJson(response, 200, {})
+        replyNoIntervention()
         return
       }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
-        sendJson(response, 200, {})
+        replyNoIntervention()
         return
       }
       const providerSessionId = providerSessionIdentity(payload, registration.provider)
       const eventName = nonEmptyText(payload.hook_event_name) ??
         nonEmptyText(payload.hookEventName) ??
         'unknown'
-      const isStatusline = parsedUrl?.isStatusline === true || eventName === 'unknown'
+      const isStatusline = parsedUrl?.kind === 'statusline' || eventName === 'unknown'
+      const preToolDecision = isPreToolUseRequest && registration.provider === 'antigravity'
+        ? evaluateAntigravityPreToolUse(payload, {
+            ...(registration.mtExecutablePath === undefined
+              ? {}
+              : { mtExecutablePath: registration.mtExecutablePath })
+          })
+        : undefined
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
       if (registration.forkSourceProviderSessionId !== undefined) {
         if (!registration.acceptIdentity || !providerSessionId) {
-          sendJson(response, 200, {})
+          replyNoIntervention()
           return
         }
         if (providerSessionId === registration.forkSourceProviderSessionId) {
@@ -441,7 +465,7 @@ export class ProviderHookServer {
               parentProviderSessionId: providerSessionId
             })
           }
-          sendJson(response, 200, {})
+          replyNoIntervention()
           return
         }
       }
@@ -453,14 +477,14 @@ export class ProviderHookServer {
       if (registration.forkAuthority !== undefined && (
         !registration.acceptIdentity || !providerSessionId || !confirmsConversation
       )) {
-        sendJson(response, 200, {})
+        replyNoIntervention()
         return
       }
       if (registration.expectedProviderSessionId !== undefined) {
         // During a targeted restore, no provider-owned side effect is trusted
         // until one authoritative payload confirms the requested conversation.
         if (!registration.acceptIdentity || !providerSessionId || !confirmsConversation) {
-          sendJson(response, 200, {})
+          replyNoIntervention()
           return
         }
         if (providerSessionId !== registration.expectedProviderSessionId) {
@@ -474,7 +498,7 @@ export class ProviderHookServer {
             actualProviderSessionId: providerSessionId,
             eventName
           })
-          sendJson(response, 200, {})
+          replyNoIntervention()
           return
         }
       }
@@ -563,18 +587,18 @@ export class ProviderHookServer {
             if (!(error instanceof StaleForkProviderIdentityError)) throw error
             registration.acceptIdentity = false
             registration.identityRejected = true
-            sendJson(response, 200, {})
+            replyNoIntervention()
             return
           }
         }
       }
       if (registration.provider === 'codex') {
-        sendJson(response, 200, {})
+        replyNoIntervention()
         return
       }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
-        sendJson(response, 200, {})
+        replyNoIntervention()
         return
       }
       this.#onHudPayload({
@@ -600,7 +624,7 @@ export class ProviderHookServer {
         })
         if (!this.#acceptsSideEffects(registration)) {
           this.#stopTitleWatch(registration)
-          sendJson(response, 200, {})
+          replyNoIntervention()
           return
         }
         if (observations.length > 0) await this.#onTeamObservations(observations)
@@ -613,7 +637,7 @@ export class ProviderHookServer {
       }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
-        sendJson(response, 200, {})
+        replyNoIntervention()
         return
       }
       const previousAgentState = registration.lastAgentState
@@ -645,7 +669,12 @@ export class ProviderHookServer {
           workStatus: antigravityWorkStatus
         })
       }
-      sendJson(response, 200, {})
+      if (isPreToolUseRequest) {
+        if (preToolDecision) sendJson(response, 200, preToolDecision)
+        else sendEmpty(response)
+      } else {
+        sendJson(response, 200, {})
+      }
     } catch (error) {
       sendJson(response, 409, { error: errorMessage(error) })
     }
@@ -933,13 +962,77 @@ async function readUserAntigravityStatusCommand(settingsPath: string): Promise<s
   }
 }
 
-function parseHookUrl(url: string | undefined): { token: string; isStatusline: boolean } | undefined {
+function parseHookUrl(url: string | undefined): {
+  token: string
+  kind: 'event' | 'statusline' | 'pre-tool-use'
+} | undefined {
   if (!url) return undefined
   const match = /^\/hooks\/([A-Za-z0-9_-]+)(?:\?(.*))?$/.exec(url)
   if (!match) return undefined
-  const query = match[2] ?? ''
-  const isStatusline = query.split('&').includes('kind=statusline')
-  return { token: match[1]!, isStatusline }
+  const params = new URLSearchParams(match[2] ?? '')
+  const rawKind = params.get('kind')
+  const kind = rawKind === 'statusline'
+    ? 'statusline'
+    : rawKind === 'pre-tool-use'
+      ? 'pre-tool-use'
+      : 'event'
+  return { token: match[1]!, kind }
+}
+
+export interface AntigravityPreToolUseDecision {
+  decision: 'allow'
+  overwrite: {
+    BypassSandbox: true
+  }
+}
+
+const DISALLOWED_MT_SHELL_CHARS_RE = /[;&|`$()<>{}\r\n\0]/
+
+/** Allows sandbox bypass only for direct single-command `mt` invocations in Antigravity PreToolUse. */
+export function evaluateAntigravityPreToolUse(
+  payload: Record<string, unknown>,
+  options: { mtExecutablePath?: string } = {}
+): AntigravityPreToolUseDecision | undefined {
+  const eventName = nonEmptyText(payload.hookEventName) ?? nonEmptyText(payload.hook_event_name)
+  if (eventName !== undefined && eventName !== 'PreToolUse') return undefined
+  const toolCall = record(payload.toolCall)
+  if (nonEmptyText(toolCall?.name) !== 'run_command') return undefined
+  const args = record(toolCall?.args)
+  const rawCommandLine = args?.CommandLine
+  if (typeof rawCommandLine !== 'string') return undefined
+  const trimmed = rawCommandLine.trim()
+  if (!trimmed || DISALLOWED_MT_SHELL_CHARS_RE.test(trimmed)) return undefined
+  const firstWord = extractFirstShellWord(trimmed)
+  if (!firstWord) return undefined
+  const allowedMtPath = nonEmptyText(options.mtExecutablePath)
+  if (firstWord !== 'mt' && (!allowedMtPath || firstWord !== allowedMtPath)) {
+    return undefined
+  }
+  return {
+    decision: 'allow',
+    overwrite: {
+      BypassSandbox: true
+    }
+  }
+}
+
+function extractFirstShellWord(trimmedCommand: string): string | undefined {
+  if (trimmedCommand.startsWith('"')) {
+    const endQuote = trimmedCommand.indexOf('"', 1)
+    if (endQuote <= 1) return undefined
+    const nextChar = trimmedCommand[endQuote + 1]
+    if (nextChar !== undefined && !/\s/.test(nextChar)) return undefined
+    return trimmedCommand.slice(1, endQuote)
+  }
+  if (trimmedCommand.startsWith("'")) {
+    const endQuote = trimmedCommand.indexOf("'", 1)
+    if (endQuote <= 1) return undefined
+    const nextChar = trimmedCommand[endQuote + 1]
+    if (nextChar !== undefined && !/\s/.test(nextChar)) return undefined
+    return trimmedCommand.slice(1, endQuote)
+  }
+  const match = /^(\S+)/.exec(trimmedCommand)
+  return match?.[1]
 }
 
 export function antigravityPermissionModeFromPayload(payload: Record<string, unknown>): string | undefined {
@@ -1186,6 +1279,11 @@ function nonEmptyText(value: unknown): string | undefined {
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { 'content-type': 'application/json' })
   response.end(JSON.stringify(body))
+}
+
+function sendEmpty(response: ServerResponse): void {
+  response.writeHead(204)
+  response.end()
 }
 
 function errorMessage(error: unknown): string {

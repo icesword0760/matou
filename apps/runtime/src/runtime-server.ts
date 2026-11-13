@@ -2113,7 +2113,10 @@ export class RuntimeServer {
                       'differs-from-parent-after-slash-fork'
                     ? { forkSourceProviderSessionId: forkLaunch.sourceProviderSessionId }
                     : {}),
-                  ...(antigravitySystemMessage ? { systemMessageMarkdown: antigravitySystemMessage } : {})
+                  ...(antigravitySystemMessage ? { systemMessageMarkdown: antigravitySystemMessage } : {}),
+                  ...(this.#controlAssetRoot
+                    ? { mtExecutablePath: join(this.#controlAssetRoot, 'bin', 'mt') }
+                    : {})
                 })
               : undefined
         if (hookRegistration) {

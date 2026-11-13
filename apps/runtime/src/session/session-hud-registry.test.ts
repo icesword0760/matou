@@ -595,3 +595,70 @@ it('treats Antigravity status ticks without cycle_mode as Ask mode (null) while 
   expect(registry.antigravityCycleMode('agy-ask')).toBe('accept-edits')
   expect(registry.snapshot('agy-ask')?.permissionMode).toBe('acceptEdits')
 })
+
+it('keeps default permission during real agy 1.5.8 startup model ticks before first cycle_mode, then detects Ask once cycle_mode has been seen', () => {
+  const registry = new SessionHudRegistry()
+  registry.spawn({
+    sessionId: 'agy-startup',
+    profile: 'antigravity',
+    cwd: '/repo',
+    startedAt: 100
+  })
+
+  const observed: Array<string | null> = []
+  registry.onAntigravityCycleMode('agy-startup', (mode) => observed.push(mode))
+
+  // Frame 1: pre-model startup frame
+  registry.ingestProvider('agy-startup', {
+    agent_state: 'idle',
+    conversation_id: '',
+    model: null,
+    context_window: { context_window_size: 0, used_percentage: 0 }
+  })
+  expect(registry.snapshot('agy-startup')?.permissionMode).toBe('default')
+
+  // Frames 2-5: real agy 1.5.8 emits model + quota BEFORE cycle_mode is initialized
+  registry.ingestProvider('agy-startup', {
+    agent_state: 'idle',
+    conversation_id: '',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' },
+    context_window: { context_window_size: 1048576, used_percentage: 0 }
+  })
+  registry.ingestProvider('agy-startup', {
+    agent_state: 'idle',
+    conversation_id: '',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' },
+    quota: { 'gemini-5h': { remaining_fraction: 0.76, reset_time: '2026-11-13T21:14:59Z' } }
+  })
+  expect(observed).toEqual([])
+  expect(registry.antigravityCycleMode('agy-startup')).toBeUndefined()
+  expect(registry.snapshot('agy-startup')?.permissionMode).toBe('default')
+  expect(registry.snapshot('agy-startup')?.model).toBe('Gemini 4 Carbon (Medium)')
+
+  // Frame 6: agy emits initial cycle_mode='auto'
+  registry.ingestProvider('agy-startup', {
+    agent_state: 'idle',
+    conversation_id: '',
+    cycle_mode: 'auto',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' }
+  })
+  expect(observed).toEqual(['auto'])
+  expect(registry.snapshot('agy-startup')?.permissionMode).toBe('default')
+
+  // Later Shift+Tab to plan -> Ask (omitted cycle_mode) IS reflected as 'ask'
+  registry.ingestProvider('agy-startup', {
+    agent_state: 'idle',
+    conversation_id: 'conv-1',
+    cycle_mode: 'plan',
+    plan_tier: 'Google AI Ultra',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' }
+  })
+  registry.ingestProvider('agy-startup', {
+    agent_state: 'idle',
+    conversation_id: 'conv-1',
+    plan_tier: 'Google AI Ultra',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' }
+  })
+  expect(registry.antigravityCycleMode('agy-startup')).toBeNull()
+  expect(registry.snapshot('agy-startup')?.permissionMode).toBe('ask')
+})

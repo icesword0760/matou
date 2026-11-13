@@ -27,6 +27,19 @@ const MATOU_HOOK_SH = `#!/bin/sh
 [ -n "\${MATOU_PROVIDER_HOOK_URL:-}" ] || exit 0
 [ -n "\${MATOU_PROVIDER_HOOK_TOKEN:-}" ] || exit 0
 payload=$(cat)
+case "$payload" in
+  *'"hookEventName":"PreToolUse"'*|*'"hookEventName": "PreToolUse"'*)
+    case "$MATOU_PROVIDER_HOOK_URL" in
+      *\\?*) decision_url="\${MATOU_PROVIDER_HOOK_URL}&kind=pre-tool-use" ;;
+      *) decision_url="\${MATOU_PROVIDER_HOOK_URL}?kind=pre-tool-use" ;;
+    esac
+    decision=$(printf '%s' "$payload" | /usr/bin/curl --silent --fail --max-time 1 \\
+      --request POST --header 'content-type: application/json' \\
+      --data-binary @- "$decision_url" 2>/dev/null) || exit 0
+    [ -n "$decision" ] && printf '%s' "$decision"
+    exit 0
+    ;;
+esac
 (
   printf '%s' "$payload" | /usr/bin/curl --silent --show-error --max-time 2 \\
     --request POST --header 'content-type: application/json' \\

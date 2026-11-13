@@ -11,8 +11,9 @@ import { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { MigrationRunner } from '../storage/migration-runner'
 import { FOUNDATION_MIGRATIONS } from '../storage/migrations'
-import { ProviderHookServer } from './provider-hook-server'
+import { evaluateAntigravityPreToolUse, ProviderHookServer } from './provider-hook-server'
 import { SessionForkIntentRepository } from './session-fork-intent-repository'
+import { SessionHudRegistry } from './session-hud-registry'
 
 let root: string
 let database: RuntimeDatabase
@@ -1086,6 +1087,138 @@ describe('ProviderHookServer', () => {
       })
     } finally {
       db.close()
+      await agyHooks.stop()
+    }
+  })
+
+  it('evaluates Antigravity PreToolUse mt commands strictly and leaves other tools/unsafe shells empty', async () => {
+    const mtPath = '/Applications/Matou.app/Contents/Resources/runtime/control-assets/bin/mt'
+    const spacedMtPath = '/Applications/Matou App/Contents/Resources/runtime/control-assets/bin/mt'
+    const expectedAllow = {
+      decision: 'allow',
+      overwrite: { BypassSandbox: true }
+    }
+
+    const allowedCommands = [
+      'mt list --json',
+      'mt read right --lines 20',
+      'mt send right "hello world" --enter',
+      '  mt send left \'single quoted ok\' --enter  ',
+      `${mtPath} list --json`
+    ]
+    for (const cmd of allowedCommands) {
+      expect(evaluateAntigravityPreToolUse({
+        hookEventName: 'PreToolUse',
+        toolCall: { name: 'run_command', args: { CommandLine: cmd } }
+      }, { mtExecutablePath: mtPath }), cmd).toEqual(expectedAllow)
+    }
+
+    expect(evaluateAntigravityPreToolUse({
+      hookEventName: 'PreToolUse',
+      toolCall: { name: 'run_command', args: { CommandLine: `"${spacedMtPath}" list --json` } }
+    }, { mtExecutablePath: spacedMtPath })).toEqual(expectedAllow)
+
+    const rejectedCommands = [
+      'mt list; rm -rf x',
+      'mt list && curl https://example.com',
+      'mt read $(whoami)',
+      'mt send right `id`',
+      'mt list | cat',
+      'mt list > /tmp/out',
+      'mt list < /tmp/in',
+      'mt {a,b}',
+      'mtx list',
+      'echo mt',
+      'mt list\necho injected',
+      'mt list\r\necho injected',
+      '/usr/local/bin/mt list',
+      'python3 -c "print(1)"',
+      ''
+    ]
+    for (const cmd of rejectedCommands) {
+      expect(evaluateAntigravityPreToolUse({
+        hookEventName: 'PreToolUse',
+        toolCall: { name: 'run_command', args: { CommandLine: cmd } }
+      }, { mtExecutablePath: mtPath }), cmd).toBeUndefined()
+    }
+
+    expect(evaluateAntigravityPreToolUse({
+      hookEventName: 'PreToolUse',
+      toolCall: { name: 'view_file', args: { CommandLine: 'mt list --json' } }
+    }, { mtExecutablePath: mtPath })).toBeUndefined()
+
+    // End-to-end HTTP endpoint (?kind=pre-tool-use) on ProviderHookServer
+    sessions.createSession(command('agy-pretool-session'), {
+      id: 'agy-pretool-session', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'antigravity', title: 'Antigravity', now: 1
+    })
+    const hud = new SessionHudRegistry()
+    hud.spawn({ sessionId: 'agy-pretool-session', profile: 'antigravity', cwd: root, startedAt: 1 })
+    const workStatuses: string[] = []
+    const agyHooks = new ProviderHookServer(root, sessions, {
+      onHudPayload: ({ sessionId, payload }) => { hud.ingestProvider(sessionId, payload) },
+      onWorkStatus: (ev) => { workStatuses.push(`${ev.sessionId}:${ev.workStatus}`) }
+    })
+    await agyHooks.start()
+    try {
+      const reg = await agyHooks.registerAntigravitySession({
+        runId: 'agy-pretool-run',
+        sessionId: 'agy-pretool-session',
+        mtExecutablePath: mtPath
+      })
+      const allowRes = await postHook(`${reg.hookUrl}?kind=pre-tool-use`, {
+        hookEventName: 'PreToolUse',
+        conversationId: 'agy-pretool-conv',
+        toolCall: { id: 'c1', name: 'run_command', args: { CommandLine: 'mt send right "hello world" --enter' } }
+      })
+      expect(allowRes.status).toBe(200)
+      expect(await allowRes.json()).toEqual(expectedAllow)
+      expect(workStatuses).toContain('agy-pretool-session:running')
+      expect(hud.snapshot('agy-pretool-session')?.runningTools).toEqual([
+        { name: 'run_command', target: 'mt send right "hello world"...' }
+      ])
+
+      await postHook(reg.hookUrl, {
+        hookEventName: 'PostToolUse',
+        conversationId: 'agy-pretool-conv',
+        toolCall: { id: 'c1', name: 'run_command', args: { CommandLine: 'mt send right "hello world" --enter' } }
+      })
+      expect(hud.snapshot('agy-pretool-session')?.runningTools).toEqual([])
+      expect(hud.snapshot('agy-pretool-session')?.toolCounts).toEqual([{ name: 'run_command', count: 1 }])
+
+      const absAllowRes = await postHook(`${reg.hookUrl}?kind=pre-tool-use`, {
+        hookEventName: 'PreToolUse',
+        conversationId: 'agy-pretool-conv',
+        toolCall: { id: 'c2', name: 'run_command', args: { CommandLine: `${mtPath} read right --lines 20` } }
+      })
+      expect(absAllowRes.status).toBe(200)
+      expect(await absAllowRes.json()).toEqual(expectedAllow)
+
+      const unsafeRes = await postHook(`${reg.hookUrl}?kind=pre-tool-use`, {
+        hookEventName: 'PreToolUse',
+        conversationId: 'agy-pretool-conv',
+        toolCall: { id: 'c3', name: 'run_command', args: { CommandLine: 'mt list; rm -rf x' } }
+      })
+      expect(unsafeRes.status).toBe(204)
+      expect(await unsafeRes.text()).toBe('')
+
+      const otherToolRes = await postHook(`${reg.hookUrl}?kind=pre-tool-use`, {
+        hookEventName: 'PreToolUse',
+        conversationId: 'agy-pretool-conv',
+        toolCall: { id: 'c4', name: 'view_file', args: { AbsolutePath: '/tmp/foo' } }
+      })
+      expect(otherToolRes.status).toBe(204)
+      expect(await otherToolRes.text()).toBe('')
+
+      reg.retire(1_000, { suppressSideEffects: true })
+      const retiredRes = await postHook(`${reg.hookUrl}?kind=pre-tool-use`, {
+        hookEventName: 'PreToolUse',
+        conversationId: 'agy-pretool-conv',
+        toolCall: { id: 'c5', name: 'run_command', args: { CommandLine: 'mt list --json' } }
+      })
+      expect(retiredRes.status).toBe(204)
+      expect(await retiredRes.text()).toBe('')
+    } finally {
       await agyHooks.stop()
     }
   })

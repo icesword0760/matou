@@ -315,9 +315,7 @@ export class SessionHudRegistry {
       !text(payload.hook_event_name) &&
       !text(payload.hookEventName) &&
       ('cycle_mode' in payload || 'model' in payload || 'context_window' in payload || 'agent_state' in payload) &&
-      ('cycle_mode' in payload ||
-        current.antigravityCycleMode !== undefined ||
-        Boolean(nestedText(payload.model, 'id') ?? nestedText(payload.model, 'display_name')))
+      ('cycle_mode' in payload || current.antigravityCycleMode !== undefined)
     const observedCycleMode = isAntigravityStatusTick ? (text(payload.cycle_mode) ?? null) : undefined
     const rawPermission = current.provider === 'antigravity'
       ? (text(payload.cycle_mode) === 'auto' ? 'default' : text(payload.cycle_mode))
