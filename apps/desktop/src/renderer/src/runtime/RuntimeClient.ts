@@ -93,9 +93,12 @@ export class RuntimeClient {
   readonly #recoveryListeners = new Set<(status: SessionRecoveryStatus) => void>()
   readonly #recoveryResetListeners = new Set<() => void>()
   readonly #recoveryStatuses = new Map<string, SessionRecoveryStatus>()
-  readonly #egressStatusListeners = new Set<(status: EgressStatusWire) => void>()
-  readonly #egressReconnectListeners = new Set<() => void>()
+  readonly #egressStatusListeners = new Set<() => void>()
   #egressStatus: EgressStatusWire | undefined
+  #egressFetchedForPort = false
+  #egressFetchInFlight: Promise<void> | null = null
+  #egressPortEpoch = 0
+  #egressPushSeq = 0
   readonly #readyWaiters = new Set<() => void>()
   #port: RuntimeClientPort
   #ready = false
@@ -140,8 +143,16 @@ export class RuntimeClient {
       this.#requests.delete(requestId)
     }
     this.#bindPort(port)
-    this.#egressStatus = undefined
-    for (const listener of this.#egressReconnectListeners) listener()
+    this.#egressPortEpoch += 1
+    this.#egressFetchedForPort = false
+    this.#egressFetchInFlight = null
+    if (this.#egressStatus !== undefined) {
+      this.#egressStatus = undefined
+      this.#notifyEgressListeners()
+    }
+    if (this.#egressStatusListeners.size > 0) {
+      this.#ensureEgressStatus()
+    }
   }
 
   dispose(): void {
@@ -156,7 +167,7 @@ export class RuntimeClient {
     this.#recoveryListeners.clear()
     this.#recoveryResetListeners.clear()
     this.#egressStatusListeners.clear()
-    this.#egressReconnectListeners.clear()
+    this.#egressFetchInFlight = null
     for (const [requestId, pending] of this.#requests) {
       clearTimeout(pending.timeout)
       pending.reject(new Error('Runtime client was disposed before the request completed'))
@@ -282,17 +293,57 @@ export class RuntimeClient {
     }
   }
 
-  subscribeEgressStatus(
-    listener: (status: EgressStatusWire) => void,
-    onReconnect?: () => void
-  ): () => void {
+  getEgressStatusSnapshot = (): EgressStatusWire | undefined => {
+    return this.#egressStatus
+  }
+
+  subscribeEgressStatus = (listener: () => void): (() => void) => {
     this.#egressStatusListeners.add(listener)
-    if (onReconnect) this.#egressReconnectListeners.add(onReconnect)
-    if (this.#egressStatus !== undefined) listener(this.#egressStatus)
+    this.#ensureEgressStatus()
     return () => {
       this.#egressStatusListeners.delete(listener)
-      if (onReconnect) this.#egressReconnectListeners.delete(onReconnect)
     }
+  }
+
+  updateEgressStatus(status: EgressStatusWire): void {
+    if (this.#disposed) return
+    this.#egressPushSeq += 1
+    this.#egressStatus = status
+    this.#notifyEgressListeners()
+  }
+
+  #notifyEgressListeners(): void {
+    for (const listener of this.#egressStatusListeners) listener()
+  }
+
+  #ensureEgressStatus(): void {
+    if (this.#disposed || this.#egressFetchedForPort || this.#egressFetchInFlight) return
+    this.#egressFetchedForPort = true
+    const epoch = this.#egressPortEpoch
+    const pushSeqAtStart = this.#egressPushSeq
+    const promise = this.request<EgressStatusWire>('egress.status', undefined)
+      .then((status) => {
+        if (
+          this.#disposed ||
+          epoch !== this.#egressPortEpoch ||
+          pushSeqAtStart !== this.#egressPushSeq
+        ) {
+          return
+        }
+        if (isEgressStatusPayload(status)) {
+          this.#egressStatus = status
+          this.#notifyEgressListeners()
+        }
+      })
+      .catch(() => {
+        // Silent fallback: RPC errors hide egress UI without blocking cards.
+      })
+      .finally(() => {
+        if (this.#egressFetchInFlight === promise) {
+          this.#egressFetchInFlight = null
+        }
+      })
+    this.#egressFetchInFlight = promise
   }
 
   prioritizeSessionRecovery(
@@ -582,8 +633,9 @@ export class RuntimeClient {
       return
     }
     if (message.type === 'egress.status') {
+      this.#egressPushSeq += 1
       this.#egressStatus = message.status
-      for (const listener of this.#egressStatusListeners) listener(message.status)
+      this.#notifyEgressListeners()
     }
   }
 
@@ -737,6 +789,17 @@ function hostNavigationAttemptKey(value: {
   attemptId: string
 }): string {
   return `${value.requestId}\u0000${value.attemptId}`
+}
+
+function isEgressStatusPayload(value: unknown): value is EgressStatusWire {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    Array.isArray(record.families) &&
+    Array.isArray(record.checks) &&
+    Boolean(record.sessionFamilies) &&
+    typeof record.sessionFamilies === 'object'
+  )
 }
 
 function effectiveTerminalConfig(

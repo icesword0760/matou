@@ -59,7 +59,6 @@ function buildSampleStatus(overrides: Partial<EgressStatusWire> = {}): EgressSta
       { id: 'mainland', family: 'openai', result: 'pass' },
       {
         id: 'browser-path',
-        family: 'openai',
         result: 'warn',
         facts: { browserIp: '203.0.113.5', agentIp: '198.51.100.42' }
       },
@@ -107,7 +106,11 @@ describe('EgressPanel', () => {
     expect(screen.getByText('检测于 09:05')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Claude（Anthropic）' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Codex（OpenAI）' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: '本机' })).toBeTruthy()
+    const thisMacSection = screen.getByRole('region', { name: '本机' })
+    expect(thisMacSection).toBeTruthy()
+    expect(thisMacSection.textContent).toContain(
+      '浏览器 203.0.113.5，终端 198.51.100.42。授权登录和使用时 IP 不同。'
+    )
 
     expect(
       screen.getByText(

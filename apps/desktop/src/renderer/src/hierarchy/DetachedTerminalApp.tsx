@@ -19,7 +19,7 @@ import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 import { ReadOnlyRecoveryBanner } from '../recovery/ReadOnlyRecoveryBanner'
 import { StorageFaultOverlay } from './StorageFaultOverlay'
 import { EgressFreezeBanner } from '../egress/EgressFreezeBanner'
-import { isSessionEgressFrozen, useEgressStatus } from '../egress/use-egress-status'
+import { useEgressActions, useSessionEgressBanner } from '../egress/use-egress-status'
 import {
   DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
   usePersistentTerminalFontSize
@@ -31,11 +31,12 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
   const m = messages.hierarchyTerminal.detachedWindow
   const shell = messages.hierarchyShell
   const client = useRuntimeClient()
-  const { status: egressStatus, recheck: recheckEgress, override: overrideEgress } = useEgressStatus()
+  const { recheck: recheckEgress, override: overrideEgress } = useEgressActions()
   const readOnly = runtimeMode === 'read-only'
   const query = new URLSearchParams(window.location.search)
   const sessionId = query.get('sessionId') ?? ''
-  const egressFrozen = isSessionEgressFrozen(egressStatus, sessionId)
+  const egressBanner = useSessionEgressBanner(sessionId)
+  const egressFrozen = egressBanner.frozen
   const mainWindowId = query.get('mainWindowId') ?? ''
   const sceneId = query.get('sceneId') ?? ''
   const executionContextId = query.get('executionContextId') ?? 'local-default'
@@ -220,7 +221,7 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
       }} />}
     {!isTeamMember && <EgressFreezeBanner
       sessionId={sessionId}
-      status={egressStatus}
+      banner={egressBanner}
       onRecheck={recheckEgress}
       onOverride={overrideEgress} />}
     {isTeamMember ? <AgentTeamMemberSummary

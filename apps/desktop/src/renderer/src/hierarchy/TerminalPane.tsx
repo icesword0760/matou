@@ -19,7 +19,7 @@ import type { SessionEnvironmentTarget } from '@matou/contracts'
 import { useRuntimeClient } from '../runtime/RuntimeProvider'
 import { StorageFaultOverlay } from './StorageFaultOverlay'
 import { EgressFreezeBanner } from '../egress/EgressFreezeBanner'
-import { isSessionEgressFrozen, useEgressStatus } from '../egress/use-egress-status'
+import { useEgressActions, useSessionEgressBanner } from '../egress/use-egress-status'
 import {
   activeForkProgress,
   ForkProgressOverlay
@@ -200,8 +200,9 @@ export function TerminalPane(props: {
     if (recoveryBusy) setTerminalVisualReady(false)
   }, [recoveryBusy])
   const storageBlocked = storageFault !== null
-  const { status: egressStatus, recheck: recheckEgress, override: overrideEgress } = useEgressStatus()
-  const egressFrozen = isSessionEgressFrozen(egressStatus, session.id)
+  const egressBanner = useSessionEgressBanner(session.id)
+  const egressFrozen = egressBanner.frozen
+  const { recheck: recheckEgress, override: overrideEgress } = useEgressActions()
   const actionBlocked = readOnly || storageBlocked || environmentUnavailable || recoveryBlocking
   const forkRepairBlocked = readOnly || storageBlocked || environmentUnavailable
   const freshStartBlocked = readOnly || storageBlocked || environmentUnavailable
@@ -458,7 +459,7 @@ export function TerminalPane(props: {
       </div>}
     {!isTeamMember && <EgressFreezeBanner
       sessionId={session.id}
-      status={egressStatus}
+      banner={egressBanner}
       onRecheck={recheckEgress}
       onOverride={overrideEgress} />}
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary

@@ -1,11 +1,14 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
+import type { EgressStatusWire } from '@matou/contracts'
 import { useLocale } from '../i18n/LocaleProvider'
-import { chipCopy } from './egress-copy'
+import { chipCopy, type ChipCopy } from './egress-copy'
 import { EgressPanel } from './EgressPanel'
 import {
   findEgressFamily,
   sessionEgressFamily,
+  useEgressActions,
+  useEgressSelector,
   useEgressStatus
 } from './use-egress-status'
 import './egress.css'
@@ -14,19 +17,16 @@ export interface EgressChipProps {
   readonly sessionId: string
 }
 
-/** Compact HUD exit-status chip for official Claude and Codex cards; hidden for shell/third-party cards. */
-export function EgressChip({ sessionId }: EgressChipProps) {
-  const zh = useLocale() === 'zh-CN'
-  const { status, recheck, setRule, acceptCurrent, setProtection } = useEgressStatus()
-  const [open, setOpen] = useState(false)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-
+function selectChipCopy(
+  status: EgressStatusWire | undefined,
+  sessionId: string,
+  zh: boolean
+): ChipCopy | null {
   if (!status) return null
   const family = sessionEgressFamily(status, sessionId)
   if (!family) return null
-
   const familyState = findEgressFamily(status, family)
-  const copy = chipCopy(
+  return chipCopy(
     status.state,
     family,
     familyState,
@@ -34,6 +34,50 @@ export function EgressChip({ sessionId }: EgressChipProps) {
     status.checkedAt,
     zh
   )
+}
+
+function equalChipCopy(a: ChipCopy | null, b: ChipCopy | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.label === b.label && a.tone === b.tone
+}
+
+function ConnectedEgressPanel({
+  anchorRef,
+  onClose
+}: {
+  anchorRef: RefObject<HTMLElement | null>
+  onClose: () => void
+}) {
+  const { status, recheck, setRule, acceptCurrent, setProtection } = useEgressStatus()
+  if (!status) return null
+  return (
+    <EgressPanel
+      status={status}
+      anchorRef={anchorRef}
+      onClose={onClose}
+      onRecheck={recheck}
+      onSetRule={setRule}
+      onAcceptCurrent={acceptCurrent}
+      onSetProtection={setProtection}
+    />
+  )
+}
+
+/** Compact HUD exit-status chip for official Claude and Codex cards; hidden for shell/third-party cards. */
+export function EgressChip({ sessionId }: EgressChipProps) {
+  const zh = useLocale() === 'zh-CN'
+  const selector = useCallback(
+    (status: EgressStatusWire | undefined) => selectChipCopy(status, sessionId, zh),
+    [sessionId, zh]
+  )
+  const copy = useEgressSelector(selector, equalChipCopy)
+  // Keep actions ref stable without pulling full status updates.
+  useEgressActions()
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+
+  if (!copy) return null
 
   return (
     <>
@@ -51,14 +95,9 @@ export function EgressChip({ sessionId }: EgressChipProps) {
       </button>
       {open &&
         createPortal(
-          <EgressPanel
-            status={status}
+          <ConnectedEgressPanel
             anchorRef={triggerRef}
             onClose={() => setOpen(false)}
-            onRecheck={recheck}
-            onSetRule={setRule}
-            onAcceptCurrent={acceptCurrent}
-            onSetProtection={setProtection}
           />,
           document.body
         )}
