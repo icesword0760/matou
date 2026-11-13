@@ -4,7 +4,8 @@ import {
   type EgressFamily,
   type EgressFamilyWire,
   type EgressHostSample,
-  type EgressStatusWire
+  type EgressStatusWire,
+  type SubscriptionProvider
 } from '@matou/contracts'
 import {
   EGRESS_HOSTS,
@@ -47,6 +48,12 @@ function matchesOfficialHost(rawUrl: string | undefined, officialHost: string): 
   }
 }
 
+export interface EgressLaunchPlan {
+  family?: EgressFamily
+  hideTimeZone: boolean
+  exitFamily?: EgressFamily
+}
+
 /** Maps a session launch profile and provider environment to its monitored official egress family. */
 export function egressFamilyForLaunch(
   profile: string,
@@ -63,6 +70,33 @@ export function egressFamilyForLaunch(
       : undefined
   }
   return undefined
+}
+
+/** Resolves session egress monitoring family and mainland time-zone hiding policy for a launch. */
+export function egressPlanForLaunch(
+  profile: string,
+  providerEnv: Record<string, string | undefined>,
+  subscriptionProvider?: SubscriptionProvider
+): EgressLaunchPlan {
+  if (profile === 'claude-code') {
+    if (subscriptionProvider === 'codex') {
+      return {
+        family: 'chatgpt-subscription',
+        hideTimeZone: true,
+        exitFamily: 'chatgpt-subscription'
+      }
+    }
+    if (subscriptionProvider === 'antigravity') {
+      return {
+        hideTimeZone: true
+      }
+    }
+  }
+  const family = egressFamilyForLaunch(profile, providerEnv)
+  return {
+    ...(family === undefined ? {} : { family, exitFamily: family }),
+    hideTimeZone: family !== undefined
+  }
 }
 
 /** Monitors provider network exits and coordinates per-provider session freezing and auto-resume. */

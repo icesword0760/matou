@@ -14,7 +14,8 @@ import {
   EGRESS_RECOVERY_CONFIRM_DELAY_MS,
   EGRESS_WAKE_DRIFT_THRESHOLD_MS,
   EgressMonitor,
-  egressFamilyForLaunch
+  egressFamilyForLaunch,
+  egressPlanForLaunch
 } from './egress-monitor'
 import { EgressSettings } from './egress-settings'
 
@@ -975,5 +976,47 @@ describe('egressFamilyForLaunch', () => {
     ).toBeUndefined()
 
     expect(egressFamilyForLaunch('shell', {})).toBeUndefined()
+  })
+})
+
+describe('egressPlanForLaunch', () => {
+  it('classifies subscription, official, third-party, and shell launches accurately', () => {
+    expect(egressPlanForLaunch('claude-code', {}, 'codex')).toEqual({
+      family: 'chatgpt-subscription',
+      hideTimeZone: true,
+      exitFamily: 'chatgpt-subscription'
+    })
+
+    expect(egressPlanForLaunch('claude-code', {}, 'antigravity')).toEqual({
+      hideTimeZone: true
+    })
+
+    expect(
+      egressPlanForLaunch('claude-code', { ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' })
+    ).toEqual({
+      hideTimeZone: false
+    })
+
+    expect(egressPlanForLaunch('claude-code', {})).toEqual({
+      family: 'anthropic',
+      hideTimeZone: true,
+      exitFamily: 'anthropic'
+    })
+
+    expect(egressPlanForLaunch('codex', {})).toEqual({
+      family: 'openai',
+      hideTimeZone: true,
+      exitFamily: 'openai'
+    })
+
+    expect(
+      egressPlanForLaunch('codex', { OPENAI_BASE_URL: 'https://openrouter.ai/api/v1' })
+    ).toEqual({
+      hideTimeZone: false
+    })
+
+    expect(egressPlanForLaunch('shell', {})).toEqual({
+      hideTimeZone: false
+    })
   })
 })

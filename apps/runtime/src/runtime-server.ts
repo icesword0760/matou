@@ -51,7 +51,7 @@ import {
   type HostNavigationRegistration
 } from './control/host-navigation-broker'
 import { RpcFault, RuntimeRpcRouter } from './rpc/runtime-rpc-router'
-import { egressFamilyForLaunch, type EgressMonitor } from './egress/egress-monitor'
+import { egressPlanForLaunch, type EgressMonitor } from './egress/egress-monitor'
 import { PtySession, SessionEgressFrozenError } from './session/pty-session'
 import { ClaudeSettings } from './session/claude-settings'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
@@ -2077,8 +2077,13 @@ export class RuntimeServer {
             ...(providerModel ? { model: providerModel } : {}),
             env: providerSelection.env
           }
-      const egressFamily = egressFamilyForLaunch(message.profile, providerLaunch.env)
-      const egressCountry = egressFamily ? this.#egress?.exitCountry(egressFamily) : undefined
+      const egressPlan = egressPlanForLaunch(
+        message.profile,
+        providerLaunch.env,
+        providerSelection?.subscription?.subscription.provider
+      )
+      const egressFamily = egressPlan.family
+      const egressCountry = egressPlan.exitFamily ? this.#egress?.exitCountry(egressPlan.exitFamily) : undefined
       if (!this.#hud.snapshot(message.sessionId)) {
         this.#hud.spawn({
           sessionId: message.sessionId,
@@ -2303,7 +2308,7 @@ export class RuntimeServer {
           ...providerLaunch.env, ...controlEnvironment,
           ...new ClaudeSettings(this.#database).environment(message.profile, {
             ...(egressCountry === undefined ? {} : { exitCountry: egressCountry }),
-            official: egressFamily !== undefined
+            official: egressPlan.hideTimeZone
           })
         },
         ...(attachView ? { send: this.#sendToPort } : {}),

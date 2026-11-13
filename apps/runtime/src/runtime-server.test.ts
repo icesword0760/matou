@@ -18,6 +18,8 @@ import {
 import { EgressMonitor } from './egress/egress-monitor'
 import { EGRESS_HOSTS, type EgressSample } from './egress/egress-evaluator'
 import { EgressSettings } from './egress/egress-settings'
+import type { ClaudeLaunchInput } from './model-router/claude-launch'
+import type { SubscriptionAccounts } from './model-router/subscription-accounts'
 import { SessionEgressFrozenError } from './session/pty-session'
 
 import { TerminalScreenProjector } from './control/terminal-screen-projector'
@@ -7623,7 +7625,14 @@ describe('RuntimeServer egress monitoring', () => {
     }
   }
 
-  function createHarness(initialSample: EgressSample) {
+  function createHarness(
+    initialSample: EgressSample,
+    extraOptions?: {
+      providerConfigs?: ProviderConfigStore
+      providerHooks?: ProviderHookServer
+      subscriptionAccounts?: SubscriptionAccounts
+    }
+  ) {
     let currentSample = initialSample
     const sessions = createTestSessionRegistry()
     const egressServers = new Set<RuntimeServer>()
@@ -7648,9 +7657,22 @@ describe('RuntimeServer egress monitoring', () => {
       }
     })
     const testPort = new MockPort()
-    const egressServer = new RuntimeServer(testPort, root, database, undefined, undefined, sessions, undefined, undefined, {
-      egress: monitor
-    })
+    const egressServer = new RuntimeServer(
+      testPort,
+      root,
+      database,
+      extraOptions?.providerConfigs
+        ? new RuntimeRpcRouter(database, undefined, { providerConfigs: extraOptions.providerConfigs })
+        : undefined,
+      undefined,
+      sessions,
+      extraOptions?.providerHooks,
+      undefined,
+      {
+        egress: monitor,
+        ...(extraOptions?.subscriptionAccounts ? { subscriptionAccounts: extraOptions.subscriptionAccounts } : {})
+      }
+    )
     egressServers.add(egressServer)
     testPort.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'egress-client' })
     return {
@@ -7949,6 +7971,208 @@ describe('RuntimeServer egress monitoring', () => {
       ).toBe(true)
     } finally {
       harness.cleanup()
+    }
+  })
+
+  it('classifies ChatGPT subscription claude-code sessions as chatgpt-subscription instead of anthropic', async () => {
+    const providerConfigs = new ProviderConfigStore(root)
+    const adopted = await providerConfigs.adoptSubscription({
+      name: 'ChatGPT Subscription',
+      modelMapping: { opus: 'gpt-6.1-sol', sonnet: 'gpt-6-sol', haiku: 'gpt-6-luna' },
+      subscription: {
+        provider: 'codex',
+        credentialRef: { name: 'codex.json' },
+        account: { status: 'ready' },
+        modelMetadata: [
+          { id: 'gpt-6.1-sol', contextWindow: 400000 },
+          { id: 'gpt-6-sol', contextWindow: 200000 },
+          { id: 'gpt-6-luna', contextWindow: 100000 }
+        ]
+      }
+    })
+    await providerConfigs.activate('claude-code', adopted.id)
+
+    const input: Omit<ClaudeLaunchInput, 'inheritedEnvNames'> = {
+      subscription: 'chatgpt',
+      accountPrefix: 'matou-chatgpt',
+      routerUrl: 'http://127.0.0.1:12345',
+      clientKey: 'local-router-client-key',
+      providerName: 'ChatGPT Subscription',
+      mainRole: 'opus',
+      models: {
+        opus: { id: 'gpt-6.1-sol', displayName: 'Fixture Opus', contextWindow: 400000, maxOutputTokens: 128000 },
+        sonnet: { id: 'gpt-6-sol', contextWindow: 200000 },
+        haiku: { id: 'gpt-6-luna', contextWindow: 100000 }
+      }
+    }
+    const subscriptionAccounts = {
+      onChange: () => () => {},
+      prepareLaunch: async () => ({
+        input,
+        lease: {
+          connection: { baseUrl: input.routerUrl, clientKey: input.clientKey, managementKey: 'private', pid: process.pid },
+          release: () => {}
+        }
+      })
+    } as unknown as SubscriptionAccounts
+
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    const providerHooks = new ProviderHookServer(root, repository)
+    await providerHooks.start()
+
+    const chatgptTwSample = (): EgressSample => ({
+      ...okSample('CN', '223.5.5.5'),
+      hosts: {
+        ...okSample('CN', '223.5.5.5').hosts,
+        'chatgpt-subscription': {
+          api: { host: 'chatgpt.com', ip: '198.51.100.30', country: 'TW' },
+          login: { host: 'auth.openai.com', ip: '198.51.100.30', country: 'TW' }
+        }
+      }
+    })
+    const harness = createHarness(chatgptTwSample(), {
+      providerConfigs,
+      providerHooks,
+      subscriptionAccounts
+    })
+    await harness.monitor.recheck()
+    const registerSpy = vi.spyOn(harness.monitor, 'registerSession')
+
+    const captureFile = join(root, 'chatgpt-sub-env.txt')
+    const executable = join(root, 'claude-chatgpt-sub-stub.sh')
+    await writeFile(executable, `#!/bin/sh\nprintf "%s|%s" "$TZ" "$ANTHROPIC_BASE_URL" > '${captureFile}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    const previousTz = process.env.TZ
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.TZ = 'Asia/Shanghai'
+
+    try {
+      registerCanvasSession(database, 'egress-chatgpt-sub', 'claude-code')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-chatgpt-sub', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-chatgpt-sub')
+      await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Taipei|http://127.0.0.1:12345')
+
+      expect(registerSpy).toHaveBeenCalledWith('egress-chatgpt-sub', 'chatgpt-subscription')
+      expect(registerSpy).not.toHaveBeenCalledWith('egress-chatgpt-sub', 'anthropic')
+      expect(harness.monitor.status().sessionFamilies['egress-chatgpt-sub']).toBe('chatgpt-subscription')
+      expect(harness.sessions.get('egress-chatgpt-sub')?.egressFrozen).toBe(false)
+
+      harness.setSample({
+        ...okSample('US', '203.0.113.10'),
+        hosts: {
+          ...okSample('US', '203.0.113.10').hosts,
+          'chatgpt-subscription': {
+            api: { host: 'chatgpt.com', ip: '223.5.5.5', country: 'CN' },
+            login: { host: 'auth.openai.com', ip: '223.5.5.5', country: 'CN' }
+          }
+        }
+      })
+      await harness.monitor.recheck()
+      await waitUntil(() => harness.sessions.get('egress-chatgpt-sub')?.egressFrozen === true)
+    } finally {
+      harness.cleanup()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+      restoreEnv('TZ', previousTz)
+    }
+  })
+
+  it('hides timezone but does not register or freeze antigravity subscription claude-code sessions', async () => {
+    const providerConfigs = new ProviderConfigStore(root)
+    await providerConfigs.confirmAntigravityRisk()
+    const adopted = await providerConfigs.adoptSubscription({
+      name: 'Antigravity Subscription',
+      modelMapping: { opus: 'gemini-3-pro', sonnet: 'gemini-3-pro', haiku: 'gemini-3-flash' },
+      subscription: {
+        provider: 'antigravity',
+        credentialRef: { name: 'antigravity.json' },
+        account: { status: 'ready' },
+        modelMetadata: [
+          { id: 'gemini-3-pro', contextWindow: 400000 },
+          { id: 'gemini-3-flash', contextWindow: 200000 }
+        ]
+      }
+    })
+    await providerConfigs.activate('claude-code', adopted.id)
+
+    const input: Omit<ClaudeLaunchInput, 'inheritedEnvNames'> = {
+      subscription: 'antigravity',
+      accountPrefix: 'matou-antigravity',
+      routerUrl: 'http://127.0.0.1:12346',
+      clientKey: 'local-router-client-key',
+      providerName: 'Antigravity Subscription',
+      mainRole: 'opus',
+      models: {
+        opus: { id: 'gemini-3-pro', displayName: 'Fixture AG Opus', contextWindow: 400000, maxOutputTokens: 128000 },
+        sonnet: { id: 'gemini-3-pro', contextWindow: 400000 },
+        haiku: { id: 'gemini-3-flash', contextWindow: 200000 }
+      }
+    }
+    const subscriptionAccounts = {
+      onChange: () => () => {},
+      prepareLaunch: async () => ({
+        input,
+        lease: {
+          connection: { baseUrl: input.routerUrl, clientKey: input.clientKey, managementKey: 'private', pid: process.pid },
+          release: () => {}
+        }
+      })
+    } as unknown as SubscriptionAccounts
+
+    const repository = new SessionRepository(database, new DomainTransactionManager(database))
+    const providerHooks = new ProviderHookServer(root, repository)
+    await providerHooks.start()
+
+    const allCnSample: EgressSample = {
+      ...okSample('CN', '223.5.5.5'),
+      hosts: {
+        ...okSample('CN', '223.5.5.5').hosts,
+        'chatgpt-subscription': {
+          api: { host: 'chatgpt.com', ip: '223.5.5.5', country: 'CN' },
+          login: { host: 'auth.openai.com', ip: '223.5.5.5', country: 'CN' }
+        }
+      }
+    }
+    const harness = createHarness(allCnSample, {
+      providerConfigs,
+      providerHooks,
+      subscriptionAccounts
+    })
+    await harness.monitor.recheck()
+    const registerSpy = vi.spyOn(harness.monitor, 'registerSession')
+
+    const captureFile = join(root, 'antigravity-sub-env.txt')
+    const executable = join(root, 'claude-antigravity-sub-stub.sh')
+    await writeFile(executable, `#!/bin/sh\nprintf "%s|%s" "$TZ" "$ANTHROPIC_BASE_URL" > '${captureFile}'\nsleep 30\n`)
+    await chmod(executable, 0o755)
+    const previousClaude = process.env.MATOU_CLAUDE_COMMAND
+    const previousTz = process.env.TZ
+    process.env.MATOU_CLAUDE_COMMAND = executable
+    process.env.TZ = 'Asia/Shanghai'
+
+    try {
+      registerCanvasSession(database, 'egress-ag-sub', 'claude-code')
+      harness.testPort.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'egress-ag-sub', executionContextId: 'replay-context',
+        profile: 'claude-code', cols: 80, rows: 24
+      })
+      await waitUntil(() => harness.testPort.last('terminal.spawned')?.sessionId === 'egress-ag-sub')
+      await waitUntilAsync(async () => (await readFile(captureFile, 'utf8').catch(() => '')) === 'Asia/Singapore|http://127.0.0.1:12346')
+
+      expect(registerSpy).not.toHaveBeenCalled()
+      expect(harness.monitor.status().sessionFamilies['egress-ag-sub']).toBeUndefined()
+      expect(harness.sessions.get('egress-ag-sub')?.egressFrozen).toBe(false)
+    } finally {
+      harness.cleanup()
+      await providerHooks.stop()
+      restoreEnv('MATOU_CLAUDE_COMMAND', previousClaude)
+      restoreEnv('TZ', previousTz)
     }
   })
 })
