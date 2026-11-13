@@ -85,6 +85,7 @@ export class RuntimeClient {
   #foregroundTerminalSessions = new Set<string>()
   readonly #terminalCheckpoints = new Map<string, TerminalCheckpointQueue>()
   readonly #terminalResizeIds = new Map<string, number>()
+  readonly #providerConfigListeners = new Set<() => void>()
   readonly #projectionListeners = new Set<(message: RuntimeMessage) => void>()
   readonly #hostNavigationListeners = new Set<(request: HostNavigationRequestWire) => void>()
   readonly #hostNavigationPorts = new Map<string, RuntimeClientPort>()
@@ -147,6 +148,7 @@ export class RuntimeClient {
     this.#hostNavigationPorts.clear()
     this.#hostNavigationListeners.clear()
     this.#projectionListeners.clear()
+    this.#providerConfigListeners.clear()
     this.#recoveryListeners.clear()
     this.#recoveryResetListeners.clear()
     for (const [requestId, pending] of this.#requests) {
@@ -174,14 +176,16 @@ export class RuntimeClient {
   ): Promise<T> {
     await this.whenReady()
     const requestId = crypto.randomUUID()
-    const timeoutMs = options.timeoutMs ?? this.#requestTimeoutMs
+    const timeoutMs = options.timeoutMs ?? (method === 'provider-config.subscription.login-start' ? 30_000 : this.#requestTimeoutMs)
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.#requests.delete(requestId)
         this.#post({
           type: 'rpc.cancel', protocolVersion: PROTOCOL_VERSION, requestId
         })
-        reject(new Error(`Runtime request ${method} timed out`))
+        const messageLocalized = { zh: 'Matou 后台没有及时响应，请重试', en: "Matou didn't respond in time. Try again." }
+        const locale = payload && typeof payload === 'object' && 'locale' in payload ? payload.locale : undefined
+        reject(Object.assign(new Error(locale === 'en' ? messageLocalized.en : messageLocalized.zh), { messageLocalized }))
       }, timeoutMs)
       this.#requests.set(requestId, {
         resolve: (value) => resolve(value as T), reject, timeout
@@ -238,6 +242,11 @@ export class RuntimeClient {
       limit,
       ...(before ? { before } : {})
     })
+  }
+
+  subscribeProviderConfig(listener: () => void): () => void {
+    this.#providerConfigListeners.add(listener)
+    return () => { this.#providerConfigListeners.delete(listener) }
   }
 
   subscribeProjection(listener: (message: RuntimeMessage) => void): () => void {
@@ -472,6 +481,10 @@ export class RuntimeClient {
   }
 
   #receive(message: RuntimeMessage, port: RuntimeClientPort): void {
+    if (message.type === 'provider-config.changed') {
+      for (const listener of this.#providerConfigListeners) listener()
+      return
+    }
     if (message.type === 'protocol.ready') {
       this.#ready = true
       for (const resolve of this.#readyWaiters) resolve()
@@ -511,7 +524,7 @@ export class RuntimeClient {
       clearTimeout(pending.timeout)
       this.#requests.delete(message.requestId)
       if (message.type === 'rpc.response') pending.resolve(message.result)
-      else pending.reject(Object.assign(new Error(message.message), { code: message.code }))
+      else pending.reject(Object.assign(new Error(message.message), { code: message.code, ...(message.messageLocalized ? { messageLocalized: message.messageLocalized } : {}), ...(message.providerFailure ? { providerFailure: message.providerFailure } : {}) }))
       return
     }
     if (message.type === 'session.recovery-status') {

@@ -2429,7 +2429,7 @@ function hostNavigationRequest(
   }
 }
 
-function installHostNavigationRuntime(request = vi.fn()) {
+function installHostNavigationRuntime(request: ReturnType<typeof vi.fn> = vi.fn(async (): Promise<unknown> => undefined)) {
   let navigationListener: ((request: HostNavigationRequestWire) => void) | undefined
   const acknowledge = vi.fn()
   const unsubscribe = vi.fn(() => { navigationListener = undefined })

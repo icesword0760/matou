@@ -98,7 +98,7 @@ describe('ProviderConfigStore', () => {
     const saved = await store.upsert({
       cli: 'codex', name: 'Proxy', endpoint: 'https://api.example/v1', model: 'gpt-test', apiKey: 'TOKEN'
     })
-    await store.upsert({ ...saved, name: 'Renamed', apiKey: '' })
+    await store.upsert({ ...saved, kind: 'api-key', name: 'Renamed', apiKey: '' })
     await store.activate('codex', saved.id)
 
     expect((await store.launchConfig('codex')).env.OPENAI_API_KEY).toBe('TOKEN')
@@ -108,7 +108,7 @@ describe('ProviderConfigStore', () => {
   it('requires a new secret for a changed destination in both edit and discovery', async () => {
     const store = new ProviderConfigStore(await mkdtemp(join(tmpdir(), 'matou-provider-config-')))
     const saved = await store.upsert({ cli: 'claude-code', name: 'Private gateway', endpoint: 'https://original.example/v1', model: 'test', apiKey: 'PRIVATE_TOKEN' })
-    await expect(store.upsert({ ...saved, endpoint: 'https://other.example/v1', apiKey: '' })).rejects.toThrow('Endpoint changed')
+    await expect(store.upsert({ ...saved, kind: 'api-key', endpoint: 'https://other.example/v1', apiKey: '' })).rejects.toThrow('Endpoint changed')
     expect(await store.discoverModels({ cli: 'claude-code', providerId: saved.id, endpoint: 'https://other.example/v1' })).toEqual({ error: 'key-required' })
     expect((await store.launchSelection('claude-code', saved.id)).env.ANTHROPIC_BASE_URL).toBe('https://original.example/v1')
   })
@@ -119,7 +119,7 @@ describe('ProviderConfigStore', () => {
     const saved = await store.upsert({ cli: 'claude-code', name: 'Mapped', endpoint: 'https://mapping.example', model: 'test', apiKey: 'TOKEN', modelMapping: { opus: 'big', haiku: 'small' } })
     await store.upsert({ cli: 'claude-code', id: saved.id, name: 'Renamed', endpoint: saved.endpoint, model: saved.model })
     expect((await new ProviderConfigStore(root).launchSelection('claude-code', saved.id)).env).toMatchObject({ ANTHROPIC_DEFAULT_OPUS_MODEL: 'big', ANTHROPIC_DEFAULT_HAIKU_MODEL: 'small' })
-    await store.upsert({ ...saved, modelMapping: { opus: '', haiku: '' } })
+    await store.upsert({ ...saved, kind: 'api-key', modelMapping: { opus: '', haiku: '' } })
     expect((await store.launchSelection('claude-code', saved.id)).env).not.toHaveProperty('ANTHROPIC_DEFAULT_OPUS_MODEL')
   })
 })

@@ -4,9 +4,11 @@ import { join } from 'node:path'
 
 import {
   CLI_DEFAULT_MODEL,
-  type ProviderModelsInput, type ProviderModelsResult, type ProviderCli, type ProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView
+  type ProviderModelsInput, type ProviderModelsResult, type ProviderCli, type ProviderConfigInput, type ApiKeyProviderConfigInput, type ProviderConfigSnapshot, type ProviderConfigView,
+  type SubscriptionProvider, type SubscriptionModel, type SubscriptionAccountSummary
 } from '@matou/contracts'
 
+import { toClientModelId } from '../model-router/claude-launch'
 import { discoverProviderModels } from './provider-models'
 
 import { EntityMissingError } from '../errors'
@@ -21,6 +23,22 @@ interface StoredProvider {
   apiKey?: string
   modelMapping?: ProviderConfigInput['modelMapping']
   builtIn?: boolean
+  kind?: 'api-key' | 'subscription'
+  subscription?: StoredSubscription
+}
+
+export interface CredentialRef { name: string; authIndex?: string }
+export interface StoredSubscription {
+  provider: SubscriptionProvider
+  credentialRef: CredentialRef
+  account: SubscriptionAccountSummary
+  modelMetadata: SubscriptionModel[]
+}
+export interface StoredSubscriptionProvider {
+  id: string
+  name: string
+  modelMapping: Record<'opus' | 'sonnet' | 'haiku', string>
+  subscription: StoredSubscription
 }
 
 interface StoredProviderState {
@@ -28,6 +46,7 @@ interface StoredProviderState {
   revision: number
   providers: Record<ProviderCli, StoredProvider[]>
   activeProviderIds: Record<ProviderCli, string>
+  policies?: { antigravityRiskAcceptedAt?: string }
 }
 
 export interface ProviderLaunchConfig {
@@ -36,6 +55,7 @@ export interface ProviderLaunchConfig {
 }
 
 export interface ProviderLaunchSelection {
+  subscription?: StoredSubscriptionProvider
   providerConfigId: string
   model: string
   env: Record<string, string>
@@ -89,10 +109,12 @@ export class ProviderConfigStore {
   }
 
   async upsert(input: ProviderConfigInput): Promise<ProviderConfigView> {
+    if (input.kind === 'subscription') throw new Error('Subscription requires a completed sign-in')
     return this.#mutate(async (state) => {
       const normalized = normalizeInput(input)
       const list = state.providers[normalized.cli]
       const existing = input.id ? list.find(({ id }) => id === input.id) : undefined
+      if (existing?.kind === 'subscription') throw new Error('Cannot change a subscription into an API key provider')
       if (existing?.apiKey && normalized.endpoint !== existing.endpoint && !normalized.apiKey) throw new Error('Endpoint changed: enter the API key for the new service')
       const apiKey = normalized.apiKey || existing?.apiKey
       const provider: StoredProvider = {
@@ -114,6 +136,61 @@ export class ProviderConfigStore {
       else list.push(provider)
       state.revision += 1
       return view(provider)
+    })
+  }
+
+  async subscriptions(): Promise<StoredSubscriptionProvider[]> {
+    const state = await this.#read()
+    return state.providers['claude-code'].filter(provider => provider.kind === 'subscription' && provider.subscription)
+      .map(provider => ({ id: provider.id, name: provider.name, modelMapping: { opus: provider.modelMapping?.opus ?? '', sonnet: provider.modelMapping?.sonnet ?? '', haiku: provider.modelMapping?.haiku ?? '' }, subscription: structuredClone(provider.subscription!) }))
+  }
+
+  async antigravityRiskAccepted(): Promise<boolean> { return Boolean((await this.#read()).policies?.antigravityRiskAcceptedAt) }
+  async confirmAntigravityRisk(): Promise<{ accepted: true }> {
+    return this.#mutate(async state => {
+      state.policies = { ...state.policies, antigravityRiskAcceptedAt: state.policies?.antigravityRiskAcceptedAt ?? new Date().toISOString() }
+      state.revision += 1
+      return { accepted: true as const }
+    })
+  }
+
+  /** Internal commit only. Renderer supplies an attempt, never a credentialRef. */
+  async adoptSubscription(input: Omit<StoredSubscriptionProvider, 'id'> & { id?: string }): Promise<ProviderConfigView> {
+    return this.#mutate(async state => {
+      const provider = input.subscription.provider
+      if (provider !== 'codex' && provider !== 'antigravity') throw new Error('Invalid subscription provider')
+      if (provider === 'antigravity' && !state.policies?.antigravityRiskAcceptedAt) throw new Error('Antigravity risk confirmation is required')
+      if (!input.name.trim() || input.name.length > 256) throw new Error('Invalid provider name')
+      if (!/^[^/\\\0]+\.json$/.test(input.subscription.credentialRef.name)) throw new Error('Invalid credential reference')
+      for (const role of ['opus', 'sonnet', 'haiku'] as const) {
+        if (!input.subscription.modelMetadata.some(model => model.id === input.modelMapping[role])) throw new Error('Selected model is not available')
+      }
+      const list = state.providers['claude-code']
+      const existing = list.find(value => value.kind === 'subscription' && value.subscription?.provider === provider)
+      if (input.id && input.id !== existing?.id) throw new Error('Subscription identity does not match')
+      const subscription: StoredSubscription = {
+        ...existing?.subscription,
+        provider,
+        credentialRef: { name: input.subscription.credentialRef.name, ...(input.subscription.credentialRef.authIndex ? { authIndex: input.subscription.credentialRef.authIndex } : {}) },
+        account: {
+          status: input.subscription.account.status,
+          ...(input.subscription.account.email ? { email: input.subscription.account.email } : {}),
+          ...(input.subscription.account.plan ? { plan: input.subscription.account.plan } : {})
+        },
+        modelMetadata: input.subscription.modelMetadata.map(model => ({
+          id: model.id, ...(model.displayName ? { displayName: model.displayName } : {}),
+          ...(model.ownedBy ? { ownedBy: model.ownedBy } : {}),
+          ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+          ...(model.maxOutputTokens ? { maxOutputTokens: model.maxOutputTokens } : {})
+        }))
+      }
+      const value: StoredProvider = { ...existing, id: existing?.id ?? randomUUID(), cli: 'claude-code', kind: 'subscription', name: input.name.trim(), endpoint: '', model: input.modelMapping.sonnet, modelMapping: { ...input.modelMapping }, subscription }
+      delete value.apiKey
+      const index = list.findIndex(item => item.id === value.id)
+      if (index === -1) list.push(value)
+      else list[index] = value
+      state.revision += 1
+      return view(value)
     })
   }
 
@@ -162,6 +239,13 @@ export class ProviderConfigStore {
     const provider = state.providers[cli].find(({ id }) => id === selectedId)
     if (!provider) {
       throw new EntityMissingError(runtimeMessages().providerConfig.sessionProviderNotFound)
+    }
+    if (provider.kind === 'subscription' && provider.subscription) {
+      const subscription = (await this.subscriptions()).find(row => row.id === provider.id)!
+      const model = subscription.subscription.modelMetadata.find(model => model.id === subscription.modelMapping.opus)
+      if (!model) throw new Error('Subscription Opus model metadata is missing')
+      const kind = subscription.subscription.provider === 'codex' ? 'chatgpt' : 'antigravity'
+      return { providerConfigId: provider.id, model: `matou-${kind}/${toClientModelId(kind, 'opus', model)}`, env: {}, subscription }
     }
     const endpoint = provider.endpoint.replace(/\/$/, '')
     if (cli === 'claude-code') {
@@ -218,7 +302,7 @@ export class ProviderConfigStore {
   }
 }
 
-function normalizeInput(input: ProviderConfigInput): ProviderConfigInput & { apiKey: string } {
+function normalizeInput(input: ApiKeyProviderConfigInput): ApiKeyProviderConfigInput & { apiKey: string } {
   if (input.cli !== 'claude-code' && input.cli !== 'codex') {
     throw new Error(runtimeMessages().providerConfig.invalidCli)
   }
@@ -281,7 +365,15 @@ function view(provider: StoredProvider): ProviderConfigView {
     id: provider.id, cli: provider.cli, name: provider.name,
     endpoint: provider.endpoint, model: provider.model || CLI_DEFAULT_MODEL,
     ...(provider.modelMapping ? { modelMapping: provider.modelMapping } : {}),
-    hasApiKey: Boolean(provider.apiKey), ...(provider.builtIn ? { builtIn: true } : {})
+    hasApiKey: Boolean(provider.apiKey), ...(provider.builtIn ? { builtIn: true } : {}),
+    ...(provider.kind === 'subscription' && provider.subscription ? {
+      kind: 'subscription' as const,
+      subscription: {
+        provider: provider.subscription.provider,
+        account: { ...provider.subscription.account },
+        modelMetadata: provider.subscription.modelMetadata.map(model => ({ ...model }))
+      }
+    } : {})
   }
 }
 

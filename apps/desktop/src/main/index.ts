@@ -448,6 +448,8 @@ if (primaryInstance) app.whenReady().then(async () => {
     dock: app.dock
   })
   runtimeHost = new RuntimeHost(resolveRuntimeEntry(), undefined, {
+    ...(isPackagedApplication ? { modelRouterBinary: join(process.resourcesPath, 'model-router', 'model-router') } : {}),
+    openExternal: url => shell.openExternal(url),
     messages,
     locale: () => localeStore.current()
   })
