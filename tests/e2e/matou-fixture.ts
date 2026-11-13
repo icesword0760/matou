@@ -1,11 +1,26 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import { _electron as electron, expect, type ElectronApplication, type Page } from '@playwright/test'
 
 const execFileAsync = promisify(execFile)
+
+const DEFAULT_EGRESS_FIXTURE = {
+  anthropic: {
+    api: { ip: '169.128.10.1', country: 'US' },
+    login: { ip: '169.128.10.1', country: 'US' }
+  },
+  openai: {
+    api: { ip: '169.128.10.1', country: 'US' },
+    login: { ip: '169.128.10.1', country: 'US' }
+  },
+  browserLogin: null,
+  systemProxyEnabled: false,
+  tunDetected: true,
+  ipv6Bypass: false
+}
 
 export interface MatouFixture {
   app: ElectronApplication
@@ -60,6 +75,13 @@ async function startMatou(root: string, options: LaunchMatouOptions = {}): Promi
   const electronUserDataDirectory = join(root, 'electron-user-data')
   await mkdir(workspaceDirectory, { recursive: true })
   await mkdir(electronUserDataDirectory, { recursive: true })
+  const hasExplicitFixture =
+    Object.hasOwn(options.env ?? {}, 'MATOU_E2E_EGRESS_FIXTURE') ||
+    Boolean(process.env.MATOU_E2E_EGRESS_FIXTURE)
+  const defaultEgressFixturePath = join(root, 'egress-fixture.json')
+  if (!hasExplicitFixture) {
+    await writeFile(defaultEgressFixturePath, JSON.stringify(DEFAULT_EGRESS_FIXTURE, null, 2))
+  }
   const app = await electron.launch({
     args: [
       resolve(import.meta.dirname, '../../apps/desktop'),
@@ -68,6 +90,7 @@ async function startMatou(root: string, options: LaunchMatouOptions = {}): Promi
     env: {
       ...process.env,
       MATOU_LOCALE: 'zh-CN',
+      ...(hasExplicitFixture ? {} : { MATOU_E2E_EGRESS_FIXTURE: defaultEgressFixturePath }),
       ...options.env,
       MATOU_E2E: '1', MATOU_DATA_DIR: dataDirectory,
       MATOU_DEFAULT_WORKSPACE: workspaceDirectory,

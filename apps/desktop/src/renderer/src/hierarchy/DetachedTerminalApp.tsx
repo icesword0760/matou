@@ -18,6 +18,8 @@ import { useDagShortcut } from '../dag/useDagShortcut'
 import { AgentTeamMemberSummary } from './AgentTeamMemberSummary'
 import { ReadOnlyRecoveryBanner } from '../recovery/ReadOnlyRecoveryBanner'
 import { StorageFaultOverlay } from './StorageFaultOverlay'
+import { EgressFreezeBanner } from '../egress/EgressFreezeBanner'
+import { useEgressActions, useSessionEgressBanner } from '../egress/use-egress-status'
 import {
   DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
   usePersistentTerminalFontSize
@@ -29,9 +31,12 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
   const m = messages.hierarchyTerminal.detachedWindow
   const shell = messages.hierarchyShell
   const client = useRuntimeClient()
+  const { recheck: recheckEgress, override: overrideEgress } = useEgressActions()
   const readOnly = runtimeMode === 'read-only'
   const query = new URLSearchParams(window.location.search)
   const sessionId = query.get('sessionId') ?? ''
+  const egressBanner = useSessionEgressBanner(sessionId)
+  const egressFrozen = egressBanner.frozen
   const mainWindowId = query.get('mainWindowId') ?? ''
   const sceneId = query.get('sceneId') ?? ''
   const executionContextId = query.get('executionContextId') ?? 'local-default'
@@ -214,10 +219,15 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
         setSearchOpen(false)
         setFocusRequest((value) => value + 1)
       }} />}
+    {!isTeamMember && <EgressFreezeBanner
+      sessionId={sessionId}
+      banner={egressBanner}
+      onRecheck={recheckEgress}
+      onOverride={overrideEgress} />}
     {isTeamMember ? <AgentTeamMemberSummary
       workStatus={teamMemberNode?.workStatus ?? 'starting'}
       latestLines={teamMemberNode?.latestLines ?? []} /> : <TerminalSurface sessionId={sessionId} executionContextId={executionContextId}
-      profile={profile} visible readOnly={readOnly} inputDisabled={readOnly || storageFault !== null}
+      profile={profile} visible readOnly={readOnly} inputDisabled={readOnly || storageFault !== null || egressFrozen}
       themeKey={themeKey} fontSize={fontSize} onFontSizeChange={setFontSize}
       {...(searchOpen ? { searchRequest } : {})} onSearchResults={setSearchResults}
       focusRequest={focusRequest}

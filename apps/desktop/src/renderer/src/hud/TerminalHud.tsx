@@ -1,6 +1,7 @@
 import type { HudAgentActivity } from '@matou/contracts'
 import { useAccountUsage } from '../claude-accounts/use-account-usage'
 import { ClaudeAccountsControl } from '../claude-accounts/ClaudeAccountsControl'
+import { EgressChip } from '../egress/EgressChip'
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -182,6 +183,7 @@ export function TerminalHud(props: {
       disabled={!props.environmentActions} onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
       }} />}
+    <EgressChip sessionId={sessionId} />
     <ClaudeAccountsControl sessionId={sessionId} />
     </div>
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {

@@ -82,6 +82,12 @@ import { createE2eForkCrashObserver } from './session-canvas/fork-operation-e2e-
 import { createE2eForkSetupPolicyProvider } from './session-canvas/e2e-fork-setup-policy'
 import { createE2eJournalOptionsProvider } from './journal/e2e-journal-fault-controller'
 import { ProviderConfigStore } from './provider-config/provider-config-store'
+import { ClaudeSettings } from './session/claude-settings'
+import { EgressMonitor } from './egress/egress-monitor'
+import { createEgressSampler } from './egress/egress-sampler'
+import { EgressSettings } from './egress/egress-settings'
+import { networkSignature } from './egress/local-network'
+import { isMainlandTimeZone } from './egress/time-zone-policy'
 import { SubscriptionAccounts } from './model-router/subscription-accounts'
 import { ModelRouterManager } from './model-router/manager'
 import { RouterHostBridge } from './model-router/host-bridge'
@@ -140,6 +146,7 @@ interface WritableRuntimeState extends RuntimeStateBase {
   forkBatchCoordinator: ForkBatchCoordinator
   hostActions: RuntimeHostActionFacade
   recoveryCoordinator: RuntimeRecoveryCoordinator
+  egress: EgressMonitor
 }
 
 interface ReadOnlyRuntimeState extends RuntimeStateBase {
@@ -151,6 +158,7 @@ type RuntimeState = WritableRuntimeState | ReadOnlyRuntimeState
 let runtimeState: RuntimeState | undefined
 let readOnlyDatabase: RuntimeDatabase | undefined
 let forkCoordinator: ForkOperationCoordinator | undefined
+let egressMonitor: EgressMonitor | undefined
 const lifecycleCoordinator = new RuntimeLifecycleCoordinator()
 const lifecyclePublisher = new RuntimeLifecyclePublisher(parentPort)
 const bootstrapObserver: RuntimeDatabaseBootstrapObserver = {
@@ -189,6 +197,9 @@ lifecyclePublisher.opening()
 const runtimeReady = lifecycleCoordinator.startInitialization(initializeRuntime).then((state) => {
   runtimeState = state
   lifecyclePublisher.ready(state.mode)
+  if (state.mode === 'normal' && !lifecycleCoordinator.shutdownRequested) {
+    state.egress.start()
+  }
   return state
 })
 void runtimeReady.catch((error: unknown) => {
@@ -245,6 +256,38 @@ async function initializeRuntime(): Promise<RuntimeState> {
     console.error('[model-router.reconcile] Subscription credential reconciliation failed; account operations will retry')
   })
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
+  const egressSettings = new EgressSettings(database)
+  const egressSampler = createEgressSampler({
+    baseEnv: process.env,
+    agentTimeZoneMainland: () => {
+      const tz =
+        new ClaudeSettings(database).environment('claude-code', { official: true }).TZ ??
+        Intl.DateTimeFormat().resolvedOptions().timeZone
+      return isMainlandTimeZone(tz)
+    }
+  })
+  const egress = new EgressMonitor({
+    now: Date.now,
+    setTimer: (callback, ms) => {
+      const timer = setTimeout(callback, ms)
+      timer.unref?.()
+      return () => clearTimeout(timer)
+    },
+    sampleFull: () => egressSampler.sampleFull(),
+    sampleLight: (family) => egressSampler.sampleLight(family),
+    networkSignature: () => networkSignature(os.networkInterfaces()),
+    settings: egressSettings,
+    freeze: async (sessionId) => {
+      await sessions.get(sessionId)?.setEgressFrozen(true)
+    },
+    thaw: async (sessionId) => {
+      await sessions.get(sessionId)?.setEgressFrozen(false)
+    },
+    publish: (status) => {
+      for (const server of servers) server.publishEgress(status)
+    }
+  })
+  egressMonitor = egress
   const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
   const stopSessions = async (sessionIds: string[]) => {
@@ -253,7 +296,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
       if (!live) continue
       live.dispose({ notifyExit: false })
       await live.whenClosed()
-      sessions.delete(sessionId, live)
+      if (sessions.delete(sessionId, live)) {
+        egress.unregisterSession(sessionId)
+      }
     }
   }
   const stopRuns = async (runIds: string[]) => {
@@ -308,7 +353,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
         if (!live) return
         live.dispose({ notifyExit: false, reason: 'environment-transition' })
         await live.whenClosed()
-        sessions.delete(sessionId, live)
+        if (sessions.delete(sessionId, live)) {
+          egress.unregisterSession(sessionId)
+        }
       },
       resumeSession: async () => undefined
     },
@@ -500,7 +547,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
         journalOptionsForSession: e2eJournalOptionsForSession
       } : {}),
       recoveryCoordinator,
-      navigationBroker: hostNavigation
+      navigationBroker: hostNavigation,
+      egress
     }
   )
   servers.add(backgroundServer)
@@ -613,7 +661,8 @@ async function initializeRuntime(): Promise<RuntimeState> {
     forkBatchCoordinator,
     hostActions,
     recoveryCoordinator,
-    providerConfigs
+    providerConfigs,
+    egress
   }
 }
 
@@ -626,6 +675,8 @@ function shutdown(): Promise<void> {
       if (runtimeState?.mode === 'normal') {
         runtimeState.providerReady.cancelAll(new Error(runtimeMessages().server.runtimeShuttingDown))
       }
+      egressMonitor?.stop()
+      egressMonitor = undefined
       forkCoordinator?.stop()
       forkCoordinator = undefined
       hostNavigation.close()
@@ -769,7 +820,7 @@ parentPort.on('message', async (event) => {
         ...(e2eJournalOptionsForSession ? {
           journalOptionsForSession: e2eJournalOptionsForSession
         } : {}),
-        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator } : {}),
+        ...(state.mode === 'normal' ? { recoveryCoordinator: state.recoveryCoordinator, egress: state.egress } : {}),
         navigationBroker: hostNavigation
       }
     )

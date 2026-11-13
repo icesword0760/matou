@@ -1,8 +1,17 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { Profiler } from 'react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { PROTOCOL_VERSION, type EgressStatusWire } from '@matou/contracts'
 import type { SessionEnvironment } from '@matou/domain'
+import { RuntimeClient, type RuntimeClientPort } from '../runtime/RuntimeClient'
+
+let mockEgressRuntimeClient: RuntimeClient | null = null
+
+vi.mock('../runtime/RuntimeProvider', () => ({
+  useRuntimeClient: () => mockEgressRuntimeClient
+}))
 
 import { TerminalPane } from './TerminalPane'
 import { foregroundTerminalModels } from '../terminal/terminal-model-cache'
@@ -39,6 +48,7 @@ vi.mock('../terminal/TerminalSurface', () => ({
 afterEach(() => {
   cleanup()
   foregroundTerminalModels.clear()
+  mockEgressRuntimeClient = null
 })
 
 describe('Terminal pane', () => {
@@ -793,6 +803,191 @@ describe('Terminal pane', () => {
       environment={worktreeEnvironment('ready')} />)
     expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
     expect(onRemoveBranch).not.toHaveBeenCalled()
+  })
+
+  it('shows egress freeze banner above terminal and disables input while frozen without disabling shell cards', async () => {
+    const frozenStatus: EgressStatusWire = {
+      state: 'abnormal',
+      protectionEnabled: true,
+      ruleMode: 'country',
+      checkedAt: 1_700_000_000_000,
+      families: [
+        {
+          family: 'anthropic',
+          state: 'abnormal',
+          violation: 'mainland',
+          hosts: [],
+          overridden: false,
+          frozenSessionIds: ['session-1'],
+          recovering: false
+        }
+      ],
+      checks: [],
+      sessionFamilies: { 'session-1': 'anthropic' }
+    }
+    const request = vi.fn(async (method: string) => {
+      if (method === 'egress.override') {
+        return {
+          ...frozenStatus,
+          families: [
+            {
+              ...frozenStatus.families[0]!,
+              overridden: true,
+              frozenSessionIds: []
+            }
+          ]
+        }
+      }
+      return frozenStatus
+    })
+    mockEgressRuntimeClient = {
+      request,
+      subscribeEgressStatus: vi.fn(() => () => {})
+    } as unknown as RuntimeClient
+
+    render(<TerminalPane {...fixture()} foreground visible />)
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('出口异常（检测到中国大陆 IP），已暂停。网络恢复后自动继续。')
+      ).toBeTruthy()
+    })
+    const surface = screen.getByTestId('surface-session-1')
+    expect(surface.dataset.inputDisabled).toBe('true')
+    expect(surface.dataset.readOnly).toBe('false')
+
+    // Overriding unlocks input cleanly.
+    fireEvent.click(screen.getByRole('button', { name: '仍要继续' }))
+    fireEvent.click(screen.getByRole('button', { name: '继续' }))
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('egress.override', { family: 'anthropic' })
+      expect(screen.getByTestId('surface-session-1').dataset.inputDisabled).toBe('false')
+    })
+
+    // Shell session stays unblocked and renders no banner.
+    cleanup()
+    const shellProps = fixture()
+    render(
+      <TerminalPane
+        {...shellProps}
+        session={{ ...shellProps.session, id: 'session-shell', kind: 'shell', title: 'Shell' }}
+        foreground
+        visible
+      />
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId('surface-session-shell').dataset.inputDisabled).toBe('false')
+    })
+    expect(
+      screen.queryByText('出口异常（检测到中国大陆 IP），已暂停。网络恢复后自动继续。')
+    ).toBeNull()
+  })
+
+  it('does not re-render an anthropic TerminalPane when a pushed status only changes openai state', async () => {
+    const port: RuntimeClientPort & {
+      onmessage: ((event: MessageEvent) => void) | null
+      deliver: (data: unknown) => void
+    } = {
+      onmessage: null,
+      postMessage() {},
+      start() {},
+      close() {},
+      deliver(data) {
+        this.onmessage?.({ data } as MessageEvent)
+      }
+    }
+    const client = new RuntimeClient(port, { clientId: 'pane-perf-test' })
+    const initialStatus: EgressStatusWire = {
+      state: 'ok',
+      protectionEnabled: true,
+      ruleMode: 'country',
+      checkedAt: 1_700_000_000_000,
+      families: [
+        {
+          family: 'anthropic',
+          state: 'ok',
+          exit: { ip: '169.128.10.5', country: 'US' },
+          hosts: [],
+          overridden: false,
+          frozenSessionIds: [],
+          recovering: false
+        },
+        {
+          family: 'openai',
+          state: 'ok',
+          exit: { ip: '198.51.100.42', country: 'JP' },
+          hosts: [],
+          overridden: false,
+          frozenSessionIds: [],
+          recovering: false
+        }
+      ],
+      checks: [],
+      sessionFamilies: {
+        'session-1': 'anthropic',
+        'session-2': 'openai'
+      }
+    }
+    port.deliver({
+      type: 'protocol.ready',
+      protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1',
+      capabilities: ['domain-rpc-v1']
+    })
+    port.deliver({
+      type: 'egress.status',
+      protocolVersion: PROTOCOL_VERSION,
+      status: initialStatus
+    })
+    mockEgressRuntimeClient = client
+
+    let paneRenderCount = 0
+    const props = fixture()
+    render(
+      <Profiler
+        id="anthropic-pane"
+        onRender={() => {
+          paneRenderCount += 1
+        }}
+      >
+        <TerminalPane {...props} foreground visible />
+      </Profiler>
+    )
+
+    const rendersAfterMount = paneRenderCount
+    expect(rendersAfterMount).toBeGreaterThanOrEqual(1)
+    expect(screen.getByTestId('surface-session-1').dataset.inputDisabled).toBe('false')
+
+    // Push a status that only freezes openai and changes checkedAt — anthropic slice is unchanged.
+    act(() => {
+      port.deliver({
+        type: 'egress.status',
+        protocolVersion: PROTOCOL_VERSION,
+        status: {
+          ...initialStatus,
+          state: 'abnormal',
+          checkedAt: 1_700_000_060_000,
+          families: [
+            initialStatus.families[0]!,
+            {
+              family: 'openai',
+              state: 'abnormal',
+              violation: 'mainland',
+              exit: { ip: '114.114.114.114', country: 'CN' },
+              hosts: [],
+              overridden: false,
+              frozenSessionIds: ['session-2'],
+              recovering: false
+            }
+          ]
+        }
+      })
+    })
+
+    expect(paneRenderCount).toBe(rendersAfterMount)
+    expect(screen.getByTestId('surface-session-1').dataset.inputDisabled).toBe('false')
+
+    client.dispose()
   })
 })
 

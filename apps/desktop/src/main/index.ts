@@ -28,6 +28,7 @@ import electronUpdater from 'electron-updater'
 import { PROVIDER_PRESETS, isLocale, isLocalePreference, type LocalePreference } from '@matou/contracts'
 
 import { AppUpdateManager } from './app-update-manager'
+import { isAllowedExternalUrl } from './external-url-policy'
 import { resolveAppUpdateInstallMode } from './app-update-install-mode'
 import { LocaleStore } from './locale-store'
 import { mainMessages } from './messages'
@@ -575,6 +576,11 @@ ipcMain.handle(DESKTOP_CHANNELS.openProviderKeyPage, async (_event, cli: unknown
   const preset = PROVIDER_PRESETS[cli].find(p => p.id === presetId)
   if (!preset) throw new Error('Unknown provider preset')
   await shell.openExternal(preset.keyUrl)
+})
+ipcMain.handle(DESKTOP_CHANNELS.openExternal, async (_event, url: unknown) => {
+  if (!isAllowedExternalUrl(url)) return false
+  await shell.openExternal(url)
+  return true
 })
 ipcMain.handle(DESKTOP_CHANNELS.writeClipboardText, (_event, text: string) => {
   clipboard.writeText(text)

@@ -12,7 +12,7 @@ import { HostTopologyProjector } from './host-topology-projector'
 import { CommandBoundaryRepository } from '../anchors/anchor-resolver'
 import { TaskTelemetryRepository } from '../domain/product-foundation-repository'
 import { readSessionFrames, type DecodedJournalFrame } from '../journal/segment-journal'
-import type { PtySession } from '../session/pty-session'
+import { SessionEgressFrozenError, type PtySession } from '../session/pty-session'
 import type { RuntimeDatabase } from '../storage/database'
 import { DomainTransactionManager } from '../storage/domain-transaction'
 import { TaskWindowMigrationService } from '../hierarchy/task-window-migration-service'
@@ -84,7 +84,16 @@ export class RuntimeControlBackend implements HostControlBackend {
     const session = this.#requireActive(sessionId)
     const write = () => {
       if (this.#active.get(sessionId) !== session) throw new Error('SessionRun changed while input was waiting')
-      session.write(data)
+      try {
+        session.write(data)
+      } catch (error) {
+        if (error instanceof SessionEgressFrozenError) {
+          throw new HostControlTargetNotReadyError(
+            'session is paused because the network exit failed a safety check'
+          )
+        }
+        throw error
+      }
     }
     if (this.#inputGate) await this.#inputGate(write)
     else write()

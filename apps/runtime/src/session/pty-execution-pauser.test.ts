@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { PtyExecutionPauser } from './pty-execution-pauser'
+import { PtyExecutionPauser, SharedExecutionPauser } from './pty-execution-pauser'
 
 const children: ChildProcess[] = []
 const roots: string[] = []
@@ -62,6 +62,85 @@ describe('PtyExecutionPauser', () => {
 
     await pauser.resume()
     await waitFor(async () => (await byteLength(counter)) > stoppedAt)
+  })
+})
+
+describe('SharedExecutionPauser', () => {
+  it('pauses inner once across multiple reasons and resumes only after the last reason resumes', async () => {
+    const inner = {
+      pause: vi.fn(),
+      resume: vi.fn()
+    }
+    const shared = new SharedExecutionPauser(inner)
+    const durability = shared.lease('durability')
+    const egress = shared.lease('egress')
+
+    expect(shared.isPausedFor('durability')).toBe(false)
+    expect(shared.isPausedFor('egress')).toBe(false)
+
+    await durability.pause()
+    expect(shared.isPausedFor('durability')).toBe(true)
+    expect(shared.isPausedFor('egress')).toBe(false)
+    expect(inner.pause).toHaveBeenCalledTimes(1)
+
+    await egress.pause()
+    expect(shared.isPausedFor('durability')).toBe(true)
+    expect(shared.isPausedFor('egress')).toBe(true)
+    expect(inner.pause).toHaveBeenCalledTimes(1)
+    expect(inner.resume).not.toHaveBeenCalled()
+
+    await durability.resume()
+    expect(shared.isPausedFor('durability')).toBe(false)
+    expect(shared.isPausedFor('egress')).toBe(true)
+    expect(inner.resume).not.toHaveBeenCalled()
+
+    await egress.resume()
+    expect(shared.isPausedFor('durability')).toBe(false)
+    expect(shared.isPausedFor('egress')).toBe(false)
+    expect(inner.resume).toHaveBeenCalledTimes(1)
+  })
+
+  it('treats repeated pause and resume calls on the same lease as idempotent', async () => {
+    const inner = {
+      pause: vi.fn(),
+      resume: vi.fn()
+    }
+    const shared = new SharedExecutionPauser(inner)
+    const egress = shared.lease('egress')
+
+    await egress.resume()
+    expect(inner.resume).not.toHaveBeenCalled()
+
+    await egress.pause()
+    await egress.pause()
+    expect(inner.pause).toHaveBeenCalledTimes(1)
+
+    await egress.resume()
+    await egress.resume()
+    expect(inner.resume).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps reason paused if inner resume rejects so a retry can still resume', async () => {
+    let failResume = true
+    const inner = {
+      pause: vi.fn(async () => {}),
+      resume: vi.fn(async () => {
+        if (failResume) {
+          failResume = false
+          throw new Error('transient resume failure')
+        }
+      })
+    }
+    const shared = new SharedExecutionPauser(inner)
+    const durability = shared.lease('durability')
+
+    await durability.pause()
+    await expect(durability.resume()).rejects.toThrow('transient resume failure')
+    expect(shared.isPausedFor('durability')).toBe(true)
+
+    await durability.resume()
+    expect(shared.isPausedFor('durability')).toBe(false)
+    expect(inner.resume).toHaveBeenCalledTimes(2)
   })
 })
 
