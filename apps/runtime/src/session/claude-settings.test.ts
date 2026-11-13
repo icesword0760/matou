@@ -18,22 +18,53 @@ beforeEach(async () => {
 })
 afterEach(async () => { database.close(); await rm(root, { recursive: true, force: true }) })
 
-it('persists through RPC and database reopen, isolates Claude, and resets to inherited defaults', async () => {
+it('defaults to auto, hides mainland zones for official sessions, and persists preferences across reopen', async () => {
   const originalTZ = process.env.TZ
   const router = new RuntimeRpcRouter(database)
-  const otherWindow = new ClaudeSettings(database)
-  expect(otherWindow.environment('claude-code')).toEqual({})
+  const mainlandWindow = new ClaudeSettings(database, { systemTimeZone: () => 'Asia/Shanghai' })
+
+  expect(mainlandWindow.snapshot()).toEqual({
+    timeZone: 'auto',
+    systemTimeZone: 'Asia/Shanghai',
+    autoTimeZone: 'Asia/Singapore'
+  })
+  expect(mainlandWindow.environment('claude-code')).toEqual({ TZ: 'Asia/Singapore' })
+  expect(mainlandWindow.environment('codex', { exitCountry: 'TW', official: true })).toEqual({ TZ: 'Asia/Taipei' })
+  expect(mainlandWindow.environment('shell')).toEqual({})
+  expect(mainlandWindow.environment('claude-code', { official: false })).toEqual({})
+  expect(mainlandWindow.environment('codex', { official: false })).toEqual({})
+
+  const berlinWindow = new ClaudeSettings(database, { systemTimeZone: () => 'Europe/Berlin' })
+  expect(berlinWindow.snapshot()).toEqual({
+    timeZone: 'auto',
+    systemTimeZone: 'Europe/Berlin'
+  })
+  expect(berlinWindow.snapshot().autoTimeZone).toBeUndefined()
+  expect(berlinWindow.environment('claude-code')).toEqual({})
+  expect(berlinWindow.environment('codex', { exitCountry: 'TW', official: true })).toEqual({})
+
   await router.handle('claude-settings.set', { timeZone: 'America/Los_Angeles' })
-  expect(otherWindow.environment('claude-code')).toEqual({ TZ: 'America/Los_Angeles' })
-  expect(otherWindow.environment('codex')).toEqual({})
-  expect(otherWindow.environment('shell')).toEqual({})
+  expect(mainlandWindow.environment('claude-code')).toEqual({ TZ: 'America/Los_Angeles' })
+  expect(mainlandWindow.environment('claude-code', { official: false })).toEqual({ TZ: 'America/Los_Angeles' })
+  expect(mainlandWindow.environment('codex')).toEqual({ TZ: 'Asia/Singapore' })
+  expect(mainlandWindow.environment('shell')).toEqual({})
   expect(process.env.TZ).toBe(originalTZ)
+
   database.close()
   database = RuntimeDatabase.open(join(root, 'matou.sqlite'))
   const reopened = new RuntimeRpcRouter(database)
   await expect(reopened.handle('claude-settings.get', {})).resolves.toMatchObject({ timeZone: 'America/Los_Angeles' })
+
   await reopened.handle('claude-settings.set', { timeZone: 'system' })
-  expect(new ClaudeSettings(database).environment('claude-code')).toEqual({})
+  const afterSystem = new ClaudeSettings(database, { systemTimeZone: () => 'Asia/Shanghai' })
+  expect(afterSystem.environment('claude-code')).toEqual({})
+  expect(afterSystem.environment('codex')).toEqual({ TZ: 'Asia/Singapore' })
+
+  await reopened.handle('claude-settings.set', { timeZone: 'auto' })
+  await expect(reopened.handle('claude-settings.get', {})).resolves.toMatchObject({ timeZone: 'auto' })
+  expect(new ClaudeSettings(database, { systemTimeZone: () => 'Asia/Shanghai' }).environment('claude-code')).toEqual({
+    TZ: 'Asia/Singapore'
+  })
 })
 
 it('rejects malformed zones without overwriting the last saved preference', async () => {
@@ -45,8 +76,34 @@ it('rejects malformed zones without overwriting the last saved preference', asyn
   await expect(router.handle('claude-settings.get', {})).resolves.toMatchObject({ timeZone: 'UTC' })
 })
 
+it('reads the host process TZ when systemTimeZone is not injected', () => {
+  const originalTZ = process.env.TZ
+  try {
+    const settings = new ClaudeSettings(database)
+    process.env.TZ = 'Asia/Shanghai'
+    expect(settings.snapshot()).toEqual({
+      timeZone: 'auto',
+      systemTimeZone: 'Asia/Shanghai',
+      autoTimeZone: 'Asia/Singapore'
+    })
+    expect(settings.environment('claude-code')).toEqual({ TZ: 'Asia/Singapore' })
+    expect(settings.environment('codex')).toEqual({ TZ: 'Asia/Singapore' })
+
+    process.env.TZ = 'Europe/Berlin'
+    expect(settings.snapshot()).toEqual({
+      timeZone: 'auto',
+      systemTimeZone: 'Europe/Berlin'
+    })
+    expect(settings.environment('claude-code')).toEqual({})
+    expect(settings.environment('codex')).toEqual({})
+  } finally {
+    if (originalTZ === undefined) delete process.env.TZ
+    else process.env.TZ = originalTZ
+  }
+})
+
 it('allows reading in storage recovery mode but blocks saving', async () => {
   const router = new RuntimeRpcRouter(database, new NotificationProjection(), { accessPolicy: new RuntimeAccessPolicy('read-only') })
-  await expect(router.handle('claude-settings.get', {})).resolves.toMatchObject({ timeZone: 'system' })
+  await expect(router.handle('claude-settings.get', {})).resolves.toMatchObject({ timeZone: 'auto' })
   await expect(router.handle('claude-settings.set', { timeZone: 'UTC' })).rejects.toThrow()
 })
