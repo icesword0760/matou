@@ -442,6 +442,9 @@ it('tracks Antigravity model+effort, context, quota, cycle_mode, toolCall, and A
     expect(running?.contextPercent).toBe(25)
     expect(running?.contextWindowSize).toBe(1_048_576)
     expect(running?.usageWindows).toEqual([
+      { label: 'Weekly', percent: 10, resetsAt: Date.parse('2026-11-20T00:00:00Z') }
+    ])
+    expect(running?.allUsageWindows).toEqual([
       { label: 'Gemini 5h', percent: 25, resetsAt: Date.parse('2026-11-13T11:14:59Z') },
       { label: '3P Weekly', percent: 10, resetsAt: Date.parse('2026-11-20T00:00:00Z') }
     ])
@@ -467,7 +470,118 @@ it('tracks Antigravity model+effort, context, quota, cycle_mode, toolCall, and A
     expect(settled?.taskStatus).toBe('idle')
     expect(settled?.permissionMode).toBe('acceptEdits')
     expect(observedCycles).toEqual(['accept-edits', null])
+    expect(registry.antigravityCycleMode('agy-1')).toBeNull()
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+it('filters Antigravity HUD quota windows by active model family and dedicated weekly group with full hover details', () => {
+  const registry = new SessionHudRegistry(() => 1_000, '/tmp/unused-claude-dir')
+  registry.spawn({ sessionId: 'agy-q', profile: 'antigravity' })
+
+  const quota = {
+    'gemini-5h': { remaining_fraction: 0.9, reset_time: '2026-11-13T16:00:00Z' },
+    'gemini-weekly': { remaining_fraction: 0.85, reset_time: '2026-11-20T06:00:00Z' },
+    'argon-weekly': { remaining_fraction: 0.55, reset_time: '2026-11-20T08:00:00Z' },
+    '3p-5h': { remaining_fraction: 0.7, reset_time: '2026-11-13T17:00:00Z' },
+    '3p-weekly': { remaining_fraction: 0.4, reset_time: '2026-11-20T12:00:00Z' }
+  }
+
+  // Missing model -> fall back cleanly to all quota windows without error
+  registry.ingestProvider('agy-q', { quota })
+  expect(registry.snapshot('agy-q')?.usageWindows?.map((w) => [w.label, w.percent])).toEqual([
+    ['Gemini 5h', 10],
+    ['Gemini Weekly', 15],
+    ['3P 5h', 30],
+    ['3P Weekly', 60],
+    ['Argon Weekly', 45]
+  ])
+  expect(registry.snapshot('agy-q')?.allUsageWindows).toEqual(registry.snapshot('agy-q')?.usageWindows)
+
+  // Gemini Carbon -> gemini-5h + gemini-weekly as 5h / Weekly
+  registry.ingestProvider('agy-q', {
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' }
+  })
+  expect(registry.snapshot('agy-q')?.usageWindows).toEqual([
+    { label: '5h', percent: 10, resetsAt: Date.parse('2026-11-13T16:00:00Z') },
+    { label: 'Weekly', percent: 15, resetsAt: Date.parse('2026-11-20T06:00:00Z') }
+  ])
+  expect(registry.snapshot('agy-q')?.allUsageWindows?.map((w) => [w.label, w.percent])).toEqual([
+    ['Gemini 5h', 10],
+    ['Gemini Weekly', 15],
+    ['3P 5h', 30],
+    ['3P Weekly', 60],
+    ['Argon Weekly', 45]
+  ])
+
+  // Gemini Argon -> substitutes argon-weekly for generic gemini-weekly
+  registry.ingestProvider('agy-q', {
+    model: { id: 'Gemini 4 Argon (High)', display_name: 'Gemini 4 Argon (High)', effort: 'high' }
+  })
+  expect(registry.snapshot('agy-q')?.usageWindows).toEqual([
+    { label: '5h', percent: 10, resetsAt: Date.parse('2026-11-13T16:00:00Z') },
+    { label: 'Weekly', percent: 45, resetsAt: Date.parse('2026-11-20T08:00:00Z') }
+  ])
+
+  // Third-party GPT / Claude -> 3p-5h + 3p-weekly
+  registry.ingestProvider('agy-q', {
+    model: { id: 'GPT-5 Codex', display_name: 'GPT-5 Codex' }
+  })
+  expect(registry.snapshot('agy-q')?.usageWindows).toEqual([
+    { label: '5h', percent: 30, resetsAt: Date.parse('2026-11-13T17:00:00Z') },
+    { label: 'Weekly', percent: 60, resetsAt: Date.parse('2026-11-20T12:00:00Z') }
+  ])
+
+  // Unrecognized custom model -> fall back to all windows without error
+  registry.ingestProvider('agy-q', {
+    model: { id: 'Unknown Experimental Model', display_name: 'Unknown Experimental Model' }
+  })
+  expect(registry.snapshot('agy-q')?.usageWindows?.length).toBe(5)
+})
+
+it('treats Antigravity status ticks without cycle_mode as Ask mode (null) while ignoring hook events', () => {
+  const registry = new SessionHudRegistry()
+  registry.spawn({
+    sessionId: 'agy-ask',
+    profile: 'antigravity',
+    cwd: '/repo',
+    startedAt: 100
+  })
+
+  const observed: Array<string | null> = []
+  registry.onAntigravityCycleMode('agy-ask', (mode) => observed.push(mode))
+
+  // Early pre-model status tick before agy initializes should not emit a bogus null
+  registry.ingestProvider('agy-ask', {
+    agent_state: 'idle',
+    conversation_id: ''
+  })
+  expect(observed).toEqual([])
+
+  // Real auto status tick arrives
+  registry.ingestProvider('agy-ask', {
+    agent_state: 'idle',
+    cycle_mode: 'auto',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' }
+  })
+  // Hook event without cycle_mode must NOT clear cycle_mode
+  registry.ingestProvider('agy-ask', {
+    hook_event_name: 'Stop',
+    agent_state: 'idle'
+  })
+  // Ask mode omits cycle_mode from statusLine JSON completely
+  registry.ingestProvider('agy-ask', {
+    agent_state: 'idle',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' },
+    context_window: { used_percentage: 2, context_window_size: 1048576 }
+  })
+  registry.ingestProvider('agy-ask', {
+    agent_state: 'idle',
+    cycle_mode: 'accept-edits',
+    model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)' }
+  })
+
+  expect(observed).toEqual(['auto', null, 'accept-edits'])
+  expect(registry.antigravityCycleMode('agy-ask')).toBe('accept-edits')
 })

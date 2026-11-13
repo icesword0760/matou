@@ -732,6 +732,7 @@ describe('main parity for Codex HUD controls', () => {
 describe('Antigravity agent-aware HUD copy', () => {
   it('uses Antigravity wording in Bypass Permissions dialogs and AGENTS.md editor modal', async () => {
     const user = userEvent.setup()
+    const onPermissionMode = vi.fn()
     render(
       <TerminalHud
         hud={agent({
@@ -744,11 +745,15 @@ describe('Antigravity agent-aware HUD copy', () => {
         runtimeClient={{
           request: async () => ({ path: '', exists: true, content: '# Agents Rules\n' })
         } as never}
-        onPermissionMode={vi.fn()}
+        onPermissionMode={onPermissionMode}
       />
     )
 
     await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
+    await user.click(screen.getByRole('menuitem', { name: 'Accept Edits' }))
+    expect(onPermissionMode).toHaveBeenCalledWith('session-1', 'acceptEdits', false, 'antigravity')
+
+    await user.click(screen.getByRole('button', { name: /当前权限模式：Accept Edits/ }))
     await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
     expect(screen.getByRole('alertdialog', { name: '切换到高权限模式' }).textContent)
       .toContain('当前 Antigravity 会话还没有生成可恢复的 sessionId')
@@ -759,5 +764,45 @@ describe('Antigravity agent-aware HUD copy', () => {
     expect(screen.getByRole('button', { name: '关闭 AGENTS.md 编辑器' })).toBeTruthy()
     expect(screen.getByRole('textbox', { name: 'AGENTS.md 内容' })).toBeTruthy()
     await user.click(screen.getByRole('button', { name: '关闭 AGENTS.md 编辑器' }))
+  })
+
+  it('shows active quota group on Antigravity status bar and all quota groups in hover tooltip', async () => {
+    const user = userEvent.setup()
+    const reset5h = Date.now() + 2 * 3_600_000
+    const resetWeekly = Date.now() + 5 * 86_400_000
+    const { container } = render(
+      <TerminalHud
+        hud={agent({
+          provider: 'antigravity',
+          model: 'Gemini 4 Carbon (Medium)',
+          usageWindows: [
+            { label: '5h', percent: 11, resetsAt: reset5h },
+            { label: 'Weekly', percent: 15, resetsAt: resetWeekly }
+          ],
+          allUsageWindows: [
+            { label: 'Gemini 5h', percent: 11, resetsAt: reset5h },
+            { label: 'Gemini Weekly', percent: 15, resetsAt: resetWeekly },
+            { label: '3P 5h', percent: 30, resetsAt: reset5h },
+            { label: '3P Weekly', percent: 60, resetsAt: resetWeekly }
+          ]
+        })}
+      />
+    )
+
+    const usageFields = [...container.querySelectorAll('.status-usage')]
+    expect(usageFields.map((el) => el.textContent?.trim())).toEqual([
+      '5h 11% · 2h',
+      'Weekly 15% · 5d'
+    ])
+    expect(container.textContent).not.toContain('Gemini 5h')
+    expect(container.textContent).not.toContain('3P Weekly')
+
+    await user.hover(usageFields[0]!)
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip.textContent).toContain('全部用量额度')
+    expect(tooltip.textContent).toContain('Gemini 5h 11%')
+    expect(tooltip.textContent).toContain('Gemini Weekly 15%')
+    expect(tooltip.textContent).toContain('3P 5h 30%')
+    expect(tooltip.textContent).toContain('3P Weekly 60%')
   })
 })

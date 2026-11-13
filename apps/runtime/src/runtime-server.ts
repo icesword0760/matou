@@ -2001,9 +2001,11 @@ export class RuntimeServer {
       const fullResumePromptMonitor = message.profile === 'claude-code' && providerSessionId
         ? new ClaudeFullResumePromptMonitor()
         : undefined
-      const workspaceTrustPromptMonitor = message.profile === 'claude-code' && providerSessionId &&
-        permissionMode === 'bypassPermissions'
-        ? new ClaudeWorkspaceTrustPromptMonitor()
+      const workspaceTrustPromptMonitor = providerSessionId && (
+        (message.profile === 'claude-code' && permissionMode === 'bypassPermissions') ||
+        (message.profile === 'antigravity' && (forkLaunch !== undefined || permissionMode === 'bypassPermissions'))
+      )
+        ? new ClaudeWorkspaceTrustPromptMonitor(message.profile)
         : undefined
       let activeSession: PtySession | undefined
       let pendingResumeFailure: string | undefined
@@ -2015,7 +2017,9 @@ export class RuntimeServer {
           // The provider redraws this startup screen once after first paint and
           // resets the highlighted row. Select only after that redraw, then
           // give the TUI one frame to apply the choice before confirming it.
-          session.write(CLAUDE_NEXT_OPTION)
+          if (workspaceTrustPromptMonitor?.requiresMoveDown !== false) {
+            session.write(CLAUDE_NEXT_OPTION)
+          }
           setTimeout(() => {
             if (this.#sessions.get(message.sessionId) === session) {
               session.write(CLAUDE_CONFIRM_OPTION)
@@ -3592,6 +3596,9 @@ export class RuntimeServer {
           : undefined
     if (!targetCycleMode) return false
 
+    let expectedBaseline = this.#hud.antigravityCycleMode(sessionId)
+    if (expectedBaseline === targetCycleMode) return true
+
     const maxPresses = 4
     const totalTimeoutMs = this.#antigravityPermissionSwitchTimeoutMs
     const deadline = Date.now() + totalTimeoutMs
@@ -3600,7 +3607,6 @@ export class RuntimeServer {
     const unsubscribe = this.#hud.onAntigravityCycleMode(sessionId, (cycleMode) => {
       events.push(cycleMode)
       notify?.()
-      notify = undefined
     })
 
     try {
@@ -3615,18 +3621,26 @@ export class RuntimeServer {
         }
         const matchedOrMoved = await new Promise<'matched' | 'moved' | 'timeout'>((resolve) => {
           const consume = (): boolean => {
+            let moved = false
             while (events.length > 0) {
-              const observed = events.shift()
+              const observed = events.shift()!
               if (observed === targetCycleMode) {
+                notify = undefined
                 clearTimeout(timer)
                 resolve('matched')
                 return true
               }
-              if (events.length === 0) {
-                clearTimeout(timer)
-                resolve('moved')
-                return true
+              if (expectedBaseline !== undefined && observed === expectedBaseline) {
+                continue
               }
+              expectedBaseline = observed
+              moved = true
+            }
+            if (moved) {
+              notify = undefined
+              clearTimeout(timer)
+              resolve('moved')
+              return true
             }
             return false
           }

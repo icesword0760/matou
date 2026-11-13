@@ -53,6 +53,7 @@ export interface SessionHudWire {
   /** Quota may follow the device account only for a verified default-login Claude session. */
   defaultAccountUsage?: boolean
   usageWindows?: HudUsageWindow[]
+  allUsageWindows?: HudUsageWindow[]
   configCounts?: HudConfigCounts
   mcpErrors?: string[]
   todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>

@@ -187,8 +187,8 @@ export function createHierarchyCommands(
     }),
     returnSession: (sceneWindowId) => command('hierarchy.return-session', { sceneWindowId })
     ,
-    setPermissionMode: (sessionId, permissionMode, respawn) => command('session.set-permission-mode', {
-      sessionId, provider: 'claude-code', permissionMode, respawn
+    setPermissionMode: (sessionId, permissionMode, respawn, provider) => command('session.set-permission-mode', {
+      sessionId, provider: provider ?? 'claude-code', permissionMode, respawn
     }),
     setModel: (sessionId, modelStrategy) => command('session.set-model', {
       sessionId, modelStrategy

@@ -172,6 +172,9 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     expect(snapshot.permissionMode).toBe('default')
     expect(snapshot.contextPercent).toBe(12)
     expect(snapshot.usageWindows).toEqual([
+      { label: '5h', percent: 25, resetsAt: Date.parse('2026-11-13T11:14:59Z') }
+    ])
+    expect(snapshot.allUsageWindows).toEqual([
       { label: 'Gemini 5h', percent: 25, resetsAt: Date.parse('2026-11-13T11:14:59Z') }
     ])
     expect(workStatuses.get('agy-s1')).toBe('idle')
@@ -374,6 +377,15 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
       { windowId: 'win-agy', sceneId, sessionId: failedChildId, now: 30 }
     )
     await waitUntil(() => sessionRepository.getResumeBinding(failedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
+
+    // Worktree Fork landing in a brand-new untrusted folder auto-confirms trust via Enter (never Down+Enter).
+    await writeFile(join(root, 'fork-requires-trust'), '1', 'utf8')
+    const trustedCreate = await forkWorkflow.createForkChild(
+      { commandId: 'cmd-fork-trust', commandType: 'session.fork', requestHash: 'fork-trust' },
+      { windowId: 'win-agy', sceneId, sourceSessionId: parentId, name: 'Worktree Trust Branch', worktreeMode: 'current', now: 40 }
+    )
+    const trustedChildId = trustedCreate.session!.id
+    await waitUntil(() => sessionRepository.getResumeBinding(trustedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
   }, 20_000)
 
   it('injects antigravity-system-message.md via SessionStart and enables mt identify/list/read inside Antigravity cards', async () => {
@@ -500,6 +512,45 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
       await controlServer.stop()
     }
   }, 20_000)
+
+  it('ignores duplicate statusLine cycle_mode heartbeats while switching modes via Shift+Tab', async () => {
+    await writeFile(join(root, 'emit-duplicate-cycle-tick'), '1', 'utf8')
+    registerSession(database, 'agy-dup', 'antigravity')
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: 'agy-dup', executionContextId: 'ctx-1',
+      profile: 'antigravity', cols: 100, rows: 30
+    })
+
+    await waitUntil(() => hud.antigravityCycleMode('agy-dup') === 'auto')
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+      requestId: 'agy-dup-plan', method: 'session.set-permission-mode',
+      capability: 'renderer', deadlineAt: Date.now() + 3_000,
+      payload: {
+        command: { commandId: 'cmd-dup-1', commandType: 'session.set-permission-mode', requestHash: 'hd1' },
+        input: { sessionId: 'agy-dup', provider: 'antigravity', permissionMode: 'plan', respawn: false, now: 10 }
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('agy-dup-plan') !== undefined)
+    expect(await readLaunches(launchLogPath)).toHaveLength(1)
+    expect(hud.antigravityCycleMode('agy-dup')).toBe('plan')
+    expect(hud.snapshot('agy-dup')?.permissionMode).toBe('plan')
+
+    port.receive({
+      type: 'rpc.request', protocolVersion: PROTOCOL_VERSION,
+      requestId: 'agy-dup-ae', method: 'session.set-permission-mode',
+      capability: 'renderer', deadlineAt: Date.now() + 3_000,
+      payload: {
+        command: { commandId: 'cmd-dup-2', commandType: 'session.set-permission-mode', requestHash: 'hd2' },
+        input: { sessionId: 'agy-dup', provider: 'antigravity', permissionMode: 'acceptEdits', respawn: false, now: 11 }
+      }
+    })
+    await waitUntil(() => port.findRpcResponse('agy-dup-ae') !== undefined)
+    expect(await readLaunches(launchLogPath)).toHaveLength(1)
+    expect(hud.antigravityCycleMode('agy-dup')).toBe('accept-edits')
+    expect(hud.snapshot('agy-dup')?.permissionMode).toBe('acceptEdits')
+  })
 })
 
 const MOCK_AGY_SCRIPT = `
@@ -556,7 +607,7 @@ function sendStatus(cycleMode, agentState = 'idle', conv = conversationId) {
   const payload = {
     conversation_id: conv,
     agent_state: agentState,
-    ...(cycleMode === undefined ? {} : { cycle_mode: cycleMode }),
+    ...(cycleMode === undefined || cycleMode === null ? {} : { cycle_mode: cycleMode }),
     model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' },
     context_window: { context_window_size: 1048576, used_percentage: 12 },
     quota: { 'gemini-5h': { remaining_fraction: 0.75, reset_time: '2026-11-13T11:14:59Z' } }
@@ -569,7 +620,21 @@ let cycleIndex = Math.max(0, cycleOrder.indexOf(initialMode ?? 'auto'));
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 let inputBuffer = '';
+let awaitingTrust = forkedMode && fs.existsSync(path.join(path.dirname(__filename), 'fork-requires-trust'));
 process.stdin.on('data', (chunk) => {
+  if (awaitingTrust) {
+    if (chunk.includes('\\u001b[B')) {
+      process.stderr.write('unexpected move-down on antigravity trust prompt\\n');
+      process.exit(2);
+    }
+    if (chunk.includes('\\r') || chunk.includes('\\n')) {
+      awaitingTrust = false;
+      sendStatus(initialMode, 'idle', conversationId);
+      sendStatus(initialMode, 'idle', conversationId);
+      process.stdout.write('AGY_READY\\r\\n');
+    }
+    return;
+  }
   inputBuffer += chunk;
   while (inputBuffer.includes('/fork\\r') || inputBuffer.includes('/fork\\n')) {
     const idxR = inputBuffer.indexOf('/fork\\r');
@@ -584,19 +649,33 @@ process.stdin.on('data', (chunk) => {
   }
   if (fs.existsSync(path.join(path.dirname(__filename), 'ignore-shift-tab'))) return;
   if (chunk.includes('\\u001b[Z')) {
+    if (fs.existsSync(path.join(path.dirname(__filename), 'emit-duplicate-cycle-tick'))) {
+      sendStatus(cycleOrder[cycleIndex]);
+    }
     cycleIndex = (cycleIndex + 1) % cycleOrder.length;
     sendStatus(cycleOrder[cycleIndex]);
   }
 });
 
-if (forkedMode) {
+if (awaitingTrust) {
+  process.stdout.write(
+    'Accessing workspace:\\r\\n' +
+    '/tmp/new-worktree\\r\\n' +
+    'Do you trust the contents of this project?\\r\\n' +
+    'Antigravity CLI requires permission to read, edit, and execute files here.\\r\\n' +
+    '> Yes, I trust this folder\\r\\n' +
+    'No, exit\\r\\n' +
+    '↑/↓ Navigate · enter Confirm\\r\\n'
+  );
+} else if (forkedMode) {
   sendStatus(initialMode, 'authenticating', '');
   sendStatus(initialMode, 'idle', conversationId);
   sendStatus(initialMode, 'idle', conversationId);
+  process.stdout.write('AGY_READY\\r\\n');
 } else {
   sendStatus(initialMode);
+  process.stdout.write('AGY_READY\\r\\n');
 }
-process.stdout.write('AGY_READY\\r\\n');
 setInterval(() => {}, 10000);
 `
 

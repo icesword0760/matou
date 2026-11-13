@@ -9,6 +9,7 @@ describe('PRD 02 HUD commands', () => {
 
     await commands.setPermissionMode('session-1', 'plan', false)
     await commands.setPermissionMode('session-1', 'bypassPermissions', true)
+    await commands.setPermissionMode('session-2', 'acceptEdits', false, 'antigravity')
     await commands.setModel('session-1', 'claude-sonnet-4-6')
 
     expect(request.mock.calls.map(([method, payload]) => [method, payload.input])).toEqual([
@@ -17,6 +18,9 @@ describe('PRD 02 HUD commands', () => {
       })],
       ['session.set-permission-mode', expect.objectContaining({
         sessionId: 'session-1', provider: 'claude-code', permissionMode: 'bypassPermissions', respawn: true
+      })],
+      ['session.set-permission-mode', expect.objectContaining({
+        sessionId: 'session-2', provider: 'antigravity', permissionMode: 'acceptEdits', respawn: false
       })],
       ['session.set-model', expect.objectContaining({
         sessionId: 'session-1', modelStrategy: 'claude-sonnet-4-6'

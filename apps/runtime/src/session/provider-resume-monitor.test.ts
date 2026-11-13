@@ -80,6 +80,20 @@ describe('ClaudeWorkspaceTrustPromptMonitor', () => {
     const monitor = new ClaudeWorkspaceTrustPromptMonitor()
 
     expect(monitor.ingest('The setup notes say Yes, I trust this folder.')).toBe(false)
+    expect(monitor.requiresMoveDown).toBe(true)
+  })
+
+  it('detects Antigravity workspace trust prompt across ANSI chunks without moving down', () => {
+    const monitor = new ClaudeWorkspaceTrustPromptMonitor('antigravity')
+    expect(monitor.requiresMoveDown).toBe(false)
+
+    expect(monitor.ingest('\u001b[33mAccessing workspace:\u001b[39m\r\n/tmp/worktree\r\n')).toBe(false)
+    expect(monitor.ingest(
+      'Do you trust the contents of this project?\r\n' +
+      'Antigravity CLI requires permission to read, edit, and execute files here.\r\n' +
+      '> Yes, I trust this folder\r\nNo, exit\r\n↑/↓ Navigate · enter Confirm'
+    )).toBe(true)
+    expect(monitor.ingest('Yes, I trust this folder')).toBe(false)
   })
 })
 

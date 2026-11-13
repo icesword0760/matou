@@ -58,6 +58,7 @@ export interface SessionHudSnapshot {
   toolCounts?: HudToolCount[]
   lastTool?: HudToolActivity
   usageWindows?: HudUsageWindow[]
+  allUsageWindows?: HudUsageWindow[]
   configCounts?: HudConfigCounts
   instructionFileLabel?: string
   mcpErrors?: string[]
@@ -80,6 +81,8 @@ interface MutableHud extends SessionHudSnapshot {
   providerModelObserved: boolean
   configCheckedAt?: number
   configCwd?: string
+  antigravityQuota?: Record<string, unknown>
+  antigravityCycleMode?: string | null
 }
 
 export class SessionHudRegistry {
@@ -245,6 +248,11 @@ export class SessionHudRegistry {
     const strategy = normalizeModelStrategy(model)
     if (strategy) current.modelStrategy = strategy
     current.providerModelObserved = false
+    if (current.provider === 'antigravity' && current.antigravityQuota) {
+      const resolved = resolveAntigravityQuotaWindows(current.antigravityQuota, current.model)
+      current.usageWindows = resolved.usageWindows
+      current.allUsageWindows = resolved.allUsageWindows
+    }
   }
 
   updateSessionName(sessionId: string, name: string): void {
@@ -256,6 +264,10 @@ export class SessionHudRegistry {
   markResumable(sessionId: string): void {
     const current = this.#states.get(sessionId)
     if (current?.mode === 'agent') current.resumable = true
+  }
+
+  antigravityCycleMode(sessionId: string): string | null | undefined {
+    return this.#states.get(sessionId)?.antigravityCycleMode
   }
 
   onAntigravityCycleMode(
@@ -299,8 +311,17 @@ export class SessionHudRegistry {
       current.providerPermissionObserved = true
       delete current.pendingPermissionMode
     }
-    if (current.provider === 'antigravity' && 'cycle_mode' in payload) {
+    const isAntigravityStatusTick =
+      current.provider === 'antigravity' &&
+      !text(payload.hook_event_name) &&
+      !text(payload.hookEventName) &&
+      ('cycle_mode' in payload || 'model' in payload || 'context_window' in payload || 'agent_state' in payload) &&
+      ('cycle_mode' in payload ||
+        current.antigravityCycleMode !== undefined ||
+        Boolean(nestedText(payload.model, 'id') ?? nestedText(payload.model, 'display_name')))
+    if (isAntigravityStatusTick) {
       const observedCycleMode = text(payload.cycle_mode) ?? null
+      current.antigravityCycleMode = observedCycleMode
       for (const listener of this.#cycleModeListeners.get(sessionId) ?? []) {
         listener(observedCycleMode)
       }
@@ -328,9 +349,18 @@ export class SessionHudRegistry {
     if (duration !== undefined && duration > Math.max(0, this.#now() - current.startedAt)) {
       current.startedAt = this.#now() - duration
     }
-    const usageWindows = usageWindowsFromPayload(payload)
-    if (usageWindows) current.usageWindows = usageWindows
-    this.accountUsage.observe(sessionId, payload, usageWindows)
+    const antigravityQuota = current.provider === 'antigravity' ? object(payload.quota) : undefined
+    if (antigravityQuota) current.antigravityQuota = antigravityQuota
+    if (current.provider === 'antigravity' && current.antigravityQuota) {
+      const resolved = resolveAntigravityQuotaWindows(current.antigravityQuota, current.model)
+      current.usageWindows = resolved.usageWindows
+      current.allUsageWindows = resolved.allUsageWindows
+      this.accountUsage.observe(sessionId, payload, resolved.usageWindows)
+    } else {
+      const usageWindows = usageWindowsFromPayload(payload)
+      if (usageWindows) current.usageWindows = usageWindows
+      this.accountUsage.observe(sessionId, payload, usageWindows)
+    }
 
     const eventName = text(payload.hook_event_name) ?? text(payload.hookEventName)
     if (!eventName) {
@@ -483,6 +513,8 @@ export class SessionHudRegistry {
       pendingPermissionMode: _pendingPermissionMode,
       providerModelObserved: _providerModelObserved,
       configCheckedAt: _configCheckedAt, configCwd: _configCwd,
+      antigravityQuota: _antigravityQuota,
+      antigravityCycleMode: _antigravityCycleMode,
       ...snapshot
     } = state
     if (state.mode === 'agent') {
@@ -668,25 +700,99 @@ function usageWindowsFromPayload(payload: Record<string, unknown>): HudUsageWind
   }
   const quota = object(payload.quota)
   if (!quota) return undefined
+  return collectAntigravityAllQuotaWindows(quota)
+}
+
+function collectAntigravityAllQuotaWindows(quota: Record<string, unknown>): HudUsageWindow[] {
+  const keys = orderedAntigravityQuotaKeys(quota)
+  const windows: HudUsageWindow[] = []
+  for (const key of keys) {
+    const window = antigravityQuotaWindow(quota[key], formatAntigravityQuotaLabel(key))
+    if (window) windows.push(window)
+  }
+  return windows
+}
+
+function orderedAntigravityQuotaKeys(quota: Record<string, unknown>): string[] {
   const preferredOrder = ['gemini-5h', 'gemini-weekly', '3p-5h', '3p-weekly']
-  const keys = [
+  return [
     ...preferredOrder.filter((key) => key in quota),
     ...Object.keys(quota).filter((key) => !preferredOrder.includes(key))
   ].slice(0, 8)
-  const windows: HudUsageWindow[] = []
-  for (const key of keys) {
-    const entry = object(quota[key])
-    const remainingFraction = numeric(entry?.remaining_fraction ?? entry?.remainingFraction)
-    if (remainingFraction === undefined) continue
-    const usedPercent = clampPercent((1 - Math.max(0, Math.min(1, remainingFraction))) * 100)
-    const resetsAt = timestampMilliseconds(entry?.reset_time ?? entry?.resetTime)
-    windows.push({
-      label: formatAntigravityQuotaLabel(key),
-      percent: usedPercent,
-      ...(resetsAt ? { resetsAt } : {})
-    })
+}
+
+function antigravityQuotaWindow(raw: unknown, label: string): HudUsageWindow | undefined {
+  const entry = object(raw)
+  const remainingFraction = numeric(entry?.remaining_fraction ?? entry?.remainingFraction)
+  if (remainingFraction === undefined) return undefined
+  const usedPercent = clampPercent((1 - Math.max(0, Math.min(1, remainingFraction))) * 100)
+  const resetsAt = timestampMilliseconds(entry?.reset_time ?? entry?.resetTime)
+  return {
+    label,
+    percent: usedPercent,
+    ...(resetsAt ? { resetsAt } : {})
   }
-  return windows
+}
+
+function resolveAntigravityQuotaWindows(
+  quota: Record<string, unknown>,
+  model: string | undefined
+): { usageWindows: HudUsageWindow[]; allUsageWindows: HudUsageWindow[] } {
+  const allUsageWindows = collectAntigravityAllQuotaWindows(quota)
+  const normalizedModel = model?.trim().toLowerCase() ?? ''
+  if (!normalizedModel) {
+    return { usageWindows: allUsageWindows, allUsageWindows }
+  }
+
+  const keys = Object.keys(quota)
+  const dedicatedWeeklyKey = findDedicatedQuotaKey(keys, normalizedModel, 'weekly')
+  const dedicatedFiveHourKey = findDedicatedQuotaKey(keys, normalizedModel, '5h')
+  const thirdParty = isThirdPartyModel(normalizedModel)
+  const gemini = !thirdParty && (
+    /\bgemini\b/.test(normalizedModel) ||
+    dedicatedWeeklyKey !== undefined ||
+    dedicatedFiveHourKey !== undefined
+  )
+  if (!gemini && !thirdParty) {
+    return { usageWindows: allUsageWindows, allUsageWindows }
+  }
+
+  const fiveHourKey = dedicatedFiveHourKey ?? (thirdParty ? '3p-5h' : 'gemini-5h')
+  const weeklyKey = dedicatedWeeklyKey ?? (thirdParty ? '3p-weekly' : 'gemini-weekly')
+  const matched: HudUsageWindow[] = []
+  const fiveHour = antigravityQuotaWindow(quota[fiveHourKey], '5h')
+  if (fiveHour) matched.push(fiveHour)
+  const weekly = antigravityQuotaWindow(quota[weeklyKey], 'Weekly')
+  if (weekly) matched.push(weekly)
+
+  return {
+    usageWindows: matched.length > 0 ? matched : allUsageWindows,
+    allUsageWindows
+  }
+}
+
+function findDedicatedQuotaKey(
+  keys: string[],
+  normalizedModel: string,
+  suffix: '5h' | 'weekly'
+): string | undefined {
+  const pattern = suffix === '5h' ? /^([a-z0-9-]+)-5h$/i : /^([a-z0-9-]+)-weekly$/i
+  for (const key of keys) {
+    const match = pattern.exec(key)
+    const token = match?.[1]?.toLowerCase()
+    if (!token || token === 'gemini' || token === '3p') continue
+    if (matchModelToken(normalizedModel, token)) return key
+  }
+  return undefined
+}
+
+function isThirdPartyModel(normalizedModel: string): boolean {
+  return /\b(claude|opus|sonnet|haiku|gpt|o1|o3|o4|chatgpt|openai|codex|deepseek|qwen|llama|mistral|grok|kimi|glm|minimax)\b/.test(normalizedModel)
+}
+
+function matchModelToken(normalizedModel: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`).test(normalizedModel)
 }
 
 function formatAntigravityQuotaLabel(key: string): string {
@@ -694,7 +800,19 @@ function formatAntigravityQuotaLabel(key: string): string {
   if (key === 'gemini-weekly') return 'Gemini Weekly'
   if (key === '3p-5h') return '3P 5h'
   if (key === '3p-weekly') return '3P Weekly'
+  const weeklyMatch = /^([a-z0-9-]+)-weekly$/i.exec(key)
+  if (weeklyMatch?.[1]) return `${capitalizeToken(weeklyMatch[1])} Weekly`.slice(0, 64)
+  const fiveHourMatch = /^([a-z0-9-]+)-5h$/i.exec(key)
+  if (fiveHourMatch?.[1]) return `${capitalizeToken(fiveHourMatch[1])} 5h`.slice(0, 64)
   return key.slice(0, 64)
+}
+
+function capitalizeToken(token: string): string {
+  return token
+    .split('-')
+    .filter(Boolean)
+    .map((part) => `${part[0]!.toUpperCase()}${part.slice(1)}`)
+    .join(' ')
 }
 
 function appendUsageWindow(

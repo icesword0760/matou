@@ -23,6 +23,15 @@ const CLAUDE_WORKSPACE_TRUST_PROMPT_MARKERS = [
   'enter to confirm'
 ]
 
+const ANTIGRAVITY_WORKSPACE_TRUST_PROMPT_MARKERS = [
+  'accessing workspace:',
+  'do you trust the contents of this project?',
+  'antigravity cli requires permission to read, edit, and execute files here.',
+  'yes, i trust this folder',
+  'no, exit',
+  'enter confirm'
+]
+
 export class ClaudeFullResumePromptMonitor {
   #recentOutput = ''
   #handled = false
@@ -53,17 +62,27 @@ export class ClaudeFullResumePromptMonitor {
 }
 
 export class ClaudeWorkspaceTrustPromptMonitor {
+  readonly #markers: readonly string[]
+  readonly #moveDownFirst: boolean
   #recentOutput = ''
   #handled = false
 
+  constructor(provider: 'claude-code' | 'antigravity' = 'claude-code') {
+    this.#markers = provider === 'antigravity'
+      ? ANTIGRAVITY_WORKSPACE_TRUST_PROMPT_MARKERS
+      : CLAUDE_WORKSPACE_TRUST_PROMPT_MARKERS
+    this.#moveDownFirst = provider === 'claude-code'
+  }
+
+  get requiresMoveDown(): boolean { return this.#moveDownFirst }
+
   ingest(data: string): boolean {
     if (this.#handled) return false
-    this.#recentOutput = normalizeProviderOutput(`${this.#recentOutput}${data}`)
-      .toLowerCase()
-      .slice(-8_192)
-    if (!CLAUDE_WORKSPACE_TRUST_PROMPT_MARKERS.every(
-      (marker) => this.#recentOutput.includes(marker)
-    )) {
+    // Keep raw bytes until matching so a split ANSI escape or word is not
+    // normalized into a different prompt between PTY chunks.
+    this.#recentOutput = `${this.#recentOutput}${data}`.slice(-8_192)
+    const output = normalizeProviderOutput(this.#recentOutput).toLowerCase()
+    if (!this.#markers.every((marker) => output.includes(marker))) {
       return false
     }
     this.#handled = true

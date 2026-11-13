@@ -116,6 +116,7 @@ export interface SessionHudView {
   /** Quota may follow the device account only for a verified default-login Claude session. */
   defaultAccountUsage?: boolean
   usageWindows?: HudUsageWindow[]
+  allUsageWindows?: HudUsageWindow[]
   configCounts?: HudConfigCounts
   instructionFileLabel?: string
   mcpErrors?: string[]
@@ -259,7 +260,12 @@ export interface HierarchyCommands {
   ): Promise<SessionEnvironmentActionResult>
   detachSession(sceneId: string, mountId: string, sessionId: string, sceneWindowId: string): unknown
   returnSession(sceneWindowId: string): unknown
-  setPermissionMode(sessionId: string, permissionMode: HudPermissionMode, respawn: boolean): unknown
+  setPermissionMode(
+    sessionId: string,
+    permissionMode: HudPermissionMode,
+    respawn: boolean,
+    provider?: AgentProfileId
+  ): unknown
   setModel(sessionId: string, modelStrategy: HudModelStrategy): unknown
 }
 import type { SessionEnvironment, SessionGitState } from '@matou/domain'

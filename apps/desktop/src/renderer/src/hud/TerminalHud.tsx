@@ -15,7 +15,13 @@ import {
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
-import { getAgentManifest, getAgentShortName, type SessionEnvironment, type SessionGitState } from '@matou/domain'
+import {
+  getAgentManifest,
+  getAgentShortName,
+  type AgentProfileId,
+  type SessionEnvironment,
+  type SessionGitState
+} from '@matou/domain'
 
 type HudMessages = Messages['hud']
 
@@ -29,7 +35,12 @@ const PERMISSION_MODES: Array<{ value: HudPermissionMode; abbreviation: string }
 export function TerminalHud(props: {
   hud: SessionHudView | undefined
   sessionId?: string
-  onPermissionMode?(sessionId: string, mode: HudPermissionMode, respawn: boolean): unknown
+  onPermissionMode?(
+    sessionId: string,
+    mode: HudPermissionMode,
+    respawn: boolean,
+    provider?: AgentProfileId
+  ): unknown
   gitContext?: GitControlContext
   runtimeClient?: GitRequestClient
   disabledReason?: string
@@ -164,11 +175,13 @@ export function TerminalHud(props: {
         items={hud.configCounts.hookNames ?? []} />}
       {usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
         title={useDeviceQuota ? `${quotaAccount} · ${quotaEmpty}` : (zh ? '暂无用量数据' : 'Usage unavailable')}>—</span>}
-      {usageWindows.map((window, index) => <span
-        className="status-field status-usage status-priority-6"
-        title={`${useDeviceQuota ? `${quotaAccount} · ` : ''}${usageTitle(window, zh)}${useDeviceQuota && quotaProblem ? ` · ${quotaProblem}` : ''}`} key={`${window.label}:${index}`}>
-        {window.label} <strong>{window.percent}%</strong><small> · {formatReset(window.resetsAt)}</small>
-      </span>)}
+      {!useDeviceQuota && (hud.allUsageWindows?.length ?? 0) > 0
+        ? <QuotaDetailWindows windows={usageWindows} allWindows={hud.allUsageWindows!} zh={zh} />
+        : usageWindows.map((window, index) => <span
+          className="status-field status-usage status-priority-6"
+          title={`${useDeviceQuota ? `${quotaAccount} · ` : ''}${usageTitle(window, zh)}${useDeviceQuota && quotaProblem ? ` · ${quotaProblem}` : ''}`} key={`${window.label}:${index}`}>
+          {window.label} <strong>{window.percent}%</strong><small> · {formatReset(window.resetsAt)}</small>
+        </span>)}
       {hud.teamRole && <span className={`team-role-badge status-priority-5 team-${teamTone(hud.teamStatus)}`}>{hud.teamRole}</span>}
       {(hud.mcpErrors ?? []).map((name) => <span className="status-field status-mcp-error status-priority-5" key={name}>⚠ {name}</span>)}
       {manifest?.hud.supportsTodos !== false && todoDisplay(hud) && <span className="status-field status-todos status-priority-4">
@@ -207,7 +220,11 @@ export function TerminalHud(props: {
             return
           }
           setPermissionMode(option.value)
-          void Promise.resolve(props.onPermissionMode?.(sessionId, option.value, false)).catch(() => {})
+          const provider = hud?.provider && hud.provider !== 'claude-code' ? hud.provider : undefined
+          const request = provider
+            ? props.onPermissionMode?.(sessionId, option.value, false, provider)
+            : props.onPermissionMode?.(sessionId, option.value, false)
+          void Promise.resolve(request).catch(() => {})
         }}><span className={`perm-menu__dot perm-${option.value}`} />
         <span className="perm-menu__label">{m.permission[option.value]}</span>
         {permissionMode === option.value && <span className="perm-menu__check">✓</span>}
@@ -222,7 +239,11 @@ export function TerminalHud(props: {
         const target = confirmTarget
         setConfirmTarget(null)
         setSwitching(true)
-        void Promise.resolve(props.onPermissionMode?.(sessionId, target, true)).then(() => {
+        const provider = hud.provider && hud.provider !== 'claude-code' ? hud.provider : undefined
+        const request = provider
+          ? props.onPermissionMode?.(sessionId, target, true, provider)
+          : props.onPermissionMode?.(sessionId, target, true)
+        void Promise.resolve(request).then(() => {
           setPermissionMode(target)
         }).catch((error: unknown) => {
           setSwitchError(m.switchFailed(error instanceof Error ? error.message : m.unknownError))
@@ -264,8 +285,7 @@ function EnvironmentButton(props: {
     </svg> : label}</button>
 }
 
-function HudDetail(props: { label: string; title: string; items: string[]; children?: ReactNode; className?: string; tooltipClassName?: string }) {
-  const m = useMessages().hud
+function useHoverTooltip() {
   const [open, setOpen] = useState(false)
   const [style, setStyle] = useState<CSSProperties>({})
   const closeTimer = useRef<number | undefined>(undefined)
@@ -284,16 +304,50 @@ function HudDetail(props: { label: string; title: string; items: string[]; child
     setStyle({ left: rect.left + rect.width / 2, top: rect.top - 8 })
     setOpen(true)
   }
+  return { open, style, cancelClose, scheduleClose, show }
+}
+
+function HudDetail(props: { label: string; title: string; items: string[]; children?: ReactNode; className?: string; tooltipClassName?: string }) {
+  const m = useMessages().hud
+  const tooltip = useHoverTooltip()
   return <>
     <span className={`status-field status-detail status-config ${props.className ?? ''}`} role="button" tabIndex={0}
       aria-label={m.detailList(props.title)}
-      onMouseEnter={(event) => show(event.currentTarget)} onMouseLeave={scheduleClose}
-      onFocus={(event) => show(event.currentTarget)} onBlur={scheduleClose}>{props.label}</span>
-    {open && createPortal(<div className={`hud-detail-tooltip ${props.tooltipClassName ?? ''}`} role="tooltip" style={style}
-      onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
+      onMouseEnter={(event) => tooltip.show(event.currentTarget)} onMouseLeave={tooltip.scheduleClose}
+      onFocus={(event) => tooltip.show(event.currentTarget)} onBlur={tooltip.scheduleClose}>{props.label}</span>
+    {tooltip.open && createPortal(<div className={`hud-detail-tooltip ${props.tooltipClassName ?? ''}`} role="tooltip" style={tooltip.style}
+      onMouseEnter={tooltip.cancelClose} onMouseLeave={tooltip.scheduleClose}>
       <strong>{props.title}</strong>
       {props.children ?? <ul>{(props.items.length > 0 ? props.items : [m.detailPending]).map((item, index) =>
         <li key={`${item}:${index}`}>{item}</li>)}</ul>}
+    </div>, document.body)}
+  </>
+}
+
+function QuotaDetailWindows(props: {
+  windows: NonNullable<SessionHudView['usageWindows']>
+  allWindows: NonNullable<SessionHudView['allUsageWindows']>
+  zh: boolean
+}) {
+  const m = useMessages().hud
+  const tooltip = useHoverTooltip()
+  return <>
+    {props.windows.map((window, index) => <span
+      className="status-field status-usage status-detail status-priority-6"
+      tabIndex={0}
+      aria-label={`${usageTitle(window, props.zh)} · ${m.quotaDetails}`}
+      key={`${window.label}:${index}`}
+      onMouseEnter={(event) => tooltip.show(event.currentTarget)}
+      onMouseLeave={tooltip.scheduleClose}
+      onFocus={(event) => tooltip.show(event.currentTarget)}
+      onBlur={tooltip.scheduleClose}>
+      {window.label} <strong>{window.percent}%</strong><small> · {formatReset(window.resetsAt)}</small>
+    </span>)}
+    {tooltip.open && createPortal(<div className="hud-detail-tooltip" role="tooltip" style={tooltip.style}
+      onMouseEnter={tooltip.cancelClose} onMouseLeave={tooltip.scheduleClose}>
+      <strong>{m.quotaDetails}</strong>
+      <ul>{props.allWindows.map((window, index) =>
+        <li key={`${window.label}:${index}`}>{window.label} {window.percent}% · {formatReset(window.resetsAt)}</li>)}</ul>
     </div>, document.body)}
   </>
 }
