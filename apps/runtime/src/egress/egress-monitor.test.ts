@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { EgressHostSample, EgressStatusWire } from '@matou/contracts'
+import type { EgressFamily, EgressHostSample, EgressStatusWire } from '@matou/contracts'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RuntimeDatabase } from '../storage/database'
 import { MigrationRunner } from '../storage/migration-runner'
@@ -160,17 +160,24 @@ afterEach(async () => {
 
 function createHarness(overrides?: {
   sampleFull?: () => Promise<EgressSample>
-  sampleLight?: () => Promise<EgressHostSample>
+  sampleLight?: (family: EgressFamily) => Promise<EgressHostSample>
   networkSignature?: () => string
   freeze?: (sessionId: string) => Promise<void>
   thaw?: (sessionId: string) => Promise<void>
 }) {
   const clock = new FakeClock()
   let currentFull = makeSample()
-  let currentLight: EgressHostSample = {
-    host: EGRESS_HOSTS.anthropic.api,
-    ip: '169.128.1.1',
-    country: 'US'
+  const currentLight: Record<EgressFamily, EgressHostSample> = {
+    anthropic: {
+      host: EGRESS_HOSTS.anthropic.api,
+      ip: '169.128.1.1',
+      country: 'US'
+    },
+    openai: {
+      host: EGRESS_HOSTS.openai.api,
+      ip: '198.51.100.1',
+      country: 'US'
+    }
   }
   let signature = 'en0:192.168.1.10'
   const frozenCalls: string[] = []
@@ -178,7 +185,9 @@ function createHarness(overrides?: {
   const published: EgressStatusWire[] = []
 
   const sampleFullSpy = vi.fn(overrides?.sampleFull ?? (async () => currentFull))
-  const sampleLightSpy = vi.fn(overrides?.sampleLight ?? (async () => currentLight))
+  const sampleLightSpy = vi.fn(
+    overrides?.sampleLight ?? (async (family: EgressFamily) => currentLight[family])
+  )
   const networkSignatureSpy = vi.fn(overrides?.networkSignature ?? (() => signature))
   const freezeSpy = vi.fn(
     overrides?.freeze ??
@@ -223,8 +232,8 @@ function createHarness(overrides?: {
     setFullSample(sample: EgressSample) {
       currentFull = sample
     },
-    setLightSample(sample: EgressHostSample) {
-      currentLight = sample
+    setLightSample(sample: EgressHostSample, family: EgressFamily = 'anthropic') {
+      currentLight[family] = sample
     },
     setSignature(next: string) {
       signature = next
@@ -554,6 +563,76 @@ describe('EgressMonitor', () => {
     harness.setLightSample({ host: 'api.anthropic.com', ip: '169.128.1.1', country: 'US' })
     await harness.clock.advanceBy(60_000)
     expect(harness.sampleFullSpy).toHaveBeenCalledTimes(8)
+
+    harness.monitor.stop()
+  })
+
+  it('samples only anthropic during light checks when no sessions are registered', async () => {
+    const harness = createHarness()
+    harness.monitor.start()
+    await harness.clock.flushMicrotasks()
+
+    await harness.clock.advanceBy(60_000)
+    expect(harness.sampleLightSpy.mock.calls).toEqual([['anthropic']])
+
+    harness.monitor.stop()
+  })
+
+  it('samples openai when only codex is registered and freezes codex on CN light fallback', async () => {
+    const harness = createHarness()
+    harness.monitor.registerSession('codex-1', 'openai')
+    harness.monitor.start()
+    await harness.clock.flushMicrotasks()
+    expect(harness.sampleFullSpy).toHaveBeenCalledTimes(1)
+
+    const cnOpenaiSample = makeSample({
+      openaiApi: { ip: '220.181.2.2', country: 'CN' },
+      openaiLogin: { ip: '220.181.2.2', country: 'CN' }
+    })
+    harness.setFullSample(cnOpenaiSample)
+    harness.setLightSample({ host: 'api.openai.com', ip: '220.181.2.2', country: 'CN' }, 'openai')
+
+    await harness.clock.advanceBy(60_000)
+
+    expect(harness.sampleLightSpy.mock.calls).toEqual([['openai']])
+    expect(harness.sampleFullSpy).toHaveBeenCalledTimes(2)
+    expect(harness.frozenCalls).toEqual(['codex-1'])
+    expect(harness.monitor.status().families.find((f) => f.family === 'openai')).toMatchObject({
+      state: 'abnormal',
+      violation: 'mainland',
+      frozenSessionIds: ['codex-1']
+    })
+    expect(harness.monitor.status().families.find((f) => f.family === 'anthropic')).toMatchObject({
+      state: 'ok',
+      frozenSessionIds: []
+    })
+
+    harness.monitor.stop()
+  })
+
+  it('samples all active providers concurrently and triggers only one full check when multiple change', async () => {
+    const harness = createHarness()
+    harness.monitor.registerSession('claude-1', 'anthropic')
+    harness.monitor.registerSession('codex-1', 'openai')
+    harness.monitor.start()
+    await harness.clock.flushMicrotasks()
+    expect(harness.sampleFullSpy).toHaveBeenCalledTimes(1)
+
+    harness.setLightSample({ host: 'api.anthropic.com', ip: '169.128.2.2', country: 'US' }, 'anthropic')
+    harness.setLightSample({ host: 'api.openai.com', ip: '198.51.100.2', country: 'US' }, 'openai')
+    harness.setFullSample(
+      makeSample({
+        anthropicApi: { ip: '169.128.2.2', country: 'US' },
+        anthropicLogin: { ip: '169.128.2.2', country: 'US' },
+        openaiApi: { ip: '198.51.100.2', country: 'US' },
+        openaiLogin: { ip: '198.51.100.2', country: 'US' }
+      })
+    )
+
+    await harness.clock.advanceBy(60_000)
+
+    expect(harness.sampleLightSpy.mock.calls).toEqual([['anthropic'], ['openai']])
+    expect(harness.sampleFullSpy).toHaveBeenCalledTimes(2)
 
     harness.monitor.stop()
   })

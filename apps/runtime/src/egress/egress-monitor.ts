@@ -28,7 +28,7 @@ export interface EgressMonitorDependencies {
   now(): number
   setTimer(callback: () => void, ms: number): () => void
   sampleFull(): Promise<EgressSample>
-  sampleLight(): Promise<EgressHostSample>
+  sampleLight(family: EgressFamily): Promise<EgressHostSample>
   networkSignature(): string
   settings: EgressSettings
   freeze(sessionId: string): Promise<void>
@@ -492,21 +492,29 @@ export class EgressMonitor {
     }, EGRESS_LIGHT_SAMPLE_INTERVAL_MS)
   }
 
+  #lightSampleFamilies(): EgressFamily[] {
+    const active = new Set<EgressFamily>(this.#sessionFamilies.values())
+    return active.size > 0 ? FAMILIES.filter((family) => active.has(family)) : ['anthropic']
+  }
+
   async #onLightSampleTick(): Promise<void> {
     if (this.#stopped) return
-    let nextApi: EgressHostSample
-    try {
-      nextApi = await this.#deps.sampleLight()
-    } catch {
-      if (!this.#stopped) this.#scheduleLightSample()
-      return
-    }
+    const families = this.#lightSampleFamilies()
+    const settled = await Promise.allSettled(
+      families.map(async (family) => ({
+        family,
+        sample: await this.#deps.sampleLight(family)
+      }))
+    )
     if (this.#stopped) return
     this.#scheduleLightSample()
 
-    const prevApi = this.#lastSample?.hosts.anthropic.api
-    const shouldTriggerFull =
-      (nextApi.ip !== undefined && nextApi.ip !== prevApi?.ip) || nextApi.country === 'CN'
+    const shouldTriggerFull = settled.some((result) => {
+      if (result.status !== 'fulfilled') return false
+      const { family, sample } = result.value
+      const prevApi = this.#lastSample?.hosts[family].api
+      return (sample.ip !== undefined && sample.ip !== prevApi?.ip) || sample.country === 'CN'
+    })
     if (shouldTriggerFull) {
       await this.#runFullCheck()
     }
