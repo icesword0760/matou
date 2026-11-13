@@ -5,6 +5,10 @@ import { resolve } from 'node:path'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 
 import {
+  getAgentManifest,
+  isAgentProfileId
+} from '@matou/domain'
+import {
   PROTOCOL_VERSION,
   parseRuntimeRecoveryCommand,
   type RuntimeConnectRequest,
@@ -411,13 +415,13 @@ async function initializeRuntime(): Promise<RuntimeState> {
       providerReady.record(sessionId, runId, sessions.get(sessionId)?.runId ?? '')
       sessionHuds.markResumable(sessionId)
       const now = Date.now()
-      if (provider === 'claude-code') {
+      if (getAgentManifest(provider)?.capabilities.autoRestore === true) {
         try {
           providerModes.observeHook({
             commandId: `provider-mode-${runId}-${eventName}-${randomUUID()}`,
             commandType: 'provider-hook.mode',
             requestHash: `${sessionId}:${providerSessionId}:${eventName}:${now}`
-          }, { sessionId, providerSessionId, eventName, now })
+          }, { sessionId, providerSessionId, eventName, provider, now })
         } catch (error) {
           console.error(`[provider-mode] ${errorMessage(error)}`)
         }
@@ -825,11 +829,13 @@ function forkExecutionDescriptor(
      FROM sessions WHERE sessions.id = ? AND sessions.archived_at IS NULL`,
     sessionId
   )
-  if (!row || row.kind !== 'claude-code') return undefined
+  if (!row || !isAgentProfileId(row.kind) || !getAgentManifest(row.kind)?.capabilities.autoRestore) {
+    return undefined
+  }
   return {
     sessionId,
     executionContextId: row.execution_context_id,
-    profile: 'claude-code',
+    profile: row.kind,
     cols: validTerminalSize(row.cols, 120, 2, 1_000),
     rows: validTerminalSize(row.rows, 40, 1, 500)
   }

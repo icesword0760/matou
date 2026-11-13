@@ -1,3 +1,5 @@
+import type { SessionRunProfile } from '@matou/domain'
+
 export type RecoveryState = 'deferred' | 'queued' | 'restoring' | 'ready' | 'failed'
 export type RecoveryPriority =
   | 'active-session'
@@ -14,7 +16,7 @@ export interface RecoveryJob {
   workspaceId?: string
   taskId?: string
   executionContextId?: string
-  profile?: 'shell' | 'claude-code' | 'codex'
+  profile?: SessionRunProfile
   recoveryAuthority?: 'fork'
   /** User interaction/creation time, never a provider heartbeat or restart time. */
   lastUsedAt?: number

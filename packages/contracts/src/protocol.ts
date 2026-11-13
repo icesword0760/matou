@@ -1,3 +1,4 @@
+import { SESSION_RUN_PROFILES } from '@matou/domain'
 import { z } from 'zod'
 
 import type { RuntimeErrorCode, StorageFaultCode } from './runtime-lifecycle'
@@ -47,7 +48,7 @@ const spawnSchema = z.object({
   protocolVersion,
   sessionId,
   executionContextId: identifier,
-  profile: z.enum(['shell', 'claude-code', 'codex']),
+  profile: z.enum(SESSION_RUN_PROFILES),
   cols: z.number().int().min(2).max(1000),
   rows: z.number().int().min(1).max(500),
   spawnRevision: z.number().int().nonnegative().optional()

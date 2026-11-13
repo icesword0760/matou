@@ -1,3 +1,17 @@
+import type {
+  AgentProviderId,
+  SessionCurrentMode,
+  SessionKind,
+  SessionRunProfile
+} from './agent-manifest'
+
+export type {
+  AgentProviderId,
+  SessionCurrentMode,
+  SessionKind,
+  SessionRunProfile
+} from './agent-manifest'
+
 export type WorkspaceId = string
 export type TaskId = string
 export type SessionId = string
@@ -119,9 +133,7 @@ export interface Worktree {
   retainedAt?: number
 }
 
-export type SessionKind = 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
 export type SessionStatus = 'created' | 'starting' | 'running' | 'waiting' | 'interrupted' | 'exited' | 'archived'
-export type SessionCurrentMode = SessionKind
 export type SessionTitleSource = 'default' | 'auto' | 'manual'
 export type SessionWorkStatus =
   | 'starting'
@@ -267,7 +279,7 @@ export interface SessionRun {
   sessionId: SessionId
   ordinal: number
   runtimeGeneration: string
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: SessionRunProfile
   pid?: number
   status: SessionRunStatus
   cols: number
@@ -281,7 +293,7 @@ export interface SessionRun {
 export interface ProviderBinding {
   id: ProviderBindingId
   sessionId: SessionId
-  provider: 'claude-code' | 'codex' | 'generic'
+  provider: AgentProviderId
   providerSessionId: string
   resumeState: 'unknown' | 'available' | 'resuming' | 'resumed' | 'failed' | 'expired'
   restoreState?: ProviderRestoreState
@@ -481,7 +493,7 @@ export interface SemanticAnchor {
   sessionId: SessionId
   eventId: EventId
   sourceRef?: {
-    provider: 'claude-code' | 'codex' | 'generic'
+    provider: AgentProviderId
     providerEventId: string
   }
   contentPath?: string

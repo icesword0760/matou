@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto'
 
-import type {
-  DomainCommandMetadata,
-  SceneSessionGraph,
-  Session,
-  SessionCanvasMembership
+import {
+  getAgentManifest,
+  getAgentShortName,
+  type DomainCommandMetadata,
+  type SceneSessionGraph,
+  type Session,
+  type SessionCanvasMembership,
+  type SessionKind,
+  type SessionRunProfile
 } from '@matou/domain'
 import type { RemoveNodeScope } from '@matou/contracts'
 
@@ -92,7 +96,7 @@ export interface CreateSessionSiblingInput extends CreateNavigationOptions {
   sceneId: string
   sourceSessionId: string
   parentSessionId?: string
-  profile: Extract<Session['kind'], 'shell' | 'claude-code' | 'codex'>
+  profile: SessionRunProfile
   title?: string
   executionContextId?: string
   now: number
@@ -463,7 +467,7 @@ export class SessionCanvasService {
         id: string
         task_id: string
         execution_context_id: string
-        kind: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+        kind: SessionKind
         title: string
         cwd: string
         scene_id: string
@@ -483,15 +487,17 @@ export class SessionCanvasService {
          WHERE id = ? AND archived_at IS NULL`, scene.task_id
       ), 'Task')
       assertWorkspacePathAvailable(tx, task.workspace_id)
-      const providerBinding = source.kind === 'claude-code' ? tx.get<{ id: string }>(
+      const canAutoRestore = getAgentManifest(source.kind)?.capabilities.autoRestore === true
+      const providerBinding = canAutoRestore ? tx.get<{ id: string }>(
         `SELECT id FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code'
+         WHERE session_id = ? AND provider = ?
            AND resume_state IN ('available', 'resumed')
            AND validated_at IS NOT NULL AND invalidated_at IS NULL
          ORDER BY updated_at DESC, id DESC LIMIT 1`,
-        source.id
+        source.id,
+        source.kind
       ) : undefined
-      const nextKind = providerBinding ? 'claude-code' : 'shell'
+      const nextKind = providerBinding ? source.kind : 'shell'
 
       tx.run(
         `UPDATE sessions SET kind = ?, status = 'created', archived_at = NULL,
@@ -1027,9 +1033,7 @@ function nextCanvasName(tx: DatabaseTransaction, taskId: string): string {
 }
 
 function defaultSessionTitle(profile: CreateSessionSiblingInput['profile']): string {
-  if (profile === 'claude-code') return 'Claude'
-  if (profile === 'codex') return 'Codex'
-  return 'Shell'
+  return getAgentShortName(profile, 'Shell')
 }
 
 function requiredTitle(value: string, label: string): string {

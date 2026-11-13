@@ -1,5 +1,5 @@
 import type { HudPermissionMode } from '@matou/contracts'
-import type { ForkProgress, ForkStage } from '@matou/domain'
+import type { AgentProfileId, ForkProgress, ForkStage } from '@matou/domain'
 
 import { runtimeMessages } from '../i18n/messages'
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
@@ -53,6 +53,7 @@ export interface ForkOperationRecord {
 
 export interface AcceptForkIntentInput extends ForkOperationIdentity {
   sourceSessionId: string
+  sourceProvider?: AgentProfileId
   sourceProviderSessionId: string
   permissionMode: HudPermissionMode
   displayName: string
@@ -112,11 +113,12 @@ export class SessionForkIntentRepository {
            attempt_count, updated_at, operation_id, submission_key, stage,
            completed_steps, total_steps, attempt, lease_fence
          ) VALUES (
-           ?, ?, 'claude-code', ?, ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?,
+           ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?, ?, ?, ?, ?,
            0, ?, ?, ?, 'queued', 0, ?, 0, 0
          )`,
         input.sessionId,
         input.sourceSessionId,
+        input.sourceProvider ?? 'claude-code',
         input.sourceProviderSessionId,
         input.permissionMode,
         input.now,

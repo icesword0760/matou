@@ -5,10 +5,12 @@ import type { RuntimeDatabase } from '../storage/database'
 import type { RuntimeSessionRegistry } from './runtime-session-registry'
 import type { ForkLease } from './session-fork-intent-repository'
 
+import type { SessionRunProfile } from '@matou/domain'
+
 export interface SessionExecutionDescriptor {
   sessionId: string
   executionContextId: string
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: SessionRunProfile
   cols: number
   rows: number
   spawnRevision?: number | undefined

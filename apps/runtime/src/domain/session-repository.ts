@@ -1,14 +1,22 @@
-import type {
-  DomainCommandMetadata,
-  DomainCommit,
-  ProviderBinding,
-  Session,
-  SessionKind,
-  SessionRun,
-  SessionRunStatus,
-  SessionStatus,
-  SessionTitleSource
+import {
+  getAgentShortName,
+  listAgentManifests,
+  type AgentProfileId,
+  type AgentProviderId,
+  type DomainCommandMetadata,
+  type DomainCommit,
+  type ProviderBinding,
+  type Session,
+  type SessionKind,
+  type SessionRun,
+  type SessionRunProfile,
+  type SessionRunStatus,
+  type SessionStatus,
+  type SessionTitleSource
 } from '@matou/domain'
+
+const AGENT_SHORT_NAMES = listAgentManifests().map((manifest) => manifest.shortName)
+const AGENT_SHORT_NAME_SQL_LIST = AGENT_SHORT_NAMES.map((name) => `'${name}'`).join(', ')
 
 import type { RuntimeDatabase } from '../storage/database'
 import type { DomainTransactionManager } from '../storage/domain-transaction'
@@ -48,7 +56,7 @@ interface RunRow {
   session_id: string
   ordinal: number
   runtime_generation: string
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: SessionRunProfile
   pid: number | null
   status: SessionRunStatus
   cols: number
@@ -62,7 +70,7 @@ interface RunRow {
 interface BindingRow {
   id: string
   session_id: string
-  provider: 'claude-code' | 'codex' | 'generic'
+  provider: AgentProviderId
   provider_session_id: string
   resume_state: ProviderBinding['resumeState']
   metadata_json: string
@@ -156,7 +164,7 @@ export class SessionRepository {
       id: string
       sessionId: string
       runtimeGeneration: string
-      profile: 'shell' | 'claude-code' | 'codex'
+      profile: SessionRunProfile
       pid?: number
       cols: number
       rows: number
@@ -790,7 +798,7 @@ export class SessionRepository {
       tx.run(
         `UPDATE sessions
          SET kind = 'shell',
-             title = CASE WHEN title IN ('Claude', 'Codex') OR title = id THEN 'Shell' ELSE title END,
+             title = CASE WHEN title IN (${AGENT_SHORT_NAME_SQL_LIST}) OR title = id THEN 'Shell' ELSE title END,
              work_status = 'idle',
              updated_at = ?, last_activity_at = ?,
              version = version + 1
@@ -815,7 +823,7 @@ export class SessionRepository {
   promoteShellToAgent(
     command: DomainCommandMetadata,
     sessionId: string,
-    kind: 'claude-code' | 'codex',
+    kind: AgentProfileId,
     now: number
   ): DomainCommit<Session> {
     return this.#transactions.execute(command, ({ tx, emit }) => {
@@ -825,7 +833,7 @@ export class SessionRepository {
       )
       if (before.archived_at !== null) throw new Error('archived Session cannot start an Agent')
       const title = before.title === 'Shell' || before.title === before.id
-        ? (kind === 'claude-code' ? 'Claude' : 'Codex')
+        ? getAgentShortName(kind)
         : before.title
       tx.run(
         `UPDATE sessions
@@ -1052,13 +1060,11 @@ function inferredTitleSource(kind: SessionKind, title: string): SessionTitleSour
 }
 
 function defaultSessionTitle(kind: SessionKind): string {
-  if (kind === 'claude-code') return 'Claude'
-  if (kind === 'codex') return 'Codex'
-  return 'Shell'
+  return getAgentShortName(kind, 'Shell')
 }
 
 function genericShellTitle(title: string, sessionId: string): string {
-  return title === 'Claude' || title === 'Codex' || title === sessionId ? 'Shell' : title
+  return AGENT_SHORT_NAMES.includes(title) || title === sessionId ? 'Shell' : title
 }
 
 function mapRun(row: RunRow): SessionRun {

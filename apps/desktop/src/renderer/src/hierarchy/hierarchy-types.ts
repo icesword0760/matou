@@ -1,3 +1,5 @@
+import type { AgentProfileId, SessionKind } from '@matou/domain'
+
 export interface WorkspaceView {
   id: string; name: string; rootDirectory: string
   isDefault?: boolean; isPinned?: boolean; pinSortKey?: string; lastOpenedAt?: number
@@ -24,7 +26,7 @@ export interface SessionView {
   title: string
   titleSource?: 'default' | 'auto' | 'manual'
   providerTitle?: string
-  kind?: 'shell' | 'claude-code' | 'codex' | string
+  kind?: SessionKind | string
   status?: string
   executionContextId?: string
 }
@@ -33,7 +35,7 @@ export interface SessionGraphNodeView {
   sceneId: string
   parentSessionId?: string
   relationKind?: 'derived-from' | 'forked-from'
-  currentMode: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+  currentMode: SessionKind
   workStatus: 'starting' | 'idle' | 'running' | 'needs-input' | 'error' | 'interrupted' | 'exited'
   providerRestoreState: 'none' | 'restoring' | 'failed'
   providerRestoreError?: string
@@ -91,6 +93,7 @@ export interface SessionHudView {
   agents?: import('@matou/contracts').HudAgentActivity[]
   sessionId: string
   mode: 'shell' | 'agent'
+  provider?: AgentProfileId
   shell?: string
   cwd?: string
   gitBranch?: string

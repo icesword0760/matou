@@ -5,12 +5,15 @@ import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import type { HudPermissionMode } from '@matou/contracts'
-import type {
-  DomainCommandMetadata,
-  ForkProgress,
-  SceneSessionGraph,
-  Session,
-  Worktree
+import {
+  getAgentManifest,
+  isAgentProfileId,
+  type AgentProfileId,
+  type DomainCommandMetadata,
+  type ForkProgress,
+  type SceneSessionGraph,
+  type Session,
+  type Worktree
 } from '@matou/domain'
 
 import {
@@ -159,7 +162,7 @@ interface BindingRow {
 }
 
 interface FrozenProviderContext {
-  profile: 'claude-code' | 'codex'
+  profile: AgentProfileId
   providerSessionId: string
   providerConfigId: string
   model: string
@@ -694,7 +697,8 @@ export class ForkWorkflowService {
   }
 
   #validForkBinding(source: SessionRow): BindingRow {
-    if (source.kind !== 'claude-code' && source.kind !== 'codex') {
+    const manifest = isAgentProfileId(source.kind) ? getAgentManifest(source.kind) : undefined
+    if (!manifest || manifest.launch.forkStrategy === 'none') {
       throw new ForkWorkflowError(
         'FORK_SOURCE_NOT_READY', runtimeMessages().sessionCanvas.fork.sourceNotReady
       )
@@ -711,7 +715,8 @@ export class ForkWorkflowService {
     )
     if (
       !binding || binding.restore_state !== 'none' ||
-      (source.kind === 'claude-code' && metadata(binding.metadata_json).canFork !== true)
+      (manifest.capabilities.forkRequiresCompletedTurn &&
+        metadata(binding.metadata_json).canFork !== true)
     ) {
       throw new ForkWorkflowError(
         'FORK_SOURCE_NOT_READY', runtimeMessages().sessionCanvas.fork.sourceNotReady
@@ -722,7 +727,8 @@ export class ForkWorkflowService {
 
   async #freezeProviderContext(source: SourceContext): Promise<FrozenProviderContext> {
     const profile = source.forkSource.kind
-    if (profile !== 'claude-code' && profile !== 'codex') {
+    const manifest = isAgentProfileId(profile) ? getAgentManifest(profile) : undefined
+    if (!manifest || manifest.launch.forkStrategy === 'none') {
       throw new ForkWorkflowError(
         'FORK_SOURCE_NOT_READY', runtimeMessages().sessionCanvas.fork.sourceNotReady
       )
@@ -732,9 +738,11 @@ export class ForkWorkflowService {
       persisted.providerConfigId.trim()
       ? persisted.providerConfigId
       : undefined
-    const selected = await this.#providerConfigs.launchSelection(profile, providerConfigId)
+    const selected = manifest.capabilities.providerConfig
+      ? await this.#providerConfigs.launchSelection(profile as 'claude-code' | 'codex', providerConfigId)
+      : { providerConfigId: '', model: '' }
     return {
-      profile,
+      profile: manifest.id,
       providerSessionId: source.binding.provider_session_id,
       providerConfigId: selected.providerConfigId,
       model: typeof persisted.model === 'string' ? persisted.model : selected.model,

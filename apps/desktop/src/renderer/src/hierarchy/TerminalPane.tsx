@@ -1,3 +1,4 @@
+import { getAgentManifest, isAgentProfileId } from '@matou/domain'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -172,9 +173,9 @@ export function TerminalPane(props: {
     taskName, sessionTitle: session.title, workStatus,
     childCount: childNodes.length
   })
-  const profile = session.kind === 'claude-code' || session.kind === 'codex'
-    ? session.kind : 'shell'
-  const showFork = session.kind === 'claude-code' && onFork !== undefined
+  const profile = isAgentProfileId(session.kind) ? session.kind : 'shell'
+  const capabilities = getAgentManifest(session.kind)?.capabilities
+  const showFork = capabilities?.fork === true && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
   const forkReadinessReason = workStatus === 'running' || workStatus === 'starting' || workStatus === 'needs-input'
     ? m.pane.forkReadyAfterReply
@@ -412,14 +413,14 @@ export function TerminalPane(props: {
           : restoreError === 'provider session running in background'
             ? m.pane.providerRunningInBackground : restoreError}</span>
       </div>
-      {onRetryRestore && (!restoreIdentityExpired || session.kind === 'claude-code') && <button type="button"
+      {onRetryRestore && (!restoreIdentityExpired || capabilities?.autoRestore === true) && <button type="button"
         disabled={actionBlocked || restoreRetryPending} title={actionBlockedReason} onClick={(event) => {
         event.stopPropagation()
         if (restoreRetryPending) return
         setRestoreRetryPending(true)
         void Promise.resolve(onRetryRestore(session.id)).finally(() => setRestoreRetryPending(false))
       }}>{restoreRetryPending ? m.pane.restoring : m.pane.retryRestore}</button>}
-      {session.kind === 'claude-code' && onStartFreshProvider && <button type="button"
+      {capabilities?.autoRestore === true && onStartFreshProvider && <button type="button"
         disabled={freshStartBlocked || restoreRetryPending} title={freshStartBlockedReason}
         onClick={(event) => {
           event.stopPropagation()
@@ -455,7 +456,7 @@ export function TerminalPane(props: {
     {isTeamMember && forkState !== 'failed' && <AgentTeamMemberSummary
       workStatus={workStatus} latestLines={latestLines} />}
     {!isTeamMember && forkState !== 'failed' &&
-      !(effectiveRestoreState === 'failed' && session.kind === 'claude-code') && foreground &&
+      !(effectiveRestoreState === 'failed' && capabilities?.autoRestore === true) && foreground &&
       (recoveryState === 'ready' || storageFault !== null) && <TerminalSurface sessionId={session.id}
       executionContextId={session.executionContextId ?? 'local-default'}
       profile={profile} visible={visible} active={active} foreground={foreground}
@@ -601,7 +602,7 @@ export function TerminalPane(props: {
           setRenameFailure(null)
           setRenaming(true)
         }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>{m.pane.rename}</button>}
-        {session.kind === 'claude-code' && session.titleSource === 'manual' && onRestoreAutoTitle &&
+        {capabilities?.autoTitle === true && session.titleSource === 'manual' && onRestoreAutoTitle &&
           <button className="detach-menu-item" role="menuitem" disabled={actionBlocked}
             title={actionBlockedReason} onClick={() => {
             setContextMenu(null)

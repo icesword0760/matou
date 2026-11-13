@@ -1,3 +1,4 @@
+import type { SessionKind } from '@matou/domain'
 import type { ClaudeAccountCommand, ClaudeAccountsState } from './claude-accounts'
 import type {
   Locale,
@@ -147,7 +148,7 @@ export interface DetachedTerminalWindowInput {
   mountId: string
   sessionId: string
   executionContextId: string
-  profile: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+  profile: SessionKind
   title: string
 }
 

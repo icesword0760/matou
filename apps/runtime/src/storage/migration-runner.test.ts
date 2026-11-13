@@ -67,7 +67,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result).toMatchObject({ appliedVersions: [34], currentVersion: 34 })
+    expect(result).toMatchObject({ appliedVersions: [34, 35], currentVersion: 35 })
     expect(database.all(
       `SELECT id, title, title_source, provider_title
        FROM sessions WHERE id IN ('broken', 'renamed') ORDER BY id`
@@ -89,7 +89,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result).toMatchObject({ appliedVersions: [33, 34], currentVersion: 34 })
+    expect(result).toMatchObject({ appliedVersions: [33, 34, 35], currentVersion: 35 })
     expect(database.all<{ name: string }>(
       `SELECT name FROM pragma_table_info('fork_batch_ledger')
        WHERE name IN ('public_request_fingerprint', 'resolved_request_json')
@@ -152,7 +152,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result).toMatchObject({ appliedVersions: [32, 33, 34], currentVersion: 34 })
+    expect(result).toMatchObject({ appliedVersions: [32, 33, 34, 35], currentVersion: 35 })
     expect(database.get<{ name: string; notnull: number; dflt_value: string }>(
       "SELECT name, [notnull], dflt_value FROM pragma_table_info('fork_batch_retry_attempts') " +
       "WHERE name = 'replay_pending'"
@@ -177,7 +177,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.currentVersion).toBe(34)
+    expect(result.currentVersion).toBe(35)
     expect(database.all<{ name: string }>(
       `SELECT name FROM sqlite_master
        WHERE type = 'table' AND name LIKE 'fork_batch_retry_%' ORDER BY name`
@@ -216,7 +216,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result).toMatchObject({ appliedVersions: [31, 32, 33, 34], currentVersion: 34 })
+    expect(result).toMatchObject({ appliedVersions: [31, 32, 33, 34, 35], currentVersion: 35 })
     expect(database.all(
       `SELECT item_key, failure_generation, failure_receipt
        FROM fork_batch_items WHERE batch_key = 'batch-upgrade' ORDER BY ordinal`
@@ -238,7 +238,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.currentVersion).toBe(34)
+    expect(result.currentVersion).toBe(35)
     expect(database.all<{ name: string }>(
       `SELECT name FROM sqlite_master
        WHERE type = 'table' AND name IN ('fork_batch_items', 'fork_batch_ledger')
@@ -254,8 +254,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
-    expect(result.currentVersion).toBe(34)
+    expect(result.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
+    expect(result.currentVersion).toBe(35)
     const tables = database
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .map(({ name }) => name)
@@ -336,7 +336,7 @@ describe('MigrationRunner', () => {
 
     await expect(runner.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 34,
+      currentVersion: 35,
       backupPath: undefined
     })
     expect(database.all<{ checksum: string }>(
@@ -380,8 +380,8 @@ describe('MigrationRunner', () => {
       'b34eff91ec349bd3472ab71c46b0bd840ab08f0cafc06957a795187d9d64b0bd')
 
     await expect(new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()).resolves.toMatchObject({
-      appliedVersions: [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34],
-      currentVersion: 34
+      appliedVersions: [24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35],
+      currentVersion: 35
     })
     expect(database.all<{ checksum: string }>(
       'SELECT checksum FROM schema_migrations ORDER BY version'
@@ -430,7 +430,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([27, 28, 29, 30, 31, 32, 33, 34])
+    expect(result.appliedVersions).toEqual([27, 28, 29, 30, 31, 32, 33, 34, 35])
     expect(database.all(
       `SELECT session_id, operation_id, submission_key, stage, completed_steps,
               total_steps, attempt, lease_fence
@@ -541,7 +541,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
+    expect(result.appliedVersions).toEqual([21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
     expect(() => database.run(
       `INSERT INTO provider_bindings (
          id, session_id, provider, provider_session_id, resume_state,
@@ -627,8 +627,8 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
-    expect(result.currentVersion).toBe(34)
+    expect(result.appliedVersions).toEqual([22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
+    expect(result.currentVersion).toBe(35)
     expect(database.all(
       `SELECT session_id, local_execution_context_id, managed_worktree_id,
               active_target, state, error_message, updated_at
@@ -739,7 +739,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
+    expect(result.appliedVersions).toEqual([25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
     expect(database.all(
       `SELECT execution_context_id, repository_root, state, branch, detached_head,
               dirty, error_message, updated_at
@@ -827,7 +827,8 @@ describe('MigrationRunner', () => {
       FOUNDATION_MIGRATIONS[30]!,
       FOUNDATION_MIGRATIONS[31]!,
       FOUNDATION_MIGRATIONS[32]!,
-      FOUNDATION_MIGRATIONS[33]!
+      FOUNDATION_MIGRATIONS[33]!,
+      FOUNDATION_MIGRATIONS[34]!
     ]
 
     await expect(new MigrationRunner(database, edited).migrate()).rejects.toThrow(
@@ -848,7 +849,7 @@ describe('MigrationRunner', () => {
 
     await expect(
       new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
-    ).rejects.toThrow('database schema version 99 is newer than supported version 34')
+    ).rejects.toThrow('database schema version 99 is newer than supported version 35')
   })
 
   it('repairs stale Shell and Agent titles when upgrading an existing PRD 06 database', async () => {
@@ -883,7 +884,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
+    expect(result.appliedVersions).toEqual([12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
     expect(database.all<{ id: string; title: string }>(
       'SELECT id, title FROM sessions ORDER BY id'
     )).toEqual([
@@ -947,7 +948,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
+    expect(result.appliedVersions).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
     expect(database.all(
       `SELECT session_id, scene_id, sibling_created_seq, last_user_interaction_seq
        FROM session_canvas_memberships ORDER BY sibling_created_seq`
@@ -1026,7 +1027,7 @@ describe('MigrationRunner', () => {
 
     const result = await new MigrationRunner(database, FOUNDATION_MIGRATIONS).migrate()
 
-    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34])
+    expect(result.appliedVersions).toEqual([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35])
     expect(database.get<{ state: string }>(
       `SELECT state FROM session_fork_intents WHERE session_id = 'child'`
     )).toEqual({ state: 'succeeded' })

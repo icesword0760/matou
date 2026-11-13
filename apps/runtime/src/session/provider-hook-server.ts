@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { watch, type FSWatcher } from 'node:fs'
 import { chmod, mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
+import type { AgentProfileId } from '@matou/domain'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -19,7 +20,7 @@ const MAX_HOOK_BYTES = 1024 * 1024
 interface HookRegistrationRecord {
   runId: string
   sessionId: string
-  provider: 'claude-code' | 'codex'
+  provider: AgentProfileId
   permissionMode?: string
   providerConfigId?: string
   model?: string
@@ -48,14 +49,14 @@ interface HookRegistrationRecord {
 export interface ProviderHookNotification {
   runId: string
   sessionId: string
-  provider: 'claude-code'
+  provider: AgentProfileId
   event: ProviderNotificationEvent
 }
 
 export interface ProviderIdentityMismatch {
   runId: string
   sessionId: string
-  provider: 'claude-code' | 'codex'
+  provider: AgentProfileId
   expectedProviderSessionId: string
   actualProviderSessionId: string
   eventName: string
@@ -77,13 +78,13 @@ export interface ProviderHookServerOptions {
   onHudPayload?: (event: {
     runId: string
     sessionId: string
-    provider: 'claude-code'
+    provider: AgentProfileId
     payload: Record<string, unknown>
   }) => void
   onIdentityRecorded?: (event: {
     runId: string
     sessionId: string
-    provider: 'claude-code' | 'codex'
+    provider: AgentProfileId
     providerSessionId: string
     eventName: string
     forkAuthority?: ProviderIdentityForkAuthority
@@ -91,7 +92,7 @@ export interface ProviderHookServerOptions {
   onTitleObserved?: (event: {
     runId: string
     sessionId: string
-    provider: 'claude-code'
+    provider: AgentProfileId
     providerSessionId: string
     title: string
   }) => void | Promise<void>
@@ -171,6 +172,23 @@ export class ProviderHookServer {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 
+  async registerSession(
+    provider: AgentProfileId,
+    input: {
+      runId: string
+      sessionId: string
+      permissionMode?: string
+      providerConfigId?: string
+      model?: string
+      acceptStatuslineIdentity?: boolean
+      expectedProviderSessionId?: string
+      inheritedConversation?: boolean
+      forkAuthority?: ProviderIdentityForkAuthority
+    }
+  ): Promise<ProviderHookRegistration> {
+    return this.#registerProviderSession(provider, input)
+  }
+
   async registerClaudeSession(input: {
     runId: string
     sessionId: string
@@ -199,7 +217,7 @@ export class ProviderHookServer {
   }
 
   async #registerProviderSession(
-    provider: 'claude-code' | 'codex',
+    provider: AgentProfileId,
     input: {
       runId: string
       sessionId: string
@@ -449,7 +467,7 @@ export class ProviderHookServer {
       this.#onHudPayload({
         runId: registration.runId,
         sessionId: registration.sessionId,
-        provider: 'claude-code',
+        provider: registration.provider,
         payload
       })
       const transcriptPath = providerTranscriptPath(payload)
@@ -478,12 +496,12 @@ export class ProviderHookServer {
         sendJson(response, 200, {})
         return
       }
-      const notificationEvent = toProviderNotificationEvent(payload)
+      const notificationEvent = toProviderNotificationEvent(payload, registration.provider)
       if (notificationEvent) {
         this.#onNotification({
           runId: registration.runId,
           sessionId: registration.sessionId,
-          provider: 'claude-code',
+          provider: registration.provider,
           event: notificationEvent
         })
       }
@@ -516,7 +534,7 @@ export class ProviderHookServer {
     await this.#onTitleObserved({
       runId: registration.runId,
       sessionId: registration.sessionId,
-      provider: 'claude-code',
+      provider: registration.provider,
       providerSessionId,
       title
     })

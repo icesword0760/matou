@@ -1,6 +1,12 @@
+import {
+  getAgentDisplayName,
+  getAgentShortName,
+  type AgentProfileId
+} from '@matou/domain'
+
 export interface ProviderNotificationEvent {
   eventType: 'completed' | 'permission' | 'error' | 'waiting' | 'attention'
-  title: 'Claude Code'
+  title: string
   subtitle: string
   body: string
   sound: boolean
@@ -8,19 +14,23 @@ export interface ProviderNotificationEvent {
   replacementKey?: string
 }
 
-const TITLE = 'Claude Code' as const
-
 export function toProviderNotificationEvent(
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  provider: AgentProfileId = 'claude-code'
 ): ProviderNotificationEvent | null {
+  const title = getAgentDisplayName(provider, 'Claude Code')
+  const shortName = getAgentShortName(provider, 'Claude')
   const hookEvent = text(payload.hook_event_name) ?? text(payload.hookEventName)
-  if (hookEvent === 'Stop') return stopNotification(payload)
-  if (hookEvent === 'PermissionRequest') return permissionRequestNotification(payload)
-  if (hookEvent === 'Notification') return hookNotification(payload)
+  if (hookEvent === 'Stop') return stopNotification(payload, title, shortName)
+  if (hookEvent === 'PermissionRequest') return permissionRequestNotification(payload, title)
+  if (hookEvent === 'Notification') return hookNotification(payload, title, shortName)
   return null
 }
 
-function permissionRequestNotification(payload: Record<string, unknown>): ProviderNotificationEvent {
+function permissionRequestNotification(
+  payload: Record<string, unknown>,
+  title: string
+): ProviderNotificationEvent {
   const tool = text(payload.tool_name) ?? text(payload.toolName) ?? 'operation'
   const detail = firstText([
     payload.message,
@@ -32,7 +42,7 @@ function permissionRequestNotification(payload: Record<string, unknown>): Provid
   ])
   return {
     eventType: 'permission',
-    title: TITLE,
+    title,
     subtitle: 'Permission',
     body: compact(detail ? `${tool}: ${detail}` : `${tool} requires approval`, 180),
     sound: true,
@@ -40,19 +50,23 @@ function permissionRequestNotification(payload: Record<string, unknown>): Provid
   }
 }
 
-function stopNotification(payload: Record<string, unknown>): ProviderNotificationEvent {
+function stopNotification(
+  payload: Record<string, unknown>,
+  title: string,
+  shortName: string
+): ProviderNotificationEvent {
   const projectName = tailName(text(payload.cwd))
   const latestAnswer = text(payload.last_assistant_message) ??
     text(payload.lastAssistantMessage) ??
     text(payload.result)
   return {
     eventType: 'completed',
-    title: TITLE,
+    title,
     subtitle: projectName ? `Completed in ${projectName}` : 'Completed',
     body: compact(
       latestAnswer ?? (projectName
-        ? `Claude session completed in ${projectName}`
-        : 'Claude session completed'),
+        ? `${shortName} session completed in ${projectName}`
+        : `${shortName} session completed`),
       200
     ),
     sound: true,
@@ -60,7 +74,11 @@ function stopNotification(payload: Record<string, unknown>): ProviderNotificatio
   }
 }
 
-function hookNotification(payload: Record<string, unknown>): ProviderNotificationEvent {
+function hookNotification(
+  payload: Record<string, unknown>,
+  title: string,
+  shortName: string
+): ProviderNotificationEvent {
   const raw = firstText([
     payload.message,
     payload.body,
@@ -86,9 +104,9 @@ function hookNotification(payload: Record<string, unknown>): ProviderNotificatio
   }
   return {
     eventType,
-    title: TITLE,
+    title,
     subtitle,
-    body: compact(raw ?? 'Claude needs your attention', 180),
+    body: compact(raw ?? `${shortName} needs your attention`, 180),
     sound: true,
     cooldownKey: 'Notification'
   }

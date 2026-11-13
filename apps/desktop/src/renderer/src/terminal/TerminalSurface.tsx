@@ -1,5 +1,6 @@
 import { type DragEvent, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
+import type { SessionRunProfile } from '@matou/domain'
 import {
   MAX_CHECKPOINT_SNAPSHOT_BYTES,
   type RuntimeMessage,
@@ -50,7 +51,7 @@ export type TerminalStorageFaultMessage = Extract<
 interface TerminalSurfaceProps {
   sessionId?: string
   executionContextId?: string
-  profile?: 'shell' | 'claude-code' | 'codex'
+  profile?: SessionRunProfile
   visible?: boolean
   active?: boolean
   foreground?: boolean

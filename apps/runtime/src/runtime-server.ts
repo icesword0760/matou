@@ -9,6 +9,12 @@ import { basename, delimiter, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
+  getAgentManifest,
+  isAgentProfileId,
+  type SessionKind,
+  type SessionRunProfile
+} from '@matou/domain'
+import {
   PROTOCOL_VERSION,
   parseRendererMessage,
   type RendererMessage,
@@ -509,8 +515,9 @@ export class RuntimeServer {
     if (!job.executionContextId || !job.profile) {
       throw new Error(`Session ${job.sessionId} is missing a recovery launch descriptor`)
     }
-    const providerRecovery = job.profile === 'claude-code' &&
-      this.#sessionRepository.getResumeBinding(job.sessionId, 'claude-code')
+    const providerRecovery = job.profile !== 'shell' &&
+      getAgentManifest(job.profile)?.capabilities.autoRestore === true &&
+      this.#sessionRepository.getResumeBinding(job.sessionId, job.profile)
       ? this.#waitForProviderRecovery(job.sessionId)
       : undefined
     try {
@@ -566,7 +573,7 @@ export class RuntimeServer {
     this.#providerIdentityMismatches.delete(sessionId)
     const restoring = this.#database.get<{ id: string }>(
       `SELECT id FROM provider_bindings
-       WHERE session_id = ? AND provider = 'claude-code' AND restore_state = 'restoring'
+       WHERE session_id = ? AND provider <> 'generic' AND restore_state = 'restoring'
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
       sessionId
     )
@@ -1141,7 +1148,7 @@ export class RuntimeServer {
         ? undefined : this.#sessions.get(permissionSessionId)
       const ephemeralPermission = permissionSessionId !== undefined && permissionSession !== undefined &&
         permissionSession.profile !== 'shell' &&
-        this.#sessionRepository.getResumeBinding(permissionSessionId, 'claude-code') === undefined
+        this.#sessionRepository.getResumeBinding(permissionSessionId, permissionSession.profile) === undefined
       this.#accessPolicy.assertRpcAllowed(message.method)
       if (providerMutationSessionId !== undefined) {
         this.#assertProviderMutationAllowed(providerMutationSessionId)
@@ -1707,7 +1714,7 @@ export class RuntimeServer {
     const persistentAuthority = this.#database.get<{
       execution_context_id: string
       cwd: string
-      kind: 'shell' | 'claude-code' | 'codex'
+      kind: SessionKind
       workspace_root: string
     }>(
       `SELECT sessions.execution_context_id, sessions.cwd, sessions.kind,
@@ -1849,7 +1856,8 @@ export class RuntimeServer {
       (forkDecision?.kind === 'launch' ? forkDecision : undefined)
     const skipResume = this.#skipResumeSessionIds.delete(message.sessionId)
     if (
-      message.profile === 'claude-code' && forkLaunch === undefined && !skipResume &&
+      getAgentManifest(message.profile)?.capabilities.autoRestore === true &&
+      forkLaunch === undefined && !skipResume &&
       this.#hasParkedProviderRestoreFailure(message.sessionId)
     ) {
       return
@@ -1864,13 +1872,14 @@ export class RuntimeServer {
       providerSettingsBinding?.metadata
     )
     const providerSessionId = forkLaunch?.sourceProviderSessionId ?? resumeBinding?.providerSessionId
-    const supersedesRestoreFailure = message.profile === 'claude-code' &&
+    const supersedesRestoreFailure = isAgentProfileId(message.profile) &&
       providerSessionId === undefined && Boolean(this.#database.get(
         `SELECT 1 FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code'
+         WHERE session_id = ? AND provider = ?
            AND (restore_state = 'failed' OR resume_state = 'expired')
          LIMIT 1`,
-        message.sessionId
+        message.sessionId,
+        message.profile
       ))
     const persistOrdinaryShellHistory = message.profile === 'shell' &&
       persistentAuthority?.kind === 'shell' &&
@@ -1900,12 +1909,12 @@ export class RuntimeServer {
         forkLaunch?.permissionMode ??
         permissionModeFromMetadata(providerSettingsBinding?.metadata) ??
         permissionModeFromMetadata(resumeBinding?.metadata)
-      const providerSelection = message.profile === 'shell'
-        ? undefined
-        : await this.#providerConfigs.launchSelection(
-            message.profile,
+      const providerSelection = getAgentManifest(message.profile)?.capabilities.providerConfig
+        ? await this.#providerConfigs.launchSelection(
+            message.profile as 'claude-code' | 'codex',
             boundProviderSettings.providerConfigId
           )
+        : undefined
       const providerModel = boundProviderSettings.model ?? providerSelection?.model
       const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
@@ -2023,8 +2032,12 @@ export class RuntimeServer {
               // when its statusline arrives. Accept that new identity immediately.
               acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure
             })
-          : await this.#providerHooks.registerCodexSession(providerHookInput)
-        this.#trackProviderHook(message.sessionId, runId, hookRegistration)
+          : message.profile === 'codex'
+            ? await this.#providerHooks.registerCodexSession(providerHookInput)
+            : undefined
+        if (hookRegistration) {
+          this.#trackProviderHook(message.sessionId, runId, hookRegistration)
+        }
         if (providerSessionId !== undefined) {
           this.#providerLaunchRunIds.set(message.sessionId, runId)
         }
@@ -2900,7 +2913,7 @@ export class RuntimeServer {
   #hasParkedProviderRestoreFailure(sessionId: string): boolean {
     return this.#database.get<{ restore_state: string }>(
       `SELECT restore_state FROM provider_bindings
-       WHERE session_id = ? AND provider = 'claude-code'
+       WHERE session_id = ? AND provider <> 'generic'
        ORDER BY updated_at DESC, id DESC LIMIT 1`,
       sessionId
     )?.restore_state === 'failed'
@@ -3126,7 +3139,7 @@ export class RuntimeServer {
     if (!descriptor) return
     const authority = this.#database.get<{
       execution_context_id: string
-      kind: 'shell' | 'claude-code' | 'codex'
+      kind: SessionKind
     }>('SELECT execution_context_id, kind FROM sessions WHERE id = ? AND archived_at IS NULL', sessionId)
     if (!authority) {
       this.#environmentResumeDescriptors.delete(sessionId)
@@ -3135,7 +3148,7 @@ export class RuntimeServer {
     await this.#spawn({
       ...descriptor,
       executionContextId: authority.execution_context_id,
-      profile: authority.kind,
+      profile: authority.kind === 'agent-team-member' ? 'claude-code' : authority.kind,
       spawnRevision: (descriptor.spawnRevision ?? 0) + 1
     })
     this.#environmentResumeDescriptors.delete(sessionId)
@@ -3387,9 +3400,11 @@ export class RuntimeServer {
           active.profile
         )
         const launchSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
-        const selection = binding !== undefined && launchSettings.providerConfigId === undefined
+        const selection = binding !== undefined &&
+          launchSettings.providerConfigId === undefined &&
+          getAgentManifest(active.profile)?.capabilities.providerConfig === true
           ? await this.#providerConfigs.launchSelection(
-              active.profile,
+              active.profile as 'claude-code' | 'codex',
               launchSettings.providerConfigId
             )
           : undefined
@@ -3405,7 +3420,7 @@ export class RuntimeServer {
               requestHash: `${sessionId}:${strategy}`
             }, {
               bindingId: binding.id,
-              providerConfigId: launchSettings.providerConfigId ?? selection!.providerConfigId,
+              providerConfigId: launchSettings.providerConfigId ?? selection?.providerConfigId ?? '',
               model: strategy,
               permissionMode: permissionModeFromMetadata(binding.metadata) ?? 'default',
               now: Date.now()
@@ -3939,7 +3954,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function shellName(profile: 'shell' | 'claude-code' | 'codex'): string | undefined {
+function shellName(profile: SessionRunProfile): string | undefined {
   if (profile !== 'shell') return undefined
   const shell = process.env.SHELL
   return shell ? basename(shell) : process.platform === 'win32' ? 'PowerShell' : undefined

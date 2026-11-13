@@ -15,7 +15,7 @@ import {
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
-import type { SessionEnvironment, SessionGitState } from '@matou/domain'
+import { getAgentManifest, type SessionEnvironment, type SessionGitState } from '@matou/domain'
 
 type HudMessages = Messages['hud']
 
@@ -41,10 +41,18 @@ export function TerminalHud(props: {
 }) {
   const { hud } = props
   const m = useMessages().hud
-  const accountState = useAccountUsage(hud?.mode === 'agent' && hud.defaultAccountUsage === true)
+  const manifest = getAgentManifest(hud?.provider ?? 'claude-code')
+  const accountSwitchingEnabled = manifest?.capabilities.accountSwitching ?? true
+  const instructionButtonLabel = manifest?.instructionFiles.buttonLabel
+  const allowedPermissionModes = manifest?.capabilities.permissionModes ?? [
+    'default', 'acceptEdits', 'plan', 'bypassPermissions'
+  ]
+  const accountState = useAccountUsage(
+    accountSwitchingEnabled && hud?.mode === 'agent' && hud.defaultAccountUsage === true
+  )
   const account = accountState?.accounts.find(a => a.id === accountState.currentId) ??
     accountState?.detected
-  const useDeviceQuota = hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
+  const useDeviceQuota = accountSwitchingEnabled && hud?.defaultAccountUsage === true && Boolean(window.matouDesktop?.getClaudeAccounts)
   const deviceWindows = account?.needsLogin ? [] : ([['5h', account?.usage?.fiveHour], ['Weekly', account?.usage?.weekly]] as const)
     .flatMap(([label, value]) => value && Number.isFinite(value.used) ? [{ label, percent: Math.round(value.used), resetsAt: Date.parse(value.resetsAt) }] : [])
   const zh = useLocale() === 'zh-CN'
@@ -122,13 +130,13 @@ export function TerminalHud(props: {
   }
 
   return <div className="status-info" data-hud-mode={hud?.mode ?? 'environment'} data-session-id={sessionId} ref={rootRef}>
-    {hud?.mode === 'agent' && hud.configCounts?.projectInstructionFileExists === true && <button type="button"
+    {hud?.mode === 'agent' && hud.configCounts?.projectInstructionFileExists === true && instructionButtonLabel && <button type="button"
       className="status-field status-instructions is-clickable"
-      aria-label={m.editClaudeMd} disabled={!gitClient}
-      title={m.editClaudeMdTitle}
+      aria-label={instructionButtonLabel === 'ClaudeMd' ? m.editClaudeMd : instructionButtonLabel} disabled={!gitClient}
+      title={instructionButtonLabel === 'ClaudeMd' ? m.editClaudeMdTitle : instructionButtonLabel}
       onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen(false); setInstructionsOpen(true)
-      }}>ClaudeMd</button>}
+      }}>{instructionButtonLabel}</button>}
     <div className="status-info__primary">
     {hud?.mode === 'agent' ? <>
       <button type="button" className={`status-field status-perm-badge is-clickable perm-${permissionMode}`}
@@ -154,7 +162,7 @@ export function TerminalHud(props: {
       {hud.configCounts && hud.configCounts.hooks > 0 && <HudDetail
         label={`${hud.configCounts.hooks} hooks`} title="Hooks"
         items={hud.configCounts.hookNames ?? []} />}
-      {usageWindows.length === 0 && <span className="status-field status-usage status-priority-6" role="status"
+      {usageWindows.length === 0 && manifest?.hud.hideEmptyQuotaPlaceholder !== true && <span className="status-field status-usage status-priority-6" role="status"
         title={useDeviceQuota ? `${quotaAccount} · ${quotaEmpty}` : (zh ? '暂无用量数据' : 'Usage unavailable')}>—</span>}
       {usageWindows.map((window, index) => <span
         className="status-field status-usage status-priority-6"
@@ -182,13 +190,13 @@ export function TerminalHud(props: {
       disabled={!props.environmentActions} onClick={() => {
         setMenu(null); setGitOpen(false); setEnvironmentOpen((open) => !open)
       }} />}
-    <ClaudeAccountsControl sessionId={sessionId} />
+    {accountSwitchingEnabled && <ClaudeAccountsControl sessionId={sessionId} />}
     </div>
     {menu && !disabled && createPortal(<div className="perm-menu-overlay" onPointerDown={(event) => {
       if (event.currentTarget === event.target) setMenu(null)
     }}><div className="perm-menu" style={menuStyle} role="menu" aria-label={m.permissionMenu}>
       <div className="perm-menu__title">{m.permissionMenu}</div>
-      {PERMISSION_MODES.filter(({ value }) => value !== 'auto').map((option) => <button type="button" role="menuitem"
+      {PERMISSION_MODES.filter(({ value }) => allowedPermissionModes.includes(value)).map((option) => <button type="button" role="menuitem"
         className={`perm-menu__item${permissionMode === option.value ? ' is-active' : ''}`} key={option.value}
         onClick={() => {
           setMenu(null)
@@ -406,7 +414,8 @@ function permissionAbbreviation(mode: HudPermissionMode): string {
 }
 function modelLabel(hud: SessionHudView, m: HudMessages): string {
   const name = hud.model?.trim()
-  let label = name?.replace(/^Claude\s+/i, '') ?? ''
+  const stripClaudePrefix = getAgentManifest(hud.provider ?? 'claude-code')?.hud.stripClaudeModelPrefix ?? true
+  let label = (stripClaudePrefix ? name?.replace(/^Claude\s+/i, '') : name) ?? ''
   if (!label && hud.modelStrategy) label = m.model[hud.modelStrategy]
   const context = formatContextWindow(hud.contextWindowSize)
   return label && context ? m.modelWithContext(label, context) : label

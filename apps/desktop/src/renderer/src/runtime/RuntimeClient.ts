@@ -1,3 +1,4 @@
+import type { SessionRunProfile } from '@matou/domain'
 import {
   PROTOCOL_VERSION,
   type HostNavigationRequestWire,
@@ -23,7 +24,7 @@ export interface RuntimeClientPort {
 export interface TerminalAttachment {
   sessionId: string
   executionContextId: string
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: SessionRunProfile
   cols: number
   rows: number
   spawnRevision?: number

@@ -1,15 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 
-import type {
-  DomainCommandMetadata,
-  PlainDirectoryContext,
-  Scene,
-  Session,
-  SessionMount,
-  Task,
-  WindowNavigation,
-  Workspace
+import {
+  getAgentManifest,
+  getAgentShortName,
+  isAgentProfileId,
+  type DomainCommandMetadata,
+  type PlainDirectoryContext,
+  type Scene,
+  type Session,
+  type SessionMount,
+  type Task,
+  type WindowNavigation,
+  type Workspace
 } from '@matou/domain'
 
 import { HierarchyConflictError } from './hierarchy-errors'
@@ -1460,23 +1463,26 @@ export class HierarchyApplicationService {
          WHERE scene_id = ? AND session_id = ? ORDER BY created_at LIMIT 1`,
         input.sceneId, input.sourceSessionId
       ), 'SessionMount')
-      const sourceBinding = tx.get<{
-        provider_session_id: string
-      }>(
-        `SELECT provider_session_id FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code'
-           AND resume_state IN ('available', 'resumed')
-           AND validated_at IS NOT NULL AND invalidated_at IS NULL
-         ORDER BY validated_at DESC LIMIT 1`,
-        input.sourceSessionId
-      )
+      const sourceBinding = isAgentProfileId(source.kind)
+        ? tx.get<{ provider_session_id: string }>(
+          `SELECT provider_session_id FROM provider_bindings
+           WHERE session_id = ? AND provider = ?
+             AND resume_state IN ('available', 'resumed')
+             AND validated_at IS NOT NULL AND invalidated_at IS NULL
+           ORDER BY validated_at DESC LIMIT 1`,
+          input.sourceSessionId,
+          source.kind
+        )
+        : undefined
       if (
-        source.kind !== 'claude-code' ||
+        !isAgentProfileId(source.kind) ||
+        getAgentManifest(source.kind)?.capabilities.fork !== true ||
         sourceMount.scene_window_id !== null ||
         !sourceBinding
       ) {
         throw new Error('only resumable Claude Sessions can be forked')
       }
+      const shortName = getAgentShortName(source.kind)
       const sourceNode = requireRow<{
         id: string; parent_node_id: string | null; ordinal: number
       }>(tx.get(
@@ -1511,9 +1517,9 @@ export class HierarchyApplicationService {
         `INSERT INTO sessions (
            id, task_id, execution_context_id, kind, status, title, cwd,
            created_at, updated_at, last_activity_at, version
-         ) VALUES (?, ?, ?, 'claude-code', 'created', 'Claude', ?, ?, ?, ?, 1)`,
+         ) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, 1)`,
         ids.sessionId, task.id, source.execution_context_id,
-        source.cwd, input.now, input.now, input.now
+        source.kind, shortName, source.cwd, input.now, input.now, input.now
       )
       tx.run(
         `INSERT INTO session_mounts (
@@ -1531,8 +1537,8 @@ export class HierarchyApplicationService {
            session_id, source_session_id, source_provider, source_provider_session_id,
            state, created_at, updated_at, operation_id, submission_key, stage,
            completed_steps, total_steps, attempt, lease_fence
-         ) VALUES (?, ?, 'claude-code', ?, 'pending', ?, ?, ?, ?, 'queued', 0, 2, 0, 0)`,
-        ids.sessionId, source.id, sourceBinding.provider_session_id, input.now, input.now,
+         ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, 'queued', 0, 2, 0, 0)`,
+        ids.sessionId, source.id, source.kind, sourceBinding.provider_session_id, input.now, input.now,
         `legacy-operation:${randomUUID()}`, `legacy-fork:${command.commandId}`
       )
       const relationInsertion = tx.run(

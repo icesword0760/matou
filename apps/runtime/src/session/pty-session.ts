@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import type { RuntimeMessage, StorageFaultCode } from '@matou/contracts'
 import { PROTOCOL_VERSION } from '@matou/contracts'
+import { getAgentManifest, type SessionRunProfile } from '@matou/domain'
 import * as pty from 'node-pty'
 
 import { CreditWindow } from '../flow-control/credit-window'
@@ -30,7 +31,7 @@ export interface PtySessionOptions {
   rows: number
   cwd: string
   dataRoot: string
-  profile?: 'shell' | 'claude-code' | 'codex'
+  profile?: SessionRunProfile
   providerSessionId?: string
   forkSession?: boolean
   permissionMode?: string
@@ -59,7 +60,7 @@ export class PtySession {
   readonly sessionId: string
   readonly pid: number
   readonly executionContextId: string
-  readonly profile: 'shell' | 'claude-code' | 'codex'
+  readonly profile: SessionRunProfile
   readonly runId: string | undefined
   readonly replayFromSequence: number
 
@@ -684,12 +685,10 @@ function resolveShell(): string {
   return process.env.SHELL ?? (os.platform() === 'darwin' ? '/bin/zsh' : '/bin/bash')
 }
 
-function resolveExecutable(profile: 'shell' | 'claude-code' | 'codex'): string {
-  if (profile === 'claude-code') {
-    return process.env.MATOU_CLAUDE_COMMAND ?? 'claude'
-  }
-  if (profile === 'codex') {
-    return process.env.MATOU_CODEX_COMMAND ?? 'codex'
+function resolveExecutable(profile: SessionRunProfile): string {
+  const manifest = getAgentManifest(profile)
+  if (manifest) {
+    return process.env[manifest.executable.envVar] ?? manifest.executable.defaultCommand
   }
   return resolveShell()
 }

@@ -1,3 +1,4 @@
+import type { AgentProviderId } from './agent-manifest'
 import type { CommandId, EventId, SessionId, TaskId, WorkspaceId } from './model'
 
 export interface DomainEventInput {
@@ -61,7 +62,7 @@ export interface AgentSemanticEvent {
   eventId: EventId
   sessionId: SessionId
   kind: AgentSemanticKind
-  provider: 'claude-code' | 'codex' | 'generic'
+  provider: AgentProviderId
   sourceRef: {
     providerEventId: string
     source: 'structured' | 'transcript' | 'terminal-marker' | 'terminal-parse'

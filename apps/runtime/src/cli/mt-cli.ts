@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { TextDecoder } from 'node:util'
 
+import { isSessionRunProfile, SESSION_RUN_PROFILES } from '@matou/domain'
+
 import type {
   ForkBatchResult,
   ForkEnvironmentChoice,
@@ -261,8 +263,8 @@ async function parseCreateCommand(
   }
 
   const profile = options.values.profile ?? 'shell'
-  if (!['shell', 'claude-code', 'codex'].includes(profile)) {
-    throw new MtUsageError('--profile 需要 shell、claude-code 或 codex')
+  if (!isSessionRunProfile(profile)) {
+    throw new MtUsageError(`--profile 需要 ${SESSION_RUN_PROFILES.join('、')}`)
   }
   return {
     method: 'structure.create.session',
@@ -968,7 +970,7 @@ Usage:
   mt create workspace --path PATH [--title TITLE] [--submission-key KEY] [--enter] [--json]
   mt create task --workspace TARGET [--title TITLE] [--submission-key KEY] [--enter] [--json]
   mt create canvas --task TARGET [--title TITLE] [--submission-key KEY] [--enter] [--json]
-  mt create session --canvas TARGET [--profile shell|claude-code|codex] [--title TITLE] [--submission-key KEY] [--enter] [--json]
+  mt create session --canvas TARGET [--profile ${SESSION_RUN_PROFILES.join('|')}] [--title TITLE] [--submission-key KEY] [--enter] [--json]
 
   mt fork child SOURCE --title TITLE --environment-json JSON [--prompt TEXT] [--start] [--submission-key KEY] [--json]
   mt fork sibling SOURCE --title TITLE --environment-json JSON [--prompt TEXT] [--start] [--submission-key KEY] [--json]

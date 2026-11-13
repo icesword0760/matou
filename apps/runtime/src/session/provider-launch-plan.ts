@@ -1,7 +1,8 @@
+import type { SessionRunProfile } from '@matou/domain'
 import { join } from 'node:path'
 
 export interface PtyCommandInput {
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: SessionRunProfile
   executable: string
   providerSessionId?: string
   forkSession?: boolean

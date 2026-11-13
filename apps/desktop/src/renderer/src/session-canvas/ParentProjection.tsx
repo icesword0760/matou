@@ -1,3 +1,4 @@
+import { getAgentDisplayName } from '@matou/domain'
 import type { CSSProperties } from 'react'
 
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
@@ -25,7 +26,7 @@ export function ParentProjection(props: {
         {m.parentStatus[parent.workStatus]}
       </span>
       <strong>{parent.title}</strong>
-      <span>{parent.currentMode === 'claude-code' ? 'Claude Code' : 'Shell'}</span>
+      <span>{getAgentDisplayName(parent.currentMode, 'Shell')}</span>
       {parent.latestLines.length > 0 && <pre>{parent.latestLines.slice(-3).join('\n')}</pre>}
       <div className="parent-projection__instruction">
         <b>{ready ? m.parentPullReady : m.parentPullHint}</b>

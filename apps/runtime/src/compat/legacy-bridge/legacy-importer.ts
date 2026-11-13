@@ -1,3 +1,8 @@
+import {
+  isAgentProfileId,
+  type AgentProviderId,
+  type SessionKind
+} from '@matou/domain'
 import { createHash } from 'node:crypto'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -508,14 +513,14 @@ export function legacyIdFor(kind: string, legacyId: string): string {
   return `legacy-${kind}-${createHash('sha256').update(legacyId).digest('hex').slice(0, 20)}`
 }
 
-function sessionKind(panel: LegacyRecord): 'shell' | 'claude-code' | 'codex' | 'agent-team-member' {
+function sessionKind(panel: LegacyRecord): SessionKind {
   if (text(panel.teamId)) return 'agent-team-member'
   const brand = text(panel.cliBrand).toLowerCase()
-  if (brand === 'codex') return 'codex'
+  if (isAgentProfileId(brand)) return brand
   return text(panel.mode) === 'shell' && !text(panel.claudeSessionId) ? 'shell' : 'claude-code'
 }
 
-function providerFor(panel: LegacyRecord): 'claude-code' | 'codex' | 'generic' {
+function providerFor(panel: LegacyRecord): AgentProviderId {
   const brand = text(panel.cliBrand).toLowerCase()
   return brand === 'codex' ? 'codex' : brand && brand !== 'claude-code' ? 'generic' : 'claude-code'
 }

@@ -3,7 +3,7 @@ import {
   type Dispatch, type SetStateAction
 } from 'react'
 
-import type { ForkStage, LayoutNode, SessionEnvironment } from '@matou/domain'
+import { isAgentProfileId, type ForkStage, type LayoutNode, type SessionEnvironment } from '@matou/domain'
 import type {
   HostNavigationPath, HostNavigationRequestWire, RuntimeMessage, RuntimeMode
 } from '@matou/contracts'
@@ -1249,7 +1249,7 @@ function HierarchyProduct({
                             windowId: sceneWindowId, mainWindowId: projection.windowId,
                             sceneId: scene.id, mountId: mount.id, sessionId: session.id,
                             executionContextId: session.executionContextId ?? 'local-default',
-                            profile: session.kind === 'claude-code' || session.kind === 'codex' || session.kind === 'agent-team-member'
+                            profile: session.kind === 'agent-team-member' || isAgentProfileId(session.kind)
                               ? session.kind : 'shell', title: session.title
                           })
                         } catch (error) {

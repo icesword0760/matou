@@ -1,3 +1,5 @@
+import type { SessionRunProfile } from '@matou/domain'
+
 import type { HostActionMethod } from './host-action-types'
 
 /** Shared request/response budget; CLI payload limits leave room for the protocol envelope. */
@@ -50,7 +52,7 @@ export interface HostTarget {
   sessionId: string
   mountId?: string
   title: string
-  profile: 'shell' | 'claude-code' | 'codex'
+  profile: SessionRunProfile
   cwd: string
   workStatus: string
   environment: HostTargetEnvironment

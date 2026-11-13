@@ -1,3 +1,5 @@
+import type { AgentProfileId } from '@matou/domain'
+
 export type HudAgentState = 'running' | 'waiting' | 'warning' | 'error'
 export interface HudAgentActivity {
   id: string
@@ -25,6 +27,7 @@ export interface HudConfigCounts {
 export interface SessionHudWire {
   sessionId: string
   mode: 'shell' | 'agent'
+  provider?: AgentProfileId
   shell?: string
   cwd?: string
   gitBranch?: string
@@ -33,6 +36,8 @@ export interface SessionHudWire {
   permissionMode?: HudPermissionMode
   modelStrategy?: HudModelStrategy
   model?: string
+  effort?: string
+  instructionFileLabel?: string
   sessionName?: string
   contextPercent?: number
   contextWindowSize?: number

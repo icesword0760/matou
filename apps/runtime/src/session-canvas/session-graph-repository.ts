@@ -1,17 +1,18 @@
-import type {
-  DomainCommandMetadata,
-  DomainCommit,
-  ForkStage,
-  ProviderRestoreState,
-  SceneSessionGraph,
-  SessionCanvasMembership,
-  SessionEnvironment,
-  SessionGitState,
-  SessionGraphEdge,
-  SessionGraphNode,
-  SessionKind,
-  SessionStatus,
-  SessionWorkStatus
+import {
+  getAgentManifest,
+  type DomainCommandMetadata,
+  type DomainCommit,
+  type ForkStage,
+  type ProviderRestoreState,
+  type SceneSessionGraph,
+  type SessionCanvasMembership,
+  type SessionEnvironment,
+  type SessionGitState,
+  type SessionGraphEdge,
+  type SessionGraphNode,
+  type SessionKind,
+  type SessionStatus,
+  type SessionWorkStatus
 } from '@matou/domain'
 
 import type { DatabaseTransaction, RuntimeDatabase } from '../storage/database'
@@ -406,7 +407,7 @@ export function projectSceneGraphFrom(
         ...(providerSpawnRevision(row.provider_metadata_json) === undefined ? {} : {
           providerSpawnRevision: providerSpawnRevision(row.provider_metadata_json)!
         }),
-        canFork: row.kind === 'claude-code' &&
+        canFork: getAgentManifest(row.kind)?.capabilities.fork === true &&
           row.restore_state === 'none' &&
           providerCanFork(row.provider_metadata_json),
         title: row.title,

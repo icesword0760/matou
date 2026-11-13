@@ -1,4 +1,4 @@
-import type { ProviderCli } from '@matou/contracts'
+import type { AgentProfileId } from '@matou/domain'
 
 import { providerTranscriptPath } from './provider-hook-server'
 import { SessionHudRegistry } from './session-hud-registry'
@@ -6,7 +6,7 @@ import { SessionHudRegistry } from './session-hud-registry'
 export interface ProviderHudPayloadEvent {
   runId: string
   sessionId: string
-  provider: ProviderCli
+  provider: AgentProfileId
   payload: Record<string, unknown>
 }
 

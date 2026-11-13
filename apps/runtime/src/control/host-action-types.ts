@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import type { HostNavigationPath } from '@matou/contracts'
+import { SESSION_RUN_PROFILES, type SessionRunProfile } from '@matou/domain'
 
 export type HostActionMethod =
   | 'structure.create.workspace' | 'structure.create.task'
@@ -57,7 +58,7 @@ export type HostActionRequest =
   | { method: 'structure.create.canvas'; task: HostEntitySelector; title?: string;
       submissionKey: string; enter?: boolean }
   | { method: 'structure.create.session'; canvas: HostEntitySelector;
-      profile: 'shell' | 'claude-code' | 'codex'; title?: string;
+      profile: SessionRunProfile; title?: string;
       submissionKey: string; enter?: boolean }
   | { method: 'structure.fork.child' | 'structure.fork.sibling';
       source: HostActionTargetSelector; title: string; environment: ForkEnvironmentChoice;
@@ -186,7 +187,7 @@ const hostActionRequestSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('structure.create.workspace'), path: nonEmptyText(4096), title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.literal('structure.create.task'), workspace: entitySelectorSchema, title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.literal('structure.create.canvas'), task: entitySelectorSchema, title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
-  z.object({ method: z.literal('structure.create.session'), canvas: entitySelectorSchema, profile: z.enum(['shell', 'claude-code', 'codex']), title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
+  z.object({ method: z.literal('structure.create.session'), canvas: entitySelectorSchema, profile: z.enum(SESSION_RUN_PROFILES), title: optionalTitle, submissionKey: keySchema, enter: optionalEnter }).strict(),
   z.object({ method: z.enum(['structure.fork.child', 'structure.fork.sibling']), source: actionTargetSelectorSchema, title: titleSchema, environment: environmentSchema, prompt: optionalPrompt, start: optionalStart, submissionKey: keySchema }).strict(),
   z.object({ method: z.literal('structure.fork.children'), source: actionTargetSelectorSchema, batchKey: keySchema, items: z.array(forkItemSchema).max(50), retryItemKeys: z.array(keySchema).max(50).optional() }).strict().superRefine((request, context) => {
     const itemKeys = new Set<string>()

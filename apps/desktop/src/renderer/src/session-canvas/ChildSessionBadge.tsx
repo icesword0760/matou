@@ -1,3 +1,4 @@
+import { listAgentManifests } from '@matou/domain'
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import { useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
@@ -15,9 +16,16 @@ export function ChildSessionBadge(props: {
   const counts = statusCounts(children)
   const claude = children.filter(({ currentMode }) => currentMode === 'claude-code').length
   const shell = children.filter(({ currentMode }) => currentMode === 'shell').length
+  const extraAgents = listAgentManifests()
+    .filter((manifest) => manifest.id !== 'claude-code')
+    .map((manifest) => ({
+      shortName: manifest.shortName,
+      count: children.filter(({ currentMode }) => currentMode === manifest.id).length
+    }))
+    .filter(({ count }) => count > 0)
   const highest = highestStatus(counts)
   const detail = [
-    `Claude ${claude} · Shell ${shell}`,
+    [`Claude ${claude}`, ...extraAgents.map(({ shortName, count }) => `${shortName} ${count}`), `Shell ${shell}`].join(' · '),
     statusDetail(counts, m)
   ].filter((value) => Boolean(value)).join(m.detailJoin)
   const status = summaryStatus(counts, m)

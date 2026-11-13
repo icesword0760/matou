@@ -1,3 +1,4 @@
+import type { SessionKind } from '@matou/domain'
 import type { RuntimeDatabase } from '../storage/database'
 import {
   HostControlTargetNotFoundError,
@@ -18,7 +19,7 @@ interface TargetRow {
   worktree_id: string | null
   worktree_branch_name: string | null
   title: string
-  kind: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+  kind: SessionKind
   cwd: string
   work_status: string
   workspace_id: string

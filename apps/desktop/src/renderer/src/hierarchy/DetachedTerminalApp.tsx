@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { isAgentProfileId } from '@matou/domain'
 import type { RuntimeMessage, RuntimeMode } from '@matou/contracts'
 
 import {
@@ -37,8 +38,7 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
   const executionContextId = query.get('executionContextId') ?? 'local-default'
   const requestedProfile = query.get('profile')
   const isTeamMember = requestedProfile === 'agent-team-member'
-  const profile = requestedProfile === 'claude-code' || requestedProfile === 'codex'
-    ? requestedProfile : 'shell'
+  const profile = isAgentProfileId(requestedProfile) ? requestedProfile : 'shell'
   const title = query.get('title') ?? m.defaultTitle
   const windowId = query.get('windowId') ?? ''
   const [hud, setHud] = useState<SessionHudView>(() => ({
@@ -46,6 +46,7 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
     mode: profile === 'shell' ? 'shell' : 'agent',
     startedAt: Date.now(),
     ...(profile === 'shell' ? {} : {
+      provider: profile,
       permissionMode: 'default' as const,
       modelStrategy: 'opusplan' as const
     })
@@ -113,7 +114,10 @@ export function DetachedTerminalApp({ runtimeMode = 'normal' }: { runtimeMode?: 
     if (!client || readOnly || storageFault !== null) return
     const method = 'session.set-permission-mode'
     const input = {
-      sessionId: targetSessionId, provider: 'claude-code', permissionMode, respawn
+      sessionId: targetSessionId,
+      provider: profile === 'shell' ? 'claude-code' : profile,
+      permissionMode,
+      respawn
     }
     const commandId = `${method}-${Date.now()}-${++sequence.current}`
     return client.request(method, {

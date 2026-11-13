@@ -1,15 +1,28 @@
 import type {
   ClaudeSessionPermissionMode,
 } from '@matou/contracts'
-import type {
-  DomainCommandMetadata,
-  ProviderBinding,
-  SceneSessionGraph,
-  Session,
-  SessionKind,
-  SessionStatus,
-  SessionWorkStatus
+import {
+  getAgentManifest,
+  getAgentShortName,
+  isAgentProfileId,
+  listAgentManifests,
+  type AgentProfileId,
+  type DomainCommandMetadata,
+  type ProviderBinding,
+  type SceneSessionGraph,
+  type Session,
+  type SessionKind,
+  type SessionStatus,
+  type SessionWorkStatus
 } from '@matou/domain'
+
+const AGENT_SHORT_NAME_SQL_LIST = listAgentManifests()
+  .map((manifest) => `'${manifest.shortName}'`)
+  .join(', ')
+
+function bindingProvider(binding: { provider: string }): AgentProfileId {
+  return isAgentProfileId(binding.provider) ? binding.provider : 'claude-code'
+}
 
 import { runtimeMessages } from '../i18n/messages'
 import type { RuntimeDatabase } from '../storage/database'
@@ -78,27 +91,30 @@ export class ProviderModeService {
       title: string
       permissionMode: ClaudeSessionPermissionMode
       model?: string
+      provider?: AgentProfileId
       now: number
     }
   ): ProviderModeTransitionResult {
+    const provider: AgentProfileId = input.provider ?? 'claude-code'
+    const shortName = getAgentShortName(provider, 'Claude')
     const providerSessionId = input.providerSessionId.trim()
-    const title = input.title.trim() || 'Claude'
+    const title = input.title.trim() || shortName
     if (!providerSessionId) throw new Error('Provider session identity must not be empty')
     return this.#transactions.execute(command, ({ tx, emit }) => {
       const owner = requireOwner(tx, input.sessionId)
       const session = requireSession(tx, input.sessionId)
       const existing = tx.get<BindingRow>(
         `SELECT * FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?`,
-        session.id, providerSessionId
+         WHERE session_id = ? AND provider = ? AND provider_session_id = ?`,
+        session.id, provider, providerSessionId
       )
 
       tx.run(
         `UPDATE provider_bindings
          SET resume_state = 'expired', restore_state = 'none', restore_error = NULL,
              invalidated_at = ?, updated_at = ?
-         WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id <> ?`,
-        input.now, input.now, session.id, providerSessionId
+         WHERE session_id = ? AND provider = ? AND provider_session_id <> ?`,
+        input.now, input.now, session.id, provider, providerSessionId
       )
       const metadata = {
         ...(existing ? asMetadata(existing.metadata_json) : {}),
@@ -127,17 +143,17 @@ export class ProviderModeService {
              id, session_id, provider, provider_session_id, resume_state, restore_state,
              restore_error, user_exited_at, metadata_json, created_at, updated_at,
              validated_at, invalidated_at
-           ) VALUES (?, ?, 'claude-code', ?, 'available', 'restoring',
+           ) VALUES (?, ?, ?, ?, 'available', 'restoring',
                      NULL, NULL, ?, ?, ?, ?, NULL)`,
-          input.bindingId, session.id, providerSessionId, JSON.stringify(metadata),
+          input.bindingId, session.id, provider, providerSessionId, JSON.stringify(metadata),
           input.now, input.now, input.now
         )
       }
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code', title = ?, status = 'starting',
+        `UPDATE sessions SET kind = ?, title = ?, status = 'starting',
            work_status = 'starting', updated_at = ?, last_activity_at = ?, version = version + 1
          WHERE id = ?`,
-        title, input.now, input.now, session.id
+        provider, title, input.now, input.now, session.id
       )
       const binding = existing
         ? requireBinding(tx, existing.id)
@@ -157,12 +173,14 @@ export class ProviderModeService {
       if (input.bindingId !== undefined && binding.id !== input.bindingId) {
         throw new Error('Provider binding does not match the active Claude conversation')
       }
+      const provider = bindingProvider(binding)
+      const shortName = getAgentShortName(provider, 'Claude')
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code',
-           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+        `UPDATE sessions SET kind = ?,
+           title = CASE WHEN title = 'Shell' OR title = id THEN ? ELSE title END,
            work_status = 'idle',
            updated_at = ?, version = version + 1 WHERE id = ?`,
-        input.now, session.id
+        provider, shortName, input.now, session.id
       )
       tx.run(
         `UPDATE provider_bindings
@@ -180,9 +198,10 @@ export class ProviderModeService {
     input: { sessionId: string; now: number }
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
+      const provider = bindingProvider(binding)
       tx.run(
         `UPDATE sessions SET kind = 'shell',
-           title = CASE WHEN title = 'Claude' OR title = id THEN 'Shell' ELSE title END,
+           title = CASE WHEN title IN (${AGENT_SHORT_NAME_SQL_LIST}) OR title = id THEN 'Shell' ELSE title END,
            work_status = 'idle',
            updated_at = ?, last_activity_at = ?, version = version + 1 WHERE id = ?`,
         input.now, input.now, session.id
@@ -191,9 +210,9 @@ export class ProviderModeService {
         `UPDATE provider_bindings
          SET resume_state = 'expired', restore_state = 'none', restore_error = NULL,
              user_exited_at = ?, invalidated_at = ?, updated_at = ?
-         WHERE session_id = ? AND provider = 'claude-code'
+         WHERE session_id = ? AND provider = ?
            AND resume_state IN ('unknown', 'available', 'resuming', 'resumed')`,
-        input.now, input.now, input.now, session.id
+        input.now, input.now, input.now, session.id, provider
       )
       // The latest binding remains the historical conversation identity, without an error state.
       if (binding.resume_state === 'failed' || binding.resume_state === 'expired') {
@@ -245,15 +264,17 @@ export class ProviderModeService {
       if (binding.restore_state !== 'failed') {
         throw new Error(runtimeMessages().sessionCanvas.retryRestoreOnlyFailed)
       }
+      const provider = bindingProvider(binding)
+      const shortName = getAgentShortName(provider, 'Claude')
       const metadata = asMetadata(binding.metadata_json)
       metadata.spawnRevision = input.now
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code',
-           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+        `UPDATE sessions SET kind = ?,
+           title = CASE WHEN title = 'Shell' OR title = id THEN ? ELSE title END,
            status = 'starting',
            work_status = 'starting',
            updated_at = ?, version = version + 1 WHERE id = ?`,
-        input.now, session.id
+        provider, shortName, input.now, session.id
       )
       tx.run(
         `UPDATE provider_bindings
@@ -273,14 +294,16 @@ export class ProviderModeService {
       if (binding.restore_state !== 'failed') {
         throw new Error(runtimeMessages().sessionCanvas.startFreshOnlyFailed)
       }
+      const provider = bindingProvider(binding)
+      const shortName = getAgentShortName(provider, 'Claude')
       const metadata = asMetadata(binding.metadata_json)
       metadata.spawnRevision = input.now
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code',
-           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+        `UPDATE sessions SET kind = ?,
+           title = CASE WHEN title = 'Shell' OR title = id THEN ? ELSE title END,
            status = 'starting', work_status = 'starting',
            updated_at = ?, version = version + 1 WHERE id = ?`,
-        input.now, session.id
+        provider, shortName, input.now, session.id
       )
       tx.run(
         `UPDATE provider_bindings
@@ -298,9 +321,12 @@ export class ProviderModeService {
       sessionId: string
       providerSessionId: string
       eventName: string
+      provider?: AgentProfileId
       now: number
     }
   ): ProviderModeTransitionResult {
+    const provider: AgentProfileId = input.provider ?? 'claude-code'
+    const shortName = getAgentShortName(provider, 'Claude')
     const providerSessionId = input.providerSessionId.trim()
     if (!providerSessionId) throw new Error('Provider session identity must not be empty')
     return this.#transactions.execute(command, ({ tx, emit }) => {
@@ -308,8 +334,8 @@ export class ProviderModeService {
       const session = requireSession(tx, input.sessionId)
       const binding = requireRow(tx.get<BindingRow>(
         `SELECT * FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code' AND provider_session_id = ?`,
-        input.sessionId, providerSessionId
+         WHERE session_id = ? AND provider = ? AND provider_session_id = ?`,
+        input.sessionId, provider, providerSessionId
       ), 'ProviderBinding')
 
       // Retired hooks from a manually exited process do not reactivate a Shell node.
@@ -319,10 +345,10 @@ export class ProviderModeService {
 
       const staleRestoreFailure = tx.get<{ id: string }>(
         `SELECT id FROM provider_bindings
-         WHERE session_id = ? AND provider = 'claude-code' AND id <> ?
+         WHERE session_id = ? AND provider = ? AND id <> ?
            AND restore_state = 'failed'
          LIMIT 1`,
-        input.sessionId, binding.id
+        input.sessionId, provider, binding.id
       )
       const wasRecovering = binding.restore_state !== 'none' ||
         binding.restore_error !== null || staleRestoreFailure !== undefined
@@ -338,11 +364,11 @@ export class ProviderModeService {
       metadata.lastHookEvent = input.eventName
       const workStatus = providerWorkStatus(input.eventName, session.work_status)
       tx.run(
-        `UPDATE sessions SET kind = 'claude-code',
-           title = CASE WHEN title = 'Shell' OR title = id THEN 'Claude' ELSE title END,
+        `UPDATE sessions SET kind = ?,
+           title = CASE WHEN title = 'Shell' OR title = id THEN ? ELSE title END,
            work_status = ?,
            updated_at = ?, version = version + 1 WHERE id = ?`,
-        workStatus, input.now, session.id
+        provider, shortName, workStatus, input.now, session.id
       )
       tx.run(
         `UPDATE provider_bindings
@@ -359,9 +385,9 @@ export class ProviderModeService {
           `UPDATE provider_bindings
            SET resume_state = 'expired', restore_state = 'none', restore_error = NULL,
                invalidated_at = COALESCE(invalidated_at, ?)
-           WHERE session_id = ? AND provider = 'claude-code' AND id <> ?
+           WHERE session_id = ? AND provider = ? AND id <> ?
              AND restore_state = 'failed'`,
-          input.now, input.sessionId, binding.id
+          input.now, input.sessionId, provider, binding.id
         )
       }
       const result = buildResult(
@@ -381,14 +407,14 @@ export class ProviderModeService {
        FROM sessions
        JOIN provider_bindings AS binding ON binding.id = (
          SELECT id FROM provider_bindings
-         WHERE session_id = sessions.id AND provider = 'claude-code'
+         WHERE session_id = sessions.id AND provider = sessions.kind
          ORDER BY updated_at DESC, id DESC LIMIT 1
        )
        WHERE sessions.id = ? AND sessions.archived_at IS NULL`,
       sessionId
     )
-    return row?.kind === 'claude-code' && row.restore_state === 'none' &&
-      asMetadata(row.metadata_json).canFork === true
+    return row !== undefined && getAgentManifest(row.kind)?.capabilities.fork === true &&
+      row.restore_state === 'none' && asMetadata(row.metadata_json).canFork === true
   }
 
   #transition(
@@ -446,7 +472,7 @@ function emitRecoveryNotificationFailure(
     sessionId: result.session.id,
     payload: {
       targetSessionId: result.session.id,
-      provider: 'claude-code',
+      provider: bindingProvider(result.binding),
       runId: `restore:${result.binding.id}`,
       event: {
         operation: 'upsert',
@@ -491,7 +517,7 @@ function emitRecoveryNotificationDismissal(
     sessionId: result.session.id,
     payload: {
       targetSessionId: result.session.id,
-      provider: 'claude-code',
+      provider: bindingProvider(result.binding),
       runId: `restore:${result.binding.id}`,
       event
     },
@@ -564,7 +590,7 @@ function latestBinding(
 ): BindingRow {
   return requireRow(tx.get<BindingRow>(
     `SELECT * FROM provider_bindings
-     WHERE session_id = ? AND provider = 'claude-code'
+     WHERE session_id = ? AND provider <> 'generic'
      ORDER BY updated_at DESC, id DESC LIMIT 1`,
     sessionId
   ), 'ProviderBinding')

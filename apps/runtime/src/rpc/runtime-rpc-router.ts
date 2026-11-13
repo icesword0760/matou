@@ -5,14 +5,17 @@ import { dirname, join, resolve } from 'node:path'
 
 import { REMOVE_NODE_SCOPES, type RpcMethod } from '@matou/contracts'
 import type { ProviderModelsInput, ProviderCli, ProviderConfigInput } from '@matou/contracts'
-import type {
-  DomainCommandMetadata,
-  LayoutNode,
-  RelationKind,
-  SceneMode,
-  SessionKind,
-  SessionStatus,
-  TaskStatus
+import {
+  AGENT_PERMISSION_MODES,
+  LAUNCHABLE_AGENT_PROFILES,
+  SESSION_KINDS,
+  type DomainCommandMetadata,
+  type LayoutNode,
+  type RelationKind,
+  type SceneMode,
+  type SessionKind,
+  type SessionStatus,
+  type TaskStatus
 } from '@matou/domain'
 
 import { SessionRepository } from '../domain/session-repository'
@@ -878,7 +881,7 @@ export class RuntimeRpcRouter {
         return this.#sessions.createSession(command, {
           id: text(input.id, 'id'), taskId: text(input.taskId, 'taskId'),
           executionContextId: text(input.executionContextId, 'executionContextId'),
-          kind: enumeration(input.kind, ['shell', 'claude-code', 'codex', 'agent-team-member'] as const, 'kind') as SessionKind,
+          kind: enumeration(input.kind, SESSION_KINDS, 'kind') as SessionKind,
           title: text(input.title, 'title'), now: integer(input.now, 'now', 0)
         })
       case 'session.update':
@@ -893,12 +896,12 @@ export class RuntimeRpcRouter {
           sessionId: text(input.sessionId, 'sessionId'),
           provider: enumeration(
             input.provider,
-            ['claude-code', 'codex'] as const,
+            LAUNCHABLE_AGENT_PROFILES,
             'provider'
           ),
           permissionMode: enumeration(
             input.permissionMode,
-            ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const,
+            AGENT_PERMISSION_MODES,
             'permissionMode'
           ),
           now: integer(input.now, 'now', 0)

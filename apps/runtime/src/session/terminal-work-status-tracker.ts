@@ -1,12 +1,12 @@
-import type { SessionWorkStatus } from '@matou/domain'
+import type { AgentProfileId, SessionWorkStatus } from '@matou/domain'
 
 const OSC_133 = /\u001b\]133;([CD])(?:;(-?\d+))?(?:\u0007|\u001b\\)/g
 
 export class TerminalWorkStatusTracker {
   #buffer = ''
-  readonly #provider: 'claude-code' | undefined
+  readonly #provider: AgentProfileId | undefined
 
-  constructor(options: { provider?: 'claude-code' } = {}) {
+  constructor(options: { provider?: AgentProfileId } = {}) {
     this.#provider = options.provider
   }
 

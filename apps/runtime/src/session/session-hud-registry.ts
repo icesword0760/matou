@@ -1,4 +1,9 @@
 import type { HudAgentActivity } from '@matou/contracts'
+import {
+  getAgentManifest,
+  type AgentProfileId,
+  type SessionRunProfile
+} from '@matou/domain'
 import { sortAgents } from './external-agent-status'
 import { AccountUsageTracker } from './account-usage-tracker'
 import { existsSync, readFileSync } from 'node:fs'
@@ -30,6 +35,7 @@ export interface SessionHudRunOwnership {
 export interface SessionHudSnapshot {
   sessionId: string
   mode: 'shell' | 'agent'
+  provider?: AgentProfileId
   shell?: string
   cwd?: string
   gitBranch?: string
@@ -94,7 +100,7 @@ export class SessionHudRegistry {
 
   spawn(input: {
     sessionId: string
-    profile: 'shell' | 'claude-code' | 'codex'
+    profile: SessionRunProfile
     shell?: string
     cwd?: string
     startedAt?: number
@@ -106,13 +112,16 @@ export class SessionHudRegistry {
     this.accountUsage.spawn(input.sessionId)
     const previous = this.#states.get(input.sessionId)
     const mode = input.profile === 'shell' ? 'shell' : 'agent'
+    const provider = input.profile === 'shell' ? undefined : input.profile
     const permissionMode = normalizePermission(input.permissionMode)
     const modelStrategy = normalizeModelStrategy(input.modelStrategy ?? input.model)
+    const instructionCandidates = getAgentManifest(provider)?.instructionFiles.candidates
     const configCounts = mode === 'agent' && input.cwd
-      ? inspectProviderConfig(input.cwd, this.#configDir) : undefined
+      ? inspectProviderConfig(input.cwd, this.#configDir, instructionCandidates) : undefined
     this.#states.set(input.sessionId, {
       sessionId: input.sessionId,
       mode,
+      ...(provider ? { provider } : {}),
       ...(input.shell ? { shell: input.shell } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
       startedAt: previous?.startedAt ?? input.startedAt ?? this.#now(),
@@ -250,7 +259,11 @@ export class SessionHudRegistry {
       current.configCwd !== configCwd || current.configCheckedAt === undefined ||
       this.#now() - current.configCheckedAt >= 5_000
     )) {
-      current.configCounts = inspectProviderConfig(configCwd, this.#configDir)
+      current.configCounts = inspectProviderConfig(
+        configCwd,
+        this.#configDir,
+        getAgentManifest(current.provider)?.instructionFiles.candidates
+      )
       current.configCwd = configCwd
       current.configCheckedAt = this.#now()
     }
@@ -374,7 +387,11 @@ export class SessionHudRegistry {
   refreshConfig(sessionId: string): boolean {
     const current = this.#states.get(sessionId)
     if (!current || current.mode !== 'agent' || !current.cwd) return false
-    const next = inspectProviderConfig(current.cwd, this.#configDir)
+    const next = inspectProviderConfig(
+      current.cwd,
+      this.#configDir,
+      getAgentManifest(current.provider)?.instructionFiles.candidates
+    )
     const previous = current.configCounts
     current.configCounts = next
     current.configCwd = current.cwd
@@ -434,9 +451,15 @@ function ownsCurrentRun(ownership: SessionHudRunOwnership): boolean {
   return ownership.currentRunId() === ownership.runId
 }
 
-export function inspectProviderConfig(cwd: string, configDir: string): HudConfigCounts {
+export function inspectProviderConfig(
+  cwd: string,
+  configDir: string,
+  instructionCandidates: readonly string[] = ['CLAUDE.md']
+): HudConfigCounts {
   let instructionFiles = 0
-  const projectInstructionFileExists = existsSync(join(cwd, 'CLAUDE.md'))
+  const projectInstructionFileExists = instructionCandidates.some((name) =>
+    existsSync(join(cwd, name))
+  )
   const hookNames = new Set<string>()
   const userMcp = new Set<string>()
   const projectMcp = new Set<string>()

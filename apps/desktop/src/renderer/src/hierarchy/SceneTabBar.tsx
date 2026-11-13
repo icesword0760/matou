@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 
 import { ConfirmationSequence, ConfirmDialog } from './ConfirmDialog'
 import { RenameDialog } from './RenameDialog'
+import { getAgentShortName } from '@matou/domain'
 import type { HierarchyProjection } from './hierarchy-types'
 import { sceneCloseFlow } from './terminal-close-flow'
 import { useMessages } from '../i18n/LocaleProvider'
@@ -294,6 +295,6 @@ export function sceneDisplayName(
   const focusedId = graph?.focusedSessionId ?? projection.navigation.sessionByScene[scene.id]
   const node = graph?.nodes.find(({ sessionId }) => sessionId === focusedId)
   if (!node?.cwd) return scene.name
-  const label = node.currentMode === 'claude-code' ? 'Claude' : node.currentMode === 'codex' ? 'Codex' : 'Shell'
+  const label = getAgentShortName(node.currentMode, 'Shell')
   return `${label} · ${node.cwd}`
 }

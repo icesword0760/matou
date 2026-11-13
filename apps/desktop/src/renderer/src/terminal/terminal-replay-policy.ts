@@ -1,7 +1,9 @@
+import type { SessionRunProfile } from '@matou/domain'
+
 export function replayFromSequenceForSpawn(message: {
   reattached?: boolean
   replayFromSequence?: number
-}, hasReusableTerminalModel: boolean, profile: 'shell' | 'claude-code' | 'codex',
+}, hasReusableTerminalModel: boolean, profile: SessionRunProfile,
 lastAppliedSequence = 0): number | undefined {
   if (!message.reattached || !Number.isSafeInteger(message.replayFromSequence)) return undefined
   if (message.replayFromSequence! < 0) return undefined

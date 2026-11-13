@@ -1,6 +1,8 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import type { SessionKind } from '@matou/domain'
+
 import { CheckpointManager } from '../checkpoints/checkpoint-manager'
 import { JournalCorruptionError, SegmentJournal } from '../journal/segment-journal'
 import type { RuntimeDatabase } from '../storage/database'
@@ -43,7 +45,7 @@ interface RecoveryPlanRow {
   task_id: string
   workspace_id: string
   execution_context_id: string
-  profile: 'shell' | 'claude-code' | 'codex' | 'agent-team-member'
+  profile: SessionKind
   mount_created_at: number
   last_activity_at: number
   last_used_at: number

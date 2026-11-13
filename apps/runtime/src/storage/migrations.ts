@@ -1465,5 +1465,187 @@ export const FOUNDATION_MIGRATIONS: readonly Migration[] = [
             AND TRIM(fork.display_name) <> ''
         );
     `
+  },
+  {
+    version: 35,
+    name: 'expand-agent-provider-constraints',
+    foreignKeysOff: true,
+    sql: `
+      CREATE TABLE sessions_v35 (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        execution_context_id TEXT NOT NULL REFERENCES execution_contexts(id),
+        kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+        status TEXT NOT NULL CHECK (
+          status IN ('created', 'starting', 'running', 'waiting', 'interrupted', 'exited', 'archived')
+        ),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_activity_at INTEGER NOT NULL,
+        archived_at INTEGER,
+        title TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL DEFAULT 1,
+        cwd TEXT NOT NULL DEFAULT '',
+        work_status TEXT NOT NULL DEFAULT 'idle' CHECK (
+          work_status IN (
+            'starting', 'idle', 'running', 'needs-input', 'error',
+            'interrupted', 'exited'
+          )
+        ),
+        title_source TEXT NOT NULL DEFAULT 'default' CHECK (
+          title_source IN ('default', 'auto', 'manual')
+        ),
+        provider_title TEXT
+      ) STRICT;
+
+      INSERT INTO sessions_v35 (
+        id, task_id, execution_context_id, kind, status, created_at, updated_at, last_activity_at,
+        archived_at, title, version, cwd, work_status, title_source, provider_title
+      )
+      SELECT
+        id, task_id, execution_context_id, kind, status, created_at, updated_at, last_activity_at,
+        archived_at, title, version, cwd, work_status, title_source, provider_title
+      FROM sessions;
+
+      DROP TABLE sessions;
+      ALTER TABLE sessions_v35 RENAME TO sessions;
+      CREATE INDEX sessions_task_idx ON sessions(task_id, archived_at, last_activity_at);
+
+      CREATE TRIGGER sessions_default_cwd_after_insert
+      AFTER INSERT ON sessions
+      WHEN NEW.cwd = ''
+      BEGIN
+        UPDATE sessions
+        SET cwd = COALESCE((
+          SELECT execution_contexts.cwd
+          FROM execution_contexts
+          WHERE execution_contexts.id = NEW.execution_context_id
+        ), '')
+        WHERE id = NEW.id;
+      END;
+
+      CREATE TRIGGER session_environment_binding_after_session_insert
+      AFTER INSERT ON sessions
+      BEGIN
+        INSERT INTO session_environment_bindings (
+          session_id, local_execution_context_id, managed_worktree_id,
+          active_target, state, error_message, updated_at
+        ) VALUES (
+          NEW.id, NEW.execution_context_id, NULL,
+          'local', 'ready', NULL, NEW.updated_at
+        );
+      END;
+
+      CREATE TABLE provider_bindings_v35 (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id),
+        provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+        provider_session_id TEXT NOT NULL,
+        resume_state TEXT NOT NULL CHECK (
+          resume_state IN ('unknown', 'available', 'resuming', 'resumed', 'failed', 'expired')
+        ),
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        validated_at INTEGER,
+        invalidated_at INTEGER,
+        restore_state TEXT NOT NULL DEFAULT 'none' CHECK (
+          restore_state IN ('none', 'restoring', 'failed')
+        ),
+        restore_error TEXT,
+        user_exited_at INTEGER,
+        UNIQUE(session_id, provider, provider_session_id)
+      ) STRICT;
+
+      INSERT INTO provider_bindings_v35 (
+        id, session_id, provider, provider_session_id, resume_state, metadata_json,
+        created_at, updated_at, validated_at, invalidated_at, restore_state,
+        restore_error, user_exited_at
+      )
+      SELECT
+        id, session_id, provider, provider_session_id, resume_state, metadata_json,
+        created_at, updated_at, validated_at, invalidated_at, restore_state,
+        restore_error, user_exited_at
+      FROM provider_bindings;
+
+      DROP TABLE provider_bindings;
+      ALTER TABLE provider_bindings_v35 RENAME TO provider_bindings;
+
+      CREATE TABLE session_fork_intents_v35 (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+        source_session_id TEXT NOT NULL REFERENCES sessions(id),
+        source_provider TEXT NOT NULL CHECK (length(trim(source_provider)) > 0),
+        source_provider_session_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'starting', 'succeeded', 'failed')),
+        error_message TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER,
+        display_name TEXT NOT NULL DEFAULT '',
+        worktree_mode TEXT NOT NULL DEFAULT 'current' CHECK (worktree_mode IN ('current', 'new')),
+        worktree_id TEXT,
+        target_execution_context_id TEXT,
+        worktree_path TEXT,
+        branch_name TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        operation_id TEXT NOT NULL DEFAULT '',
+        submission_key TEXT NOT NULL DEFAULT '',
+        stage TEXT NOT NULL DEFAULT 'queued' CHECK (
+          stage IN (
+            'queued', 'creating-worktree', 'applying-setup', 'binding-session',
+            'restoring-provider', 'starting-window', 'succeeded', 'failed'
+          )
+        ),
+        completed_steps INTEGER NOT NULL DEFAULT 0 CHECK (completed_steps >= 0),
+        total_steps INTEGER NOT NULL DEFAULT 5 CHECK (
+          total_steps > 0 AND completed_steps <= total_steps
+        ),
+        attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+        lease_owner TEXT,
+        lease_token TEXT,
+        lease_expires_at INTEGER,
+        lease_fence INTEGER NOT NULL DEFAULT 0 CHECK (lease_fence >= 0),
+        last_heartbeat_at INTEGER,
+        permission_mode TEXT NOT NULL DEFAULT 'default' CHECK (
+          permission_mode IN (
+            'default', 'auto', 'acceptEdits', 'plan', 'bypassPermissions'
+          )
+        ),
+        CHECK (source_session_id <> session_id)
+      ) STRICT;
+
+      INSERT INTO session_fork_intents_v35 (
+        session_id, source_session_id, source_provider, source_provider_session_id,
+        state, error_message, created_at, started_at, completed_at, display_name,
+        worktree_mode, worktree_id, target_execution_context_id, worktree_path,
+        branch_name, attempt_count, updated_at, operation_id, submission_key,
+        stage, completed_steps, total_steps, attempt, lease_owner, lease_token,
+        lease_expires_at, lease_fence, last_heartbeat_at, permission_mode
+      )
+      SELECT
+        session_id, source_session_id, source_provider, source_provider_session_id,
+        state, error_message, created_at, started_at, completed_at, display_name,
+        worktree_mode, worktree_id, target_execution_context_id, worktree_path,
+        branch_name, attempt_count, updated_at, operation_id, submission_key,
+        stage, completed_steps, total_steps, attempt, lease_owner, lease_token,
+        lease_expires_at, lease_fence, last_heartbeat_at, permission_mode
+      FROM session_fork_intents;
+
+      DROP TABLE session_fork_intents;
+      ALTER TABLE session_fork_intents_v35 RENAME TO session_fork_intents;
+
+      CREATE INDEX session_fork_intents_source_idx
+      ON session_fork_intents(source_session_id, created_at);
+
+      CREATE UNIQUE INDEX session_fork_intents_operation_idx
+      ON session_fork_intents(operation_id);
+
+      CREATE UNIQUE INDEX session_fork_intents_submission_idx
+      ON session_fork_intents(submission_key);
+
+      CREATE INDEX session_fork_intents_lease_idx
+      ON session_fork_intents(stage, lease_expires_at, created_at);
+    `
   }
 ]

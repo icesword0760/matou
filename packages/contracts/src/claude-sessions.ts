@@ -1,3 +1,5 @@
+import type { AgentProfileId } from '@matou/domain'
+
 export type ClaudeSessionPermissionMode =
   | 'default'
   | 'auto'
@@ -19,6 +21,7 @@ export interface ClaudeSessionSearchHit {
 }
 
 export interface ClaudeSessionSummary {
+  provider?: AgentProfileId
   providerSessionId: string
   title: string
   cwd: string
@@ -57,6 +60,7 @@ export interface ClaudeSessionEventPageInfo {
 }
 
 export interface ClaudeSessionListResult {
+  provider?: AgentProfileId
   sessions: ClaudeSessionSummary[]
   total: number
   offset: number
@@ -76,6 +80,7 @@ export interface ClaudeSessionSearchResult {
 }
 
 export interface ClaudeSessionLoadResult {
+  provider?: AgentProfileId
   sessionId: string
   providerSessionId: string
   permissionMode: ClaudeSessionPermissionMode

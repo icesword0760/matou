@@ -8,6 +8,7 @@ export interface Migration {
   name: string
   sql: string
   acceptedLegacyChecksums?: readonly string[]
+  foreignKeysOff?: boolean
 }
 
 export interface MigrationResult {
@@ -108,17 +109,34 @@ export class MigrationRunner {
     }
     const appliedVersions: number[] = []
     for (const migration of pending) {
-      this.#database.transaction((transaction) => {
-        transaction.exec(migration.sql)
-        this.#observer.onMigrationTransactionPrepared?.(migration)
-        transaction.run(
-          'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)',
-          migration.version,
-          migration.name,
-          contentChecksum(migration),
-          Date.now()
-        )
-      })
+      if (migration.foreignKeysOff) {
+        this.#database.exec('PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;')
+      }
+      try {
+        this.#database.transaction((transaction) => {
+          transaction.exec(migration.sql)
+          if (migration.foreignKeysOff) {
+            const fkViolations = transaction.all<Record<string, unknown>>('PRAGMA foreign_key_check')
+            if (fkViolations.length > 0) {
+              throw new Error(
+                `migration ${migration.version} left ${fkViolations.length} foreign key violation(s): ${JSON.stringify(fkViolations.slice(0, 5))}`
+              )
+            }
+          }
+          this.#observer.onMigrationTransactionPrepared?.(migration)
+          transaction.run(
+            'INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)',
+            migration.version,
+            migration.name,
+            contentChecksum(migration),
+            Date.now()
+          )
+        })
+      } finally {
+        if (migration.foreignKeysOff) {
+          this.#database.exec('PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;')
+        }
+      }
       appliedVersions.push(migration.version)
       this.#observer.onMigrationCommitted?.(migration)
     }
