@@ -16,12 +16,20 @@ export interface ProviderConfigView {
   hasApiKey: boolean
   modelMapping?: Partial<Record<'opus' | 'sonnet' | 'haiku', string>>
   builtIn?: boolean
+  kind?: 'api-key' | 'subscription'
+  subscription?: {
+    provider: SubscriptionProvider
+    account: SubscriptionAccountSummary
+    modelMetadata: SubscriptionModel[]
+  }
 }
 
 export interface ProviderConfigSnapshot {
   revision: number
   providers: Record<ProviderCli, ProviderConfigView[]>
   activeProviderIds: Record<ProviderCli, string>
+  /** Runtime capability; omitted by storage-only mutation results. */
+  subscriptionSupported?: boolean
 }
 
 export type ProviderSessionActivationDeferredReason =
@@ -40,11 +48,23 @@ export type ProviderSessionActivationTransition =
       reason: ProviderSessionActivationDeferredReason
     }
 
+/** Structured preparation failure; card account status keeps its existing enum. */
+export interface ProviderActivationFailure {
+  status: 'router-start-failed' | 'needs-sign-in'
+  /** Compatible display string in the runtime locale; never raw engine details. */
+  reason?: string
+  reasonLocalized?: { zh: string; en: string }
+  /** Complete user-facing copy, including the localized reason when present. */
+  message: { zh: string; en: string }
+  recovery: 'retry' | 'sign-in'
+}
+
 export interface ProviderConfigActivationResult extends ProviderConfigSnapshot {
   sessionTransitions: ProviderSessionActivationTransition[]
 }
 
-export interface ProviderConfigInput {
+export interface ApiKeyProviderConfigInput {
+  kind?: 'api-key'
   id?: string
   cli: ProviderCli
   name: string
@@ -52,6 +72,63 @@ export interface ProviderConfigInput {
   model: string
   apiKey?: string
   modelMapping?: Partial<Record<'opus' | 'sonnet' | 'haiku', string>>
+}
+
+export type SubscriptionProvider = 'codex' | 'antigravity'
+export interface SubscriptionModel {
+  id: string
+  displayName?: string
+  ownedBy?: string
+  contextWindow?: number
+  maxOutputTokens?: number
+}
+export interface SubscriptionAccountSummary {
+  email?: string
+  plan?: string
+  status: 'ready' | 'needs-sign-in' | 'account-unavailable' | 'router-not-running'
+  reason?: string
+}
+export interface SubscriptionQuotaWindow {
+  name: string
+  group?: string
+  windowSeconds?: number
+  usedPercent: number
+  resetsAt?: string
+}
+export interface SubscriptionAccountDetails {
+  account: SubscriptionAccountSummary
+  models: SubscriptionModel[]
+  quota?: SubscriptionQuotaWindow[]
+}
+export interface SubscriptionProviderConfigInput {
+  kind: 'subscription'
+  id?: string
+  cli: 'claude-code'
+  name: string
+  subscription: { provider: SubscriptionProvider; attemptId?: string }
+  modelMapping: Record<'opus' | 'sonnet' | 'haiku', string>
+  // Keep legacy property lookups type-safe while rejecting these on the wire.
+  endpoint?: never
+  model?: never
+  apiKey?: never
+}
+export type ProviderConfigInput = ApiKeyProviderConfigInput | SubscriptionProviderConfigInput
+export interface SubscriptionLoginStartInput { provider: SubscriptionProvider; locale?: 'zh-CN' | 'en' }
+export type SubscriptionModelsReadInput = { attemptId: string; providerId?: never } | { providerId: string; attemptId?: never }
+export interface SubscriptionLoginView {
+  attemptId: string
+  provider: SubscriptionProvider
+  status: 'waiting' | 'exchanging' | 'ready' | 'failed' | 'cancelled' | 'expired' | 'saved'
+  reason?: string
+  reasonLocalized?: { zh: string; en: string }
+  /** Browser launch failed, but this attempt can still receive its callback. */
+  canReopen?: boolean
+  details?: SubscriptionAccountDetails
+}
+export interface SubscriptionSettingsSnapshot {
+  snapshot: ProviderConfigSnapshot
+  accounts: Record<string, SubscriptionAccountDetails>
+  antigravityRiskAccepted: boolean
 }
 
 export interface ProviderModelsInput {

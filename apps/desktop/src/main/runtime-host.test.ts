@@ -17,6 +17,7 @@ vi.mock('electron', () => ({
 }))
 
 import { RuntimeHost } from './runtime-host'
+import { RouterProcessOwner } from '../../../runtime/src/model-router/process-owner'
 
 const opening = lifecycle('normal', 'opening-database', 0)
 const ready = lifecycle('normal', 'ready', 1)
@@ -32,9 +33,59 @@ beforeEach(() => {
   })
   vi.useFakeTimers()
 })
-afterEach(() => vi.useRealTimers())
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('RuntimeHost', () => {
+  it('waits for the old router to exit before launching a replacement runtime', async () => {
+    let finishCleanup!: () => void
+    const cleanup = new Promise<void>(done => { finishCleanup = done })
+    const stopRouter = vi.spyOn(RouterProcessOwner.prototype, 'stop').mockReturnValue(cleanup)
+    const host = new RuntimeHost('/runtime/index.cjs')
+    const starting = host.start()
+    const first = electron.children[0] as MockUtilityProcess
+    first.emit('spawn')
+    await starting
+    first.emit('exit', 9)
+    expect(stopRouter).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(electron.children).toHaveLength(1)
+    finishCleanup()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(electron.children).toHaveLength(2)
+    const second = electron.children[1] as MockUtilityProcess
+    second.emit('spawn')
+    const stopping = host.stop()
+    second.emit('exit', 0)
+    await stopping
+  })
+  it('opens subscription authorization only from the current runtime and only on the fixed service allowlist', async () => {
+    const openExternal = vi.fn(async () => {})
+    const host = new RuntimeHost('/runtime/index.cjs', undefined, { openExternal })
+    const starting = host.start()
+    const child = electron.children[0] as MockUtilityProcess
+    child.emit('spawn')
+    await starting
+    const url = 'https://auth.openai.com/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback'
+    const request = { type: 'runtime.model-router-request', requestId: 'auth-1', action: 'open-authorization', provider: 'codex', url }
+    child.emit('message', request)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(openExternal).toHaveBeenCalledWith(url)
+    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'auth-1', ok: true })
+    child.emit('message', { ...request, requestId: 'auth-2', url: url.replace('auth.openai.com', 'auth.openai.com.evil.test') })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(openExternal).toHaveBeenCalledOnce()
+    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'auth-2', ok: false })
+    openExternal.mockRejectedValueOnce(new Error('browser unavailable'))
+    child.emit('message', { ...request, requestId: 'auth-failed' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(child.postMessage).toHaveBeenCalledWith({ type: 'runtime.model-router-result', requestId: 'auth-failed', ok: false })
+    const stopping = host.stop()
+    child.emit('exit', 0)
+    await stopping
+    child.emit('message', { ...request, requestId: 'stale-auth' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(openExternal).toHaveBeenCalledTimes(2)
+  })
   it('passes the private control asset root and bundled executable to the Runtime', async () => {
     const host = new RuntimeHost('/runtime/index.cjs', '/runtime/control-assets')
     const starting = host.start()

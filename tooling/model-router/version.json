@@ -1,0 +1,15 @@
+{
+  "version": "8.0.69",
+  "commit": "f7ae8feeb3710319f524730849fbe32fde1751e4",
+  "repository": "router-for-me/CLIProxyAPI",
+  "assets": {
+    "arm64": {
+      "name": "CLIProxyAPI_8.0.69_darwin_aarch64.tar.gz",
+      "sha256": "44070a946dd8932829a52e5d15fe8f01c3748afbbdacc17b10f5a42ce7dba263"
+    },
+    "x64": {
+      "name": "CLIProxyAPI_8.0.69_darwin_amd64.tar.gz",
+      "sha256": "dc9b9e782cf1266eedb9c7102ade1f263027af2cf509c8175e156b74bda994d6"
+    }
+  }
+}

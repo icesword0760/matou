@@ -82,6 +82,10 @@ import { createE2eForkCrashObserver } from './session-canvas/fork-operation-e2e-
 import { createE2eForkSetupPolicyProvider } from './session-canvas/e2e-fork-setup-policy'
 import { createE2eJournalOptionsProvider } from './journal/e2e-journal-fault-controller'
 import { ProviderConfigStore } from './provider-config/provider-config-store'
+import { SubscriptionAccounts } from './model-router/subscription-accounts'
+import { ModelRouterManager } from './model-router/manager'
+import { RouterHostBridge } from './model-router/host-bridge'
+import { loadLoginShellProxyEnvironment } from './session/provider-command-environment'
 
 type UtilityProcess = NodeJS.Process & { parentPort?: ParentPort }
 
@@ -104,6 +108,12 @@ const scaleEventLoopDelay = process.env.MATOU_E2E_SCALE === '1'
 scaleEventLoopDelay?.enable()
 const sessionHuds = new SessionHudRegistry()
 const dataRoot = resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
+const routerHostBridge = new RouterHostBridge(message => parentPort.postMessage(message))
+let subscriptionAccounts: SubscriptionAccounts | undefined
+const modelRouter = new ModelRouterManager({ dataRoot, control: routerHostBridge })
+// Resolve the GUI launch's shell proxies while runtime bootstrap does other
+// work. The same in-flight/result cache is used by the first router start.
+void loadLoginShellProxyEnvironment(process.env)
 const e2eJournalOptionsForSession = createE2eJournalOptionsProvider(process.env)
 const e2eForkCrashObserver = createE2eForkCrashObserver(process.env)
 const e2eForkSetupPolicyForWorkspace = createE2eForkSetupPolicyProvider(process.env)
@@ -230,6 +240,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
       providerConfigs
     }
   }
+  subscriptionAccounts = new SubscriptionAccounts({ dataRoot: runtimeDataRoot, manager: modelRouter, store: providerConfigs, openAuthorizationUrl: (provider, url) => routerHostBridge.openAuthorizationUrl(provider, url) })
+  void subscriptionAccounts.initialize().catch(() => {
+    console.error('[model-router.reconcile] Subscription credential reconciliation failed; account operations will retry')
+  })
   const controlEndpoint = controlEndpointForPlatform(runtimeDataRoot)
   const telemetry = new TaskTelemetryRepository(database, database.runtimeGeneration)
   const transactions = new DomainTransactionManager(database)
@@ -473,6 +487,7 @@ async function initializeRuntime(): Promise<RuntimeState> {
     undefined,
     {
       hudRegistry: sessionHuds,
+      ...(subscriptionAccounts ? { subscriptionAccounts } : {}),
       accessPolicy,
       providerConfigs,
       ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
@@ -618,9 +633,12 @@ function shutdown(): Promise<void> {
       servers.clear()
     },
     shutdownSessions: () => sessions.shutdownAll()
-  }).finally(() => {
-    readOnlyDatabase?.close()
-    readOnlyDatabase = undefined
+  }).finally(async () => {
+    try { await subscriptionAccounts?.close() } finally {
+      readOnlyDatabase?.close()
+      readOnlyDatabase = undefined
+      await modelRouter.close()
+    }
   })
 }
 const processOrchestrator = new RuntimeProcessOrchestrator({
@@ -635,6 +653,7 @@ process.once('SIGTERM', () => {
 })
 
 parentPort.on('message', async (event) => {
+  if (routerHostBridge.receive(event.data)) return
   if (event.data?.type === 'runtime.claude-accounts-request') {
     const request = event.data
     if (typeof request.requestId !== 'string' || !['snapshot', 'usage-reset', 'hold', 'release', 'resume', 'restart'].includes(request.action) ||
@@ -725,6 +744,7 @@ parentPort.on('message', async (event) => {
         }
       : undefined
     const providerHooks = state.mode === 'normal' ? state.providerHooks : undefined
+    const settingsRouter = modelRouter.bindSettingsConnection(port)
     const server = new RuntimeServer(
       port,
       state.dataRoot,
@@ -736,6 +756,8 @@ parentPort.on('message', async (event) => {
       undefined,
       {
         hudRegistry: sessionHuds,
+        settingsRouter,
+        ...(subscriptionAccounts ? { subscriptionAccounts, subscriptionConnection: subscriptionAccounts.bindConnection(port) } : {}),
         accessPolicy: state.accessPolicy,
         providerConfigs: state.providerConfigs,
         ...(process.env.MATOU_CONTROL_ASSET_ROOT === undefined ? {} : {
@@ -754,7 +776,11 @@ parentPort.on('message', async (event) => {
     servers.add(server)
     for (const resolve of recoveryServerWaiters) resolve(server)
     recoveryServerWaiters.clear()
-    port.once('close', () => servers.delete(server))
+    // Settings acquisition is wired in the UI gate; disconnection cleanup is
+    // already tied to this exact RPC channel rather than a guessed timeout.
+    port.once('close', () => {
+      servers.delete(server)
+    })
   } catch (error) {
     console.error('Matou Runtime schema migration failed', error)
     port.close()

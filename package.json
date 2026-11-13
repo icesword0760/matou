@@ -14,7 +14,7 @@
     "build:runtime": "pnpm --filter @matou/runtime build",
     "build:desktop": "pnpm --filter @matou/desktop build",
     "build": "pnpm build:packages && pnpm build:runtime && pnpm build:desktop",
-    "dev": "pnpm build:packages && pnpm build:runtime && pnpm --filter @matou/desktop dev",
+    "dev": "pnpm build:packages && pnpm build:runtime && pnpm router:prepare && pnpm --filter @matou/desktop dev",
     "test:identifiers": "node --test tooling/project-identifier-policy.test.mjs",
     "test": "pnpm check:identifiers && pnpm test:identifiers && pnpm build:packages && pnpm -r --workspace-concurrency=1 --if-present run test",
     "typecheck": "pnpm build:packages && pnpm -r --if-present run typecheck",
@@ -38,10 +38,11 @@
     "test:e2e:recovery-scale": "node tooling/run-recovery-scale-gate.mjs",
     "test:e2e:fork-crash-recovery": "pnpm build && playwright test tests/e2e/fork-runtime-crash-recovery.spec.ts --workers=1 --reporter=line",
     "clean": "pnpm -r --if-present run clean",
-    "package:mac": "export MATOU_UPDATE_BASE_URL=\"${MATOU_UPDATE_BASE_URL:-https://updates.baize-ailabs.com/stable}\" && pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --mac dmg zip --${MATOU_MAC_ARCH:-arm64} --publish never --config.forceCodeSigning=true",
+    "package:mac": "export MATOU_UPDATE_BASE_URL=\"${MATOU_UPDATE_BASE_URL:-https://updates.baize-ailabs.com/stable}\" && pnpm build && node tooling/prepare-package-resources.mjs && electron-builder --projectDir apps/desktop --mac dmg zip --${MATOU_MAC_ARCH:-arm64} --publish never --config.forceCodeSigning=true --config.mac.entitlements=\"$PWD/apps/desktop/build/entitlements.mac.plist\" --config.mac.entitlementsInherit=\"$PWD/apps/desktop/build/entitlements.mac.plist\"",
     "accounts:setup": "uv sync --project tooling/claude-accounts --frozen",
     "accounts:build": "node tooling/claude-accounts/build.mjs",
-    "test:accounts": "pnpm --filter @matou/desktop exec vitest run src/main/claude-accounts && uv run --frozen --project tooling/claude-accounts python -m unittest discover -s tooling/claude-accounts -p 'test_*.py'"
+    "test:accounts": "pnpm --filter @matou/desktop exec vitest run src/main/claude-accounts && uv run --frozen --project tooling/claude-accounts python -m unittest discover -s tooling/claude-accounts -p 'test_*.py'",
+    "router:prepare": "node tooling/model-router/prepare.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
