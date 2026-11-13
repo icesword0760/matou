@@ -1,0 +1,4 @@
+{
+  "fixtureMode": "controlled-missing-binary",
+  "bannerText": "会话启动失败\n未检测到 Antigravity（命令：/private/tmp/does-not-exist/agy-missing-binary）。请先安装并确保 `/private/tmp/does-not-exist/agy-missing-binary` 在 PATH 中，再重试。\n重试启动\n移除失败会话"
+}
