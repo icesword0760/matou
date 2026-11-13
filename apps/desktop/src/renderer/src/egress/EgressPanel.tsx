@@ -1,14 +1,16 @@
 import { useEffect, useId, useRef, useState, type RefObject } from 'react'
-import type {
-  EgressCheckWire,
-  EgressExit,
-  EgressFamily,
-  EgressStatusWire
+import {
+  EGRESS_FAMILIES,
+  type EgressCheckWire,
+  type EgressExit,
+  type EgressFamily,
+  type EgressStatusWire
 } from '@matou/contracts'
 import { useLocale } from '../i18n/LocaleProvider'
 import {
   buildEgressReport,
   checkCopy,
+  familyHeading,
   formatCheckedTime,
   ruleLabel
 } from './egress-copy'
@@ -149,16 +151,10 @@ export function EgressPanel({
       .catch(() => {})
   }
 
-  const familyGroups: readonly { family: EgressFamily; heading: string }[] = [
-    {
-      family: 'anthropic',
-      heading: zh ? 'Claude（Anthropic）' : 'Claude (Anthropic)'
-    },
-    {
-      family: 'openai',
-      heading: zh ? 'Codex（OpenAI）' : 'Codex (OpenAI)'
-    }
-  ]
+  const familyGroups = EGRESS_FAMILIES.map((family) => ({
+    family,
+    heading: familyHeading(family, zh)
+  }))
 
   const globalChecks = status.checks.filter((check) => check.family === undefined)
 

@@ -1,18 +1,20 @@
-import type {
-  EgressCheckResult,
-  EgressCheckWire,
-  EgressExit,
-  EgressFamily,
-  EgressHostSample
+import {
+  EGRESS_FAMILIES,
+  type EgressCheckResult,
+  type EgressCheckWire,
+  type EgressExit,
+  type EgressFamily,
+  type EgressHostSample
 } from '@matou/contracts'
 
 export const EGRESS_HOSTS: Record<EgressFamily, { api: string; login: string }> = {
   anthropic: { api: 'api.anthropic.com', login: 'claude.ai' },
-  openai: { api: 'api.openai.com', login: 'chatgpt.com' }
+  openai: { api: 'api.openai.com', login: 'chatgpt.com' },
+  'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' }
 }
 
 export interface EgressSample {
-  hosts: Record<EgressFamily, { api: EgressHostSample; login: EgressHostSample }>
+  hosts: Partial<Record<EgressFamily, { api: EgressHostSample; login: EgressHostSample }>>
   browserLogin?: EgressHostSample
   agentHasProxyEnv: boolean
   systemProxyEnabled: boolean
@@ -39,14 +41,14 @@ export interface EgressRule {
   baselines: Partial<Record<EgressFamily, EgressExit>>
 }
 
-const FAMILIES: readonly EgressFamily[] = ['anthropic', 'openai']
-
 export function evaluateEgress(sample: EgressSample, rule: EgressRule): EgressEvaluation {
   const families: FamilyEvaluation[] = []
   const checks: EgressCheckWire[] = []
 
-  for (const family of FAMILIES) {
-    const { evaluation, familyChecks } = evaluateFamily(family, sample.hosts[family], rule)
+  for (const family of EGRESS_FAMILIES) {
+    const pair = sample.hosts[family]
+    if (!pair) continue
+    const { evaluation, familyChecks } = evaluateFamily(family, pair, rule)
     families.push(evaluation)
     checks.push(...familyChecks)
   }
@@ -215,7 +217,7 @@ function evaluateBrowserPath(sample: EgressSample): EgressCheckWire {
     return { id: 'browser-path', result: 'pass' }
   }
 
-  const agentIp = sample.hosts.anthropic.login.ip
+  const agentIp = sample.hosts.anthropic?.login.ip
   const browserIp = sample.browserLogin.ip
   if (!browserIp || !agentIp) {
     return { id: 'browser-path', result: 'unknown' }

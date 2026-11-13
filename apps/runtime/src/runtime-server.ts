@@ -1332,7 +1332,10 @@ export class RuntimeServer {
       case 'egress.accept-current': {
         const family = input.family
         if (!isEgressFamily(family)) {
-          throw new RpcFault('INVALID_REQUEST', 'egress family must be "anthropic" or "openai"')
+          throw new RpcFault(
+            'INVALID_REQUEST',
+            'egress family must be "anthropic", "openai", or "chatgpt-subscription"'
+          )
         }
         try {
           return await monitor.acceptCurrent(family)
@@ -1350,7 +1353,10 @@ export class RuntimeServer {
       case 'egress.override': {
         const family = input.family
         if (!isEgressFamily(family)) {
-          throw new RpcFault('INVALID_REQUEST', 'egress family must be "anthropic" or "openai"')
+          throw new RpcFault(
+            'INVALID_REQUEST',
+            'egress family must be "anthropic", "openai", or "chatgpt-subscription"'
+          )
         }
         try {
           return await monitor.override(family)

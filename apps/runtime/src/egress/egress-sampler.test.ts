@@ -241,7 +241,7 @@ describe('createEgressSampler', () => {
       const light = await sampler.sampleLight('anthropic')
 
       expect(probeTrace).toHaveBeenCalledTimes(5)
-      expect(full.hosts.anthropic.api).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
+      expect(full.hosts.anthropic?.api).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
       expect(light).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
     }
   })
@@ -405,6 +405,157 @@ describe('createEgressSampler', () => {
     expect(await invalidSampler.sampleLight('anthropic')).toEqual({
       host: 'api.anthropic.com',
       error: 'timeout'
+    })
+  })
+
+  it('skips chatgpt-subscription hosts and resolveRouterProxy when routerFamilyEnabled is false', async () => {
+    const probeCalls: Array<{ host: string; proxyUrl: string | undefined }> = []
+    const probeTrace = vi.fn(async (host: string, proxyUrl: string | undefined): Promise<EgressHostSample> => {
+      probeCalls.push({ host, proxyUrl })
+      return { host, ip: '203.0.113.1', country: 'US' }
+    })
+    const resolveRouterProxy = vi.fn(async () => ({ source: 'system' as const, proxyUrl: 'http://127.0.0.1:7897' }))
+
+    const sampler = createEgressSampler({
+      baseEnv: {},
+      claudeUserSettingsPath: join(root, 'missing.json'),
+      agentTimeZoneMainland: () => false,
+      routerFamilyEnabled: async () => false,
+      resolveRouterProxy,
+      probeTrace,
+      readSystemProxy: async () => undefined,
+      networkInterfaces: () => ({}),
+      canReachIpv6Directly: async () => false
+    })
+
+    const sample = await sampler.sampleFull()
+    expect(resolveRouterProxy).not.toHaveBeenCalled()
+    expect(probeCalls.map((c) => c.host)).toEqual([
+      'api.anthropic.com',
+      'claude.ai',
+      'api.openai.com',
+      'chatgpt.com'
+    ])
+    expect(probeCalls.some((c) => c.host === 'auth.openai.com')).toBe(false)
+    expect(sample.hosts['chatgpt-subscription']).toBeUndefined()
+
+    const lightDisabled = await sampler.sampleLight('chatgpt-subscription')
+    expect(lightDisabled).toEqual({ host: 'chatgpt.com', error: 'unreachable' })
+    expect(resolveRouterProxy).not.toHaveBeenCalled()
+    expect(probeCalls).toHaveLength(4)
+  })
+
+  it('probes chatgpt-subscription hosts via resolveRouterProxy proxyUrl when enabled and ignores openai baseEnv proxy', async () => {
+    const probeCalls: Array<{ host: string; proxyUrl: string | undefined }> = []
+    const probeTrace = vi.fn(async (host: string, proxyUrl: string | undefined): Promise<EgressHostSample> => {
+      probeCalls.push({ host, proxyUrl })
+      return {
+        host,
+        ip: proxyUrl === 'http://127.0.0.1:7897' ? '198.51.100.77' : '203.0.113.10',
+        country: 'US'
+      }
+    })
+    const resolveRouterProxy = vi.fn(async () => ({
+      source: 'system' as const,
+      proxyUrl: 'http://127.0.0.1:7897'
+    }))
+
+    const sampler = createEgressSampler({
+      baseEnv: { HTTPS_PROXY: 'http://127.0.0.1:8080' },
+      claudeUserSettingsPath: join(root, 'missing.json'),
+      agentTimeZoneMainland: () => false,
+      routerFamilyEnabled: async () => true,
+      resolveRouterProxy,
+      probeTrace,
+      readSystemProxy: async () => undefined,
+      networkInterfaces: () => ({}),
+      canReachIpv6Directly: async () => false
+    })
+
+    const sample = await sampler.sampleFull()
+    expect(resolveRouterProxy).toHaveBeenCalledTimes(1)
+    expect(resolveRouterProxy).toHaveBeenCalledWith({ HTTPS_PROXY: 'http://127.0.0.1:8080' })
+    expect(probeCalls).toContainEqual({ host: 'chatgpt.com', proxyUrl: 'http://127.0.0.1:8080' })
+    expect(probeCalls).toContainEqual({ host: 'chatgpt.com', proxyUrl: 'http://127.0.0.1:7897' })
+    expect(probeCalls).toContainEqual({ host: 'auth.openai.com', proxyUrl: 'http://127.0.0.1:7897' })
+    expect(sample.hosts['chatgpt-subscription']).toEqual({
+      api: { host: 'chatgpt.com', ip: '198.51.100.77', country: 'US' },
+      login: { host: 'auth.openai.com', ip: '198.51.100.77', country: 'US' }
+    })
+
+    const light = await sampler.sampleLight('chatgpt-subscription')
+    expect(resolveRouterProxy).toHaveBeenCalledTimes(2)
+    expect(light).toEqual({ host: 'chatgpt.com', ip: '198.51.100.77', country: 'US' })
+  })
+
+  it('probes chatgpt-subscription directly when resolveRouterProxy returns direct with providerBypass', async () => {
+    const probeCalls: Array<{ host: string; proxyUrl: string | undefined }> = []
+    const probeTrace = vi.fn(async (host: string, proxyUrl: string | undefined): Promise<EgressHostSample> => {
+      probeCalls.push({ host, proxyUrl })
+      return { host, ip: '223.5.5.5', country: 'CN' }
+    })
+    const resolveRouterProxy = vi.fn(async () => ({
+      source: 'direct' as const,
+      noProxy: 'chatgpt.com',
+      providerBypass: true
+    }))
+
+    const sampler = createEgressSampler({
+      baseEnv: { HTTPS_PROXY: 'http://127.0.0.1:8080' },
+      claudeUserSettingsPath: join(root, 'missing.json'),
+      agentTimeZoneMainland: () => false,
+      routerFamilyEnabled: async () => true,
+      resolveRouterProxy,
+      probeTrace,
+      readSystemProxy: async () => undefined,
+      networkInterfaces: () => ({}),
+      canReachIpv6Directly: async () => false
+    })
+
+    const sample = await sampler.sampleFull()
+    expect(probeCalls).toContainEqual({ host: 'chatgpt.com', proxyUrl: undefined })
+    expect(probeCalls).toContainEqual({ host: 'auth.openai.com', proxyUrl: undefined })
+    expect(sample.hosts['chatgpt-subscription']).toEqual({
+      api: { host: 'chatgpt.com', ip: '223.5.5.5', country: 'CN' },
+      login: { host: 'auth.openai.com', ip: '223.5.5.5', country: 'CN' }
+    })
+
+    await sampler.sampleLight('chatgpt-subscription')
+    expect(probeCalls.at(-1)).toEqual({ host: 'chatgpt.com', proxyUrl: undefined })
+  })
+
+  it('supports optional chatgpt-subscription key in MATOU_E2E_EGRESS_FIXTURE', async () => {
+    const fixturePath = join(root, 'subscription-fixture.json')
+    await writeFile(fixturePath, JSON.stringify({
+      anthropic: {
+        api: { ip: '169.128.10.1', country: 'US' },
+        login: { ip: '169.128.10.1', country: 'US' }
+      },
+      openai: {
+        api: { ip: '169.128.10.1', country: 'US' },
+        login: { ip: '169.128.10.1', country: 'US' }
+      },
+      'chatgpt-subscription': {
+        api: { ip: '223.5.5.5', country: 'CN' },
+        login: { ip: '223.5.5.5', country: 'CN' }
+      }
+    }))
+
+    const sampler = createEgressSampler({
+      baseEnv: { MATOU_E2E: '1', MATOU_E2E_EGRESS_FIXTURE: fixturePath },
+      claudeUserSettingsPath: join(root, 'missing.json'),
+      agentTimeZoneMainland: () => false
+    })
+
+    const full = await sampler.sampleFull()
+    expect(full.hosts['chatgpt-subscription']).toEqual({
+      api: { host: 'chatgpt.com', ip: '223.5.5.5', country: 'CN' },
+      login: { host: 'auth.openai.com', ip: '223.5.5.5', country: 'CN' }
+    })
+    expect(await sampler.sampleLight('chatgpt-subscription')).toEqual({
+      host: 'chatgpt.com',
+      ip: '223.5.5.5',
+      country: 'CN'
     })
   })
 })

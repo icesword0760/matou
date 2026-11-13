@@ -16,7 +16,7 @@ import {
   type RuntimeMessage
 } from '@matou/contracts'
 import { EgressMonitor } from './egress/egress-monitor'
-import type { EgressSample } from './egress/egress-evaluator'
+import { EGRESS_HOSTS, type EgressSample } from './egress/egress-evaluator'
 import { EgressSettings } from './egress/egress-settings'
 import { SessionEgressFrozenError } from './session/pty-session'
 
@@ -7631,7 +7631,8 @@ describe('RuntimeServer egress monitoring', () => {
       now: Date.now,
       setTimer: () => () => {},
       sampleFull: async () => currentSample,
-      sampleLight: async (family: EgressFamily) => currentSample.hosts[family].api,
+      sampleLight: async (family: EgressFamily) =>
+        currentSample.hosts[family]?.api ?? { host: EGRESS_HOSTS[family].api, error: 'timeout' },
       networkSignature: () => 'sig-1',
       settings: new EgressSettings(database),
       freeze: async (sessionId) => {

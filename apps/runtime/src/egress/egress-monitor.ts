@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import type {
-  EgressFamily,
-  EgressFamilyWire,
-  EgressHostSample,
-  EgressStatusWire
+import {
+  EGRESS_FAMILIES,
+  type EgressFamily,
+  type EgressFamilyWire,
+  type EgressHostSample,
+  type EgressStatusWire
 } from '@matou/contracts'
 import {
   EGRESS_HOSTS,
@@ -20,7 +21,7 @@ export const EGRESS_WAKE_DRIFT_THRESHOLD_MS = 15_000
 export const EGRESS_FROZEN_RECHECK_INTERVAL_MS = 15_000
 export const EGRESS_RECOVERY_CONFIRM_DELAY_MS = 5_000
 
-const FAMILIES: readonly EgressFamily[] = ['anthropic', 'openai']
+const CHECKING_FAMILIES: readonly EgressFamily[] = ['anthropic', 'openai']
 
 type RecoveryPhase = 'idle' | 'rechecking' | 'confirming'
 
@@ -71,10 +72,9 @@ export class EgressMonitor {
   readonly #frozenSessions = new Set<string>()
   readonly #overrides = new Map<EgressFamily, string>()
   readonly #lastResolvedIp = new Map<EgressFamily, string>()
-  readonly #recoveryPhase = new Map<EgressFamily, RecoveryPhase>([
-    ['anthropic', 'idle'],
-    ['openai', 'idle']
-  ])
+  readonly #recoveryPhase = new Map<EgressFamily, RecoveryPhase>(
+    EGRESS_FAMILIES.map((family) => [family, 'idle'])
+  )
 
   #started = false
   #stopped = false
@@ -138,7 +138,7 @@ export class EgressMonitor {
     if (!removedSession && !removedFrozen) return
 
     if (removedFrozen) {
-      for (const family of FAMILIES) {
+      for (const family of EGRESS_FAMILIES) {
         if (this.#frozenSessionsForFamily(family).length === 0) {
           this.#recoveryPhase.set(family, 'idle')
         }
@@ -161,7 +161,7 @@ export class EgressMonitor {
     const sessionFamilies = Object.fromEntries(this.#sessionFamilies)
 
     if (!this.#lastEvaluation || !this.#lastSample) {
-      const families: EgressFamilyWire[] = FAMILIES.map((family) => {
+      const families: EgressFamilyWire[] = CHECKING_FAMILIES.map((family) => {
         const baseline = rule.baselines[family]
         const hosts = EGRESS_HOSTS[family]
         return {
@@ -194,7 +194,7 @@ export class EgressMonitor {
         family,
         state: evaluation.state,
         ...(evaluation.exit ? { exit: evaluation.exit } : {}),
-        hosts: [samplePair.api, samplePair.login],
+        hosts: samplePair ? [samplePair.api, samplePair.login] : [],
         ...(evaluation.violation ? { violation: evaluation.violation } : {}),
         ...(baseline ? { baseline } : {}),
         overridden: this.#overrides.has(family),
@@ -233,7 +233,7 @@ export class EgressMonitor {
   }
 
   async acceptCurrent(family: EgressFamily): Promise<EgressStatusWire> {
-    const api = this.#lastSample?.hosts[family].api
+    const api = this.#lastSample?.hosts[family]?.api
     if (!api?.ip || !api.country || api.country === 'CN') {
       throw new Error(`Current API exit for ${family} does not pass the mainland check`)
     }
@@ -251,7 +251,7 @@ export class EgressMonitor {
   async setProtection(enabled: boolean): Promise<EgressStatusWire> {
     this.#deps.settings.setProtection(enabled)
     if (!enabled) {
-      for (const family of FAMILIES) {
+      for (const family of EGRESS_FAMILIES) {
         await this.#thawSessions(this.#frozenSessionsForFamily(family))
         this.#recoveryPhase.set(family, 'idle')
       }
@@ -323,12 +323,14 @@ export class EgressMonitor {
     let evaluation = evaluateEgress(sample, rule)
 
     let wroteBaseline = false
-    for (const family of FAMILIES) {
+    for (const family of EGRESS_FAMILIES) {
       if (rule.baselines[family]) continue
+      const pair = sample.hosts[family]
+      if (!pair) continue
       const mainlandCheck = evaluation.checks.find(
         (check) => check.id === 'mainland' && check.family === family
       )
-      const api = sample.hosts[family].api
+      const api = pair.api
       if (mainlandCheck?.result === 'pass' && api.ip && api.country) {
         this.#deps.settings.setBaseline(family, { ip: api.ip, country: api.country })
         wroteBaseline = true
@@ -344,6 +346,15 @@ export class EgressMonitor {
     for (const familyEval of evaluation.families) {
       this.#updateOverrideState(familyEval)
       await this.#reconcileFamily(familyEval, now, options.immediateThaw)
+    }
+
+    for (const family of EGRESS_FAMILIES) {
+      if (evaluation.families.some((entry) => entry.family === family)) continue
+      const frozen = this.#frozenSessionsForFamily(family)
+      if (frozen.length > 0) {
+        await this.#thawSessions(frozen)
+      }
+      this.#recoveryPhase.set(family, 'idle')
     }
   }
 
@@ -494,7 +505,7 @@ export class EgressMonitor {
 
   #lightSampleFamilies(): EgressFamily[] {
     const active = new Set<EgressFamily>(this.#sessionFamilies.values())
-    return active.size > 0 ? FAMILIES.filter((family) => active.has(family)) : ['anthropic']
+    return active.size > 0 ? EGRESS_FAMILIES.filter((family) => active.has(family)) : ['anthropic']
   }
 
   async #onLightSampleTick(): Promise<void> {
@@ -512,7 +523,7 @@ export class EgressMonitor {
     const shouldTriggerFull = settled.some((result) => {
       if (result.status !== 'fulfilled') return false
       const { family, sample } = result.value
-      const prevApi = this.#lastSample?.hosts[family].api
+      const prevApi = this.#lastSample?.hosts[family]?.api
       return (sample.ip !== undefined && sample.ip !== prevApi?.ip) || sample.country === 'CN'
     })
     if (shouldTriggerFull) {
@@ -558,7 +569,7 @@ export class EgressMonitor {
 
     let needsConfirm = false
     let needsRecheck = false
-    for (const family of FAMILIES) {
+    for (const family of EGRESS_FAMILIES) {
       if (this.#frozenSessionsForFamily(family).length === 0) continue
       const phase = this.#recoveryPhase.get(family)
       if (phase === 'confirming') needsConfirm = true

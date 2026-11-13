@@ -27,7 +27,8 @@ describe('EGRESS_HOSTS', () => {
   it('defines the expected provider API and login hosts', () => {
     expect(EGRESS_HOSTS).toEqual({
       anthropic: { api: 'api.anthropic.com', login: 'claude.ai' },
-      openai: { api: 'api.openai.com', login: 'chatgpt.com' }
+      openai: { api: 'api.openai.com', login: 'chatgpt.com' },
+      'chatgpt-subscription': { api: 'chatgpt.com', login: 'auth.openai.com' }
     })
   })
 })
@@ -45,7 +46,7 @@ describe('evaluateEgress', () => {
 
   it('marks only anthropic abnormal with mainland violation when anthropic api is CN and openai is US', () => {
     const sample = makeBaseSample()
-    sample.hosts.anthropic.api = { host: 'api.anthropic.com', ip: '220.181.1.1', country: 'CN' }
+    sample.hosts.anthropic!.api = { host: 'api.anthropic.com', ip: '220.181.1.1', country: 'CN' }
 
     const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
 
@@ -64,10 +65,10 @@ describe('evaluateEgress', () => {
 
   it('does not treat HK, MO, or TW as mainland China', () => {
     const sample = makeBaseSample()
-    sample.hosts.anthropic.api = { host: 'api.anthropic.com', ip: '1.2.3.4', country: 'HK' }
-    sample.hosts.anthropic.login = { host: 'claude.ai', ip: '1.2.3.4', country: 'HK' }
-    sample.hosts.openai.api = { host: 'api.openai.com', ip: '5.6.7.8', country: 'TW' }
-    sample.hosts.openai.login = { host: 'chatgpt.com', ip: '5.6.7.8', country: 'TW' }
+    sample.hosts.anthropic!.api = { host: 'api.anthropic.com', ip: '1.2.3.4', country: 'HK' }
+    sample.hosts.anthropic!.login = { host: 'claude.ai', ip: '1.2.3.4', country: 'HK' }
+    sample.hosts.openai!.api = { host: 'api.openai.com', ip: '5.6.7.8', country: 'TW' }
+    sample.hosts.openai!.login = { host: 'chatgpt.com', ip: '5.6.7.8', country: 'TW' }
 
     const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
     expect(result.state).toBe('ok')
@@ -75,8 +76,8 @@ describe('evaluateEgress', () => {
 
   it('warns on login-api-match without becoming abnormal when claude.ai and api.anthropic.com have different IPs', () => {
     const sample = makeBaseSample()
-    sample.hosts.anthropic.login = { host: 'claude.ai', ip: '1.1.1.1', country: 'US' }
-    sample.hosts.anthropic.api = { host: 'api.anthropic.com', ip: '2.2.2.2', country: 'US' }
+    sample.hosts.anthropic!.login = { host: 'claude.ai', ip: '1.1.1.1', country: 'US' }
+    sample.hosts.anthropic!.api = { host: 'api.anthropic.com', ip: '2.2.2.2', country: 'US' }
 
     const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
 
@@ -94,8 +95,8 @@ describe('evaluateEgress', () => {
 
   it('treats different exits across providers as ok', () => {
     const sample = makeBaseSample()
-    sample.hosts.openai.api = { host: 'api.openai.com', ip: '203.0.113.10', country: 'JP' }
-    sample.hosts.openai.login = { host: 'chatgpt.com', ip: '203.0.113.10', country: 'JP' }
+    sample.hosts.openai!.api = { host: 'api.openai.com', ip: '203.0.113.10', country: 'JP' }
+    sample.hosts.openai!.login = { host: 'chatgpt.com', ip: '203.0.113.10', country: 'JP' }
 
     const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
 
@@ -105,8 +106,8 @@ describe('evaluateEgress', () => {
 
   it('flags exit-rule violations in country mode and ip mode', () => {
     const jpApiSample = makeBaseSample()
-    jpApiSample.hosts.anthropic.api = { host: 'api.anthropic.com', ip: '203.0.113.20', country: 'JP' }
-    jpApiSample.hosts.anthropic.login = { host: 'claude.ai', ip: '203.0.113.20', country: 'JP' }
+    jpApiSample.hosts.anthropic!.api = { host: 'api.anthropic.com', ip: '203.0.113.20', country: 'JP' }
+    jpApiSample.hosts.anthropic!.login = { host: 'claude.ai', ip: '203.0.113.20', country: 'JP' }
 
     const countryResult = evaluateEgress(jpApiSample, {
       mode: 'country',
@@ -116,8 +117,8 @@ describe('evaluateEgress', () => {
     expect(countryResult.families.find((f) => f.family === 'anthropic')?.violation).toBe('rule')
 
     const sameCountryNewIpSample = makeBaseSample()
-    sameCountryNewIpSample.hosts.anthropic.api = { host: 'api.anthropic.com', ip: '169.128.9.9', country: 'US' }
-    sameCountryNewIpSample.hosts.anthropic.login = { host: 'claude.ai', ip: '169.128.9.9', country: 'US' }
+    sameCountryNewIpSample.hosts.anthropic!.api = { host: 'api.anthropic.com', ip: '169.128.9.9', country: 'US' }
+    sameCountryNewIpSample.hosts.anthropic!.login = { host: 'claude.ai', ip: '169.128.9.9', country: 'US' }
 
     const ipResult = evaluateEgress(sameCountryNewIpSample, {
       mode: 'ip',
@@ -201,7 +202,7 @@ describe('evaluateEgress', () => {
 
   it('ignores unknown login-api-match in family and overall state while preserving the unknown check', () => {
     const sample = makeBaseSample()
-    sample.hosts.openai.login = { host: 'chatgpt.com', error: 'invalid' }
+    sample.hosts.openai!.login = { host: 'chatgpt.com', error: 'invalid' }
 
     const result = evaluateEgress(sample, {
       mode: 'country',
@@ -220,5 +221,38 @@ describe('evaluateEgress', () => {
       family: 'openai',
       result: 'unknown'
     })
+  })
+
+  it('omits chatgpt-subscription from families and checks when absent from sample', () => {
+    const result = evaluateEgress(makeBaseSample(), { mode: 'country', baselines: {} })
+
+    expect(result.families.map((f) => f.family)).toEqual(['anthropic', 'openai'])
+    expect(result.checks.some((c) => c.family === 'chatgpt-subscription')).toBe(false)
+    expect(result.state).toBe('ok')
+  })
+
+  it('evaluates chatgpt-subscription independently when present in sample', () => {
+    const sample = makeBaseSample()
+    sample.hosts['chatgpt-subscription'] = {
+      api: { host: EGRESS_HOSTS['chatgpt-subscription'].api, ip: '220.181.1.1', country: 'CN' },
+      login: { host: EGRESS_HOSTS['chatgpt-subscription'].login, ip: '220.181.1.1', country: 'CN' }
+    }
+
+    const result = evaluateEgress(sample, { mode: 'country', baselines: {} })
+
+    expect(result.state).toBe('abnormal')
+    expect(result.families.map((f) => f.family)).toEqual([
+      'anthropic',
+      'openai',
+      'chatgpt-subscription'
+    ])
+    expect(result.families.find((f) => f.family === 'chatgpt-subscription')).toMatchObject({
+      family: 'chatgpt-subscription',
+      state: 'abnormal',
+      violation: 'mainland',
+      exit: { ip: '220.181.1.1', country: 'CN' }
+    })
+    expect(result.families.find((f) => f.family === 'anthropic')?.state).toBe('ok')
+    expect(result.families.find((f) => f.family === 'openai')?.state).toBe('ok')
   })
 })
