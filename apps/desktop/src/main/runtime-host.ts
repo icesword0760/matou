@@ -1,8 +1,11 @@
+import { isSubscriptionAuthorizationUrl } from '../../../runtime/src/model-router/authorization-url'
 import type { ClaudeAccountRuntimeAction, ClaudeAccountSession, ClaudeAccountRuntimeResult } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
 
 import { MessageChannelMain, utilityProcess, type UtilityProcess, type WebContents } from 'electron'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import os from 'node:os'
+import { RouterProcessOwner } from '../../../runtime/src/model-router/process-owner'
 
 import {
   PROTOCOL_VERSION,
@@ -93,6 +96,8 @@ interface PendingScaleMetrics {
 }
 
 export interface RuntimeHostOptions {
+  modelRouterBinary?: string
+  openExternal?(url: string): Promise<void>
   /** Getter so a locale change applies without reconstructing the host. */
   messages?: () => MainMessages
   /** Getter for the current locale, forwarded to the forked Runtime as `MATOU_LOCALE`. */
@@ -100,6 +105,9 @@ export interface RuntimeHostOptions {
 }
 
 export class RuntimeHost {
+  readonly #openExternal: ((url: string) => Promise<void>) | undefined
+  readonly #modelRouterBinary: string
+  #routerCleanup: Promise<void> | undefined
   readonly #runtimeEntry: string
   readonly #controlAssetRoot: string
   readonly #messages: () => MainMessages
@@ -133,7 +141,9 @@ export class RuntimeHost {
     controlAssetRoot = join(dirname(runtimeEntry), 'control-assets'),
     options: RuntimeHostOptions = {}
   ) {
+    this.#openExternal = options.openExternal
     this.#runtimeEntry = runtimeEntry
+    this.#modelRouterBinary = options.modelRouterBinary ?? resolve(dirname(runtimeEntry), '../../../.cache/model-router/8.0.69', `darwin-${process.arch}`, 'model-router')
     this.#controlAssetRoot = controlAssetRoot
     this.#messages = options.messages ?? (() => mainMessages('zh-CN'))
     this.#locale = options.locale ?? (() => 'zh-CN')
@@ -227,6 +237,13 @@ export class RuntimeHost {
   }
 
   async #launch(): Promise<void> {
+    if (this.#routerCleanup) await this.#routerCleanup
+    const routerOwner = new RouterProcessOwner({
+      executable: process.execPath,
+      supervisor: join(dirname(this.#runtimeEntry), 'model-router-supervisor.cjs'),
+      binary: this.#modelRouterBinary,
+      dataRoot: resolve(process.env.MATOU_DATA_DIR ?? resolve(os.homedir(), '.matou'))
+    })
     const child = utilityProcess.fork(this.#runtimeEntry, [], {
       serviceName: 'Matou Terminal Runtime',
       stdio: 'pipe',
@@ -241,7 +258,29 @@ export class RuntimeHost {
     child.stderr?.pipe(process.stderr)
     this.#child = child
     this.#connectedRenderers.clear()
-    child.on('message', (message: unknown) => this.#receive(message))
+    const unsubscribeRouter = routerOwner.onEvent(event => {
+      if (this.#child === child) child.postMessage({ type: 'runtime.model-router-event', event })
+    })
+    child.on('message', (message: unknown) => {
+      const request = message as { type?: string; requestId?: string; action?: string; provider?: string; url?: string } | null
+      if (request?.type === 'runtime.model-router-request') {
+        if (this.#child !== child || typeof request.requestId !== 'string' || !['start', 'stop', 'open-authorization'].includes(request.action ?? '')) return
+        const operation = request.action === 'open-authorization'
+          ? Promise.resolve().then(async () => {
+              if ((request.provider !== 'codex' && request.provider !== 'antigravity') || typeof request.url !== 'string' ||
+                  !isSubscriptionAuthorizationUrl(request.provider, request.url) || !this.#openExternal) throw new Error('Sign-in authorization URL is not allowed')
+              await this.#openExternal(request.url)
+            })
+          : request.action === 'start' ? routerOwner.start() : routerOwner.stop()
+        void operation.then(() => {
+          if (this.#child === child) child.postMessage({ type: 'runtime.model-router-result', requestId: request.requestId, ok: true })
+        }, () => {
+          if (this.#child === child) child.postMessage({ type: 'runtime.model-router-result', requestId: request.requestId, ok: false })
+        })
+        return
+      }
+      this.#receive(message)
+    })
 
     await new Promise<void>((resolve, reject) => {
       child.once('spawn', resolve)
@@ -250,6 +289,12 @@ export class RuntimeHost {
         reject(new Error(`Runtime failed to start: ${error}`))
       })
       child.once('exit', (code) => {
+        unsubscribeRouter()
+        const cleanup = routerOwner.stop()
+        this.#routerCleanup = cleanup
+        void cleanup.finally(() => {
+          if (this.#routerCleanup === cleanup) this.#routerCleanup = undefined
+        })
         if (this.#child !== child) return
         this.#child = undefined
         this.#connectedRenderers.clear()
@@ -301,11 +346,11 @@ export class RuntimeHost {
     this.#rejectPending(new Error('Runtime stopped during database recovery'))
     this.#rejectScaleMetrics(new Error('Runtime stopped during scale measurement'))
     const child = this.#child
-    if (!child) return Promise.resolve()
+    if (!child) return this.#routerCleanup ?? Promise.resolve()
     this.#stopPromise = new Promise<void>((resolve) => {
       child.once('exit', () => resolve())
       child.kill()
-    }).finally(() => {
+    }).then(() => this.#routerCleanup).finally(() => {
       if (this.#child === child) this.#child = undefined
     })
     return this.#stopPromise

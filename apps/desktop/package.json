@@ -79,7 +79,19 @@
             ]
           }
         ]
-      }
+      },
+      "binaries": [
+        "Contents/Resources/model-router/model-router"
+      ],
+      "extraResources": [
+        {
+          "from": "package-resources/model-router",
+          "to": "model-router",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ]
     },
     "linux": {
       "target": "dir"

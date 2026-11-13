@@ -1,3 +1,6 @@
+import { SubscriptionLaunchError, SubscriptionPlatformError, type PreparedSubscriptionLaunch, type SubscriptionAccounts, type SubscriptionConnection } from './model-router/subscription-accounts'
+import { mapSubscriptionLoginFailure, sanitizeProviderReason } from './model-router/errors'
+import type { SubscriptionLoginStartInput, SubscriptionModelsReadInput, SubscriptionProviderConfigInput } from '@matou/contracts'
 import { ExternalAgentStatusMonitor } from './session/external-agent-status'
 import type { ClaudeAccountSession, ClaudeAccountRuntimeAction } from '@matou/contracts'
 import { randomUUID } from 'node:crypto'
@@ -143,6 +146,9 @@ interface ReplayState {
 type TerminalSpawnMessage = Extract<RendererMessage, { type: 'terminal.spawn' }>
 
 export interface RuntimeServerOptions {
+  subscriptionAccounts?: SubscriptionAccounts
+  subscriptionConnection?: SubscriptionConnection
+  settingsRouter?: { open(): Promise<import('./model-router/manager').RouterLease>; close(): void }
   providerResumeTimeoutMs?: number
   forkProviderIdentityTimeoutMs?: number
   hudRegistry?: SessionHudRegistry
@@ -209,6 +215,10 @@ const PROVIDER_HOOK_REGISTRATIONS = new WeakMap<
 const configuredCcLaunches = new Map<string, Promise<InteractiveClaudeLaunch | undefined>>()
 
 export class RuntimeServer {
+  readonly #subscriptionUnsubscribe: (() => void) | undefined
+  readonly #subscriptionAccounts: SubscriptionAccounts | undefined
+  readonly #subscriptionConnection: SubscriptionConnection | undefined
+  readonly settingsRouter: RuntimeServerOptions['settingsRouter']
   static #accountBarrier: Promise<void> | undefined
   static #releaseAccounts: (() => void) | undefined
   static #accountOperations = 0
@@ -379,6 +389,12 @@ export class RuntimeServer {
     ),
     options: RuntimeServerOptions = {}
   ) {
+    this.#subscriptionUnsubscribe = options.subscriptionAccounts?.onChange(() => {
+      if (this.#handshakeComplete && !this.#closed && !this.#portClosed) this.#sendToPort({ type: 'provider-config.changed', protocolVersion: PROTOCOL_VERSION })
+    })
+    this.#subscriptionAccounts = options.subscriptionAccounts
+    this.#subscriptionConnection = options.subscriptionConnection
+    this.settingsRouter = options.settingsRouter
     this.#port = port
     this.#dataRoot = dataRoot
     this.#database = database
@@ -699,6 +715,7 @@ export class RuntimeServer {
     for (const sessionId of this.#summaryBuffers.keys()) this.#flushSessionSummary(sessionId)
     this.#unregisterNavigationWindow()
     this.#closed = true
+    this.#subscriptionUnsubscribe?.()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
     for (const timer of this.#cwdTimers.values()) clearTimeout(timer)
@@ -722,6 +739,7 @@ export class RuntimeServer {
 
   #disconnectPort(): void {
     if (this.#portClosed) return
+    this.#subscriptionUnsubscribe?.()
     this.#unregisterNavigationWindow()
     this.#portClosed = true
     RuntimeServer.#instances.delete(this)
@@ -1144,6 +1162,27 @@ export class RuntimeServer {
     }
   }
 
+  async #handleSubscriptionRpc(method: string, payload: unknown): Promise<unknown> {
+    const connection = this.#subscriptionConnection!, accounts = this.#subscriptionAccounts!
+    const input = isRecord(payload) ? payload : {}
+    if (method === 'provider-config.snapshot') return accounts.snapshot()
+    if (method === 'provider-config.upsert') return { provider: await connection.save(input.provider as SubscriptionProviderConfigInput) }
+    if (method === 'provider-config.delete') {
+      if ((input.cli !== 'claude-code' && input.cli !== 'codex') || typeof input.providerId !== 'string') throw new Error('Invalid provider deletion')
+      return accounts.delete(input.cli, input.providerId)
+    }
+    if (method === 'provider-config.subscription.login-start') return connection.start(input as unknown as SubscriptionLoginStartInput)
+    if (method === 'provider-config.subscription.login-status' || method === 'provider-config.subscription.login-cancel' || method === 'provider-config.subscription.login-reopen') {
+      if (typeof input.attemptId !== 'string') throw new Error('Invalid sign-in attempt')
+      return method.endsWith('login-status') ? connection.status(input.attemptId) : method.endsWith('login-reopen') ? connection.reopen(input.attemptId) : connection.cancel(input.attemptId)
+    }
+    if (method === 'provider-config.subscription.settings-read') return connection.settings()
+    if (method === 'provider-config.subscription.models-read') return connection.models(input as unknown as SubscriptionModelsReadInput)
+    if (method === 'provider-config.subscription.settings-close') { await connection.closeSettings(); return { closed: true } }
+    if (method === 'provider-config.subscription.risk-confirm') return connection.confirmRisk(input.accepted === true)
+    throw new Error('Unknown subscription operation')
+  }
+
   async #handleRpc(message: Extract<RendererMessage, { type: 'rpc.request' }>): Promise<void> {
     if (this.#cancelledRequests.delete(message.requestId)) {
       this.#sendRpcError(message.requestId, 'CANCELLED', 'request was cancelled', false)
@@ -1153,6 +1192,7 @@ export class RuntimeServer {
       this.#sendRpcError(message.requestId, 'TIMEOUT', 'request deadline elapsed', true)
       return
     }
+    let activationPreparation: PreparedSubscriptionLaunch | undefined
     try {
       const beforeHud = message.method === 'session.set-permission-mode'
         ? this.#hud.snapshot(textFromRpcInput(message.payload, 'sessionId') ?? '')
@@ -1171,6 +1211,17 @@ export class RuntimeServer {
       if (providerMutationSessionId !== undefined) {
         this.#assertProviderMutationAllowed(providerMutationSessionId)
       }
+      let activationSelection: ProviderLaunchSelection | undefined
+      if (message.method === 'provider-config.activate') {
+        const input = isRecord(message.payload) ? message.payload : undefined
+        if ((input?.cli === 'claude-code' || input?.cli === 'codex') && typeof input.providerId === 'string') {
+          activationSelection = await this.#providerConfigs.launchSelection(input.cli, input.providerId)
+          if (activationSelection.subscription) {
+            if (!this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
+            activationPreparation = await this.#subscriptionAccounts.prepareLaunch(activationSelection.providerConfigId, 'subscription-activation-preparation')
+          }
+        }
+      }
       let result = ephemeralPermission
         ? {
             sessionId: permissionSessionId,
@@ -1183,6 +1234,10 @@ export class RuntimeServer {
             ? await this.#handleTerminalHistoryRpc(message.method, message.payload)
             : isEgressRpc(message.method)
               ? await this.#handleEgressRpc(message.method, message.payload)
+            : this.#subscriptionConnection && this.#subscriptionAccounts && (message.method.startsWith('provider-config.subscription.') ||
+                message.method === 'provider-config.snapshot' || message.method === 'provider-config.delete' ||
+                (message.method === 'provider-config.upsert' && isRecord(message.payload) && isRecord(message.payload.provider) && message.payload.provider.kind === 'subscription'))
+              ? await this.#handleSubscriptionRpc(message.method, message.payload)
               : await this.#router.handle(message.method, message.payload)
       if (message.method === 'provider-config.activate') {
         const input = isRecord(message.payload) ? message.payload : undefined
@@ -1193,7 +1248,7 @@ export class RuntimeServer {
           sessionTransitions = await RuntimeServer.#restartProviderSessions(
             this.#sessions,
             cli,
-            await this.#providerConfigs.launchSelection(cli, providerId)
+            activationSelection ?? await this.#providerConfigs.launchSelection(cli, providerId)
           )
         }
         if (cli && providerId && isRecord(result)) {
@@ -1232,12 +1287,24 @@ export class RuntimeServer {
       })
       for (const consumerId of this.#subscriptions.keys()) this.#pumpSubscription(consumerId)
     } catch (error) {
-      if (error instanceof RpcFault) {
+      if (error instanceof SubscriptionPlatformError) {
+        const locale = (message.payload as { locale?: string } | undefined)?.locale ?? process.env.MATOU_LOCALE
+        this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', error.messageLocalized[locale === 'en' ? 'en' : 'zh'], false, undefined, error.messageLocalized)
+      } else if ((message.method.startsWith('provider-config.subscription.login-') || message.method === 'provider-config.subscription.models-read') && !(error instanceof RpcFault)) {
+        const localized = message.method === 'provider-config.subscription.models-read'
+          ? { zh: '模型列表未能读取，请重试。', en: 'The model list could not be read. Try again.' }
+          : mapSubscriptionLoginFailure(errorMessage(error))
+        const locale = (message.payload as { locale?: string } | undefined)?.locale ?? process.env.MATOU_LOCALE
+        console.error(`[subscription.${message.method.endsWith('models-read') ? 'models' : 'login'}] ${sanitizeProviderReason(errorMessage(error)) ?? 'Request failed'}`)
+        this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', localized[locale === 'en' ? 'en' : 'zh'], true, undefined, localized)
+      } else if (error instanceof SubscriptionLaunchError) {
+        this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', error.message, error.providerFailure.recovery === 'retry', error.providerFailure)
+      } else if (error instanceof RpcFault) {
         this.#sendRpcError(message.requestId, error.code, error.message, error.retryable)
       } else {
         this.#sendRpcError(message.requestId, 'INTERNAL_ERROR', errorMessage(error), false)
       }
-    }
+    } finally { activationPreparation?.lease.release() }
   }
 
   async #handleEgressRpc(
@@ -1748,7 +1815,9 @@ export class RuntimeServer {
     requestId: string,
     code: Extract<RuntimeMessage, { type: 'rpc.error' }>['code'],
     message: string,
-    retryable: boolean
+    retryable: boolean,
+    providerFailure?: Extract<RuntimeMessage, { type: 'rpc.error' }>['providerFailure'],
+    messageLocalized?: Extract<RuntimeMessage, { type: 'rpc.error' }>['messageLocalized']
   ): void {
     this.#port.postMessage({
       type: 'rpc.error',
@@ -1757,7 +1826,9 @@ export class RuntimeServer {
       runtimeGeneration: this.#database.runtimeGeneration,
       code,
       message,
-      retryable
+      retryable,
+      ...(messageLocalized ? { messageLocalized } : {}),
+      ...(providerFailure ? { providerFailure } : {})
     })
   }
 
@@ -1765,11 +1836,12 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     forkAuthority?: ForkExecutionAuthority,
     executionMode?: 'attach-only',
-    attachView = true
+    attachView = true,
+    launchModelOverride?: string
   ): Promise<void> {
     if (RuntimeServer.#accountBarrier) await RuntimeServer.#accountBarrier
     RuntimeServer.#accountOperations++
-    try { await this.#spawnAccountReady(message, forkAuthority, executionMode, attachView) }
+    try { await this.#spawnAccountReady(message, forkAuthority, executionMode, attachView, launchModelOverride) }
     finally { RuntimeServer.#accountOperations-- }
   }
 
@@ -1777,7 +1849,8 @@ export class RuntimeServer {
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     forkAuthority?: ForkExecutionAuthority,
     executionMode?: 'attach-only',
-    attachView = true
+    attachView = true,
+    launchModelOverride?: string
   ): Promise<void> {
     // A view attaching or switching canvases must not bypass explicit recovery.
     if (this.#recoveryCoordinator?.isDeferred(message.sessionId)) {
@@ -1987,7 +2060,11 @@ export class RuntimeServer {
             message.profile,
             boundProviderSettings.providerConfigId
           )
-      const providerModel = boundProviderSettings.model ?? providerSelection?.model
+      if (providerSelection?.subscription && !this.#subscriptionAccounts) throw new SubscriptionLaunchError('Subscription launch service is unavailable')
+      const boundModel = boundProviderSettings.model
+      const providerModel = !providerSelection?.subscription && boundModel?.startsWith('matou-')
+        ? providerSelection?.model
+        : boundModel ?? providerSelection?.model
       const providerLaunch = providerSelection === undefined
         ? { env: {} as Record<string, string> }
         : {
@@ -2213,7 +2290,8 @@ export class RuntimeServer {
         ...(this.#controlAssetRoot === undefined ? {} : {
           controlAssetRoot: this.#controlAssetRoot
         }),
-        ...(providerLaunch.model === undefined ? {} : { model: providerLaunch.model }),
+        ...((launchModelOverride ?? providerLaunch.model) === undefined ? {} : { model: launchModelOverride ?? providerLaunch.model }),
+        ...(providerSelection?.subscription && this.#subscriptionAccounts ? { subscription: { accounts: this.#subscriptionAccounts, providerConfigId: providerSelection.providerConfigId } } : {}),
         ...(runId === undefined ? {} : { runId }),
         env: {
           ...providerLaunch.env, ...controlEnvironment,
@@ -3662,6 +3740,9 @@ export class RuntimeServer {
           )
         : undefined
       const previousSettings = providerLaunchSettingsFromMetadata(binding?.metadata)
+      const launchModel = !selection.subscription && !selection.model && previousSettings.model?.startsWith('matou-')
+        ? 'default'
+        : selection.model
       const deferredReason = this.#providerActivationDeferredReason(
         sessionId,
         descriptor.profile,
@@ -3716,7 +3797,9 @@ export class RuntimeServer {
         active.dispose({ notifyExit: false })
         await active.whenClosed()
 
-        await this.#spawn(descriptor, undefined, undefined, wasAttached)
+        // This reset belongs only to the provider transition. Persisting
+        // "default" would suppress a later native /model choice on every resume.
+        await this.#spawn(descriptor, undefined, undefined, wasAttached, launchModel)
         const replacement = this.#sessions.get(sessionId)
         if (!replacement || replacement === active || replacement.profile !== descriptor.profile) {
           throw new Error('provider Session restart did not produce a matching process')

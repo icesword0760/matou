@@ -3,18 +3,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CLI_DEFAULT_MODEL,
   type Locale, type LocalePreference,
-  type ProviderCli, type ProviderConfigActivationResult, type ProviderConfigInput,
-  type ProviderConfigSnapshot, type ProviderConfigView, type RpcMethod
+  type ProviderCli, type ProviderActivationFailure, type ProviderConfigActivationResult, type ProviderConfigInput,
+  type ProviderConfigSnapshot, type ProviderConfigView, type RpcMethod,
+  type SubscriptionAccountDetails, type SubscriptionProvider, type SubscriptionSettingsSnapshot
 } from '@matou/contracts'
 
 import { APP_DISPLAY_NAME } from '../../../shared/brand'
 import { messages } from '../i18n/current'
+import { SubscriptionSetupDialog } from './SubscriptionSetupDialog'
+import { SubscriptionProviderCard } from './SubscriptionProviderCard'
+import { subscriptionQuotaText, subscriptionQuotaTitle } from './subscription-settings'
 import { ProviderSetupDialog } from './ProviderSetupDialog'
 import { ClaudeTimeZoneSettings } from './ClaudeTimeZoneSettings'
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 
 export interface ProviderConfigClient {
-  request(method: RpcMethod, payload: unknown): Promise<unknown>
+  request(method: RpcMethod, payload: unknown, options?: { timeoutMs?: number }): Promise<unknown>
+  subscribeProviderConfig?(listener: () => void): () => void
 }
 
 /** The settings panel shows one pane per category; the nav column switches between them. */
@@ -33,14 +38,25 @@ export function ModelSwitchSettings({ client, onClose }: {
   const [snapshot, setSnapshot] = useState<ProviderConfigSnapshot>()
   const [loading, setLoading] = useState(true)
   const [failure, setFailure] = useState('')
-  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string }>()
-  const [editor, setEditor] = useState<{ existing?: ProviderConfigView }>()
+  const [notice, setNotice] = useState<{ kind: 'success' | 'error'; text: string; retry?: ProviderConfigView; recovery?: ProviderActivationFailure['recovery'] }>()
+  const [editor, setEditor] = useState<{ existing?: ProviderConfigView; subscriptionProvider?: SubscriptionProvider; relogin?: boolean }>()
   const [switching, setSwitching] = useState('')
   const [transitionResult, setTransitionResult] = useState<ProviderConfigActivationResult>()
   const [showSessions, setShowSessions] = useState(false)
+  const [accounts, setAccounts] = useState<Record<string, SubscriptionAccountDetails>>({})
+  const [riskAccepted, setRiskAccepted] = useState(false)
+  // A runtime capability, not a UI preference. Storage-only mutation results
+  // omit it, so remember the latest actual boolean instead of clearing it.
+  const [subscriptionSupported, setSubscriptionSupported] = useState(true)
+  const loginDetails = useRef<SubscriptionAccountDetails | undefined>(undefined)
+  const settingsCloser = useRef<() => void>(() => {})
+  const requestClose = () => { settingsCloser.current(); onClose() }
   const operation = useRef(false)
   const revision = useRef(-1)
   const accept = (next: ProviderConfigSnapshot) => {
+    // The capability is runtime-wide, so learn it even from an older
+    // storage-only response; only the provider list is revision-gated.
+    if (typeof next.subscriptionSupported === 'boolean') setSubscriptionSupported(next.subscriptionSupported)
     if (next.revision < revision.current) return
     revision.current = next.revision; setSnapshot(next)
   }
@@ -63,9 +79,23 @@ export function ModelSwitchSettings({ client, onClose }: {
 
   useEffect(() => { void refresh() }, [refresh])
   useEffect(() => {
+    if (!client) return
+    let live = true, closed = false
+    const close = () => { if (closed) return; closed = true; void client.request('provider-config.subscription.settings-close', {}).catch(() => {}) }
+    settingsCloser.current = close
+    void client.request('provider-config.subscription.settings-read', {}).then(value => {
+      if (!live || closed) return
+      const result = value as SubscriptionSettingsSnapshot
+      if (!result.snapshot) return
+      accept(result.snapshot); setAccounts(current => ({ ...result.accounts, ...current })); setRiskAccepted(current => current || result.antigravityRiskAccepted)
+    }).catch(() => { /* Quota reads never block the provider list or switching. */ })
+    return () => { live = false; close() }
+  }, [client])
+  useEffect(() => client?.subscribeProviderConfig?.(() => { void refresh() }), [client, refresh])
+  useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || editor || operation.current) return
-      onClose()
+      settingsCloser.current(); onClose()
     }
     window.addEventListener('keydown', onEscape)
     return () => window.removeEventListener('keydown', onEscape)
@@ -79,6 +109,13 @@ export function ModelSwitchSettings({ client, onClose }: {
 
   const providers = snapshot?.providers[cli] ?? []
   const activeId = snapshot?.activeProviderIds[cli]
+  const official = providers.find(provider => provider.builtIn)
+  const signIn = (provider: ProviderConfigView) => {
+    const current = providers.find(row => row.id === provider.id) ?? provider
+    if (!current.subscription) return
+    loginDetails.current = undefined
+    setEditor({ existing: current, subscriptionProvider: current.subscription.provider, relogin: true })
+  }
   const announceChange = () => {
     if (typeof BroadcastChannel === 'undefined') return
     const channel = new BroadcastChannel('matou-provider-config')
@@ -97,7 +134,8 @@ export function ModelSwitchSettings({ client, onClose }: {
       setNotice({ kind: 'success', text: cli === 'codex' ? m.switchedCodex(provider.name) : deferred > 0 ? m.switchedDeferred(provider.name, updated, deferred) : updated > 0 ? m.switchedUpdated(provider.name, updated) : m.switchedClaude(provider.name) })
       setEditor(undefined)
     } catch (error) {
-      setNotice({ kind: 'error', text: message(error, m.switchFailed) })
+      const failure = providerActivationFailure(error)
+      setNotice({ kind: 'error', text: failure?.message[zh ? 'zh' : 'en'] ?? message(error, m.switchFailed), retry: provider, recovery: failure?.recovery ?? 'retry' })
       // A failed RPC is not proof that no server-side change happened.
       void refresh()
       throw error
@@ -106,11 +144,12 @@ export function ModelSwitchSettings({ client, onClose }: {
   const save = async (provider: ProviderConfigInput, use: boolean) => {
     if (!client) throw new Error(m.serviceConnecting)
     const result = await client.request('provider-config.upsert', { provider }) as { provider: ProviderConfigView }
+    if (provider.kind === 'subscription' && loginDetails.current) { const details = loginDetails.current; setAccounts(current => ({ ...current, [result.provider.id]: details })) }
     await refresh(); announceChange(); setEditor(undefined); setTransitionResult(undefined); setShowSessions(false)
     setNotice({ kind: 'success', text: provider.id ? m.configurationSaved : t('供应商已保存，尚未切换。', 'Provider saved; not switched yet.') })
     if (use) {
       try { await activate(result.provider) }
-      catch { setNotice({ kind: 'error', text: t('配置已保存，但切换未确认完成。请核对当前默认供应商后重试，无需重新添加。', 'Configuration saved, but switching was not confirmed. Check the current default and retry; do not add it again.') }) }
+      catch { /* activate preserves the runtime reason and retry action. */ }
     }
   }
   const remove = async (provider: ProviderConfigView) => {
@@ -152,7 +191,7 @@ export function ModelSwitchSettings({ client, onClose }: {
             <h1>{category === 'model' ? t('服务供应商', 'Service providers') : category === 'claude' ? 'Claude Code' : language.title}</h1>
             <p>{category === 'model' ? m.heading : category === 'claude' ? t('管理码头中的 Claude Code 偏好设置', 'Manage Claude Code preferences in Matou') : language.heading}</p>
           </div>
-          <button type="button" aria-label={m.close} disabled={Boolean(switching)} onClick={onClose}>×</button>
+          <button type="button" aria-label={m.close} disabled={Boolean(switching)} onClick={requestClose}>×</button>
         </header>
         {category === 'language' && <LanguageSettings />}
         {category === 'claude' && <ClaudeTimeZoneSettings client={client} />}
@@ -163,19 +202,28 @@ export function ModelSwitchSettings({ client, onClose }: {
         </div>}
         {category === 'model' && (loading ? <div className="model-settings__state" aria-busy="true">{m.loading}</div> : <>
           {notice && <section className={`provider-result is-${notice.kind}`} role={notice.kind === 'error' ? 'alert' : 'status'}>
-            <span className="provider-result__icon">{notice.kind === 'error' ? '!' : '✓'}</span><div><strong>{notice.kind === 'error' ? t('需要检查', 'Needs attention') : transitionResult ? t('默认供应商已切换', 'Default provider switched') : t('配置已保存', 'Configuration saved')}</strong><p>{notice.text}</p>
+            <span className="provider-result__icon">{notice.kind === 'error' ? '!' : '✓'}</span><div><strong>{notice.kind === 'error' ? t('需要检查', 'Needs attention') : transitionResult ? t('默认供应商已切换', 'Default provider switched') : t('配置已保存', 'Configuration saved')}</strong><p>{notice.text}</p>{notice.retry && <button type="button" className="provider-link" disabled={Boolean(switching)} onClick={() => { if (notice.recovery === 'sign-in') signIn(notice.retry!); else void activate(notice.retry!).catch(() => {}) }}>{notice.recovery === 'sign-in' ? t('重新登录', 'Sign in again') : t('重试', 'Retry')}</button>}
             {Boolean(transitionResult?.sessionTransitions?.length) && <button className="provider-link" type="button" onClick={() => setShowSessions(!showSessions)}>{showSessions ? t('收起会话', 'Hide sessions') : t('查看会话', 'View sessions')} →</button>}
             {showSessions && <ul className="provider-session-results">{transitionResult?.sessionTransitions?.map(row => <li key={row.sessionId}><span>{t('会话', 'Session')} {row.sessionId}</span><b>{row.status === 'updated' ? t('已更新', 'Updated') : deferredReason(row.reason)}</b></li>)}</ul>}
             </div><button className="provider-icon-button" aria-label={t('关闭提示', 'Dismiss notice')} type="button" onClick={() => { setNotice(undefined); setShowSessions(false) }}>×</button>
           </section>}
           <div className="model-settings__toolbar">
             <h2>{m.providers} <span>{m.providerCount(providers.length)}</span></h2>
-            <button type="button" aria-label={m.newProvider} disabled={Boolean(switching)} onClick={() => setEditor({})}>{m.newProviderAction}</button>
+            <button type="button" aria-label={m.newProvider} disabled={Boolean(switching)} onClick={() => { loginDetails.current = undefined; setEditor({}) }}>{m.newProviderAction}</button>
           </div>
           {failure && !editor && <div className="model-settings__error" role="alert">{failure}<button type="button" onClick={() => void refresh()}>{t('重试', 'Retry')}</button></div>}
           <div className="model-settings__providers">
             {providers.map((provider) => {
               const current = provider.id === activeId
+              if (provider.kind === 'subscription' && provider.subscription) {
+                const cached = accounts[provider.id]
+                const details = { ...cached, account: { ...cached?.account, ...provider.subscription.account }, models: cached?.models ?? provider.subscription.modelMetadata }
+                return <SubscriptionProviderCard key={provider.id} provider={provider} details={details} quotaText={subscriptionQuotaText(provider.subscription.provider, cached, zh)} quotaTitle={subscriptionQuotaTitle(cached, zh)} current={current} switching={Boolean(switching)} subscriptionSupported={subscriptionSupported}
+                  onEdit={() => { loginDetails.current = undefined; setEditor({ existing: provider, subscriptionProvider: provider.subscription!.provider }) }}
+                  onSignIn={() => signIn(provider)}
+                  onActivate={() => { void activate(provider).catch(() => {}) }}
+                  onUseOfficial={official ? () => { void activate(official).catch(() => {}) } : undefined} />
+              }
               return <article key={provider.id} className={`model-provider${current ? ' is-current' : ''}`}>
                 <ProviderLogo provider={provider} />
                 <div className="model-provider__name"><strong>{provider.name}{current && <i>{m.inUse}</i>}</strong><span>{shortEndpoint(provider.endpoint)}</span></div>
@@ -193,7 +241,10 @@ export function ModelSwitchSettings({ client, onClose }: {
         </>)}
       </main>
     </div>
-    {editor && <ProviderSetupDialog key={cli} cli={cli} existing={editor.existing}
+    {editor?.subscriptionProvider ? <SubscriptionSetupDialog key={`${editor.subscriptionProvider}-${editor.existing?.id ?? 'new'}`} provider={editor.subscriptionProvider} existing={editor.existing} relogin={editor.relogin}
+      details={editor.existing ? accounts[editor.existing.id] : undefined} riskAccepted={riskAccepted} activeId={activeId} client={client}
+      onClose={() => setEditor(undefined)} onRiskAccepted={() => setRiskAccepted(true)} onDetails={details => { loginDetails.current = details }} onSave={save} onDelete={remove} /> : editor && <ProviderSetupDialog key={cli} cli={cli} existing={editor.existing} subscriptionSupported={subscriptionSupported}
+      onSelectSubscription={provider => { loginDetails.current = undefined; const existing = providers.find(p => p.kind === 'subscription' && p.subscription?.provider === provider); setEditor({ subscriptionProvider: provider, ...(existing ? { existing, relogin: true } : {}) }) }}
       official={providers.find(p => p.builtIn)} activeId={activeId} client={client}
       onClose={() => setEditor(undefined)} onSave={save} onUseOfficial={activate} onDelete={remove} />}
   </section>
@@ -264,4 +315,11 @@ function message(error: unknown, fallback: string) {
   return error instanceof Error
     ? messages().hierarchyShell.modelSettings.errorDetail(fallback, error.message)
     : fallback
+}
+
+function providerActivationFailure(error: unknown): ProviderActivationFailure | undefined {
+  if (error && typeof error === 'object' && 'providerFailure' in error) {
+    return error.providerFailure as ProviderActivationFailure | undefined
+  }
+  return undefined
 }

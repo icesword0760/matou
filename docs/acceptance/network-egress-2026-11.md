@@ -66,3 +66,13 @@
 - 全量 `pnpm test:e2e`：93 通过、40 失败、1 跳过。逐项对照改动前的 `main`（`c78f0d1`）后，**没有本次改动引入的回归**：
   - 账户 3 组（25 项）：新 worktree 缺 `tooling/claude-accounts/.venv`。接上后 `claude-accounts`、`claude-accounts-refresh` 全部通过；`claude-accounts-hud-restart` 的 7 项在 `main` 上同样失败（期望「工作账户」，实际为「Claude 账户」），属既有问题。
   - 会话恢复、画布、分叉、worktree、窗口焦点等 9 个文件：同一批测试在 `main` 上 17 项失败，本分支 18 项，失败集合基本重合。仅有的两项差异（`prd-04:60` 焦点恢复、`prd-05-detached:50` 剪贴板复制）各重复 3 次，`main` 与本分支表现一致（均为时过时不过），原因是本机前台有正在使用的 Matou 窗口抢焦点。
+
+## 同步 main（订阅账号功能合入后）
+
+main 在验收期间合入了「订阅账号接入 Claude Code」（`e731b50`）。本分支已同步 main：3 处冲突都是两边新增内容，保留双方即可。同步后：
+
+- `pnpm typecheck`、`pnpm build` 通过。
+- `pnpm test` 全部通过：desktop 943、runtime 1420（35 跳过）、runtime-server 144。
+- `network-egress`、`claude-time-zone`、`prd-02-bottom-hud`、`provider-onboarding` e2e：首轮 `network-egress` 失败 1 次，随后单独运行 1 次、连同 provider-onboarding 连续运行 3 次，均通过。属于本机前台窗口抢焦点导致的偶发失败。
+- 订阅账号的模型路由只把登录 shell 里的代理变量用于路由自身的出站流量，agent 会话的环境不变，因此「探测走 agent 同一路径」仍然成立。
+- 已知缺口：订阅账号驱动的 Claude 会话（`ANTHROPIC_BASE_URL` 指向本机路由）目前按第三方服务商处理，不检测、不冻结、不换时区。是否纳入保护待产品决定。

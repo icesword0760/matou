@@ -25,3 +25,6 @@ tests/e2e/launch-video/
 tooling/claude-accounts/.venv/
 tooling/claude-accounts/build/
 __pycache__/
+
+# Worktree-local pinned router and task dependency caches
+/.cache/
