@@ -1,13 +1,18 @@
 import { EventEmitter } from 'node:events'
+import { execFile, spawn } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { PROTOCOL_VERSION, type RuntimeMessage } from '@matou/contracts'
 import { AntigravityPluginInstaller } from './agents/antigravity-plugin-installer'
+import { CapabilityTokenService, HostControlServer } from './control/host-control-server'
+import { RuntimeControlBackend } from './control/runtime-control-backend'
+import { TaskTelemetryRepository } from './domain/product-foundation-repository'
 import { SessionRepository } from './domain/session-repository'
 import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
@@ -370,6 +375,131 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     )
     await waitUntil(() => sessionRepository.getResumeBinding(failedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
   }, 20_000)
+
+  it('injects antigravity-system-message.md via SessionStart and enables mt identify/list/read inside Antigravity cards', async () => {
+    server.close()
+    const execFileAsync = promisify(execFile)
+    const controlAssetRoot = resolve(__dirname, '../dist/control-assets')
+    const expectedSystemMessage = await readFile(
+      join(controlAssetRoot, 'providers', 'antigravity-system-message.md'),
+      'utf8'
+    )
+    const controlSocketPath = join(root, 'control.sock')
+    const controlBackend = new RuntimeControlBackend(
+      database,
+      root,
+      new TaskTelemetryRepository(database, database.runtimeGeneration)
+    )
+    const controlTokens = new CapabilityTokenService(database.runtimeGeneration)
+    const controlServer = new HostControlServer({
+      socketPath: controlSocketPath,
+      tokenService: controlTokens,
+      backend: controlBackend
+    })
+    await controlServer.start()
+    server = new RuntimeServer(
+      port,
+      root,
+      database,
+      undefined,
+      { backend: controlBackend, tokens: controlTokens, endpoint: controlSocketPath },
+      sessions,
+      hookServer,
+      undefined,
+      {
+        hudRegistry: hud,
+        antigravityPluginInstaller: new AntigravityPluginInstaller(pluginDir),
+        controlAssetRoot,
+        antigravityPermissionSwitchTimeoutMs: 600,
+        antigravityForkNewIdTimeoutMs: 1_200
+      }
+    )
+    port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-agy-mt' })
+
+    try {
+      registerSession(database, 'agy-mt', 'antigravity')
+      port.receive({
+        type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+        sessionId: 'agy-mt', executionContextId: 'ctx-1',
+        profile: 'antigravity', cols: 100, rows: 30
+      })
+
+      let launch: { args: string[]; env: Record<string, string | undefined> } | undefined
+      await waitUntil(() => {
+        try {
+          const parsed = require('node:fs').readFileSync(launchLogPath, 'utf8')
+            .trim().split('\n').filter(Boolean).map((line: string) => JSON.parse(line))
+          launch = parsed.at(-1)
+          return Boolean(launch?.env.MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE && launch?.env.MATOU_CONTROL_TOKEN)
+        } catch {
+          return false
+        }
+      }, 6_000)
+
+      const injectFile = launch!.env.MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE!
+      const injected = JSON.parse(await readFile(injectFile, 'utf8')) as {
+        injectSteps: Array<{ systemMessage: { systemMessage: string } }>
+      }
+      expect(injected.injectSteps[0]?.systemMessage.systemMessage).toBe(expectedSystemMessage.trimEnd())
+
+      const sessionStartStdout = await new Promise<string>((resolveOut, rejectOut) => {
+        const child = spawn('/bin/sh', [join(pluginDir, 'hooks', 'session-start.sh')], {
+          env: {
+            ...process.env,
+            MATOU_PROVIDER_HOOK_URL: launch!.env.MATOU_PROVIDER_HOOK_URL,
+            MATOU_PROVIDER_HOOK_TOKEN: launch!.env.MATOU_PROVIDER_HOOK_TOKEN,
+            MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE: injectFile
+          },
+          stdio: ['pipe', 'pipe', 'pipe']
+        })
+        let out = ''
+        let err = ''
+        child.stdout.on('data', (chunk) => { out += String(chunk) })
+        child.stderr.on('data', (chunk) => { err += String(chunk) })
+        child.on('error', rejectOut)
+        child.on('close', (code) => {
+          if (code === 0) resolveOut(out)
+          else rejectOut(new Error(`session-start.sh exited ${code}: ${err}`))
+        })
+        child.stdin.end(JSON.stringify({ conversation_id: 'agy-conv-1' }))
+      })
+      expect(JSON.parse(sessionStartStdout)).toEqual(injected)
+
+      const mtEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: launch!.env.PATH,
+        MATOU_CONTROL_ENDPOINT: launch!.env.MATOU_CONTROL_ENDPOINT,
+        MATOU_CONTROL_TOKEN: launch!.env.MATOU_CONTROL_TOKEN,
+        MATOU_CONTROL_CALLER_SESSION: launch!.env.MATOU_CONTROL_CALLER_SESSION,
+        MATOU_CONTROL_CALLER_RUN: launch!.env.MATOU_CONTROL_CALLER_RUN,
+        MATOU_CONTROL_ASSET_ROOT: launch!.env.MATOU_CONTROL_ASSET_ROOT,
+        MATOU_CONTROL_NODE_EXECUTABLE: launch!.env.MATOU_CONTROL_NODE_EXECUTABLE
+      }
+
+      const identifyResult = await execFileAsync('mt', ['identify', '--json'], { env: mtEnv, timeout: 5_000 })
+      expect(JSON.parse(identifyResult.stdout)).toMatchObject({
+        target: { sessionId: 'agy-mt', profile: 'antigravity' }
+      })
+
+      const listResult = await execFileAsync('mt', ['list', '--json'], { env: mtEnv, timeout: 5_000 })
+      const listParsed = JSON.parse(listResult.stdout) as { targets: Array<{ sessionId: string }> }
+      expect(listParsed.targets.map((target) => target.sessionId)).toContain('agy-mt')
+
+      let readText = ''
+      const readDeadline = Date.now() + 5_000
+      while (Date.now() < readDeadline) {
+        const readResult = await execFileAsync('mt', ['read', 'self', '--json'], { env: mtEnv, timeout: 5_000 })
+        readText = (JSON.parse(readResult.stdout) as { text: string }).text
+        if (readText.includes('AGY_READY')) break
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 25))
+      }
+      expect(readText).toContain('AGY_READY')
+    } finally {
+      server.close()
+      await sessions.shutdownAll()
+      await controlServer.stop()
+    }
+  }, 20_000)
 })
 
 const MOCK_AGY_SCRIPT = `
@@ -401,8 +531,16 @@ if (convIdx >= 0 && argv[convIdx + 1]) {
 fs.appendFileSync(logPath, JSON.stringify({
   args: argv,
   env: {
+    PATH: process.env.PATH,
     MATOU_PROVIDER_HOOK_URL: process.env.MATOU_PROVIDER_HOOK_URL,
-    MATOU_PROVIDER_HOOK_TOKEN: process.env.MATOU_PROVIDER_HOOK_TOKEN
+    MATOU_PROVIDER_HOOK_TOKEN: process.env.MATOU_PROVIDER_HOOK_TOKEN,
+    MATOU_CONTROL_ENDPOINT: process.env.MATOU_CONTROL_ENDPOINT,
+    MATOU_CONTROL_TOKEN: process.env.MATOU_CONTROL_TOKEN,
+    MATOU_CONTROL_CALLER_SESSION: process.env.MATOU_CONTROL_CALLER_SESSION,
+    MATOU_CONTROL_CALLER_RUN: process.env.MATOU_CONTROL_CALLER_RUN,
+    MATOU_CONTROL_ASSET_ROOT: process.env.MATOU_CONTROL_ASSET_ROOT,
+    MATOU_CONTROL_NODE_EXECUTABLE: process.env.MATOU_CONTROL_NODE_EXECUTABLE,
+    MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE: process.env.MATOU_ANTIGRAVITY_SYSTEM_MESSAGE_FILE
   }
 }) + '\\n');
 
@@ -458,6 +596,7 @@ if (forkedMode) {
 } else {
   sendStatus(initialMode);
 }
+process.stdout.write('AGY_READY\\r\\n');
 setInterval(() => {}, 10000);
 `
 

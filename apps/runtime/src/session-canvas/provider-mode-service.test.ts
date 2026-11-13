@@ -430,6 +430,36 @@ describe('ProviderModeService', () => {
       `SELECT resume_state FROM provider_bindings WHERE id = 'binding-codex'`
     )?.resume_state).toBe('available')
   })
+
+  it('uses Antigravity display names in recovery failure notifications and retry errors', () => {
+    const initial = bootstrapClaudeTree()
+    database.run(`UPDATE sessions SET kind = 'antigravity', title = 'Antigravity' WHERE id = ?`, initial.parentSessionId)
+    database.run(
+      `UPDATE provider_bindings SET provider = 'antigravity', provider_session_id = 'agy-parent-1'
+       WHERE id = 'binding-parent'`
+    )
+
+    expect(() => providerModes.retryRestore(command('agy-retry-not-failed'), {
+      sessionId: initial.parentSessionId, now: 25
+    })).toThrow('只有恢复失败的 Antigravity 会话需要重试')
+
+    expect(() => providerModes.startFreshClaude(command('agy-fresh-not-failed'), {
+      sessionId: initial.parentSessionId, now: 26
+    })).toThrow('只有恢复失败的 Antigravity 会话可新开对话')
+
+    providerModes.markRestoreFailed(command('agy-restore-failed'), {
+      sessionId: initial.parentSessionId,
+      bindingId: 'binding-parent',
+      reason: 'antigravity conversation missing',
+      now: 30
+    })
+    expect(latestRecoveryNotification(initial.parentSessionId)).toMatchObject({
+      operation: 'upsert',
+      eventType: 'error',
+      title: 'Antigravity 恢复失败',
+      body: 'antigravity conversation missing'
+    })
+  })
 })
 
 function bootstrapClaudeTree(options: { canFork?: boolean } = {}) {

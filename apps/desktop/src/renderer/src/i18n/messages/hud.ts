@@ -49,16 +49,25 @@ export const hudZhCN = {
   bypassExitConfirm: '确认退出',
   bypassNotResumable:
     '当前 Claude 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 Claude 会话，当前内容将不会保留。\n\n是否确认？',
+  bypassNotResumableFor: (agent: string) =>
+    `当前 ${agent} 会话还没有生成可恢复的 sessionId。继续切换会启动一个全新的 ${agent} 会话，当前内容将不会保留。\n\n是否确认？`,
   bypassEnterBody:
     '切换到 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？',
+  bypassEnterBodyFor: (agent: string) =>
+    `切换到 Bypass Permissions 会打断当前 ${agent} 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？`,
   bypassExitBody:
     '退出 Bypass Permissions 会打断当前 Claude 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？',
+  bypassExitBodyFor: (agent: string) =>
+    `退出 Bypass Permissions 会打断当前 ${agent} 会话进程（正在执行的任务会被中断），重启后会自动 resume 恢复会话历史。\n\n是否确认？`,
   switchFailed: (reason: string) => `切换失败：${reason}`,
   unknownError: '未知错误',
   instructionsReading: '正在读取…',
   instructionsFallbackPath: '当前项目 / CLAUDE.md',
+  instructionsFallbackPathFor: (fileName: string) => `当前项目 / ${fileName}`,
   instructionsClose: '关闭 ClaudeMd 编辑器',
+  instructionsCloseFor: (label: string) => `关闭 ${label} 编辑器`,
   instructionsContent: 'ClaudeMd 内容',
+  instructionsContentFor: (label: string) => `${label} 内容`,
   instructionsReadOnly: '恢复期间为只读',
   instructionsSaveHint: '保存后立即用于当前项目的新请求',
   instructionsReadFailed: '读取失败',
@@ -213,16 +222,25 @@ export const hudEn: CatalogShape<typeof hudZhCN> = {
   bypassExitConfirm: 'Leave',
   bypassNotResumable:
     'The current Claude session has no resumable session ID yet. Switching now starts a brand new Claude session, and the current content is not kept.\n\nContinue?',
+  bypassNotResumableFor: (agent: string) =>
+    `The current ${agent} session has no resumable session ID yet. Switching now starts a brand new ${agent} session, and the current content is not kept.\n\nContinue?`,
   bypassEnterBody:
     'Switching to Bypass Permissions restarts the Claude session process, so any running task is interrupted. The session history is resumed automatically after the restart.\n\nContinue?',
+  bypassEnterBodyFor: (agent: string) =>
+    `Switching to Bypass Permissions restarts the ${agent} session process, so any running task is interrupted. The session history is resumed automatically after the restart.\n\nContinue?`,
   bypassExitBody:
     'Leaving Bypass Permissions restarts the Claude session process, so any running task is interrupted. The session history is resumed automatically after the restart.\n\nContinue?',
+  bypassExitBodyFor: (agent: string) =>
+    `Leaving Bypass Permissions restarts the ${agent} session process, so any running task is interrupted. The session history is resumed automatically after the restart.\n\nContinue?`,
   switchFailed: (reason: string) => `Could not switch: ${reason}`,
   unknownError: 'Unknown error',
   instructionsReading: 'Reading…',
   instructionsFallbackPath: 'Current project / CLAUDE.md',
+  instructionsFallbackPathFor: (fileName: string) => `Current project / ${fileName}`,
   instructionsClose: 'Close the ClaudeMd editor',
+  instructionsCloseFor: (label: string) => `Close the ${label} editor`,
   instructionsContent: 'ClaudeMd content',
+  instructionsContentFor: (label: string) => `${label} content`,
   instructionsReadOnly: 'Read-only during recovery',
   instructionsSaveHint: 'Saved content applies to new requests in this project right away',
   instructionsReadFailed: 'Could not read the file',

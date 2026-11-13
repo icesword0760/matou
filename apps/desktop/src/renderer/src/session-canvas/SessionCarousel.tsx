@@ -3,6 +3,7 @@ import {
   type PointerEvent, type ReactNode
 } from 'react'
 
+import { getAgentShortName } from '@matou/domain'
 import type { SessionGraphNodeView } from '../hierarchy/hierarchy-types'
 import { useMessages } from '../i18n/LocaleProvider'
 import { ParentProjection } from './ParentProjection'
@@ -958,7 +959,9 @@ export function SessionCarousel(props: {
             <span className={`status-${node.workStatus}`}>{m.compactStatus[node.workStatus]}</span>
             {(node.providerRestoreState === 'failed' || node.activeChildCount > 0) &&
               <div className="session-compact-summary__priority">
-                {node.providerRestoreState === 'failed' && <b>{m.claudeRestoreFailed}</b>}
+                {node.providerRestoreState === 'failed' && (
+                  <b>{m.providerRestoreFailed(getAgentShortName(node.currentMode, 'Claude'))}</b>
+                )}
                 {node.activeChildCount > 0 && <small>{m.childSessionCount(node.activeChildCount)}</small>}
               </div>}
             <pre title={node.cwd}>{node.latestLines.slice(-3).join('\n') || node.cwd}</pre>

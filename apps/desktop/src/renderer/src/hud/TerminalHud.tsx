@@ -15,7 +15,7 @@ import {
 import { useLocale, useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 import type { HudPermissionMode, SessionHudView } from '../hierarchy/hierarchy-types'
-import { getAgentManifest, type SessionEnvironment, type SessionGitState } from '@matou/domain'
+import { getAgentManifest, getAgentShortName, type SessionEnvironment, type SessionGitState } from '@matou/domain'
 
 type HudMessages = Messages['hud']
 
@@ -215,7 +215,7 @@ export function TerminalHud(props: {
     </div></div>, document.body)}
     {confirmTarget && hud && !disabled && props.onPermissionMode && createPortal(<ConfirmDialog
       title={confirmTarget === 'bypassPermissions' ? m.bypassEnterTitle : m.bypassExitTitle}
-      body={bypassCopy(confirmTarget, hud.resumable === true, m)}
+      body={bypassCopy(confirmTarget, hud.resumable === true, getAgentShortName(hud.provider, 'Claude'), m)}
       confirmLabel={confirmTarget === 'bypassPermissions' ? m.bypassEnterConfirm : m.bypassExitConfirm}
       onCancel={() => setConfirmTarget(null)}
       onConfirm={() => {
@@ -356,14 +356,20 @@ function InstructionFileDialog(props: {
     }
   }
 
+  const fallbackFileName =
+    props.label === 'GeminiMd' || props.label === 'GEMINI.md'
+      ? 'GEMINI.md'
+      : props.label === 'AgentsMd' || props.label === 'AGENTS.md'
+        ? 'AGENTS.md'
+        : 'CLAUDE.md'
   return <div className="instruction-file-overlay" onPointerDown={(event) => {
     if (event.currentTarget === event.target) props.onClose()
   }}><section className="instruction-file-dialog" role="dialog" aria-modal="true"
     aria-label={props.label === 'ClaudeMd' ? m.editClaudeMd : props.label}>
-    <header><div><h2>{props.label}</h2><p>{path || m.instructionsFallbackPath}</p></div>
-      <button type="button" aria-label={m.instructionsClose} onClick={props.onClose}>×</button></header>
+    <header><div><h2>{props.label}</h2><p>{path || m.instructionsFallbackPathFor(fallbackFileName)}</p></div>
+      <button type="button" aria-label={m.instructionsCloseFor(props.label)} onClick={props.onClose}>×</button></header>
     {loading ? <div className="instruction-file-state">{m.instructionsReading}</div> : <textarea
-      aria-label={m.instructionsContent} value={content} readOnly={props.readOnly}
+      aria-label={m.instructionsContentFor(props.label)} value={content} readOnly={props.readOnly}
       spellCheck={false} autoFocus onChange={(event) => setContent(event.target.value)} />}
     {error && <div className="instruction-file-error" role="alert">{error}</div>}
     <footer><span>{props.readOnly ? m.instructionsReadOnly : m.instructionsSaveHint}</span>
@@ -486,9 +492,9 @@ function hasAgentInfo(hud: SessionHudView): boolean {
     agentDisplay(hud).count > 0 || hud.teamRole || todoDisplay(hud))
 }
 
-function bypassCopy(target: HudPermissionMode, resumable: boolean, m: HudMessages): string {
-  if (!resumable) return m.bypassNotResumable
-  return target === 'bypassPermissions' ? m.bypassEnterBody : m.bypassExitBody
+function bypassCopy(target: HudPermissionMode, resumable: boolean, agent: string, m: HudMessages): string {
+  if (!resumable) return m.bypassNotResumableFor(agent)
+  return target === 'bypassPermissions' ? m.bypassEnterBodyFor(agent) : m.bypassExitBodyFor(agent)
 }
 
 function agentDisplay(hud: SessionHudView): { count: number; items: HudAgentActivity[] } {

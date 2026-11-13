@@ -1,4 +1,4 @@
-import { getAgentManifest, isAgentProfileId } from '@matou/domain'
+import { getAgentDisplayName, getAgentManifest, getAgentShortName, isAgentProfileId } from '@matou/domain'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -174,12 +174,14 @@ export function TerminalPane(props: {
     childCount: childNodes.length
   })
   const profile = isAgentProfileId(session.kind) ? session.kind : 'shell'
+  const agentDisplayName = isAgentProfileId(session.kind) ? getAgentDisplayName(session.kind) : 'Claude Code'
+  const agentShortName = isAgentProfileId(session.kind) ? getAgentShortName(session.kind) : 'Claude'
   const capabilities = getAgentManifest(session.kind)?.capabilities
   const showFork = capabilities?.fork === true && onFork !== undefined
   const canFork = showFork && (forkReady ?? resumable)
   const forkReadinessReason = workStatus === 'running' || workStatus === 'starting' || workStatus === 'needs-input'
     ? m.pane.forkReadyAfterReply
-    : m.pane.forkNeedsReply
+    : m.pane.forkNeedsReplyFor(agentDisplayName)
   const environmentUnavailable = environment !== undefined && environment.state !== 'ready'
   const recoveryBlocking = recoveryState !== 'ready'
   const recoveryBusy = recoveryState === 'queued' || recoveryState === 'restoring'
@@ -279,7 +281,7 @@ export function TerminalPane(props: {
   // child still exposes the approved sibling operation.
   const canForkSibling = onForkSibling !== undefined
   const canDetach = onDetach !== undefined
-  const forkFailure = forkFailurePresentation(forkError, m)
+  const forkFailure = forkFailurePresentation(forkError, agentDisplayName, m)
   const currentForkProgress = recoveryState === 'deferred' ? undefined : activeForkProgress(forkProgress)
   const loadingPresentation = terminalLoadingPresentation({
     visible, foreground, isTeamMember, pathValid, terminalVisualReady, activationLoading,
@@ -348,8 +350,8 @@ export function TerminalPane(props: {
         {onOpenChildren && <ChildSessionBadge children={childNodes}
           onOpen={() => void onOpenChildren(session.id)} />}
         {onLoadSession && <button className="pane-fork pane-load-session" type="button" draggable={false}
-          aria-label={m.pane.loadClaudeSessionInto(session.title)} disabled={actionBlocked}
-          title={actionBlockedReason ?? m.pane.loadClaudeSession}
+          aria-label={m.pane.loadAgentSessionInto(session.title, agentDisplayName)} disabled={actionBlocked}
+          title={actionBlockedReason ?? m.pane.loadAgentSession(agentDisplayName)}
           onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}
           onClick={(event) => {
             event.stopPropagation()
@@ -407,11 +409,11 @@ export function TerminalPane(props: {
     {recoveryState !== 'deferred' && effectiveRestoreState === 'failed' && forkState !== 'failed' && visible && restoreNoticeVisible &&
       <div className="provider-restore-banner" role="status">
       <div><strong>{restoreIdentityExpired && session.kind === 'shell'
-        ? m.pane.parentConversationExpired : m.pane.claudeRestoreFailed}</strong>
+        ? m.pane.parentConversationExpiredFor(agentDisplayName) : m.pane.providerRestoreFailed(agentDisplayName)}</strong>
         <span className="provider-restore-reason">{restoreIdentityExpired && session.kind === 'shell'
           ? m.pane.switchedToShell
           : restoreError === 'provider session running in background'
-            ? m.pane.providerRunningInBackground : restoreError}</span>
+            ? m.pane.providerRunningInBackgroundFor(agentShortName) : restoreError}</span>
       </div>
       {onRetryRestore && (!restoreIdentityExpired || capabilities?.autoRestore === true) && <button type="button"
         disabled={actionBlocked || restoreRetryPending} title={actionBlockedReason} onClick={(event) => {
@@ -427,10 +429,10 @@ export function TerminalPane(props: {
           setRestoreRetryPending(true)
           void Promise.resolve(onStartFreshProvider(session.id)).finally(() => setRestoreRetryPending(false))
         }}
-      >{m.pane.startFreshClaude}</button>}
+      >{m.pane.startFreshAgent(agentDisplayName)}</button>}
     </div>}
     {recoveryState !== 'deferred' && effectiveRestoreState === 'restoring' && forkState !== 'failed' && visible && <div className="provider-restore-banner restoring" role="status">
-      <strong>{m.pane.restoringClaudeSession}</strong>
+      <strong>{m.pane.restoringAgentSession(agentDisplayName)}</strong>
     </div>}
     {runtimeStatus === 'error' && forkState !== 'failed' && effectiveRestoreState !== 'failed' && visible &&
       <div className="session-start-failure-card" role="status">
@@ -608,7 +610,7 @@ export function TerminalPane(props: {
             setContextMenu(null)
             void Promise.resolve(onRestoreAutoTitle(session.id)).catch(NOOP)
           }} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation() }}>
-            {m.pane.restoreAutoTitle}
+            {m.pane.restoreAutoTitleFor(agentShortName)}
           </button>}
         {showFork && onForkPeer && <button className="detach-menu-item" role="menuitem"
           aria-disabled={actionBlocked || !canFork} disabled={actionBlocked}
@@ -686,14 +688,14 @@ export function RemoveNodeIcon() {
   return <AppIcon name="circle-minus" />
 }
 
-function forkFailurePresentation(error: string | undefined, m: TerminalMessages): {
+function forkFailurePresentation(error: string | undefined, agent: string, m: TerminalMessages): {
   title: string
   reason: string | undefined
 } {
   if (error && /provider session not found|no conversation found|conversation.*not found/i.test(error)) {
     return {
       title: m.forkFailure.parentExpiredTitle,
-      reason: m.forkFailure.parentExpiredReason
+      reason: m.forkFailure.parentExpiredReasonFor(agent)
     }
   }
   return { title: m.forkFailure.title, reason: error }

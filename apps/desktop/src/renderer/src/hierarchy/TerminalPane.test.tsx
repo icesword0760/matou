@@ -794,6 +794,25 @@ describe('Terminal pane', () => {
     expect(screen.getByRole('alertdialog', { name: '移除节点“Claude 主会话”？' })).toBeTruthy()
     expect(onRemoveBranch).not.toHaveBeenCalled()
   })
+
+  it('uses Antigravity copy for load button, restore failure notice, and fresh-start CTA', () => {
+    const props = fixture()
+    const antigravitySession = { ...props.session, kind: 'antigravity' as const, title: 'Agy 主会话' }
+    const view = render(<TerminalPane {...props}
+      session={antigravitySession}
+      onLoadSession={vi.fn()} />)
+
+    expect(screen.getByRole('button', { name: '载入 Antigravity 会话到“Agy 主会话”' })).toBeTruthy()
+
+    view.rerender(<TerminalPane {...props}
+      session={antigravitySession}
+      onLoadSession={vi.fn()}
+      providerRestoreState="failed" restoreError="conversation missing"
+      onRetryRestore={vi.fn()} onStartFreshProvider={vi.fn()} />)
+
+    expect(screen.getByRole('status').textContent).toContain('Antigravity 恢复失败')
+    expect(screen.getByRole('button', { name: '新开 Antigravity' })).toBeTruthy()
+  })
 })
 
 function fixture() {

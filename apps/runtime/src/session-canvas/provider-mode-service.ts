@@ -2,6 +2,7 @@ import type {
   ClaudeSessionPermissionMode,
 } from '@matou/contracts'
 import {
+  getAgentDisplayName,
   getAgentManifest,
   getAgentShortName,
   isAgentProfileId,
@@ -266,10 +267,10 @@ export class ProviderModeService {
     input: { sessionId: string; now: number }
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
-      if (binding.restore_state !== 'failed') {
-        throw new Error(runtimeMessages().sessionCanvas.retryRestoreOnlyFailed)
-      }
       const provider = bindingProvider(binding)
+      if (binding.restore_state !== 'failed') {
+        throw new Error(runtimeMessages().sessionCanvas.retryRestoreOnlyFailedFor(getAgentDisplayName(provider)))
+      }
       const shortName = getAgentShortName(provider, 'Claude')
       const metadata = asMetadata(binding.metadata_json)
       metadata.spawnRevision = input.now
@@ -296,10 +297,10 @@ export class ProviderModeService {
     input: { sessionId: string; now: number }
   ): ProviderModeTransitionResult {
     return this.#transition(command, input.sessionId, input.now, ({ tx, session, binding }) => {
-      if (binding.restore_state !== 'failed') {
-        throw new Error(runtimeMessages().sessionCanvas.startFreshOnlyFailed)
-      }
       const provider = bindingProvider(binding)
+      if (binding.restore_state !== 'failed') {
+        throw new Error(runtimeMessages().sessionCanvas.startFreshOnlyFailedFor(getAgentDisplayName(provider)))
+      }
       const shortName = getAgentShortName(provider, 'Claude')
       const metadata = asMetadata(binding.metadata_json)
       metadata.spawnRevision = input.now
@@ -468,6 +469,8 @@ function emitRecoveryNotificationFailure(
   result: ProviderModeTransitionResult,
   now: number
 ): void {
+  const provider = bindingProvider(result.binding)
+  const agentName = getAgentDisplayName(provider)
   const replacementKey = `provider-restore:${result.session.id}`
   emit({
     eventId: `${commandId}:agent.notification`,
@@ -479,14 +482,14 @@ function emitRecoveryNotificationFailure(
     sessionId: result.session.id,
     payload: {
       targetSessionId: result.session.id,
-      provider: bindingProvider(result.binding),
+      provider,
       runId: `restore:${result.binding.id}`,
       event: {
         operation: 'upsert',
         replacementKey,
         eventType: 'error',
-        title: runtimeMessages().sessionCanvas.recoveryFailedTitle,
-        body: result.binding.restoreError ?? runtimeMessages().sessionCanvas.recoveryIncomplete,
+        title: runtimeMessages().sessionCanvas.recoveryFailedTitleFor(agentName),
+        body: result.binding.restoreError ?? runtimeMessages().sessionCanvas.recoveryIncompleteFor(agentName),
         sound: true
       }
     },

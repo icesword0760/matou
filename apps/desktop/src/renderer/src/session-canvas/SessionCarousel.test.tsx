@@ -1179,6 +1179,23 @@ describe('SessionCarousel', () => {
     }), { continuous: true })
     vi.useRealTimers()
   })
+
+  it('shows Antigravity restore failed badge on compact sibling cards', () => {
+    const nodes = fixtures(4)
+    nodes[1] = {
+      ...nodes[1]!, currentMode: 'antigravity', providerRestoreState: 'failed',
+      providerRestoreError: 'missing conversation', workStatus: 'error'
+    }
+    render(<SessionCarousel nodes={nodes} focusedSessionId="session-1"
+      onActivate={() => undefined} renderSession={(node) => <span>{node.title}</span>} />)
+    const viewport = screen.getByRole('region', { name: '同级会话列表' })
+    Object.defineProperty(viewport, 'clientWidth', { configurable: true, value: 600 })
+
+    fireEvent(window, new Event('resize'))
+
+    const sibling = document.querySelector('[data-session-id="session-2"] .session-compact-summary')!
+    expect(sibling.textContent).toContain('Antigravity 恢复失败')
+  })
 })
 
 function fixtures(count: number): SessionGraphNodeView[] {

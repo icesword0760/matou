@@ -13,9 +13,13 @@ export const sessionCanvasZhCN = {
 
   // provider-mode-service.ts
   retryRestoreOnlyFailed: '只有恢复失败的 Claude Code 会话需要重试',
+  retryRestoreOnlyFailedFor: (agent: string) => `只有恢复失败的 ${agent} 会话需要重试`,
   startFreshOnlyFailed: '只有恢复失败的 Claude Code 会话可新开对话',
+  startFreshOnlyFailedFor: (agent: string) => `只有恢复失败的 ${agent} 会话可新开对话`,
   recoveryFailedTitle: 'Claude Code 恢复失败',
+  recoveryFailedTitleFor: (agent: string) => `${agent} 恢复失败`,
   recoveryIncomplete: 'Claude Code 会话恢复未完成',
+  recoveryIncompleteFor: (agent: string) => `${agent} 会话恢复未完成`,
 
   // branch-name.ts — the fork name typed in the branch dialog
   branchName: {
@@ -52,9 +56,14 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
   interactionKindNotOrdering: 'This user interaction kind does not take part in session ordering',
 
   retryRestoreOnlyFailed: 'Only a Claude Code session whose restore failed needs a retry',
+  retryRestoreOnlyFailedFor: (agent: string) => `Only a ${agent} session whose restore failed needs a retry`,
   startFreshOnlyFailed: 'Only a Claude Code session whose restore failed can start a fresh conversation',
+  startFreshOnlyFailedFor: (agent: string) =>
+    `Only a ${agent} session whose restore failed can start a fresh conversation`,
   recoveryFailedTitle: 'Claude Code recovery failed',
+  recoveryFailedTitleFor: (agent: string) => `${agent} recovery failed`,
   recoveryIncomplete: 'The Claude Code session was not fully restored',
+  recoveryIncompleteFor: (agent: string) => `The ${agent} session was not fully restored`,
 
   branchName: {
     required: 'Enter a fork name',

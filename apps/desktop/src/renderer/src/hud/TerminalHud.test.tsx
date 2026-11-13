@@ -728,3 +728,36 @@ describe('main parity for Codex HUD controls', () => {
     }
   })
 })
+
+describe('Antigravity agent-aware HUD copy', () => {
+  it('uses Antigravity wording in Bypass Permissions dialogs and AGENTS.md editor modal', async () => {
+    const user = userEvent.setup()
+    render(
+      <TerminalHud
+        hud={agent({
+          provider: 'antigravity',
+          permissionMode: 'default',
+          resumable: false,
+          usageWindows: [],
+          configCounts: { instructionFiles: 1, projectInstructionFileExists: true, mcpServers: 0, hooks: 0 }
+        })}
+        runtimeClient={{
+          request: async () => ({ path: '', exists: true, content: '# Agents Rules\n' })
+        } as never}
+        onPermissionMode={vi.fn()}
+      />
+    )
+
+    await user.click(screen.getByRole('button', { name: /当前权限模式：Default/ }))
+    await user.click(screen.getByRole('menuitem', { name: 'Bypass Permissions' }))
+    expect(screen.getByRole('alertdialog', { name: '切换到高权限模式' }).textContent)
+      .toContain('当前 Antigravity 会话还没有生成可恢复的 sessionId')
+    await user.click(screen.getByRole('button', { name: '取消' }))
+
+    await user.click(screen.getByRole('button', { name: 'AGENTS.md' }))
+    expect(screen.getByText('当前项目 / AGENTS.md')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '关闭 AGENTS.md 编辑器' })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: 'AGENTS.md 内容' })).toBeTruthy()
+    await user.click(screen.getByRole('button', { name: '关闭 AGENTS.md 编辑器' }))
+  })
+})

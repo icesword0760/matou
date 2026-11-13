@@ -12,6 +12,7 @@ export const sessionCanvasZhCN = {
   // SessionCarousel
   siblingSessions: '同级会话列表',
   claudeRestoreFailed: 'Claude 恢复失败',
+  providerRestoreFailed: (agent: string) => `${agent} 恢复失败`,
   childSessionCount: (count: number) => `子会话 ${count}`,
   /** Keyed by SessionWorkStatus. */
   compactStatus: {
@@ -224,6 +225,7 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
   // SessionCarousel
   siblingSessions: 'Sibling sessions',
   claudeRestoreFailed: 'Claude recovery failed',
+  providerRestoreFailed: (agent: string) => `${agent} recovery failed`,
   childSessionCount: (count: number) =>
     count === 1 ? '1 child session' : `${count} child sessions`,
   compactStatus: {
