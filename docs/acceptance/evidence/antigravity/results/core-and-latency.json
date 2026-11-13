@@ -1,32 +1,32 @@
 {
-  "sessionId": "b887d7b0-39e4-4180-a977-b9f9ba7a8c67",
-  "providerSessionId": "677ef243-c0f3-4677-a927-56cdbc929293",
-  "initialPaneTitle": "Codeword Memory Test And Response",
-  "restoredAutoTitle": "Codeword Memory Test And Response",
+  "sessionId": "b1d26572-cdd6-4660-bd30-71ab7e4a851e",
+  "providerSessionId": "085509a7-3953-4167-b943-4750d2682200",
+  "initialPaneTitle": "TITAN_904 Memory Test",
+  "restoredAutoTitle": "TITAN_904 Memory Test",
   "runningSamples": [
     {
       "round": 1,
-      "triggerAtMs": 1794591264889,
-      "runtimeEventAtMs": 1794591265663,
-      "uiObservedAtMs": 1794591265664,
-      "runtimeToUiMs": 1,
+      "triggerAtMs": 1794601784548,
+      "runtimeEventAtMs": 1794601785327,
+      "uiObservedAtMs": 1794601785329,
+      "runtimeToUiMs": 2,
       "within1000ms": true,
-      "triggerToUiMs": 775
+      "triggerToUiMs": 781
     },
     {
       "round": 2,
-      "triggerAtMs": 1794591278914,
-      "runtimeEventAtMs": 1794591279286,
-      "uiObservedAtMs": 1794591279287,
-      "runtimeToUiMs": 1,
+      "triggerAtMs": 1794601790972,
+      "runtimeEventAtMs": 1794601791336,
+      "uiObservedAtMs": 1794601791338,
+      "runtimeToUiMs": 2,
       "within1000ms": true,
-      "triggerToUiMs": 373
+      "triggerToUiMs": 366
     },
     {
       "round": 3,
-      "triggerAtMs": 1794591289978,
-      "runtimeEventAtMs": 1794591290351,
-      "uiObservedAtMs": 1794591290353,
+      "triggerAtMs": 1794601800505,
+      "runtimeEventAtMs": 1794601800878,
+      "uiObservedAtMs": 1794601800880,
       "runtimeToUiMs": 2,
       "within1000ms": true,
       "triggerToUiMs": 375
@@ -35,46 +35,46 @@
   "idleSamples": [
     {
       "round": 1,
-      "triggerAtMs": 1794591264889,
-      "runtimeEventAtMs": 1794591278171,
-      "uiObservedAtMs": 1794591278172,
+      "triggerAtMs": 1794601784548,
+      "runtimeEventAtMs": 1794601790574,
+      "uiObservedAtMs": 1794601790575,
       "runtimeToUiMs": 1,
       "within1000ms": true
     },
     {
       "round": 2,
-      "triggerAtMs": 1794591278914,
-      "runtimeEventAtMs": 1794591289566,
-      "uiObservedAtMs": 1794591289568,
-      "runtimeToUiMs": 2,
+      "triggerAtMs": 1794601790972,
+      "runtimeEventAtMs": 1794601799829,
+      "uiObservedAtMs": 1794601799833,
+      "runtimeToUiMs": 4,
       "within1000ms": true
     },
     {
       "round": 3,
-      "triggerAtMs": 1794591289978,
-      "runtimeEventAtMs": 1794591299698,
-      "uiObservedAtMs": 1794591299700,
-      "runtimeToUiMs": 2,
+      "triggerAtMs": 1794601800505,
+      "runtimeEventAtMs": 1794601806470,
+      "uiObservedAtMs": 1794601806473,
+      "runtimeToUiMs": 3,
       "within1000ms": true
     }
   ],
   "summary": {
     "runningCount": 3,
-    "runningAvgMs": 1.3,
+    "runningAvgMs": 2,
     "runningMaxMs": 2,
-    "runningTriggerAvgMs": 507.7,
+    "runningTriggerAvgMs": 507.3,
     "idleCount": 3,
-    "idleAvgMs": 1.7,
-    "idleMaxMs": 2
+    "idleAvgMs": 2.7,
+    "idleMaxMs": 4
   },
   "dbBindingsAfter": [
     {
-      "session_id": "b887d7b0-39e4-4180-a977-b9f9ba7a8c67",
+      "session_id": "b1d26572-cdd6-4660-bd30-71ab7e4a851e",
       "provider": "antigravity",
-      "provider_session_id": "677ef243-c0f3-4677-a927-56cdbc929293",
+      "provider_session_id": "085509a7-3953-4167-b943-4750d2682200",
       "resume_state": "available",
-      "metadata_json": "{\"permissionMode\":\"default\",\"cwd\":\"/private/tmp/claude-501/-Users-icesword-Documents-AIProjects-matou/da0ac5f4-7b9e-4679-81d7-890907cb84cf/scratchpad/agy-e2e/title-restart-JhWxcA/repo\",\"lastHookEvent\":\"unknown\",\"canFork\":true,\"observedUserPrompt\":true,\"model\":\"Gemini 4 Carbon (Medium)\",\"observedNormalStop\":true}",
-      "updated_at": 1794591330632
+      "metadata_json": "{\"permissionMode\":\"default\",\"cwd\":\"/private/tmp/claude-501/-Users-icesword-Documents-AIProjects-matou/da0ac5f4-7b9e-4679-81d7-890907cb84cf/scratchpad/agy-e2e/title-restart-GSml9t/repo\",\"lastHookEvent\":\"unknown\",\"canFork\":true,\"observedUserPrompt\":true,\"model\":\"Gemini 4 Carbon (Medium)\",\"observedNormalStop\":true}",
+      "updated_at": 1794601816829
     }
   ]
 }

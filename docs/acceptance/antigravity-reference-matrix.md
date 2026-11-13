@@ -96,3 +96,42 @@
 - `pnpm check:identifiers`：**通过（exit 0）**
 - `@matou/runtime` PreToolUse、HUD 与回归单测（最终修改后复跑）：`src/session/session-hud-registry.test.ts`、`src/session/provider-hook-server.test.ts`、`src/agents/antigravity-plugin-installer.test.ts`、`src/antigravity-runtime.test.ts`、`src/runtime-server.test.ts`（**5 个文件 202/202 passed**）
 - `@matou/desktop` HUD 与投影状态单测（最终修改后复跑）：`src/renderer/src/projection/RuntimeProjectionStore.test.ts`、`src/renderer/src/hierarchy/TerminalPane.test.tsx`、`src/renderer/src/hierarchy/hierarchy-hud-commands.test.ts`（**3 个文件 82/82 passed**）
+
+## 最终版本回归（HEAD: `10120cd`）
+
+本轮基于 `HEAD = 10120cd`（`fix(i18n): add ask label to the Chinese session loader permission catalog`）重新打包并执行全量回归验证，未修改任何产品代码。
+
+### 1. 最终打包产物与 SHA-256（`task-4728`）
+
+执行命令：`CSC_IDENTITY_AUTO_DISCOVERY=false pnpm package:dir`（exit 0）。
+
+| 产物路径 | SHA-256 |
+| --- | --- |
+| `apps/desktop/release/mac-arm64/码头.app/Contents/MacOS/码头` | `221d5695ab9eb2263b9107e4a5bb3f5780adc35963530e322673d5535e8eeae5` |
+| `apps/desktop/release/mac-arm64/码头.app/Contents/Resources/app.asar` | `64f74b0d88022c9cb85b4f58acd52768c537fa189680db6e39148739ddda51fc` |
+| `apps/desktop/release/mac-arm64/码头.app/Contents/Resources/runtime/index.cjs` | `25d8c55512695aa1aa560d2d0c783bd635cbb85a5dc3edecc223fd0c23e9a62e` |
+| `apps/desktop/release/mac-arm64/码头.app/Contents/Resources/runtime/mt-cli.cjs` | `5dc1252919881527360dcc7c1cbb1587c78c437409b91601a94b1c6b892840e3` |
+| `apps/desktop/release/mac-arm64/码头.app/Contents/Resources/runtime/control-assets/bin/mt` | `859676985a2b233e8d6dc7744e7760c3e955b59c6a56932bfcdff3f12a87bc03` |
+| `apps/desktop/release/mac-arm64/码头.app/Contents/Resources/runtime/control-assets/providers/antigravity-system-message.md` | `c03b81fbc31e41d41bcf73cc2f715c6225e713fdf9058422a161e6bb4c9d62f6` |
+
+### 2. Antigravity E2E 完整实测（`task-4733`）
+
+- 命令：`MATOU_E2E_DISPLAY=primary pnpm exec playwright test tests/e2e/antigravity-acceptance.spec.ts --retries=1 --reporter=line`
+- 结果：**5 passed (5.3m)**，5 条用例全部**首轮零重试一次通过**：
+  1. `PRD #1 #3 #4 #5 #6 #11 #12: Real agy lifecycle, HUD, notifications, modes, and /model in packaged 码头.app`：**passed**（`core-lifecycle.json`：idle -> running `runtimeToUiMs: 0ms` / `endToEndMs: 746ms`，running -> idle `runtimeToUiMs: 2ms`，running -> needs-input `runtimeToUiMs: 3ms`）
+  2. `PRD #7 #9a + Latency (3x): Auto Title lock/restore, Restart recovery, and Running/Idle latency`：**passed**（`core-and-latency.json`：Running `runtimeToUiMs` 3 次均值 `2ms`、最大 `2ms`，触发到 UI 均值 `507.3ms`；Idle `runtimeToUiMs` 3 次均值 `2.7ms`、最大 `4ms`）
+  3. `PRD #2 #8 #10 + Running-Parent Fork: DAG/Badge/ParentProjection, Fork Current/Worktree/Running, SessionLoader`：**passed**
+  4. `PRD #13: mt cross-card control inside real Antigravity card`：**passed**
+  5. `PRD #9b #14: Controlled fixtures for missing binary, unauthenticated sign-in prompt, and restore failure`：**passed**
+
+### 3. Claude Code 4 份 E2E 回归对照（`task-4738`）
+
+- 命令：`MATOU_E2E_DISPLAY=primary pnpm exec playwright test tests/e2e/prd-01-agent-notifications.spec.ts tests/e2e/prd-02-bottom-hud.spec.ts tests/e2e/prd-06-session-fork.spec.ts tests/e2e/session-load-existing-claude.spec.ts --reporter=line`
+- 结果：**11 passed / 2 failed (1.1m)**，无任何新回归：
+
+| 用例文件 | 本次结果（`10120cd`） | `main`（`6132501`）已知基线 | 结论 |
+| --- | --- | --- | --- |
+| `tests/e2e/prd-01-agent-notifications.spec.ts` | **4/4 passed** | 全通过 | 无回归 |
+| `tests/e2e/prd-02-bottom-hud.spec.ts` | **3/3 passed** | 全通过 | 无回归 |
+| `tests/e2e/prd-06-session-fork.spec.ts` | **2/4 passed，2 failed**（line 187 / line 276） | line 187、line 276 既有失败 | 失败集合与 `main` 一致，无回归 |
+| `tests/e2e/session-load-existing-claude.spec.ts` | **2/2 passed** | line 157 既有失败 | 无回归（本次全部通过） |

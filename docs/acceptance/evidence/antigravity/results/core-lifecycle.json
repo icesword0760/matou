@@ -1,0 +1,45 @@
+{
+  "sessionId": "48bee003-2cfa-4f92-957e-80d4a3be4af1",
+  "providerSessionId": "49e6ba9e-6ca2-4f9e-a6a4-063d84573853",
+  "modelBefore": "Gemini 4 Carbon (Medium) (1M context)",
+  "modelAfter": "Gemini 4 Carbon (Medium) (1M context)",
+  "latencies": [
+    {
+      "transition": "idle -> running",
+      "triggerAtMs": 1794601718773,
+      "runtimeEventAtMs": 1794601725434,
+      "uiObservedAtMs": 1794601719519,
+      "runtimeToUiMs": 0,
+      "within1000ms": true,
+      "endToEndMs": 746
+    },
+    {
+      "transition": "running -> idle (Stop)",
+      "triggerAtMs": 1794601718773,
+      "runtimeEventAtMs": 1794601725383,
+      "uiObservedAtMs": 1794601725385,
+      "runtimeToUiMs": 2,
+      "within1000ms": true,
+      "endToEndMs": 6612
+    },
+    {
+      "transition": "running -> needs-input (tool_use)",
+      "triggerAtMs": 1794601731007,
+      "runtimeEventAtMs": 1794601743121,
+      "uiObservedAtMs": 1794601743124,
+      "runtimeToUiMs": 3,
+      "within1000ms": true,
+      "endToEndMs": 12117
+    }
+  ],
+  "dbBindingsAfter": [
+    {
+      "session_id": "48bee003-2cfa-4f92-957e-80d4a3be4af1",
+      "provider": "antigravity",
+      "provider_session_id": "49e6ba9e-6ca2-4f9e-a6a4-063d84573853",
+      "resume_state": "available",
+      "metadata_json": "{\"permissionMode\":\"bypassPermissions\",\"cwd\":\"/private/tmp/claude-501/-Users-icesword-Documents-AIProjects-matou/da0ac5f4-7b9e-4679-81d7-890907cb84cf/scratchpad/agy-e2e/core-Lm8Hr5/repo\",\"lastHookEvent\":\"unknown\",\"canFork\":true,\"observedUserPrompt\":true,\"model\":\"Gemini 4 Carbon (Medium)\",\"observedNormalStop\":true}",
+      "updated_at": 1794601776658
+    }
+  ]
+}
