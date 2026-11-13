@@ -197,6 +197,216 @@ describe('createEgressSampler', () => {
     expect(anthropicSample).toEqual({ host: 'api.anthropic.com', ip: '198.51.100.1', country: 'US' })
     expect(openaiSample).toEqual({ host: 'api.openai.com', ip: '203.0.113.2', country: 'US' })
   })
+
+  it('keeps real probing behavior when MATOU_E2E_EGRESS_FIXTURE is unset or MATOU_E2E is not 1', async () => {
+    const fixturePath = join(root, 'ignored-fixture.json')
+    await writeFile(fixturePath, JSON.stringify({
+      anthropic: {
+        api: { ip: '223.5.5.5', country: 'CN' },
+        login: { ip: '223.5.5.5', country: 'CN' }
+      },
+      openai: {
+        api: { ip: '223.5.5.5', country: 'CN' },
+        login: { ip: '223.5.5.5', country: 'CN' }
+      },
+      browserLogin: null,
+      systemProxyEnabled: false,
+      tunDetected: true,
+      ipv6Bypass: false
+    }))
+
+    const probeTrace = vi.fn(async (host: string): Promise<EgressHostSample> => ({
+      host,
+      ip: '169.128.10.1',
+      country: 'US'
+    }))
+
+    for (const baseEnv of [
+      {},
+      { MATOU_E2E: '0', MATOU_E2E_EGRESS_FIXTURE: fixturePath },
+      { MATOU_E2E_EGRESS_FIXTURE: fixturePath }
+    ]) {
+      probeTrace.mockClear()
+      const sampler = createEgressSampler({
+        baseEnv,
+        claudeUserSettingsPath: join(root, 'missing.json'),
+        agentTimeZoneMainland: () => false,
+        probeTrace,
+        readSystemProxy: async () => undefined,
+        networkInterfaces: () => ({}),
+        canReachIpv6Directly: async () => false
+      })
+
+      const full = await sampler.sampleFull()
+      const light = await sampler.sampleLight('anthropic')
+
+      expect(probeTrace).toHaveBeenCalledTimes(5)
+      expect(full.hosts.anthropic.api).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
+      expect(light).toEqual({ host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' })
+    }
+  })
+
+  it('reads MATOU_E2E_EGRESS_FIXTURE on every call without probing when MATOU_E2E=1', async () => {
+    const fixturePath = join(root, 'egress-fixture.json')
+    const settingsPath = join(root, 'settings.json')
+    await writeFile(settingsPath, JSON.stringify({
+      env: { HTTPS_PROXY: 'http://127.0.0.1:7890' }
+    }))
+    await writeFile(fixturePath, JSON.stringify({
+      anthropic: {
+        api: { ip: '169.128.10.1', country: 'US' },
+        login: { ip: '169.128.10.1', country: 'US' }
+      },
+      openai: {
+        api: { ip: '169.128.10.1', country: 'US' },
+        login: { ip: '169.128.10.1', country: 'US' }
+      },
+      browserLogin: null,
+      systemProxyEnabled: false,
+      tunDetected: true,
+      ipv6Bypass: false
+    }))
+
+    let mainlandTz = false
+    const probeTrace = vi.fn()
+    const readSystemProxy = vi.fn()
+    const networkInterfaces = vi.fn()
+    const canReachIpv6Directly = vi.fn()
+
+    const sampler = createEgressSampler({
+      baseEnv: { MATOU_E2E: '1', MATOU_E2E_EGRESS_FIXTURE: fixturePath },
+      claudeUserSettingsPath: settingsPath,
+      agentTimeZoneMainland: () => mainlandTz,
+      probeTrace,
+      readSystemProxy,
+      networkInterfaces,
+      canReachIpv6Directly
+    })
+
+    const initial = await sampler.sampleFull()
+    expect(initial).toEqual({
+      hosts: {
+        anthropic: {
+          api: { host: 'api.anthropic.com', ip: '169.128.10.1', country: 'US' },
+          login: { host: 'claude.ai', ip: '169.128.10.1', country: 'US' }
+        },
+        openai: {
+          api: { host: 'api.openai.com', ip: '169.128.10.1', country: 'US' },
+          login: { host: 'chatgpt.com', ip: '169.128.10.1', country: 'US' }
+        }
+      },
+      agentHasProxyEnv: true,
+      systemProxyEnabled: false,
+      tunDetected: true,
+      ipv6Bypass: false,
+      agentTimeZoneMainland: false
+    })
+    expect(await sampler.sampleLight('anthropic')).toEqual({
+      host: 'api.anthropic.com',
+      ip: '169.128.10.1',
+      country: 'US'
+    })
+
+    mainlandTz = true
+    await writeFile(fixturePath, JSON.stringify({
+      anthropic: {
+        api: { ip: '223.5.5.5', country: 'CN' },
+        login: { error: 'timeout' }
+      },
+      openai: {
+        api: { ip: '169.128.10.2', country: 'JP' },
+        login: { ip: '169.128.10.2', country: 'JP' }
+      },
+      browserLogin: { ip: '198.51.100.7', country: 'SG' },
+      systemProxyEnabled: true,
+      tunDetected: false,
+      ipv6Bypass: true
+    }))
+
+    const updated = await sampler.sampleFull()
+    expect(updated).toEqual({
+      hosts: {
+        anthropic: {
+          api: { host: 'api.anthropic.com', ip: '223.5.5.5', country: 'CN' },
+          login: { host: 'claude.ai', error: 'timeout' }
+        },
+        openai: {
+          api: { host: 'api.openai.com', ip: '169.128.10.2', country: 'JP' },
+          login: { host: 'chatgpt.com', ip: '169.128.10.2', country: 'JP' }
+        }
+      },
+      browserLogin: { host: 'claude.ai', ip: '198.51.100.7', country: 'SG' },
+      agentHasProxyEnv: true,
+      systemProxyEnabled: true,
+      tunDetected: false,
+      ipv6Bypass: true,
+      agentTimeZoneMainland: true
+    })
+    expect(await sampler.sampleLight('anthropic')).toEqual({
+      host: 'api.anthropic.com',
+      ip: '223.5.5.5',
+      country: 'CN'
+    })
+    expect(probeTrace).not.toHaveBeenCalled()
+    expect(readSystemProxy).not.toHaveBeenCalled()
+    expect(networkInterfaces).not.toHaveBeenCalled()
+    expect(canReachIpv6Directly).not.toHaveBeenCalled()
+  })
+
+  it('returns timeout for all hosts when MATOU_E2E_EGRESS_FIXTURE is missing or invalid JSON', async () => {
+    const missingPath = join(root, 'does-not-exist.json')
+    const missingSampler = createEgressSampler({
+      baseEnv: { MATOU_E2E: '1', MATOU_E2E_EGRESS_FIXTURE: missingPath },
+      claudeUserSettingsPath: join(root, 'missing-settings.json'),
+      agentTimeZoneMainland: () => false
+    })
+
+    const missingFull = await missingSampler.sampleFull()
+    expect(missingFull).toEqual({
+      hosts: {
+        anthropic: {
+          api: { host: 'api.anthropic.com', error: 'timeout' },
+          login: { host: 'claude.ai', error: 'timeout' }
+        },
+        openai: {
+          api: { host: 'api.openai.com', error: 'timeout' },
+          login: { host: 'chatgpt.com', error: 'timeout' }
+        }
+      },
+      agentHasProxyEnv: false,
+      systemProxyEnabled: false,
+      tunDetected: false,
+      ipv6Bypass: false,
+      agentTimeZoneMainland: false
+    })
+    expect(await missingSampler.sampleLight('openai')).toEqual({
+      host: 'api.openai.com',
+      error: 'timeout'
+    })
+
+    const invalidPath = join(root, 'invalid-fixture.json')
+    await writeFile(invalidPath, '{broken json')
+    const invalidSampler = createEgressSampler({
+      baseEnv: { MATOU_E2E: '1', MATOU_E2E_EGRESS_FIXTURE: invalidPath },
+      claudeUserSettingsPath: join(root, 'missing-settings.json'),
+      agentTimeZoneMainland: () => false
+    })
+
+    expect((await invalidSampler.sampleFull()).hosts).toEqual({
+      anthropic: {
+        api: { host: 'api.anthropic.com', error: 'timeout' },
+        login: { host: 'claude.ai', error: 'timeout' }
+      },
+      openai: {
+        api: { host: 'api.openai.com', error: 'timeout' },
+        login: { host: 'chatgpt.com', error: 'timeout' }
+      }
+    })
+    expect(await invalidSampler.sampleLight('anthropic')).toEqual({
+      host: 'api.anthropic.com',
+      error: 'timeout'
+    })
+  })
 })
 
 function ipv4Info(address: string, netmask: string, internal: boolean): NetworkInterfaceInfo {
