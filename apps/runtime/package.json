@@ -15,7 +15,9 @@
     "@matou/domain": "workspace:*",
     "@xterm/addon-serialize": "0.14.0",
     "@xterm/headless": "6.0.0",
+    "https-proxy-agent": "7.0.6",
     "node-pty": "1.1.0",
+    "socks-proxy-agent": "8.0.5",
     "zod": "4.4.3"
   }
 }
