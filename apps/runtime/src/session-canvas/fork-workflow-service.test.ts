@@ -982,6 +982,31 @@ describe('ForkWorkflowService', () => {
     )).toEqual({ state: 'failed' })
     await expect(realpath(retainedPath)).resolves.toBe(retainedPath)
   })
+
+  it('requires a completed turn before allowing Antigravity fork and records antigravity source_provider', async () => {
+    const source = bootstrapProvider('antigravity', 'agy-parent-1', {
+      permissionMode: 'default', canFork: false
+    })
+    await expect(service.createForkChild(command('agy-fork-blocked'), {
+      windowId: 'window-1', sceneId: source.sceneId, sourceSessionId: source.sessionId,
+      name: 'Blocked Agy Child', worktreeMode: 'current', now: 30
+    })).rejects.toMatchObject({ code: 'FORK_SOURCE_NOT_READY' })
+
+    const ready = bootstrapProvider('antigravity', 'agy-parent-ready', {
+      permissionMode: 'acceptEdits', observedUserPrompt: true, observedNormalStop: true, canFork: true
+    })
+    const created = await service.createForkChild(command('agy-fork-ok'), {
+      windowId: 'window-1', sceneId: ready.sceneId, sourceSessionId: ready.sessionId,
+      name: 'Agy Child', worktreeMode: 'current', now: 35
+    })
+    expect(database.get<{ source_provider: string; source_provider_session_id: string }>(
+      'SELECT source_provider, source_provider_session_id FROM session_fork_intents WHERE session_id = ?',
+      created.session!.id
+    )).toEqual({
+      source_provider: 'antigravity',
+      source_provider_session_id: 'agy-parent-ready'
+    })
+  })
 })
 
 function bootstrapShell() {
@@ -1003,14 +1028,14 @@ function bootstrapClaude(providerSessionId: string) {
 }
 
 function bootstrapProvider(
-  profile: 'claude-code' | 'codex',
+  profile: 'claude-code' | 'codex' | 'antigravity',
   providerSessionId: string,
   settings: Record<string, unknown> = {}
 ) {
   const result = bootstrapShell()
   database.run(
     'UPDATE sessions SET kind = ?, title = ? WHERE id = ?',
-    profile, profile === 'claude-code' ? 'Claude' : 'Codex', result.sessionId
+    profile, profile === 'claude-code' ? 'Claude' : profile === 'codex' ? 'Codex' : 'Antigravity', result.sessionId
   )
   seedProviderBinding(result.sessionId, profile, providerSessionId, {
     canFork: true,
@@ -1028,7 +1053,7 @@ function seedClaudeBinding(sessionId: string, providerSessionId: string, canFork
 
 function seedProviderBinding(
   sessionId: string,
-  provider: 'claude-code' | 'codex',
+  provider: 'claude-code' | 'codex' | 'antigravity',
   providerSessionId: string,
   metadata: Record<string, unknown>,
   now: number

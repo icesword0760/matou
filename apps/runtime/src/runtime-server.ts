@@ -156,6 +156,7 @@ export interface RuntimeServerOptions {
   providerResumeTimeoutMs?: number
   forkProviderIdentityTimeoutMs?: number
   antigravityPermissionSwitchTimeoutMs?: number
+  antigravityForkNewIdTimeoutMs?: number
   antigravityPluginInstaller?: AntigravityPluginInstaller
   hudRegistry?: SessionHudRegistry
   accessPolicy?: RuntimeAccessPolicy
@@ -175,6 +176,7 @@ const CATCH_UP_REPLAY_MAX_BYTES = 256 * 1024
 const MAX_PENDING_PROVIDER_DERIVATION_BYTES = 1024 * 1024
 const DEFAULT_PROVIDER_RESUME_TIMEOUT_MS = 10_000
 const DEFAULT_FORK_PROVIDER_IDENTITY_TIMEOUT_MS = 60_000
+const DEFAULT_ANTIGRAVITY_FORK_NEW_ID_TIMEOUT_MS = 30_000
 const CLAUDE_NEXT_OPTION = '\u001b[B'
 const CLAUDE_CONFIRM_OPTION = '\r'
 const CLAUDE_WORKSPACE_TRUST_SELECTION_DELAY_MS = 500
@@ -362,7 +364,15 @@ export class RuntimeServer {
   readonly #providerResumeTimeoutMs: number
   readonly #forkProviderIdentityTimeoutMs: number
   readonly #antigravityPermissionSwitchTimeoutMs: number
+  readonly #antigravityForkNewIdTimeoutMs: number
   readonly #antigravityPluginInstaller: AntigravityPluginInstaller
+  readonly #pendingAntigravityForkRuns = new Map<string, {
+    runId: string
+    message: TerminalSpawnMessage
+    session: PtySession
+    authority?: ForkExecutionAuthority
+    slashSent: boolean
+  }>()
   #portClosed = false
   readonly #hud: SessionHudRegistry
   readonly #control:
@@ -495,6 +505,10 @@ export class RuntimeServer {
       options.antigravityPermissionSwitchTimeoutMs,
       3_000
     )
+    this.#antigravityForkNewIdTimeoutMs = positiveTimeout(
+      options.antigravityForkNewIdTimeoutMs,
+      DEFAULT_ANTIGRAVITY_FORK_NEW_ID_TIMEOUT_MS
+    )
     this.#antigravityPluginInstaller = options.antigravityPluginInstaller ??
       new AntigravityPluginInstaller()
     this.#workspacePaths = workspacePaths
@@ -610,6 +624,8 @@ export class RuntimeServer {
     const launchMatches = this.#providerLaunchRunIds.get(sessionId) === runId ||
       this.#sessions.get(sessionId)?.runId === runId
     if (!launchMatches) return
+    const pendingFork = this.#pendingAntigravityForkRuns.get(sessionId)
+    if (pendingFork?.runId === runId) this.#pendingAntigravityForkRuns.delete(sessionId)
     this.#confirmProviderDerivedOutput(sessionId, runId)
     if (this.#providerResumeTimers.has(sessionId)) {
       this.#clearProviderResumeTimer(sessionId)
@@ -618,6 +634,28 @@ export class RuntimeServer {
       return
     }
     this.#settleProviderRecovery(sessionId)
+  }
+
+  antigravityForkSlashTargetReady(event: {
+    runId: string
+    sessionId: string
+  }): void {
+    const pending = this.#pendingAntigravityForkRuns.get(event.sessionId)
+    if (!pending || pending.runId !== event.runId || pending.slashSent) return
+    if (this.#sessions.get(event.sessionId) !== pending.session) return
+    if (this.#sessions.providerIdentityConfirmed(event.runId)) return
+    pending.slashSent = true
+    try {
+      pending.session.write('/fork\r')
+    } catch {
+      return
+    }
+    this.#scheduleForkProviderIdentityTimeout(
+      pending.message,
+      pending.session,
+      pending.authority,
+      Math.min(this.#forkProviderIdentityTimeoutMs, this.#antigravityForkNewIdTimeoutMs)
+    )
   }
 
   providerIdentityMismatch(event: ProviderIdentityMismatch): void {
@@ -708,6 +746,7 @@ export class RuntimeServer {
     this.#providerResumeTimers.clear()
     this.#closeAllHudFileWatchers()
     this.#providerLaunchRunIds.clear()
+    this.#pendingAntigravityForkRuns.clear()
     this.#providerIdentityMismatches.clear()
     this.#rejectAllProviderRecoveries(
       new Error('Runtime connection closed during provider recovery')
@@ -2065,6 +2104,11 @@ export class RuntimeServer {
               ? await this.#providerHooks.registerAntigravitySession({
                   ...providerHookInput,
                   acceptStatuslineIdentity: providerSessionId !== undefined || supersedesRestoreFailure,
+                  ...(forkLaunch !== undefined &&
+                    getAgentManifest(message.profile)?.events.forkIdentityRule ===
+                      'differs-from-parent-after-slash-fork'
+                    ? { forkSourceProviderSessionId: forkLaunch.sourceProviderSessionId }
+                    : {}),
                   ...(antigravitySystemMessage ? { systemMessageMarkdown: antigravitySystemMessage } : {})
                 })
               : undefined
@@ -2315,6 +2359,10 @@ export class RuntimeServer {
             this.#workStatusTrackers.delete(message.sessionId)
             this.#permissionModeTrackers.delete(message.sessionId)
           }
+          const pendingFork = this.#pendingAntigravityForkRuns.get(message.sessionId)
+          if (pendingFork && (!exited.runId || pendingFork.runId === exited.runId)) {
+            this.#pendingAntigravityForkRuns.delete(message.sessionId)
+          }
           if (exited.runId) {
             try {
               this.#sessionRepository.finishRun(
@@ -2400,6 +2448,15 @@ export class RuntimeServer {
         }
       }
       this.#sessions.set(session)
+      if (message.profile === 'antigravity' && forkLaunch !== undefined && runId !== undefined) {
+        this.#pendingAntigravityForkRuns.set(message.sessionId, {
+          runId,
+          message,
+          session,
+          ...(forkAuthority === undefined ? {} : { authority: forkAuthority }),
+          slashSent: false
+        })
+      }
       this.#permissionOverrides.delete(message.sessionId)
       this.#spawnDescriptors.set(message.sessionId, message)
       activeSession = session
@@ -2430,8 +2487,15 @@ export class RuntimeServer {
         this.#beginForkFailure(message, session, pendingResumeFailure, forkAuthority)
       } else if (pendingResumeFailure && resumeBinding) {
         this.#parkResumeFailure(message, session, resumeBinding.id, pendingResumeFailure)
-      } else if (forkLaunch && forkAuthority) {
-        this.#scheduleForkProviderIdentityTimeout(message, session, forkAuthority)
+      } else if (forkLaunch && (forkAuthority || message.profile === 'antigravity')) {
+        this.#scheduleForkProviderIdentityTimeout(
+          message,
+          session,
+          forkAuthority,
+          message.profile === 'antigravity'
+            ? Math.min(this.#forkProviderIdentityTimeoutMs, this.#antigravityForkNewIdTimeoutMs)
+            : undefined
+        )
       } else if (resumeMonitor && resumeBinding) {
         this.#scheduleProviderResumeTimeout(message, session, resumeBinding.id, resumeMonitor)
       }
@@ -2468,6 +2532,8 @@ export class RuntimeServer {
     authority?: ForkExecutionAuthority
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
+    const pendingFork = this.#pendingAntigravityForkRuns.get(message.sessionId)
+    if (pendingFork?.session === session) this.#pendingAntigravityForkRuns.delete(message.sessionId)
     this.#rejectProviderDerivedOutput(message.sessionId, session.runId)
     this.#clearProviderResumeTimer(message.sessionId)
     if (!this.#failFork(message.sessionId, reason, authority)) {
@@ -2637,6 +2703,8 @@ export class RuntimeServer {
     reason: string
   ): void {
     if (this.#sessions.get(message.sessionId) !== session) return
+    const pendingFork = this.#pendingAntigravityForkRuns.get(message.sessionId)
+    if (pendingFork?.session === session) this.#pendingAntigravityForkRuns.delete(message.sessionId)
     this.#rejectProviderDerivedOutput(message.sessionId, session.runId)
     this.#clearProviderResumeTimer(message.sessionId)
     this.#settleProviderRecovery(message.sessionId, new Error(reason))
@@ -2706,7 +2774,8 @@ export class RuntimeServer {
   #scheduleForkProviderIdentityTimeout(
     message: Extract<RendererMessage, { type: 'terminal.spawn' }>,
     session: PtySession,
-    authority: ForkExecutionAuthority
+    authority?: ForkExecutionAuthority,
+    timeoutMs: number = this.#forkProviderIdentityTimeoutMs
   ): void {
     if (this.#consumeProviderIdentityConfirmation(message.sessionId, session.runId)) return
     this.#clearProviderResumeTimer(message.sessionId)
@@ -2720,7 +2789,7 @@ export class RuntimeServer {
         authority
       )
       this.flushSemanticEvents()
-    }, this.#forkProviderIdentityTimeoutMs))
+    }, timeoutMs))
   }
 
   #clearProviderResumeTimer(sessionId: string): void {
@@ -3112,6 +3181,7 @@ export class RuntimeServer {
       new Error('Session was removed from the product structure')
     )
     this.#forgetProviderLaunch(sessionId, session?.runId)
+    this.#pendingAntigravityForkRuns.delete(sessionId)
     this.#endedSessionIds.delete(sessionId)
     this.#completedReplayThrough.delete(sessionId)
     this.#replayRequestGenerations.delete(sessionId)

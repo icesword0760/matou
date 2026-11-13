@@ -867,6 +867,89 @@ describe('ProviderHookServer', () => {
       await agyHooks.stop()
     }
   })
+
+  it('holds Antigravity fork identity until statusline/hook reports a conversation ID different from parent', async () => {
+    sessions.createSession(command('agy-fork-source'), {
+      id: 'agy-fork-source', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'antigravity', title: 'Antigravity', now: 2
+    })
+    sessions.createSession(command('agy-fork-child'), {
+      id: 'agy-fork-child', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'antigravity', title: 'Agy Child', now: 2
+    })
+    const intents = new SessionForkIntentRepository(database)
+    const now = Date.now()
+    intents.accept({
+      operationId: 'agy-op', submissionKey: 'agy-sub',
+      sessionId: 'agy-fork-child', sourceSessionId: 'agy-fork-source',
+      sourceProvider: 'antigravity', sourceProviderSessionId: 'agy-parent-id',
+      permissionMode: 'default', displayName: 'Agy Child',
+      worktreeMode: 'current', totalSteps: 2, now
+    })
+    const acquired = intents.acquireLease({
+      operationId: 'agy-op', owner: 'runtime', now, ttlMs: 60_000
+    })
+    if (acquired.kind !== 'acquired') throw new Error('Antigravity fork lease missing')
+    intents.advanceStage({
+      operationId: 'agy-op', lease: acquired.lease, stage: 'restoring-provider', now
+    })
+
+    const slashReadyEvents: Array<{ sessionId: string; runId: string; parentProviderSessionId: string }> = []
+    const recordedIdentities: Array<{ sessionId: string; providerSessionId: string }> = []
+    const agyHooks = new ProviderHookServer(root, sessions, {
+      onForkSlashTargetReady: (event) => { slashReadyEvents.push(event) },
+      onIdentityRecorded: (event) => {
+        recordedIdentities.push({ sessionId: event.sessionId, providerSessionId: event.providerSessionId })
+      }
+    })
+    await agyHooks.start()
+    try {
+      const reg = await agyHooks.registerAntigravitySession({
+        runId: 'agy-fork-run', sessionId: 'agy-fork-child',
+        inheritedConversation: true,
+        forkSourceProviderSessionId: 'agy-parent-id',
+        forkAuthority: {
+          operationId: 'agy-op', runId: 'agy-fork-run', lease: acquired.lease
+        }
+      })
+
+      // 1. Authenticating / empty ID / parent ID working must NOT accept identity or fire slash-fork.
+      await postHook(`${reg.hookUrl}?kind=statusline`, { conversation_id: '', agent_state: 'authenticating' })
+      await postHook(`${reg.hookUrl}?kind=statusline`, { conversation_id: 'agy-parent-id', agent_state: 'working' })
+      expect(slashReadyEvents).toEqual([])
+      expect(recordedIdentities).toEqual([])
+      expect(database.get<{ stage: string }>(
+        'SELECT stage FROM session_fork_intents WHERE operation_id = ?', 'agy-op'
+      )?.stage).toBe('restoring-provider')
+
+      // 2. Idle on parent ID triggers slash-fork ready, still holds child identity until new ID arrives.
+      await postHook(`${reg.hookUrl}?kind=statusline`, { conversation_id: 'agy-parent-id', agent_state: 'idle' })
+      expect(slashReadyEvents).toEqual([{
+        runId: 'agy-fork-run', sessionId: 'agy-fork-child',
+        provider: 'antigravity', parentProviderSessionId: 'agy-parent-id'
+      }])
+      expect(recordedIdentities).toEqual([])
+      expect(sessions.getResumeBinding('agy-fork-child', 'antigravity')).toBeUndefined()
+
+      // 3. New conversation ID !== parent ID confirms child identity and completes fork intent.
+      await postHook(`${reg.hookUrl}?kind=statusline`, { conversation_id: 'agy-child-id', agent_state: 'idle' })
+      expect(recordedIdentities).toEqual([{ sessionId: 'agy-fork-child', providerSessionId: 'agy-child-id' }])
+      expect(sessions.getResumeBinding('agy-fork-child', 'antigravity')).toMatchObject({
+        providerSessionId: 'agy-child-id',
+        resumeState: 'available'
+      })
+      expect(database.get<{ stage: string }>(
+        'SELECT stage FROM session_fork_intents WHERE operation_id = ?', 'agy-op'
+      )?.stage).toBe('succeeded')
+
+      // 4. Stale/delayed statusline on parent ID after switch cannot revert child identity.
+      await postHook(`${reg.hookUrl}?kind=statusline`, { conversation_id: 'agy-parent-id', agent_state: 'idle' })
+      expect(slashReadyEvents).toHaveLength(1)
+      expect(sessions.getResumeBinding('agy-fork-child', 'antigravity')?.providerSessionId).toBe('agy-child-id')
+    } finally {
+      await agyHooks.stop()
+    }
+  })
 })
 
 function command(commandId: string) {

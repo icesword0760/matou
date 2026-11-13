@@ -1004,6 +1004,7 @@ export class ForkWorkflowService {
         submissionKey,
         sessionId: ids.sessionId,
         sourceSessionId: source.forkSource.id,
+        sourceProvider: providerContext.profile,
         sourceProviderSessionId: source.binding.provider_session_id,
         permissionMode: permissionModeFromBinding(source.binding),
         displayName,

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,14 +9,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { PROTOCOL_VERSION, type RuntimeMessage } from '@matou/contracts'
 import { AntigravityPluginInstaller } from './agents/antigravity-plugin-installer'
 import { SessionRepository } from './domain/session-repository'
+import { HierarchyApplicationService } from './hierarchy/hierarchy-application-service'
 import { AgentNotificationRepository } from './notifications/agent-notification-repository'
 import { RuntimeServer, type PortMessageEvent, type RuntimePort } from './runtime-server'
+import { ForkOperationCoordinator } from './session-canvas/fork-operation-coordinator'
+import { ForkWorkflowService } from './session-canvas/fork-workflow-service'
 import { SessionCanvasService } from './session-canvas/session-canvas-service'
 import { ProviderModeService } from './session-canvas/provider-mode-service'
 import { SessionWorkStatusService } from './session-canvas/session-work-status-service'
 import { ProviderHookServer } from './session/provider-hook-server'
 import { createProviderHudPayloadHandler } from './session/provider-hud-payload-handler'
 import { RuntimeSessionRegistry } from './session/runtime-session-registry'
+import { SessionForkIntentRepository } from './session/session-fork-intent-repository'
 import { SessionHudRegistry } from './session/session-hud-registry'
 import { RuntimeDatabase } from './storage/database'
 import { DomainTransactionManager } from './storage/domain-transaction'
@@ -35,6 +39,9 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
   let previousIgnoreShiftTab: string | undefined
   let pluginDir: string
   let launchLogPath: string
+  let forkCoordinator: ForkOperationCoordinator | undefined
+  let sessionRepository: SessionRepository
+  let providerModes: ProviderModeService
   let workStatuses: SessionWorkStatusService
   let notifications: AgentNotificationRepository
 
@@ -47,8 +54,8 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     seedWorkspace(database, root)
 
     const transactions = new DomainTransactionManager(database)
-    const sessionRepository = new SessionRepository(database, transactions)
-    const providerModes = new ProviderModeService(database, transactions)
+    sessionRepository = new SessionRepository(database, transactions)
+    providerModes = new ProviderModeService(database, transactions)
     workStatuses = new SessionWorkStatusService(database, transactions)
     notifications = new AgentNotificationRepository(database, transactions)
     sessions = new RuntimeSessionRegistry()
@@ -83,7 +90,7 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
         }, { ...notification, eventId: `ev-${now}`, now })
       },
       onHudPayload: onProviderHudPayload,
-      onIdentityRecorded: ({ sessionId, runId, provider, providerSessionId, eventName }) => {
+      onIdentityRecorded: ({ sessionId, runId, provider, providerSessionId, eventName, forkAuthority }) => {
         hud.markResumable(sessionId)
         providerModes.observeHook({
           commandId: `mode-${runId}-${eventName}`,
@@ -92,6 +99,16 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
         }, { sessionId, providerSessionId, eventName, provider, now: Date.now() })
         server.providerIdentityRecorded(sessionId, runId)
         server.flushSemanticEvents()
+        if (forkAuthority) {
+          void forkCoordinator?.confirmAuthoritativeIdentity(
+            sessionId,
+            providerSessionId,
+            forkAuthority.operationId
+          )
+        }
+      },
+      onForkSlashTargetReady: ({ sessionId, runId }) => {
+        server?.antigravityForkSlashTargetReady({ sessionId, runId })
       }
     })
     await hookServer.start()
@@ -110,12 +127,14 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     server = new RuntimeServer(port, root, database, undefined, undefined, sessions, hookServer, undefined, {
       hudRegistry: hud,
       antigravityPluginInstaller: new AntigravityPluginInstaller(pluginDir),
-      antigravityPermissionSwitchTimeoutMs: 600
+      antigravityPermissionSwitchTimeoutMs: 600,
+      antigravityForkNewIdTimeoutMs: 1_200
     })
     port.receive({ type: 'protocol.hello', protocolVersion: PROTOCOL_VERSION, clientId: 'renderer-agy' })
   })
 
   afterEach(async () => {
+    forkCoordinator?.stop()
     server.close()
     await sessions.shutdownAll()
     await hookServer.stop()
@@ -240,6 +259,117 @@ describe('Antigravity RuntimeServer integration (mocked agy)', () => {
     await waitUntil(() => port.last('protocol.error') !== undefined)
     expect(port.last('protocol.error')?.message).toContain('Antigravity')
   })
+
+  it('forks Antigravity via --conversation + idempotent /fork, preserves parent state, and fails/retries cleanly on timeout', async () => {
+    const transactions = new DomainTransactionManager(database)
+    const hierarchy = new HierarchyApplicationService(database, transactions)
+    const forkWs = join(root, 'fork-ws')
+    await mkdir(forkWs, { recursive: true })
+    const bootstrapped = hierarchy.createWorkspace(
+      { commandId: 'cmd-boot', commandType: 'hierarchy.create-workspace', requestHash: 'boot-agy' },
+      { windowId: 'win-agy', rootDirectory: forkWs, name: 'ForkWS', now: 1 }
+    )
+    const parentId = bootstrapped.created!.session!.id
+    const sceneId = bootstrapped.created!.scene!.id
+    const executionContextId = bootstrapped.created!.session!.executionContextId
+
+    // Promote parent to Antigravity and start live parent PTY.
+    database.run(`UPDATE sessions SET kind = 'antigravity', title = 'Antigravity' WHERE id = ?`, parentId)
+    port.receive({
+      type: 'terminal.spawn', protocolVersion: PROTOCOL_VERSION,
+      sessionId: parentId, executionContextId,
+      profile: 'antigravity', cols: 100, rows: 30
+    })
+    await waitUntil(() => hud.snapshot(parentId)?.model === 'Gemini 4 Carbon (Medium)')
+
+    const forkWorkflow = new ForkWorkflowService(root, database, transactions, {
+      stopRuns: async () => undefined
+    })
+    // Before 1 completed turn, fork must be blocked.
+    expect(providerModes.canFork(parentId)).toBe(false)
+    await expect(forkWorkflow.createForkChild(
+      { commandId: 'cmd-fork-blocked', commandType: 'session.fork', requestHash: 'blocked' },
+      { windowId: 'win-agy', sceneId, sourceSessionId: parentId, name: 'Early Child', worktreeMode: 'current', now: 2 }
+    )).rejects.toMatchObject({ code: 'FORK_SOURCE_NOT_READY' })
+
+    // Complete 1 turn on parent via PreInvocation + Stop hook payloads.
+    const hookUrl = (await readLaunches(launchLogPath))[0]!.env.MATOU_PROVIDER_HOOK_URL!
+    await fetch(hookUrl, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hookEventName: 'PreInvocation', conversationId: 'agy-conv-1' })
+    })
+    await fetch(hookUrl, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hookEventName: 'Stop', conversationId: 'agy-conv-1' })
+    })
+    expect(providerModes.canFork(parentId)).toBe(true)
+
+    const intents = new SessionForkIntentRepository(database)
+    const forkNotifications: unknown[] = []
+    forkCoordinator = new ForkOperationCoordinator(intents, {
+      ownerId: 'runtime-test',
+      heartbeatMs: 50,
+      executeFork: (command, input) => forkWorkflow.executeFork(command, input),
+      startOrResume: async (sessionId, authority) => {
+        const row = database.get<{ execution_context_id: string; kind: 'antigravity' }>(
+          'SELECT execution_context_id, kind FROM sessions WHERE id = ?',
+          sessionId
+        )!
+        return server.startOrResumeSession({
+          sessionId,
+          executionContextId: row.execution_context_id,
+          profile: row.kind,
+          cols: 100,
+          rows: 30
+        }, authority)
+      },
+      notify: (notification) => { forkNotifications.push(notification) }
+    })
+    forkCoordinator.start()
+
+    const forked = await forkWorkflow.createForkChild(
+      { commandId: 'cmd-fork-1', commandType: 'session.fork', requestHash: 'fork-1' },
+      { windowId: 'win-agy', sceneId, sourceSessionId: parentId, name: 'Agy Branch', worktreeMode: 'current', now: 10 }
+    )
+    const childId = forked.session!.id
+
+    await waitUntil(() => sessionRepository.getResumeBinding(childId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
+    await waitUntil(() => forkNotifications.length >= 1, 6_000)
+
+    const launches = await readLaunches(launchLogPath)
+    const childLaunch = launches.find((item) => item.args.includes('--conversation'))!
+    expect(childLaunch.args).toEqual(expect.arrayContaining(['--conversation', 'agy-conv-1']))
+    expect(childLaunch.args).not.toContain('--fork-session')
+
+    // /fork\r must have been sent idempotently ONCE despite authenticating + duplicate idle ticks.
+    const forkInputs = await readFile(join(root, 'fork-commands.log'), 'utf8')
+    expect(forkInputs.trim().split('\n')).toHaveLength(1)
+
+    // Parent binding, HUD and status must remain completely intact.
+    expect(sessionRepository.getResumeBinding(parentId, 'antigravity')?.providerSessionId).toBe('agy-conv-1')
+    expect(workStatuses.get(parentId)).toBe('idle')
+    expect(hud.snapshot(parentId)).toMatchObject({
+      provider: 'antigravity',
+      model: 'Gemini 4 Carbon (Medium)',
+      permissionMode: 'default'
+    })
+
+    // Failure & Retry: when /fork never switches ID within timeout, enters failed state; retry recovers cleanly.
+    await writeFile(join(root, 'ignore-slash-fork'), '1', 'utf8')
+    const failedCreate = await forkWorkflow.createForkChild(
+      { commandId: 'cmd-fork-fail', commandType: 'session.fork', requestHash: 'fork-fail' },
+      { windowId: 'win-agy', sceneId, sourceSessionId: parentId, name: 'Timeout Branch', worktreeMode: 'current', now: 20 }
+    )
+    const failedChildId = failedCreate.session!.id
+    await waitUntil(() => intents.state(failedChildId) === 'failed', 6_000)
+
+    await rm(join(root, 'ignore-slash-fork'), { force: true })
+    await forkWorkflow.retryFork(
+      { commandId: 'cmd-fork-retry', commandType: 'session.fork-retry', requestHash: 'fork-retry' },
+      { windowId: 'win-agy', sceneId, sessionId: failedChildId, now: 30 }
+    )
+    await waitUntil(() => sessionRepository.getResumeBinding(failedChildId, 'antigravity')?.providerSessionId === 'agy-forked-child-1', 6_000)
+  }, 20_000)
 })
 
 const MOCK_AGY_SCRIPT = `
@@ -260,6 +390,14 @@ else {
   if (idx >= 0) initialMode = argv[idx + 1];
 }
 
+let conversationId = 'agy-conv-1';
+let forkedMode = false;
+const convIdx = argv.indexOf('--conversation');
+if (convIdx >= 0 && argv[convIdx + 1]) {
+  conversationId = argv[convIdx + 1];
+  forkedMode = true;
+}
+
 fs.appendFileSync(logPath, JSON.stringify({
   args: argv,
   env: {
@@ -275,11 +413,11 @@ if (settingsPath && fs.existsSync(settingsPath)) {
   } catch {}
 }
 
-function sendStatus(cycleMode) {
+function sendStatus(cycleMode, agentState = 'idle', conv = conversationId) {
   if (!statusCmd) return;
   const payload = {
-    conversation_id: 'agy-conv-1',
-    agent_state: 'idle',
+    conversation_id: conv,
+    agent_state: agentState,
     ...(cycleMode === undefined ? {} : { cycle_mode: cycleMode }),
     model: { id: 'Gemini 4 Carbon (Medium)', display_name: 'Gemini 4 Carbon (Medium)', effort: 'medium' },
     context_window: { context_window_size: 1048576, used_percentage: 12 },
@@ -288,19 +426,38 @@ function sendStatus(cycleMode) {
   spawnSync(statusCmd, [], { input: JSON.stringify(payload), encoding: 'utf8' });
 }
 
-sendStatus(initialMode);
-
 const cycleOrder = ['auto', 'plan', null, 'accept-edits'];
 let cycleIndex = Math.max(0, cycleOrder.indexOf(initialMode ?? 'auto'));
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
+let inputBuffer = '';
 process.stdin.on('data', (chunk) => {
+  inputBuffer += chunk;
+  while (inputBuffer.includes('/fork\\r') || inputBuffer.includes('/fork\\n')) {
+    const idxR = inputBuffer.indexOf('/fork\\r');
+    const idxN = inputBuffer.indexOf('/fork\\n');
+    const idx = idxR >= 0 && idxN >= 0 ? Math.min(idxR, idxN) : Math.max(idxR, idxN);
+    inputBuffer = inputBuffer.slice(idx + 6);
+    fs.appendFileSync(path.join(path.dirname(__filename), 'fork-commands.log'), '/fork\\n');
+    if (!fs.existsSync(path.join(path.dirname(__filename), 'ignore-slash-fork'))) {
+      conversationId = 'agy-forked-child-1';
+      sendStatus(initialMode, 'idle', conversationId);
+    }
+  }
   if (fs.existsSync(path.join(path.dirname(__filename), 'ignore-shift-tab'))) return;
   if (chunk.includes('\\u001b[Z')) {
     cycleIndex = (cycleIndex + 1) % cycleOrder.length;
     sendStatus(cycleOrder[cycleIndex]);
   }
 });
+
+if (forkedMode) {
+  sendStatus(initialMode, 'authenticating', '');
+  sendStatus(initialMode, 'idle', conversationId);
+  sendStatus(initialMode, 'idle', conversationId);
+} else {
+  sendStatus(initialMode);
+}
 setInterval(() => {}, 10000);
 `
 

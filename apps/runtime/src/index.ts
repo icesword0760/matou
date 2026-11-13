@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 
 import {
+  getAgentDisplayName,
   getAgentManifest,
   isAgentProfileId
 } from '@matou/domain'
@@ -463,6 +464,9 @@ async function initializeRuntime(): Promise<RuntimeState> {
     },
     onIdentityMismatch: (event) => {
       for (const server of servers) server.providerIdentityMismatch(event)
+    },
+    onForkSlashTargetReady: ({ sessionId, runId }) => {
+      for (const server of servers) server.antigravityForkSlashTargetReady({ sessionId, runId })
     }
   })
   lifecycleCoordinator.registerProviderHooks(providerHooks)
@@ -576,6 +580,14 @@ async function initializeRuntime(): Promise<RuntimeState> {
           notification.error
         )
         const now = Date.now()
+        const sessionRow = database.get<{ kind: string }>(
+          'SELECT kind FROM sessions WHERE id = ?',
+          notification.sessionId
+        )
+        const sessionProvider: 'claude-code' | 'codex' | 'antigravity' = sessionRow &&
+          isAgentProfileId(sessionRow.kind)
+          ? sessionRow.kind
+          : 'claude-code'
         agentNotifications.publish({
           commandId: notification.eventId,
           commandType: 'fork-operation.notification',
@@ -584,10 +596,10 @@ async function initializeRuntime(): Promise<RuntimeState> {
           eventId: notification.eventId,
           runId: notification.operationId,
           sessionId: notification.sessionId,
-          provider: 'claude-code',
+          provider: sessionProvider,
           event: {
             eventType: notification.status === 'succeeded' ? 'completed' : 'error',
-            title: 'Claude Code',
+            title: getAgentDisplayName(sessionProvider),
             subtitle: notification.status === 'succeeded'
               ? runtimeMessages().server.branchReady
               : runtimeMessages().server.branchFailed,

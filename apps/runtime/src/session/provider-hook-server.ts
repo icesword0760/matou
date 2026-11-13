@@ -31,6 +31,7 @@ interface HookRegistrationRecord {
   identityRejected?: boolean
   inheritedConversation: boolean
   forkAuthority?: ProviderIdentityForkAuthority
+  forkSourceProviderSessionId?: string
   acceptIdentity: boolean
   acceptSideEffects: boolean
   settingsPath: string
@@ -110,6 +111,12 @@ export interface ProviderHookServerOptions {
   }) => void | Promise<void>
   onIdentityMismatch?: (event: ProviderIdentityMismatch) => void
   onTeamObservations?: (observations: AgentTeamObservation[]) => void | Promise<void>
+  onForkSlashTargetReady?: (event: {
+    runId: string
+    sessionId: string
+    provider: AgentProfileId
+    parentProviderSessionId: string
+  }) => void
 }
 
 export interface ProviderHookRegistration {
@@ -139,6 +146,7 @@ export class ProviderHookServer {
   readonly #onTitleObserved: NonNullable<ProviderHookServerOptions['onTitleObserved']>
   readonly #onIdentityMismatch: NonNullable<ProviderHookServerOptions['onIdentityMismatch']>
   readonly #onTeamObservations: NonNullable<ProviderHookServerOptions['onTeamObservations']>
+  readonly #onForkSlashTargetReady: NonNullable<ProviderHookServerOptions['onForkSlashTargetReady']>
   #server: Server | undefined
   #port: number | undefined
 
@@ -155,6 +163,7 @@ export class ProviderHookServer {
     this.#onTitleObserved = options.onTitleObserved ?? (() => {})
     this.#onIdentityMismatch = options.onIdentityMismatch ?? (() => {})
     this.#onTeamObservations = options.onTeamObservations ?? (() => {})
+    this.#onForkSlashTargetReady = options.onForkSlashTargetReady ?? (() => {})
   }
 
   async start(): Promise<void> {
@@ -205,6 +214,7 @@ export class ProviderHookServer {
       expectedProviderSessionId?: string
       inheritedConversation?: boolean
       forkAuthority?: ProviderIdentityForkAuthority
+      forkSourceProviderSessionId?: string
       systemMessageMarkdown?: string
     }
   ): Promise<ProviderHookRegistration> {
@@ -248,6 +258,7 @@ export class ProviderHookServer {
     expectedProviderSessionId?: string
     inheritedConversation?: boolean
     forkAuthority?: ProviderIdentityForkAuthority
+    forkSourceProviderSessionId?: string
     systemMessageMarkdown?: string
   }): Promise<ProviderHookRegistration> {
     return this.#registerProviderSession('antigravity', input)
@@ -265,6 +276,7 @@ export class ProviderHookServer {
       expectedProviderSessionId?: string
       inheritedConversation?: boolean
       forkAuthority?: ProviderIdentityForkAuthority
+      forkSourceProviderSessionId?: string
       systemMessageMarkdown?: string
     }
   ): Promise<ProviderHookRegistration> {
@@ -323,6 +335,9 @@ export class ProviderHookServer {
         : { expectedProviderSessionId: input.expectedProviderSessionId }),
       inheritedConversation: input.inheritedConversation === true,
       ...(input.forkAuthority === undefined ? {} : { forkAuthority: input.forkAuthority }),
+      ...(input.forkSourceProviderSessionId?.trim()
+        ? { forkSourceProviderSessionId: input.forkSourceProviderSessionId.trim() }
+        : {}),
       acceptIdentity: true,
       acceptSideEffects: true,
       settingsPath,
@@ -398,6 +413,28 @@ export class ProviderHookServer {
       const confirmsConversation = eventName !== 'SessionEnd' && (
         eventName !== 'unknown' || registration.acceptStatuslineIdentity
       )
+      if (registration.forkSourceProviderSessionId !== undefined) {
+        if (!registration.acceptIdentity || !providerSessionId) {
+          sendJson(response, 200, {})
+          return
+        }
+        if (providerSessionId === registration.forkSourceProviderSessionId) {
+          if (
+            isStatusline &&
+            nonEmptyText(payload.agent_state) === 'idle' &&
+            registration.confirmedProviderSessionId === undefined
+          ) {
+            this.#onForkSlashTargetReady({
+              runId: registration.runId,
+              sessionId: registration.sessionId,
+              provider: registration.provider,
+              parentProviderSessionId: providerSessionId
+            })
+          }
+          sendJson(response, 200, {})
+          return
+        }
+      }
       // A durable Fork launch owns no user-visible state until one hook both
       // confirms its conversation and proves the current lease fence. In
       // particular, SessionEnd may be the first event from a superseded child;
