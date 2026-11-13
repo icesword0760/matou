@@ -1,6 +1,7 @@
 import { open, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
 import type {
@@ -64,29 +65,63 @@ export function antigravityMetadataPath(root: string): string {
   return resolve(root, 'cache', 'conversation_metadata.json')
 }
 
+export function antigravitySummariesDbPath(root: string): string {
+  return resolve(root, 'conversation_summaries.db')
+}
+
 export function antigravityTranscriptPath(root: string, providerSessionId: string): string {
   return resolve(root, 'brain', providerSessionId, '.system_generated', 'logs', 'transcript.jsonl')
+}
+
+function inspectAntigravityMetadataTitle(
+  source: string,
+  providerSessionId: string
+): { internal: boolean; title?: string } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(source) as unknown
+  } catch {
+    return { internal: false }
+  }
+  const conversations = readConversationsMap(parsed)
+  if (!conversations) return { internal: false }
+  const rawEntry = conversations[providerSessionId]
+  if (!isRecord(rawEntry)) return { internal: false }
+  if (rawEntry.is_internal === true) return { internal: true }
+  const summary = isRecord(rawEntry.summary) ? rawEntry.summary : undefined
+  if (!summary || summary.Internal === true) return { internal: summary?.Internal === true }
+  const title = typeof summary.Title === 'string' ? summary.Title.trim() : ''
+  return title ? { internal: false, title } : { internal: false }
 }
 
 export function extractAntigravityAutoTitleFromJson(
   source: string,
   providerSessionId: string
 ): string | undefined {
-  let parsed: unknown
+  const inspected = inspectAntigravityMetadataTitle(source, providerSessionId)
+  return inspected.internal ? undefined : inspected.title
+}
+
+function readTitleFromSummariesDb(
+  dbPath: string,
+  providerSessionId: string
+): string | undefined {
+  let db: DatabaseSync | undefined
   try {
-    parsed = JSON.parse(source) as unknown
+    db = new DatabaseSync(dbPath, { readOnly: true })
+    const row = db.prepare(
+      `SELECT title FROM conversation_summaries
+       WHERE conversation_id = ?
+         AND (app_data_dir = '' OR app_data_dir = 'antigravity-cli')
+       LIMIT 1`
+    ).get(providerSessionId) as { title?: unknown } | undefined
+    const title = typeof row?.title === 'string' ? row.title.trim() : ''
+    return title || undefined
   } catch {
     return undefined
+  } finally {
+    db?.close()
   }
-  const conversations = readConversationsMap(parsed)
-  if (!conversations) return undefined
-  const rawEntry = conversations[providerSessionId]
-  if (!isRecord(rawEntry)) return undefined
-  if (rawEntry.is_internal === true) return undefined
-  const summary = isRecord(rawEntry.summary) ? rawEntry.summary : undefined
-  if (!summary || summary.Internal === true) return undefined
-  const title = typeof summary.Title === 'string' ? summary.Title.trim() : ''
-  return title || undefined
 }
 
 export async function latestAntigravityAutoTitle(
@@ -94,13 +129,16 @@ export async function latestAntigravityAutoTitle(
   providerSessionId: string
 ): Promise<string | undefined> {
   if (!isProviderSessionId(providerSessionId)) return undefined
+  let metadataResult: { internal: boolean; title?: string } = { internal: false }
   try {
     const source = await readFile(metadataFilePath, 'utf8')
-    return extractAntigravityAutoTitleFromJson(source, providerSessionId)
+    metadataResult = inspectAntigravityMetadataTitle(source, providerSessionId)
   } catch (error) {
-    if (isMissing(error)) return undefined
-    throw error
+    if (!isMissing(error)) throw error
   }
+  if (metadataResult.internal) return undefined
+  const summariesDbPath = resolve(dirname(metadataFilePath), '..', 'conversation_summaries.db')
+  return readTitleFromSummariesDb(summariesDbPath, providerSessionId) ?? metadataResult.title
 }
 
 export class AntigravitySessionCatalog {

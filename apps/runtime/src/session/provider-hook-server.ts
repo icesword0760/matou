@@ -49,7 +49,7 @@ interface HookRegistrationRecord {
   titleWatch?: {
     providerSessionId: string
     transcriptPath: string
-    watcher?: FSWatcher
+    watchers?: FSWatcher[]
     timeout: ReturnType<typeof setTimeout>
     debounce?: ReturnType<typeof setTimeout>
   }
@@ -715,7 +715,7 @@ export class ProviderHookServer {
     watcher.on('error', () => this.#stopTitleWatch(registration))
     const timeout = setTimeout(() => this.#stopTitleWatch(registration), TITLE_WATCH_WINDOW_MS)
     timeout.unref?.()
-    registration.titleWatch = { providerSessionId, transcriptPath, watcher, timeout }
+    registration.titleWatch = { providerSessionId, transcriptPath, watchers: [watcher], timeout }
 
     // Close the gap between the first read and installing the file watcher.
     await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)
@@ -734,27 +734,38 @@ export class ProviderHookServer {
     if (current?.providerSessionId === providerSessionId && current.transcriptPath === metadataPath) return
     this.#stopTitleWatch(registration)
 
-    let watcher: FSWatcher | undefined
-    try {
-      const dirWatcher = watch(dirname(metadataPath), { persistent: false }, (_eventType, filename) => {
-        if (filename && filename !== 'conversation_metadata.json') return
-        const active = registration.titleWatch
-        if (!active || active.debounce) return
-        active.debounce = setTimeout(() => {
-          const latest = registration.titleWatch
-          if (!latest) return
-          delete latest.debounce
-          void this.#observeAntigravityTitle(registration, providerSessionId, metadataPath).catch(() => {})
-        }, TITLE_WATCH_DEBOUNCE_MS)
-        active.debounce.unref?.()
-      })
-      dirWatcher.on('error', () => {
-        if (registration.titleWatch?.watcher === dirWatcher) delete registration.titleWatch.watcher
-      })
-      watcher = dirWatcher
-    } catch {
-      watcher = undefined
+    const watchers: FSWatcher[] = []
+    const scheduleObserve = () => {
+      const active = registration.titleWatch
+      if (!active || active.debounce) return
+      active.debounce = setTimeout(() => {
+        const latest = registration.titleWatch
+        if (!latest) return
+        delete latest.debounce
+        void this.#observeAntigravityTitle(registration, providerSessionId, metadataPath).catch(() => {})
+      }, TITLE_WATCH_DEBOUNCE_MS)
+      active.debounce.unref?.()
     }
+    const watchDirectory = (directory: string, filter: (filename: string | null) => boolean) => {
+      try {
+        const dirWatcher = watch(directory, { persistent: false }, (_eventType, filename) => {
+          if (filter(filename)) scheduleObserve()
+        })
+        dirWatcher.on('error', () => {
+          dirWatcher.close()
+          const remaining = registration.titleWatch?.watchers?.filter((candidate) => candidate !== dirWatcher)
+          if (registration.titleWatch) registration.titleWatch.watchers = remaining ?? []
+        })
+        watchers.push(dirWatcher)
+      } catch {
+        // Directory may not exist yet; another watcher or initial debounce handles observation.
+      }
+    }
+    watchDirectory(dirname(metadataPath), (filename) => !filename || filename === 'conversation_metadata.json')
+    watchDirectory(
+      this.#antigravityRoot,
+      (filename) => !filename || filename.startsWith('conversation_summaries.db')
+    )
 
     const timeout = setTimeout(() => this.#stopTitleWatch(registration), TITLE_WATCH_WINDOW_MS)
     timeout.unref?.()
@@ -768,7 +779,7 @@ export class ProviderHookServer {
     registration.titleWatch = {
       providerSessionId,
       transcriptPath: metadataPath,
-      ...(watcher ? { watcher } : {}),
+      watchers,
       timeout,
       debounce
     }
@@ -821,7 +832,7 @@ export class ProviderHookServer {
     delete registration.titleWatch
     clearTimeout(active.timeout)
     clearTimeout(active.debounce)
-    active.watcher?.close()
+    for (const watcher of active.watchers ?? []) watcher.close()
   }
 }
 

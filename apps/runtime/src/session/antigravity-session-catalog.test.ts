@@ -2,12 +2,14 @@ import { join } from 'node:path'
 
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { DatabaseSync } from 'node:sqlite'
 
 import { beforeEach, describe, expect, it } from 'vitest'
 
 import {
   AntigravitySessionCatalog,
   antigravityMetadataPath,
+  antigravitySummariesDbPath,
   antigravityTranscriptPath,
   latestAntigravityAutoTitle
 } from './antigravity-session-catalog'
@@ -200,5 +202,35 @@ describe('AntigravitySessionCatalog', () => {
 
     expect(await latestAntigravityAutoTitle(metadataFile, 'agy-no-title')).toBeUndefined()
     expect(await latestAntigravityAutoTitle(metadataFile, 'agy-titled')).toBe('自动生成标题')
+  })
+
+  it('reads live titles from conversation_summaries.db while respecting Internal suppression', async () => {
+    const metadataFile = antigravityMetadataPath(antigravityRoot)
+    const db = new DatabaseSync(antigravitySummariesDbPath(antigravityRoot))
+    try {
+      db.exec(
+        `CREATE TABLE conversation_summaries (
+          conversation_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          app_data_dir TEXT NOT NULL DEFAULT ''
+        )`
+      )
+      db.prepare(
+        `INSERT INTO conversation_summaries (conversation_id, title, app_data_dir) VALUES (?, ?, ?)`
+      ).run('agy-live-db', '数据库实时标题', 'antigravity-cli')
+      db.prepare(
+        `INSERT INTO conversation_summaries (conversation_id, title, app_data_dir) VALUES (?, ?, ?)`
+      ).run('agy-internal-db', '内部任务标题', 'antigravity-cli')
+    } finally {
+      db.close()
+    }
+    await writeFile(metadataFile, JSON.stringify({
+      conversations: {
+        'agy-internal-db': { summary: { ID: 'agy-internal-db', Title: '内部任务标题', Internal: true } }
+      }
+    }))
+
+    expect(await latestAntigravityAutoTitle(metadataFile, 'agy-live-db')).toBe('数据库实时标题')
+    expect(await latestAntigravityAutoTitle(metadataFile, 'agy-internal-db')).toBeUndefined()
   })
 })

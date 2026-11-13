@@ -1,6 +1,7 @@
 import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -1032,6 +1033,59 @@ describe('ProviderHookServer', () => {
         providerTitle: '更新后的自动标题'
       })
     } finally {
+      await agyHooks.stop()
+    }
+  })
+
+  it('observes Antigravity titles written only to conversation_summaries.db after Stop', async () => {
+    sessions.createSession(command('agy-db-title-session'), {
+      id: 'agy-db-title-session', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'antigravity', title: 'Antigravity', now: 1
+    })
+    const antigravityRoot = join(root, 'agy-db-title-root')
+    await mkdir(join(antigravityRoot, 'cache'), { recursive: true })
+    const db = new DatabaseSync(join(antigravityRoot, 'conversation_summaries.db'))
+    db.exec(
+      `CREATE TABLE conversation_summaries (
+        conversation_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        app_data_dir TEXT NOT NULL DEFAULT ''
+      )`
+    )
+
+    const observed: Array<{ sessionId: string; title: string }> = []
+    const agyHooks = new ProviderHookServer(root, sessions, {
+      antigravityRoot,
+      onTitleObserved: ({ sessionId, title }) => {
+        observed.push({ sessionId, title })
+        sessions.observeProviderTitle(command(`observe-db-${title}`), {
+          sessionId, title, now: Date.now()
+        })
+      }
+    })
+    await agyHooks.start()
+    try {
+      const reg = await agyHooks.registerAntigravitySession({
+        runId: 'agy-db-title-run', sessionId: 'agy-db-title-session'
+      })
+      await postHook(reg.hookUrl, {
+        hook_event_name: 'Stop', conversation_id: 'agy-db-conv'
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      db.prepare(
+        `INSERT INTO conversation_summaries (conversation_id, title, app_data_dir) VALUES (?, ?, ?)`
+      ).run('agy-db-conv', '数据库自动标题', 'antigravity-cli')
+
+      await waitFor(() => observed.length === 1, 2_000)
+      expect(observed[0]).toEqual({ sessionId: 'agy-db-title-session', title: '数据库自动标题' })
+      expect(sessions.getSession('agy-db-title-session')).toMatchObject({
+        title: '数据库自动标题',
+        titleSource: 'auto',
+        providerTitle: '数据库自动标题'
+      })
+    } finally {
+      db.close()
       await agyHooks.stop()
     }
   })
