@@ -43,6 +43,7 @@ import { RuntimeAccessPolicy } from '../storage/runtime-access-policy'
 import { NotificationProjection } from '../product/experience-foundation'
 import { GitWorkspaceService } from '../git/git-workspace-service'
 import { ClaudeSessionCatalog } from '../session/claude-session-catalog'
+import { AntigravitySessionCatalog, defaultAntigravityRoot } from '../session/antigravity-session-catalog'
 import { SessionGitStateRepository } from '../session/session-git-state-repository'
 import type { WorktreeSetupStep } from '../worktrees/worktree-service'
 import { ProviderConfigStore } from '../provider-config/provider-config-store'
@@ -89,6 +90,7 @@ export class RuntimeRpcRouter {
   readonly #git: GitWorkspaceService
   readonly #gitStates: SessionGitStateRepository
   readonly #claudeSessions: ClaudeSessionCatalog
+  readonly #antigravitySessions: AntigravitySessionCatalog
   readonly #accessPolicy: RuntimeAccessPolicy
   readonly #providerConfigs: ProviderConfigStore
 
@@ -97,6 +99,7 @@ export class RuntimeRpcRouter {
     notifications = new NotificationProjection(),
     options: {
       projectsRoot?: string
+      antigravityRoot?: string
       accessPolicy?: RuntimeAccessPolicy
       setupPolicyForWorkspace?: (workspaceId: string) => WorktreeSetupStep[]
       providerConfigs?: ProviderConfigStore
@@ -134,6 +137,9 @@ export class RuntimeRpcRouter {
     this.#claudeSessions = new ClaudeSessionCatalog(
       options.projectsRoot ?? process.env.MATOU_CLAUDE_PROJECTS_ROOT ??
         resolve(homedir(), '.claude', 'projects')
+    )
+    this.#antigravitySessions = new AntigravitySessionCatalog(
+      options.antigravityRoot ?? defaultAntigravityRoot()
     )
     this.#accessPolicy = options.accessPolicy ?? new RuntimeAccessPolicy(
       database.readOnly ? 'read-only' : 'normal'
@@ -277,9 +283,11 @@ export class RuntimeRpcRouter {
     if (method === 'claude-sessions.list') {
       const input = record(payload)
       const sessionId = text(input.sessionId, 'sessionId')
-      const result = await this.#claudeSessions.list({
+      const provider = this.#sessionCatalogProvider(input.provider)
+      const result = await this.#sessionCatalog(provider).list({
         cwd: this.#sessionCwd(sessionId),
-        titleForSession: (providerSessionId) => this.#providerConversationUsage(providerSessionId, sessionId).loadedSessionTitle,
+        titleForSession: (providerSessionId) =>
+          this.#providerConversationUsage(providerSessionId, sessionId, provider).loadedSessionTitle,
         query: optionalString(input.query),
         searchScope: input.searchScope === 'metadata' ? 'metadata' : 'all',
         offset: optionalInteger(input.offset, 0, 'offset', 0),
@@ -287,20 +295,21 @@ export class RuntimeRpcRouter {
       })
       const sessions = result.sessions
         .map((session) => {
-          const usage = this.#providerConversationUsage(session.providerSessionId, sessionId)
+          const usage = this.#providerConversationUsage(session.providerSessionId, sessionId, provider)
           return {
             ...session,
             ...usage,
             ...(usage.loadedSessionTitle ? { title: usage.loadedSessionTitle } : {})
           }
         })
-      return { ...result, sessions }
+      return { ...result, ...(provider === 'antigravity' ? { provider } : {}), sessions }
     }
     if (method === 'claude-sessions.detail') {
       const input = record(payload)
       const sessionId = text(input.sessionId, 'sessionId')
       const providerSessionId = text(input.providerSessionId, 'providerSessionId')
-      const detail = await this.#claudeSessions.detail({
+      const provider = this.#sessionCatalogProvider(input.provider)
+      const detail = await this.#sessionCatalog(provider).detail({
         cwd: this.#sessionCwd(sessionId), providerSessionId,
         query: optionalString(input.query),
         ...(input.beforeEventIndex === undefined ? {} : {
@@ -311,7 +320,7 @@ export class RuntimeRpcRouter {
         }),
         limit: optionalInteger(input.limit, 200)
       })
-      const usage = this.#providerConversationUsage(providerSessionId, sessionId)
+      const usage = this.#providerConversationUsage(providerSessionId, sessionId, provider)
       return {
         ...detail,
         ...usage,
@@ -321,7 +330,8 @@ export class RuntimeRpcRouter {
     if (method === 'claude-sessions.search') {
       const input = record(payload)
       const sessionId = text(input.sessionId, 'sessionId')
-      return this.#claudeSessions.search({
+      const provider = this.#sessionCatalogProvider(input.provider)
+      return this.#sessionCatalog(provider).search({
         cwd: this.#sessionCwd(sessionId),
         providerSessionId: text(input.providerSessionId, 'providerSessionId'),
         query: optionalString(input.query),
@@ -337,12 +347,14 @@ export class RuntimeRpcRouter {
       case 'claude-sessions.load': {
         const sessionId = text(input.sessionId, 'sessionId')
         const providerSessionId = text(input.providerSessionId, 'providerSessionId')
-        const detail = await this.#claudeSessions.detail({
+        const provider = this.#sessionCatalogProvider(input.provider)
+        const detail = await this.#sessionCatalog(provider).detail({
           cwd: this.#sessionCwd(sessionId), providerSessionId, query: '', limit: 1
         })
         const result = this.#providerModes.loadClaudeSession(command, {
           sessionId,
           bindingId: randomUUID(),
+          provider,
           providerSessionId,
           title: detail.title,
           permissionMode: detail.permissionMode,
@@ -352,6 +364,7 @@ export class RuntimeRpcRouter {
         return {
           ...result,
           load: {
+            ...(provider === 'antigravity' ? { provider } : {}),
             sessionId, providerSessionId, permissionMode: detail.permissionMode
           }
         }
@@ -994,7 +1007,21 @@ export class RuntimeRpcRouter {
     }
   }
 
-  #providerConversationUsage(providerSessionId: string, targetSessionId: string): {
+  #sessionCatalogProvider(value: unknown): 'claude-code' | 'antigravity' {
+    return value === undefined
+      ? 'claude-code'
+      : enumeration(value, ['claude-code', 'antigravity'] as const, 'provider')
+  }
+
+  #sessionCatalog(provider: 'claude-code' | 'antigravity') {
+    return provider === 'antigravity' ? this.#antigravitySessions : this.#claudeSessions
+  }
+
+  #providerConversationUsage(
+    providerSessionId: string,
+    targetSessionId: string,
+    provider: 'claude-code' | 'antigravity' = 'claude-code'
+  ): {
     availability: 'available' | 'loaded-here' | 'loaded-elsewhere'
     loadedSessionId?: string
     loadedSessionTitle?: string
@@ -1015,7 +1042,7 @@ export class RuntimeRpcRouter {
        FROM provider_bindings AS binding
        JOIN sessions AS owner ON owner.id = binding.session_id
        JOIN tasks ON tasks.id = owner.task_id
-       WHERE binding.provider = 'claude-code' AND binding.provider_session_id = ?
+       WHERE binding.provider = ? AND binding.provider_session_id = ?
          AND tasks.workspace_id = ?
          AND binding.validated_at IS NOT NULL
          AND NOT EXISTS (
@@ -1025,9 +1052,9 @@ export class RuntimeRpcRouter {
              AND newer.resume_state IN ('available', 'resuming', 'resumed')
              AND newer.validated_at > binding.validated_at
          )`,
-      providerSessionId, workspaceId
+      provider, providerSessionId, workspaceId
     ).filter((binding) => binding.archived_at === null && binding.task_archived_at === null &&
-      binding.kind === 'claude-code' && binding.invalidated_at === null &&
+      binding.kind === provider && binding.invalidated_at === null &&
       ['unknown', 'available', 'resuming', 'resumed'].includes(binding.resume_state))
     const binding = bindings.find(({ session_id }) => session_id === targetSessionId) ?? bindings[0]
     if (!binding) return { availability: 'available' }

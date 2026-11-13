@@ -7,6 +7,11 @@ export const sessionZhCN = {
   /** Default transcript title, read when a Claude Code session is catalogued. */
   untitledClaudeSession: '未命名 Claude 会话',
 
+  // antigravity-session-catalog.ts
+  antigravitySessionNotInWorkspace: 'Antigravity 会话不存在或不属于当前工作空间',
+  antigravitySessionIdInvalid: 'Antigravity 会话标识格式错误',
+  untitledAntigravitySession: '未命名 Antigravity 会话',
+
   // provider-hook-server.ts
   hookStatusMessage: '正在确认会话',
   teammateFinished: '队友已完成当前任务',
@@ -20,6 +25,11 @@ export const sessionEn: CatalogShape<typeof sessionZhCN> = {
     'That Claude Code session does not exist, or it does not belong to this workspace',
   claudeSessionIdInvalid: 'The Claude Code session id has an invalid format',
   untitledClaudeSession: 'Untitled Claude session',
+
+  antigravitySessionNotInWorkspace:
+    'That Antigravity session does not exist, or it does not belong to this workspace',
+  antigravitySessionIdInvalid: 'The Antigravity session id has an invalid format',
+  untitledAntigravitySession: 'Untitled Antigravity session',
 
   hookStatusMessage: 'Confirming the session',
   teammateFinished: 'A teammate finished the current task',

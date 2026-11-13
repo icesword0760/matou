@@ -5,7 +5,7 @@ import type { AgentProfileId, SessionWorkStatus } from '@matou/domain'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { runtimeMessages } from '../i18n/messages'
 import {
@@ -13,6 +13,11 @@ import {
   type ProviderIdentityForkAuthority,
   type SessionRepository
 } from '../domain/session-repository'
+import {
+  antigravityMetadataPath,
+  defaultAntigravityRoot,
+  latestAntigravityAutoTitle
+} from './antigravity-session-catalog'
 import { latestClaudeAutoTitle } from './claude-session-catalog'
 import { toProviderNotificationEvent, type ProviderNotificationEvent } from './provider-notification-event'
 
@@ -44,7 +49,7 @@ interface HookRegistrationRecord {
   titleWatch?: {
     providerSessionId: string
     transcriptPath: string
-    watcher: FSWatcher
+    watcher?: FSWatcher
     timeout: ReturnType<typeof setTimeout>
     debounce?: ReturnType<typeof setTimeout>
   }
@@ -79,6 +84,7 @@ export interface AgentTeamObservation {
 
 export interface ProviderHookServerOptions {
   antigravitySettingsPath?: string
+  antigravityRoot?: string
   currentRunId?: (sessionId: string) => string | undefined
   onNotification?: (notification: ProviderHookNotification) => void
   onWorkStatus?: (event: {
@@ -132,11 +138,13 @@ export interface ProviderHookRegistration {
 const DEFAULT_RETIREMENT_GRACE_MS = 2_000
 const TITLE_WATCH_WINDOW_MS = 10_000
 const TITLE_WATCH_DEBOUNCE_MS = 25
+const ANTIGRAVITY_TITLE_DEBOUNCE_MS = 40
 
 export class ProviderHookServer {
   readonly #dataRoot: string
   readonly #sessions: SessionRepository
   readonly #antigravitySettingsPath: string
+  readonly #antigravityRoot: string
   readonly #registrations = new Map<string, HookRegistrationRecord>()
   readonly #currentRunId: NonNullable<ProviderHookServerOptions['currentRunId']>
   readonly #onNotification: (notification: ProviderHookNotification) => void
@@ -155,6 +163,8 @@ export class ProviderHookServer {
     this.#sessions = sessions
     this.#antigravitySettingsPath = options.antigravitySettingsPath ??
       join(homedir(), '.gemini', 'antigravity-cli', 'settings.json')
+    this.#antigravityRoot = options.antigravityRoot ??
+      (options.antigravitySettingsPath ? dirname(options.antigravitySettingsPath) : defaultAntigravityRoot())
     this.#currentRunId = options.currentRunId ?? (() => undefined)
     this.#onNotification = options.onNotification ?? (() => {})
     this.#onWorkStatus = options.onWorkStatus ?? (() => {})
@@ -595,6 +605,12 @@ export class ProviderHookServer {
         }
         if (observations.length > 0) await this.#onTeamObservations(observations)
       }
+      if (registration.provider === 'antigravity' && !isStatusline && eventName === 'Stop') {
+        const antigravitySessionId = providerSessionId ?? registration.confirmedProviderSessionId
+        if (antigravitySessionId) {
+          this.#startAntigravityTitleWatch(registration, antigravitySessionId)
+        }
+      }
       if (!this.#acceptsSideEffects(registration)) {
         this.#stopTitleWatch(registration)
         sendJson(response, 200, {})
@@ -705,6 +721,90 @@ export class ProviderHookServer {
     await this.#observeTitle(registration, providerSessionId, transcriptPath).catch(() => false)
   }
 
+  #startAntigravityTitleWatch(
+    registration: HookRegistrationRecord,
+    providerSessionId: string
+  ): void {
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return
+    }
+    const metadataPath = antigravityMetadataPath(this.#antigravityRoot)
+    const current = registration.titleWatch
+    if (current?.providerSessionId === providerSessionId && current.transcriptPath === metadataPath) return
+    this.#stopTitleWatch(registration)
+
+    let watcher: FSWatcher | undefined
+    try {
+      const dirWatcher = watch(dirname(metadataPath), { persistent: false }, (_eventType, filename) => {
+        if (filename && filename !== 'conversation_metadata.json') return
+        const active = registration.titleWatch
+        if (!active || active.debounce) return
+        active.debounce = setTimeout(() => {
+          const latest = registration.titleWatch
+          if (!latest) return
+          delete latest.debounce
+          void this.#observeAntigravityTitle(registration, providerSessionId, metadataPath).catch(() => {})
+        }, TITLE_WATCH_DEBOUNCE_MS)
+        active.debounce.unref?.()
+      })
+      dirWatcher.on('error', () => {
+        if (registration.titleWatch?.watcher === dirWatcher) delete registration.titleWatch.watcher
+      })
+      watcher = dirWatcher
+    } catch {
+      watcher = undefined
+    }
+
+    const timeout = setTimeout(() => this.#stopTitleWatch(registration), TITLE_WATCH_WINDOW_MS)
+    timeout.unref?.()
+    const debounce = setTimeout(() => {
+      const latest = registration.titleWatch
+      if (!latest) return
+      delete latest.debounce
+      void this.#observeAntigravityTitle(registration, providerSessionId, metadataPath).catch(() => {})
+    }, ANTIGRAVITY_TITLE_DEBOUNCE_MS)
+    debounce.unref?.()
+    registration.titleWatch = {
+      providerSessionId,
+      transcriptPath: metadataPath,
+      ...(watcher ? { watcher } : {}),
+      timeout,
+      debounce
+    }
+  }
+
+  async #observeAntigravityTitle(
+    registration: HookRegistrationRecord,
+    providerSessionId: string,
+    metadataPath: string
+  ): Promise<boolean> {
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return false
+    }
+    const title = await latestAntigravityAutoTitle(metadataPath, providerSessionId).catch(() => undefined)
+    if (!this.#acceptsSideEffects(registration)) {
+      this.#stopTitleWatch(registration)
+      return false
+    }
+    if (!title) return false
+    if (registration.observedTitle === title) {
+      this.#stopTitleWatch(registration)
+      return true
+    }
+    await this.#onTitleObserved({
+      runId: registration.runId,
+      sessionId: registration.sessionId,
+      provider: registration.provider,
+      providerSessionId,
+      title
+    })
+    registration.observedTitle = title
+    this.#stopTitleWatch(registration)
+    return true
+  }
+
   #acceptsSideEffects(registration: HookRegistrationRecord): boolean {
     if (!registration.acceptSideEffects) return false
     try {
@@ -721,7 +821,7 @@ export class ProviderHookServer {
     delete registration.titleWatch
     clearTimeout(active.timeout)
     clearTimeout(active.debounce)
-    active.watcher.close()
+    active.watcher?.close()
   }
 }
 

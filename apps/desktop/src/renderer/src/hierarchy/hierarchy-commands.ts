@@ -121,22 +121,28 @@ export function createHierarchyCommands(
     }),
     retryProviderRestore: (sessionId) => command('hierarchy.retry-provider-restore', { sessionId }),
     startFreshProvider: (sessionId) => command('hierarchy.start-fresh-provider', { sessionId }),
-    listClaudeSessions: (sessionId, query, searchScope, offset, limit) => client.request<ClaudeSessionListResult>(
-      'claude-sessions.list', {
-        sessionId, query, ...(searchScope ? { searchScope } : {}),
-        ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit })
-      }
-    ),
+    listClaudeSessions: (sessionId, query, searchScope, offset, limit, provider) =>
+      client.request<ClaudeSessionListResult>(
+        'claude-sessions.list', {
+          sessionId, query, ...(searchScope ? { searchScope } : {}),
+          ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }),
+          ...(provider && provider !== 'claude-code' ? { provider } : {})
+        }
+      ),
     getClaudeSessionDetail: (sessionId, providerSessionId, options = {}) => client.request<ClaudeSessionDetail>(
       'claude-sessions.detail', { sessionId, providerSessionId, ...options }
     ),
-    searchClaudeSession: (sessionId, providerSessionId, query, offset, limit) =>
+    searchClaudeSession: (sessionId, providerSessionId, query, offset, limit, provider) =>
       client.request<ClaudeSessionSearchResult>('claude-sessions.search', {
         sessionId, providerSessionId, query,
-        ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit })
+        ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }),
+        ...(provider && provider !== 'claude-code' ? { provider } : {})
       }),
-    loadClaudeSession: async (sessionId, providerSessionId) => {
-      const result = await command('claude-sessions.load', { sessionId, providerSessionId }) as {
+    loadClaudeSession: async (sessionId, providerSessionId, provider) => {
+      const result = await command('claude-sessions.load', {
+        sessionId, providerSessionId,
+        ...(provider && provider !== 'claude-code' ? { provider } : {})
+      }) as {
         load: ClaudeSessionLoadResult
       }
       return result.load

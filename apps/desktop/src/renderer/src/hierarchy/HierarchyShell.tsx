@@ -361,6 +361,7 @@ function HierarchyProduct({
     sceneId: string
     title: string
     running: boolean
+    provider: 'claude-code' | 'antigravity'
   } | null>(null)
   const [searchRequest, setSearchRequest] = useState({
     query: '', options: { caseSensitive: false, regex: false, wholeWord: false } as TerminalSearchOptions,
@@ -404,30 +405,43 @@ function HierarchyProduct({
     .map(({ id, title }) => `${id}\u0000${title}`)
     .join('\u0001'), [projection.sessions])
   const listLoaderSessions = useCallback((
-    query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number
+    query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
+    provider?: 'claude-code' | 'antigravity'
   ) => {
     if (!loaderSessionId) return Promise.resolve({
       sessions: [], total: 0, offset: 0, limit: limit ?? 50, nextOffset: 0, hasMore: false
     })
-    return commands.listClaudeSessions(loaderSessionId, query, searchScope, offset, limit)
+    return commands.listClaudeSessions(loaderSessionId, query, searchScope, offset, limit, provider)
   }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision])
-  const loadLoaderDetail = useCallback((providerSessionId: string, options = {}) => {
+  const loadLoaderDetail = useCallback((
+    providerSessionId: string,
+    options: {
+      beforeEventIndex?: number
+      aroundEventIndex?: number
+      limit?: number
+      provider?: 'claude-code' | 'antigravity'
+    } = {}
+  ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
     return commands.getClaudeSessionDetail(loaderSessionId, providerSessionId, options)
   }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
   const searchLoaderSession = useCallback((
-    providerSessionId: string, query: string, offset?: number, limit?: number
+    providerSessionId: string, query: string, offset?: number, limit?: number,
+    provider?: 'claude-code' | 'antigravity'
   ) => {
     if (!loaderSessionId) return Promise.reject(new Error(m.sessionLoaderClosed))
-    return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit)
+    return commands.searchClaudeSession(loaderSessionId, providerSessionId, query, offset, limit, provider)
   }, [commands, loaderSessionId, loaderTitleRevision, loaderBindingRevision, m])
   const cancelSessionLoader = useCallback(() => {
     setSessionLoader(null)
     setTerminalFocusRequest((value) => value + 1)
   }, [])
-  const loadIntoCurrentCard = useCallback(async (providerSessionId: string) => {
+  const loadIntoCurrentCard = useCallback(async (
+    providerSessionId: string,
+    provider?: 'claude-code' | 'antigravity'
+  ) => {
     if (!loaderSessionId || !loaderSceneId) return
-    await commands.loadClaudeSession(loaderSessionId, providerSessionId)
+    await commands.loadClaudeSession(loaderSessionId, providerSessionId, provider)
     await Promise.resolve(commands.setFocusedSession(loaderSceneId, loaderSessionId))
     setSessionLoader(null)
     setTerminalFocusRequest((value) => value + 1)
@@ -1199,7 +1213,8 @@ function HierarchyProduct({
                     sceneId: scene.id,
                     title: session.title,
                     running: graphNode?.workStatus === 'running' ||
-                      graphNode?.workStatus === 'starting'
+                      graphNode?.workStatus === 'starting',
+                    provider: session.kind === 'antigravity' ? 'antigravity' : 'claude-code'
                   })}
                   descendantNodes={[...descendantNodes]}
                   {...(graphNode?.parentSessionId ? { parentSessionId: graphNode.parentSessionId } : {})}
@@ -1405,6 +1420,7 @@ function HierarchyProduct({
                 targetTitle={projection.sessions.find(({ id }) => id === sessionLoader.sessionId)?.title ??
                   sessionLoader.title}
                 targetRunning={sessionLoader.running}
+                initialProvider={sessionLoader.provider}
                 {...(workspaceStageRef.current ? { portalTarget: workspaceStageRef.current } : {})}
                 listSessions={listLoaderSessions}
                 loadDetail={loadLoaderDetail}

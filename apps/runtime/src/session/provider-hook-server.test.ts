@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -946,6 +946,91 @@ describe('ProviderHookServer', () => {
       await postHook(`${reg.hookUrl}?kind=statusline`, { conversation_id: 'agy-parent-id', agent_state: 'idle' })
       expect(slashReadyEvents).toHaveLength(1)
       expect(sessions.getResumeBinding('agy-fork-child', 'antigravity')?.providerSessionId).toBe('agy-child-id')
+    } finally {
+      await agyHooks.stop()
+    }
+  })
+
+  it('observes Antigravity auto title from conversation_metadata.json after Stop without overwriting manual titles', async () => {
+    sessions.createSession(command('agy-title-session'), {
+      id: 'agy-title-session', taskId: 'task-1', executionContextId: 'context-1',
+      kind: 'antigravity', title: 'Antigravity', now: 1
+    })
+    const antigravityRoot = join(root, 'agy-title-root')
+    await mkdir(join(antigravityRoot, 'cache'), { recursive: true })
+    const metadataFile = join(antigravityRoot, 'cache', 'conversation_metadata.json')
+    await writeFile(metadataFile, JSON.stringify({
+      conversations: {
+        'agy-title-conv': { summary: { ID: 'agy-title-conv', Title: '', Preview: 'Should not use preview' } }
+      }
+    }))
+
+    const observed: Array<{ sessionId: string; title: string; provider: string }> = []
+    const agyHooks = new ProviderHookServer(root, sessions, {
+      antigravityRoot,
+      onTitleObserved: ({ sessionId, title, provider }) => {
+        observed.push({ sessionId, title, provider })
+        sessions.observeProviderTitle(command(`observe-${title}`), {
+          sessionId, title, now: Date.now()
+        })
+      }
+    })
+    await agyHooks.start()
+    try {
+      const reg = await agyHooks.registerAntigravitySession({
+        runId: 'agy-title-run', sessionId: 'agy-title-session'
+      })
+      await postHook(reg.hookUrl, {
+        hook_event_name: 'Stop', conversation_id: 'agy-title-conv'
+      })
+
+      // Write Title shortly after Stop (simulating async metadata flush by agy)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      await writeFile(metadataFile, JSON.stringify({
+        conversations: {
+          'agy-title-conv': { summary: { ID: 'agy-title-conv', Title: '自动汇总会话标题', Preview: 'Preview' } }
+        }
+      }))
+
+      await waitFor(() => observed.length === 1, 2_000)
+      expect(observed[0]).toEqual({
+        sessionId: 'agy-title-session',
+        title: '自动汇总会话标题',
+        provider: 'antigravity'
+      })
+      expect(sessions.getSession('agy-title-session')).toMatchObject({
+        title: '自动汇总会话标题',
+        titleSource: 'auto',
+        providerTitle: '自动汇总会话标题'
+      })
+
+      // Manual rename locks title; subsequent Stop update updates providerTitle only and restore works
+      sessions.renameSession(command('manual-rename'), {
+        sessionId: 'agy-title-session', title: '手动命名', now: 10
+      })
+      await writeFile(metadataFile, JSON.stringify({
+        conversations: {
+          'agy-title-conv': { summary: { ID: 'agy-title-conv', Title: '更新后的自动标题' } }
+        }
+      }))
+      await postHook(reg.hookUrl, {
+        hook_event_name: 'Stop', conversation_id: 'agy-title-conv'
+      })
+      await waitFor(() => observed.length === 2, 2_000)
+      expect(sessions.getSession('agy-title-session')).toMatchObject({
+        title: '手动命名',
+        titleSource: 'manual',
+        providerTitle: '更新后的自动标题'
+      })
+
+      const restored = sessions.restoreProviderTitle(command('restore-auto'), {
+        sessionId: 'agy-title-session', now: 11
+      }).result
+      expect(restored).toMatchObject({
+        title: '更新后的自动标题',
+        titleSource: 'auto',
+        providerTitle: '更新后的自动标题'
+      })
     } finally {
       await agyHooks.stop()
     }

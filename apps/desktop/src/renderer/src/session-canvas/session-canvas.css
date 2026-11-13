@@ -95,11 +95,15 @@
 .session-loader-dialog { display: grid; width: min(1040px,100%); height: min(720px,100%); min-height: 430px; grid-template-rows: 58px minmax(0,1fr) 58px; overflow: hidden; border: 1px solid #3b424d; border-radius: 16px; color: #e8ebf0; background: #1a1d22; box-shadow: 0 28px 90px rgba(0,0,0,.48); }
 .session-loader-header,.session-loader-footer { display: flex; box-sizing: border-box; align-items: center; gap: 10px; padding: 0 18px; border-color: #343a44; background: #20242a; }
 .session-loader-header { justify-content: space-between; border-bottom: 1px solid #343a44; }
-.session-loader-header > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.session-loader-header > div:first-child { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
 .session-loader-header strong { font-size: 15px; }
 .session-loader-header span { overflow: hidden; color: #8d96a3; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.session-loader-header button { width: 28px; height: 28px; border: 0; border-radius: 7px; color: #9fa7b3; background: transparent; font-size: 20px; cursor: pointer; }
-.session-loader-header button:hover { color: #fff; background: rgba(255,255,255,.07); }
+.session-loader-providers { display: flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #39404b; border-radius: 9px; background: #16191e; }
+.session-loader-providers button { height: 24px; padding: 0 10px; border: 0; border-radius: 6px; color: #8d96a3; background: transparent; font-size: 11px; cursor: pointer; }
+.session-loader-providers button:hover { color: #d9dde3; background: rgba(255,255,255,.05); }
+.session-loader-providers button.active { color: #fff; background: #347bc8; }
+.session-loader-header > button { width: 28px; height: 28px; border: 0; border-radius: 7px; color: #9fa7b3; background: transparent; font-size: 20px; cursor: pointer; }
+.session-loader-header > button:hover { color: #fff; background: rgba(255,255,255,.07); }
 .session-loader-body { display: grid; min-height: 0; grid-template-columns: minmax(250px,36%) minmax(0,1fr); }
 .session-loader-list { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto minmax(0,1fr); padding: 14px 12px 0; border-right: 1px solid #333943; background: #1d2025; }
 .session-loader-search { display: flex; width: min(310px,100%); height: 34px; box-sizing: border-box; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid #414854; border-radius: 9px; background: #15181c; transition: border-color 120ms ease,box-shadow 120ms ease; }
@@ -157,7 +161,11 @@
 .light-theme .session-loader-backdrop { background: rgba(226,231,238,.62); }
 .light-theme .session-loader-dialog { border-color: #cbd2dc; color: #2d3542; background: #fff; box-shadow: 0 26px 80px rgba(40,52,69,.23); }
 .light-theme .session-loader-header,.light-theme .session-loader-footer { border-color: #d9dee6; background: #f7f8fa; }
-.light-theme .session-loader-header button:hover { color: #2e3744; background: #e9edf2; }
+.light-theme .session-loader-providers { border-color: #cbd2dc; background: #eef1f5; }
+.light-theme .session-loader-providers button { color: #5b6675; }
+.light-theme .session-loader-providers button:hover { color: #2d3542; background: rgba(48,65,87,.07); }
+.light-theme .session-loader-providers button.active { color: #fff; background: #347bc8; }
+.light-theme .session-loader-header > button:hover { color: #2e3744; background: #e9edf2; }
 .light-theme .session-loader-list { border-color: #d9dee6; background: #f5f7f9; }
 .light-theme .session-loader-search { border-color: #cbd2dc; background: #fff; }
 .light-theme .session-loader-search input { color: #2d3542; }

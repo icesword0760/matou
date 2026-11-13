@@ -284,6 +284,80 @@ describe('RuntimeRpcRouter', () => {
     )?.total).toBe(2)
   })
 
+  it('lists, previews, searches, and loads Antigravity sessions via provider parameter', async () => {
+    const workspaceRoot = join(testRoot, 'agy-workspace')
+    const antigravityRoot = join(testRoot, 'antigravity-cli')
+    await mkdir(workspaceRoot)
+    await mkdir(join(antigravityRoot, 'cache'), { recursive: true })
+    await mkdir(join(antigravityRoot, 'brain', 'agy-conv-1', '.system_generated', 'logs'), { recursive: true })
+    await writeFile(join(antigravityRoot, 'cache', 'conversation_metadata.json'), JSON.stringify({
+      conversations: {
+        'agy-conv-1': {
+          summary: {
+            ID: 'agy-conv-1',
+            Title: 'Antigravity 加载测试',
+            Preview: '帮我看下脚本',
+            NumSteps: 2,
+            UpdatedAt: '2026-11-12T10:00:00Z',
+            WorkspaceURIs: [`file://${workspaceRoot}`],
+            AppDataDir: 'antigravity-cli'
+          }
+        }
+      }
+    }))
+    await writeFile(
+      join(antigravityRoot, 'brain', 'agy-conv-1', '.system_generated', 'logs', 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 1, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '检查加载路径' }),
+        JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', content: '已完成路径检查' })
+      ].join('\n')
+    )
+    router = new RuntimeRpcRouter(database, new NotificationProjection(), { antigravityRoot })
+    const initial = await router.handle('hierarchy.bootstrap-window', payload('agy-bootstrap', {
+      windowId: 'window-agy', defaultRootDirectory: workspaceRoot,
+      defaultName: 'agy-workspace', now: 1
+    })) as { session: { id: string } }
+
+    const list = await router.handle('claude-sessions.list', {
+      sessionId: initial.session.id, query: '', provider: 'antigravity'
+    }) as { provider?: string; sessions: Array<{ provider?: string; providerSessionId: string; title: string }> }
+    expect(list.provider).toBe('antigravity')
+    expect(list.sessions).toEqual([expect.objectContaining({
+      provider: 'antigravity',
+      providerSessionId: 'agy-conv-1',
+      title: 'Antigravity 加载测试'
+    })])
+
+    const detail = await router.handle('claude-sessions.detail', {
+      sessionId: initial.session.id, providerSessionId: 'agy-conv-1', provider: 'antigravity', query: ''
+    }) as { events: Array<{ index: number; text: string }> }
+    expect(detail.events).toHaveLength(2)
+
+    const search = await router.handle('claude-sessions.search', {
+      sessionId: initial.session.id, providerSessionId: 'agy-conv-1', provider: 'antigravity', query: '已完成'
+    }) as { total: number; hits: Array<{ eventIndex: number }> }
+    expect(search).toMatchObject({ total: 1, hits: [{ eventIndex: 2 }] })
+
+    const loaded = await router.handle('claude-sessions.load', payload('agy-load', {
+      sessionId: initial.session.id,
+      providerSessionId: 'agy-conv-1',
+      provider: 'antigravity',
+      now: 2
+    })) as { load: { provider?: string; providerSessionId: string } }
+    expect(loaded.load).toMatchObject({ provider: 'antigravity', providerSessionId: 'agy-conv-1' })
+
+    expect(database.get(
+      `SELECT sessions.id, sessions.kind, binding.provider, binding.provider_session_id
+       FROM sessions JOIN provider_bindings AS binding ON binding.session_id = sessions.id
+       WHERE sessions.id = ?`, initial.session.id
+    )).toMatchObject({
+      id: initial.session.id,
+      kind: 'antigravity',
+      provider: 'antigravity',
+      provider_session_id: 'agy-conv-1'
+    })
+  })
+
   it('routes Git status and branch mutations for the active repository', async () => {
     const repositoryRoot = join(testRoot, 'repository')
     await mkdir(repositoryRoot)

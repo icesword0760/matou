@@ -205,6 +205,63 @@ describe('SessionLoaderDialog', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: '仍然载入' }))
     await waitFor(() => expect(onLoad).toHaveBeenCalledWith('provider-1'))
   })
+
+  it('switches between Claude Code and Antigravity sessions and loads the selected Antigravity session', async () => {
+    const onLoad = vi.fn(async () => undefined)
+    const listSessions = vi.fn(async (
+      _query: string, _scope?: 'metadata' | 'all', _offset?: number, _limit?: number,
+      provider?: 'claude-code' | 'antigravity'
+    ): Promise<ClaudeSessionListResult> => (
+      provider === 'antigravity'
+        ? {
+            provider: 'antigravity',
+            total: 1, offset: 0, limit: 50, nextOffset: 1, hasMore: false,
+            sessions: [{
+              provider: 'antigravity',
+              providerSessionId: 'agy-1', title: 'Antigravity 会话', cwd: '/workspace',
+              updatedAt: 20, permissionMode: 'default', eventCount: 3, matchCount: 0,
+              hits: [], availability: 'available'
+            }]
+          }
+        : listResult([summary()])
+    ))
+    const loadDetail = vi.fn(async (providerSessionId: string, options?: { provider?: 'claude-code' | 'antigravity' }) => (
+      options?.provider === 'antigravity'
+        ? {
+            provider: 'antigravity' as const,
+            providerSessionId,
+            title: 'Antigravity 会话',
+            cwd: '/workspace',
+            updatedAt: 20,
+            permissionMode: 'default' as const,
+            eventCount: 2,
+            matchCount: 0,
+            hits: [],
+            availability: 'available' as const,
+            events: [
+              { index: 1, kind: 'user' as const, role: 'user' as const, text: '你好 agy', matched: false },
+              { index: 2, kind: 'assistant' as const, role: 'assistant' as const, text: '收到任务', matched: false }
+            ],
+            page: page(1, 2, 2)
+          }
+        : detail()
+    ))
+    render(<SessionLoaderDialog targetTitle="Shell" targetRunning={false}
+      listSessions={listSessions} loadDetail={loadDetail} searchSession={emptySearch}
+      onLoad={onLoad} onCancel={() => undefined} />)
+
+    expect(await screen.findByRole('dialog', { name: '载入 Claude Code 会话' })).toBeTruthy()
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'Antigravity' }))
+
+    expect(await screen.findByRole('dialog', { name: '载入 Antigravity 会话' })).toBeTruthy()
+    await waitFor(() => expect(listSessions).toHaveBeenLastCalledWith('', 'metadata', 0, 50, 'antigravity'))
+    expect(await screen.findByRole('button', { name: /预览会话：Antigravity 会话/ })).toBeTruthy()
+    expect(await screen.findByText('收到任务')).toBeTruthy()
+    expect(screen.getAllByText('Antigravity').length).toBeGreaterThan(1)
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '载入到当前卡片' }))
+    await waitFor(() => expect(onLoad).toHaveBeenCalledWith('agy-1', 'antigravity'))
+  })
 })
 
 function summary() {

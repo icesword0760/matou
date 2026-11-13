@@ -149,6 +149,8 @@ export const sessionCanvasZhCN = {
 
   // SessionLoaderDialog
   loader: {
+    dialogTitle: (agent: string) => `载入 ${agent} 会话`,
+    providerTabs: '选择会话来源',
     loadInto: (title: string) => `载入到“${title}”`,
     close: '关闭会话管理',
     resumableSessions: '可恢复会话',
@@ -172,6 +174,7 @@ export const sessionCanvasZhCN = {
     loadingMore: '正在载入更多会话…',
     noMatchingSessions: '左侧没有匹配的会话',
     noSessions: '当前工作空间内没有 Claude Code 会话',
+    noSessionsFor: (agent: string) => `当前工作空间内没有 ${agent} 会话`,
     preview: '会话预览',
     selectSession: '选择会话查看内容',
     searchContent: '查找右侧会话内容',
@@ -191,8 +194,8 @@ export const sessionCanvasZhCN = {
     endAndLoad: '结束当前运行并载入',
     loadHere: '载入到当前卡片',
     duplicateTitle: '会话已在当前工作空间载入',
-    duplicateBody: (session: string, card: string) =>
-      `${session}已载入到${card}。仍然可以载入到当前卡片，两张卡片将关联同一个 Claude Code 会话。`,
+    duplicateBody: (session: string, card: string, agent = 'Claude Code') =>
+      `${session}已载入到${card}。仍然可以载入到当前卡片，两张卡片将关联同一个 ${agent} 会话。`,
     thisSession: '“该会话”',
     loadAnyway: '仍然载入',
     /** Keyed by ClaudeSessionPermissionMode. */
@@ -368,6 +371,8 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
 
   // SessionLoaderDialog
   loader: {
+    dialogTitle: (agent: string) => `Load ${agent} session`,
+    providerTabs: 'Choose session source',
     loadInto: (title: string) => `Load into "${title}"`,
     close: 'Close the session loader',
     resumableSessions: 'Resumable sessions',
@@ -388,6 +393,7 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
     loadingMore: 'Loading more sessions…',
     noMatchingSessions: 'No matching sessions',
     noSessions: 'No Claude Code sessions in this workspace',
+    noSessionsFor: (agent: string) => `No ${agent} sessions in this workspace`,
     preview: 'Session preview',
     selectSession: 'Select a session to see its content',
     searchContent: 'Search session content',
@@ -408,8 +414,8 @@ export const sessionCanvasEn: CatalogShape<typeof sessionCanvasZhCN> = {
     endAndLoad: 'End the current run and load',
     loadHere: 'Load into this card',
     duplicateTitle: 'This session is already loaded in this workspace',
-    duplicateBody: (session: string, card: string) =>
-      `${session} is already loaded in ${card}. You can still load it into this card, and both cards will then share the same Claude Code session.`,
+    duplicateBody: (session: string, card: string, agent = 'Claude Code') =>
+      `${session} is already loaded in ${card}. You can still load it into this card, and both cards will then share the same ${agent} session.`,
     thisSession: 'This session',
     loadAnyway: 'Load anyway',
     /**

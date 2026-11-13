@@ -12,12 +12,15 @@ import type {
   ClaudeSessionSearchResult,
   ClaudeSessionSummary
 } from '@matou/contracts'
+import { getAgentDisplayName, getAgentShortName } from '@matou/domain'
 import { ConfirmDialog } from '../hierarchy/ConfirmDialog'
 import { useMessages } from '../i18n/LocaleProvider'
 import type { Messages } from '../i18n/messages'
 
 type LoaderMessages = Messages['sessionCanvas']['loader']
+type LoaderProvider = 'claude-code' | 'antigravity'
 
+const LOADER_PROVIDERS: readonly LoaderProvider[] = ['claude-code', 'antigravity']
 const SESSION_PAGE_SIZE = 50
 const EVENT_PAGE_SIZE = 200
 const SEARCH_PAGE_SIZE = 100
@@ -26,28 +29,35 @@ interface DetailOptions {
   beforeEventIndex?: number
   aroundEventIndex?: number
   limit?: number
+  provider?: LoaderProvider
 }
 
 export function SessionLoaderDialog(props: {
   targetTitle: string
   targetRunning: boolean
+  initialProvider?: LoaderProvider
   listSessions(
-    query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number
+    query: string, searchScope?: 'metadata' | 'all', offset?: number, limit?: number,
+    provider?: LoaderProvider
   ): Promise<ClaudeSessionListResult>
   loadDetail(providerSessionId: string, options?: DetailOptions): Promise<ClaudeSessionDetail>
   searchSession(
-    providerSessionId: string, query: string, offset?: number, limit?: number
+    providerSessionId: string, query: string, offset?: number, limit?: number,
+    provider?: LoaderProvider
   ): Promise<ClaudeSessionSearchResult>
-  onLoad(providerSessionId: string): Promise<unknown>
+  onLoad(providerSessionId: string, provider?: LoaderProvider): Promise<unknown>
   onCancel(): void
   portalTarget?: Element
 }) {
   const messages = useMessages()
   const m = messages.sessionCanvas.loader
   const {
-    targetTitle, targetRunning, listSessions, loadDetail, searchSession,
-    onLoad, onCancel, portalTarget
+    targetTitle, targetRunning, initialProvider = 'claude-code',
+    listSessions, loadDetail, searchSession, onLoad, onCancel, portalTarget
   } = props
+  const [provider, setProvider] = useState<LoaderProvider>(initialProvider)
+  const providerName = getAgentDisplayName(provider)
+  const providerShortName = getAgentShortName(provider)
   const [sessionQuery, setSessionQuery] = useState('')
   const [effectiveSessionQuery, setEffectiveSessionQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
@@ -118,11 +128,53 @@ export function SessionLoaderDialog(props: {
     return () => window.clearTimeout(timer)
   }, [contentQuery])
 
+  const fetchListPage = useCallback((
+    query: string, searchScope: 'metadata' | 'all', offset: number, limit: number
+  ) => (
+    provider === 'claude-code'
+      ? listSessions(query, searchScope, offset, limit)
+      : listSessions(query, searchScope, offset, limit, provider)
+  ), [listSessions, provider])
+
+  const fetchDetailPage = useCallback((
+    providerSessionId: string, options: DetailOptions
+  ) => loadDetail(
+    providerSessionId,
+    provider === 'claude-code' ? options : { ...options, provider }
+  ), [loadDetail, provider])
+
+  const fetchSearchPage = useCallback((
+    providerSessionId: string, query: string, offset: number, limit: number
+  ) => (
+    provider === 'claude-code'
+      ? searchSession(providerSessionId, query, offset, limit)
+      : searchSession(providerSessionId, query, offset, limit, provider)
+  ), [provider, searchSession])
+
+  const selectProvider = useCallback((next: LoaderProvider) => {
+    if (next === provider) return
+    listRequestSequence.current += 1
+    detailRequestSequence.current += 1
+    setProvider(next)
+    setSessions([])
+    setSessionTotal(0)
+    setNextSessionOffset(0)
+    setHasMoreSessions(false)
+    setSelectedId('')
+    setDetail(null)
+    setSearchPage(null)
+    setActiveMatchAbsolute(0)
+    setActiveEventIndex(null)
+    setConfirmRunning(false)
+    setConfirmDuplicate(false)
+    setError('')
+  }, [provider])
+
   useEffect(() => {
     const sequence = ++listRequestSequence.current
     setLoadingList(true)
     setError('')
-    void listSessions(effectiveSessionQuery, 'metadata', 0, SESSION_PAGE_SIZE).then((result) => {
+    void fetchListPage(effectiveSessionQuery, 'metadata', 0, SESSION_PAGE_SIZE).then((result) => {
       if (sequence !== listRequestSequence.current) return
       setSessions(result.sessions)
       setSessionTotal(result.total)
@@ -136,14 +188,14 @@ export function SessionLoaderDialog(props: {
     }).finally(() => {
       if (sequence === listRequestSequence.current) setLoadingList(false)
     })
-  }, [effectiveSessionQuery, listSessions])
+  }, [effectiveSessionQuery, fetchListPage])
 
   const loadMoreSessions = useCallback(async () => {
     if (loadingList || loadingMoreSessions || !hasMoreSessions) return
     const sequence = listRequestSequence.current
     setLoadingMoreSessions(true)
     try {
-      const result = await listSessions(
+      const result = await fetchListPage(
         effectiveSessionQuery, 'metadata', nextSessionOffset, SESSION_PAGE_SIZE
       )
       if (sequence !== listRequestSequence.current) return
@@ -159,7 +211,7 @@ export function SessionLoaderDialog(props: {
     } finally {
       setLoadingMoreSessions(false)
     }
-  }, [effectiveSessionQuery, hasMoreSessions, listSessions, loadingList, loadingMoreSessions, nextSessionOffset])
+  }, [effectiveSessionQuery, fetchListPage, hasMoreSessions, loadingList, loadingMoreSessions, nextSessionOffset])
 
   useEffect(() => {
     if (!selectedId) {
@@ -174,7 +226,7 @@ export function SessionLoaderDialog(props: {
     setError('')
     if (!effectiveContentQuery) {
       setSearchPage(null)
-      void loadDetail(selectedId, { limit: EVENT_PAGE_SIZE }).then((result) => {
+      void fetchDetailPage(selectedId, { limit: EVENT_PAGE_SIZE }).then((result) => {
         if (sequence !== detailRequestSequence.current) return
         setDetail(result)
         requestAnimationFrame(() => eventVirtualizer.scrollToIndex(
@@ -187,17 +239,17 @@ export function SessionLoaderDialog(props: {
       })
       return
     }
-    void searchSession(selectedId, effectiveContentQuery, 0, SEARCH_PAGE_SIZE).then(async (result) => {
+    void fetchSearchPage(selectedId, effectiveContentQuery, 0, SEARCH_PAGE_SIZE).then(async (result) => {
       if (sequence !== detailRequestSequence.current) return
       setSearchPage(result)
       const hit = result.hits[0]
       if (!hit) {
-        const nextDetail = await loadDetail(selectedId, { limit: EVENT_PAGE_SIZE })
+        const nextDetail = await fetchDetailPage(selectedId, { limit: EVENT_PAGE_SIZE })
         if (sequence === detailRequestSequence.current) setDetail(nextDetail)
         return
       }
       setActiveEventIndex(hit.eventIndex)
-      const nextDetail = await loadDetail(selectedId, {
+      const nextDetail = await fetchDetailPage(selectedId, {
         aroundEventIndex: hit.eventIndex, limit: EVENT_PAGE_SIZE
       })
       if (sequence !== detailRequestSequence.current) return
@@ -208,7 +260,7 @@ export function SessionLoaderDialog(props: {
     }).finally(() => {
       if (sequence === detailRequestSequence.current) setLoadingDetail(false)
     })
-  }, [effectiveContentQuery, loadDetail, searchSession, selectedId])
+  }, [effectiveContentQuery, fetchDetailPage, fetchSearchPage, selectedId])
 
   const loadEarlier = useCallback(async () => {
     if (!detail?.page.hasEarlier || loadingEarlier || effectiveContentQuery) return
@@ -216,7 +268,7 @@ export function SessionLoaderDialog(props: {
     if (!anchorIndex) return
     setLoadingEarlier(true)
     try {
-      const earlier = await loadDetail(selectedId, {
+      const earlier = await fetchDetailPage(selectedId, {
         beforeEventIndex: detail.page.startEventIndex, limit: EVENT_PAGE_SIZE
       })
       setDetail((current) => current?.providerSessionId === selectedId
@@ -231,7 +283,7 @@ export function SessionLoaderDialog(props: {
     } finally {
       setLoadingEarlier(false)
     }
-  }, [detail, effectiveContentQuery, eventVirtualizer, loadDetail, loadingEarlier, selectedId])
+  }, [detail, effectiveContentQuery, eventVirtualizer, fetchDetailPage, loadingEarlier, selectedId])
 
   const navigateToHit = useCallback(async (
     absoluteIndex: number, page: ClaudeSessionSearchResult, hit: ClaudeSessionSearchHit
@@ -241,7 +293,7 @@ export function SessionLoaderDialog(props: {
     setActiveEventIndex(hit.eventIndex)
     setLoadingDetail(true)
     try {
-      const nextDetail = await loadDetail(selectedId, {
+      const nextDetail = await fetchDetailPage(selectedId, {
         aroundEventIndex: hit.eventIndex, limit: EVENT_PAGE_SIZE
       })
       if (sequence !== detailRequestSequence.current) return
@@ -253,7 +305,7 @@ export function SessionLoaderDialog(props: {
     } finally {
       setLoadingDetail(false)
     }
-  }, [eventVirtualizer, loadDetail, selectedId])
+  }, [eventVirtualizer, fetchDetailPage, selectedId])
 
   const stepMatch = useCallback(async (delta: number) => {
     if (!searchPage?.total || !effectiveContentQuery) return
@@ -261,11 +313,11 @@ export function SessionLoaderDialog(props: {
     let page = searchPage
     if (target < page.offset || target >= page.offset + page.hits.length) {
       const pageOffset = Math.floor(target / SEARCH_PAGE_SIZE) * SEARCH_PAGE_SIZE
-      page = await searchSession(selectedId, effectiveContentQuery, pageOffset, SEARCH_PAGE_SIZE)
+      page = await fetchSearchPage(selectedId, effectiveContentQuery, pageOffset, SEARCH_PAGE_SIZE)
     }
     const hit = page.hits[target - page.offset]
     if (hit) await navigateToHit(target, page, hit)
-  }, [activeMatchAbsolute, effectiveContentQuery, navigateToHit, searchPage, searchSession, selectedId])
+  }, [activeMatchAbsolute, effectiveContentQuery, fetchSearchPage, navigateToHit, searchPage, selectedId])
 
   const selectedSession = sessions.find(({ providerSessionId }) => providerSessionId === selectedId)
   const selectedAvailability = selectedSession?.availability ?? detail?.availability ?? 'available'
@@ -282,7 +334,7 @@ export function SessionLoaderDialog(props: {
     setLoadingSession(true)
     setError('')
     try {
-      await onLoad(selectedId)
+      await (provider === 'claude-code' ? onLoad(selectedId) : onLoad(selectedId, provider))
     } catch (reason) {
       setError(errorMessage(reason))
       setLoadingSession(false)
@@ -303,10 +355,19 @@ export function SessionLoaderDialog(props: {
   return createPortal(<div className="session-loader-backdrop" role="presentation"
     onPointerDown={(event) => { if (event.target === event.currentTarget) onCancel() }}>
     <section className="session-loader-dialog" role="dialog" aria-modal="true"
-      aria-label={messages.hierarchyTerminal.pane.loadClaudeSession}>
+      aria-label={m.dialogTitle(providerName)}>
       <header className="session-loader-header">
-        <div><strong>{messages.hierarchyTerminal.pane.loadClaudeSession}</strong>
+        <div><strong>{m.dialogTitle(providerName)}</strong>
           <span>{m.loadInto(targetTitle)}</span></div>
+        <div className="session-loader-providers" role="tablist" aria-label={m.providerTabs}>
+          {LOADER_PROVIDERS.map((id) => (
+            <button key={id} type="button" role="tab" aria-selected={provider === id}
+              className={provider === id ? 'active' : undefined}
+              onClick={() => selectProvider(id)}>
+              {getAgentDisplayName(id)}
+            </button>
+          ))}
+        </div>
         <button type="button" aria-label={m.close} onClick={onCancel}>×</button>
       </header>
       <div className="session-loader-body">
@@ -341,7 +402,7 @@ export function SessionLoaderDialog(props: {
                       aria-label={m.previewSession(session.title)}
                       onClick={() => setSelectedId(session.providerSessionId)}>
                       <strong>{session.title}</strong>
-                      <span>{relativeTime(session.updatedAt, m)} · {session.model ?? 'Claude Code'}</span>
+                      <span>{relativeTime(session.updatedAt, m)} · {session.model ?? providerName}</span>
                       <small>{m.permission[session.permissionMode]} · {m.entries(session.eventCount)}</small>
                       {session.availability === 'loaded-here' && <small>{m.loadedHere}</small>}
                       {session.availability === 'loaded-elsewhere' &&
@@ -355,14 +416,14 @@ export function SessionLoaderDialog(props: {
             </div>
             {loadingMoreSessions && <div className="session-loader-page-status">{m.loadingMore}</div>}
             {!loadingList && sessions.length === 0 && <div className="session-loader-empty">
-              {effectiveSessionQuery ? m.noMatchingSessions : m.noSessions}
+              {effectiveSessionQuery ? m.noMatchingSessions : m.noSessionsFor(providerName)}
             </div>}
           </div>
         </aside>
         <section className="session-loader-preview" aria-label={m.preview}>
           <header>
             <div><strong>{detail?.title ?? m.selectSession}</strong>
-              {detail && <span>{detail.model ?? 'Claude Code'} · {m.permission[detail.permissionMode]}</span>}
+              {detail && <span>{detail.model ?? providerName} · {m.permission[detail.permissionMode]}</span>}
             </div>
             <div className="session-loader-content-search-group">
               <label className="session-loader-search" data-search-scope="content">
@@ -399,7 +460,7 @@ export function SessionLoaderDialog(props: {
                   <article className={`session-loader-event is-${event.kind}${
                     matched ? ' matched active-match' : ''}`}>
                     <div><strong>{highlightMatches(
-                      event.kind === 'tool' ? event.toolName ?? m.tool : event.role === 'user' ? m.you : 'Claude',
+                      event.kind === 'tool' ? event.toolName ?? m.tool : event.role === 'user' ? m.you : providerShortName,
                       effectiveContentQuery
                     )}</strong>
                       <span>#{event.index}</span></div>
@@ -429,7 +490,8 @@ export function SessionLoaderDialog(props: {
           selectedSession?.title ? m.quoted(selectedSession.title) : m.thisSession,
           selectedSession?.loadedSessionTitle
             ? m.quoted(selectedSession.loadedSessionTitle)
-            : m.otherCard
+            : m.otherCard,
+          providerName
         )}
         confirmLabel={m.loadAnyway} onCancel={() => setConfirmDuplicate(false)}
         onConfirm={() => { setConfirmDuplicate(false); void submitLoad(true) }} />}
