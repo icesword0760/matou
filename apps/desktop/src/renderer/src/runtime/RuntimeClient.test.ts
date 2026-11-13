@@ -812,6 +812,95 @@ describe('RuntimeClient', () => {
       type: 'protocol.error', code: 'WORKSPACE_PATH_INVALID', sessionId: 'session-2'
     })])
   })
+
+  it('coalesces initial egress.status RPC, caches pushes, and clears cache on replacePort', async () => {
+    const port = new FakePort()
+    const client = new RuntimeClient(port, { clientId: 'renderer-1' })
+    port.deliver({
+      type: 'protocol.ready',
+      protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-1',
+      capabilities: ['domain-rpc-v1']
+    })
+
+    expect(client.getEgressStatusSnapshot()).toBeUndefined()
+
+    let notifications1 = 0
+    let notifications2 = 0
+    const unsub1 = client.subscribeEgressStatus(() => { notifications1 += 1 })
+    const unsub2 = client.subscribeEgressStatus(() => { notifications2 += 1 })
+
+    // Let whenReady() microtask flush and check only ONE egress.status RPC was sent.
+    await Promise.resolve()
+    const egressRpcs = port.sent.filter(
+      (msg) => msg.type === 'rpc.request' && msg.method === 'egress.status'
+    )
+    expect(egressRpcs).toHaveLength(1)
+
+    const sampleStatus = {
+      state: 'ok' as const,
+      protectionEnabled: true,
+      ruleMode: 'country' as const,
+      checkedAt: 1_700_000_000_000,
+      families: [],
+      checks: [],
+      sessionFamilies: {}
+    }
+    port.deliver({
+      type: 'rpc.response',
+      protocolVersion: PROTOCOL_VERSION,
+      requestId: egressRpcs[0]!.requestId,
+      ok: true,
+      result: sampleStatus
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(client.getEgressStatusSnapshot()).toEqual(sampleStatus)
+    expect(notifications1).toBe(1)
+    expect(notifications2).toBe(1)
+
+    // Subsequent subscriber reads cached snapshot synchronously and triggers no new RPC.
+    const unsub3 = client.subscribeEgressStatus(() => {})
+    await Promise.resolve()
+    expect(
+      port.sent.filter((msg) => msg.type === 'rpc.request' && msg.method === 'egress.status')
+    ).toHaveLength(1)
+
+    // Pushed update refreshes cached snapshot.
+    const pushedStatus = { ...sampleStatus, checkedAt: 1_700_000_060_000 }
+    port.deliver({
+      type: 'egress.status',
+      protocolVersion: PROTOCOL_VERSION,
+      status: pushedStatus
+    })
+    expect(client.getEgressStatusSnapshot()).toEqual(pushedStatus)
+
+    // Rebuilding the port with no active listeners clears cache without eagerly fetching;
+    // the next subscriber fetches fresh status on the rebuilt port.
+    unsub1()
+    unsub2()
+    unsub3()
+    const port2 = new FakePort()
+    client.replacePort(port2)
+    expect(client.getEgressStatusSnapshot()).toBeUndefined()
+    expect(port2.sent.filter((msg) => msg.type === 'rpc.request')).toHaveLength(0)
+
+    port2.deliver({
+      type: 'protocol.ready',
+      protocolVersion: PROTOCOL_VERSION,
+      runtimeId: 'runtime-2',
+      capabilities: ['domain-rpc-v1']
+    })
+    const unsubAfter = client.subscribeEgressStatus(() => {})
+    await Promise.resolve()
+    expect(
+      port2.sent.filter((msg) => msg.type === 'rpc.request' && msg.method === 'egress.status')
+    ).toHaveLength(1)
+
+    unsubAfter()
+    client.dispose()
+  })
 })
 
 class FakePort implements RuntimeClientPort {
